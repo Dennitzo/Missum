@@ -1,0 +1,132 @@
+using Missum.Ai.Contracts;
+using Missum.Ai.Server.Core.Configuration;
+using Missum.Ai.Server.Core.Models;
+using Microsoft.Extensions.Options;
+
+namespace Missum.Ai.Server.Core.Status;
+
+public sealed class CapabilityService
+{
+    private readonly MissumAiServerOptions _options;
+    private readonly ModelRuntimeClient? _modelRuntime;
+
+    public CapabilityService(IOptions<MissumAiServerOptions> options)
+    {
+        _options = options.Value;
+    }
+
+    public CapabilityService(IOptions<MissumAiServerOptions> options, ModelRuntimeClient modelRuntime)
+        : this(options)
+    {
+        _modelRuntime = modelRuntime;
+    }
+
+    public async Task<CapabilitySnapshot> GetSnapshotAsync(CancellationToken cancellationToken = default)
+    {
+        if (_modelRuntime is null)
+        {
+            return GetSnapshot();
+        }
+
+        var status = await _modelRuntime.GetStatusAsync(cancellationToken).ConfigureAwait(false);
+        var dynamicModels = status.Models.Select(static model => new ModelCapability(
+                model.Id,
+                model.Role,
+                model.ContextTokens,
+                model.SupportsTools,
+                model.SupportsVision,
+                false,
+                model.ReasoningEfforts,
+                model.DefaultReasoningEffort)).ToArray();
+        return CreateSnapshot(dynamicModels);
+    }
+
+    public CapabilitySnapshot GetSnapshot() => CreateSnapshot(null);
+
+    private CapabilitySnapshot CreateSnapshot(IReadOnlyList<ModelCapability>? dynamicModels) => new(
+        MissumAiProtocol.Version,
+        typeof(CapabilityService).Assembly.GetName().Version?.ToString() ?? "1.0.0",
+        dynamicModels ?? [
+            CreateModelCapability(_options.GeneralModelId, "general", _options.GeneralContextLength, true, false),
+            CreateModelCapability(_options.VisionModelId, "vision", _options.VisionContextLength, true, true),
+            CreateModelCapability(_options.EmbeddingModelId, "embedding", _options.EmbeddingContextLength, false, false),
+        ],
+        [
+            "web.search", "web.fetch", "web.deepResearch", "media.inspect", "media.analyze",
+            "image.generate", "speech.synthesize", "math.evaluate", "context.embed", "context.retrieve",
+            "coding.updatePlan",
+        ],
+        [
+            ClientToolNames.CodingList,
+            ClientToolNames.CodingSearch,
+            ClientToolNames.CodingRead,
+            ClientToolNames.CodingReadOutput,
+            ClientToolNames.CodingSearchRunEvidence,
+            ClientToolNames.CodingWrite,
+            ClientToolNames.CodingEdit,
+            ClientToolNames.CodingCommand,
+            ClientToolNames.CodingGitDiff,
+            ClientToolNames.CodingUndo,
+            ClientToolNames.CodingSearchHistory,
+            ClientToolNames.CodingSearchKnowledge,
+            ClientToolNames.CodingRenderHtml,
+            WorkspaceTools.ImageInput, WorkspaceTools.Open,
+            ClientToolNames.DocumentRead,
+            ClientToolNames.DocumentCreate,
+            ClientToolNames.DocumentsList,
+            ClientToolNames.DocumentsSearch,
+            ClientToolNames.DocumentsReadPages,
+        ],
+        new Dictionary<string, long>(StringComparer.Ordinal)
+        {
+            ["image"] = 25L * 1024 * 1024,
+            ["audio"] = 100L * 1024 * 1024,
+            ["video"] = 500L * 1024 * 1024,
+            ["json"] = MissumAiProtocol.MaximumJsonBytes,
+            ["clientToolText"] = MissumAiProtocol.MaximumToolResultTextBytes,
+        },
+        [
+            "image/png", "image/jpeg", "image/webp", "audio/wav", "audio/mpeg", "audio/ogg",
+            "video/mp4", "video/webm", "application/pdf", "text/plain",
+        ],
+        true,
+        MissumAiProtocol.UploadChunkSize,
+        new LiveCaptionCapability(
+            true,
+            ["audio/wav; codecs=pcm_s16le"],
+            [MissumAiProtocol.LiveCaptionSampleRate],
+            MissumAiProtocol.MaximumLiveCaptionChunkBytes,
+            1_000,
+            10_000,
+            true),
+        SupportsCodingSessionContext: true,
+        SupportsRunSteering: true,
+        Extensions:
+        [
+            new("builtin.web", "1.0.0", "active", ["web.search", "web.fetch", "web.deepResearch"]),
+            new("builtin.media", "1.0.0", "active", ["media.inspect", "media.analyze"]),
+            new("builtin.image", "1.0.0", "active", ["image.generate"]),
+            new("builtin.speech", "1.0.0", "active", ["speech.synthesize"]),
+            new("builtin.context", "1.0.0", "active", ["math.evaluate", "context.embed", "context.retrieve"]),
+            new("builtin.coding", "1.0.0", "active", ["coding.updatePlan"]),
+        ]);
+
+    private static ModelCapability CreateModelCapability(
+        string modelId,
+        string role,
+        int contextTokens,
+        bool supportsTools,
+        bool supportsVision)
+    {
+        var reasoning = ModelReasoningProfiles.Resolve(modelId, role);
+        return new ModelCapability(
+            modelId,
+            role,
+            contextTokens,
+            supportsTools,
+            supportsVision,
+            false,
+            reasoning.SupportedEfforts,
+            reasoning.DefaultEffort);
+    }
+}

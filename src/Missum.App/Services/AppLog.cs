@@ -1,0 +1,69 @@
+using Microsoft.Extensions.Logging;
+
+namespace Missum.App.Services;
+
+internal static partial class AppLog
+{
+    [LoggerMessage(EventId = 1000, Level = LogLevel.Warning, Message = "Local AI API availability check failed")]
+    public static partial void LocalAiAvailabilityCheckFailed(ILogger logger, Exception exception);
+
+    [LoggerMessage(EventId = 1001, Level = LogLevel.Warning, Message = "Final window state could not be saved")]
+    public static partial void WindowStateSaveFailed(ILogger logger, Exception exception);
+
+    [LoggerMessage(EventId = 1002, Level = LogLevel.Critical, Message = "Unhandled application exception: {Details}")]
+    public static partial void UnhandledApplicationException(ILogger logger, Exception? exception, string details);
+
+    [LoggerMessage(EventId = 1003, Level = LogLevel.Warning, Message = "Application shutdown cleanup failed")]
+    public static partial void ShutdownCleanupFailed(ILogger logger, Exception exception);
+
+    [LoggerMessage(EventId = 1004, Level = LogLevel.Error, Message = "Navigation to page {PageType} failed")]
+    public static partial void NavigationFailed(ILogger logger, Exception exception, string pageType);
+
+    [LoggerMessage(EventId = 1005, Level = LogLevel.Warning, Message = "Saved window placement could not be restored; using the current display")]
+    public static partial void WindowRestoreFailed(ILogger logger, Exception exception);
+
+    [LoggerMessage(EventId = 1006, Level = LogLevel.Information, Message = "Missum-AI-Verbindungsstatus geändert: {State}")]
+    public static partial void LocalAiConnectionStateChanged(ILogger logger, string state);
+
+    [LoggerMessage(EventId = 1007, Level = LogLevel.Warning, Message = "External session activation failed")]
+    public static partial void SessionActivationFailed(ILogger logger, Exception exception);
+
+    [LoggerMessage(EventId = 1008, Level = LogLevel.Warning, Message = "Session URI protocol registration failed")]
+    public static partial void SessionProtocolRegistrationFailed(ILogger logger, Exception exception);
+
+    [LoggerMessage(EventId = 1100, Level = LogLevel.Error, Message = "WebView2 initialization failed")]
+    public static partial void WebViewInitializationFailed(ILogger logger, Exception exception);
+
+    [LoggerMessage(EventId = 1104, Level = LogLevel.Warning, Message = "WebView2 profile could not be opened; using a temporary profile")]
+    public static partial void WebViewProfileFallback(ILogger logger, Exception exception);
+
+    [LoggerMessage(EventId = 1105, Level = LogLevel.Debug, Message = "Optional system theme event {EventName} is unavailable")]
+    public static partial void SystemThemeEventUnavailable(ILogger logger, Exception exception, string eventName);
+
+    [LoggerMessage(EventId = 1106, Level = LogLevel.Warning, Message = "WebView2 close failed during page cleanup")]
+    public static partial void WebViewCloseFailed(ILogger logger, Exception exception);
+
+    [LoggerMessage(EventId = 1107, Level = LogLevel.Warning, Message = "Message view could not be reset after PDF export")]
+    public static partial void MessagePdfViewResetFailed(ILogger logger, Exception exception);
+
+    [LoggerMessage(EventId = 1108, Level = LogLevel.Debug, Message = "Read-from-here context menu could not be prepared")]
+    public static partial void ReadFromContextMenuFailed(ILogger logger, Exception exception);
+
+    [LoggerMessage(EventId = 1101, Level = LogLevel.Error, Message = "Assistant UI request {RequestType} failed")]
+    public static partial void AssistantRequestFailed(ILogger logger, Exception exception, string requestType);
+
+    [LoggerMessage(EventId = 1102, Level = LogLevel.Warning, Message = "WebView bridge rejected origin {Origin}")]
+    public static partial void WebBridgeOriginRejected(ILogger logger, string origin);
+
+    [LoggerMessage(EventId = 1103, Level = LogLevel.Warning, Message = "WebView bridge rejected an invalid {FailureKind} message")]
+    public static partial void WebBridgeMessageRejected(ILogger logger, string failureKind);
+
+    [LoggerMessage(EventId = 1104, Level = LogLevel.Warning, Message = "Assistant draft could not be flushed")]
+    public static partial void AssistantDraftFlushFailed(ILogger logger, Exception exception);
+
+    [LoggerMessage(EventId = 1300, Level = LogLevel.Error, Message = "Log export failed")]
+    public static partial void LogExportFailed(ILogger logger, Exception exception);
+
+    [LoggerMessage(EventId = 1400, Level = LogLevel.Error, Message = "Settings UI action failed")]
+    public static partial void SettingsActionFailed(ILogger logger, Exception exception);
+}

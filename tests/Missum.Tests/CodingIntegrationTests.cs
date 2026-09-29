@@ -1,0 +1,602 @@
+using System.Text.Json;
+using Missum.Ai.Contracts;
+using Missum.App.Services;
+using Missum.App.Pages;
+using Missum.App.ViewModels;
+using Missum.Core.Contracts;
+using Missum.Core.Extensions;
+using Missum.Core.Models;
+using Missum.Infrastructure;
+using Missum.Infrastructure.Settings;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Data.Sqlite;
+
+namespace Missum.Tests;
+
+public sealed class CodingIntegrationTests
+{
+    [Fact]
+    public async Task CodingSettingsSurviveRestartIndependentlyFromGeneralModel()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var workspace = Path.Combine(environment.Directory, "Projekt mit Leerzeichen");
+        using (var coordinator = new SettingsCoordinator(environment.Get<ISettingsStore>()))
+        {
+            await coordinator.InitializeAsync();
+            await coordinator.UpdateAsync(settings => settings with
+            {
+                SelectedModel = "vendor/general-model:q8_0",
+                SelectedCodingModel = "  local/coder-model:q4_k_m  ",
+                CodingWorkspacePath = $"  {workspace}  ",
+            });
+        }
+
+        using var reopenedStore = new JsonSettingsStore(new MissumInfrastructureOptions { DataDirectory = environment.Directory });
+        using (var restarted = new SettingsCoordinator(reopenedStore))
+        {
+            await restarted.InitializeAsync();
+            Assert.Equal("vendor/general-model:q8_0", restarted.Current.SelectedModel);
+            Assert.Equal("local/coder-model:q4_k_m", restarted.Current.SelectedCodingModel);
+            Assert.Equal(workspace, restarted.Current.CodingWorkspacePath);
+            await restarted.UpdateAsync(settings => settings with { SelectedCodingModel = "local/another-coder:q6_k" });
+        }
+
+        var persisted = await reopenedStore.LoadAsync();
+        Assert.Equal("vendor/general-model:q8_0", persisted.SelectedModel);
+        Assert.Equal("local/another-coder:q6_k", persisted.SelectedCodingModel);
+        Assert.Equal(workspace, persisted.CodingWorkspacePath);
+    }
+
+    [Fact]
+    public async Task EmptyCodingSettingsNormalizeWithoutChangingGeneralSelection()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var store = environment.Get<ISettingsStore>();
+        await store.SaveAsync(new AppSettings
+        {
+            SelectedModel = "vendor/general-model",
+            SelectedCodingModel = "  ",
+            CodingWorkspacePath = "\t",
+        });
+
+        var restored = await store.LoadAsync();
+        Assert.Equal("vendor/general-model", restored.SelectedModel);
+        Assert.Null(restored.SelectedCodingModel);
+        Assert.Null(restored.CodingWorkspacePath);
+    }
+
+    [Fact]
+    public void CodingChipCreatesTheCodingTriggerWithoutRequiringAPromptPrefix()
+    {
+        var match = AssistantCoordinator.CreateToolMatch("coding", "  Repariere den fehlenden Import.  ");
+
+        Assert.Equal(PromptTriggerAction.Coding, match.Trigger.Action);
+        Assert.Equal("Repariere den fehlenden Import.", match.RemainingPrompt);
+    }
+
+    [Fact]
+    public async Task NativeCatalogPopulatesBothTextSelectorsWithoutReplacingTheirSelections()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        const string generalId = "coding/qwen3-coder-next-Q8_0~c012";
+        const string codingId = "coding/gpt-oss-120b-MXFP4~f00a";
+        await settings.UpdateAsync(current => current with
+        {
+            SelectedModel = generalId,
+            SelectedCodingModel = codingId,
+        });
+        ModelRuntimeStatus[] models =
+        [
+            new(generalId, "general", true, false, "unloaded", 32_768),
+            new(generalId, "coding", true, false, "unloaded", 32_768),
+            new(codingId, "general", true, false, "unloaded", 32_768),
+            new(codingId, "coding", true, false, "unloaded", 32_768),
+            new("vision/qwen3-vl~local", "vision", true, false, "unloaded", 32_768),
+            new("embedding/bge-m3~local", "embedding", true, false, "unloaded", 8_192),
+        ];
+        using var connection = new MissumAiConnectionService(settings, NullLogger<MissumAiConnectionService>.Instance,
+            () => new NativeCatalogHandler(models));
+        var viewModel = new SettingsViewModel(settings, connection,
+            environment.Get<IPromptTriggerRepository>(), environment.Get<IBackupService>(),
+            new ShellViewModel(), new ModelCapabilityRegistry());
+        viewModel.Initialize();
+
+        var status = await viewModel.RefreshModelsAsync();
+
+        Assert.True(status?.IsReady);
+        Assert.Equal(new[] { generalId, codingId }, viewModel.Models.Select(model => model.Id));
+        Assert.Equal(new[] { generalId, codingId }, viewModel.CodingModels.Select(model => model.Id));
+        Assert.Equal(generalId, viewModel.SelectedGeneralModelItem?.Id);
+        Assert.Equal(codingId, viewModel.SelectedCodingModelItem?.Id);
+        Assert.Equal(generalId, settings.Current.SelectedModel);
+        Assert.Equal(codingId, settings.Current.SelectedCodingModel);
+    }
+
+    [Fact]
+    public async Task CodingModePersistsToTheSessionAndSurvivesSnapshotRecreation()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var store = environment.Get<ISettingsStore>();
+        var chats = environment.Get<IChatRepository>();
+        var session = await chats.CreateSessionAsync("Bestehendes Projekt", ChatMode.Coding);
+        var message = await chats.AddMessageAsync(session.Id, ChatRole.User, "Vorhandener Chattext", MessageStatus.Completed);
+        var workspace = Path.Combine(environment.Directory, "workspace");
+        await chats.SetCodingWorkspacePathAsync(session.Id, workspace);
+
+        using (var settings = new SettingsCoordinator(store))
+        {
+            await settings.InitializeAsync();
+            await settings.UpdateAsync(current => current with { ActiveSessionId = session.Id, CodingWorkspacePath = Path.Combine(environment.Directory, "last-used-other-workspace") });
+            var coordinator = CreateCoordinator(environment, settings);
+            var snapshot = JsonSerializer.SerializeToElement(await coordinator.BuildSnapshotAsync(), JsonSerializerOptions.Web);
+            Assert.Equal("coding", snapshot.GetProperty("chatMode").GetString());
+            Assert.Equal(JsonValueKind.Null, snapshot.GetProperty("selectedToolAction").ValueKind);
+            Assert.Equal(workspace, snapshot.GetProperty("codingWorkspacePath").GetString());
+            Assert.Equal(session.Id, snapshot.GetProperty("activeSessionId").GetGuid());
+        }
+
+        using var restartedSettings = new SettingsCoordinator(store);
+        await restartedSettings.InitializeAsync();
+        var restartedCoordinator = CreateCoordinator(environment, restartedSettings);
+        var restoredSnapshot = JsonSerializer.SerializeToElement(await restartedCoordinator.BuildSnapshotAsync(), JsonSerializerOptions.Web);
+        Assert.Equal("coding", restoredSnapshot.GetProperty("chatMode").GetString());
+        Assert.Equal(ChatMode.Coding, (await chats.GetSessionAsync(session.Id))?.ChatMode);
+        Assert.Null((await chats.GetSessionAsync(session.Id))?.PersistentExtensionActionId);
+        Assert.Equal(message.Content, Assert.Single(await chats.ListMessagesAsync(session.Id)).Content);
+        Assert.Equal(message.Id, Assert.Single(await chats.ListMessagesAsync(session.Id)).Id);
+    }
+
+    [Fact]
+    public async Task CodingModeWithoutWorkspaceReportsTheEmptyStateAndRejectsRunsBeforeCreatingMessages()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var chats = environment.Get<IChatRepository>();
+        var session = await chats.CreateSessionAsync("Coding ohne Projekt", ChatMode.Coding);
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        await settings.UpdateAsync(current => current with { ActiveSessionId = session.Id });
+        var coordinator = CreateCoordinator(environment, settings);
+
+        var snapshot = JsonSerializer.SerializeToElement(
+            await coordinator.BuildSnapshotAsync(), JsonSerializerOptions.Web);
+
+        Assert.Equal("coding", snapshot.GetProperty("chatMode").GetString());
+        Assert.True(snapshot.GetProperty("codingWorkspaceRequired").GetBoolean());
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => coordinator.HandleAsync(new(
+            AssistantWebBridge.ProtocolVersion,
+            "chat.send",
+            "missing-workspace",
+            JsonSerializer.SerializeToElement(new
+            {
+                sessionId = session.Id,
+                prompt = "Bearbeite das Projekt.",
+            })), static (_, _, _) => Task.CompletedTask));
+        Assert.Contains("Projekt oder einen Workspace", exception.Message, StringComparison.Ordinal);
+        Assert.Empty(await chats.ListMessagesAsync(session.Id));
+    }
+
+    [Fact]
+    public async Task CodingSnapshotRestoresItsRuntimeContextWindowIndependentlyFromGeneralModel()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var store = environment.Get<ISettingsStore>();
+        var chats = environment.Get<IChatRepository>();
+        var session = await chats.CreateSessionAsync("Coding-Kontext", ChatMode.Coding);
+        await chats.AddMessageAsync(session.Id, ChatRole.User, "Prüfe die Projektdateien.", MessageStatus.Completed);
+        const string codingModel = "coding/Qwen3.8-27B-Q4_K_M~local";
+        int contextUsed;
+        using (var settings = new SettingsCoordinator(store))
+        {
+            await settings.InitializeAsync();
+            await settings.UpdateAsync(current => current with
+            {
+                ActiveSessionId = session.Id,
+                SelectedModel = "openai/gpt-oss-120b",
+                SelectedCodingModel = codingModel,
+            });
+            var snapshot = JsonSerializer.SerializeToElement(
+                await CreateCoordinator(environment, settings).BuildSnapshotAsync(), JsonSerializerOptions.Web);
+            Assert.Equal(ModelContextProfiles.Qwen38Maximum, snapshot.GetProperty("contextLimit").GetInt32());
+            Assert.Equal(codingModel, snapshot.GetProperty("model").GetString());
+            contextUsed = snapshot.GetProperty("contextUsed").GetInt32();
+            Assert.Equal(("Prüfe die Projektdateien.".Length + 3) / 4, contextUsed);
+            Assert.Contains("Geschätzter Coding-Kontext", snapshot.GetProperty("contextNotice").GetString(), StringComparison.Ordinal);
+        }
+
+        using var restartedSettings = new SettingsCoordinator(store);
+        await restartedSettings.InitializeAsync();
+        var coordinator = CreateCoordinator(environment, restartedSettings);
+        var reopened = JsonSerializer.SerializeToElement(await coordinator.BuildSnapshotAsync(), JsonSerializerOptions.Web);
+        Assert.Equal(ModelContextProfiles.Qwen38Maximum, reopened.GetProperty("contextLimit").GetInt32());
+        Assert.Equal(contextUsed, reopened.GetProperty("contextUsed").GetInt32());
+        Assert.Equal(codingModel, reopened.GetProperty("model").GetString());
+
+        JsonElement? general = null;
+        await coordinator.HandleAsync(new(
+            AssistantWebBridge.ProtocolVersion,
+            "mode.switch",
+            "general",
+            JsonSerializer.SerializeToElement(new { chatMode = "general" })), (type, payload, _) =>
+        {
+            if (type == "session.changed") general = JsonSerializer.SerializeToElement(payload, JsonSerializerOptions.Web);
+            return Task.CompletedTask;
+        });
+        Assert.NotNull(general);
+        Assert.Equal(ModelContextProfiles.GptOss120BMaximum, general.Value.GetProperty("contextLimit").GetInt32());
+        Assert.Equal(AppSettings.DefaultSelectedModel, restartedSettings.Current.SelectedModel);
+    }
+
+    [Fact]
+    public async Task SessionSwitchRestoresOnlyThatSessionsCodingWorkspace()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var chats = environment.Get<IChatRepository>();
+        var first = await chats.CreateSessionAsync("Projekt A", ChatMode.Coding);
+        var second = await chats.CreateSessionAsync("Projekt B", ChatMode.Coding);
+        var unbound = await chats.CreateSessionAsync("Noch ohne Projekt");
+        var firstRoot = Path.Combine(environment.Directory, "projekt-a");
+        var secondRoot = Path.Combine(environment.Directory, "projekt-b");
+        await chats.SetCodingWorkspacePathAsync(first.Id, firstRoot);
+        await chats.SetCodingWorkspacePathAsync(second.Id, secondRoot);
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        await settings.UpdateAsync(current => current with { CodingWorkspacePath = secondRoot });
+        var coordinator = CreateCoordinator(environment, settings);
+
+        foreach (var (sessionId, expectedRoot) in new (Guid, string?)[]
+                 { (second.Id, secondRoot), (first.Id, firstRoot), (unbound.Id, null), (first.Id, firstRoot) })
+        {
+            var envelope = new WebBridgeEnvelope(
+                AssistantWebBridge.ProtocolVersion, "session.open", Guid.NewGuid().ToString("D"),
+                JsonSerializer.SerializeToElement(new { sessionId }));
+            JsonElement? snapshot = null;
+            await coordinator.HandleAsync(envelope, (type, payload, _) =>
+            {
+                if (type == "session.changed") snapshot = JsonSerializer.SerializeToElement(payload, JsonSerializerOptions.Web);
+                return Task.CompletedTask;
+            });
+            Assert.NotNull(snapshot);
+            Assert.Equal(expectedRoot, snapshot.Value.GetProperty("codingWorkspacePath").GetString());
+        }
+    }
+
+    [Fact]
+    public async Task OpeningASessionSwitchesModeWithoutChangingPersistentTools()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var chats = environment.Get<IChatRepository>();
+        var first = await chats.CreateSessionAsync("Coding-Sitzung A", ChatMode.Coding);
+        var second = await chats.CreateSessionAsync("General-Sitzung B", ChatMode.General);
+        await chats.SetPersistentExtensionActionIdAsync(second.Id, BuiltInActionIds.CreateAudiobook);
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        await settings.UpdateAsync(current => current with { ActiveSessionId = second.Id });
+        var coordinator = CreateCoordinator(environment, settings);
+
+        JsonElement? snapshot = null;
+        await coordinator.HandleAsync(new(
+            AssistantWebBridge.ProtocolVersion,
+            "session.open",
+            "open-coding",
+            JsonSerializer.SerializeToElement(new { sessionId = first.Id })), (type, payload, _) =>
+        {
+            if (type == "session.changed") snapshot = JsonSerializer.SerializeToElement(payload, JsonSerializerOptions.Web);
+            return Task.CompletedTask;
+        });
+
+        Assert.NotNull(snapshot);
+        Assert.Null((await chats.GetSessionAsync(first.Id))?.PersistentExtensionActionId);
+        Assert.Equal(BuiltInActionIds.CreateAudiobook, (await chats.GetSessionAsync(second.Id))?.PersistentExtensionActionId);
+        Assert.Equal(first.Id, snapshot.Value.GetProperty("activeSessionId").GetGuid());
+        Assert.Equal("coding", snapshot.Value.GetProperty("chatMode").GetString());
+        Assert.Equal(JsonValueKind.Null, snapshot.Value.GetProperty("selectedToolAction").ValueKind);
+    }
+
+    [Fact]
+    public async Task FolderPickerResultStaysBoundToItsCapturedSession()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var chats = environment.Get<IChatRepository>();
+        var first = await chats.CreateSessionAsync("Picker-Sitzung A");
+        var second = await chats.CreateSessionAsync("Aktuelle Sitzung B");
+        var firstRoot = Path.Combine(environment.Directory, "projekt-a");
+        var secondRoot = Path.Combine(environment.Directory, "projekt-b");
+        Directory.CreateDirectory(firstRoot);
+        await chats.SetCodingWorkspacePathAsync(second.Id, secondRoot);
+        await chats.SetPersistentExtensionActionIdAsync(second.Id, BuiltInActionIds.CreateAudiobook);
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        await settings.UpdateAsync(current => current with { ActiveSessionId = first.Id });
+        var capturedSessionId = first.Id;
+        var coordinator = CreateCoordinator(environment, settings);
+        await settings.UpdateAsync(current => current with { ActiveSessionId = second.Id });
+
+        await coordinator.SetCodingWorkspacePathAsync(capturedSessionId, firstRoot);
+
+        Assert.Equal(firstRoot, (await chats.GetSessionAsync(first.Id))?.CodingWorkspacePath);
+        Assert.Null((await chats.GetSessionAsync(first.Id))?.PersistentExtensionActionId);
+        Assert.Equal(secondRoot, (await chats.GetSessionAsync(second.Id))?.CodingWorkspacePath);
+        Assert.Equal(BuiltInActionIds.CreateAudiobook, (await chats.GetSessionAsync(second.Id))?.PersistentExtensionActionId);
+        Assert.Equal(second.Id, settings.Current.ActiveSessionId);
+
+        await chats.DeleteSessionAsync(first.Id);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => coordinator.SetCodingWorkspacePathAsync(capturedSessionId, firstRoot));
+        Assert.Equal(secondRoot, (await chats.GetSessionAsync(second.Id))?.CodingWorkspacePath);
+    }
+
+    [Fact]
+    public async Task InvalidWorkspaceDoesNotChangeTheSelectedModeOrExistingFolder()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var chats = environment.Get<IChatRepository>();
+        var session = await chats.CreateSessionAsync("Unveränderte Sitzung");
+        var original = Path.Combine(environment.Directory, "existing");
+        Directory.CreateDirectory(original);
+        await chats.SetCodingWorkspacePathAsync(session.Id, original);
+        await chats.SetPersistentExtensionActionIdAsync(session.Id, BuiltInActionIds.CreateAudiobook);
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        var coordinator = CreateCoordinator(environment, settings);
+
+        await Assert.ThrowsAsync<DirectoryNotFoundException>(() => coordinator.SetCodingWorkspacePathAsync(
+            session.Id, Path.Combine(environment.Directory, "missing")));
+
+        var restored = await chats.GetSessionAsync(session.Id);
+        Assert.Equal(original, restored?.CodingWorkspacePath);
+        Assert.Equal(BuiltInActionIds.CreateAudiobook, restored?.PersistentExtensionActionId);
+    }
+
+    [Fact]
+    public async Task WorkspaceSelectionDoesNotImplicitlyActivateCoding()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var chats = environment.Get<IChatRepository>();
+        var session = await chats.CreateSessionAsync("Atomarer Workspace-Wechsel");
+        var original = Path.Combine(environment.Directory, "original");
+        var replacement = Path.Combine(environment.Directory, "replacement");
+        Directory.CreateDirectory(original);
+        Directory.CreateDirectory(replacement);
+        await chats.SetCodingWorkspacePathAsync(session.Id, original);
+        await chats.SetPersistentExtensionActionIdAsync(session.Id, BuiltInActionIds.CreateAudiobook);
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        var coordinator = CreateCoordinator(environment, settings);
+
+        await coordinator.SetCodingWorkspacePathAsync(session.Id, replacement);
+
+        var restored = await chats.GetSessionAsync(session.Id);
+        Assert.Equal(replacement, restored?.CodingWorkspacePath);
+        Assert.Equal(BuiltInActionIds.CreateAudiobook, restored?.PersistentExtensionActionId);
+    }
+
+    [Fact]
+    public async Task CancelledOrDeletedWorkspaceActivationCannotPartiallyChangeTheSession()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var chats = environment.Get<IChatRepository>();
+        var session = await chats.CreateSessionAsync("Abgebrochener Workspace-Wechsel", ChatMode.Coding);
+        var original = Path.Combine(environment.Directory, "original");
+        var replacement = Path.Combine(environment.Directory, "replacement");
+        await chats.SetCodingWorkspacePathAsync(session.Id, original);
+        await chats.SetPersistentExtensionActionIdAsync(session.Id, BuiltInActionIds.CreateAudiobook);
+        using var cancellation = new CancellationTokenSource();
+        await cancellation.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => chats.SetCodingWorkspacePathAsync(
+            session.Id, replacement, activateCoding: true, cancellation.Token));
+        var restored = await chats.GetSessionAsync(session.Id);
+        Assert.Equal(original, restored?.CodingWorkspacePath);
+        Assert.Equal(BuiltInActionIds.CreateAudiobook, restored?.PersistentExtensionActionId);
+
+        await chats.DeleteSessionAsync(session.Id);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => chats.SetCodingWorkspacePathAsync(session.Id, replacement, activateCoding: true));
+        Assert.Null(await chats.GetSessionAsync(session.Id));
+    }
+
+    [Fact]
+    public async Task WorkspaceCommitHoldsTheChatGateUntilTheAtomicSaveFinishes()
+    {
+        using var gate = new SemaphoreSlim(1, 1);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var commit = AssistantPage.CommitCodingWorkspaceAsync(gate, static () => false, async token =>
+        {
+            entered.TrySetResult();
+            await release.Task.WaitAsync(token);
+        });
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.False(await gate.WaitAsync(0));
+            Assert.False(commit.IsCompleted);
+        }
+        finally
+        {
+            release.TrySetResult();
+            await commit;
+        }
+        Assert.Equal(1, gate.CurrentCount);
+    }
+
+    [Fact]
+    public async Task WorkspaceCommitRejectsPendingOrActiveRunsAndAlwaysReleasesItsGate()
+    {
+        using var gate = new SemaphoreSlim(1, 1);
+        var committed = false;
+        Task Commit(CancellationToken _) { committed = true; return Task.CompletedTask; }
+        await gate.WaitAsync();
+        try
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(() => AssistantPage.CommitCodingWorkspaceAsync(gate, static () => false, Commit));
+            Assert.Equal(0, gate.CurrentCount);
+        }
+        finally { gate.Release(); }
+        await Assert.ThrowsAsync<InvalidOperationException>(() => AssistantPage.CommitCodingWorkspaceAsync(gate, static () => true, Commit));
+        Assert.False(committed);
+        Assert.Equal(1, gate.CurrentCount);
+        await Assert.ThrowsAsync<IOException>(() => AssistantPage.CommitCodingWorkspaceAsync(gate, static () => false,
+            static _ => throw new IOException("injected save failure")));
+        Assert.Equal(1, gate.CurrentCount);
+    }
+
+    [Theory]
+    [InlineData("coding.list", ToolRiskClass.ReadOnly)]
+    [InlineData("coding.search", ToolRiskClass.ReadOnly)]
+    [InlineData("coding.read", ToolRiskClass.ReadOnly)]
+    [InlineData("coding.gitDiff", ToolRiskClass.ReadOnly)]
+    [InlineData("coding.write", ToolRiskClass.LocalMutation)]
+    [InlineData("coding.edit", ToolRiskClass.LocalMutation)]
+    [InlineData("coding.undo", ToolRiskClass.LocalMutation)]
+    [InlineData("coding.command", ToolRiskClass.Process)]
+    public void CodingToolRiskMustMatchTheLocalContract(string tool, ToolRiskClass expectedRisk)
+    {
+        var proposal = CreateProposal(tool, expectedRisk);
+        LocalToolBroker.ValidateProposal(proposal);
+
+        foreach (var claimedRisk in Enum.GetValues<ToolRiskClass>().Where(risk => risk != expectedRisk))
+        {
+            Assert.Throws<InvalidDataException>(() => LocalToolBroker.ValidateProposal(proposal with { RiskClass = claimedRisk }));
+        }
+    }
+
+    [Fact]
+    public void UnknownAndExpiredCodingProposalsAreRejected()
+    {
+        Assert.Throws<InvalidDataException>(() => LocalToolBroker.ValidateProposal(CreateProposal("coding.unrestrictedShell", ToolRiskClass.Process)));
+        var now = DateTimeOffset.UtcNow;
+        var expired = CreateProposal("coding.command", ToolRiskClass.Process) with { ExpiresAt = now.AddSeconds(-1) };
+        Assert.Throws<InvalidDataException>(() => LocalToolBroker.ValidateProposal(expired, now));
+    }
+
+    [Fact]
+    public void ScientificToolRisksAndArgumentsMustMatchTheLocalContract()
+    {
+        var symbolic = CreateProposal(ClientToolNames.MathSymbolic, ToolRiskClass.Process) with
+        {
+            Arguments = JsonSerializer.SerializeToElement(new { projectId = "proof", expression = "x**2", operation = "factor" }),
+        };
+        var write = CreateProposal(ClientToolNames.ResearchCodeWrite, ToolRiskClass.LocalMutation) with
+        {
+            Arguments = JsonSerializer.SerializeToElement(new { projectId = "proof", path = "candidate.py", content = "print(1)" }),
+        };
+        LocalToolBroker.ValidateProposal(symbolic);
+        LocalToolBroker.ValidateProposal(write);
+        Assert.Throws<InvalidDataException>(() => LocalToolBroker.ValidateProposal(symbolic with { RiskClass = ToolRiskClass.ReadOnly }));
+        Assert.Throws<InvalidDataException>(() => LocalToolBroker.ValidateProposal(write with { RiskClass = ToolRiskClass.Process }));
+        Assert.Throws<ArgumentException>(() => LocalToolBroker.ValidateProposal(symbolic with
+        {
+            Arguments = JsonSerializer.SerializeToElement(new { projectId = "..", expression = "x", operation = "factor" }),
+        }));
+    }
+
+    [Fact]
+    public void CodingWaitingKeepsTheContextReadyDisplayInsteadOfRoundsAndElapsedTime()
+    {
+        var counter = new MissumAiAssistantService.ModelTokenProgressState();
+        var waiting = MissumAiAssistantService.FormatModelTokenProgress(
+            new ModelGenerationEvent("codingWaiting", Attempt: 2, ElapsedSeconds: 37),
+            counter);
+
+        Assert.Equal("0 Token", waiting);
+        Assert.DoesNotContain("Runde", waiting, StringComparison.Ordinal);
+        Assert.False(counter.HasStarted);
+        Assert.Equal(0, counter.ActiveTokens);
+
+        _ = MissumAiAssistantService.FormatModelTokenProgress(
+            new ModelGenerationEvent("promptProcessing", PromptProgress: 0.98, PromptTokens: 28_687, ProcessedPromptTokens: 28_113),
+            counter);
+        _ = MissumAiAssistantService.FormatModelTokenProgress(
+            new ModelGenerationEvent("tokenProgress", GeneratedTokens: 574, CurrentTokens: 574),
+            counter);
+        var continuedWaiting = MissumAiAssistantService.FormatModelTokenProgress(
+            new ModelGenerationEvent("codingWaiting", Attempt: 5, ElapsedSeconds: 145),
+            counter);
+        Assert.Equal($"Kontext bereit · 98 % · {28_687:N0} Token", continuedWaiting);
+        Assert.DoesNotContain("Runde", continuedWaiting, StringComparison.Ordinal);
+        Assert.DoesNotContain(" s ·", continuedWaiting, StringComparison.Ordinal);
+        Assert.True(counter.HasStarted);
+        Assert.Equal(28_687, counter.ActiveTokens);
+
+        // The loading heartbeat of a later round keeps the same context state.
+        Assert.Equal(continuedWaiting, MissumAiAssistantService.FormatModelTokenProgress(
+            new ModelGenerationEvent("codingLoading", Attempt: 6, ElapsedSeconds: 3), counter));
+        // A new model attempt starts from zero again, without a stale percentage.
+        Assert.Equal("0 Token", MissumAiAssistantService.FormatModelTokenProgress(new ModelGenerationEvent("generationStarted"), counter));
+        Assert.Equal("0 Token", MissumAiAssistantService.FormatModelTokenProgress(
+            new ModelGenerationEvent("codingWaiting", Attempt: 6, ElapsedSeconds: 4), counter));
+    }
+
+    private static ToolProposal CreateProposal(string name, ToolRiskClass risk) => new(
+        "coding-proposal",
+        "coding-run",
+        name,
+        JsonSerializer.SerializeToElement(new { path = "src/example.cs" }),
+        risk,
+        "Coding-Werkzeug ausführen",
+        DateTimeOffset.UtcNow.AddMinutes(5));
+
+    private sealed class NativeCatalogHandler(IReadOnlyList<ModelRuntimeStatus> models) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var now = DateTimeOffset.UtcNow;
+            object payload = request.RequestUri?.AbsolutePath switch
+            {
+                "/v1/models/coding" => new CodingModelCatalogResponse(models.Where(model => model.Role == "coding").ToArray(),
+                    "C:\\Users\\AMD\\.cache\\huggingface\\hub", true, null, now),
+                "/v1/models/status" => new ModelStatusSnapshot(true, "http://host.docker.internal:8081", models, now),
+                "/v1/health/live" => new HealthSnapshot("live", MissumAiProtocol.Version, now),
+                "/v1/health/ready" => new HealthSnapshot("modelNotLoaded", MissumAiProtocol.Version, now),
+                "/v1/capabilities" => new CapabilitySnapshot(MissumAiProtocol.Version, "1.0", [], [], [],
+                    new Dictionary<string, long>(), [], true, 8_388_608),
+                _ => throw new InvalidOperationException($"Unexpected gateway request: {request.RequestUri}"),
+            };
+            return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent(JsonSerializer.Serialize(payload, payload.GetType(), MissumAiProtocol.CreateJsonOptions()),
+                    System.Text.Encoding.UTF8, "application/json"),
+            });
+        }
+    }
+
+    private static AssistantCoordinator CreateCoordinator(TestEnvironment environment, SettingsCoordinator settings)
+    {
+        var recentActivity = new RecentActivityService(settings, new ShellViewModel(), NullLogger<RecentActivityService>.Instance);
+        recentActivity.Restore();
+        return new AssistantCoordinator(
+            environment.Get<IChatRepository>(), environment.Get<IDocumentIngestor>(),
+            environment.Get<IContextAssembler>(),
+            environment.Get<IPromptTriggerRepository>(),
+            environment.Get<IAssistantAttachmentRepository>(),
+            environment.Get<IChatArtifactRepository>(),
+            environment.Get<IConversationSnapshotRepository>(),
+            null,
+            settings,
+            recentActivity);
+    }
+
+    private static async Task<JsonElement> SelectToolAsync(AssistantCoordinator coordinator, string? action, Guid? sessionId = null)
+    {
+        sessionId ??= JsonSerializer.SerializeToElement(await coordinator.BuildSnapshotAsync(), JsonSerializerOptions.Web)
+            .GetProperty("activeSessionId").GetGuid();
+        var requestId = Guid.NewGuid().ToString("D");
+        var envelope = new WebBridgeEnvelope(
+            AssistantWebBridge.ProtocolVersion,
+            "session.tool",
+            requestId,
+            JsonSerializer.SerializeToElement(new { action, sessionId }));
+        JsonElement? snapshot = null;
+        await coordinator.HandleAsync(envelope, (type, payload, responseId) =>
+        {
+            if (type == "session.changed")
+            {
+                Assert.Equal(requestId, responseId);
+                snapshot = JsonSerializer.SerializeToElement(payload, JsonSerializerOptions.Web);
+            }
+            return Task.CompletedTask;
+        });
+        return snapshot ?? throw new InvalidOperationException("session.tool hat keinen Snapshot erzeugt.");
+    }
+}

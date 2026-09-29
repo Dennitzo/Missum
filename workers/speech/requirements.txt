@@ -1,0 +1,8 @@
+fastapi==0.141.1
+faster-whisper==1.2.1
+librosa==0.11.0
+onnxruntime-gpu==1.23.2
+soundfile==0.13.1
+torch==2.9.1+cu128
+torchaudio==2.9.1+cu128
+uvicorn==0.52.2

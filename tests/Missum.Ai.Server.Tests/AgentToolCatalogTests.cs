@@ -1,0 +1,330 @@
+using Missum.Ai.Contracts;
+using Missum.Ai.Server.Core.Runs;
+using System.Text.Json;
+
+namespace Missum.Ai.Server.Tests;
+
+public sealed class AgentToolCatalogTests
+{
+    private static readonly string[] RequiredQueryProperties = ["query"];
+    [Fact]
+    public void CompactSelectorExposesNamesWithoutFullToolSchemas()
+    {
+        var catalog = new AgentToolCatalog();
+        var available = catalog.GetAvailableTools(CreateRequest([]));
+
+        var selector = AgentToolCatalog.CreateSelectorDefinition(available);
+
+        Assert.Equal(AgentToolCatalog.SelectorToolName, selector.Name);
+        var names = selector.Parameters.GetProperty("properties").GetProperty("name").GetProperty("enum");
+        Assert.Equal(available.Count, names.GetArrayLength());
+        Assert.DoesNotContain("maximumResults", selector.Parameters.GetRawText(), StringComparison.Ordinal);
+        Assert.All(available, tool =>
+        {
+            Assert.Contains($"- {tool.Name}", selector.Description, StringComparison.Ordinal);
+            Assert.Contains(tool.Description[..Math.Min(180, tool.Description.Length)], selector.Description, StringComparison.Ordinal);
+        });
+        Assert.Contains(": ", selector.Description, StringComparison.Ordinal);
+        Assert.Equal("assistant.selectTool", selector.Name);
+        Assert.True(AgentToolCatalog.IsSelectorToolName(selector.Name));
+        Assert.True(AgentToolCatalog.IsSelectorToolName(AgentToolCatalog.LegacySelectorToolName));
+    }
+
+    [Fact]
+    public void SelectorResolvesExactlyOneAvailableTool()
+    {
+        var catalog = new AgentToolCatalog();
+        var available = catalog.GetAvailableTools(CreateRequest([]));
+        var selection = JsonSerializer.SerializeToElement(new { name = "web.search" });
+
+        var tool = catalog.ResolveSelection(selection, available);
+
+        Assert.Equal("web.search", tool.Name);
+        Assert.Throws<ArgumentException>(() => catalog.ResolveSelection(
+            JsonSerializer.SerializeToElement(new { name = "web.search", extra = true }),
+            available));
+    }
+
+    [Fact]
+    public void ModelReceivesNamesFirstAndOnlyTheSelectedFullSchemaAfterward()
+    {
+        var catalog = new AgentToolCatalog();
+        var available = catalog.GetAvailableTools(CreateRequest(["documentIo"]));
+        var selected = catalog.Resolve(ClientToolNames.DocumentRead, available);
+
+        var firstStage = Assert.Single(RunProcessor.CreateModelToolDefinitions(available, selectedToolName: null));
+        var secondStage = Assert.Single(RunProcessor.CreateModelToolDefinitions(available, selected.Name));
+
+        Assert.Equal(AgentToolCatalog.SelectorToolName, firstStage.Name);
+        Assert.DoesNotContain("startLine", firstStage.Parameters.GetRawText(), StringComparison.Ordinal);
+        Assert.Equal(selected.Name, secondStage.Name);
+        Assert.Equal(selected.Description, secondStage.Description);
+        Assert.Equal(selected.Schema.GetRawText(), secondStage.Parameters.GetRawText());
+    }
+
+    [Fact]
+    public void ClientToolsAreOnlyAdvertisedForReportedCapabilities()
+    {
+        var catalog = new AgentToolCatalog();
+        var withoutClient = catalog.GetAvailableTools(CreateRequest(null));
+        Assert.DoesNotContain(withoutClient, static tool => !tool.ServerSide);
+
+        var withDocuments = catalog.GetAvailableTools(CreateRequest(["documents"]));
+        Assert.Contains(withDocuments, static tool => tool.Name == ClientToolNames.DocumentsList);
+        Assert.Contains(withDocuments, static tool => tool.Name == ClientToolNames.DocumentsSearch);
+        Assert.Contains(withDocuments, static tool => tool.Name == ClientToolNames.DocumentsReadPages);
+        Assert.DoesNotContain(withDocuments, static tool => tool.Name == ClientToolNames.DocumentCreate);
+
+        var withDocumentIo = catalog.GetAvailableTools(CreateRequest(["documentIo"]));
+        Assert.Contains(withDocumentIo, static tool => tool.Name == ClientToolNames.DocumentRead);
+        Assert.Contains(withDocumentIo, static tool => tool.Name == ClientToolNames.DocumentCreate);
+    }
+
+    [Fact]
+    public void ProcessAndWorkspaceOpenToolsRequireTheirExplicitCapabilities()
+    {
+        var catalog = new AgentToolCatalog();
+        var restricted = catalog.GetAvailableTools(CreateRequest(["coding", "workspace", "visual-tools"]) with { Mode = RunMode.Coding });
+        Assert.Contains(restricted, static tool => tool.Name == ClientToolNames.CodingRead);
+        Assert.Contains(restricted, static tool => tool.Name == ClientToolNames.CodingEdit);
+        Assert.Contains(restricted, static tool => tool.Name == WorkspaceTools.ImageInput);
+        Assert.DoesNotContain(restricted, static tool => tool.Name == ClientToolNames.CodingCommand);
+        Assert.DoesNotContain(restricted, static tool => tool.Name == ClientToolNames.MathSymbolic);
+        Assert.Contains(restricted, static tool => tool.Name == ClientToolNames.ResearchCodeWrite);
+        Assert.Contains(restricted, static tool => tool.Name == ClientToolNames.ResearchCodeRestore);
+        Assert.DoesNotContain(restricted, static tool => tool.Name == WorkspaceTools.Open);
+
+        var normal = catalog.GetAvailableTools(CreateRequest(
+            ["coding", "workspace", "coding.process", "workspace.open"]) with { Mode = RunMode.Coding });
+        Assert.Contains(normal, static tool => tool.Name == ClientToolNames.CodingCommand);
+        Assert.Contains(normal, static tool => tool.Name == ClientToolNames.MathSymbolic);
+        Assert.Contains(normal, static tool => tool.Name == ClientToolNames.MathNumeric);
+        Assert.Contains(normal, static tool => tool.Name == ClientToolNames.MathSmt);
+        Assert.Contains(normal, static tool => tool.Name == ClientToolNames.MathFormalProof);
+        Assert.Contains(normal, static tool => tool.Name == ClientToolNames.ResearchCodeExecute);
+        Assert.Contains(normal, static tool => tool.Name == ClientToolNames.ResearchCodeTest);
+        Assert.Contains(normal, static tool => tool.Name == ClientToolNames.ResearchCodeBenchmark);
+        Assert.Contains(normal, static tool => tool.Name == WorkspaceTools.Open);
+
+        var general = catalog.GetAvailableTools(CreateRequest(
+            ["coding", "workspace", "coding.process", "workspace.open"]) with { Mode = RunMode.General });
+        Assert.DoesNotContain(general, static tool => tool.Name.StartsWith("research.code.", StringComparison.Ordinal));
+        Assert.DoesNotContain(general, static tool => tool.Name is ClientToolNames.MathSymbolic or ClientToolNames.MathNumeric
+            or ClientToolNames.MathSmt or ClientToolNames.MathFormalProof);
+    }
+
+    [Fact]
+    public void DocumentToolsUseBoundedSectionContracts()
+    {
+        var catalog = new AgentToolCatalog();
+        var tools = catalog.GetAvailableTools(CreateRequest(["documentIo"]));
+        var read = catalog.Resolve(ClientToolNames.DocumentRead, tools);
+        var create = catalog.Resolve(ClientToolNames.DocumentCreate, tools);
+        using var readWindow = JsonDocument.Parse("""{"scope":"session","mode":"read","reference":"00000000-0000-0000-0000-000000000001","startUnit":2,"maximumUnits":3,"maximumCharacters":12000}""");
+        using var append = JsonDocument.Parse("""{"operation":"appendSection","reference":"00000000-0000-0000-0000-000000000001","format":"pdf","sectionId":"kapitel-2","heading":"Kapitel 2","content":"Text","expectedSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}""");
+        using var unbounded = JsonDocument.Parse("""{"scope":"session","mode":"read","reference":"00000000-0000-0000-0000-000000000001","maximumCharacters":40001}""");
+        using var staleEdit = JsonDocument.Parse("""{"operation":"replaceSection","reference":"00000000-0000-0000-0000-000000000001","format":"pdf","sectionId":"kapitel-2","content":"Text"}""");
+        using var workspaceRead = JsonDocument.Parse("""{"scope":"workspace","mode":"read","reference":"notes.txt"}""");
+
+        catalog.Validate(read, readWindow.RootElement);
+        catalog.Validate(create, append.RootElement);
+        Assert.Throws<ArgumentException>(() => catalog.Validate(read, unbounded.RootElement));
+        Assert.Throws<ArgumentException>(() => catalog.Validate(create, staleEdit.RootElement));
+        Assert.Throws<ArgumentException>(() => catalog.Validate(read, workspaceRead.RootElement));
+    }
+
+    [Theory]
+    [InlineData("docx")]
+    [InlineData("xlsx")]
+    [InlineData("pptx")]
+    public void NativeOfficeFormatsAreAcceptedForCreationAndHashGuardedChanges(string format)
+    {
+        var catalog = new AgentToolCatalog();
+        var tool = catalog.Resolve(ClientToolNames.DocumentCreate, catalog.GetAvailableTools(CreateRequest(["documentIo"])));
+        catalog.Validate(tool, JsonSerializer.SerializeToElement(new
+        {
+            operation = "create", reference = "Bericht." + format, format,
+            sectionId = "kosten", heading = "Kosten", content = "| Posten | Wert |\n| --- | --- |\n| Energie | 12 |",
+        }));
+        catalog.Validate(tool, JsonSerializer.SerializeToElement(new
+        {
+            operation = "replaceSection", reference = "00000000-0000-0000-0000-000000000001", format,
+            sectionId = "kosten", content = "Aktualisiert", expectedSha256 = new string('a', 64),
+        }));
+        Assert.Throws<ArgumentException>(() => catalog.Validate(tool, JsonSerializer.SerializeToElement(new
+        {
+            operation = "replaceSection", reference = "00000000-0000-0000-0000-000000000001", format,
+            sectionId = "kosten", content = "Ohne Versionsschutz",
+        })));
+    }
+
+    [Fact]
+    public void WebFetchExposesBoundedPhraseSearchInsteadOfWholePages()
+    {
+        var catalog = new AgentToolCatalog();
+        var tools = catalog.GetAvailableTools(CreateRequest([]));
+        var fetch = catalog.Resolve("web.fetch", tools);
+        using var valid = JsonDocument.Parse("""
+            {"url":"https://example.com/reference","query":"Newtons zweites Gesetz","maximumCharacters":8000}
+            """);
+        using var oversized = JsonDocument.Parse("""
+            {"url":"https://example.com/reference","query":"Newtons zweites Gesetz","maximumCharacters":12001}
+            """);
+
+        catalog.Validate(fetch, valid.RootElement);
+        Assert.Throws<ArgumentException>(() => catalog.Validate(fetch, oversized.RootElement));
+        Assert.True(fetch.Schema.GetProperty("properties").TryGetProperty("query", out _));
+        Assert.Equal(
+            12_000,
+            fetch.Schema.GetProperty("properties").GetProperty("maximumCharacters").GetProperty("maximum").GetInt32());
+        Assert.Contains("Trefferfenster", fetch.Description, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LegacyPdfRenderToolIsNotAdvertised()
+    {
+        var catalog = new AgentToolCatalog();
+        var request = CreateRequest(["pdf"]);
+        Assert.Throws<InvalidOperationException>(() => catalog.Resolve(
+            "document.renderPdf",
+            catalog.GetAvailableTools(request)));
+    }
+
+    [Fact]
+    public void UnknownPropertiesAndUnknownToolsAreRejected()
+    {
+        var catalog = new AgentToolCatalog();
+        var tools = catalog.GetAvailableTools(CreateRequest(null));
+        var search = catalog.Resolve("web.search", tools);
+        using var arguments = JsonDocument.Parse("""{"query":"Wissenschaft","unexpected":true}""");
+
+        Assert.Throws<ArgumentException>(() => catalog.Validate(search, arguments.RootElement));
+        Assert.Throws<InvalidOperationException>(() => catalog.Resolve("shell.execute", tools));
+    }
+
+    [Fact]
+    public void MediaDetailWindowsAreStrictAndBounded()
+    {
+        var catalog = new AgentToolCatalog();
+        var tools = catalog.GetAvailableTools(CreateRequest(null));
+        var media = catalog.Resolve("media.analyze", tools);
+        using var valid = JsonDocument.Parse("""{"uploadId":"upload-0123456789abcdef0123456789abcdef","detailWindows":[{"start":10,"end":20}]}""");
+        using var invalid = JsonDocument.Parse("""{"uploadId":"upload-0123456789abcdef0123456789abcdef","detailWindows":[{"start":20,"end":10,"extra":true}]}""");
+
+        catalog.Validate(media, valid.RootElement);
+        Assert.Throws<ArgumentException>(() => catalog.Validate(media, invalid.RootElement));
+    }
+
+    [Fact]
+    public void ExplicitServerToolAllowListPreventsInheritedImageGeneration()
+    {
+        var catalog = new AgentToolCatalog();
+        var request = CreateRequest(null) with
+        {
+            AllowedServerTools = ["math.evaluate", "context.retrieve"],
+        };
+
+        var tools = catalog.GetAvailableTools(request);
+
+        Assert.Contains(tools, static tool => tool.Name == "math.evaluate");
+        Assert.DoesNotContain(tools, static tool => tool.Name == "image.generate");
+        Assert.DoesNotContain(tools, static tool => tool.Name == "web.search");
+    }
+
+    [Fact]
+    public void EmptyServerToolAllowListExcludesWebResearch()
+    {
+        var catalog = new AgentToolCatalog();
+        var request = CreateRequest([]) with
+        {
+            AllowedServerTools = [],
+        };
+
+        var tools = catalog.GetAvailableTools(request);
+
+        Assert.DoesNotContain(tools, static tool => tool.Name == "web.search");
+        Assert.DoesNotContain(tools, static tool => tool.Name == "web.fetch");
+        Assert.DoesNotContain(tools, static tool => tool.Name == "image.generate");
+    }
+
+    [Fact]
+    public void GeneralRunsAcceptExplicitStagedWebResearchTools()
+    {
+        var catalog = new AgentToolCatalog();
+        var request = CreateRequest([]) with
+        {
+            AllowedServerTools = ["web.search", "web.fetch", "math.evaluate"],
+            Messages = [new RunMessage("user", [new ContentPart("text", "[MISSUM_WEB_RESEARCH_REQUEST]\nFrage")])],
+        };
+
+        var tools = catalog.GetAvailableTools(request);
+
+        Assert.Contains(tools, static tool => tool.Name == "web.search");
+        Assert.Contains(tools, static tool => tool.Name == "web.fetch");
+        Assert.True(StagedWebResearchPipeline.IsRequested(request, tools));
+    }
+
+    [Fact]
+    public void NullServerToolAllowListRetainsProtocolCompatibility()
+    {
+        var tools = new AgentToolCatalog().GetAvailableTools(CreateRequest(null));
+        Assert.Contains(tools, static tool => tool.Name == "image.generate");
+    }
+
+    [Fact]
+    public void ContextPreparationAdvertisesNoTools()
+    {
+        var request = CreateRequest([]) with
+        {
+            AllowedServerTools = [],
+            PreferredGeneralModelId = "gpt-oss-120b",
+            ConversationProfile = ConversationProfile.ContextPreparation,
+        };
+
+        Assert.Empty(new AgentToolCatalog().GetAvailableTools(request));
+    }
+
+    [Fact]
+    public void DynamicClientToolIsAdvertisedResolvedAndValidated()
+    {
+        var descriptor = new ToolDescriptor(
+            "com.example.lookup",
+            "Liest einen begrenzten lokalen Datensatz.",
+            ToolRiskClass.ReadOnly,
+            JsonSerializer.SerializeToElement(new
+            {
+                type = "object",
+                properties = new
+                {
+                    query = new { type = "string" },
+                },
+                required = RequiredQueryProperties,
+                additionalProperties = false,
+            }),
+            TimeoutSeconds: 30,
+            MaximumOutputBytes: 16_384);
+        var request = CreateRequest([]) with { ClientTools = [descriptor] };
+        var catalog = new AgentToolCatalog();
+
+        var available = catalog.GetAvailableTools(request);
+        var tool = catalog.Resolve(descriptor.Name, available);
+
+        Assert.False(tool.ServerSide);
+        Assert.Equal(descriptor.Description, tool.Description);
+        Assert.Equal(descriptor.RiskClass, tool.RiskClass);
+        Assert.Equal(descriptor.InputSchema.GetRawText(), tool.Schema.GetRawText());
+        catalog.Validate(tool, JsonSerializer.SerializeToElement(new { query = "status" }));
+        Assert.Throws<ArgumentException>(() => catalog.Validate(
+            tool,
+            JsonSerializer.SerializeToElement(new { query = "status", unexpected = true })));
+        Assert.Throws<ArgumentException>(() => catalog.Validate(
+            tool,
+            JsonSerializer.SerializeToElement(new { })));
+    }
+
+    private static RunRequest CreateRequest(IReadOnlyList<string>? capabilities) => new(
+        MissumAiProtocol.Version,
+        RunMode.General,
+        [new RunMessage("user", [new ContentPart("text", "Test")])],
+        ClientCapabilities: capabilities);
+}

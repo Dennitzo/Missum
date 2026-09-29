@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Missum.Ai.SmokeClient</RootNamespace>
+    <AssemblyName>Missum.Ai.SmokeClient</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Missum.Ai.Client\Missum.Ai.Client.csproj" />
+    <ProjectReference Include="..\Missum.Ai.Contracts\Missum.Ai.Contracts.csproj" />
+  </ItemGroup>
+</Project>

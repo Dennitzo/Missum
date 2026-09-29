@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Missum.Infrastructure</RootNamespace>
+    <AssemblyName>Missum.Infrastructure</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Missum.Core\Missum.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="DocumentFormat.OpenXml" />
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
+    <PackageReference Include="Microsoft.Extensions.Http" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+    <PackageReference Include="PdfPig" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" />
+  </ItemGroup>
+</Project>

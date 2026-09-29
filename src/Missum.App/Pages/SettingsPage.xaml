@@ -1,0 +1,380 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+  x:Class="Missum.App.Pages.SettingsPage"
+  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+  xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+  xmlns:local="using:Missum.App.Pages"
+  xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+  xmlns:tv="using:WinUI.TableView"
+  xmlns:viewModels="using:Missum.App.ViewModels"
+  Background="Transparent"
+  Loaded="OnLoaded"
+  mc:Ignorable="d">
+
+  <ScrollViewer HorizontalContentAlignment="Stretch" HorizontalScrollBarVisibility="Disabled">
+    <StackPanel Padding="24" HorizontalAlignment="Stretch" Spacing="16">
+      <Grid ColumnSpacing="12">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="Auto" />
+          <ColumnDefinition Width="*" />
+          <ColumnDefinition Width="Auto" />
+        </Grid.ColumnDefinitions>
+        <Button
+          Width="40"
+          Height="40"
+          VerticalAlignment="Top"
+          AutomationProperties.Name="Zurück zum AI Assistenten"
+          Click="OnBackToAssistant"
+          Style="{StaticResource NavigationBackButtonNormalStyle}"
+          ToolTipService.ToolTip="Zurück zum AI Assistenten" />
+        <StackPanel Grid.Column="1">
+          <TextBlock Style="{StaticResource MissumPageTitleStyle}" Text="Einstellungen" />
+          <TextBlock
+            Margin="0,4,0,0"
+            Foreground="{ThemeResource MissumMutedTextBrush}"
+            Text="Docker-Gateway, Prompt-Trigger, lokale Werkzeuge, Darstellung und Datensicherung konfigurieren."
+            TextWrapping="Wrap" />
+        </StackPanel>
+        <Button Grid.Column="2" Click="OnSave" Content="Speichern" Style="{StaticResource MissumPrimaryButtonStyle}" />
+      </Grid>
+
+      <InfoBar x:Name="StatusBar" IsClosable="True" IsOpen="False" Severity="Informational" />
+
+      <Border Style="{StaticResource MissumCardStyle}">
+        <StackPanel Spacing="14">
+          <Grid ColumnSpacing="10">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="*" />
+              <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <StackPanel>
+              <TextBlock Style="{StaticResource MissumSectionTitleStyle}" Text="AI-Verbindung" />
+              <TextBlock
+                Margin="0,3,0,0"
+                Foreground="{ThemeResource MissumMutedTextBrush}"
+                Text="Direkte Verbindung zum Docker-Gateway auf dem GPU-Server. Es werden keine Schlüssel, Zertifikate oder Fingerprints benötigt."
+                TextWrapping="Wrap" />
+            </StackPanel>
+            <Border Grid.Column="1" Style="{StaticResource MissumStatusPillStyle}">
+              <StackPanel Orientation="Horizontal" Spacing="7">
+                <ProgressRing Width="15" Height="15" IsActive="{x:Bind ViewModel.IsBusy, Mode=OneWay}" />
+                <TextBlock MaxWidth="300" Text="{x:Bind ViewModel.ConnectionStatus, Mode=OneWay}" TextTrimming="CharacterEllipsis" />
+              </StackPanel>
+            </Border>
+          </Grid>
+
+          <ToggleSwitch
+            Header="Neue AI-Antworten automatisch vorlesen"
+            IsOn="{x:Bind ViewModel.IsAutomaticSpeechEnabled, Mode=TwoWay}"
+            OffContent="Aus"
+            OnContent="Ein" />
+
+          <Grid ColumnSpacing="10">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="*" />
+              <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBox
+              Header="Docker-Gatewayadresse"
+              PlaceholderText="http://192.168.0.67:8080"
+              Text="{x:Bind ViewModel.MissumAiServerUrl, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+            <Button
+              Grid.Column="1"
+              Margin="0,24,0,0"
+              Click="OnRefreshModels"
+              Content="Verbindung testen und Fähigkeiten laden"
+              Style="{StaticResource MissumPrimaryButtonStyle}" />
+          </Grid>
+
+          <ComboBox x:Name="CaptionLanguageBox" Header="Sprache für Untertitel" SelectionChanged="OnCaptionLanguageChanged">
+            <ComboBoxItem Content="Deutsch" Tag="de" />
+            <ComboBoxItem Content="Englisch" Tag="en" />
+            <ComboBoxItem Content="Automatisch" Tag="auto" />
+          </ComboBox>
+
+          <ComboBox
+            Header="General AI Modell"
+            ItemsSource="{x:Bind ViewModel.Models, Mode=OneWay}"
+            DisplayMemberPath="DisplayName"
+            SelectedItem="{x:Bind ViewModel.SelectedGeneralModelItem, Mode=TwoWay}" />
+          <TextBlock
+            Margin="0,-6,0,0"
+            Foreground="{ThemeResource MissumMutedTextBrush}"
+            Text="Die native Unsloth-Laufzeit erkennt lokale GGUF-Modelle und ihre Fähigkeiten. General und Coding verwenden unabhängig ausgewählte Textmodelle aus demselben Modellordner; Vision und Embedding werden automatisch zugeordnet."
+            TextWrapping="Wrap" />
+
+          <ComboBox
+            Header="Coding AI Modell"
+            ItemsSource="{x:Bind ViewModel.CodingModels, Mode=OneWay}"
+            DisplayMemberPath="DisplayName"
+            SelectedItem="{x:Bind ViewModel.SelectedCodingModelItem, Mode=TwoWay}" />
+          <TextBlock
+            Margin="0,-6,0,0"
+            Foreground="{ThemeResource MissumMutedTextBrush}"
+            Text="{x:Bind ViewModel.CodingModelStatus, Mode=OneWay}"
+            TextWrapping="Wrap" />
+
+          <TextBlock FontWeight="SemiBold" Text="Coding · experimentelle Funktionen" />
+
+
+        </StackPanel>
+      </Border>
+
+      <Border Style="{StaticResource MissumCardStyle}">
+        <StackPanel Spacing="14">
+          <StackPanel>
+            <TextBlock Style="{StaticResource MissumSectionTitleStyle}" Text="Darstellung" />
+            <TextBlock Margin="0,3,0,0" Foreground="{ThemeResource MissumMutedTextBrush}" Text="Akzentfarbe und Hintergrundoptik lassen sich unabhängig für Missum und den AI-Assistenten einstellen." TextWrapping="Wrap" />
+          </StackPanel>
+          <StackPanel Spacing="10">
+            <ComboBox x:Name="ThemeBox" Header="App-Theme" SelectionChanged="OnThemeChanged">
+              <ComboBoxItem Content="Windows-Systemeinstellung" Tag="System" />
+              <ComboBoxItem Content="Hell" Tag="Light" />
+              <ComboBoxItem Content="Dunkel" Tag="Dark" />
+            </ComboBox>
+            <ComboBox x:Name="LanguageBox" Header="Sprache" SelectionChanged="OnLanguageChanged">
+              <ComboBoxItem Content="Deutsch" Tag="de-DE" />
+              <ComboBoxItem Content="English" Tag="en-US" />
+            </ComboBox>
+          </StackPanel>
+          <ToggleSwitch
+            Header="Werkzeugschritte automatisch aufklappen"
+            IsOn="{x:Bind ViewModel.CodingToolStepsExpanded, Mode=TwoWay}"
+            OffContent="Standardmäßig eingeklappt"
+            OnContent="Standardmäßig ausgeklappt" />
+          <StackPanel Spacing="7">
+            <TextBlock FontWeight="SemiBold" Text="Akzentfarbe" />
+            <ListView x:Name="AccentColorList" HorizontalAlignment="Stretch" ItemsSource="{x:Bind AccentColors}" SelectionChanged="OnAccentColorChanged" SelectionMode="Single">
+              <ListView.ItemsPanel><ItemsPanelTemplate><ItemsWrapGrid Orientation="Horizontal" /></ItemsPanelTemplate></ListView.ItemsPanel>
+              <ListView.ItemContainerStyle><Style TargetType="ListViewItem"><Setter Property="MinWidth" Value="118" /><Setter Property="Margin" Value="0,0,8,8" /><Setter Property="Padding" Value="8" /><Setter Property="HorizontalContentAlignment" Value="Stretch" /></Style></ListView.ItemContainerStyle>
+              <ListView.ItemTemplate><DataTemplate x:DataType="local:SettingsAccentColorOption"><StackPanel Orientation="Horizontal" Spacing="8"><Ellipse Width="24" Height="24" Fill="{x:Bind PreviewBrush}" Stroke="{ThemeResource MissumStrokeBrush}" StrokeThickness="1" /><TextBlock VerticalAlignment="Center" Text="{x:Bind Name}" /></StackPanel></DataTemplate></ListView.ItemTemplate>
+            </ListView>
+          </StackPanel>
+          <StackPanel Spacing="7">
+            <TextBlock FontWeight="SemiBold" Text="Hintergrundfarbe" />
+            <TextBlock Foreground="{ThemeResource MissumMutedTextBrush}" Text="Standard, Grau, Dunkel und Schwarz erzeugen eine neutrale Hell-/Dunkelmodus-Optik; weitere Farben tönen die Flächen ein." TextWrapping="Wrap" />
+            <ListView x:Name="BackgroundColorList" HorizontalAlignment="Stretch" ItemsSource="{x:Bind BackgroundColors}" SelectionChanged="OnBackgroundColorChanged" SelectionMode="Single">
+              <ListView.ItemsPanel><ItemsPanelTemplate><ItemsWrapGrid Orientation="Horizontal" /></ItemsPanelTemplate></ListView.ItemsPanel>
+              <ListView.ItemContainerStyle><Style TargetType="ListViewItem"><Setter Property="MinWidth" Value="118" /><Setter Property="Margin" Value="0,0,8,8" /><Setter Property="Padding" Value="8" /><Setter Property="HorizontalContentAlignment" Value="Stretch" /></Style></ListView.ItemContainerStyle>
+              <ListView.ItemTemplate><DataTemplate x:DataType="local:SettingsAccentColorOption"><StackPanel Orientation="Horizontal" Spacing="8"><Ellipse Width="24" Height="24" Fill="{x:Bind PreviewBrush}" Stroke="{ThemeResource MissumStrokeBrush}" StrokeThickness="1" /><TextBlock VerticalAlignment="Center" Text="{x:Bind Name}" /></StackPanel></DataTemplate></ListView.ItemTemplate>
+            </ListView>
+          </StackPanel>
+        </StackPanel>
+      </Border>
+
+      <Border Style="{StaticResource MissumCardStyle}">
+        <StackPanel Spacing="12">
+          <TextBlock Style="{StaticResource MissumSectionTitleStyle}" Text="Sicherung" />
+          <TextBlock Foreground="{ThemeResource MissumMutedTextBrush}" Text="Chats, Projekte, Dateien, Trigger und Einstellungen in einer .missumbackup-Datei sichern. Backups sind nicht verschlüsselt." TextWrapping="Wrap" />
+          <StackPanel Orientation="Horizontal" Spacing="8">
+            <Button Click="OnCreateBackup" Content="Backup erstellen" Style="{StaticResource MissumPrimaryButtonStyle}" />
+            <Button Click="OnRestoreBackup" Content="Backup wiederherstellen" />
+          </StackPanel>
+        </StackPanel>
+      </Border>
+
+      <StackPanel Spacing="18">
+        <StackPanel Spacing="4">
+          <TextBlock Style="{StaticResource MissumSectionTitleStyle}" Text="Prompt-Trigger" />
+          <TextBlock
+            Foreground="{ThemeResource MissumMutedTextBrush}"
+            Text="Aktive Phrasen werden als Präfix erkannt und routen die Anfrage deterministisch zum zugeordneten Dienst."
+            TextWrapping="Wrap" />
+        </StackPanel>
+
+        <InfoBar
+          IsClosable="False"
+          IsOpen="True"
+          Message="Triggerphrase, Beschreibung, Kategorie und Aktivstatus können direkt in der Tabelle bearbeitet werden. Änderungen werden mit „Speichern“ in Missum.db übernommen."
+          Severity="Informational"
+          Title="Dienst-Routing" />
+
+        <Border Style="{StaticResource MissumCardStyle}">
+          <StackPanel Spacing="12">
+            <StackPanel Spacing="3">
+              <TextBlock Style="{StaticResource MissumSectionTitleStyle}" Text="Prompt-Trigger hinzufügen" />
+              <TextBlock
+                Foreground="{ThemeResource MissumMutedTextBrush}"
+                Text="Dienst auswählen und eine neue Triggerphrase als Tabellenzeile anlegen."
+                TextWrapping="Wrap" />
+            </StackPanel>
+            <Grid ColumnSpacing="10" RowSpacing="10">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="260" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+              <ComboBox
+                x:Name="NewTriggerActionBox"
+                Header="Kategorie"
+                DisplayMemberPath="Label"
+                ItemsSource="{x:Bind ViewModel.TriggerActions, Mode=OneWay}"
+                PlaceholderText="Dienst auswählen" />
+              <TextBox
+                x:Name="NewTriggerPhraseBox"
+                Grid.Column="1"
+                Header="Neue Triggerphrase"
+                MaxLength="160"
+                PlaceholderText="Zum Beispiel: Erstelle ein Bild" />
+              <Button
+                x:Name="AddTriggerButton"
+                Grid.Column="2"
+                VerticalAlignment="Bottom"
+                Click="OnAddTrigger"
+                Content="Zeile hinzufügen"
+                Style="{StaticResource MissumPrimaryButtonStyle}" />
+            </Grid>
+          </StackPanel>
+        </Border>
+
+        <Border Padding="0" Style="{StaticResource MissumCardStyle}">
+          <Grid>
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto" />
+              <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+            <Grid
+              Padding="12,10"
+              Background="{ThemeResource MissumLayerStrongBrush}"
+              ColumnSpacing="12"
+              RowSpacing="8">
+              <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+              </Grid.RowDefinitions>
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+              <AutoSuggestBox
+                x:Name="TriggerSearchBox"
+                Grid.ColumnSpan="3"
+                AutomationProperties.Name="Prompt-Trigger durchsuchen"
+                PlaceholderText="Tabelle durchsuchen …"
+                QueryIcon="Find"
+                Text="{x:Bind ViewModel.TriggerSearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                TextChanged="OnTriggerSearchTextChanged" />
+              <TextBlock
+                Grid.Row="1"
+                VerticalAlignment="Center"
+                Foreground="{ThemeResource MissumMutedTextBrush}"
+                Text="Eine oder mehrere Zeilen auswählen, um sie zu löschen."
+                TextWrapping="Wrap" />
+              <ComboBox
+                x:Name="TriggerCategoryFilterBox"
+                Grid.Row="1"
+                Grid.Column="1"
+                MinWidth="220"
+                AutomationProperties.Name="Prompt-Trigger nach Kategorie filtern"
+                DisplayMemberPath="Label"
+                ItemsSource="{x:Bind ViewModel.TriggerCategoryFilters, Mode=OneWay}"
+                SelectedItem="{x:Bind ViewModel.SelectedTriggerCategoryFilter, Mode=TwoWay}" />
+              <Button
+                x:Name="DeleteTriggerRowsButton"
+                Grid.Row="1"
+                Grid.Column="2"
+                AutomationProperties.Name="Ausgewählte Prompt-Trigger löschen"
+                Click="OnDeleteSelectedTriggers"
+                IsEnabled="{x:Bind ViewModel.CanDeleteSelectedPromptTrigger, Mode=OneWay}"
+                Style="{StaticResource MissumDangerButtonStyle}">
+                <StackPanel Orientation="Horizontal" Spacing="7">
+                  <SymbolIcon Symbol="Delete" />
+                  <TextBlock Text="Zeile löschen" />
+                </StackPanel>
+              </Button>
+            </Grid>
+
+            <tv:TableView
+              x:Name="PromptTriggerTable"
+              Grid.Row="1"
+              Height="460"
+              AutomationProperties.Name="Sortierbare Prompt-Trigger"
+              AutoGenerateColumns="False"
+              CellEditEnded="OnPromptTriggerCellEditEnded"
+              CanFilterColumns="False"
+              CanReorderColumns="False"
+              CanResizeColumns="True"
+              CanSortColumns="True"
+              IsReadOnly="False"
+              ItemsSource="{x:Bind ViewModel.VisiblePromptTriggers, Mode=OneWay}"
+              MaxColumnWidth="900"
+              MinColumnWidth="72"
+              SelectionChanged="OnPromptTriggerSelectionChanged"
+              SelectionMode="Multiple"
+              ShowExportOptions="False"
+              Sorting="OnPromptTriggerTableSorting">
+              <tv:TableView.Columns>
+                <tv:TableViewTextColumn
+                  Binding="{Binding Phrase, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                  CanResize="True"
+                  CanSort="True"
+                  Header="Triggerphrase"
+                  IsReadOnly="False"
+                  SortMemberPath="Phrase"
+                  Tag="Phrase"
+                  Width="2*" />
+                <tv:TableViewTemplateColumn
+                  CanResize="True"
+                  CanSort="True"
+                  Header="Kategorie"
+                  IsReadOnly="False"
+                  SortMemberPath="Action"
+                  Tag="Action"
+                  Width="220">
+                  <tv:TableViewTemplateColumn.CellTemplate>
+                    <DataTemplate x:DataType="viewModels:PromptTriggerEditorItem">
+                      <TextBlock
+                        VerticalAlignment="Center"
+                        Text="{x:Bind ActionDisplayName}"
+                        TextTrimming="CharacterEllipsis"
+                        ToolTipService.ToolTip="{x:Bind ActionDisplayName}" />
+                    </DataTemplate>
+                  </tv:TableViewTemplateColumn.CellTemplate>
+                  <tv:TableViewTemplateColumn.EditingTemplate>
+                    <DataTemplate x:DataType="viewModels:PromptTriggerEditorItem">
+                      <ComboBox
+                        MinWidth="190"
+                        DisplayMemberPath="Label"
+                        ItemsSource="{x:Bind ActionOptions}"
+                        SelectedItem="{x:Bind SelectedActionOption, Mode=TwoWay}" />
+                    </DataTemplate>
+                  </tv:TableViewTemplateColumn.EditingTemplate>
+                </tv:TableViewTemplateColumn>
+                <tv:TableViewTextColumn
+                  Binding="{Binding Description, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                  CanResize="True"
+                  CanSort="True"
+                  Header="Beschreibung"
+                  IsReadOnly="False"
+                  SortMemberPath="Description"
+                  Tag="Description"
+                  Width="2*" />
+                <tv:TableViewTemplateColumn
+                  CanResize="True"
+                  CanSort="True"
+                  Header="Aktiv"
+                  IsReadOnly="True"
+                  SortMemberPath="IsEnabled"
+                  Tag="IsEnabled"
+                  Width="100">
+                  <tv:TableViewTemplateColumn.CellTemplate>
+                    <DataTemplate x:DataType="viewModels:PromptTriggerEditorItem">
+                      <ToggleSwitch
+                        AutomationProperties.Name="Prompt-Trigger aktivieren oder deaktivieren"
+                        IsOn="{x:Bind IsEnabled, Mode=TwoWay}"
+                        OffContent=""
+                        OnContent=""
+                        Tag="{x:Bind}" />
+                    </DataTemplate>
+                  </tv:TableViewTemplateColumn.CellTemplate>
+                </tv:TableViewTemplateColumn>
+              </tv:TableView.Columns>
+            </tv:TableView>
+          </Grid>
+        </Border>
+      </StackPanel>
+    </StackPanel>
+  </ScrollViewer>
+</Page>

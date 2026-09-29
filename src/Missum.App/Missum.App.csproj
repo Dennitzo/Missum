@@ -1,0 +1,169 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <RootNamespace>Missum.App</RootNamespace>
+    <AssemblyName>Missum</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\AppLogo.ico</ApplicationIcon>
+    <Configurations>Debug;Release;Portable</Configurations>
+    <Platforms>x64</Platforms>
+    <Platform>x64</Platform>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <UseWinUI>true</UseWinUI>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <WindowsPackageType>None</WindowsPackageType>
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <AppxPackageSigningEnabled>false</AppxPackageSigningEnabled>
+    <PublishTrimmed>false</PublishTrimmed>
+    <PublishReadyToRun>false</PublishReadyToRun>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Portable'">
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
+    <ExtensionHostPublishDir>$(MSBuildProjectDirectory)\obj\extension-host-publish\</ExtensionHostPublishDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <ProjectReference Include="..\Missum.Ai.Client\Missum.Ai.Client.csproj" />
+    <ProjectReference Include="..\Missum.Ai.Contracts\Missum.Ai.Contracts.csproj" />
+    <ProjectReference Include="..\ExtensionHost\ExtensionHost.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\Missum.Core\Missum.Core.csproj" />
+    <ProjectReference Include="..\Missum.Infrastructure\Missum.Infrastructure.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CSharpMath.SkiaSharp" />
+    <PackageReference Include="CommunityToolkit.Mvvm" />
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" />
+    <PackageReference Include="NAudio" />
+    <PackageReference Include="WinUI.TableView" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="Assets\Notices\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="Assets\AppLogo.ico">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="Assets\Web\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="Assets\Scripts\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="..\..\windows\manage-coding-llama.ps1">
+      <Link>Assets\NativeRuntime\windows\manage-coding-llama.ps1</Link>
+      <TargetPath>Assets\NativeRuntime\windows\manage-coding-llama.ps1</TargetPath>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>false</ExcludeFromSingleFile>
+    </Content>
+    <Content Include="..\..\windows\manage-llama-server.ps1">
+      <Link>Assets\NativeRuntime\windows\manage-llama-server.ps1</Link>
+      <TargetPath>Assets\NativeRuntime\windows\manage-llama-server.ps1</TargetPath>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>false</ExcludeFromSingleFile>
+    </Content>
+    <Content Include="..\..\workers\coding\catalog.py">
+      <Link>Assets\NativeRuntime\workers\coding\catalog.py</Link>
+      <TargetPath>Assets\NativeRuntime\workers\coding\catalog.py</TargetPath>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>false</ExcludeFromSingleFile>
+    </Content>
+    <Content Include="..\..\workers\coding\session_cache.py">
+      <Link>Assets\NativeRuntime\workers\coding\session_cache.py</Link>
+      <TargetPath>Assets\NativeRuntime\workers\coding\session_cache.py</TargetPath>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>false</ExcludeFromSingleFile>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Manifest Include="$(ApplicationManifest)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>Missum.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="..\..\deploy\missum-ai\research-runner\Dockerfile" Link="research-runner\Dockerfile"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\deploy\missum-ai\research-runner\requirements.lock" Link="research-runner\requirements.lock"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <Target Name="CopyExtensionHostArtifacts" AfterTargets="Build">
+    <ItemGroup>
+      <_ExtensionHostArtifacts Include="..\ExtensionHost\bin\$(Platform)\$(Configuration)\net10.0\ExtensionHost.*" />
+      <_ExtensionHostArtifacts Include="..\ExtensionHost\bin\$(Platform)\$(Configuration)\net10.0\Missum.Core.dll"
+                               Condition="Exists('..\ExtensionHost\bin\$(Platform)\$(Configuration)\net10.0\Missum.Core.dll')" />
+      <_ExtensionHostArtifacts Include="..\ExtensionHost\bin\$(Platform)\$(Configuration)\net10.0\$(RuntimeIdentifier)\ExtensionHost.*" />
+      <_ExtensionHostArtifacts Include="..\ExtensionHost\bin\$(Platform)\$(Configuration)\net10.0\$(RuntimeIdentifier)\Missum.Core.dll"
+                               Condition="Exists('..\ExtensionHost\bin\$(Platform)\$(Configuration)\net10.0\$(RuntimeIdentifier)\Missum.Core.dll')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_ExtensionHostArtifacts)"
+          DestinationFolder="$(OutDir)ExtensionHost"
+          SkipUnchangedFiles="true"
+          Condition="'@(_ExtensionHostArtifacts)' != ''" />
+  </Target>
+
+  <Target Name="CopyPublishedExtensionHostArtifacts" AfterTargets="Publish" Condition="'$(PublishDir)' != '' and '$(Configuration)' != 'Portable'">
+    <ItemGroup>
+      <_PublishedExtensionHostArtifacts Include="..\ExtensionHost\bin\$(Platform)\$(Configuration)\net10.0\ExtensionHost.*" />
+      <_PublishedExtensionHostArtifacts Include="..\ExtensionHost\bin\$(Platform)\$(Configuration)\net10.0\Missum.Core.dll"
+                                         Condition="Exists('..\ExtensionHost\bin\$(Platform)\$(Configuration)\net10.0\Missum.Core.dll')" />
+      <_PublishedExtensionHostArtifacts Include="..\ExtensionHost\bin\$(Platform)\$(Configuration)\net10.0\$(RuntimeIdentifier)\ExtensionHost.*" />
+      <_PublishedExtensionHostArtifacts Include="..\ExtensionHost\bin\$(Platform)\$(Configuration)\net10.0\$(RuntimeIdentifier)\Missum.Core.dll"
+                                         Condition="Exists('..\ExtensionHost\bin\$(Platform)\$(Configuration)\net10.0\$(RuntimeIdentifier)\Missum.Core.dll')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_PublishedExtensionHostArtifacts)"
+          DestinationFolder="$(PublishDir)ExtensionHost"
+          SkipUnchangedFiles="true"
+          Condition="'@(_PublishedExtensionHostArtifacts)' != ''" />
+  </Target>
+
+  <!-- Native packages can ship PDB files even when our own DebugSymbols are disabled. -->
+  <Target Name="ExcludePortableDebugSymbols" BeforeTargets="_ComputeFilesToBundle" Condition="'$(Configuration)' == 'Portable'">
+    <ItemGroup>
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)" Condition="'%(ResolvedFileToPublish.Extension)' == '.pdb'" />
+    </ItemGroup>
+  </Target>
+
+  <Target Name="PublishPortableExtensionHost" AfterTargets="Publish" Condition="'$(Configuration)' == 'Portable' and '$(PublishDir)' != ''">
+    <RemoveDir Directories="$(ExtensionHostPublishDir)" />
+    <MSBuild Projects="..\ExtensionHost\ExtensionHost.csproj"
+             Targets="Publish"
+             BuildInParallel="false"
+             Properties="Configuration=Release;RuntimeIdentifier=win-x64;SelfContained=true;PublishSingleFile=true;PublishTrimmed=false;PublishDir=$(ExtensionHostPublishDir)" />
+    <Error Condition="!Exists('$(ExtensionHostPublishDir)ExtensionHost.exe')"
+           Text="Der portable, eigenständige ExtensionHost wurde nicht erzeugt." />
+    <ItemGroup>
+      <_PortableExtensionHostArtifacts Include="$(ExtensionHostPublishDir)**\*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_PortableExtensionHostArtifacts)"
+          DestinationFiles="@(_PortableExtensionHostArtifacts->'$(PublishDir)ExtensionHost\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
+</Project>
+
+

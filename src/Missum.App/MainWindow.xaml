@@ -1,0 +1,194 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Window
+  x:Class="Missum.App.MainWindow"
+  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+  xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+  xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+  Title="Missum"
+  mc:Ignorable="d">
+
+  <Window.SystemBackdrop>
+    <MicaBackdrop Kind="BaseAlt" />
+  </Window.SystemBackdrop>
+
+  <Grid Background="{ThemeResource MissumWindowBrush}">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="44" />
+      <RowDefinition Height="*" />
+      <RowDefinition Height="Auto" />
+    </Grid.RowDefinitions>
+
+    <Grid
+      x:Name="AppTitleBar"
+      Grid.Row="0"
+      Padding="16,0,152,0"
+      Background="{ThemeResource MissumAccentSubtleBrush}"
+      ColumnSpacing="12">
+      <VisualStateManager.VisualStateGroups>
+        <VisualStateGroup>
+          <VisualState x:Name="ExpandedTitleBar">
+            <VisualState.StateTriggers>
+              <AdaptiveTrigger MinWindowWidth="900" />
+            </VisualState.StateTriggers>
+            <VisualState.Setters>
+              <Setter Target="WorkspaceSubtitle.Visibility" Value="Visible" />
+            </VisualState.Setters>
+          </VisualState>
+          <VisualState x:Name="CompactTitleBar">
+            <VisualState.StateTriggers>
+              <AdaptiveTrigger MinWindowWidth="0" />
+            </VisualState.StateTriggers>
+            <VisualState.Setters>
+              <Setter Target="WorkspaceSubtitle.Visibility" Value="Visible" />
+            </VisualState.Setters>
+          </VisualState>
+        </VisualStateGroup>
+      </VisualStateManager.VisualStateGroups>
+
+      <Grid
+        MinWidth="0"
+        VerticalAlignment="Center"
+        ColumnSpacing="8">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="Auto" />
+          <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
+        <TextBlock
+          VerticalAlignment="Center"
+          FontWeight="SemiBold"
+          Text="Missum" />
+        <MenuBar x:Name="WorkspaceSubtitle" Grid.Column="1" VerticalAlignment="Center">
+          <MenuBarItem Title="Datei">
+            <MenuFlyoutItem Text="AI Assistent" Click="OnMenuAssistant" />
+            <MenuFlyoutSeparator />
+            <MenuFlyoutItem Text="Einstellungen" Click="OnMenuSettings" />
+            <MenuFlyoutSeparator />
+            <MenuFlyoutItem Text="Beenden" Click="OnMenuClose" />
+          </MenuBarItem>
+          <MenuBarItem Title="Bearbeiten"><MenuFlyoutItem Text="Nachricht schreiben" Click="OnMenuCompose"/></MenuBarItem>
+          <MenuBarItem Title="Ansicht"><MenuFlyoutItem Text="Seitenleiste umschalten" Click="OnMenuSidebar"/><MenuFlyoutItem Text="Ausgaben und Quellen" Click="OnMenuInspector"/></MenuBarItem>
+          <MenuBarItem Title="Hilfe"><MenuFlyoutItem Text="Über Missum" Click="OnMenuAbout"/></MenuBarItem>
+        </MenuBar>
+      </Grid>
+
+    </Grid>
+
+    <Border
+      Grid.Row="0"
+      Height="0"
+      VerticalAlignment="Bottom"
+      Background="{ThemeResource MissumStrokeBrush}"
+      IsHitTestVisible="False" />
+
+    <Frame
+      x:Name="ContentFrame"
+      Grid.Row="1"
+      Background="Transparent"
+      HorizontalContentAlignment="Stretch"
+      VerticalContentAlignment="Stretch"
+      Loaded="OnNavigationLoaded"
+      Navigated="OnNavigated"
+      NavigationFailed="OnNavigationFailed" />
+
+    <Border
+      Grid.Row="2"
+      Visibility="Collapsed"
+      MinHeight="58"
+      Padding="14,8"
+      Background="{ThemeResource MissumLayerBrush}"
+      BorderBrush="{ThemeResource MissumStrokeBrush}"
+      BorderThickness="0,1,0,0">
+      <Grid MinWidth="0">
+        <ScrollViewer
+          MinWidth="0"
+          VerticalAlignment="Center"
+          HorizontalScrollBarVisibility="Auto"
+          HorizontalScrollMode="Enabled"
+          VerticalScrollBarVisibility="Disabled"
+          VerticalScrollMode="Disabled">
+          <ItemsControl ItemsSource="{x:Bind ViewModel.AiServices, Mode=OneWay}">
+            <ItemsControl.ItemsPanel>
+              <ItemsPanelTemplate>
+                <StackPanel Orientation="Horizontal" Spacing="8" />
+              </ItemsPanelTemplate>
+            </ItemsControl.ItemsPanel>
+            <ItemsControl.ItemTemplate>
+              <DataTemplate>
+                <Border
+                  Width="42"
+                  Height="42"
+                  Padding="3"
+                  AutomationProperties.Name="{Binding AutomationLabel}"
+                  Background="{ThemeResource MissumLayerStrongBrush}"
+                  BorderBrush="{ThemeResource MissumStrokeBrush}"
+                  BorderThickness="1"
+                  CornerRadius="8"
+                  ToolTipService.Placement="Top"
+                  ToolTipService.ToolTip="{Binding ToolTipText}">
+                  <VisualStateManager.VisualStateGroups>
+                    <VisualStateGroup x:Name="ActivityStates">
+                      <VisualState x:Name="Idle">
+                        <VisualState.StateTriggers>
+                          <StateTrigger IsActive="{Binding IsIdle}" />
+                        </VisualState.StateTriggers>
+                      </VisualState>
+                      <VisualState x:Name="Running">
+                        <VisualState.StateTriggers>
+                          <StateTrigger IsActive="{Binding IsBusy}" />
+                        </VisualState.StateTriggers>
+                        <Storyboard RepeatBehavior="Forever" AutoReverse="True">
+                          <DoubleAnimation
+                            Storyboard.TargetName="ServiceIconSurface"
+                            Storyboard.TargetProperty="Opacity"
+                            From="0.16"
+                            To="0.58"
+                            Duration="0:0:0.85">
+                            <DoubleAnimation.EasingFunction>
+                              <SineEase EasingMode="EaseInOut" />
+                            </DoubleAnimation.EasingFunction>
+                          </DoubleAnimation>
+                        </Storyboard>
+                      </VisualState>
+                    </VisualStateGroup>
+                  </VisualStateManager.VisualStateGroups>
+                  <Grid>
+                    <Border
+                      x:Name="ServiceIconSurface"
+                      Width="34"
+                      Height="34"
+                      HorizontalAlignment="Center"
+                      VerticalAlignment="Center"
+                      CornerRadius="7">
+                      <Border.Background><StaticResource ResourceKey="MissumAccentSubtleBrush" /></Border.Background>
+                      <Grid>
+                        <FontIcon
+                          x:Name="ServiceGlyph"
+                          HorizontalAlignment="Center"
+                          VerticalAlignment="Center"
+                          FontSize="16"
+                          Foreground="{ThemeResource MissumAccentBrush}"
+                          Glyph="{Binding Glyph}" />
+                        <ProgressRing
+                          x:Name="ServiceProgress"
+                          Width="20"
+                          Height="20"
+                          HorizontalAlignment="Center"
+                          VerticalAlignment="Center"
+                          Foreground="{ThemeResource MissumAccentBrush}"
+                          IsActive="{Binding IsBusy}"
+                          IsTabStop="False" />
+                      </Grid>
+                    </Border>
+                  </Grid>
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </ScrollViewer>
+      </Grid>
+    </Border>
+  </Grid>
+</Window>
+
+

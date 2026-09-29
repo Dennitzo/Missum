@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <RootNamespace>Missum.Tests</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="DocumentFormat.OpenXml" />
+    <ProjectReference Include="..\..\src\Missum.App\Missum.App.csproj" />
+    <ProjectReference Include="..\..\src\Missum.Core\Missum.Core.csproj" />
+    <ProjectReference Include="..\..\src\Missum.Infrastructure\Missum.Infrastructure.csproj" />
+    <ProjectReference Include="..\ExtensionHost.TestExtension\ExtensionHost.TestExtension.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\..\src\ExtensionHost\ExtensionHost.csproj" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="PdfPig" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <Target Name="CopyExtensionHostTestArtifacts" AfterTargets="Build">
+    <ItemGroup>
+      <_ExtensionHostTestArtifacts Include="..\..\src\ExtensionHost\bin\$(Platform)\$(Configuration)\net10.0\ExtensionHost.*" />
+      <_ExtensionHostTestArtifacts Include="..\..\src\ExtensionHost\bin\$(Platform)\$(Configuration)\net10.0\Missum.Core.dll" />
+      <_ExtensionHostFixtureArtifacts Include="..\ExtensionHost.TestExtension\bin\$(Platform)\$(Configuration)\net10.0\ExtensionHost.TestExtension.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_ExtensionHostTestArtifacts)"
+          DestinationFolder="$(OutDir)ExtensionHost"
+          SkipUnchangedFiles="true"
+          Condition="'@(_ExtensionHostTestArtifacts)' != ''" />
+    <Copy SourceFiles="@(_ExtensionHostFixtureArtifacts)"
+          DestinationFolder="$(OutDir)ExtensionHost.TestExtension"
+          SkipUnchangedFiles="true"
+          Condition="'@(_ExtensionHostFixtureArtifacts)' != ''" />
+    <Copy SourceFiles="$(OutDir)Missum.Core.dll"
+          DestinationFolder="$(OutDir)ExtensionHost.TestExtension"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(OutDir)Missum.Core.dll')" />
+  </Target>
+</Project>
+

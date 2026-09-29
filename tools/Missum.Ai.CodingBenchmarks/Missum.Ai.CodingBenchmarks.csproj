@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Missum.Ai.CodingBenchmarks</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <ProjectReference Include="../../src/Missum.Ai.Client/Missum.Ai.Client.csproj" />
+    <ProjectReference Include="../../src/Missum.Ai.Server.Core/Missum.Ai.Server.Core.csproj" />
+    <ProjectReference Include="../../src/Missum.Core/Missum.Core.csproj" />
+  </ItemGroup>
+</Project>

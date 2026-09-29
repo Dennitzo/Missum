@@ -1,0 +1,40 @@
+use_default_settings: true
+
+general:
+  instance_name: "Missum AI Recherche"
+  debug: false
+
+search:
+  safe_search: 1
+  autocomplete: ""
+  formats:
+    - json
+
+server:
+  bind_address: "0.0.0.0"
+  port: 8080
+  secret_key: "missum-ai-private-docker-network"
+  limiter: false
+  image_proxy: false
+  method: "GET"
+
+ui:
+  static_use_hash: true
+
+outgoing:
+  request_timeout: 10.0
+  max_request_timeout: 30.0
+  pool_connections: 50
+  pool_maxsize: 10
+
+# Keep independent working web engines available. CAPTCHA-prone defaults must
+# not dominate every general query; the gateway also tracks engine cooldowns.
+engines:
+  - name: google cse
+    disabled: false
+  - name: bing
+    disabled: false
+  - name: duckduckgo
+    disabled: true
+  - name: startpage
+    disabled: true

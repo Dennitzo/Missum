@@ -1,0 +1,90 @@
+# Build, portable releases, and local validation output
+/artifacts/
+/artifacts-*.log
+bin/
+obj/
+AppPackages/
+BundleArtifacts/
+*.binlog
+
+# Local IDE state
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Test output and coverage
+TestResults/
+coverage/
+htmlcov/
+*.trx
+*.coverage
+*.coveragexml
+.coverage
+.coverage.*
+
+# JavaScript dependencies and Python environments/caches
+node_modules/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+
+# Machine-specific Docker/application settings and private signing material.
+# Keep environment templates in source control.
+.env
+.env.*
+*.env
+!.env.example
+!.env.*.example
+!*.env.example
+appsettings.Local.json
+appsettings.*.local.json
+*.pfx
+*.p12
+/secrets/
+
+# Local chat databases, backups, and SQLite sidecars
+*.missumbackup
+*.gobackup
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.db.bak
+*.db.*.bak
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite-journal
+*.sqlite.bak
+*.sqlite.*.bak
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.sqlite3-journal
+*.sqlite3.bak
+*.sqlite3.*.bak
+/DatabaseBackups/
+
+# Optional runtime roots inside the checkout (normally stored outside it).
+# Do not ignore source directories such as src/*/Models or documentation assets.
+/.missum/
+/Missum-AI-Stack/
+/data/
+/profiles/
+/Models/
+/Downloads/
+*.gguf
+*.safetensors
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+Desktop.ini

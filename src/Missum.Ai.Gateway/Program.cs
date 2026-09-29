@@ -1,0 +1,100 @@
+using Missum.Ai.Server.Core.Configuration;
+using Missum.Ai.Server.Core.Gateway;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+
+var options = new MissumAiServerOptions
+{
+    DataDirectory = ResolveDataDirectory(),
+    ExpectedLanIp = Environment.GetEnvironmentVariable("MISSUM_AI_EXPECTED_LAN_IP") ?? "192.168.0.67",
+    GatewayPort = ReadGatewayPort(),
+    PublicUrl = Environment.GetEnvironmentVariable("MISSUM_AI_PUBLIC_URL") ?? "http://192.168.0.67:8080",
+    ModelRuntimeUri = ResolveUri("MISSUM_AI_MODEL_RUNTIME_URL", "http://host.docker.internal:8081"),
+    CodingModelRoot = Environment.GetEnvironmentVariable("MISSUM_AI_CODING_MODEL_ROOT") ?? "Windows Unsloth Modellordner",
+    CodingModelId = Environment.GetEnvironmentVariable("MISSUM_AI_CODING_MODEL_ID") ?? string.Empty,
+    CodingMaximumModelRounds = ReadCodingBudget("MISSUM_AI_CODING_MAXIMUM_MODEL_ROUNDS", 0, 2),
+    CodingMaximumToolCalls = ReadCodingBudget("MISSUM_AI_CODING_MAXIMUM_TOOL_CALLS", 0, 1),
+    ReasoningOnlyTimeoutMinutes = ReadReasoningOnlyTimeout(),
+    SearxngUri = ResolveUri("MISSUM_AI_SEARXNG_URL", "http://searxng:8080"),
+    SpeechWorkerUri = ResolveUri("MISSUM_AI_SPEECH_WORKER_URL", "http://speech:8080"),
+    MediaWorkerUri = ResolveUri("MISSUM_AI_MEDIA_WORKER_URL", "http://media:8080"),
+    ImageWorkerUri = ResolveUri("MISSUM_AI_IMAGE_WORKER_URL", "http://image:8080"),
+    WorkerDataDirectory = Environment.GetEnvironmentVariable("MISSUM_AI_WORKER_DATA_DIRECTORY"),
+};
+
+var builder = Host.CreateDefaultBuilder(args)
+    .ConfigureLogging(logging =>
+    {
+        logging.ClearProviders();
+        if (Environment.UserInteractive)
+        {
+            logging.AddSimpleConsole(console => console.SingleLine = true);
+        }
+        logging.AddFilter("System.Net.Http.HttpClient", LogLevel.None);
+    })
+    .ConfigureMissumAiServer(destination =>
+    {
+        destination.DataDirectory = options.DataDirectory;
+        destination.ExpectedLanIp = options.ExpectedLanIp;
+        destination.GatewayPort = options.GatewayPort;
+        destination.PublicUrl = options.PublicUrl;
+        destination.ModelRuntimeUri = options.ModelRuntimeUri;
+        destination.CodingModelRoot = options.CodingModelRoot;
+        destination.CodingModelId = options.CodingModelId;
+        destination.CodingMaximumModelRounds = options.CodingMaximumModelRounds;
+        destination.CodingMaximumToolCalls = options.CodingMaximumToolCalls;
+        destination.ReasoningOnlyTimeoutMinutes = options.ReasoningOnlyTimeoutMinutes;
+        destination.SearxngUri = options.SearxngUri;
+        destination.SpeechWorkerUri = options.SpeechWorkerUri;
+        destination.MediaWorkerUri = options.MediaWorkerUri;
+        destination.ImageWorkerUri = options.ImageWorkerUri;
+        destination.WorkerDataDirectory = options.WorkerDataDirectory;
+    });
+
+await builder.Build().RunAsync().ConfigureAwait(false);
+
+static string ResolveDataDirectory()
+{
+    var requested = Environment.GetEnvironmentVariable("MISSUM_AI_DATA_DIRECTORY");
+    return string.IsNullOrWhiteSpace(requested)
+        ? MissumAiServerOptions.ResolveDefaultDataDirectory()
+        : Path.GetFullPath(requested);
+}
+
+static int ReadGatewayPort()
+{
+    var value = Environment.GetEnvironmentVariable("MISSUM_AI_GATEWAY_PORT");
+    return int.TryParse(value, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var port)
+        && port is >= 1024 and <= 65535
+        ? port
+        : 8080;
+}
+
+static int ReadCodingBudget(string variable, int fallback, int minimum)
+{
+    var configured = Environment.GetEnvironmentVariable(variable);
+    if (string.IsNullOrWhiteSpace(configured)) return fallback;
+    return int.TryParse(configured, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var value)
+        && (value == 0 || value >= minimum) ? value
+        : throw new InvalidOperationException($"{variable} must be 0 (unlimited) or an integer of at least {minimum}.");
+}
+
+static int ReadReasoningOnlyTimeout()
+{
+    const string variable = "MISSUM_AI_REASONING_ONLY_TIMEOUT_MINUTES";
+    var configured = Environment.GetEnvironmentVariable(variable);
+    if (string.IsNullOrWhiteSpace(configured)) return 30;
+    return int.TryParse(configured, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var value)
+        && value is >= 1 and <= 1440 ? value
+        : throw new InvalidOperationException($"{variable} must be an integer between 1 and 1440 minutes.");
+}
+
+static Uri ResolveUri(string variableName, string fallback)
+{
+    var configured = Environment.GetEnvironmentVariable(variableName);
+    return Uri.TryCreate(configured, UriKind.Absolute, out var uri)
+        && uri.Scheme is "http" or "https"
+        ? uri
+        : new Uri(fallback, UriKind.Absolute);
+}

@@ -1,0 +1,172 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ResourceDictionary
+  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+  xmlns:controls="using:Missum.App.Controls">
+
+  <ResourceDictionary.ThemeDictionaries>
+    <ResourceDictionary x:Key="Default">
+      <Color x:Key="MissumWindowColor">#181818</Color>
+      <Color x:Key="MissumLayerColor">#202020</Color>
+      <Color x:Key="MissumLayerStrongColor">#303030</Color>
+      <Color x:Key="MissumStrokeColor">#303030</Color>
+      <Color x:Key="MissumMutedTextColor">#999999</Color>
+      <Color x:Key="MissumAccentColor">#A970FF</Color>
+      <Color x:Key="MissumAccentTextColor">#FFFFFF</Color>
+      <Color x:Key="MissumSuccessColor">#42D392</Color>
+      <Color x:Key="MissumWarningColor">#F4B860</Color>
+      <Color x:Key="MissumDangerColor">#FF667A</Color>
+    </ResourceDictionary>
+    <ResourceDictionary x:Key="Light">
+      <Color x:Key="MissumWindowColor">#ECE7F2</Color>
+      <Color x:Key="MissumLayerColor">#FFFFFFFF</Color>
+      <Color x:Key="MissumLayerStrongColor">#FFF8F5FC</Color>
+      <Color x:Key="MissumStrokeColor">#45241D2F</Color>
+      <Color x:Key="MissumMutedTextColor">#51465D</Color>
+      <Color x:Key="MissumAccentColor">#6425C4</Color>
+      <Color x:Key="MissumAccentTextColor">#FFFFFF</Color>
+      <Color x:Key="MissumSuccessColor">#066540</Color>
+      <Color x:Key="MissumWarningColor">#874800</Color>
+      <Color x:Key="MissumDangerColor">#B31E3A</Color>
+    </ResourceDictionary>
+    <ResourceDictionary x:Key="HighContrast">
+      <Color x:Key="MissumWindowColor">#000000</Color>
+      <Color x:Key="MissumLayerColor">#000000</Color>
+      <Color x:Key="MissumLayerStrongColor">#000000</Color>
+      <Color x:Key="MissumStrokeColor">#FFFFFF</Color>
+      <Color x:Key="MissumMutedTextColor">#FFFFFF</Color>
+      <Color x:Key="MissumAccentColor">#FFFF00</Color>
+      <Color x:Key="MissumAccentTextColor">#000000</Color>
+      <Color x:Key="MissumSuccessColor">#00FF00</Color>
+      <Color x:Key="MissumWarningColor">#FFFF00</Color>
+      <Color x:Key="MissumDangerColor">#FF8080</Color>
+    </ResourceDictionary>
+  </ResourceDictionary.ThemeDictionaries>
+
+  <SolidColorBrush x:Key="MissumWindowBrush" Color="{ThemeResource MissumWindowColor}" />
+  <SolidColorBrush x:Key="MissumLayerBrush" Color="{ThemeResource MissumLayerColor}" />
+  <SolidColorBrush x:Key="MissumLayerStrongBrush" Color="{ThemeResource MissumLayerStrongColor}" />
+  <SolidColorBrush x:Key="MissumInputBrush" Color="{ThemeResource MissumLayerStrongColor}" />
+  <SolidColorBrush x:Key="MissumHoverBrush" Color="{ThemeResource MissumLayerStrongColor}" />
+  <SolidColorBrush x:Key="MissumPressedBrush" Color="{ThemeResource MissumLayerStrongColor}" />
+  <SolidColorBrush x:Key="MissumStrokeBrush" Color="{ThemeResource MissumStrokeColor}" />
+  <SolidColorBrush x:Key="MissumMutedTextBrush" Color="{ThemeResource MissumMutedTextColor}" />
+  <SolidColorBrush x:Key="MissumAccentBrush" Color="{ThemeResource MissumAccentColor}" />
+  <SolidColorBrush x:Key="MissumAccentSubtleBrush" Color="{ThemeResource MissumAccentColor}" Opacity="0.14" />
+  <SolidColorBrush x:Key="MissumAccentTextBrush" Color="{ThemeResource MissumAccentTextColor}" />
+  <SolidColorBrush x:Key="MissumSuccessBrush" Color="{ThemeResource MissumSuccessColor}" />
+  <SolidColorBrush x:Key="MissumWarningBrush" Color="{ThemeResource MissumWarningColor}" />
+  <SolidColorBrush x:Key="MissumDangerBrush" Color="{ThemeResource MissumDangerColor}" />
+  <SolidColorBrush x:Key="AccentFillColorDefaultBrush" Color="{ThemeResource MissumAccentColor}" />
+  <SolidColorBrush x:Key="AccentFillColorSecondaryBrush" Color="{ThemeResource MissumAccentColor}" Opacity="0.90" />
+  <SolidColorBrush x:Key="AccentFillColorTertiaryBrush" Color="{ThemeResource MissumAccentColor}" Opacity="0.80" />
+  <SolidColorBrush x:Key="AccentFillColorDisabledBrush" Color="{ThemeResource MissumAccentColor}" Opacity="0.40" />
+  <SolidColorBrush x:Key="AccentTextFillColorPrimaryBrush" Color="{ThemeResource MissumAccentColor}" />
+  <SolidColorBrush x:Key="TextOnAccentFillColorPrimaryBrush" Color="{ThemeResource MissumAccentTextColor}" />
+  <SolidColorBrush x:Key="TextOnAccentFillColorSecondaryBrush" Color="{ThemeResource MissumAccentTextColor}" Opacity="0.85" />
+  <SolidColorBrush x:Key="TextOnAccentFillColorDisabledBrush" Color="{ThemeResource MissumAccentTextColor}" Opacity="0.55" />
+  <SolidColorBrush x:Key="ToggleSwitchFillOn" Color="{ThemeResource MissumAccentColor}" />
+  <SolidColorBrush x:Key="ToggleSwitchFillOnPointerOver" Color="{ThemeResource MissumAccentColor}" Opacity="0.90" />
+  <SolidColorBrush x:Key="ToggleSwitchFillOnPressed" Color="{ThemeResource MissumAccentColor}" Opacity="0.80" />
+  <SolidColorBrush x:Key="ToggleSwitchFillOnDisabled" Color="{ThemeResource MissumAccentColor}" Opacity="0.40" />
+  <SolidColorBrush x:Key="ToggleSwitchStrokeOn" Color="{ThemeResource MissumAccentColor}" />
+  <SolidColorBrush x:Key="ToggleSwitchStrokeOnPointerOver" Color="{ThemeResource MissumAccentColor}" Opacity="0.90" />
+  <SolidColorBrush x:Key="ToggleSwitchStrokeOnPressed" Color="{ThemeResource MissumAccentColor}" Opacity="0.80" />
+  <SolidColorBrush x:Key="ToggleSwitchStrokeOnDisabled" Color="{ThemeResource MissumAccentColor}" Opacity="0.40" />
+  <SolidColorBrush x:Key="ToggleSwitchKnobFillOn" Color="{ThemeResource MissumAccentTextColor}" />
+  <SolidColorBrush x:Key="ToggleSwitchKnobFillOnPointerOver" Color="{ThemeResource MissumAccentTextColor}" />
+  <SolidColorBrush x:Key="ToggleSwitchKnobFillOnPressed" Color="{ThemeResource MissumAccentTextColor}" />
+  <SolidColorBrush x:Key="ToggleSwitchKnobFillOnDisabled" Color="{ThemeResource MissumAccentTextColor}" Opacity="0.55" />
+  <SolidColorBrush x:Key="NavigationViewSelectionIndicatorForeground" Color="{ThemeResource MissumAccentColor}" />
+
+  <!-- Keep WinUI control surfaces in the same accent-derived visual system. -->
+  <StaticResource x:Key="NavigationViewDefaultPaneBackground" ResourceKey="MissumLayerBrush" />
+  <StaticResource x:Key="NavigationViewExpandedPaneBackground" ResourceKey="MissumLayerBrush" />
+  <StaticResource x:Key="NavigationViewContentBackground" ResourceKey="MissumWindowBrush" />
+  <StaticResource x:Key="NavigationViewItemBackgroundPointerOver" ResourceKey="MissumHoverBrush" />
+  <StaticResource x:Key="NavigationViewItemBackgroundPressed" ResourceKey="MissumPressedBrush" />
+  <StaticResource x:Key="NavigationViewItemBackgroundCheckedPointerOver" ResourceKey="MissumHoverBrush" />
+  <StaticResource x:Key="NavigationViewItemBackgroundCheckedPressed" ResourceKey="MissumPressedBrush" />
+  <StaticResource x:Key="NavigationViewItemBackgroundSelected" ResourceKey="MissumAccentSubtleBrush" />
+  <StaticResource x:Key="NavigationViewItemBackgroundSelectedPointerOver" ResourceKey="MissumHoverBrush" />
+  <StaticResource x:Key="NavigationViewItemBackgroundSelectedPressed" ResourceKey="MissumPressedBrush" />
+  <StaticResource x:Key="TextControlBackground" ResourceKey="MissumInputBrush" />
+  <StaticResource x:Key="TextControlBackgroundPointerOver" ResourceKey="MissumHoverBrush" />
+  <StaticResource x:Key="TextControlBackgroundFocused" ResourceKey="MissumInputBrush" />
+  <StaticResource x:Key="ComboBoxBackground" ResourceKey="MissumInputBrush" />
+  <StaticResource x:Key="ComboBoxBackgroundPointerOver" ResourceKey="MissumHoverBrush" />
+  <StaticResource x:Key="ComboBoxBackgroundPressed" ResourceKey="MissumPressedBrush" />
+  <StaticResource x:Key="ComboBoxDropDownBackground" ResourceKey="MissumLayerStrongBrush" />
+  <StaticResource x:Key="ListViewItemBackgroundPointerOver" ResourceKey="MissumHoverBrush" />
+  <StaticResource x:Key="ListViewItemBackgroundSelected" ResourceKey="MissumAccentSubtleBrush" />
+  <StaticResource x:Key="ListViewItemBackgroundSelectedPointerOver" ResourceKey="MissumHoverBrush" />
+  <StaticResource x:Key="ListViewItemBackgroundSelectedPressed" ResourceKey="MissumPressedBrush" />
+
+  <Style x:Key="MissumPageTitleStyle" TargetType="TextBlock">
+    <Setter Property="FontFamily" Value="Segoe UI Variable Text" />
+    <Setter Property="FontSize" Value="28" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="TextWrapping" Value="Wrap" />
+  </Style>
+
+  <Style x:Key="MissumSectionTitleStyle" TargetType="TextBlock">
+    <Setter Property="FontFamily" Value="Segoe UI Variable Text" />
+    <Setter Property="FontSize" Value="18" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+  </Style>
+
+  <Style x:Key="MissumCardStyle" TargetType="Border">
+    <Setter Property="Background" Value="{ThemeResource MissumLayerBrush}" />
+    <Setter Property="BorderBrush" Value="{ThemeResource MissumStrokeBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="12" />
+    <Setter Property="Padding" Value="20" />
+  </Style>
+
+  <Style x:Key="MissumStatusPillStyle" TargetType="Border">
+    <Setter Property="Background" Value="{ThemeResource MissumLayerStrongBrush}" />
+    <Setter Property="BorderBrush" Value="{ThemeResource MissumStrokeBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="8" />
+    <Setter Property="MinHeight" Value="32" />
+    <Setter Property="Padding" Value="12,6" />
+  </Style>
+
+  <Style x:Key="MissumPrimaryButtonStyle" TargetType="Button" BasedOn="{StaticResource AccentButtonStyle}">
+    <Setter Property="Background" Value="{ThemeResource MissumAccentBrush}" />
+    <Setter Property="BorderBrush" Value="{ThemeResource MissumAccentBrush}" />
+    <Setter Property="Foreground" Value="{ThemeResource MissumAccentTextBrush}" />
+    <Setter Property="CornerRadius" Value="8" />
+    <Setter Property="Padding" Value="14,8" />
+  </Style>
+
+  <Style x:Key="MissumSubtleButtonStyle" TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
+    <Setter Property="Background" Value="{ThemeResource MissumLayerStrongBrush}" />
+    <Setter Property="BorderBrush" Value="{ThemeResource MissumStrokeBrush}" />
+    <Setter Property="CornerRadius" Value="8" />
+    <Setter Property="Padding" Value="14,8" />
+  </Style>
+
+  <Style x:Key="MissumDangerButtonStyle" TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
+    <Setter Property="Background" Value="{ThemeResource MissumLayerStrongBrush}" />
+    <Setter Property="BorderBrush" Value="{ThemeResource MissumDangerBrush}" />
+    <Setter Property="Foreground" Value="{ThemeResource MissumDangerBrush}" />
+    <Setter Property="CornerRadius" Value="8" />
+    <Setter Property="Padding" Value="14,8" />
+  </Style>
+
+  <Style x:Key="MissumTableHeaderStyle" TargetType="Border">
+    <Setter Property="Background" Value="{ThemeResource MissumAccentBrush}" />
+    <Setter Property="BorderBrush" Value="{ThemeResource MissumAccentBrush}" />
+    <Setter Property="BorderThickness" Value="0,0,0,1" />
+  </Style>
+
+  <Style TargetType="Button" BasedOn="{StaticResource MissumSubtleButtonStyle}" />
+  <Style TargetType="Expander">
+    <Setter Property="controls:NativeDropdownChevron.IsEnabled" Value="True" />
+  </Style>
+  <Style TargetType="ComboBox">
+    <Setter Property="controls:NativeDropdownChevron.IsEnabled" Value="True" />
+  </Style>
+</ResourceDictionary>
+

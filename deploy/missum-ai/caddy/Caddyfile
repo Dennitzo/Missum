@@ -1,0 +1,44 @@
+{
+  admin off
+  auto_https off
+  servers {
+    protocols h1 h2c
+  }
+}
+
+:8080 {
+  encode zstd gzip
+
+  @allowedOrigin header_regexp Origin ^(?:http://localhost(?::\d+)?|http://127\.0\.0\.1(?::\d+)?|https://go\.local)$
+  header @allowedOrigin {
+    Access-Control-Allow-Origin "{http.request.header.Origin}"
+    Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS"
+    Access-Control-Allow-Headers "Content-Type, Idempotency-Key, Last-Event-ID, X-Missum-Client-ID"
+    Access-Control-Max-Age "600"
+    Vary "Origin"
+  }
+
+  @preflight {
+    method OPTIONS
+    header_regexp Origin ^(?:http://localhost(?::\d+)?|http://127\.0\.0\.1(?::\d+)?|https://go\.local)$
+  }
+  respond @preflight 204
+
+  redir /assistant /assistant/ 308
+  handle_path /assistant/* {
+    reverse_proxy {env.ASSISTANT_LAN_WEB_UPSTREAM} {
+      transport http {
+        versions 1.1
+        dial_timeout 5s
+      }
+    }
+  }
+
+  reverse_proxy gateway:8080 {
+    transport http {
+      versions 1.1
+      dial_timeout 5s
+      response_header_timeout 30m
+    }
+  }
+}

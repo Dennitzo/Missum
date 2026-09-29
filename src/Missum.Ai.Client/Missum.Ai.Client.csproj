@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Missum.Ai.Client</RootNamespace>
+    <AssemblyName>Missum.Ai.Client</AssemblyName>
+    <PackageId>Missum.Ai.Client</PackageId>
+    <Version>1.0.0</Version>
+    <Authors>Missum</Authors>
+    <Description>Typed client for the versioned Missum AI Server API.</Description>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Missum.Ai.Contracts\Missum.Ai.Contracts.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,14 @@
+<Solution>
+  <Project Path="src/Missum.Ai.Client/Missum.Ai.Client.csproj" />
+  <Project Path="src/Missum.Ai.Contracts/Missum.Ai.Contracts.csproj" />
+  <Project Path="src/Missum.Ai.Server.Core/Missum.Ai.Server.Core.csproj" />
+  <Project Path="src/Missum.Ai.Gateway/Missum.Ai.Gateway.csproj" />
+  <Project Path="src/Missum.Ai.SmokeClient/Missum.Ai.SmokeClient.csproj" />
+  <Project Path="src/ExtensionHost/ExtensionHost.csproj" />
+  <Project Path="src/Missum.App/Missum.App.csproj" />
+  <Project Path="src/Missum.Core/Missum.Core.csproj" />
+  <Project Path="src/Missum.Infrastructure/Missum.Infrastructure.csproj" />
+  <Project Path="tests/ExtensionHost.TestExtension/ExtensionHost.TestExtension.csproj" />
+  <Project Path="tests/Missum.Tests/Missum.Tests.csproj" />
+  <Project Path="tests/Missum.Ai.Server.Tests/Missum.Ai.Server.Tests.csproj" />
+</Solution>

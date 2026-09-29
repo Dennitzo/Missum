@@ -1,0 +1,234 @@
+#requires -Version 5.1
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)]
+    [string] $PublishDirectory,
+
+    [string] $ManifestPath,
+
+    [ValidateSet('Folder', 'SingleFile')]
+    [string] $Mode = 'Folder'
+)
+
+Set-StrictMode -Version 2.0
+$ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'common.ps1')
+
+$PublishDirectory = Assert-MissumArtifactPath -Path $PublishDirectory
+if (-not (Test-Path -LiteralPath $PublishDirectory -PathType Container)) {
+    throw "Publish directory does not exist: $PublishDirectory"
+}
+
+$requiredFiles = @('Missum.exe')
+foreach ($file in $requiredFiles) {
+    $path = Join-Path $PublishDirectory $file
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw "Smoke check failed; required file is missing: $path"
+    }
+}
+
+if ([string]::IsNullOrWhiteSpace($ManifestPath)) {
+    $ManifestPath = $PublishDirectory + '.manifest.json'
+}
+$ManifestPath = Assert-MissumArtifactPath -Path $ManifestPath
+if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) {
+    throw "Smoke check failed; publish manifest is missing: $ManifestPath"
+}
+$manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
+if ($manifest.schema -ne 'missum.windows.publish.v1' -or $manifest.mode -ne $Mode -or $manifest.runtimeIdentifier -ne 'win-x64') {
+    throw 'Smoke check failed; publish manifest does not match the Missum schema, mode or runtime.'
+}
+$executable = Join-Path $PublishDirectory 'Missum.exe'
+if ((Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash -ne $manifest.executableSha256) {
+    throw 'Smoke check failed; Missum.exe does not match the publish manifest.'
+}
+$publishedFiles = @(Get-ChildItem -LiteralPath $PublishDirectory -Recurse -File)
+$manifestFiles = @($manifest.files)
+if ($manifestFiles.Count -ne $publishedFiles.Count) {
+    throw 'Smoke check failed; published file count differs from the manifest.'
+}
+$publishPrefix = $PublishDirectory.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+$seenPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+foreach ($entry in $manifestFiles) {
+    if ([string]::IsNullOrWhiteSpace($entry.path) -or [IO.Path]::IsPathRooted($entry.path)) {
+        throw 'Smoke check failed; manifest contains an invalid relative path.'
+    }
+    $filePath = [IO.Path]::GetFullPath((Join-Path $PublishDirectory $entry.path))
+    if (-not $filePath.StartsWith($publishPrefix, [StringComparison]::OrdinalIgnoreCase) -or -not $seenPaths.Add($filePath)) {
+        throw "Smoke check failed; manifest path escapes the artifact or is duplicated: $($entry.path)"
+    }
+    if (-not (Test-Path -LiteralPath $filePath -PathType Leaf) -or
+        (Get-Item -LiteralPath $filePath).Length -ne $entry.length -or
+        (Get-FileHash -LiteralPath $filePath -Algorithm SHA256).Hash -ne $entry.sha256) {
+        throw "Smoke check failed; published file differs from manifest: $($entry.path)"
+    }
+}
+
+if ($Mode -eq 'Folder') {
+    $sqlite = Get-ChildItem -LiteralPath $PublishDirectory -Recurse -File -Filter 'e_sqlite3.dll' -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($null -eq $sqlite) {
+        throw 'Smoke check failed; native local SQLite runtime e_sqlite3.dll is missing.'
+    }
+}
+else {
+    # The desktop is one executable. Its separate extension process may carry
+    # its own runtime below ExtensionHost, without becoming a desktop sidecar.
+    $sidecarDlls = @(Get-ChildItem -LiteralPath $PublishDirectory -File -Filter '*.dll' -ErrorAction SilentlyContinue)
+    if ($sidecarDlls.Count -ne 0) {
+        throw ("Smoke check failed; SingleFile app still requires DLL sidecars: " +
+            (($sidecarDlls | ForEach-Object { $_.FullName }) -join ', '))
+    }
+
+
+    $runtimeSidecars = @(Get-ChildItem -LiteralPath $PublishDirectory -File | Where-Object { $_.Name -ne 'Missum.exe' })
+    if ($runtimeSidecars.Count -ne 0) {
+        throw ("Smoke check failed; SingleFile directory contains runtime sidecars: " +
+            (($runtimeSidecars | ForEach-Object { $_.FullName }) -join ', '))
+    }
+}
+
+$extensionHost = Join-Path $PublishDirectory 'ExtensionHost\ExtensionHost.exe'
+if (-not (Test-Path -LiteralPath $extensionHost -PathType Leaf) -or (Get-Item -LiteralPath $extensionHost).Length -eq 0) {
+    throw 'Smoke check failed; the local extension process ExtensionHost.exe is missing or empty.'
+}
+
+$smokeBase = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) 'Missum-Smoke'))
+$smokeRoot = [IO.Path]::GetFullPath((Join-Path $smokeBase ([Guid]::NewGuid().ToString('N'))))
+if (-not [string]::Equals([IO.Path]::GetDirectoryName($smokeRoot), $smokeBase, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Unsafe smoke directory: $smokeRoot"
+}
+if (Test-Path -LiteralPath $smokeRoot) { throw "Smoke directory already exists: $smokeRoot" }
+New-Item -ItemType Directory -Path $smokeRoot | Out-Null
+$smokeData = Join-Path $smokeRoot 'Data'
+$smokeInstance = [Guid]::NewGuid().ToString('N')
+$smokeEnvironment = @{
+    ASSISTANT_PROFILE = 'stable'
+    ASSISTANT_DATA_ROOT = $smokeData
+    ASSISTANT_INSTANCE_KEY = $smokeInstance
+    ASSISTANT_NATIVE_STATE_ROOT = (Join-Path $smokeRoot 'NativeRuntime')
+    ASSISTANT_DISABLE_RUNTIME_AUTOSTART = '1'
+    MISSUM_DATA_DIRECTORY = $smokeData
+    MISSUM_SMOKE_INSTANCE_KEY = $smokeInstance
+    DOTNET_BUNDLE_EXTRACT_BASE_DIR = (Join-Path $smokeRoot 'Bundle')
+}
+$previousEnvironment = @{}
+$process = $null
+try {
+    foreach ($name in $smokeEnvironment.Keys) {
+        $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+        [Environment]::SetEnvironmentVariable($name, $smokeEnvironment[$name], 'Process')
+    }
+    $startedAt = [DateTime]::UtcNow
+    $process = Start-Process -FilePath $executable -WorkingDirectory $PublishDirectory -PassThru -WindowStyle Hidden
+    $runtimeFiles = @(
+        (Join-Path $smokeData 'Missum.db'),
+        (Join-Path $smokeData 'settings.json')
+    )
+    $nativeReady = Join-Path $smokeData 'native-ui-ready.json'
+    $nativeState = $null
+    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    while ([DateTime]::UtcNow -lt $deadline -and -not $process.HasExited) {
+        if (Test-Path -LiteralPath $nativeReady -PathType Leaf) {
+            # The writer may still be flushing its first JSON document.
+            try { $nativeState = Get-Content -LiteralPath $nativeReady -Raw | ConvertFrom-Json }
+            catch { $nativeState = $null }
+            if ($null -ne $nativeState) { break }
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    if ($process.HasExited) { throw "Missum exited early: $($process.ExitCode)" }
+    if (-not (Test-Path -LiteralPath $nativeReady)) { throw 'Native WinUI startup did not complete.' }
+    $readySession = [Guid]::Empty
+    if ($null -eq $nativeState -or $nativeState.renderer -ne 'WinUI3' -or
+        $nativeState.page -ne 'NativeAssistantPage' -or $nativeState.ready -ne $true -or
+        $nativeState.navigationSmokeVisits -ne 5 -or
+        -not [Guid]::TryParse([string]$nativeState.sessionId, [ref]$readySession) -or $readySession -eq [Guid]::Empty -or
+        (Get-Item -LiteralPath $nativeReady).LastWriteTimeUtc -lt $startedAt.AddSeconds(-1)) {
+        throw 'Native chat did not freshly initialize a valid session in the isolated smoke profile.'
+    }
+    foreach ($runtimeFile in $runtimeFiles) {
+        if (-not (Test-Path -LiteralPath $runtimeFile -PathType Leaf) -or (Get-Item -LiteralPath $runtimeFile).Length -eq 0) {
+            throw "Native chat did not initialize its isolated local state: $runtimeFile"
+        }
+    }
+    if (Test-Path -LiteralPath (Join-Path $smokeData 'WebView2')) { throw 'Desktop unexpectedly created a WebView2 profile.' }
+    $mathPreview = Join-Path $smokeData 'native-math-preview.png'
+    if (-not (Test-Path -LiteralPath $mathPreview -PathType Leaf) -or (Get-Item -LiteralPath $mathPreview).Length -lt 100) {
+        throw 'Native math smoke did not produce a rendered formula preview.'
+    }
+    $mathEvidence = Assert-MissumArtifactPath -Path ($PublishDirectory + '.math-preview.png')
+    Copy-Item -LiteralPath $mathPreview -Destination $mathEvidence -Force
+    Write-Host "Native math rendering and streaming verified: $mathEvidence"
+    $liveMathPreview = Join-Path $smokeData 'native-math-live-preview.png'
+    if (Test-Path -LiteralPath $liveMathPreview -PathType Leaf) {
+        $liveMathEvidence = Assert-MissumArtifactPath -Path ($PublishDirectory + '.math-live-preview.png')
+        Copy-Item -LiteralPath $liveMathPreview -Destination $liveMathEvidence -Force
+        Write-Host "Native rendering of the supplied model response verified: $liveMathEvidence"
+    }
+    $runtimeContentDirectory = $PublishDirectory
+    if ($Mode -eq 'SingleFile') {
+        $extractedAssemblies = @(Get-ChildItem -LiteralPath $env:DOTNET_BUNDLE_EXTRACT_BASE_DIR -Recurse -File -Filter 'Missum.dll' -ErrorAction SilentlyContinue)
+        if ($extractedAssemblies.Count -ne 1) {
+            throw "Runtime smoke failed; expected one extracted Missum.dll under $env:DOTNET_BUNDLE_EXTRACT_BASE_DIR, found $($extractedAssemblies.Count)."
+        }
+        $runtimeContentDirectory = $extractedAssemblies[0].DirectoryName
+    }
+    $nativeRuntimeFiles = @(
+        'Assets\NativeRuntime\windows\manage-coding-llama.ps1',
+        'Assets\NativeRuntime\windows\manage-llama-server.ps1',
+        'Assets\NativeRuntime\workers\coding\catalog.py',
+        'Assets\NativeRuntime\workers\coding\session_cache.py'
+    )
+    foreach ($nativeRuntimeFile in $nativeRuntimeFiles) {
+        $nativeRuntimePath = Join-Path $runtimeContentDirectory $nativeRuntimeFile
+        if (-not (Test-Path -LiteralPath $nativeRuntimePath -PathType Leaf) -or
+            (Get-Item -LiteralPath $nativeRuntimePath).Length -eq 0) {
+            throw "Runtime smoke failed; bundled native model runtime support is missing or empty: $nativeRuntimePath"
+        }
+        $sourceNativeRuntimePath = Resolve-MissumRepositoryPath -RelativePath ($nativeRuntimeFile.Substring('Assets\NativeRuntime\'.Length))
+        if ((Get-FileHash -LiteralPath $sourceNativeRuntimePath -Algorithm SHA256).Hash -ne
+            (Get-FileHash -LiteralPath $nativeRuntimePath -Algorithm SHA256).Hash) {
+            throw "Runtime smoke failed; bundled native model runtime differs from current source: $nativeRuntimeFile"
+        }
+    }
+    Write-Host "Native model runtime support verified: $runtimeContentDirectory"
+
+    Write-Host "Native WinUI 3 session and isolated local state verified: $($nativeState.sessionId)"
+
+    if (-not $process.CloseMainWindow() -or -not $process.WaitForExit(5000)) {
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        $process.WaitForExit(5000) | Out-Null
+    }
+}
+finally {
+    if ($null -ne $process -and -not $process.HasExited) {
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        $process.WaitForExit(5000) | Out-Null
+    }
+    foreach ($name in $previousEnvironment.Keys) {
+        [Environment]::SetEnvironmentVariable($name, $previousEnvironment[$name], 'Process')
+    }
+    $smokeRoot = [IO.Path]::GetFullPath($smokeRoot)
+    if (-not [string]::Equals([IO.Path]::GetDirectoryName($smokeRoot), $smokeBase, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to remove unsafe smoke directory: $smokeRoot"
+    }
+    if (Test-Path -LiteralPath $smokeRoot) {
+        for ($attempt = 1; $attempt -le 20; $attempt++) {
+            try {
+                Remove-Item -LiteralPath $smokeRoot -Recurse -Force -ErrorAction Stop
+                break
+            }
+            catch {
+                if ($attempt -eq 20) {
+                    throw
+                }
+                Start-Sleep -Milliseconds 250
+            }
+        }
+    }
+}
+
+Write-Host "Smoke checks passed: $PublishDirectory" -ForegroundColor Green
+
+

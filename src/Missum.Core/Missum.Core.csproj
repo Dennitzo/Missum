@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Missum.Core</RootNamespace>
+    <AssemblyName>Missum.Core</AssemblyName>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Missum.Ai.Contracts\Missum.Ai.Contracts.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>Missum.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+</Project>

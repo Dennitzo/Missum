@@ -1,0 +1,2825 @@
+using System.Globalization;
+using Missum.Core.Chat;
+using Missum.Core.Contracts;
+using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.Logging;
+
+namespace Missum.Infrastructure.Storage;
+
+public sealed class SqliteDatabase : IMissumDatabase, IAsyncDisposable
+{
+    public const int CurrentSchemaVersion = 52;
+    private static readonly Action<ILogger, string, Exception?> DatabaseInitialized = LoggerMessage.Define<string>(
+        LogLevel.Information, new EventId(1000, nameof(DatabaseInitialized)), "SQLite-Datenbank {DatabasePath} wurde initialisiert.");
+    private static readonly Action<ILogger, string?, Exception?> IntegrityCheckFailed = LoggerMessage.Define<string?>(
+        LogLevel.Error, new EventId(1001, nameof(IntegrityCheckFailed)), "SQLite-Integritätsprüfung fehlgeschlagen: {Result}");
+    private readonly MissumInfrastructureOptions _options;
+    private readonly ILogger<SqliteDatabase> _logger;
+    private readonly SemaphoreSlim _writeLock = new(1, 1);
+    private int _initialized;
+
+    public SqliteDatabase(MissumInfrastructureOptions options, ILogger<SqliteDatabase> logger)
+    {
+        _options = options;
+        _logger = logger;
+        DatabasePath = Path.Combine(options.DataDirectory, options.DatabaseFileName);
+    }
+
+    public string DatabasePath { get; }
+
+    public async Task InitializeAsync(CancellationToken cancellationToken = default)
+    {
+        if (Volatile.Read(ref _initialized) == 1)
+        {
+            return;
+        }
+
+        await _writeLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (_initialized == 1)
+            {
+                return;
+            }
+
+            Directory.CreateDirectory(_options.DataDirectory);
+            SQLitePCL.Batteries_V2.Init();
+            await LegacyProfileMigration.CopyDatabaseIfNeededAsync(DatabasePath, cancellationToken).ConfigureAwait(false);
+            await using var connection = await OpenConnectionCoreAsync(cancellationToken).ConfigureAwait(false);
+            await ConfigureConnectionAsync(connection, cancellationToken).ConfigureAwait(false);
+            await EnableWalModeAsync(connection, cancellationToken).ConfigureAwait(false);
+            // Earlier migrations now use the new table name, so convert legacy schemas first.
+            await LegacyProfileMigration.RenameRunTableAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationOneAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationTwoAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationThreeAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationFourAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationFiveAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationSixAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationSevenAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationEightAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationNineAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationTenAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationElevenAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationTwelveAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationThirteenAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationFourteenAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationFifteenAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationSixteenAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationSeventeenAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationEighteenAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationNineteenAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationTwentyAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationTwentyOneAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationTwentyTwoAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationTwentyThreeAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationTwentyFourAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationTwentyFiveAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationTwentySixAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationTwentySevenAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationTwentyEightAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationTwentyNineAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationThirtyAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationThirtyOneAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationThirtyTwoAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationThirtyThreeAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationThirtyFourAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationThirtyFiveAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationThirtySixAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationThirtySevenAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationThirtyEightAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationThirtyNineAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationFortyAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationFortyOneAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationFortyTwoAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationFortyThreeAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationFortyFourAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationFortyFiveAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationFortySixAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationFortySevenAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationFortyEightAsync(connection, cancellationToken).ConfigureAwait(false);
+            await BackupBeforeClaudeScienceMigrationAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationFortyNineAsync(connection, cancellationToken).ConfigureAwait(false);
+            await LegacyProfileMigration.RecordMigrationAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationFiftyOneAsync(connection, cancellationToken).ConfigureAwait(false);
+            await BackupBeforeWorkflowRemovalMigrationAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationFiftyTwoAsync(connection, cancellationToken).ConfigureAwait(false);
+            await VerifyIntegrityAsync(connection, cancellationToken).ConfigureAwait(false);
+            Volatile.Write(ref _initialized, 1);
+            DatabaseInitialized(_logger, DatabasePath, null);
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
+    private async Task BackupBeforeClaudeScienceMigrationAsync(SqliteConnection source, CancellationToken cancellationToken)
+    {
+        await using (var check = source.CreateCommand())
+        {
+            check.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=49;";
+            if (Convert.ToInt32(await check.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0)
+                return;
+        }
+
+        var backupDirectory = Path.Combine(_options.DataDirectory, "DatabaseBackups");
+        Directory.CreateDirectory(backupDirectory);
+        var timestamp = DateTimeOffset.UtcNow.ToString("yyyyMMdd'T'HHmmssfff'Z'", CultureInfo.InvariantCulture);
+        var backupPath = Path.Combine(backupDirectory, Path.GetFileName(DatabasePath) + ".pre-v49-" + timestamp + ".bak");
+        var builder = new SqliteConnectionStringBuilder { DataSource = backupPath, Mode = SqliteOpenMode.ReadWriteCreate };
+        await using var destination = new SqliteConnection(builder.ToString());
+        await destination.OpenAsync(cancellationToken).ConfigureAwait(false);
+        source.BackupDatabase(destination);
+    }
+
+    internal async Task<SqliteConnection> OpenConnectionAsync(CancellationToken cancellationToken = default)
+    {
+        await InitializeAsync(cancellationToken).ConfigureAwait(false);
+        var connection = await OpenConnectionCoreAsync(cancellationToken).ConfigureAwait(false);
+        await ConfigureConnectionAsync(connection, cancellationToken).ConfigureAwait(false);
+        return connection;
+    }
+
+    internal async Task<T> WriteAsync<T>(Func<SqliteConnection, SqliteTransaction, CancellationToken, Task<T>> action, CancellationToken cancellationToken = default)
+    {
+        await InitializeAsync(cancellationToken).ConfigureAwait(false);
+        await _writeLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await using var connection = await OpenConnectionCoreAsync(cancellationToken).ConfigureAwait(false);
+            await ConfigureConnectionAsync(connection, cancellationToken).ConfigureAwait(false);
+            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                var result = await action(connection, transaction, cancellationToken).ConfigureAwait(false);
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                return result;
+            }
+            catch
+            {
+                await transaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
+                throw;
+            }
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
+    internal Task WriteAsync(Func<SqliteConnection, SqliteTransaction, CancellationToken, Task> action, CancellationToken cancellationToken = default) =>
+        WriteAsync(async (connection, transaction, token) =>
+        {
+            await action(connection, transaction, token).ConfigureAwait(false);
+            return true;
+        }, cancellationToken);
+
+    internal async Task<T> MaintenanceAsync<T>(Func<CancellationToken, Task<T>> action, CancellationToken cancellationToken = default)
+    {
+        await InitializeAsync(cancellationToken).ConfigureAwait(false);
+        return await RecoveryMaintenanceAsync(action, cancellationToken).ConfigureAwait(false);
+    }
+
+    internal async Task<T> RecoveryMaintenanceAsync<T>(Func<CancellationToken, Task<T>> action, CancellationToken cancellationToken = default)
+    {
+        await _writeLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await action(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
+    public async Task<bool> CheckIntegrityAsync(CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "PRAGMA integrity_check;";
+        var result = Convert.ToString(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture);
+        if (!string.Equals(result, "ok", StringComparison.OrdinalIgnoreCase))
+        {
+            IntegrityCheckFailed(_logger, result, null);
+            return false;
+        }
+
+        command.CommandText = "PRAGMA foreign_key_check;";
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        return !await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    internal void MarkUninitialized() => Volatile.Write(ref _initialized, 0);
+
+    public ValueTask DisposeAsync()
+    {
+        _writeLock.Dispose();
+        return ValueTask.CompletedTask;
+    }
+
+    private async Task<SqliteConnection> OpenConnectionCoreAsync(CancellationToken cancellationToken)
+    {
+        var builder = new SqliteConnectionStringBuilder
+        {
+            DataSource = DatabasePath,
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            // Shared-cache mode can produce SQLITE_LOCKED_TABLE when a WebView
+            // upload is read while another operation writes its binary chunks.
+            // WAL already gives us concurrent readers without sharing page locks.
+            Cache = SqliteCacheMode.Private,
+            Pooling = true,
+            DefaultTimeout = 30,
+        };
+        var connection = new SqliteConnection(builder.ToString());
+        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        return connection;
+    }
+
+    private static async Task ConfigureConnectionAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = "PRAGMA foreign_keys=ON; PRAGMA busy_timeout=30000; PRAGMA synchronous=NORMAL;";
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task EnableWalModeAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        // journal_mode changes the database header and must run only during the
+        // serialized initialization path, never for every read connection.
+        command.CommandText = "PRAGMA journal_mode=WAL;";
+        await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationOneAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = MigrationOneSql;
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=1;";
+        var exists = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            command.Parameters.Clear();
+            command.CommandText = "INSERT INTO schema_migrations(version, applied_at) VALUES(1, $now);";
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationTwoAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=2;";
+        var exists = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            command.CommandText = "ALTER TABLE project_assets ADD COLUMN title TEXT NULL;";
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            command.CommandText = "INSERT INTO schema_migrations(version, applied_at) VALUES(2, $now);";
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationThreeAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=3;";
+        var exists = Convert.ToInt32(
+            await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+            CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            command.CommandText = MigrationThreeSql;
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+
+            foreach (var trigger in PromptTriggerSeeds.All)
+            {
+                command.Parameters.Clear();
+                command.CommandText = """
+                    INSERT INTO prompt_triggers
+                        (id, action, phrase, description, match_mode, is_enabled, priority, revision, created_at, updated_at)
+                    VALUES($id, $action, $phrase, $description, 'prefix', 1, $priority, 1, $now, $now);
+                    """;
+                command.Parameters.AddWithValue("$id", trigger.Id.ToString("D"));
+                command.Parameters.AddWithValue("$action", trigger.Action);
+                command.Parameters.AddWithValue("$phrase", trigger.Phrase);
+                command.Parameters.AddWithValue("$description", trigger.Description);
+                command.Parameters.AddWithValue("$priority", trigger.Priority);
+                command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            command.Parameters.Clear();
+            command.CommandText = "INSERT INTO schema_migrations(version, applied_at) VALUES(3, $now);";
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationFourAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=4;";
+        var exists = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            var now = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
+            command.CommandText = """
+                INSERT OR IGNORE INTO prompt_triggers
+                    (id, action, phrase, description, match_mode, is_enabled, priority, revision, created_at, updated_at)
+                VALUES('a1000000-0000-4000-8000-000000000016', 'voiceInput', 'Sprachsteuerung',
+                       'Nimmt das Mikrofon auf und fügt die Transkription editierbar in das Promptfeld ein.',
+                       'prefix', 1, 180, 1, $now, $now);
+                INSERT OR IGNORE INTO prompt_triggers
+                    (id, action, phrase, description, match_mode, is_enabled, priority, revision, created_at, updated_at)
+                VALUES('a1000000-0000-4000-8000-000000000017', 'videoAnalysis', 'Video analysieren',
+                       'Analysiert eine angehängte Videodatei oder einen bewusst aufgenommenen Bildschirmclip.',
+                       'prefix', 1, 180, 1, $now, $now);
+                """;
+            command.Parameters.AddWithValue("$now", now);
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            command.Parameters.Clear();
+            command.CommandText = "INSERT INTO schema_migrations(version, applied_at) VALUES(4, $now);";
+            command.Parameters.AddWithValue("$now", now);
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationFiveAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=5;";
+        var exists = Convert.ToInt32(
+            await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+            CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            command.CommandText = """
+                CREATE TABLE client_tool_executions(
+                    proposal_id TEXT PRIMARY KEY,
+                    local_run_id TEXT NOT NULL REFERENCES missum_ai_runs(id) ON DELETE CASCADE,
+                    server_run_id TEXT NOT NULL,
+                    event_id INTEGER NOT NULL CHECK(event_id>=0),
+                    tool_name TEXT NOT NULL,
+                    state TEXT NOT NULL CHECK(state IN ('executing','completed','submitted')),
+                    result_json TEXT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                ) STRICT;
+                CREATE INDEX ix_client_tool_executions_run
+                    ON client_tool_executions(local_run_id, event_id);
+                """;
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            command.CommandText = "INSERT INTO schema_migrations(version, applied_at) VALUES(5, $now);";
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationSixAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=6;";
+        var exists = Convert.ToInt32(
+            await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+            CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            command.CommandText = """
+                ALTER TABLE chat_sessions
+                    ADD COLUMN assistant_mode TEXT NOT NULL DEFAULT 'general'
+                    CHECK(assistant_mode IN ('general','code'));
+                ALTER TABLE chat_sessions ADD COLUMN workspace_path TEXT NULL;
+                ALTER TABLE chat_sessions ADD COLUMN workspace_fingerprint TEXT NULL;
+                """;
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            command.CommandText = "INSERT INTO schema_migrations(version, applied_at) VALUES(6, $now);";
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationSevenAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=7;";
+        var exists = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            command.CommandText = "ALTER TABLE chat_sessions ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0; ALTER TABLE chat_sessions ADD COLUMN pinned_at TEXT NULL; ALTER TABLE chat_messages ADD COLUMN tool_name TEXT NULL; ALTER TABLE chat_messages ADD COLUMN tool_context TEXT NULL; ALTER TABLE chat_messages ADD COLUMN tool_status TEXT NULL; ALTER TABLE chat_messages ADD COLUMN tool_detail TEXT NULL; ALTER TABLE chat_messages ADD COLUMN tool_provider TEXT NULL;";
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            command.CommandText = "INSERT INTO schema_migrations(version, applied_at) VALUES(7, $now);";
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationEightAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await ApplyMarkerMigrationAsync(connection, 8, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationNineAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await ApplyMarkerMigrationAsync(connection, 9, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationTenAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await ApplyMarkerMigrationAsync(connection, 10, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationElevenAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=11;";
+        var exists = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            command.CommandText = """
+                DELETE FROM prompt_triggers
+                WHERE action IN ('video' || 'Generation', 'gif' || 'Generation');
+                INSERT INTO schema_migrations(version, applied_at) VALUES(11, $now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationTwelveAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=12;";
+        var exists = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            command.CommandText = "ALTER TABLE chat_messages ADD COLUMN context_summary TEXT NULL; INSERT INTO schema_migrations(version, applied_at) VALUES(12, $now);";
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationThirteenAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var check = connection.CreateCommand();
+        check.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=13;";
+        if (Convert.ToInt32(await check.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0)
+            return;
+
+        check.CommandText = "PRAGMA foreign_keys=OFF;";
+        await check.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = """
+                CREATE TABLE project_assets_v13(
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                    blob_id TEXT NOT NULL REFERENCES binary_objects(id) ON DELETE RESTRICT,
+                    file_name TEXT NOT NULL,
+                    content_type TEXT NOT NULL,
+                    category TEXT NOT NULL CHECK(category IN ('pdf','drawing','image','meeting','other','cpdb','ifc')),
+                    source_path TEXT NULL,
+                    sha256 TEXT NOT NULL,
+                    length INTEGER NOT NULL,
+                    sort_order INTEGER NOT NULL,
+                    revision INTEGER NOT NULL CHECK(revision>=1),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    title TEXT NULL
+                ) STRICT;
+                INSERT INTO project_assets_v13(id,project_id,blob_id,file_name,content_type,category,source_path,sha256,length,sort_order,revision,created_at,updated_at,title)
+                    SELECT id,project_id,blob_id,file_name,content_type,category,source_path,sha256,length,sort_order,revision,created_at,updated_at,title FROM project_assets;
+                DROP TABLE project_assets;
+                ALTER TABLE project_assets_v13 RENAME TO project_assets;
+                CREATE INDEX ix_assets_project_order ON project_assets(project_id, sort_order);
+                INSERT INTO schema_migrations(version, applied_at) VALUES(13, $now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            check.CommandText = "PRAGMA foreign_keys=ON;";
+            await check.ExecuteNonQueryAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+    }
+
+    private static async Task ApplyMigrationFourteenAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=14;";
+        var exists = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            command.CommandText = """
+                CREATE TABLE document_index_entries(
+                    sha256 TEXT PRIMARY KEY CHECK(length(sha256)=64),
+                    schema_version INTEGER NOT NULL,
+                    model_profile TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('extracting','preparing','ready','failed')),
+                    progress INTEGER NOT NULL CHECK(progress BETWEEN 0 AND 100),
+                    document_map TEXT NOT NULL DEFAULT '',
+                    error TEXT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                ) STRICT;
+                CREATE TABLE document_index_pages(
+                    sha256 TEXT NOT NULL REFERENCES document_index_entries(sha256) ON DELETE CASCADE,
+                    page_number INTEGER NOT NULL CHECK(page_number>=1),
+                    text TEXT NOT NULL,
+                    PRIMARY KEY(sha256,page_number)
+                ) STRICT;
+                CREATE TABLE document_index_chunks(
+                    id TEXT PRIMARY KEY,
+                    sha256 TEXT NOT NULL REFERENCES document_index_entries(sha256) ON DELETE CASCADE,
+                    page_number INTEGER NOT NULL CHECK(page_number>=1),
+                    chunk_number INTEGER NOT NULL CHECK(chunk_number>=0),
+                    text TEXT NOT NULL,
+                    normalized_text TEXT NOT NULL,
+                    UNIQUE(sha256,page_number,chunk_number)
+                ) STRICT;
+                CREATE INDEX ix_document_index_chunks_source ON document_index_chunks(sha256,page_number,chunk_number);
+                CREATE TABLE document_evidence_snapshots(
+                    message_id TEXT NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
+                    sha256 TEXT NOT NULL,
+                    file_name TEXT NOT NULL,
+                    page_number INTEGER NOT NULL,
+                    chunk_id TEXT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(message_id,sha256,file_name,page_number,chunk_id)
+                ) STRICT;
+
+                INSERT OR IGNORE INTO document_index_entries
+                    (sha256,schema_version,model_profile,status,progress,document_map,error,created_at,updated_at)
+                SELECT sha256,1,'local-hybrid-v1','ready',100,'',NULL,MIN(created_at),MAX(created_at)
+                FROM documents GROUP BY sha256;
+                INSERT OR IGNORE INTO document_index_pages(sha256,page_number,text)
+                SELECT d.sha256,p.page_number,p.text
+                FROM documents d JOIN document_pages p ON p.document_id=d.id
+                GROUP BY d.sha256,p.page_number;
+                INSERT OR IGNORE INTO document_index_chunks(id,sha256,page_number,chunk_number,text,normalized_text)
+                SELECT lower(hex(randomblob(16))),d.sha256,p.page_number,0,p.text,lower(p.text)
+                FROM documents d JOIN document_pages p ON p.document_id=d.id
+                GROUP BY d.sha256,p.page_number;
+                INSERT INTO schema_migrations(version,applied_at) VALUES(14,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationFifteenAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=15;";
+        var exists = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            command.CommandText = """
+                CREATE TABLE document_chunk_embeddings(
+                    chunk_id TEXT NOT NULL REFERENCES document_index_chunks(id) ON DELETE CASCADE,
+                    model_id TEXT NOT NULL,
+                    dimensions INTEGER NOT NULL CHECK(dimensions>0),
+                    vector BLOB NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(chunk_id,model_id)
+                ) STRICT;
+                CREATE INDEX ix_document_chunk_embeddings_model ON document_chunk_embeddings(model_id,chunk_id);
+
+                CREATE TABLE document_context_preparations(
+                    cache_key TEXT PRIMARY KEY CHECK(length(cache_key)=64),
+                    session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+                    corpus_revision TEXT NOT NULL CHECK(length(corpus_revision)=64),
+                    prompt_fingerprint TEXT NOT NULL CHECK(length(prompt_fingerprint)=64),
+                    model_id TEXT NOT NULL,
+                    context_budget INTEGER NOT NULL CHECK(context_budget>=1024),
+                    prepared_text TEXT NOT NULL,
+                    evidence_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                ) STRICT;
+                CREATE INDEX ix_document_context_preparations_lookup
+                    ON document_context_preparations(session_id,corpus_revision,prompt_fingerprint,model_id,context_budget);
+
+                CREATE TABLE document_context_states(
+                    document_id TEXT PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
+                    session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+                    message_id TEXT NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
+                    status TEXT NOT NULL CHECK(status IN ('preparing','failed')),
+                    progress INTEGER NOT NULL CHECK(progress BETWEEN 0 AND 100),
+                    error TEXT NULL,
+                    updated_at TEXT NOT NULL
+                ) STRICT;
+                CREATE INDEX ix_document_context_states_session ON document_context_states(session_id,status);
+
+                INSERT INTO schema_migrations(version,applied_at) VALUES(15,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationSixteenAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=16;";
+        var exists = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            command.CommandText = """
+                CREATE TABLE session_context_preparations(
+                    cache_key TEXT PRIMARY KEY CHECK(length(cache_key)=64),
+                    session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+                    history_revision TEXT NOT NULL CHECK(length(history_revision)=64),
+                    model_id TEXT NOT NULL,
+                    context_budget INTEGER NOT NULL CHECK(context_budget>=1024),
+                    through_message_id TEXT NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
+                    message_count INTEGER NOT NULL CHECK(message_count>0),
+                    prepared_text TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                ) STRICT;
+                CREATE INDEX ix_session_context_preparations_lookup
+                    ON session_context_preparations(session_id,history_revision,model_id,context_budget);
+
+                INSERT INTO schema_migrations(version,applied_at) VALUES(16,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationSeventeenAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=17;";
+        var exists = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            command.CommandText = """
+                CREATE TABLE speech_preparations(
+                    cache_key TEXT PRIMARY KEY CHECK(length(cache_key)=64),
+                    session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+                    source_message_id TEXT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
+                    source_kind TEXT NOT NULL,
+                    source_hash TEXT NOT NULL CHECK(length(source_hash)=64),
+                    model_id TEXT NOT NULL,
+                    prepared_text TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                ) STRICT;
+                CREATE INDEX ix_speech_preparations_session_source
+                    ON speech_preparations(session_id,source_message_id,source_hash,model_id);
+
+                INSERT INTO schema_migrations(version,applied_at) VALUES(17,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationEighteenAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=18;";
+        var exists = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            command.CommandText = """
+                ALTER TABLE chat_sessions
+                    ADD COLUMN persistent_tool_action TEXT NULL
+                    CHECK(persistent_tool_action IS NULL OR persistent_tool_action IN ('code','audiobook'));
+                UPDATE chat_sessions
+                SET persistent_tool_action='code'
+                WHERE assistant_mode='code';
+
+                ALTER TABLE chat_messages
+                    ADD COLUMN content_profile TEXT NOT NULL DEFAULT 'general'
+                    CHECK(content_profile IN ('general','audiobook'));
+
+                ALTER TABLE session_context_preparations
+                    ADD COLUMN profile TEXT NOT NULL DEFAULT 'general'
+                    CHECK(profile IN ('general','code','audiobook'));
+
+                INSERT OR IGNORE INTO prompt_triggers
+                    (id,action,phrase,description,match_mode,is_enabled,priority,revision,created_at,updated_at)
+                VALUES
+                    ('a1000000-0000-4000-8000-000000000019','audiobook','Hörbuch erstellen',
+                     'Erstellt oder lenkt ein fortlaufendes, direkt vorlesbares Hörbuchkapitel.',
+                     'prefix',1,190,1,$now,$now),
+                    ('a1000000-0000-4000-8000-000000000020','audiobook','Hörbuch fortsetzen',
+                     'Setzt das Hörbuch dieser Sitzung mit der vorhandenen Story-Chronik fort.',
+                     'prefix',1,200,1,$now,$now);
+
+                INSERT INTO schema_migrations(version,applied_at) VALUES(18,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationNineteenAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=19;";
+        var exists = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            command.CommandText = """
+                ALTER TABLE speech_preparations
+                    ADD COLUMN source_units_json TEXT NOT NULL DEFAULT '[]';
+                ALTER TABLE speech_preparations
+                    ADD COLUMN segments_json TEXT NOT NULL DEFAULT '[]';
+
+                INSERT INTO schema_migrations(version,applied_at) VALUES(19,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationTwentyAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=20;";
+        var exists = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            command.CommandText = """
+                DROP TABLE IF EXISTS speech_preparations;
+                INSERT INTO schema_migrations(version,applied_at) VALUES(20,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationTwentyOneAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=21;";
+        var exists = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            command.CommandText = """
+                ALTER TABLE chat_messages ADD COLUMN code_diff TEXT NULL;
+                INSERT INTO schema_migrations(version,applied_at) VALUES(21,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationTwentyTwoAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=22;";
+        var exists = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            command.CommandText = """
+                CREATE TABLE coding_campaigns(
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL UNIQUE REFERENCES chat_sessions(id) ON DELETE CASCADE,
+                    definition_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    workspace_path TEXT NOT NULL,
+                    workspace_fingerprint TEXT NOT NULL,
+                    model_id TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('running','faulted','stopped')),
+                    phase TEXT NOT NULL CHECK(phase IN ('bootstrap','iteration','correction','validation')),
+                    iteration INTEGER NOT NULL DEFAULT 0 CHECK(iteration >= 0),
+                    current_challenge TEXT NULL,
+                    last_error TEXT NULL,
+                    validation_json TEXT NOT NULL DEFAULT '[]',
+                    restart_count INTEGER NOT NULL DEFAULT 0 CHECK(restart_count >= 0),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE coding_campaign_iterations(
+                    id TEXT PRIMARY KEY,
+                    campaign_id TEXT NOT NULL REFERENCES coding_campaigns(id) ON DELETE CASCADE,
+                    iteration INTEGER NOT NULL CHECK(iteration >= 0),
+                    phase TEXT NOT NULL CHECK(phase IN ('bootstrap','iteration','correction','validation')),
+                    challenge TEXT NOT NULL,
+                    assistant_message_id TEXT NULL REFERENCES chat_messages(id) ON DELETE SET NULL,
+                    status TEXT NOT NULL,
+                    error TEXT NULL,
+                    validation_json TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE INDEX idx_coding_campaign_iterations_campaign
+                    ON coding_campaign_iterations(campaign_id, iteration, created_at);
+
+                INSERT INTO schema_migrations(version,applied_at) VALUES(22,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationTwentyThreeAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=23;";
+        var exists = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            command.CommandText = """
+                CREATE TABLE coding_campaign_solution_messages(
+                    campaign_id TEXT NOT NULL REFERENCES coding_campaigns(id) ON DELETE CASCADE,
+                    relative_path TEXT NOT NULL,
+                    content_sha256 TEXT NOT NULL CHECK(length(content_sha256)=64),
+                    message_id TEXT NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
+                    published_at TEXT NOT NULL,
+                    PRIMARY KEY(campaign_id,relative_path,content_sha256)
+                ) STRICT;
+                CREATE INDEX idx_coding_campaign_solution_messages_message
+                    ON coding_campaign_solution_messages(message_id);
+                INSERT INTO schema_migrations(version,applied_at) VALUES(23,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationTwentyFourAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=24;";
+        var exists = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            command.CommandText = """
+                ALTER TABLE chat_messages
+                    ADD COLUMN visibility TEXT NOT NULL DEFAULT 'visible'
+                    CHECK(visibility IN ('visible','internal'));
+                CREATE INDEX idx_chat_messages_visible_session
+                    ON chat_messages(session_id,visibility,created_at);
+                INSERT INTO schema_migrations(version,applied_at) VALUES(24,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationTwentyFiveAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=25;";
+        var exists = Convert.ToInt32(
+            await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+            CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            command.CommandText = """
+                ALTER TABLE chat_sessions
+                    ADD COLUMN conversation_revision INTEGER NOT NULL DEFAULT 0 CHECK(conversation_revision>=0);
+                ALTER TABLE chat_messages
+                    ADD COLUMN revision INTEGER NOT NULL DEFAULT 1 CHECK(revision>=1);
+
+                UPDATE chat_sessions
+                SET conversation_revision=(
+                    SELECT COUNT(*) FROM chat_messages message WHERE message.session_id=chat_sessions.id
+                );
+
+                CREATE TABLE coding_runs(
+                    id TEXT PRIMARY KEY,
+                    local_run_id TEXT NOT NULL UNIQUE,
+                    server_run_id TEXT NULL,
+                    session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+                    message_id TEXT NULL REFERENCES chat_messages(id) ON DELETE SET NULL,
+                    status TEXT NOT NULL,
+                    code_diff TEXT NULL,
+                    started_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    revision INTEGER NOT NULL DEFAULT 1 CHECK(revision>=1)
+                ) STRICT;
+                CREATE INDEX idx_coding_runs_session_updated
+                    ON coding_runs(session_id,updated_at DESC,id DESC);
+                CREATE INDEX idx_coding_runs_message
+                    ON coding_runs(message_id) WHERE message_id IS NOT NULL;
+
+                CREATE TABLE coding_run_entries(
+                    run_id TEXT NOT NULL REFERENCES coding_runs(id) ON DELETE CASCADE,
+                    sequence INTEGER NOT NULL CHECK(sequence>=1),
+                    timestamp TEXT NOT NULL,
+                    stage TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    detail TEXT NULL,
+                    tool TEXT NULL,
+                    target TEXT NULL,
+                    duration_milliseconds INTEGER NULL,
+                    server_event_id INTEGER NULL,
+                    process_operation_id TEXT NULL,
+                    process_command TEXT NULL,
+                    process_working_directory TEXT NULL,
+                    process_purpose TEXT NULL,
+                    process_status TEXT NULL,
+                    process_exit_code INTEGER NULL,
+                    process_stdout TEXT NULL,
+                    process_stderr TEXT NULL,
+                    PRIMARY KEY(run_id,sequence)
+                ) STRICT;
+                """;
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+
+            command.CommandText = """
+                SELECT id,content,context_summary
+                FROM chat_messages
+                WHERE content LIKE '%SESSION%TITLE%' COLLATE NOCASE
+                   OR context_summary LIKE '%SESSION%TITLE%' COLLATE NOCASE;
+                """;
+            var sanitizedRows = new List<(string Id, string Content, string? ContextSummary)>();
+            await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+            {
+                while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    sanitizedRows.Add((
+                        reader.GetString(0),
+                        ChatContentSanitizer.Sanitize(reader.GetString(1)),
+                        reader.IsDBNull(2) ? null : ChatContentSanitizer.Sanitize(reader.GetString(2))));
+                }
+            }
+
+            foreach (var row in sanitizedRows)
+            {
+                command.Parameters.Clear();
+                command.CommandText = """
+                    UPDATE chat_messages
+                    SET content=$content,context_summary=$summary,revision=revision+1,updated_at=$now
+                    WHERE id=$id;
+                    """;
+                command.Parameters.AddWithValue("$id", row.Id);
+                command.Parameters.AddWithValue("$content", row.Content);
+                command.Parameters.AddWithValue("$summary", (object?)row.ContextSummary ?? DBNull.Value);
+                command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            command.Parameters.Clear();
+            command.CommandText = "INSERT INTO schema_migrations(version,applied_at) VALUES(25,$now);";
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationTwentySixAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=26;";
+        var exists = Convert.ToInt32(
+            await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+            CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            command.CommandText = """
+                CREATE TABLE generated_documents(
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+                    file_name TEXT NOT NULL,
+                    format TEXT NOT NULL CHECK(format IN ('markdown','text','docx','pdf')),
+                    source_markdown TEXT NOT NULL,
+                    sha256 TEXT NOT NULL CHECK(length(sha256)=64),
+                    revision INTEGER NOT NULL CHECK(revision>=1),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(session_id,file_name COLLATE NOCASE)
+                ) STRICT;
+                CREATE INDEX idx_generated_documents_session_updated
+                    ON generated_documents(session_id,updated_at,id);
+                INSERT INTO schema_migrations(version,applied_at) VALUES(26,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationFiftyOneAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=51;";
+        if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+        {
+            // SQLite cannot extend a CHECK constraint in place. Copy all document
+            // identities, content hashes and revisions unchanged in one transaction.
+            command.CommandText = """
+                CREATE TABLE generated_documents_office(
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+                    file_name TEXT NOT NULL,
+                    format TEXT NOT NULL CHECK(format IN ('markdown','text','docx','pdf','xlsx','pptx')),
+                    source_markdown TEXT NOT NULL,
+                    sha256 TEXT NOT NULL CHECK(length(sha256)=64),
+                    revision INTEGER NOT NULL CHECK(revision>=1),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(session_id,file_name COLLATE NOCASE)
+                ) STRICT;
+                INSERT INTO generated_documents_office
+                    (id,session_id,file_name,format,source_markdown,sha256,revision,created_at,updated_at)
+                SELECT id,session_id,file_name,format,source_markdown,sha256,revision,created_at,updated_at
+                FROM generated_documents;
+                DROP TABLE generated_documents;
+                ALTER TABLE generated_documents_office RENAME TO generated_documents;
+                CREATE INDEX idx_generated_documents_session_updated
+                    ON generated_documents(session_id,updated_at,id);
+                INSERT INTO schema_migrations(version,applied_at) VALUES(51,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task BackupBeforeWorkflowRemovalMigrationAsync(
+        SqliteConnection source,
+        CancellationToken cancellationToken)
+    {
+        await using (var check = source.CreateCommand())
+        {
+            check.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=52;";
+            if (Convert.ToInt32(await check.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0)
+                return;
+        }
+
+        // A brand-new database passes through every historical migration in one
+        // initialization. Do not create a misleading backup when it contains no
+        // conversations and only the retired built-in workflow seeds.
+        await using (var content = source.CreateCommand())
+        {
+            content.CommandText = "SELECT COUNT(*) FROM chat_sessions;";
+            var sessionCount = Convert.ToInt32(
+                await content.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+                CultureInfo.InvariantCulture);
+            if (sessionCount == 0)
+            {
+                content.CommandText = "SELECT COUNT(*) FROM pragma_table_info('workflows') WHERE name='is_built_in';";
+                var hasBuiltInFlag = Convert.ToInt32(
+                    await content.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+                    CultureInfo.InvariantCulture) != 0;
+                content.CommandText = hasBuiltInFlag
+                    ? "SELECT COUNT(*) FROM workflows WHERE is_built_in=0;"
+                    : "SELECT COUNT(*) FROM workflows;";
+                var customWorkflowCount = Convert.ToInt32(
+                    await content.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+                    CultureInfo.InvariantCulture);
+                if (customWorkflowCount == 0) return;
+            }
+        }
+
+        var backupDirectory = Path.Combine(_options.DataDirectory, "DatabaseBackups");
+        Directory.CreateDirectory(backupDirectory);
+        var timestamp = DateTimeOffset.UtcNow.ToString("yyyyMMdd'T'HHmmssfff'Z'", CultureInfo.InvariantCulture);
+        var backupPath = Path.Combine(backupDirectory, Path.GetFileName(DatabasePath) + ".pre-v52-" + timestamp + ".bak");
+        var builder = new SqliteConnectionStringBuilder { DataSource = backupPath, Mode = SqliteOpenMode.ReadWriteCreate };
+        await using var destination = new SqliteConnection(builder.ToString());
+        await destination.OpenAsync(cancellationToken).ConfigureAwait(false);
+        source.BackupDatabase(destination);
+    }
+
+    private static async Task ApplyMigrationFiftyTwoAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        // Workflow support was removed from the product. Existing installations
+        // pass through this one-way migration so no old workflow can remain
+        // visible, executable, or referenced by a conversation.
+        await using (var pragma = connection.CreateCommand())
+        {
+            pragma.CommandText = "PRAGMA foreign_keys=OFF; PRAGMA legacy_alter_table=ON;";
+            await pragma.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        try
+        {
+            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=52;";
+            if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+            {
+                await RebuildTableWithoutColumnAsync(
+                    connection,
+                    transaction,
+                    "chat_sessions",
+                    "selected_workflow_id",
+                    cancellationToken).ConfigureAwait(false);
+                command.CommandText = """
+                    DROP TRIGGER IF EXISTS workflows_search_insert;
+                    DROP TRIGGER IF EXISTS workflows_search_delete;
+                    DROP TRIGGER IF EXISTS workflows_search_update;
+                    DROP TABLE IF EXISTS workflow_search;
+                    DROP TABLE IF EXISTS workflow_tags;
+                    DROP TABLE IF EXISTS workflows;
+                    INSERT INTO schema_migrations(version,applied_at) VALUES(52,$now);
+                    """;
+                command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            await using var pragma = connection.CreateCommand();
+            pragma.CommandText = "PRAGMA legacy_alter_table=OFF; PRAGMA foreign_keys=ON;";
+            await pragma.ExecuteNonQueryAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+    }
+
+    private static async Task RebuildTableWithoutColumnAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string tableName,
+        string removedColumn,
+        CancellationToken cancellationToken)
+    {
+        if (tableName != "chat_sessions" || removedColumn != "selected_workflow_id")
+            throw new ArgumentOutOfRangeException(nameof(tableName));
+
+        string? tableSql = null;
+        var dependentSql = new List<string>();
+        await using (var read = connection.CreateCommand())
+        {
+            read.Transaction = transaction;
+            read.CommandText = "SELECT type,sql FROM sqlite_schema WHERE tbl_name=$table AND sql IS NOT NULL ORDER BY CASE type WHEN 'trigger' THEN 0 ELSE 1 END,name;";
+            read.Parameters.AddWithValue("$table", tableName);
+            await using var reader = await read.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                var type = reader.GetString(0);
+                var sql = reader.GetString(1);
+                if (type == "table") tableSql = sql;
+                else dependentSql.Add(sql);
+            }
+        }
+
+        if (tableSql is null) throw new InvalidDataException($"Required table {tableName} is missing.");
+        var columns = new List<string>();
+        await using (var readColumns = connection.CreateCommand())
+        {
+            readColumns.Transaction = transaction;
+            readColumns.CommandText = $"PRAGMA table_info({tableName});";
+            await using var reader = await readColumns.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                var column = reader.GetString(1);
+                if (!string.Equals(column, removedColumn, StringComparison.OrdinalIgnoreCase)) columns.Add(column);
+            }
+        }
+        if (columns.Count == 0) throw new InvalidDataException($"No retained columns found on {tableName}.");
+
+        var openingParenthesis = tableSql.IndexOf('(');
+        var closingParenthesis = tableSql.LastIndexOf(')');
+        if (openingParenthesis < 0 || closingParenthesis <= openingParenthesis)
+            throw new InvalidDataException($"Could not parse the schema for {tableName}.");
+        var definitions = SplitSqlDefinitions(tableSql[(openingParenthesis + 1)..closingParenthesis]);
+        var retainedDefinitions = definitions.Where(definition => !SqlDefinitionStartsWithColumn(definition, removedColumn)).ToArray();
+        if (retainedDefinitions.Length != definitions.Count - 1)
+            throw new InvalidDataException($"Expected exactly one {removedColumn} definition on {tableName}.");
+
+        var temporaryName = tableName + "_without_workflows_v52";
+        var createPrefix = tableSql[..(openingParenthesis + 1)];
+        var tableNameIndex = createPrefix.LastIndexOf(tableName, StringComparison.OrdinalIgnoreCase);
+        if (tableNameIndex < 0)
+            throw new InvalidDataException($"Could not locate the table name in the schema for {tableName}.");
+        createPrefix = createPrefix[..tableNameIndex] + temporaryName + createPrefix[(tableNameIndex + tableName.Length)..];
+        var createSql = createPrefix + string.Join(",", retainedDefinitions) + tableSql[closingParenthesis..];
+        var quotedColumns = string.Join(",", columns.Select(column => "\"" + column.Replace("\"", "\"\"", StringComparison.Ordinal) + "\""));
+        var copyColumns = "rowid," + quotedColumns;
+
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = createSql + $"; INSERT INTO {temporaryName}({copyColumns}) SELECT {copyColumns} FROM {tableName};";
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        command.CommandText = $"DROP TABLE {tableName}; ALTER TABLE {temporaryName} RENAME TO {tableName};";
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        foreach (var index in dependentSql.Where(sql => sql.StartsWith("CREATE INDEX", StringComparison.OrdinalIgnoreCase)
+                                                       || sql.StartsWith("CREATE UNIQUE INDEX", StringComparison.OrdinalIgnoreCase)))
+        {
+            command.CommandText = index;
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        foreach (var trigger in dependentSql.Where(sql => sql.StartsWith("CREATE TRIGGER", StringComparison.OrdinalIgnoreCase)
+                                                         || sql.StartsWith("CREATE TEMP TRIGGER", StringComparison.OrdinalIgnoreCase)))
+        {
+            command.CommandText = trigger;
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private static List<string> SplitSqlDefinitions(string sql)
+    {
+        var definitions = new List<string>();
+        var start = 0;
+        var depth = 0;
+        var quote = '\0';
+        for (var index = 0; index < sql.Length; index++)
+        {
+            var character = sql[index];
+            if (quote != '\0')
+            {
+                if (character == quote)
+                {
+                    if (index + 1 < sql.Length && sql[index + 1] == quote) index++;
+                    else quote = '\0';
+                }
+                continue;
+            }
+            if (character is '\'' or '"' or '`') { quote = character; continue; }
+            if (character == '[') { quote = ']'; continue; }
+            if (character == '(') depth++;
+            else if (character == ')') depth--;
+            else if (character == ',' && depth == 0)
+            {
+                definitions.Add(sql[start..index]);
+                start = index + 1;
+            }
+        }
+        definitions.Add(sql[start..]);
+        return definitions;
+    }
+
+    private static bool SqlDefinitionStartsWithColumn(string definition, string column)
+    {
+        var trimmed = definition.TrimStart();
+        foreach (var prefix in new[] { column, "\"" + column + "\"", "[" + column + "]", "`" + column + "`" })
+        {
+            if (!trimmed.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
+            return trimmed.Length == prefix.Length || char.IsWhiteSpace(trimmed[prefix.Length]);
+        }
+        return false;
+    }
+
+    private static async Task ApplyMigrationTwentySevenAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=27;";
+        var exists = Convert.ToInt32(
+            await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+            CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            command.CommandText = """
+                ALTER TABLE chat_messages
+                    ADD COLUMN message_phase TEXT NULL
+                    CHECK(message_phase IS NULL OR message_phase IN ('commentary','finalanswer'));
+                ALTER TABLE chat_messages ADD COLUMN source_run_id TEXT NULL;
+                ALTER TABLE chat_messages ADD COLUMN source_item_id TEXT NULL;
+                ALTER TABLE chat_messages
+                    ADD COLUMN source_delta_sequence INTEGER NOT NULL DEFAULT 0
+                    CHECK(source_delta_sequence>=0);
+                ALTER TABLE missum_ai_runs
+                    ADD COLUMN final_message_id TEXT NULL REFERENCES chat_messages(id) ON DELETE SET NULL;
+
+                UPDATE chat_messages
+                SET message_phase='finalanswer'
+                WHERE role='assistant' AND message_phase IS NULL;
+
+                CREATE UNIQUE INDEX idx_chat_messages_agent_item
+                    ON chat_messages(source_run_id,source_item_id)
+                    WHERE source_run_id IS NOT NULL AND source_item_id IS NOT NULL;
+                CREATE INDEX idx_chat_messages_source_run
+                    ON chat_messages(source_run_id,created_at)
+                    WHERE source_run_id IS NOT NULL;
+
+                UPDATE missum_ai_runs
+                SET state='interrupted',error_code='client.agent_protocol_upgraded',updated_at=$now
+                WHERE action='code' AND state IN ('queued','running','waitingForClient');
+
+                INSERT INTO schema_migrations(version,applied_at) VALUES(27,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationTwentyEightAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=28;";
+        var exists = Convert.ToInt32(
+            await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+            CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            command.CommandText = """
+                UPDATE chat_sessions
+                SET assistant_mode='general',
+                    persistent_tool_action=CASE
+                        WHEN lower(COALESCE(persistent_tool_action,''))='code' THEN NULL
+                        ELSE persistent_tool_action
+                    END
+                WHERE assistant_mode='code'
+                   OR lower(COALESCE(persistent_tool_action,''))='code';
+
+                UPDATE session_context_preparations
+                SET profile='general'
+                WHERE lower(profile)='code';
+
+                DELETE FROM prompt_triggers
+                WHERE lower(action)='code';
+
+                UPDATE missum_ai_runs
+                SET state=CASE
+                        WHEN state IN ('queued','running','waitingForClient') THEN 'cancelled'
+                        ELSE state
+                    END,
+                    error_code=CASE
+                        WHEN state IN ('queued','running','waitingForClient') THEN 'client.coding_mode_removed'
+                        ELSE error_code
+                    END,
+                    action=NULL,
+                    updated_at=CASE
+                        WHEN state IN ('queued','running','waitingForClient') THEN $now
+                        ELSE updated_at
+                    END
+                WHERE lower(COALESCE(action,''))='code';
+
+                INSERT INTO schema_migrations(version,applied_at) VALUES(28,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationTwentyNineAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=29;";
+        var exists = Convert.ToInt32(
+            await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+            CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            command.CommandText = """
+                DELETE FROM chat_messages
+                WHERE visibility='internal';
+
+                DROP TABLE IF EXISTS coding_campaign_solution_messages;
+                DROP TABLE IF EXISTS coding_campaign_iterations;
+                DROP TABLE IF EXISTS coding_campaigns;
+                DROP TABLE IF EXISTS coding_run_entries;
+                DROP TABLE IF EXISTS coding_runs;
+
+                DROP INDEX IF EXISTS idx_chat_messages_visible_session;
+                DROP INDEX IF EXISTS idx_chat_messages_agent_item;
+                DROP INDEX IF EXISTS idx_chat_messages_source_run;
+
+                ALTER TABLE chat_sessions DROP COLUMN assistant_mode;
+                ALTER TABLE chat_sessions DROP COLUMN workspace_path;
+                ALTER TABLE chat_sessions DROP COLUMN workspace_fingerprint;
+
+                ALTER TABLE chat_messages DROP COLUMN code_diff;
+                ALTER TABLE chat_messages DROP COLUMN visibility;
+                ALTER TABLE chat_messages DROP COLUMN message_phase;
+                ALTER TABLE chat_messages DROP COLUMN source_run_id;
+                ALTER TABLE chat_messages DROP COLUMN source_item_id;
+                ALTER TABLE chat_messages DROP COLUMN source_delta_sequence;
+
+                ALTER TABLE missum_ai_runs DROP COLUMN final_message_id;
+
+                INSERT INTO schema_migrations(version,applied_at) VALUES(29,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationThirtyAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=30;";
+        var exists = Convert.ToInt32(
+            await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+            CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            // Remove only the two retired seeds. Copies and user-authored workflows
+            // retain their IDs and content; foreign keys clear obsolete selections
+            // and tags while preserving the associated chats and messages.
+            command.CommandText = """
+                DELETE FROM workflows
+                WHERE is_built_in=1
+                  AND id IN ('0e2fd00a-aa2e-5b23-9e06-3a0645a2ecad',
+                             '7ceee4f5-8c41-5ce3-9332-7ccbb7d8d3fb');
+
+                INSERT INTO schema_migrations(version,applied_at) VALUES(30,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationThirtyOneAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=31;";
+        var exists = Convert.ToInt32(
+            await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+            CultureInfo.InvariantCulture) != 0;
+        if (!exists)
+        {
+            // A workspace grants file access for one session. Never infer this
+            // association from the application's most recently picked folder.
+            command.CommandText = """
+                ALTER TABLE chat_sessions ADD COLUMN coding_workspace_path TEXT NULL;
+                INSERT INTO schema_migrations(version,applied_at) VALUES(31,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationThirtyTwoAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=32;";
+        if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+        {
+            command.CommandText = """
+                ALTER TABLE chat_messages ADD COLUMN tool_steps_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(tool_steps_json));
+                INSERT INTO schema_migrations(version,applied_at) VALUES(32,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationThirtyThreeAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=33;";
+        if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+        {
+            // The current session path cannot establish an older run's original workspace.
+            // Leave legacy runs NULL so resume fails safely instead of guessing a project.
+            command.CommandText = """
+                ALTER TABLE missum_ai_runs ADD COLUMN workspace_path TEXT NULL;
+                INSERT INTO schema_migrations(version,applied_at) VALUES(33,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationThirtyFourAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=34;";
+        if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+        {
+            // Topic groups for the sidebar. Deleting a session or group clears the
+            // reference instead of cascading, so session history stays intact either way.
+            command.CommandText = """
+                CREATE TABLE chat_session_groups(
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 120),
+                    is_collapsed INTEGER NOT NULL DEFAULT 0 CHECK(is_collapsed IN (0,1)),
+                    created_at TEXT NOT NULL
+                ) STRICT;
+                ALTER TABLE chat_sessions ADD COLUMN session_group_id TEXT NULL REFERENCES chat_session_groups(id) ON DELETE SET NULL;
+                CREATE INDEX ix_chat_sessions_group ON chat_sessions(session_group_id);
+                INSERT INTO schema_migrations(version,applied_at) VALUES(34,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationThirtyFiveAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=35;";
+        if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+        {
+            // Workspace assignment is performed by migration 36, including repair of
+            // databases that already applied an early version of migration 35.
+            command.CommandText = """
+                ALTER TABLE chat_session_groups ADD COLUMN workspace_path TEXT NULL;
+                INSERT INTO schema_migrations(version,applied_at) VALUES(35,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationThirtySevenAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=37;";
+        if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+        {
+            command.CommandText = """
+                DELETE FROM chat_session_groups
+                WHERE NOT EXISTS (SELECT 1 FROM chat_sessions WHERE session_group_id=chat_session_groups.id);
+                INSERT INTO schema_migrations(version,applied_at) VALUES(37,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationThirtyNineAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=39;";
+        if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+        {
+            command.CommandText = "SELECT COUNT(*) FROM pragma_table_info('chat_sessions') WHERE name='persistent_tool_variant';";
+            if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+            {
+                command.CommandText = """
+                    ALTER TABLE chat_sessions ADD COLUMN persistent_tool_variant TEXT NULL;
+                    """;
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+            command.CommandText = "INSERT INTO schema_migrations(version,applied_at) VALUES(39,$now);";
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationFortyAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=40;";
+        if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+        {
+            command.CommandText = "SELECT COUNT(*) FROM pragma_table_info('chat_sessions') WHERE name='persistent_tool_variant_v2';";
+            if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+            {
+                command.CommandText = "ALTER TABLE chat_sessions ADD COLUMN persistent_tool_variant_v2 TEXT NULL;";
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+            command.CommandText = "UPDATE chat_sessions SET persistent_tool_variant_v2=persistent_tool_variant WHERE persistent_tool_variant_v2 IS NULL;";
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            command.CommandText = "INSERT INTO schema_migrations(version,applied_at) VALUES(40,$now);";
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationFortyOneAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=41;";
+        if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+        {
+            command.CommandText = """
+                UPDATE chat_sessions
+                SET persistent_tool_action=CASE
+                        WHEN persistent_tool_action IN ('code','audiobook') THEN persistent_tool_action
+                        ELSE NULL
+                    END,
+                    persistent_tool_variant=NULL,
+                    persistent_tool_variant_v2=NULL;
+                DELETE FROM prompt_triggers
+                WHERE id IN ('a1000000-0000-4000-8000-000000000011','a1000000-0000-4000-8000-000000000012');
+                UPDATE missum_ai_runs SET action=NULL
+                WHERE action IS NOT NULL AND action NOT IN
+                    ('imageGeneration','translation','textToSpeech','transcription','audioAnalysis','videoAnalysis',
+                     'imageAnalysis','webSearch','voiceInput','liveCaptions','liveTranslation','audiobook','coding','documentCreate');
+                INSERT INTO schema_migrations(version,applied_at) VALUES(41,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationFortyTwoAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=42;";
+        if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+        {
+            command.CommandText = "SELECT COUNT(*) FROM pragma_table_info('chat_sessions') WHERE name='chat_mode';";
+            if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+            {
+                command.CommandText = "ALTER TABLE chat_sessions ADD COLUMN chat_mode TEXT NOT NULL DEFAULT 'general' CHECK(chat_mode IN ('general','coding'));";
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            // Coding used to be a persistent tool chip. Promote it to the immutable
+            // session mode, then discard the obsolete chip selection.
+            command.CommandText = """
+                UPDATE chat_sessions
+                SET chat_mode='coding',
+                    persistent_tool_action=NULL,
+                    persistent_tool_variant=NULL,
+                    persistent_tool_variant_v2=NULL
+                WHERE persistent_tool_action='code';
+                """;
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+
+            command.CommandText = "SELECT COUNT(*) FROM pragma_table_info('chat_sessions') WHERE name='pinned_at';";
+            if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0)
+            {
+                command.CommandText = "ALTER TABLE chat_sessions DROP COLUMN pinned_at;";
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+            command.CommandText = "SELECT COUNT(*) FROM pragma_table_info('chat_sessions') WHERE name='is_pinned';";
+            if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0)
+            {
+                command.CommandText = "ALTER TABLE chat_sessions DROP COLUMN is_pinned;";
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            command.CommandText = """
+                CREATE INDEX IF NOT EXISTS ix_chat_sessions_mode_updated
+                    ON chat_sessions(chat_mode,updated_at DESC);
+                INSERT INTO schema_migrations(version,applied_at) VALUES(42,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationFortyThreeAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=43;";
+        if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+        {
+            command.CommandText = "SELECT COUNT(*) FROM pragma_table_info('prompt_triggers') WHERE name='extension_action_id';";
+            if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+            {
+                command.CommandText = "ALTER TABLE prompt_triggers ADD COLUMN extension_action_id TEXT NULL;";
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            command.CommandText = "SELECT COUNT(*) FROM pragma_table_info('missum_ai_runs') WHERE name='extension_action_id';";
+            if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+            {
+                command.CommandText = "ALTER TABLE missum_ai_runs ADD COLUMN extension_action_id TEXT NULL;";
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            command.CommandText = """
+                UPDATE prompt_triggers
+                SET extension_action_id=CASE action
+                    WHEN 'imageGeneration' THEN 'builtin.image/generate'
+                    WHEN 'translation' THEN 'builtin.speech/translate'
+                    WHEN 'textToSpeech' THEN 'builtin.speech/read-aloud'
+                    WHEN 'transcription' THEN 'builtin.speech/transcribe'
+                    WHEN 'audioAnalysis' THEN 'builtin.media/audio-analysis'
+                    WHEN 'videoAnalysis' THEN 'builtin.media/video-analysis'
+                    WHEN 'imageAnalysis' THEN 'builtin.media/image-analysis'
+                    WHEN 'webSearch' THEN 'builtin.web/web-search'
+                    WHEN 'voiceInput' THEN 'builtin.speech/voice-input'
+                    WHEN 'liveCaptions' THEN 'builtin.speech/live-captions'
+                    WHEN 'liveTranslation' THEN 'builtin.speech/live-translation'
+                    WHEN 'audiobook' THEN 'builtin.audiobook/create'
+                    WHEN 'coding' THEN 'builtin.coding/run'
+                    WHEN 'documentCreate' THEN 'builtin.documents/create'
+                    ELSE extension_action_id
+                END
+                WHERE extension_action_id IS NULL OR trim(extension_action_id)='';
+
+                UPDATE missum_ai_runs
+                SET extension_action_id=CASE action
+                    WHEN 'imageGeneration' THEN 'builtin.image/generate'
+                    WHEN 'translation' THEN 'builtin.speech/translate'
+                    WHEN 'textToSpeech' THEN 'builtin.speech/read-aloud'
+                    WHEN 'transcription' THEN 'builtin.speech/transcribe'
+                    WHEN 'audioAnalysis' THEN 'builtin.media/audio-analysis'
+                    WHEN 'videoAnalysis' THEN 'builtin.media/video-analysis'
+                    WHEN 'imageAnalysis' THEN 'builtin.media/image-analysis'
+                    WHEN 'webSearch' THEN 'builtin.web/web-search'
+                    WHEN 'voiceInput' THEN 'builtin.speech/voice-input'
+                    WHEN 'liveCaptions' THEN 'builtin.speech/live-captions'
+                    WHEN 'liveTranslation' THEN 'builtin.speech/live-translation'
+                    WHEN 'audiobook' THEN 'builtin.audiobook/create'
+                    WHEN 'coding' THEN 'builtin.coding/run'
+                    WHEN 'documentCreate' THEN 'builtin.documents/create'
+                    ELSE extension_action_id
+                END
+                WHERE extension_action_id IS NULL OR trim(extension_action_id)='';
+
+                CREATE INDEX IF NOT EXISTS ix_prompt_triggers_extension_action
+                    ON prompt_triggers(extension_action_id, is_enabled, priority DESC);
+                CREATE INDEX IF NOT EXISTS ix_missum_ai_runs_extension_action
+                    ON missum_ai_runs(extension_action_id, updated_at DESC);
+                INSERT INTO schema_migrations(version,applied_at) VALUES(43,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationFortyFourAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=44;";
+        if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+        {
+            command.CommandText = "SELECT COUNT(*) FROM pragma_table_info('chat_sessions') WHERE name='persistent_extension_action_id';";
+            if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+            {
+                command.CommandText = """
+                    ALTER TABLE chat_sessions
+                        ADD COLUMN persistent_extension_action_id TEXT NULL
+                        CHECK(persistent_extension_action_id IS NULL OR (
+                            length(persistent_extension_action_id) BETWEEN 3 AND 160
+                            AND persistent_extension_action_id=lower(persistent_extension_action_id)
+                            AND persistent_extension_action_id=trim(persistent_extension_action_id)
+                            AND instr(persistent_extension_action_id,'/')>1
+                            AND instr(substr(persistent_extension_action_id,instr(persistent_extension_action_id,'/')+1),'/')=0
+                        ));
+                    """;
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            command.CommandText = "SELECT COUNT(*) FROM pragma_table_info('chat_sessions') WHERE name='persistent_tool_action';";
+            if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0)
+            {
+                command.CommandText = """
+                    UPDATE chat_sessions
+                    SET persistent_extension_action_id=CASE lower(trim(persistent_tool_action))
+                        WHEN 'audiobook' THEN 'builtin.audiobook/create'
+                        ELSE persistent_extension_action_id
+                    END
+                    WHERE persistent_tool_action IS NOT NULL;
+                    ALTER TABLE chat_sessions DROP COLUMN persistent_tool_action;
+                    """;
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            command.CommandText = "SELECT COUNT(*) FROM pragma_table_info('chat_sessions') WHERE name='persistent_tool_variant';";
+            if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0)
+            {
+                command.CommandText = "ALTER TABLE chat_sessions DROP COLUMN persistent_tool_variant;";
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            command.CommandText = "SELECT COUNT(*) FROM pragma_table_info('chat_sessions') WHERE name='persistent_tool_variant_v2';";
+            if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0)
+            {
+                command.CommandText = "ALTER TABLE chat_sessions DROP COLUMN persistent_tool_variant_v2;";
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            command.CommandText = """
+                CREATE INDEX IF NOT EXISTS ix_chat_sessions_persistent_extension_action
+                    ON chat_sessions(persistent_extension_action_id,updated_at DESC)
+                    WHERE persistent_extension_action_id IS NOT NULL;
+                INSERT INTO schema_migrations(version,applied_at) VALUES(44,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationFortyFiveAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=45;";
+        if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+        {
+            // action is retained only as an immutable compatibility value for pre-extension rows.
+            // All new edits use extension_action_id as their canonical identity.
+            command.CommandText = """
+                DROP INDEX IF EXISTS ix_prompt_triggers_match;
+                DROP INDEX IF EXISTS ix_prompt_triggers_extension_action;
+
+                CREATE TABLE prompt_triggers_v45(
+                    id TEXT PRIMARY KEY,
+                    extension_action_id TEXT NOT NULL CHECK(
+                        length(extension_action_id) BETWEEN 3 AND 160
+                        AND extension_action_id=lower(extension_action_id)
+                        AND extension_action_id=trim(extension_action_id)
+                        AND instr(extension_action_id,'/')>1
+                        AND instr(substr(extension_action_id,instr(extension_action_id,'/')+1),'/')=0
+                    ),
+                    action TEXT NULL,
+                    phrase TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    match_mode TEXT NOT NULL CHECK(match_mode IN ('prefix','contains','exact')),
+                    is_enabled INTEGER NOT NULL CHECK(is_enabled IN (0,1)),
+                    priority INTEGER NOT NULL CHECK(priority BETWEEN -10000 AND 10000),
+                    revision INTEGER NOT NULL CHECK(revision>=1),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                ) STRICT;
+
+                INSERT INTO prompt_triggers_v45(
+                    id,extension_action_id,action,phrase,description,match_mode,is_enabled,priority,revision,created_at,updated_at)
+                SELECT
+                    id,extension_action_id,action,phrase,description,match_mode,is_enabled,priority,revision,created_at,updated_at
+                FROM prompt_triggers;
+
+                DROP TABLE prompt_triggers;
+                ALTER TABLE prompt_triggers_v45 RENAME TO prompt_triggers;
+                CREATE INDEX ix_prompt_triggers_match
+                    ON prompt_triggers(is_enabled, priority DESC, phrase COLLATE NOCASE);
+                CREATE INDEX ix_prompt_triggers_extension_action
+                    ON prompt_triggers(extension_action_id, is_enabled, priority DESC);
+                CREATE UNIQUE INDEX ux_prompt_triggers_extension_phrase
+                    ON prompt_triggers(extension_action_id, phrase COLLATE NOCASE);
+                INSERT INTO schema_migrations(version,applied_at) VALUES(45,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationFortySixAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=46;";
+        if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+        {
+            command.CommandText = "SELECT COUNT(*) FROM pragma_table_info('chat_session_groups') WHERE name='chat_mode';";
+            if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+            {
+                command.CommandText = """
+                    ALTER TABLE chat_session_groups
+                        ADD COLUMN chat_mode TEXT NOT NULL DEFAULT 'general'
+                        CHECK(chat_mode IN ('general','coding'));
+                    """;
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            // A historic project group could contain both former Coding-chip
+            // conversations and General chats. Preserve its General identity and
+            // move Coding members into a cloned, mode-owned group.
+            var mixedGroups = new List<(string Id, string Name, int Collapsed, string CreatedAt, string? WorkspacePath)>();
+            command.CommandText = """
+                SELECT group_item.id,group_item.name,group_item.is_collapsed,group_item.created_at,group_item.workspace_path
+                FROM chat_session_groups AS group_item
+                WHERE EXISTS(
+                    SELECT 1 FROM chat_sessions
+                    WHERE session_group_id=group_item.id AND chat_mode='general')
+                  AND EXISTS(
+                    SELECT 1 FROM chat_sessions
+                    WHERE session_group_id=group_item.id AND chat_mode='coding');
+                """;
+            await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+            {
+                while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    mixedGroups.Add((
+                        reader.GetString(0),
+                        reader.GetString(1),
+                        reader.GetInt32(2),
+                        reader.GetString(3),
+                        reader.IsDBNull(4) ? null : reader.GetString(4)));
+                }
+            }
+
+            foreach (var group in mixedGroups)
+            {
+                var codingGroupId = Guid.NewGuid().ToString("D");
+                command.Parameters.Clear();
+                command.CommandText = """
+                    INSERT INTO chat_session_groups(
+                        id,name,is_collapsed,created_at,workspace_path,chat_mode)
+                    VALUES($id,$name,$collapsed,$created,$workspace,'coding');
+                    UPDATE chat_sessions
+                    SET session_group_id=$id
+                    WHERE session_group_id=$source AND chat_mode='coding';
+                    """;
+                command.Parameters.AddWithValue("$id", codingGroupId);
+                command.Parameters.AddWithValue("$source", group.Id);
+                command.Parameters.AddWithValue("$name", group.Name);
+                command.Parameters.AddWithValue("$collapsed", group.Collapsed);
+                command.Parameters.AddWithValue("$created", group.CreatedAt);
+                command.Parameters.AddWithValue("$workspace", (object?)group.WorkspacePath ?? DBNull.Value);
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            command.Parameters.Clear();
+            command.CommandText = """
+                UPDATE chat_session_groups
+                SET chat_mode='coding'
+                WHERE EXISTS(
+                    SELECT 1 FROM chat_sessions
+                    WHERE session_group_id=chat_session_groups.id AND chat_mode='coding')
+                  AND NOT EXISTS(
+                    SELECT 1 FROM chat_sessions
+                    WHERE session_group_id=chat_session_groups.id AND chat_mode<>'coding');
+
+                DELETE FROM chat_session_groups
+                WHERE NOT EXISTS(
+                    SELECT 1 FROM chat_sessions
+                    WHERE session_group_id=chat_session_groups.id);
+
+                CREATE TRIGGER IF NOT EXISTS trg_chat_sessions_group_mode_insert
+                BEFORE INSERT ON chat_sessions
+                WHEN NEW.session_group_id IS NOT NULL
+                  AND NOT EXISTS(
+                      SELECT 1 FROM chat_session_groups
+                      WHERE id=NEW.session_group_id AND chat_mode=NEW.chat_mode)
+                BEGIN
+                    SELECT RAISE(ABORT,'session and project group chat modes differ');
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS trg_chat_sessions_group_mode_update
+                BEFORE UPDATE OF session_group_id,chat_mode ON chat_sessions
+                WHEN NEW.session_group_id IS NOT NULL
+                  AND NOT EXISTS(
+                      SELECT 1 FROM chat_session_groups
+                      WHERE id=NEW.session_group_id AND chat_mode=NEW.chat_mode)
+                BEGIN
+                    SELECT RAISE(ABORT,'session and project group chat modes differ');
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS trg_chat_session_groups_mode_update
+                BEFORE UPDATE OF chat_mode ON chat_session_groups
+                WHEN EXISTS(
+                    SELECT 1 FROM chat_sessions
+                    WHERE session_group_id=OLD.id AND chat_mode<>NEW.chat_mode)
+                BEGIN
+                    SELECT RAISE(ABORT,'project group and member chat modes differ');
+                END;
+
+                CREATE INDEX IF NOT EXISTS ix_chat_session_groups_mode_created
+                    ON chat_session_groups(chat_mode,created_at DESC);
+                INSERT INTO schema_migrations(version,applied_at) VALUES(46,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationFortySevenAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=47;";
+        if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+        {
+            command.CommandText = """
+                DELETE FROM prompt_triggers
+                WHERE extension_action_id='builtin.development/self-development'
+                   OR lower(action)='development';
+
+                UPDATE chat_sessions
+                SET persistent_extension_action_id=NULL
+                WHERE persistent_extension_action_id='builtin.development/self-development';
+
+                UPDATE missum_ai_runs
+                SET extension_action_id=NULL,
+                    action=NULL,
+                    state=CASE WHEN state='finalizing' THEN 'cancelled' ELSE state END,
+                    error_code=CASE
+                        WHEN state='finalizing' THEN COALESCE(error_code,'client.development_removed')
+                        ELSE error_code
+                    END,
+                    updated_at=$now
+                WHERE extension_action_id='builtin.development/self-development'
+                   OR lower(action)='development'
+                   OR state='finalizing';
+
+                INSERT INTO schema_migrations(version,applied_at) VALUES(47,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationFortyEightAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=48;";
+        if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+        {
+            command.CommandText = """
+                CREATE TABLE research_projects(
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+                    profile TEXT NOT NULL,
+                    original_question TEXT NOT NULL,
+                    interpreted_question TEXT NOT NULL,
+                    autonomy_level TEXT NOT NULL CHECK(autonomy_level IN ('readOnlyResearch','codingWorkspaceResearch')),
+                    verification_level TEXT NOT NULL CHECK(verification_level IN ('standard','multiPath','formalWherePossible')),
+                    status TEXT NOT NULL CHECK(status IN ('active','verified','stronglySupported','provisionallySupported','conflictingEvidence','insufficientEvidence','refuted','unresolved','blocked','cancelled')),
+                    protocol_version INTEGER NOT NULL CHECK(protocol_version>=1),
+                    revision INTEGER NOT NULL CHECK(revision>=1),
+                    workspace_path TEXT NULL,
+                    latest_checkpoint_id TEXT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                ) STRICT;
+                CREATE INDEX ix_research_projects_session_updated ON research_projects(session_id,updated_at DESC);
+
+                CREATE TABLE research_protocol_versions(
+                    project_id TEXT NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+                    version INTEGER NOT NULL CHECK(version>=1),
+                    protocol_json TEXT NOT NULL CHECK(json_valid(protocol_json)),
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(project_id,version)
+                ) STRICT;
+                CREATE TABLE research_plan_nodes(
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+                    node_type TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('planned','active','supported','provisionallySupported','verified','refuted','blocked','unresolved','superseded')),
+                    priority INTEGER NOT NULL,
+                    confidence REAL NOT NULL CHECK(confidence>=0 AND confidence<=1),
+                    evidence_requirements_json TEXT NOT NULL CHECK(json_valid(evidence_requirements_json)),
+                    verification_requirements_json TEXT NOT NULL CHECK(json_valid(verification_requirements_json)),
+                    attempt_count INTEGER NOT NULL CHECK(attempt_count>=0),
+                    checkpoint_id TEXT NULL,
+                    payload_json TEXT NULL CHECK(payload_json IS NULL OR json_valid(payload_json)),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                ) STRICT;
+                CREATE INDEX ix_research_plan_nodes_project_status ON research_plan_nodes(project_id,status,priority DESC);
+                CREATE TABLE research_plan_edges(
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+                    from_node_id TEXT NOT NULL REFERENCES research_plan_nodes(id) ON DELETE CASCADE,
+                    to_node_id TEXT NOT NULL REFERENCES research_plan_nodes(id) ON DELETE CASCADE,
+                    edge_type TEXT NOT NULL CHECK(edge_type IN ('dependsOn','supports','contradicts','refines','tests','invalidates','derivedFrom','alternativeTo','requiresVerification')),
+                    created_at TEXT NOT NULL,
+                    UNIQUE(project_id,from_node_id,to_node_id,edge_type)
+                ) STRICT;
+                CREATE TABLE research_search_runs(
+                    id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+                    provider TEXT NOT NULL, query TEXT NOT NULL, query_kind TEXT NOT NULL, result_count INTEGER NOT NULL CHECK(result_count>=0),
+                    request_json TEXT NOT NULL CHECK(json_valid(request_json)), response_hash TEXT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL
+                ) STRICT;
+                CREATE TABLE research_provider_records(
+                    id TEXT PRIMARY KEY, search_run_id TEXT NOT NULL REFERENCES research_search_runs(id) ON DELETE CASCADE,
+                    provider_id TEXT NULL, record_json TEXT NOT NULL CHECK(json_valid(record_json)), content_hash TEXT NOT NULL, retrieved_at TEXT NOT NULL
+                ) STRICT;
+                CREATE TABLE research_works(
+                    id TEXT PRIMARY KEY, doi TEXT NULL, pmid TEXT NULL, pmcid TEXT NULL, arxiv_id TEXT NULL, datacite_id TEXT NULL,
+                    openalex_id TEXT NULL, canonical_url TEXT NULL, title TEXT NOT NULL, authors_json TEXT NOT NULL CHECK(json_valid(authors_json)),
+                    publication_year INTEGER NULL, version_kind TEXT NOT NULL, metadata_json TEXT NOT NULL CHECK(json_valid(metadata_json)),
+                    retraction_status TEXT NULL, updated_at TEXT NOT NULL
+                ) STRICT;
+                CREATE UNIQUE INDEX ux_research_works_doi ON research_works(doi) WHERE doi IS NOT NULL;
+                CREATE TABLE research_project_works(
+                    project_id TEXT NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+                    work_id TEXT NOT NULL REFERENCES research_works(id) ON DELETE CASCADE,
+                    discovery_search_id TEXT NULL REFERENCES research_search_runs(id) ON DELETE SET NULL,
+                    screening_status TEXT NOT NULL, evidence_level TEXT NULL, created_at TEXT NOT NULL,
+                    PRIMARY KEY(project_id,work_id)
+                ) STRICT;
+                CREATE TABLE research_screening_decisions(
+                    id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+                    work_id TEXT NOT NULL REFERENCES research_works(id) ON DELETE CASCADE, stage TEXT NOT NULL,
+                    decision TEXT NOT NULL, reason TEXT NOT NULL, decided_at TEXT NOT NULL
+                ) STRICT;
+                CREATE TABLE research_evidence(
+                    id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+                    work_id TEXT NOT NULL REFERENCES research_works(id) ON DELETE CASCADE, page TEXT NULL, section TEXT NULL,
+                    table_or_figure TEXT NULL, exact_excerpt TEXT NOT NULL, normalized_statement TEXT NOT NULL,
+                    content_hash TEXT NOT NULL, retrieved_at TEXT NOT NULL, evidence_level TEXT NOT NULL, locator_json TEXT NOT NULL CHECK(json_valid(locator_json))
+                ) STRICT;
+                CREATE TABLE research_hypotheses(
+                    id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+                    node_id TEXT NULL REFERENCES research_plan_nodes(id) ON DELETE SET NULL, statement TEXT NOT NULL,
+                    classification TEXT NOT NULL CHECK(classification IN ('knownResult','derivedFromKnownResults','newCandidateSolution','empiricallySupportedCandidate','formallyVerifiedResult','unresolvedHypothesis','refutedHypothesis')),
+                    status TEXT NOT NULL, confidence REAL NOT NULL CHECK(confidence>=0 AND confidence<=1), payload_json TEXT NOT NULL CHECK(json_valid(payload_json)), updated_at TEXT NOT NULL
+                ) STRICT;
+                CREATE TABLE research_derivations(
+                    id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+                    hypothesis_id TEXT NULL REFERENCES research_hypotheses(id) ON DELETE SET NULL, latex TEXT NOT NULL,
+                    structured_json TEXT NOT NULL CHECK(json_valid(structured_json)), verification_status TEXT NOT NULL, created_at TEXT NOT NULL
+                ) STRICT;
+                CREATE TABLE research_experiments(
+                    id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+                    hypothesis_id TEXT NULL REFERENCES research_hypotheses(id) ON DELETE SET NULL, environment_lock TEXT NOT NULL,
+                    source_files_json TEXT NOT NULL CHECK(json_valid(source_files_json)), random_seeds_json TEXT NOT NULL CHECK(json_valid(random_seeds_json)),
+                    input_hashes_json TEXT NOT NULL CHECK(json_valid(input_hashes_json)), command_text TEXT NOT NULL,
+                    resource_limits_json TEXT NOT NULL CHECK(json_valid(resource_limits_json)), stdout_evidence TEXT NOT NULL,
+                    stderr_evidence TEXT NOT NULL, result_artifacts_json TEXT NOT NULL CHECK(json_valid(result_artifacts_json)),
+                    verification_status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                ) STRICT;
+                CREATE TABLE research_verifications(
+                    id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+                    target_type TEXT NOT NULL, target_id TEXT NOT NULL, dimension TEXT NOT NULL, method TEXT NOT NULL,
+                    status TEXT NOT NULL, evidence_json TEXT NOT NULL CHECK(json_valid(evidence_json)), created_at TEXT NOT NULL
+                ) STRICT;
+                CREATE TABLE research_claims(
+                    id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+                    statement TEXT NOT NULL, claim_class TEXT NOT NULL CHECK(claim_class IN ('sourceReported','derived','calculated','experimentallyObserved','formallyVerified','modelInference','speculativeHypothesis')),
+                    conclusion_status TEXT NOT NULL, confidence REAL NOT NULL CHECK(confidence>=0 AND confidence<=1), payload_json TEXT NOT NULL CHECK(json_valid(payload_json)), updated_at TEXT NOT NULL
+                ) STRICT;
+                CREATE TABLE research_claim_edges(
+                    id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+                    claim_id TEXT NOT NULL REFERENCES research_claims(id) ON DELETE CASCADE, target_type TEXT NOT NULL,
+                    target_id TEXT NOT NULL, relation TEXT NOT NULL, created_at TEXT NOT NULL
+                ) STRICT;
+                CREATE TABLE research_reports(
+                    id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+                    report_kind TEXT NOT NULL, conclusion_status TEXT NOT NULL, content_markdown TEXT NOT NULL,
+                    manifest_json TEXT NOT NULL CHECK(json_valid(manifest_json)), created_at TEXT NOT NULL
+                ) STRICT;
+                CREATE TABLE research_checkpoints(
+                    id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+                    run_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>=1), stage TEXT NOT NULL,
+                    state_json TEXT NOT NULL CHECK(json_valid(state_json)), created_at TEXT NOT NULL,
+                    UNIQUE(project_id,revision)
+                ) STRICT;
+                CREATE INDEX ix_research_checkpoints_project_revision ON research_checkpoints(project_id,revision DESC);
+                CREATE TABLE research_audit_events(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+                    run_id TEXT NULL, revision INTEGER NOT NULL CHECK(revision>=1), event_type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL CHECK(json_valid(payload_json)), created_at TEXT NOT NULL
+                ) STRICT;
+                CREATE TABLE research_change_sets(
+                    id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+                    experiment_id TEXT NULL REFERENCES research_experiments(id) ON DELETE SET NULL,
+                    files_before_json TEXT NOT NULL CHECK(json_valid(files_before_json)), files_after_json TEXT NOT NULL CHECK(json_valid(files_after_json)),
+                    hashes_before_json TEXT NOT NULL CHECK(json_valid(hashes_before_json)), hashes_after_json TEXT NOT NULL CHECK(json_valid(hashes_after_json)),
+                    commands_json TEXT NOT NULL CHECK(json_valid(commands_json)), verification_json TEXT NOT NULL CHECK(json_valid(verification_json)),
+                    artifacts_json TEXT NOT NULL CHECK(json_valid(artifacts_json)), status TEXT NOT NULL, created_at TEXT NOT NULL
+                ) STRICT;
+
+                INSERT INTO schema_migrations(version,applied_at) VALUES(48,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationFortyNineAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        // SQLite cannot ALTER a CHECK constraint. Rebuild just the two mode-owned
+        // tables while preserving every column, explicit index and trigger. Foreign
+        // keys are disabled only on this migration connection and validated again
+        // by InitializeAsync immediately afterwards.
+        await using (var pragma = connection.CreateCommand())
+        {
+            pragma.CommandText = "PRAGMA foreign_keys=OFF; PRAGMA legacy_alter_table=ON;";
+            await pragma.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        try
+        {
+            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=49;";
+            if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+            {
+                await RebuildModeTableAsync(connection, transaction, "chat_session_groups",
+                    "CHECK(chat_mode IN ('general','coding'))", "CHECK(chat_mode IN ('general','coding','claudescience'))", cancellationToken).ConfigureAwait(false);
+                await RebuildModeTableAsync(connection, transaction, "chat_sessions",
+                    "CHECK(chat_mode IN ('general','coding'))", "CHECK(chat_mode IN ('general','coding','claudescience'))", cancellationToken).ConfigureAwait(false);
+                await RebuildModeTableAsync(connection, transaction, "research_projects",
+                    "CHECK(autonomy_level IN ('readOnlyResearch','codingWorkspaceResearch'))",
+                    "CHECK(autonomy_level IN ('readOnlyResearch','codingWorkspaceResearch','sandboxResearch'))", cancellationToken).ConfigureAwait(false);
+                command.CommandText = "INSERT INTO schema_migrations(version,applied_at) VALUES(49,$now);";
+                command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            await using var pragma = connection.CreateCommand();
+            pragma.CommandText = "PRAGMA legacy_alter_table=OFF; PRAGMA foreign_keys=ON;";
+            await pragma.ExecuteNonQueryAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+    }
+
+    private static async Task RebuildModeTableAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string tableName,
+        string oldCheck,
+        string newCheck,
+        CancellationToken cancellationToken)
+    {
+        if (tableName is not ("chat_session_groups" or "chat_sessions" or "research_projects"))
+            throw new ArgumentOutOfRangeException(nameof(tableName));
+
+        string? tableSql = null;
+        var dependentSql = new List<string>();
+        await using (var read = connection.CreateCommand())
+        {
+            read.Transaction = transaction;
+            read.CommandText = "SELECT type,sql FROM sqlite_schema WHERE tbl_name=$table AND sql IS NOT NULL ORDER BY CASE type WHEN 'trigger' THEN 0 ELSE 1 END,name;";
+            read.Parameters.AddWithValue("$table", tableName);
+            await using var reader = await read.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                var type = reader.GetString(0);
+                var sql = reader.GetString(1);
+                if (type == "table") tableSql = sql;
+                else dependentSql.Add(sql);
+            }
+        }
+
+        if (tableSql is null) throw new InvalidDataException($"Required table {tableName} is missing.");
+        if (!tableSql.Contains(oldCheck, StringComparison.Ordinal))
+            throw new InvalidDataException($"The expected mode/autonomy constraint was not found on {tableName}.");
+        var temporaryName = tableName + "_claudescience_v49";
+        var createSql = tableSql
+            .Replace("CREATE TABLE " + tableName, "CREATE TABLE " + temporaryName, StringComparison.Ordinal)
+            .Replace("CREATE TABLE IF NOT EXISTS " + tableName, "CREATE TABLE IF NOT EXISTS " + temporaryName, StringComparison.Ordinal)
+            .Replace(oldCheck, newCheck, StringComparison.Ordinal);
+
+        var columns = new List<string>();
+        await using (var readColumns = connection.CreateCommand())
+        {
+            readColumns.Transaction = transaction;
+            readColumns.CommandText = $"PRAGMA table_info({tableName});";
+            await using var reader = await readColumns.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false)) columns.Add(reader.GetString(1));
+        }
+        if (columns.Count == 0) throw new InvalidDataException($"No columns found on {tableName}.");
+        var quotedColumns = string.Join(",", columns.Select(column => "\"" + column.Replace("\"", "\"\"", StringComparison.Ordinal) + "\""));
+        var copyColumns = tableName == "chat_sessions"
+            ? "rowid," + quotedColumns
+            : quotedColumns;
+
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        // session_search is an external-content FTS table keyed by chat_sessions.rowid.
+        // Preserve that hidden key so rebuilding the mode constraint cannot detach
+        // existing FTS rows from their sessions when deleted rows left gaps.
+        command.CommandText = createSql + $"; INSERT INTO {temporaryName}({copyColumns}) SELECT {copyColumns} FROM {tableName};";
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        command.CommandText = $"DROP TABLE {tableName}; ALTER TABLE {temporaryName} RENAME TO {tableName};";
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        foreach (var index in dependentSql.Where(sql => sql.StartsWith("CREATE INDEX", StringComparison.OrdinalIgnoreCase)
+                                                       || sql.StartsWith("CREATE UNIQUE INDEX", StringComparison.OrdinalIgnoreCase)))
+        {
+            command.CommandText = index;
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        foreach (var trigger in dependentSql.Where(sql => sql.StartsWith("CREATE TRIGGER", StringComparison.OrdinalIgnoreCase)
+                                                         || sql.StartsWith("CREATE TEMP TRIGGER", StringComparison.OrdinalIgnoreCase)))
+        {
+            command.CommandText = trigger;
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private static async Task ApplyMigrationThirtyEightAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=38;";
+        if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+        {
+            command.CommandText = "SELECT COUNT(*) FROM pragma_table_info('chat_artifacts') WHERE name='step_id';";
+            if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+            {
+                command.CommandText = "ALTER TABLE chat_artifacts ADD COLUMN step_id TEXT NULL;";
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+            command.CommandText = "INSERT INTO schema_migrations(version,applied_at) VALUES(38,$now);";
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationThirtySixAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=36;";
+        if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0)
+        {
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        var groups = new List<(string Id, string Name, string? Path, bool Collapsed, string Created)>();
+        command.CommandText = "SELECT id,name,workspace_path,is_collapsed,created_at FROM chat_session_groups ORDER BY created_at,id;";
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+        {
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                groups.Add((reader.GetString(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2), reader.GetBoolean(3), reader.GetString(4)));
+        }
+        var projects = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var group in groups)
+        {
+            // The former SQL randomblob expression produced non-GUID IDs. Copy the
+            // parent before updating references so foreign keys remain valid throughout.
+            var id = Guid.TryParse(group.Id, out var parsedId) ? parsedId.ToString("D") : Guid.NewGuid().ToString("D");
+            var path = NormalizeWorkspaceProjectPath(group.Path);
+            var name = path is null ? group.Name : WorkspaceProjectName(path);
+            if (path is not null && projects.TryGetValue(path, out var existingId)) id = existingId;
+            command.Parameters.Clear();
+            command.CommandText = "INSERT OR IGNORE INTO chat_session_groups(id,name,workspace_path,is_collapsed,created_at) VALUES($id,$name,$path,$collapsed,$created);";
+            command.Parameters.AddWithValue("$id", id);
+            command.Parameters.AddWithValue("$name", name);
+            command.Parameters.AddWithValue("$path", (object?)path ?? DBNull.Value);
+            command.Parameters.AddWithValue("$collapsed", group.Collapsed ? 1 : 0);
+            command.Parameters.AddWithValue("$created", group.Created);
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            if (!string.Equals(id, group.Id, StringComparison.Ordinal))
+            {
+                command.Parameters.Clear();
+                command.CommandText = "UPDATE chat_sessions SET session_group_id=$id WHERE session_group_id=$old; DELETE FROM chat_session_groups WHERE id=$old;";
+                command.Parameters.AddWithValue("$id", id);
+                command.Parameters.AddWithValue("$old", group.Id);
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+            if (path is not null)
+            {
+                projects.TryAdd(path, id);
+                command.Parameters.Clear();
+                command.CommandText = "UPDATE chat_session_groups SET name=$name,workspace_path=$path WHERE id=$id;";
+                command.Parameters.AddWithValue("$id", id);
+                command.Parameters.AddWithValue("$name", name);
+                command.Parameters.AddWithValue("$path", path);
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        var sessions = new List<(string Id, string Path)>();
+        command.Parameters.Clear();
+        command.CommandText = "SELECT id,coding_workspace_path FROM chat_sessions WHERE coding_workspace_path IS NOT NULL ORDER BY created_at,id;";
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+        {
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                sessions.Add((reader.GetString(0), reader.GetString(1)));
+        }
+        foreach (var session in sessions)
+        {
+            var path = NormalizeWorkspaceProjectPath(session.Path);
+            if (path is null) continue; // Unavailable/malformed historic metadata never removes a session.
+            if (!projects.TryGetValue(path, out var id))
+            {
+                id = Guid.NewGuid().ToString("D");
+                projects.Add(path, id);
+                command.Parameters.Clear();
+                command.CommandText = "INSERT INTO chat_session_groups(id,name,workspace_path,is_collapsed,created_at) VALUES($id,$name,$path,0,$now);";
+                command.Parameters.AddWithValue("$id", id);
+                command.Parameters.AddWithValue("$name", WorkspaceProjectName(path));
+                command.Parameters.AddWithValue("$path", path);
+                command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+            command.Parameters.Clear();
+            command.CommandText = "UPDATE chat_sessions SET session_group_id=$group WHERE id=$id;";
+            command.Parameters.AddWithValue("$id", session.Id);
+            command.Parameters.AddWithValue("$group", id);
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        command.Parameters.Clear();
+        command.CommandText = "INSERT INTO schema_migrations(version,applied_at) VALUES(36,$now);";
+        command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    internal static string? NormalizeWorkspaceProjectPath(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || path.Any(char.IsControl)) return null;
+        try
+        {
+            var value = path.Trim().Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+            return Path.IsPathFullyQualified(value) ? Path.TrimEndingDirectorySeparator(Path.GetFullPath(value)) : null;
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return null;
+        }
+    }
+
+    internal static string WorkspaceProjectName(string path)
+    {
+        var name = Path.GetFileName(path);
+        if (string.IsNullOrWhiteSpace(name)) name = path;
+        return name.Length <= 120 ? name : name[..120];
+    }
+
+    private static async Task ApplyMarkerMigrationAsync(SqliteConnection connection, int version, CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES($version, $now);";
+        command.Parameters.AddWithValue("$version", version);
+        command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task VerifyIntegrityAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = "PRAGMA integrity_check;";
+        var result = Convert.ToString(
+            await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
+            CultureInfo.InvariantCulture);
+        if (!string.Equals(result, "ok", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException($"SQLite integrity_check failed after migration: {result}");
+        }
+
+        command.CommandText = "PRAGMA foreign_key_check;";
+        await using var violations = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        if (await violations.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            throw new InvalidDataException("SQLite foreign_key_check failed after migration.");
+        }
+    }
+
+    private const string MigrationOneSql = """
+        CREATE TABLE IF NOT EXISTS schema_migrations(
+            version INTEGER PRIMARY KEY,
+            applied_at TEXT NOT NULL
+        ) STRICT;
+
+        CREATE TABLE IF NOT EXISTS binary_objects(
+            id TEXT PRIMARY KEY,
+            sha256 TEXT NOT NULL UNIQUE CHECK(length(sha256)=64),
+            length INTEGER NOT NULL CHECK(length>=0),
+            content_type TEXT NOT NULL,
+            chunk_count INTEGER NOT NULL CHECK(chunk_count>=0),
+            created_at TEXT NOT NULL
+        ) STRICT;
+        CREATE TABLE IF NOT EXISTS binary_chunks(
+            object_id TEXT NOT NULL REFERENCES binary_objects(id) ON DELETE CASCADE,
+            chunk_index INTEGER NOT NULL CHECK(chunk_index>=0),
+            data BLOB NOT NULL,
+            PRIMARY KEY(object_id, chunk_index)
+        ) STRICT;
+
+        CREATE TABLE IF NOT EXISTS workflows(
+            id TEXT PRIMARY KEY,
+            slug TEXT NOT NULL UNIQUE,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL,
+            domain TEXT NOT NULL,
+            context_summary TEXT NOT NULL,
+            content_json TEXT NOT NULL CHECK(json_valid(content_json)),
+            is_built_in INTEGER NOT NULL CHECK(is_built_in IN (0,1)),
+            revision INTEGER NOT NULL CHECK(revision>=1),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        ) STRICT;
+        CREATE TABLE IF NOT EXISTS workflow_tags(
+            workflow_id TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+            tag TEXT NOT NULL,
+            PRIMARY KEY(workflow_id, tag)
+        ) STRICT;
+        CREATE INDEX IF NOT EXISTS ix_workflows_title ON workflows(title COLLATE NOCASE);
+        CREATE VIRTUAL TABLE IF NOT EXISTS workflow_search USING fts5(title,description,domain,context_summary,content='workflows',content_rowid='rowid');
+        CREATE TRIGGER IF NOT EXISTS workflows_search_insert AFTER INSERT ON workflows BEGIN
+            INSERT INTO workflow_search(rowid,title,description,domain,context_summary)
+            VALUES(new.rowid,new.title,new.description,new.domain,new.context_summary);
+        END;
+        CREATE TRIGGER IF NOT EXISTS workflows_search_delete AFTER DELETE ON workflows BEGIN
+            INSERT INTO workflow_search(workflow_search,rowid,title,description,domain,context_summary)
+            VALUES('delete',old.rowid,old.title,old.description,old.domain,old.context_summary);
+        END;
+        CREATE TRIGGER IF NOT EXISTS workflows_search_update AFTER UPDATE ON workflows BEGIN
+            INSERT INTO workflow_search(workflow_search,rowid,title,description,domain,context_summary)
+            VALUES('delete',old.rowid,old.title,old.description,old.domain,old.context_summary);
+            INSERT INTO workflow_search(rowid,title,description,domain,context_summary)
+            VALUES(new.rowid,new.title,new.description,new.domain,new.context_summary);
+        END;
+
+        CREATE TABLE IF NOT EXISTS chat_sessions(
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            selected_workflow_id TEXT NULL REFERENCES workflows(id) ON DELETE SET NULL,
+            draft TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        ) STRICT;
+        CREATE INDEX IF NOT EXISTS ix_chat_sessions_updated ON chat_sessions(updated_at DESC);
+        CREATE VIRTUAL TABLE IF NOT EXISTS session_search USING fts5(title,draft,content='chat_sessions',content_rowid='rowid');
+        CREATE TRIGGER IF NOT EXISTS sessions_search_insert AFTER INSERT ON chat_sessions BEGIN
+            INSERT INTO session_search(rowid,title,draft) VALUES(new.rowid,new.title,new.draft);
+        END;
+        CREATE TRIGGER IF NOT EXISTS sessions_search_delete AFTER DELETE ON chat_sessions BEGIN
+            INSERT INTO session_search(session_search,rowid,title,draft) VALUES('delete',old.rowid,old.title,old.draft);
+        END;
+        CREATE TRIGGER IF NOT EXISTS sessions_search_update AFTER UPDATE ON chat_sessions BEGIN
+            INSERT INTO session_search(session_search,rowid,title,draft) VALUES('delete',old.rowid,old.title,old.draft);
+            INSERT INTO session_search(rowid,title,draft) VALUES(new.rowid,new.title,new.draft);
+        END;
+        CREATE TABLE IF NOT EXISTS chat_messages(
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+            role TEXT NOT NULL CHECK(role IN ('system','user','assistant')),
+            content TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('pending','streaming','completed','cancelled','failed','interrupted')),
+            error TEXT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        ) STRICT;
+        CREATE INDEX IF NOT EXISTS ix_chat_messages_session ON chat_messages(session_id, created_at);
+        CREATE TABLE IF NOT EXISTS chat_runs(
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+            assistant_message_id TEXT NOT NULL UNIQUE REFERENCES chat_messages(id) ON DELETE CASCADE,
+            model TEXT NOT NULL,
+            api_endpoint TEXT NOT NULL,
+            reasoning_effort TEXT NULL,
+            status TEXT NOT NULL CHECK(status IN ('streaming','completed','cancelled','failed','interrupted')),
+            estimated_context_tokens INTEGER NOT NULL DEFAULT 0,
+            context_was_truncated INTEGER NOT NULL DEFAULT 0 CHECK(context_was_truncated IN (0,1)),
+            started_at TEXT NOT NULL,
+            completed_at TEXT NULL,
+            error TEXT NULL
+        ) STRICT;
+        CREATE INDEX IF NOT EXISTS ix_chat_runs_session ON chat_runs(session_id, started_at DESC);
+
+        CREATE TABLE IF NOT EXISTS documents(
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+            blob_id TEXT NOT NULL REFERENCES binary_objects(id) ON DELETE RESTRICT,
+            file_name TEXT NOT NULL,
+            content_type TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            length INTEGER NOT NULL,
+            page_count INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        ) STRICT;
+        CREATE INDEX IF NOT EXISTS ix_documents_session ON documents(session_id, created_at);
+        CREATE TABLE IF NOT EXISTS document_pages(
+            document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+            page_number INTEGER NOT NULL CHECK(page_number>=1),
+            text TEXT NOT NULL,
+            PRIMARY KEY(document_id, page_number)
+        ) STRICT;
+
+        CREATE TABLE IF NOT EXISTS projects(
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            construction_project TEXT NOT NULL,
+            description TEXT NOT NULL,
+            notes TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('active','archived')),
+            revision INTEGER NOT NULL CHECK(revision>=1),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        ) STRICT;
+        CREATE INDEX IF NOT EXISTS ix_projects_status_updated ON projects(status, updated_at DESC);
+        CREATE TABLE IF NOT EXISTS checklist_items(
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            text TEXT NOT NULL,
+            is_completed INTEGER NOT NULL CHECK(is_completed IN (0,1)),
+            sort_order INTEGER NOT NULL,
+            revision INTEGER NOT NULL CHECK(revision>=1),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        ) STRICT;
+        CREATE INDEX IF NOT EXISTS ix_checklist_project_order ON checklist_items(project_id, sort_order);
+        CREATE TABLE IF NOT EXISTS project_assets(
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            blob_id TEXT NOT NULL REFERENCES binary_objects(id) ON DELETE RESTRICT,
+            file_name TEXT NOT NULL,
+            content_type TEXT NOT NULL,
+            category TEXT NOT NULL CHECK(category IN ('pdf','drawing','image','meeting','other')),
+            source_path TEXT NULL,
+            sha256 TEXT NOT NULL,
+            length INTEGER NOT NULL,
+            sort_order INTEGER NOT NULL,
+            revision INTEGER NOT NULL CHECK(revision>=1),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        ) STRICT;
+        CREATE INDEX IF NOT EXISTS ix_assets_project_order ON project_assets(project_id, sort_order);
+        CREATE TABLE IF NOT EXISTS project_asset_thumbnails(
+            asset_id TEXT PRIMARY KEY REFERENCES project_assets(id) ON DELETE CASCADE,
+            blob_id TEXT NOT NULL REFERENCES binary_objects(id) ON DELETE RESTRICT,
+            content_type TEXT NOT NULL,
+            width INTEGER NOT NULL CHECK(width>0),
+            height INTEGER NOT NULL CHECK(height>0),
+            created_at TEXT NOT NULL
+        ) STRICT;
+        """;
+
+    private const string MigrationThreeSql = """
+        CREATE TABLE prompt_triggers(
+            id TEXT PRIMARY KEY,
+            action TEXT NOT NULL,
+            phrase TEXT NOT NULL,
+            description TEXT NOT NULL,
+            match_mode TEXT NOT NULL CHECK(match_mode IN ('prefix','contains','exact')),
+            is_enabled INTEGER NOT NULL CHECK(is_enabled IN (0,1)),
+            priority INTEGER NOT NULL CHECK(priority BETWEEN -10000 AND 10000),
+            revision INTEGER NOT NULL CHECK(revision>=1),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(action, phrase COLLATE NOCASE)
+        ) STRICT;
+        CREATE INDEX ix_prompt_triggers_match
+            ON prompt_triggers(is_enabled, priority DESC, phrase COLLATE NOCASE);
+
+        CREATE TABLE assistant_attachments(
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+            blob_id TEXT NOT NULL REFERENCES binary_objects(id) ON DELETE RESTRICT,
+            file_name TEXT NOT NULL,
+            content_type TEXT NOT NULL,
+            sha256 TEXT NOT NULL CHECK(length(sha256)=64),
+            length INTEGER NOT NULL CHECK(length>=0),
+            created_at TEXT NOT NULL
+        ) STRICT;
+        CREATE INDEX ix_assistant_attachments_session
+            ON assistant_attachments(session_id, created_at);
+
+        CREATE TABLE chat_artifacts(
+            id TEXT PRIMARY KEY,
+            message_id TEXT NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
+            blob_id TEXT NOT NULL REFERENCES binary_objects(id) ON DELETE RESTRICT,
+            server_artifact_id TEXT NOT NULL,
+            file_name TEXT NOT NULL,
+            content_type TEXT NOT NULL,
+            sha256 TEXT NOT NULL CHECK(length(sha256)=64),
+            length INTEGER NOT NULL CHECK(length>=0),
+            provider TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(metadata_json)),
+            step_id TEXT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(message_id, server_artifact_id)
+        ) STRICT;
+        CREATE INDEX ix_chat_artifacts_message ON chat_artifacts(message_id, created_at);
+
+        CREATE TABLE missum_ai_runs(
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+            assistant_message_id TEXT NOT NULL UNIQUE REFERENCES chat_messages(id) ON DELETE CASCADE,
+            action TEXT NULL,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            server_run_id TEXT NULL UNIQUE,
+            last_event_id INTEGER NOT NULL DEFAULT 0 CHECK(last_event_id>=0),
+            state TEXT NOT NULL,
+            selected_model TEXT NULL,
+            error_code TEXT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        ) STRICT;
+        CREATE INDEX ix_missum_ai_runs_resumable ON missum_ai_runs(state, updated_at);
+        """;
+}
+
+internal sealed record PromptTriggerSeed(
+    Guid Id,
+    string Action,
+    string Phrase,
+    string Description,
+    int Priority);
+
+internal static class PromptTriggerSeeds
+{
+    internal static readonly PromptTriggerSeed[] All =
+    [
+        new(Guid.Parse("a1000000-0000-4000-8000-000000000001"), "imageGeneration", "Erstelle ein Bild", "Erzeugt ein Bild mit dem lokalen Bilddienst.", 200),
+        new(Guid.Parse("a1000000-0000-4000-8000-000000000002"), "imageGeneration", "Generiere ein Bild", "Erzeugt ein Bild mit dem lokalen Bilddienst.", 190),
+        new(Guid.Parse("a1000000-0000-4000-8000-000000000003"), "translation", "Übersetze", "Übersetzt den folgenden Inhalt mit dem allgemeinen Modell.", 180),
+        new(Guid.Parse("a1000000-0000-4000-8000-000000000004"), "textToSpeech", "Vorlesen", "Erzeugt eine Sprachausgabe des folgenden Textes.", 180),
+        new(Guid.Parse("a1000000-0000-4000-8000-000000000005"), "textToSpeech", "Lies vor", "Erzeugt eine Sprachausgabe des folgenden Textes.", 170),
+        new(Guid.Parse("a1000000-0000-4000-8000-000000000018"), "textToSpeech", "Lies die letzte Nachricht vor", "Liest die letzte geeignete abgeschlossene AI-Antwort vor.", 190),
+        new(Guid.Parse("a1000000-0000-4000-8000-000000000006"), "transcription", "Transkribiere", "Wandelt die angehängte Audiodatei in Text um.", 180),
+        new(Guid.Parse("a1000000-0000-4000-8000-000000000007"), "audioAnalysis", "Audio analysieren", "Analysiert eine angehängte Audioaufnahme.", 180),
+        new(Guid.Parse("a1000000-0000-4000-8000-000000000008"), "imageAnalysis", "Bild analysieren", "Analysiert ein angehängtes Bild mit dem Vision-Modell.", 180),
+        new(Guid.Parse("a1000000-0000-4000-8000-000000000009"), "webSearch", "Führe Websuche durch", "Durchsucht das Web über den lokalen Recherchedienst.", 180),
+        new(Guid.Parse("a1000000-0000-4000-8000-000000000010"), "webSearch", "Suche im Web", "Durchsucht das Web über den lokalen Recherchedienst.", 170),
+        new(Guid.Parse("a1000000-0000-4000-8000-000000000014"), "liveCaptions", "Untertitel", "Startet Live-Untertitel für das Windows-Systemaudio.", 180),
+        new(Guid.Parse("a1000000-0000-4000-8000-000000000015"), "liveTranslation", "Live übersetzen", "Startet die Echtzeitübersetzung des Windows-Systemaudios.", 180),
+        new(Guid.Parse("a1000000-0000-4000-8000-000000000019"), "audiobook", "Hörbuch erstellen", "Erstellt oder lenkt ein fortlaufendes, direkt vorlesbares Hörbuchkapitel.", 190),
+        new(Guid.Parse("a1000000-0000-4000-8000-000000000020"), "audiobook", "Hörbuch fortsetzen", "Setzt das Hörbuch dieser Sitzung mit der vorhandenen Story-Chronik fort.", 200),
+    ];
+}
