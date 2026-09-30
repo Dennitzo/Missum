@@ -1,5 +1,19 @@
 # Claude Science-Modus und Forschungs-Sandbox
 
+## Native Ansicht: Publikation und Simulation (30.09.2026)
+
+Claude Science verwendet drei sitzungsgebundene Tabs: **Chat**, **Forschung** und **Simulation**. Der Chat enthält die laufende Antwort, normale Fortschrittsabsätze sowie die vorhandenen nachvollziehbaren Werkzeugschritte. Wiederholte Fortschrittsereignisse aktualisieren einen gespeicherten Absatz; SSE-Wiederholungen legen keine Duplikate an.
+
+**Forschung** zeigt ein echtes PDF über den nativen Windows-PDF-Renderer. Die wissenschaftliche Publikation wird auch bei geschlossenem Tab aus den gespeicherten Forschungsständen erzeugt. Sie enthält Fragestellung, Methode, Ergebnisse, Grenzen und Quellen; mathematische Ausdrücke werden lokal mit KaTeX gesetzt. Der Antworttext wird ausschließlich über den zum Forschungsstand gehörenden Run und dessen Nachrichten-ID übernommen. Während der Arbeit entstehen versionierte Arbeitsfassungen. Eine fehlgeschlagene oder überholte Aktualisierung ersetzt kein bereits lesbares PDF.
+
+Der PDF-Satz orientiert sich an einem wissenschaftlichen Lehrbuch: A4 mit zwei Spalten, Serifenschrift, blauen Kapitelmarkierungen und Abbildungsbeschriftungen sowie hellen, nummerierten Formelkästen. Lange Gleichungen dürfen beide Spalten nutzen; vorhandene Formelnummern bleiben erhalten. Referenzierte PNG-/JPEG-Abbildungen aus dem zugehörigen Forschungslauf werden geprüft und unveränderlich mit der Publikationsversion gespeichert. Der allgemeine Dokumentexport behält seine bisherige Formatierung.
+
+**Simulation** zeigt PNG/JPEG-Abbildungen aus der Python-Forschungssandbox mit Herkunft, lesbarem Quellcode und Datenvorschau. Das Modell wählt eine zur Frage passende Rechnung oder Simulation und führt sie über `research.code.write` / `research.code.execute` aus. Die Ausführung erfolgt ausschließlich im vorhandenen Docker-Runner. Numerische Berichtstabellen lassen sich automatisch darstellen; ohne quantitative Daten erscheint eine als solche gekennzeichnete Evidenzübersicht. Diese ist keine vorgetäuschte fachliche Simulation. Python-Dateien werden beim Ansehen nicht auf dem Host ausgeführt.
+
+`ScientificPresentationCoordinator` bündelt Aktualisierungen unabhängig von der gewählten Ansicht. `ScientificPublicationService` erzeugt unveränderliche PDF-/Markdown-Versionen, `ScientificSimulationService` prüft Bilddateien und erzeugt reproduzierbare Python-Abbildungen. Der reguläre Portable-Smoke prüft die Tab-Trennung; mit `MISSUM_SCIENCE_PDF_SMOKE_PATH` prüft er zusätzlich eine echte PDF-Datei nativ. Die Tests `ScientificPublicationTests`, `ScientificSimulationTests`, `ScienceProgressStreamTests` und `SciencePresentationBudgetTests` decken Aktualisierungen und Fehlergrenzen ab. Der opt-in Test `SciencePublicationScenarioLiveTests` führt mit `MISSUM_SCIENCE_PRESENTATION_LIVE=1` den vollständigen lokalen Modell-/Recherche-/Python-/PDF-Ablauf in einem isolierten Testprofil aus.
+
+Die folgenden Abschnitte dokumentieren den ursprünglichen Architekturplan; das frühere Dashboard mit Unterreitern wurde durch die oben beschriebene Ansicht ersetzt.
+
 ## Ziel
 
 Die Sidebar erhält drei getrennte Arbeitsansichten: **ChatGPT** (bisher `General`), **Codex** (bisher `Coding`) und **Claude Science**. Die ersten beiden Namen sind reine Produktbeschriftungen; bestehende Sitzungswerte und Protokolle `general` und `coding` bleiben dadurch stabil. Claude Science wird als eigener Sitzungstyp mit eigener Forschungsoberfläche gebaut. Das existierende Deep-Research-Werkzeug bleibt die Recherche- und Schlussfolgerungs-Engine, erscheint im Claude-Science-Modus aber nicht mehr als auswählbarer Chat-Chip.

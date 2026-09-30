@@ -203,7 +203,9 @@ public sealed partial class RunProcessor : BackgroundService
         IReadOnlyList<AgentToolSpec> effectiveTools)
     {
         if (request.Mode == RunMode.Coding) return CodingRunBudget.FromOptions(options).ToolCalls;
-        return options.MaximumToolCalls;
+        return HasScientificPresentationWork(request, effectiveTools)
+            ? Math.Max(options.MaximumToolCalls, CodingDeepResearchPipeline.MaximumToolCalls + ScientificPresentationToolReserve)
+            : options.MaximumToolCalls;
     }
 
     internal static int ResolveMaximumModelRounds(RunRequest request, MissumAiServerOptions options,
@@ -212,7 +214,9 @@ public sealed partial class RunProcessor : BackgroundService
         if (request.Mode == RunMode.Coding) return CodingRunBudget.FromOptions(options).ModelRounds;
         var generalRounds = request.ClientCapabilities?.Contains("workspace", StringComparer.OrdinalIgnoreCase) == true
             ? options.WorkspaceMaximumModelRounds : options.MaximumModelRounds;
-        return generalRounds;
+        return HasScientificPresentationWork(request, effectiveTools)
+            ? Math.Max(generalRounds, CodingDeepResearchPipeline.MaximumModelCalls + ScientificPresentationModelReserve)
+            : generalRounds;
     }
 
     private async Task ProcessConversationAsync(

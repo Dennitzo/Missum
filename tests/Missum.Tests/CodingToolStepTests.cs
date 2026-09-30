@@ -215,7 +215,10 @@ public sealed class CodingToolStepTests
         Assert.True(MissumAiAssistantService.IsClientToolAllowed(PromptTriggerAction.PlanMode, ToolRiskClass.ReadOnly));
         Assert.False(MissumAiAssistantService.IsClientToolAllowed(PromptTriggerAction.PlanMode, ToolRiskClass.LocalMutation));
         Assert.False(MissumAiAssistantService.IsClientToolAllowed(PromptTriggerAction.PlanMode, ToolRiskClass.Process));
-        var prompt = MissumAiAssistantService.BuildPlanModePrompt("Prüfe das Projekt");
+        var prompt = MissumAiAssistantService.BuildPlanModePrompt("Prüfe das Projekt", @"C:\Projekte\Mein Projekt");
+        Assert.Contains(System.Text.Json.JsonSerializer.Serialize(@"C:\Projekte\Mein Projekt"), prompt, StringComparison.Ordinal);
+        Assert.Contains("coding.list {\"path\":\".\"}", prompt, StringComparison.Ordinal);
+        Assert.Contains("path optional", prompt, StringComparison.Ordinal);
         Assert.Contains("keine Datei", prompt, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("assistant-plan", prompt, StringComparison.Ordinal);
         Assert.Contains("Plan implementieren", prompt, StringComparison.Ordinal);

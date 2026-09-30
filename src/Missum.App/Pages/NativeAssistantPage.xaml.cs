@@ -52,9 +52,19 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     private Task _navigationTail = Task.CompletedTask;
     private readonly MicrophoneTranscriptionService _microphone;
 
+    private NativeConversationSelection? _conversationSelection;
+
     public NativeAssistantPage()
     {
         InitializeComponent();
+        _conversationSelection = new NativeConversationSelection(ConversationContent, MessagesPanel, ConversationScroll) { ReadFromMenuFactory = CreateReadFromMenu };
+        ResetChangesSummary();
+        ComposerChipsScroll.SizeChanged += (_, _) =>
+        {
+            var width = Math.Clamp(ComposerChipsScroll.ActualWidth, 28, 220);
+            SelectedToolChip.MaxWidth = CaptionChip.MaxWidth = width;
+        };
+        ConfigureSidebarHoverActions(ProjectsHeader, AddProjectButton);
         Composer.AddHandler(UIElement.PreviewKeyDownEvent, new Microsoft.UI.Xaml.Input.KeyEventHandler(OnComposerKeyDown), true);
         NavigationCacheMode = NavigationCacheMode.Required;
         _coordinator = App.Current.GetService<AssistantCoordinator>();
@@ -220,7 +230,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                 _running = _changeReceiptState.IsPromptPending(_session)
                     || (S(data, "isRunning") == "True" && !_finishedSessions.Contains(_session));
                 ModeLabel.Text = _mode switch { "coding" => "Codex", "claudescience" => "Claude Science", _ => "ChatGPT" };
-                StatusText.Text = _running && !S(data, "runStatus").StartsWith("Modell generiert", StringComparison.Ordinal) ? S(data, "runStatus") + "  " + S(data, "runDetail") : "";
+                ChatStatus = _running && !S(data, "runStatus").StartsWith("Modell generiert", StringComparison.Ordinal) ? S(data, "runStatus") + "  " + S(data, "runDetail") : "";
                 _persistentAction = S(data, "selectedExtensionActionId");
                 if (_persistentAction == BuiltInActionIds.DeepResearch) _persistentAction = null;
                 if (!string.IsNullOrEmpty(_persistentAction) && string.IsNullOrEmpty(_selectedAction))
@@ -273,7 +283,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                 if (!_changeReceiptState.ObserveStarted(_session, startedId, ReadConversationRevision(data))) return;
                 ResetChangesSummary();
                 if (_changesCard is not null) MessagesPanel.Children.Remove(_changesCard);
-                _changesCard = null; OutputsPanel.Children.Clear();
+                _changesCard = null; OutputsPanel.Children.Clear(); OutputsPanel.Visibility = Visibility.Collapsed;
             }
             if (data.TryGetProperty("message", out var message)) { _messages[S(message, "id")] = message; RenderMessages(); }
         }
@@ -292,7 +302,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         if (type is "chat.started" or "chat.queued") { _finishedSessions.Remove(_session); _running = true; SetRunning(); }
         if (type is "chat.completed" or "chat.cancelled" or "chat.failed")
         {
-            _finishedSessions.Add(_session); _running = false; SetRunning(); StatusText.Text = S(data, "runStatus");
+            _finishedSessions.Add(_session); _running = false; SetRunning(); ChatStatus = "";
             _ = RefreshForExternalActivationAsync();
             if (type == "chat.failed") ShowError(S(data, "error", "Die Anfrage ist fehlgeschlagen."));
         }
@@ -301,7 +311,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             var status = S(data, "runStatus");
             var terminal = status is "Fertig" or "Abgebrochen" or "Fehlgeschlagen";
             if (terminal) { _finishedSessions.Add(_session); _running = false; SetRunning(); }
-            StatusText.Text = status.StartsWith("Modell generiert", StringComparison.Ordinal) ? "" : terminal ? status : status + "  " + S(data, "runDetail");
+            ChatStatus = status.StartsWith("Modell generiert", StringComparison.Ordinal) ? "" : terminal ? "" : status + "  " + S(data, "runDetail");
             var id = S(data, "messageId");
             if (data.TryGetProperty("toolStep", out var step) && step.ValueKind == JsonValueKind.Object && _messages.TryGetValue(id, out var current))
             {
@@ -327,8 +337,9 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         {
             if (S(pending, "sessionId") != _session.ToString()) continue;
             if ((S(pending, "steeringInputId") is { Length: > 0 } inputId && _messages.Values.Any(message => Items(message, "toolSteps").Any(step => S(step, "id") == "steering-" + inputId)))
-                || _messages.Values.Any(message => S(message, "id") != id && S(message, "role") == "user"
-                && S(message, "content") == S(pending, "content")
+                || _messages.Values.Any(message => !S(message, "id").StartsWith("pending:", StringComparison.Ordinal) && S(message, "role") == "user"
+                && S(message, "sessionId") == S(pending, "sessionId")
+                && Missum.Core.Chat.ChatContentSanitizer.Sanitize(S(message, "content")) == Missum.Core.Chat.ChatContentSanitizer.Sanitize(S(pending, "content"))
                 && MessageCreatedAt(message) >= MessageCreatedAt(pending)))
             { _pendingUserMessages.Remove(id); _messages.Remove(id); }
             else _messages[id] = pending;
@@ -338,7 +349,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     private string AddPendingUserMessage(Guid session, string prompt, string? steeringInputId = null)
     {
         var id = "pending:" + Guid.NewGuid().ToString("N");
-        var pending = JsonSerializer.SerializeToElement(new { id, sessionId = session, role = "user", content = prompt,
+        var pending = JsonSerializer.SerializeToElement(new { id, sessionId = session, role = "user", content = Missum.Core.Chat.ChatContentSanitizer.Sanitize(prompt.Trim()),
             status = "pending", steeringInputId, createdAt = DateTimeOffset.UtcNow.ToString("O") }, JsonOptions);
         _pendingUserMessages[id] = pending;
         _messages[id] = pending;
@@ -352,6 +363,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     private void RenderMessages() => _messagesDirty = true;
     private void ResetConversationViews()
     {
+        _conversationSelection?.Clear();
         // WinUI elements have exactly one parent. Footer controls and context
         // menus belong to the same visual lifetime as their message bubbles.
         MessagesPanel.Children.Clear();
@@ -363,7 +375,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     private void RenderMessagesNow()
     {
         ReconcilePendingMessages();
-        var follow = ConversationScroll.ScrollableHeight - ConversationScroll.VerticalOffset < 90;
+        var follow = _conversationSelection?.HasSelection != true && ConversationScroll.ScrollableHeight - ConversationScroll.VerticalOffset < 90;
         var index = 0;
         foreach (var stale in _messageViews.Keys.Where(id => !_messages.ContainsKey(id)).ToArray())
         { MessagesPanel.Children.Remove(_messageViews[stale].View); _messageViews.Remove(stale); _messageBlocks.Remove(stale); _messageActionViews.Remove(stale); }
@@ -420,6 +432,10 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             var id = S(item, "id");
             var document = item.TryGetProperty("pageCount", out _);
             var button = SidebarButton("\uE8A5", S(item, "fileName"));
+            button.Padding = new Thickness(0, 6, 0, 6);
+            button.BorderThickness = new Thickness(0);
+            button.Height = double.NaN;
+            button.MinHeight = 32;
             ((TextBlock)((Grid)button.Content).Children[1]).FontSize = 13;
             ToolTipService.SetToolTip(button, "Anhang entfernen");
             var menu = new MenuFlyout();
@@ -429,12 +445,13 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             SourcesPanel.Children.Add(button);
         }
         SourcesEmpty.Visibility = SourcesPanel.Children.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        SourcesPanel.Visibility = SourcesPanel.Children.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
     }
 
     private void RenderChanges(JsonElement summary)
     {
         if (!UpdateChangesSummary(summary)) return;
-        OutputsPanel.Children.Clear();
+        OutputsPanel.Children.Clear(); OutputsPanel.Visibility = Visibility.Collapsed;
         if (_changesCard is not null) MessagesPanel.Children.Remove(_changesCard);
         _changesCard = null;
         var files = Items(summary, "files");
@@ -458,11 +475,12 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                 Content = new NativeDiffView(S(file, "diff")),
                 Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new(0) };
             rows.Children.Add(expander);
-            var output = new TextBlock { FontSize = 13, TextWrapping = TextWrapping.Wrap };
+            var output = new TextBlock { FontSize = 13, MinHeight = 32, Padding = new Thickness(0, 6, 0, 6), TextWrapping = TextWrapping.Wrap };
             output.Inlines.Add(new Run { Text = path + "  " });
             output.Inlines.Add(new Run { Text = "+" + added, Foreground = new SolidColorBrush(Color.FromArgb(255, 48, 205, 127)) });
             output.Inlines.Add(new Run { Text = "  -" + removed, Foreground = new SolidColorBrush(Color.FromArgb(255, 255, 80, 70)) });
             OutputsPanel.Children.Add(output);
+            OutputsPanel.Visibility = Visibility.Visible;
         }
         _changesCard = new Border { Background = Brush(33), BorderBrush = Brush(48), BorderThickness = new(1), CornerRadius = new(12), Child = rows };
         MessagesPanel.Children.Add(_changesCard);
@@ -581,7 +599,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         var hasText = !string.IsNullOrWhiteSpace(Composer.Text);
         var captionRunning = _captionActive && _captionSessionId == _session;
         var stop = !hasText && (_running || _speaking || captionRunning);
-        ActivityRing.IsActive = _running;
+
         ModelButton.IsEnabled = !_running;
         SendIcon.Glyph = stop ? "\uE71A" : "\uE74A";
         var label = stop ? "Aktivität stoppen" : _running ? "Antwort umlenken" : "Nachricht senden";
@@ -652,9 +670,9 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         var promptEpoch = _changeReceiptState.BeginPrompt(session);
         ResetChangesSummary();
         if (_changesCard is not null) MessagesPanel.Children.Remove(_changesCard);
-        _changesCard = null; OutputsPanel.Children.Clear();
+        _changesCard = null; OutputsPanel.Children.Clear(); OutputsPanel.Visibility = Visibility.Collapsed;
         _draftTimer.Stop(); _rendering = true; Composer.Text = ""; _rendering = false;
-        _finishedSessions.Remove(session); _running = true; SetRunning(); ErrorBar.IsOpen = false; StatusText.Text = "Anfrage wird vorbereitet …";
+        _finishedSessions.Remove(session); _running = true; SetRunning(); _chatErrors.Remove(session); RefreshChatNotices(); ChatStatus = "Anfrage wird vorbereitet …";
         var deepResearch = mode == "claudescience" && string.IsNullOrEmpty(selectedAction);
         if (!await CommandAsync("chat.send", new { sessionId = session, prompt, extensionActionId = deepResearch ? null : selectedAction, deepResearch, deepResearchProfile = deepResearch ? "auto" : null }))
         {
@@ -711,8 +729,18 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     private void ClearToolSelection() { _selectedAction = null; _composerInstruction = null; _persistentAction = null; SelectedToolChip.Visibility = Visibility.Collapsed; }
     private async void OnClearTool(object sender, RoutedEventArgs e)
     {
-        if (!string.IsNullOrEmpty(_persistentAction) && !await CommandAsync("action.invoke", new { actionId = _persistentAction, sessionId = _session, enabled = false })) return;
-        ClearToolSelection(); await RefreshForExternalActivationAsync();
+        if (_composerToolSelectionBusy) return;
+        var session = _session;
+        _composerToolSelectionBusy = true;
+        SelectedToolChip.IsEnabled = false;
+        try
+        {
+            if (!string.IsNullOrEmpty(_persistentAction) && !await CommandAsync("action.invoke", new { actionId = _persistentAction, sessionId = session, enabled = false })) return;
+            if (_session != session || _disposed) return;
+            ClearToolSelection(); await RefreshForExternalActivationAsync();
+        }
+        catch (Exception exception) { ShowError(exception.Message); }
+        finally { _composerToolSelectionBusy = false; SelectedToolChip.IsEnabled = true; }
     }
     private void OnToolsClick(object sender, RoutedEventArgs e)
     {
@@ -920,8 +948,8 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         if (!_navigationState.CanEditComposer || _disposed) return;
         try
         {
-            if (_microphone.Current.IsRecording) { await StopNativeDictationAsync(); _dictationSession = null; StatusText.Text = ""; }
-            else { _dictationSession = _session; _dictationPrefix = Composer.Text; await StartNativeDictationAsync(); StatusText.Text = "Diktieren …"; }
+            if (_microphone.Current.IsRecording) { await StopNativeDictationAsync(); _dictationSession = null; ChatStatus = ""; }
+            else { _dictationSession = _session; _dictationPrefix = Composer.Text; await StartNativeDictationAsync(); ChatStatus = "Diktieren …"; }
         }
         catch (Exception ex) { ShowError(ex.Message); }
     }
@@ -937,11 +965,12 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     private void ShowError(string message)
     {
         if (_disposed) return;
+        var owner = _session;
         DispatcherQueue.TryEnqueue(() =>
         {
             if (_disposed) return;
-            if (_activeResearchSessionId == _session) ShowResearchError(_session, message);
-            else { ErrorBar.Message = message; ErrorBar.IsOpen = true; }
+            if (_activeResearchSessionId == owner) ShowResearchError(owner, message);
+            else { _chatErrors[owner] = message; RefreshChatNotices(); }
         });
     }
     public void FocusComposer() => Composer.Focus(FocusState.Programmatic);
@@ -964,6 +993,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         DisposeMessageActions();
         _researchRefreshTimer?.Stop();
         _ = CancelNativeMediaCaptureAsync();
+        _conversationSelection?.Clear();
         _disposed = true; _draftTimer.Stop(); _renderTimer.Stop(); _microphone.TurnChanged -= OnTranscript; _lifetime.Cancel(); _lifetime.Dispose();
     }
 }

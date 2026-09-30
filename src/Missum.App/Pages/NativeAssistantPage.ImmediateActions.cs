@@ -62,7 +62,7 @@ public sealed partial class NativeAssistantPage
         if (_disposed) return;
         ErrorBar.Message = message;
         ErrorBar.IsOpen = true;
-        if (!_running) StatusText.Text = message;
+        if (!_running) ChatStatus = message;
     }
 
     private async Task<Dictionary<string, JsonElement>> RunImmediateCommandAsync(string type, object payload)
@@ -118,11 +118,11 @@ public sealed partial class NativeAssistantPage
         var exporter = new NativeChatPdfExportService(App.Current.GetService<IConversationSnapshotRepository>(),
             App.Current.GetService<IChatRepository>(), App.Current.GetService<IChatArtifactRepository>(),
             App.Current.GetService<DocumentPdfExporter>());
-        if (!_running) StatusText.Text = "Chat-PDF wird erstellt …";
+        if (!_running) ChatStatus = "Chat-PDF wird erstellt …";
         try
         {
             var receipt = await exporter.ExportAsync(sessionId, file.Path, _lifetime.Token);
-            if (!_disposed && !_running) StatusText.Text = $"PDF gespeichert: {Path.GetFileName(receipt.SavedPath)}";
+            if (!_disposed && !_running) ChatStatus = $"PDF gespeichert: {Path.GetFileName(receipt.SavedPath)}";
         }
         finally
         {
@@ -139,7 +139,7 @@ public sealed partial class NativeAssistantPage
             $"**{title}**\n\n{text}", MessageStatus.Completed, cancellationToken: _lifetime.Token);
         if (!_disposed && _session == sessionId)
         {
-            StatusText.Text = $"{title} abgeschlossen";
+            ChatStatus = $"{title} abgeschlossen";
             await RefreshForExternalActivationAsync();
             DispatcherQueue.TryEnqueue(() => OnScrollToBottom(this, new RoutedEventArgs()));
         }
@@ -219,6 +219,7 @@ public sealed partial class NativeAssistantPage
 
     private void UpdateCaptionChip()
     {
+        CaptionChip.SetTool("Live-Untertitel", "\uE7F4");
         CaptionChip.Visibility = _captionActive && _captionSessionId == _session ? Visibility.Visible : Visibility.Collapsed;
     }
 

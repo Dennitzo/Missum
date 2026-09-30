@@ -160,6 +160,13 @@ try {
     $mathEvidence = Assert-MissumArtifactPath -Path ($PublishDirectory + '.math-preview.png')
     Copy-Item -LiteralPath $mathPreview -Destination $mathEvidence -Force
     Write-Host "Native math rendering and streaming verified: $mathEvidence"
+    foreach ($composerPreviewName in @('native-composer-preview', 'native-composer-hover-preview', 'native-composer-narrow-preview', 'native-selection-preview')) {
+        $composerPreview = Join-Path $smokeData ($composerPreviewName + '.png')
+        if (-not (Test-Path -LiteralPath $composerPreview -PathType Leaf)) { throw "Missing native composer preview: $composerPreviewName" }
+        $composerEvidence = Assert-MissumArtifactPath -Path ($PublishDirectory + '.' + $composerPreviewName + '.png')
+        Copy-Item -LiteralPath $composerPreview -Destination $composerEvidence -Force
+    }
+    Write-Host 'Native composer footer, removal affordance, narrow layout and session notices verified.'
     $liveMathPreview = Join-Path $smokeData 'native-math-live-preview.png'
     if (Test-Path -LiteralPath $liveMathPreview -PathType Leaf) {
         $liveMathEvidence = Assert-MissumArtifactPath -Path ($PublishDirectory + '.math-live-preview.png')

@@ -30,6 +30,7 @@ public sealed partial class MissumAiAssistantService
         {
             await new ScientificResearchProgressStore(scientificResearch, runs)
                 .EndAsync(run, status, CancellationToken.None).ConfigureAwait(false);
+            sciencePresentation?.Queue($"research-{run.SessionId:N}");
         }
         catch (Exception exception) when (exception is not OutOfMemoryException)
         {

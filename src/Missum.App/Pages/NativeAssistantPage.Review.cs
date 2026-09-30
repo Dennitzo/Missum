@@ -14,6 +14,20 @@ public sealed partial class NativeAssistantPage
     private readonly List<ChangesReviewTab> _reviewTabs = [];
     private Guid? _activeReviewRunId;
 
+    private void OpenEmptyChangesReview()
+    {
+        if (_disposed || _sessionTabNavigationBusy || _session == Guid.Empty) return;
+        var tab = _reviewTabs.FirstOrDefault(item => item.SessionId == _session && S(item.Summary, "emptyOverview") == "True");
+        if (tab is null)
+        {
+            var summary = JsonSerializer.SerializeToElement(new { emptyOverview = true, files = Array.Empty<object>() });
+            tab = CreateReviewTab(_session, Guid.NewGuid(), summary);
+            _reviewTabs.Add(tab);
+        }
+        ShowReviewTab(tab);
+        RenderSessionTabs();
+    }
+
     /// <summary>Opens one native review tab per run, without modifying files or chat history.</summary>
     private void OpenChangesReview(JsonElement summary)
     {
@@ -184,7 +198,7 @@ public sealed partial class NativeAssistantPage
             tab.Select.Foreground = Brush(active ? (byte)245 : (byte)170);
             tab.Close.Foreground = Brush(155);
             tab.Select.IsEnabled = tab.Close.IsEnabled = !_sessionTabNavigationBusy;
-            ToolTipService.SetToolTip(tab.Select, tab.Title + "\nLauf " + tab.RunId.ToString("N")[..8]);
+            ToolTipService.SetToolTip(tab.Select, tab.Title + (S(tab.Summary, "emptyOverview") == "True" ? "" : "\nLauf " + tab.RunId.ToString("N")[..8]));
             AutomationProperties.SetName(tab.Select, "Änderungs-Tab: " + tab.Title);
             AutomationProperties.SetName(tab.Close, "Änderungs-Tab schließen: " + tab.Title);
             AutomationProperties.SetHelpText(tab.Select, active ? "Aktive Änderungsübersicht" : "Dateiänderungen dieses Laufs öffnen");
@@ -206,7 +220,7 @@ public sealed partial class NativeAssistantPage
         var workspace = S(tab.Summary, "workspacePath");
         ReviewChangesPanel.Children.Add(new TextBlock
         {
-            Text = (workspace.Length > 0 ? workspace + "\n" : "") + "Lauf " + tab.RunId.ToString("N")[..8],
+            Text = S(tab.Summary, "emptyOverview") == "True" ? "Noch keine Änderungen in dieser Sitzung." : (workspace.Length > 0 ? workspace + "\n" : "") + "Lauf " + tab.RunId.ToString("N")[..8],
             FontSize = 13, Foreground = Brush(150), TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true,
         });
         var partial = S(tab.Summary, "isPartial") == "True";
@@ -221,7 +235,7 @@ public sealed partial class NativeAssistantPage
 
         var files = Items(tab.Summary, "files");
         if (files.Length == 0)
-            ReviewChangesPanel.Children.Add(new TextBlock { Text = partial ? "Noch keine Datei-Diffs verfügbar." : "Dieser Lauf enthält keine erfassten Dateiänderungen.",
+            ReviewChangesPanel.Children.Add(new TextBlock { Text = partial ? "Noch keine Datei-Diffs verfügbar." : "Keine erfassten Dateiänderungen vorhanden.",
                 Foreground = Brush(170), TextWrapping = TextWrapping.Wrap });
         foreach (var file in files)
         {

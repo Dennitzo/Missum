@@ -19,7 +19,7 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
     private readonly SolidColorBrush _cursorBrush = new();
     private readonly DispatcherTimer _cursorTimer = new() { Interval = TimeSpan.FromMilliseconds(400) };
     private InlineCollection? _cursorInlines;
-    private readonly TextBlock _emptyCursorHost = new() { FontSize = 16, LineHeight = 26 };
+    private readonly TextBlock _cursorHost = new() { FontSize = 16, LineHeight = 26, IsHitTestVisible = false };
 
     public void SetStreaming(bool streaming)
     {
@@ -33,7 +33,7 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
     {
         _cursorInlines?.Remove(_cursor);
         _cursorInlines = null;
-        Children.Remove(_emptyCursorHost);
+        Children.Remove(_cursorHost);
     }
 
     private void AttachCursor()
@@ -43,10 +43,9 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
             _cursorBrush.Color = brush.Color;
         else _cursorBrush.Color = Microsoft.UI.Colors.MediumPurple;
         _cursor.Foreground = _cursorBrush;
-        var last = _sections.LastOrDefault();
-        if (last?.MathText is { } mathText) _cursorInlines = mathText.TrailingInlines;
-        else if (last is not null && last.Diff is null && last.Specification.Kind != SectionKind.Math) _cursorInlines = last.Text.Inlines;
-        else { Children.Add(_emptyCursorHost); _cursorInlines = _emptyCursorHost.Inlines; }
+        // Keep the cursor on its own line, including after formulas and code blocks.
+        Children.Add(_cursorHost);
+        _cursorInlines = _cursorHost.Inlines;
         _cursorInlines.Add(_cursor);
     }
 

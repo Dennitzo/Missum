@@ -17,7 +17,7 @@ public sealed partial class NativeAssistantPage
     private JsonElement _currentChangesSummary;
     private readonly NativeChangeReceiptState _changeReceiptState = new();
 
-    /// <summary>Updates the composer summary. False means a foreign or stale receipt was ignored.</summary>
+    /// <summary>Updates the outputs summary. False means a foreign or stale receipt was ignored.</summary>
     private bool UpdateChangesSummary(JsonElement summary)
     {
         if (_changesSummarySession != _session) ResetChangesSummary();
@@ -29,7 +29,7 @@ public sealed partial class NativeAssistantPage
         if (summary.ValueKind != JsonValueKind.Object) return false;
 
         // Historical tabs can refresh their own receipt, but never replace the
-        // current composer's receipt with a different assistant turn or run.
+        // current output receipt with a different assistant turn or run.
         RefreshChangesReview(summary);
 
         var sessionId = S(summary, "sessionId");
@@ -55,14 +55,12 @@ public sealed partial class NativeAssistantPage
         if (_changesSummarySignature == signature) return true;
         _changesSummarySignature = signature;
 
-        if (files.Length == 0 && !partial)
-        {
-            ChangesSummaryButton.Visibility = Visibility.Collapsed;
-            ChangesSummaryButton.Content = null;
-            ChangesSummaryButton.IsEnabled = false;
-            return true;
-        }
+        RenderChangesSummaryContent(files, partial, notice);
+        return true;
+    }
 
+    private void RenderChangesSummaryContent(JsonElement[] files, bool partial, string notice)
+    {
         long added = 0;
         long removed = 0;
         var textFiles = 0;
@@ -80,12 +78,24 @@ public sealed partial class NativeAssistantPage
             removed += removals;
         }
 
-        var label = files.Length == 0 ? "Änderungsübersicht unvollständig"
+        var label = files.Length == 0 ? (partial ? "Änderungsübersicht unvollständig" : "Keine Dateiänderungen")
             : files.Length == 1 ? "1 Datei geändert" : $"{files.Length:N0} Dateien geändert";
-        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 9 };
-        row.Children.Add(Label(label, Brush(205)));
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4, HorizontalAlignment = HorizontalAlignment.Right };
+        var layout = new Grid { ColumnSpacing = 10 };
+        layout.ColumnDefinitions.Add(new() { Width = new GridLength(16) });
+        layout.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) });
+        layout.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
+        layout.Children.Add((UIElement)Microsoft.UI.Xaml.Markup.XamlReader.Load("""
+            <Path xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                  Width="14" Height="14" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center"
+                  Stroke="{ThemeResource TextFillColorPrimaryBrush}" StrokeThickness="1.2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                  Data="M3,1 L11,1 Q13,1 13,3 L13,11 Q13,13 11,13 L3,13 Q1,13 1,11 L1,3 Q1,1 3,1 Z M5,5 L9,5 M7,3 L7,7 M5,10 L9,10"/>
+            """));
+        var title = Label("Änderungen", Brush(235));
+        Grid.SetColumn(title, 1); layout.Children.Add(title);
+        Grid.SetColumn(row, 2); layout.Children.Add(row);
         var description = label;
-        if (textFiles > 0 && countsAvailable)
+        if (countsAvailable)
         {
             var additions = $"+{added:N0}";
             var removals = $"−{removed:N0}";
@@ -104,12 +114,11 @@ public sealed partial class NativeAssistantPage
             description += ", teilweise erfasst";
         }
 
-        ChangesSummaryButton.Content = row;
-        ChangesSummaryButton.IsEnabled = files.Length > 0;
+        ChangesSummaryButton.Content = layout;
+        ChangesSummaryButton.IsEnabled = true;
         ChangesSummaryButton.Visibility = Visibility.Visible;
         AutomationProperties.SetName(ChangesSummaryButton, description);
         ToolTipService.SetToolTip(ChangesSummaryButton, notice.Length > 0 ? description + "\n" + notice : description + "\nGit-Diff anzeigen");
-        return true;
 
         static bool ReadCount(JsonElement file, string property, out long count)
         {
@@ -134,16 +143,13 @@ public sealed partial class NativeAssistantPage
         _changesSummaryRun = "";
         _changesSummarySignature = "";
         _currentChangesSummary = default;
-        ChangesSummaryButton.Visibility = Visibility.Collapsed;
-        ChangesSummaryButton.Content = null;
-        ChangesSummaryButton.IsEnabled = false;
-        AutomationProperties.SetName(ChangesSummaryButton, "Dateiänderungen");
-        ToolTipService.SetToolTip(ChangesSummaryButton, null);
+        RenderChangesSummaryContent([], false, "");
     }
 
     private void OnChangesSummaryClick(object sender, RoutedEventArgs e)
     {
         if (_currentChangesSummary.ValueKind == JsonValueKind.Object) OpenChangesReview(_currentChangesSummary);
+        else OpenEmptyChangesReview();
     }
 
     private bool ObserveChangesConversation(Guid sessionId, JsonElement data)

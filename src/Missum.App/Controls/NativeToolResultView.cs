@@ -13,7 +13,6 @@ public sealed class NativeToolResultView : StackPanel
     public NativeToolResultView(JsonElement data, string path, bool input, bool hidePatch)
     {
         Spacing = 12;
-        var diagnostics = new Dictionary<string, JsonElement>();
         var facts = new FactsPanel();
         var cards = new List<FrameworkElement>();
         foreach (var property in data.EnumerateObject())
@@ -22,7 +21,7 @@ public sealed class NativeToolResultView : StackPanel
             if (hidePatch && key is "diff" or "stagedDiff" or "content" or "oldText" or "newText" or "edits") continue;
             var value = property.Value;
             if (value.ValueKind == JsonValueKind.Null || value.ValueKind == JsonValueKind.String && string.IsNullOrEmpty(value.GetString())) continue;
-            if (!PrimaryFields.Contains(key)) { diagnostics[key] = value.Clone(); continue; }
+            if (!PrimaryFields.Contains(key)) continue;
             if (!input && value.ValueKind == JsonValueKind.String && key is "content" or "code" or "text" or "stdout" or "stderr" or "snippet")
             {
                 var language = key is "stdout" or "stderr" || string.IsNullOrEmpty(Path.GetExtension(path)) ? "text" : Path.GetExtension(path).TrimStart('.');
@@ -53,14 +52,6 @@ public sealed class NativeToolResultView : StackPanel
         if (input && facts.Children.Count > 0) Children.Add(facts);
         foreach (var card in cards) Children.Add(card);
         if (!input && facts.Children.Count > 0) Children.Add(facts);
-        if (diagnostics.Count > 0)
-        {
-            var technical = new Expander { Header = "Technische Details", HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch, FontSize = 12,
-                Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new(0) };
-            technical.Expanding += (_, _) => technical.Content ??= new NativeStreamingMarkdown("```json\n" + JsonSerializer.Serialize(diagnostics, PrettyJson) + "\n```");
-            technical.Collapsed += (_, _) => technical.Content = null;
-            Children.Add(technical);
-        }
     }
 
     private static readonly HashSet<string> PrimaryFields = new(StringComparer.Ordinal)

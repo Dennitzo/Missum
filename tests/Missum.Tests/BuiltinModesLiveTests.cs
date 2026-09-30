@@ -85,12 +85,31 @@ public sealed class BuiltinModesLiveTests(ITestOutputHelper output)
             await Command("action.invoke", new { sessionId = coding, actionId = BuiltInActionIds.PlanMode, enabled = true });
             Assert.Equal(BuiltInActionIds.PlanMode, (await chats.GetSessionAsync(coding, ct))!.PersistentExtensionActionId);
             await Command("chat.send", new { sessionId = coding,
-                prompt = "Lies README.md mit coding.read. Erstelle einen kurzen Umsetzungsplan für die dort genannte Eingabeprüfung mit Testfällen. "
-                    + "Nenne die Projektkennung aus der Datei. Dies ist ausschließlich Planung: keine Datei ändern, keine Befehle ausführen und nichts implementieren." });
+                prompt = "Analysiere das ausgewählte Projekt und erstelle einen konkreten Verbesserungsplan mit Testfällen. "
+                    + "Nenne dabei die Projektkennung und belege deine Befunde mit Dateipfaden. Implementiere noch nichts." });
             var plan = (await chats.ListMessagesAsync(coding, ct)).Last(item => item.Role == ChatRole.Assistant);
             Assert.True(plan.Status == MessageStatus.Completed, plan.Error);
             Assert.Contains(marker, plan.Content, StringComparison.Ordinal);
+            Assert.Contains(plan.ToolSteps ?? [], item => item.Tool == ClientToolNames.CodingList && item.Status == "completed");
             Assert.Contains(plan.ToolSteps ?? [], item => ReadProjectMarker(item, marker));
+            Assert.Contains("assistant-plan", plan.Content, StringComparison.Ordinal);
+            Assert.DoesNotContain(plan.ToolSteps ?? [], item => item.Status == "completed" && item.Tool is
+                ClientToolNames.CodingWrite or ClientToolNames.CodingEdit or ClientToolNames.CodingCommand);
+            receipts.Add(new { kind = "initialPlan", plan.Content, plan.ToolSteps });
+            await Command("chat.send", new { sessionId = coding,
+                prompt = "Konkretisierung: Plane ein neues Python-Modul addition.py mit add(a, b) und unittest-Tests. "
+                    + "Erlaubt sind endliche int/float-Werte, keine bool-Werte; ungültige Typen sollen TypeError, "
+                    + "nicht endliche Werte ValueError auslösen. Nutze die bereits gelesene README. "
+                    + "Alle offenen Produktentscheidungen sind damit geklärt. Liefere jetzt den fertigen Plan, ohne etwas auszuführen oder zu ändern." });
+            plan = (await chats.ListMessagesAsync(coding, ct)).Last(item => item.Role == ChatRole.Assistant);
+            Assert.True(plan.Status == MessageStatus.Completed, plan.Error);
+            var blockStart = plan.Content.LastIndexOf("```assistant-plan", StringComparison.Ordinal);
+            Assert.True(blockStart >= 0, plan.Content);
+            var jsonStart = plan.Content.IndexOf('{', blockStart);
+            var blockEnd = plan.Content.IndexOf("```", jsonStart, StringComparison.Ordinal);
+            using var planBlock = JsonDocument.Parse(plan.Content[jsonStart..blockEnd]);
+            Assert.Equal("plan", planBlock.RootElement.GetProperty("kind").GetString());
+            Assert.Contains("addition.py", plan.Content, StringComparison.Ordinal);
             Assert.DoesNotContain(plan.ToolSteps ?? [], item => item.Status == "completed" && item.Tool is
                 ClientToolNames.CodingWrite or ClientToolNames.CodingEdit or ClientToolNames.CodingCommand);
             Assert.Equal(original, await File.ReadAllTextAsync(Path.Combine(workspace, "README.md"), ct));

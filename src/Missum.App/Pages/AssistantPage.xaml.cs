@@ -889,7 +889,7 @@ public sealed partial class AssistantPage : Page, IDisposable
                     requestId),
                 startAnchor,
                 expectedMessageUpdatedAt,
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken: cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {

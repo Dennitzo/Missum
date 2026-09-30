@@ -1,0 +1,443 @@
+using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using Missum.Core.Contracts;
+using Missum.Core.Models;
+using Missum.Core.Research;
+
+namespace Missum.App.Services;
+
+/// <summary>
+/// Produces immutable, typeset publication snapshots from durable research data.
+/// A new revision never replaces the PDF currently open in the native viewer.
+/// </summary>
+public sealed class ScientificPublicationService : IDisposable
+{
+    private readonly IScientificResearchRepository _repository;
+    private readonly Func<string, CancellationToken, Task<string?>> _render;
+    private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly string _defaultDirectory;
+    private readonly IChatRepository? _chats;
+    private readonly IMissumAiRunRepository? _runs;
+    private readonly IResearchSandboxService? _sandbox;
+
+    public ScientificPublicationService(IScientificResearchRepository repository, DocumentPdfExporter renderer,
+        IChatRepository? chats = null, IMissumAiRunRepository? runs = null, IResearchSandboxService? sandbox = null)
+        : this(repository, (path, token) => renderer.EnsureCurrentAsync(path, sourceChanged: true, scientificPublication: true, cancellationToken: token),
+            Path.Combine(AssistantRuntimeProfile.Resolve().DataDirectory, "ResearchPublications"), chats, runs, sandbox) { }
+
+    internal ScientificPublicationService(IScientificResearchRepository repository,
+        Func<string, CancellationToken, Task<string?>> render, string defaultDirectory,
+        IChatRepository? chats = null, IMissumAiRunRepository? runs = null, IResearchSandboxService? sandbox = null)
+    {
+        _repository = repository;
+        _render = render;
+        _defaultDirectory = Path.GetFullPath(defaultDirectory);
+        _chats = chats;
+        _runs = runs;
+        _sandbox = sandbox;
+    }
+
+    public Task<ScientificPublicationArtifact?> EnsureCurrentAsync(string projectId,
+        CancellationToken cancellationToken = default) => EnsureCurrentAsync(projectId, _defaultDirectory, cancellationToken);
+
+    /// <returns>The current publication, or null if the project changed during rendering. The next refresh retries.</returns>
+    public async Task<ScientificPublicationArtifact?> EnsureCurrentAsync(string projectId, string outputDirectory,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var snapshot = await ReadSnapshotAsync(projectId, cancellationToken).ConfigureAwait(false);
+            if (snapshot is null) return null;
+            var markdown = FormatPublication(snapshot.Project, snapshot.Results, snapshot.Works, snapshot.Evidence, snapshot.Report, snapshot.Manuscript);
+            ScientificPublicationImages.PreparedImages? images = null;
+            if (_sandbox is not null)
+            {
+                images = await ScientificPublicationImages.PrepareAsync(markdown, projectId, _sandbox,
+                    PublicationRunStart(snapshot.Report) ?? snapshot.Manuscript?.CreatedAt, cancellationToken).ConfigureAwait(false);
+                markdown = images.Markdown;
+            }
+            var fingerprint = PublicationFingerprint(markdown);
+            // Project ids originate in storage but are never accepted as filesystem paths.
+            var root = Path.Combine(Path.GetFullPath(outputDirectory), Fingerprint(projectId)[..24]);
+            var version = $"r{snapshot.Project.Revision.ToString(CultureInfo.InvariantCulture)}-{fingerprint[..24]}";
+            var directory = Path.Combine(root, version);
+            var pdf = Path.Combine(directory, "Publikation.pdf");
+            var source = Path.Combine(directory, "Publikation.md");
+            if (await IsValidPdfAsync(pdf, cancellationToken).ConfigureAwait(false)
+                && File.Exists(source) && string.Equals(await File.ReadAllTextAsync(source, cancellationToken).ConfigureAwait(false), markdown, StringComparison.Ordinal))
+                return Artifact(snapshot, source, pdf, fingerprint);
+
+            Directory.CreateDirectory(root);
+            var staging = Path.Combine(root, ".pending-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(staging);
+            try
+            {
+                var pendingSource = Path.Combine(staging, "Publikation.md");
+                if (images is not null) await images.WriteImagesAsync(staging, cancellationToken).ConfigureAwait(false);
+                await File.WriteAllTextAsync(pendingSource, markdown, new UTF8Encoding(false), cancellationToken).ConfigureAwait(false);
+                var rendered = await _render(pendingSource, cancellationToken).ConfigureAwait(false);
+                if (rendered is null || !await IsValidPdfAsync(rendered, cancellationToken).ConfigureAwait(false))
+                    throw new InvalidDataException("Die wissenschaftliche Publikation konnte nicht als gültiges PDF erzeugt werden.");
+
+                // Results may arrive without a revision bump. Compare all rendered content,
+                // not only the project row, before exposing a newly generated artifact.
+                var current = await ReadSnapshotAsync(projectId, cancellationToken).ConfigureAwait(false);
+                if (current is null || !CanPublishSnapshot(snapshot, current))
+                    return null;
+                cancellationToken.ThrowIfCancellationRequested();
+                var pendingPdf = Path.Combine(staging, "Publikation.pdf");
+                if (!string.Equals(Path.GetFullPath(rendered), pendingPdf, StringComparison.OrdinalIgnoreCase))
+                    File.Copy(rendered, pendingPdf, overwrite: false);
+                Directory.CreateDirectory(directory);
+                if (images is not null) await images.WriteImagesAsync(directory, cancellationToken).ConfigureAwait(false);
+                // The PDF is published last; a cancelled or failed render cannot replace
+                // a usable previous revision, or leave a PDF paired with partial source.
+                File.Move(pendingSource, source, overwrite: true);
+                File.Move(pendingPdf, pdf, overwrite: true);
+                return Artifact(snapshot, source, pdf, fingerprint);
+            }
+            finally
+            {
+                if (string.Equals(Path.GetDirectoryName(staging), root, StringComparison.OrdinalIgnoreCase)
+                    && Path.GetFileName(staging).StartsWith(".pending-", StringComparison.Ordinal)
+                    && Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
+            }
+        }
+        finally { _gate.Release(); }
+    }
+
+    private async Task<PublicationSnapshot?> ReadSnapshotAsync(string projectId, CancellationToken token)
+    {
+        var project = await _repository.GetProjectAsync(projectId, token).ConfigureAwait(false);
+        if (project is null) return null;
+        var results = await _repository.LoadResultSnapshotAsync(projectId, token).ConfigureAwait(false);
+        var archive = await _repository.LoadArchiveSnapshotAsync(projectId, token).ConfigureAwait(false);
+        var manuscript = await ReadManuscriptAsync(project, archive.Report, token).ConfigureAwait(false);
+        var current = await _repository.GetProjectAsync(projectId, token).ConfigureAwait(false);
+        if (current != project) return null;
+        return new(project, results, archive.Works, archive.Evidence, archive.Report, manuscript);
+    }
+
+    private static DateTimeOffset? PublicationRunStart(ResearchStoredReport? report)
+    {
+        if (string.IsNullOrWhiteSpace(report?.ManifestJson)) return null;
+        try
+        {
+            using var manifest = JsonDocument.Parse(report.ManifestJson);
+            return manifest.RootElement.ValueKind == JsonValueKind.Object
+                && manifest.RootElement.TryGetProperty("runStartedAt", out var start)
+                && start.ValueKind == JsonValueKind.String && start.TryGetDateTimeOffset(out var value) ? value : null;
+        }
+        catch (JsonException) { return null; }
+    }
+
+    private async Task<ChatMessage?> ReadManuscriptAsync(ScientificResearchProject project, ResearchStoredReport? report, CancellationToken token)
+    {
+        if (_chats is null || _runs is null || report is null || string.IsNullOrWhiteSpace(report.ManifestJson)) return null;
+        JsonElement manifest;
+        try { manifest = JsonSerializer.Deserialize<JsonElement>(report.ManifestJson); }
+        catch (JsonException) { return null; }
+        if (manifest.ValueKind != JsonValueKind.Object) return null;
+        var runId = manifest.TryGetProperty("runId", out var runIdValue) && runIdValue.ValueKind == JsonValueKind.String ? runIdValue.GetString() : null;
+        if (string.IsNullOrWhiteSpace(runId)) return null;
+        var run = manifest.TryGetProperty("localRunId", out var localId) && localId.ValueKind == JsonValueKind.String && localId.TryGetGuid(out var id)
+            ? await _runs.GetAsync(id, token).ConfigureAwait(false)
+            : await _runs.GetByServerRunIdAsync(runId, token).ConfigureAwait(false);
+        // A retried run keeps its message id. Only the exact server attempt enrolled
+        // in the current archive is allowed to supply this publication's manuscript.
+        if (run is null || run.SessionId != project.SessionId || run.ServerRunId != runId) return null;
+        var message = await _chats.GetMessageAsync(run.AssistantMessageId, token).ConfigureAwait(false);
+        return message is { Role: ChatRole.Assistant } && message.SessionId == project.SessionId ? message : null;
+    }
+
+    private static bool CanPublishSnapshot(PublicationSnapshot snapshot, PublicationSnapshot current)
+    {
+        var source = FormatPublication(snapshot.Project, snapshot.Results, snapshot.Works, snapshot.Evidence, snapshot.Report);
+        var latest = FormatPublication(current.Project, current.Results, current.Works, current.Evidence, current.Report);
+        if (!string.Equals(source, latest, StringComparison.Ordinal)) return false;
+        if (snapshot.Manuscript is null && current.Manuscript is null) return true;
+        if (snapshot.Manuscript is { } previous && current.Manuscript is { } present
+            && previous.Id == present.Id && previous.Status == present.Status
+            && previous.UpdatedAt == present.UpdatedAt && previous.Content == present.Content) return true;
+        // A progressing answer must not starve the PDF renderer: an immutable,
+        // clearly marked draft can show the earlier prefix of this exact run.
+        // Replacements/retries and edits to existing text are never accepted.
+        return snapshot.Manuscript is { Status: MessageStatus.Streaming or MessageStatus.Pending } prior
+            && current.Manuscript is { } next && prior.Id == next.Id
+            && next.Content.StartsWith(prior.Content, StringComparison.Ordinal);
+    }
+
+    internal static string FormatPublication(ScientificResearchProject project, ResearchResultSnapshot results,
+        IReadOnlyList<ResearchLiteratureEntry> works, IReadOnlyList<ResearchEvidenceRecord> evidence, ResearchStoredReport? report,
+        ChatMessage? manuscript = null)
+    {
+        var draft = IsDraft(project, report, manuscript);
+        if (manuscript is not null && TryReadArticle(manuscript.Content, out var articleTitle, out var articleBody, out var precedingFindings))
+            return FormatArticle(project, results, works, evidence, manuscript, draft, articleTitle, articleBody, precedingFindings);
+        var text = new StringBuilder();
+        AppendPublicationHeading(text, QuestionSummary(project, 140), project, manuscript, draft);
+
+        text.AppendLine("## Zusammenfassung").AppendLine();
+        if (results.Claims.Count > 0)
+        {
+            foreach (var claim in results.Claims.Take(3)) text.AppendLine(claim.Statement).AppendLine();
+            text.Append("Aussagenstatus: ").AppendLine(Status(report?.ConclusionStatus ?? project.Status)).AppendLine();
+        }
+        else
+            text.AppendLine(draft
+                ? "Die Forschungsfrage und die bisher verfügbaren Belege werden im Folgenden dokumentiert. Eine geprüfte Ergebnissynthese liegt noch nicht vor."
+                : "Der dokumentierte Bericht wird nachfolgend wiedergegeben. Darüber hinaus liegen keine separat gespeicherten, geprüften Kernaussagen vor.").AppendLine();
+
+        text.AppendLine("## 1. Fragestellung").AppendLine().AppendLine(QuestionSummary(project, 420)).AppendLine();
+
+        text.AppendLine("## 2. Material und Methode").AppendLine()
+            .Append("Der gespeicherte Forschungsstand umfasst ").Append(works.Count).Append(" Quellen, ").Append(evidence.Count)
+            .Append(" Belegstellen und ").Append(results.Experiments.Count).AppendLine(" rechnerische Untersuchungen. Quellen und Prüfstatus werden getrennt ausgewiesen.").AppendLine();
+        if (results.Hypotheses.Count > 0)
+        {
+            text.AppendLine("### Untersuchte Hypothesen").AppendLine();
+            foreach (var hypothesis in results.Hypotheses)
+                text.Append("- ").Append(hypothesis.Statement).Append(" — ").AppendLine(Status(hypothesis.Status));
+            text.AppendLine();
+        }
+
+        text.AppendLine("## 3. Ergebnisse").AppendLine();
+        if (!string.IsNullOrWhiteSpace(manuscript?.Content))
+            text.AppendLine(RemoveReportPreamble(manuscript.Content)).AppendLine();
+        else if (report is not null && report.ReportKind != "researchProgress" && !string.IsNullOrWhiteSpace(report.ContentMarkdown))
+            text.AppendLine(RemoveReportPreamble(report.ContentMarkdown)).AppendLine();
+        else if (results.Claims.Count == 0)
+            text.AppendLine("Die Auswertung ist noch offen. Es wird noch kein Ergebnis behauptet.").AppendLine();
+        if (results.Claims.Count > 0)
+        {
+            text.AppendLine("### Dokumentierte Kernaussagen").AppendLine();
+            foreach (var claim in results.Claims)
+                text.Append("- ").Append(claim.Statement).Append("  \n  **Prüfstatus:** ").AppendLine(Status(claim.ConclusionStatus));
+            text.AppendLine();
+        }
+        if (results.Experiments.Count > 0)
+        {
+            text.AppendLine("### Rechnerische Untersuchungen").AppendLine();
+            for (var experimentIndex = 0; experimentIndex < results.Experiments.Count; experimentIndex++)
+            {
+                var experiment = results.Experiments[experimentIndex];
+                text.Append("**Untersuchung ").Append(experimentIndex + 1).Append(" · ")
+                    .Append(Status(experiment.VerificationStatus)).AppendLine("**").AppendLine();
+                if (!string.IsNullOrWhiteSpace(experiment.StdoutEvidence))
+                    AppendCode(text, experiment.StdoutEvidence);
+                if (!string.IsNullOrWhiteSpace(experiment.StderrEvidence))
+                    text.Append("Hinweis zur Ausführung: ").AppendLine(OneLine(experiment.StderrEvidence)).AppendLine();
+            }
+        }
+        if (draft && works.Count > 0)
+        {
+            text.AppendLine("### Bisherige Beleggrundlage").AppendLine()
+                .AppendLine("Die folgenden Originalauszüge dienen der weiteren Auswertung; ihr Inhalt wird hier nicht als gesichertes Ergebnis übernommen.").AppendLine();
+            foreach (var item in evidence.Take(8))
+            {
+                var sourceIndex = works.Select((work, index) => (work, index)).FirstOrDefault(pair => pair.work.WorkId == item.WorkId);
+                if (sourceIndex.work is null) continue;
+                var excerpt = item.ExactExcerpt.Length > 700 ? item.ExactExcerpt[..700] + " … [Auszug gekürzt]" : item.ExactExcerpt;
+                text.Append("**Beleg [").Append(sourceIndex.index + 1).AppendLine("]**").AppendLine();
+                foreach (var line in excerpt.Replace("\r", "", StringComparison.Ordinal).Split('\n')) text.Append("> ").AppendLine(line);
+                text.AppendLine();
+            }
+        }
+
+        text.AppendLine("## 4. Einordnung und Grenzen").AppendLine();
+        if (draft) text.AppendLine("Diese Arbeitsfassung ist unvollständig. Aussagen können sich durch zusätzliche Quellen, Gegenbeispiele und unabhängige Prüfungen ändern.").AppendLine();
+        var verified = results.Verifications.Count(item => item.Status.Equals("verified", StringComparison.OrdinalIgnoreCase)
+            || item.Status.Equals("KernelAccepted", StringComparison.OrdinalIgnoreCase));
+        text.Append(verified).Append(" von ").Append(results.Verifications.Count).AppendLine(" gespeicherten Prüfungen sind als erfolgreich bestätigt. Numerische Simulationen illustrieren das jeweilige Modell; sie sind für sich allein kein Beweis.").AppendLine();
+        if (works.Count == 0) text.AppendLine("Für diesen Stand sind noch keine Originalquellen gespeichert.").AppendLine();
+
+        text.AppendLine("## Literatur und Quellen").AppendLine();
+        for (var index = 0; index < works.Count; index++)
+        {
+            var work = works[index];
+            text.Append('[').Append(index + 1).Append("] **").Append(EscapeLabel(work.Title)).Append("**. ");
+            if (Uri.TryCreate(work.CanonicalUrl, UriKind.Absolute, out var uri) && uri.Scheme is "https" or "http" && string.IsNullOrEmpty(uri.UserInfo))
+                text.Append("[Originalquelle](").Append(uri.AbsoluteUri.Replace(")", "%29", StringComparison.Ordinal)).Append("). ");
+            text.Append("Abruf/Stand: ").Append(work.UpdatedAt.ToString("dd.MM.yyyy", CultureInfo.InvariantCulture))
+                .Append(". Belegstatus: ").Append(Status(work.EvidenceLevel ?? work.ScreeningStatus)).AppendLine(".").AppendLine();
+        }
+        if (works.Count == 0) text.AppendLine("Noch keine Quellen verfügbar.").AppendLine();
+        return text.ToString();
+    }
+
+    private static void AppendPublicationHeading(StringBuilder text, string title, ScientificResearchProject project, ChatMessage? manuscript, bool draft)
+    {
+        text.Append("# ").AppendLine(OneLine(title)).AppendLine();
+        text.Append("**Missum · Claude Science**  \n")
+            .Append(draft ? "Arbeitsfassung" : "Forschungsbericht").Append(" · Revision ").Append(project.Revision)
+            .Append(" · ").AppendLine(PublicationUpdatedAt(project, manuscript).ToUniversalTime().ToString("dd.MM.yyyy HH:mm 'UTC'", CultureInfo.InvariantCulture)).AppendLine();
+        text.AppendLine(draft
+            ? "> **Vorläufige Publikation.** Die Untersuchung wird fortlaufend ergänzt. Gelesene Quellen, Hypothesen und numerische Ergebnisse sind keine bestätigten Schlussfolgerungen."
+            : "> Dieser Bericht dokumentiert den gespeicherten Forschungsstand und ersetzt keine unabhängige wissenschaftliche Begutachtung.").AppendLine();
+    }
+
+    private static string FormatArticle(ScientificResearchProject project, ResearchResultSnapshot results,
+        IReadOnlyList<ResearchLiteratureEntry> works, IReadOnlyList<ResearchEvidenceRecord> evidence, ChatMessage manuscript,
+        bool draft, string title, string body, string precedingFindings)
+    {
+        var text = new StringBuilder();
+        AppendPublicationHeading(text, title, project, manuscript, draft);
+        if (!string.IsNullOrWhiteSpace(precedingFindings)) text.AppendLine(precedingFindings).AppendLine();
+        text.AppendLine(body.Trim()).AppendLine();
+        var missingSources = works.Where(work => string.IsNullOrWhiteSpace(work.CanonicalUrl)
+            || !body.Contains(work.CanonicalUrl, StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (missingSources.Length > 0)
+        {
+            text.AppendLine("## Ergänzende Originalquellen").AppendLine();
+            foreach (var work in missingSources)
+            {
+                text.Append("- **").Append(EscapeLabel(work.Title)).Append("**. ");
+                if (Uri.TryCreate(work.CanonicalUrl, UriKind.Absolute, out var uri) && uri.Scheme is "https" or "http" && string.IsNullOrEmpty(uri.UserInfo))
+                    text.Append("[Originalquelle](").Append(uri.AbsoluteUri.Replace(")", "%29", StringComparison.Ordinal)).Append("). ");
+                text.Append("Belegstatus: ").Append(Status(work.EvidenceLevel ?? work.ScreeningStatus)).AppendLine(".");
+            }
+            text.AppendLine();
+        }
+        var verified = results.Verifications.Count(item => item.Status.Equals("verified", StringComparison.OrdinalIgnoreCase)
+            || item.Status.Equals("KernelAccepted", StringComparison.OrdinalIgnoreCase));
+        text.AppendLine("---").AppendLine().Append("**Dokumentationsstand:** ").Append(works.Count).Append(" gespeicherte Quellen · ")
+            .Append(evidence.Count).Append(" Belegstellen · ").Append(verified).Append(" von ").Append(results.Verifications.Count)
+            .AppendLine(" Prüfungen bestätigt. Numerische Simulationen illustrieren das jeweilige Modell; sie sind für sich allein kein Beweis.");
+        return text.ToString();
+    }
+
+    private static bool TryReadArticle(string content, out string title, out string body, out string precedingFindings)
+    {
+        title = body = precedingFindings = "";
+        var lines = content.Replace("\r", "", StringComparison.Ordinal).Split('\n');
+        char fence = '\0';
+        for (var index = 0; index < lines.Length; index++)
+        {
+            var line = lines[index].Trim();
+            if (line.StartsWith("```", StringComparison.Ordinal) || line.StartsWith("~~~", StringComparison.Ordinal))
+            {
+                if (fence == '\0') fence = line[0];
+                else if (fence == line[0]) fence = '\0';
+                continue;
+            }
+            if (fence != '\0' || !line.StartsWith("# ", StringComparison.Ordinal) || line.Length < 4) continue;
+            title = line[2..].Trim().TrimEnd('#').TrimEnd();
+            body = string.Join('\n', lines.Skip(index + 1));
+            // Remove conversational announcements, but keep factual paragraphs
+            // preceding the article; they can contain results absent from its body.
+            precedingFindings = string.Join("\n\n", string.Join('\n', lines.Take(index)).Split("\n\n", StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+                .Where(paragraph => !IsProgressAnnouncement(paragraph)));
+            return true;
+        }
+        return false;
+    }
+
+    private static bool IsProgressAnnouncement(string paragraph)
+    {
+        string[] beginnings = ["Ich werde ", "Ich recherchiere ", "Ich untersuche ", "Ich erstelle ", "Ich analysiere ",
+            "Ich prüfe ", "Ich simuliere ", "Hier folgt ", "Hier ist die ", "Die Recherche läuft", "Die Recherche startet"];
+        if (!beginnings.Any(value => paragraph.StartsWith(value, StringComparison.OrdinalIgnoreCase))) return false;
+        // A mixed introductory paragraph containing a concrete result is retained.
+        string[] resultMarkers = ["ergibt", "beträgt", "Ergebnis:", "Ergebnis lautet", "Ergebnis ist", "berechnet", "belegt", "Befund", "$$", "\\["];
+        return !resultMarkers.Any(value => paragraph.Contains(value, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string QuestionSummary(ScientificResearchProject project, int maximumLength)
+    {
+        var question = string.IsNullOrWhiteSpace(project.OriginalQuestion) ? project.InterpretedQuestion : project.OriginalQuestion;
+        question = question.Replace("[MISSUM_WEB_RESEARCH_REQUEST]", "", StringComparison.Ordinal)
+            .Replace("MISSUM_WEB_RESEARCH_REQUEST", "", StringComparison.Ordinal).Trim();
+        if (question.StartsWith("Rechercheauftrag:", StringComparison.OrdinalIgnoreCase)) question = question[17..].TrimStart();
+        var paragraphEnd = question.IndexOf("\n\n", StringComparison.Ordinal);
+        if (paragraphEnd >= 0) question = question[..paragraphEnd];
+        question = OneLine(question);
+        // The question introduces the draft; execution instructions remain in chat.
+        var sentenceEnd = -1;
+        for (var index = 0; index < question.Length; index++)
+            if (question[index] is '?' or '!' or '.' && (index + 1 == question.Length || char.IsWhiteSpace(question[index + 1])))
+            {
+                sentenceEnd = index;
+                break;
+            }
+        if (sentenceEnd >= 20 && sentenceEnd < maximumLength) question = question[..(sentenceEnd + 1)];
+        if (question.Length <= maximumLength) return string.IsNullOrWhiteSpace(question) ? "Wissenschaftliche Untersuchung" : question;
+        var boundary = question.LastIndexOf(' ', maximumLength - 1, maximumLength);
+        if (boundary < maximumLength / 2) boundary = maximumLength - 1;
+        var shortened = question[..boundary].TrimEnd();
+        if (shortened.Count(character => character == '$') % 2 != 0) shortened = shortened[..shortened.LastIndexOf('$')].TrimEnd();
+        return shortened + " …";
+    }
+
+    private static bool IsDraft(ScientificResearchProject project, ResearchStoredReport? report, ChatMessage? manuscript = null) =>
+        report is null || report.ReportKind == "researchProgress" || project.Status is "planned" or "active"
+        || manuscript is { Status: not MessageStatus.Completed };
+
+    private static DateTimeOffset PublicationUpdatedAt(ScientificResearchProject project, ChatMessage? manuscript) =>
+        manuscript is not null && manuscript.UpdatedAt > project.UpdatedAt ? manuscript.UpdatedAt : project.UpdatedAt;
+
+    private static ScientificPublicationArtifact Artifact(PublicationSnapshot snapshot, string source, string pdf, string fingerprint) =>
+        new(snapshot.Project.Id, snapshot.Project.Revision, source, pdf, IsDraft(snapshot.Project, snapshot.Report, snapshot.Manuscript),
+            PublicationUpdatedAt(snapshot.Project, snapshot.Manuscript), fingerprint);
+
+    private static string Fingerprint(string text) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
+    private static string PublicationFingerprint(string text) => Fingerprint("scientific-publication-v6\n" + text);
+    private static string OneLine(string text) => text.Replace('\r', ' ').Replace('\n', ' ').Trim();
+    private static string EscapeLabel(string text) => OneLine(text).Replace("*", "\\*", StringComparison.Ordinal)
+        .Replace("[", "\\[", StringComparison.Ordinal).Replace("]", "\\]", StringComparison.Ordinal);
+    private static string Status(string status) => status switch
+    {
+        "verified" or "KernelAccepted" => "bestätigt",
+        "supported" => "durch Belege gestützt",
+        "provisionallySupported" => "vorläufig gestützt",
+        "unresolved" or "awaitingReview" => "noch ungeprüft",
+        "refuted" => "widerlegt",
+        "blocked" => "Prüfung offen",
+        "cancelled" => "abgebrochen",
+        "failed" => "fehlgeschlagen",
+        "retrievedExcerpt" => "gelesener Originalauszug, noch ungeprüft",
+        "verifiedExcerpt" => "geprüfter Originalauszug",
+        "fullTextExcerpt" => "Auszug aus dem Volltext",
+        "active" => "in Bearbeitung",
+        "planned" => "geplant",
+        _ => status,
+    };
+
+    private static string RemoveReportPreamble(string report)
+    {
+        var lines = report.Replace("\r", "", StringComparison.Ordinal).Split('\n').ToList();
+        if (lines.Count > 0 && lines[0].Trim() == "# Deep Research") lines.RemoveAt(0);
+        while (lines.Count > 0 && (string.IsNullOrWhiteSpace(lines[0]) || lines[0].StartsWith("**Status:**", StringComparison.Ordinal))) lines.RemoveAt(0);
+        // The report's own sections remain readable inside the results section.
+        return string.Join('\n', lines.Select(line => line.StartsWith("## ", StringComparison.Ordinal) ? "#" + line : line));
+    }
+
+    private static void AppendCode(StringBuilder output, string text)
+    {
+        var fence = "~~~~";
+        while (text.Contains(fence, StringComparison.Ordinal)) fence += "~";
+        output.AppendLine(fence).AppendLine(text).AppendLine(fence).AppendLine();
+    }
+
+    private static async Task<bool> IsValidPdfAsync(string path, CancellationToken token)
+    {
+        if (!File.Exists(path) || new FileInfo(path).Length < 1024) return false;
+        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, useAsync: true);
+        var header = new byte[5];
+        await stream.ReadExactlyAsync(header, token).ConfigureAwait(false);
+        return header.AsSpan().SequenceEqual("%PDF-"u8);
+    }
+
+    public void Dispose() => _gate.Dispose();
+
+    private sealed record PublicationSnapshot(ScientificResearchProject Project, ResearchResultSnapshot Results,
+        IReadOnlyList<ResearchLiteratureEntry> Works, IReadOnlyList<ResearchEvidenceRecord> Evidence, ResearchStoredReport? Report,
+        ChatMessage? Manuscript);
+}
+
+public sealed record ScientificPublicationArtifact(string ProjectId, long Revision, string MarkdownPath, string PdfPath,
+    bool IsDraft, DateTimeOffset UpdatedAt, string ContentHash);

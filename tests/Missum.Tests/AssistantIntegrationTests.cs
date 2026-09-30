@@ -1524,6 +1524,19 @@ public sealed class AssistantIntegrationTests
     }
 
     [Fact]
+    public void ReadFromHereExcerptRequiresStableMatchingSessionAndRevision()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var message = new ChatMessage(Guid.NewGuid(), Guid.NewGuid(), ChatRole.User,
+            "Erster Absatz.\n\nZweiter Absatz.\n\nDritter Absatz.", MessageStatus.Completed, now, now);
+        MissumAiAssistantService.ValidateSpeechExcerpt(message, message.SessionId, now, "Zweiter Absatz.\n\nDritter Absatz.");
+        Assert.Throws<InvalidOperationException>(() => MissumAiAssistantService.ValidateSpeechExcerpt(message, Guid.NewGuid(), now, "Zweiter Absatz."));
+        Assert.Throws<InvalidOperationException>(() => MissumAiAssistantService.ValidateSpeechExcerpt(message, message.SessionId, now.AddSeconds(-1), "Zweiter Absatz."));
+        Assert.Throws<InvalidOperationException>(() => MissumAiAssistantService.ValidateSpeechExcerpt(message with { Status = MessageStatus.Streaming }, message.SessionId, now, "Zweiter Absatz."));
+        Assert.Throws<InvalidOperationException>(() => MissumAiAssistantService.ValidateSpeechExcerpt(message, message.SessionId, now, " "));
+    }
+
+    [Fact]
     public void FooterSpeechAcceptsEveryStableStoredAssistantMessage()
     {
         var now = DateTimeOffset.UtcNow;
@@ -1555,7 +1568,7 @@ public sealed class AssistantIntegrationTests
             now,
             now);
         Assert.False(MissumAiAssistantService.IsReadableSpeechMessage(invalid));
-        Assert.False(MissumAiAssistantService.IsReadableSpeechMessage(
+        Assert.True(MissumAiAssistantService.IsReadableSpeechMessage(
             invalid with { Role = ChatRole.User, Status = MessageStatus.Completed }));
         Assert.False(MissumAiAssistantService.IsReadableSpeechMessage(
             invalid with { Content = string.Empty, Status = MessageStatus.Completed }));

@@ -24,7 +24,7 @@ public sealed partial class NativeAssistantPage
             if (blocks.TryGetValue("header", out var header) && _messages.TryGetValue(id, out var message))
                 UpdateMessageHeader(header, message);
         RefreshContextDisplay();
-        ComposerStatusRow.Visibility = string.IsNullOrWhiteSpace(StatusText.Text) ? Visibility.Collapsed : Visibility.Visible;
+        RefreshChatNotices();
     }
 
     private void UpdateMessageHeader(FrameworkElement header, JsonElement message)
@@ -38,6 +38,7 @@ public sealed partial class NativeAssistantPage
         var text = active
             ? $"Modell generiert {_contextUsed:N0} Token · In Bearbeitung seit {duration}"
             : start.ToLocalTime().ToString("dd.MM.yyyy · HH:mm 'Uhr'", CultureInfo.CurrentCulture) + " · " + duration + " lang gearbeitet";
+        if (active && !string.IsNullOrWhiteSpace(ChatStatus)) text = ChatStatus + " · " + text;
         var label = (TextBlock)((StackPanel)header).Children[0];
         if (label.Text != text) label.Text = text;
     }
@@ -208,6 +209,8 @@ public sealed partial class NativeAssistantPage
                 "coding.read" => "Datei lesen", "coding.write" or "coding.edit" or "coding.undo" => "Datei bearbeiten",
                 "coding.command" => "Befehl ausgeführt", "coding.list" => "Dateien aufgelistet", "coding.search" => "Dateien durchsucht",
                 "coding.gitDiff" => "Änderungen geprüft", "coding.updatePlan" => "Arbeitsplan aktualisiert", "assistant.reasoning" => "Denkprozess",
+                "research.code.write" => "Python-Datei vorbereiten", "research.code.execute" => "Python-Analyse ausführen",
+                "research.code.test" => "Berechnung prüfen", "research.code.benchmark" => "Berechnung vergleichen",
                 "assistant.progress" => "Fortschritt", "web.search" => "Websuche", "web.fetch" => "Webseite lesen", _ => S(step, "label", tool) };
             _running = S(step, "status") is "running" or "pending";
             _reasoning = tool == "assistant.reasoning";
@@ -234,7 +237,7 @@ public sealed partial class NativeAssistantPage
             }
             _diff = diff;
             var input = ReadMetadata(S(step, "inputJson"));
-            _summary = _reasoning ? (S(input, "round") is { Length: > 0 } round ? "Runde " + round : "") : ToolSummary(tool, input, output);
+            _summary = _reasoning ? "" : ToolSummary(tool, input, output);
             if (_reasoning && _running) _status.Text = "Denkt nach";
             if (_details.Visibility == Visibility.Visible) RenderDetails();
             // Updates never change the user's fold state or open a completed file operation automatically.
@@ -297,7 +300,7 @@ public sealed partial class NativeAssistantPage
         {
             var path = S(output, "path", S(input, "path"));
             var target = path.Length > 0 ? path.Replace('\\', '/') : S(input, "query", S(input, "url"));
-            if (tool == "coding.command") target = S(input, "executable") + " " + (input.ValueKind == JsonValueKind.Object && input.TryGetProperty("arguments", out var args) && args.ValueKind == JsonValueKind.Array ? string.Join(" ", args.EnumerateArray().Select(x => x.ToString())) : "");
+            if (tool is "coding.command" or "research.code.execute" or "research.code.test" or "research.code.benchmark") target = S(input, "executable") + " " + (input.ValueKind == JsonValueKind.Object && input.TryGetProperty("arguments", out var args) && args.ValueKind == JsonValueKind.Array ? string.Join(" ", args.EnumerateArray().Select(x => x.ToString())) : "");
             var facts = new List<string>();
             if (target.Length > 0) facts.Add(target);
             if (tool == "coding.read" && output.ValueKind == JsonValueKind.Object && output.TryGetProperty("content", out var content) && content.ValueKind == JsonValueKind.String)

@@ -15,9 +15,16 @@ public sealed partial class DocumentPdfExporter(ILogger<DocumentPdfExporter> log
     };
     private readonly SemaphoreSlim _exportGate = new(1, 1);
 
+    public Task<string?> EnsureCurrentAsync(
+        string sourcePath,
+        bool sourceChanged,
+        CancellationToken cancellationToken = default) =>
+        EnsureCurrentAsync(sourcePath, sourceChanged, scientificPublication: false, cancellationToken);
+
     public async Task<string?> EnsureCurrentAsync(
         string sourcePath,
         bool sourceChanged,
+        bool scientificPublication,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
@@ -68,6 +75,7 @@ public sealed partial class DocumentPdfExporter(ILogger<DocumentPdfExporter> log
             {
                 startInfo.ArgumentList.Add(argument);
             }
+            if (scientificPublication) startInfo.ArgumentList.Add("-ScientificPublication");
 
             using var process = new Process { StartInfo = startInfo };
             if (!process.Start())

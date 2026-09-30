@@ -145,6 +145,9 @@ public partial class App : Application
                 services.AddSingleton<DocumentContextPreparationService>();
                 services.AddSingleton<SessionContextPreparationService>();
                 services.AddSingleton<DocumentPdfExporter>();
+                services.AddSingleton<ScientificPublicationService>();
+                services.AddSingleton<ScientificSimulationService>();
+                services.AddSingleton<ScientificPresentationCoordinator>();
                 services.AddSingleton<LocalDocumentToolService>();
                 services.AddSingleton<LocalToolBroker>();
                 services.AddSingleton<MissumAiAssistantService>();

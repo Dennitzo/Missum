@@ -92,6 +92,7 @@ public sealed partial class NativeAssistantPage
                 finally { newChatButton.IsEnabled = path.Length > 0; }
             };
             Grid.SetColumn(newChatButton, 2); projectHeader.Children.Add(newChatButton);
+            ConfigureSidebarHoverActions(projectHeader, options, newChatButton);
             project.Children.Add(projectHeader);
             if (visibleMembers.Count == 0)
             {
@@ -114,6 +115,26 @@ public sealed partial class NativeAssistantPage
             ProjectsPanel.Children.Add(new TextBlock { Text = "Projekt hinzufügen", Foreground = Brush(110), FontSize = 13, Margin = new Thickness(10, 4, 0, 8) });
 
         UpdateSidebarActivity(_snapshot);
+    }
+
+    private static void ConfigureSidebarHoverActions(Grid row, params Button[] actions)
+    {
+        row.Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        var hovered = false;
+        void Update()
+        {
+            var visible = hovered || actions.Any(button => button.FocusState == FocusState.Keyboard);
+            foreach (var button in actions)
+            {
+                button.Opacity = visible ? 1 : 0;
+                button.IsHitTestVisible = visible;
+            }
+        }
+        row.PointerEntered += (_, _) => { hovered = true; Update(); };
+        row.PointerExited += (_, _) => { hovered = false; Update(); };
+        row.GotFocus += (_, _) => Update();
+        row.LostFocus += (_, _) => Update();
+        Update();
     }
 
     private Button CreateSidebarSession(JsonElement session, bool projectChild = false)

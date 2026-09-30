@@ -84,14 +84,8 @@ public sealed partial class NativeAssistantPage
             "plan" => "\uEA80", "web" => "\uE774", "research" => "\uE721", "document" => "\uE8A5",
             "image" => "\uEB9F", "speech" or "audio" => "\uE767", _ => "\uEA86",
         };
-        var content = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 7 };
-        content.Children.Add(new FontIcon { Glyph = glyph, FontSize = 13, Foreground = ThemeBrush("MissumAccentBrush", 0xB0), VerticalAlignment = VerticalAlignment.Center });
-        content.Children.Add(new TextBlock { Text = label, FontSize = 13, Foreground = Brush(205), MaxWidth = 210, TextTrimming = TextTrimming.CharacterEllipsis });
-        content.Children.Add(new FontIcon { Glyph = "\uE711", FontSize = 10, Foreground = Brush(165), VerticalAlignment = VerticalAlignment.Center });
-        SelectedToolChip.Content = content;
+        SelectedToolChip.SetTool(_selectedAction == BuiltInActionIds.PlanMode ? "Planen" : label, glyph);
         SelectedToolChip.Visibility = Visibility.Visible;
-        ToolTipService.SetToolTip(SelectedToolChip, label + " entfernen");
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(SelectedToolChip, label + " entfernen");
     }
 
     private void ShowComposerTools()

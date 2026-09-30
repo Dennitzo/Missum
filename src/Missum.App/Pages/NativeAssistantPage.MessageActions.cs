@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using Missum.App.Services;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
@@ -43,7 +43,7 @@ public sealed partial class NativeAssistantPage
         view.SessionId = Guid.TryParse(S(message, "sessionId"), out var sessionId) ? sessionId : _session;
         view.Text = S(message, "content");
         view.IsAssistant = string.Equals(S(message, "role"), "assistant", StringComparison.OrdinalIgnoreCase);
-        view.CanRead = view.IsAssistant && !string.IsNullOrWhiteSpace(view.Text)
+        view.CanRead = (view.IsAssistant || S(message, "role") == "user") && !string.IsNullOrWhiteSpace(view.Text)
             && S(message, "status").ToLowerInvariant() is "completed" or "cancelled" or "interrupted" or "failed";
         RefreshMessageActionView(view);
     }
@@ -73,6 +73,27 @@ public sealed partial class NativeAssistantPage
         return view;
     }
 
+    private MenuFlyout? CreateReadFromMenu(FrameworkElement target, Windows.Foundation.Point point)
+    {
+        foreach (var (id, entry) in _messageViews)
+        {
+            if (!_messageActionViews.TryGetValue(id, out var view) || !view.CanRead || view.SessionId != _session) continue;
+            var blocks = MessageBody(entry.View).Children.OfType<Missum.App.Controls.NativeStreamingMarkdown>().Cast<FrameworkElement>().ToArray();
+            var excerpt = Missum.App.Controls.NativeConversationSelection.ReadableSuffix(blocks, target);
+            if (excerpt.Length == 0) continue;
+            if (!_messages.TryGetValue(id, out var message) || !DateTimeOffset.TryParse(S(message, "updatedAt"), out var updatedAt)) return null;
+            var session = _session;
+            var menu = new MenuFlyout();
+            var read = new MenuFlyoutItem { Text = "Ab hier vorlesen", Icon = new FontIcon { Glyph = "\uE767" } };
+            read.Click += async (_, _) => { if (_session == session) await StartMessageSpeechAsync(view, excerpt, updatedAt); };
+            menu.Items.Add(read);
+            var copy = new MenuFlyoutItem { Text = "Nachricht kopieren" };
+            copy.Click += (_, _) => CopyMessageText(view); menu.Items.Add(copy);
+            return menu;
+        }
+        return null;
+    }
+
     private async void CopyMessageText(MessageActionView view)
     {
         try
@@ -96,7 +117,7 @@ public sealed partial class NativeAssistantPage
         catch (Exception exception) when (exception is not OutOfMemoryException) { ShowMessageActionError(exception.Message); }
     }
 
-    private async Task StartMessageSpeechAsync(MessageActionView view)
+    private async Task StartMessageSpeechAsync(MessageActionView view, string? excerpt = null, DateTimeOffset? expectedUpdatedAt = null)
     {
         if (_disposed || _messageActionsDisposed || _messageSpeechActionBusy || !view.CanRead) return;
         if (!Guid.TryParse(view.MessageId, out var messageId)) { ShowMessageActionError("Die gespeicherte Nachricht hat keine gültige ID."); return; }
@@ -120,7 +141,7 @@ public sealed partial class NativeAssistantPage
             _speaking = true;
             var request = ++_messageSpeechRequest;
             RefreshAllMessageActions();
-            _messageSpeechTask = ReadPersistedMessageAsync(service, view.SessionId, messageId, request, cancellation);
+            _messageSpeechTask = ReadPersistedMessageAsync(service, view.SessionId, messageId, request, cancellation, excerpt, expectedUpdatedAt);
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested || _messageSpeechStopRequested) { }
         catch (Exception exception) when (exception is not OutOfMemoryException) { ShowMessageActionError(exception.Message); }
@@ -132,7 +153,7 @@ public sealed partial class NativeAssistantPage
     }
 
     private async Task ReadPersistedMessageAsync(MissumAiAssistantService service, Guid sessionId, Guid messageId,
-        long request, CancellationTokenSource cancellation)
+        long request, CancellationTokenSource cancellation, string? excerpt = null, DateTimeOffset? expectedUpdatedAt = null)
     {
         try
         {
@@ -154,7 +175,7 @@ public sealed partial class NativeAssistantPage
                     if (progress.State == SpeechPlaybackState.Paused) _messageSpeechStatus = "Vorlesen pausiert";
                     RefreshAllMessageActions();
                 }),
-                cancellationToken: cancellation.Token);
+                cancellationToken: cancellation.Token, messageExcerpt: excerpt, expectedMessageUpdatedAt: expectedUpdatedAt);
         }
         catch (OperationCanceledException) { }
         catch (Exception exception) when (exception is not OutOfMemoryException)
@@ -264,16 +285,16 @@ public sealed partial class NativeAssistantPage
     {
         var active = _speaking && IsMessageSpeechSource(view);
         var microphone = _microphone.Current;
-        view.Panel.Visibility = view.IsAssistant && !string.IsNullOrWhiteSpace(view.Text) ? Visibility.Visible : Visibility.Collapsed;
+        view.Panel.Visibility = !string.IsNullOrWhiteSpace(view.Text) ? Visibility.Visible : Visibility.Collapsed;
         view.Copy.IsEnabled = view.CopyMenu.IsEnabled = !string.IsNullOrWhiteSpace(view.Text);
-        view.Read.Visibility = view.IsAssistant ? Visibility.Visible : Visibility.Collapsed;
+        view.Read.Visibility = Visibility.Visible;
         view.Read.IsEnabled = active || view.CanRead && !_messageSpeechActionBusy;
         ((FontIcon)view.Read.Content).Glyph = active ? "\uE71A" : "\uE767";
-        var readLabel = active ? "Vorlesen beenden" : view.CanRead ? "Antwort vorlesen" : "Nach Abschluss vorlesen";
+        var readLabel = active ? "Vorlesen beenden" : view.CanRead ? "Nachricht vorlesen" : "Nach Abschluss vorlesen";
         ToolTipService.SetToolTip(view.Read, readLabel);
         AutomationProperties.SetName(view.Read, readLabel);
         view.ReadMenu.IsEnabled = view.CanRead && !active && !_messageSpeechActionBusy;
-        view.ReadMenu.Visibility = view.IsAssistant ? Visibility.Visible : Visibility.Collapsed;
+        view.ReadMenu.Visibility = Visibility.Visible;
         view.Pause.Visibility = active ? Visibility.Visible : Visibility.Collapsed;
         view.Pause.IsEnabled = active && microphone.CanPauseSpeech;
         view.PauseMenu.IsEnabled = view.Pause.IsEnabled;
@@ -290,8 +311,7 @@ public sealed partial class NativeAssistantPage
     private void ShowMessageActionError(string message)
     {
         if (_disposed || _messageActionsDisposed) return;
-        ErrorBar.Message = message;
-        ErrorBar.IsOpen = true;
+        ShowError(message);
     }
 
     private void DisposeMessageActions()
@@ -327,12 +347,12 @@ public sealed partial class NativeAssistantPage
         public long CopyVersion { get; set; }
         public StackPanel Panel { get; } = new() { Orientation = Orientation.Horizontal, Spacing = 3, MinHeight = 28 };
         public Button Copy { get; } = MessageActionButton("\uE8C8", "Nachricht kopieren");
-        public Button Read { get; } = MessageActionButton("\uE767", "Antwort vorlesen");
+        public Button Read { get; } = MessageActionButton("\uE767", "Nachricht vorlesen");
         public Button Pause { get; } = MessageActionButton("\uE769", "Vorlesen pausieren");
         public TextBlock Status { get; } = new() { FontSize = 13, Foreground = Brush(145), MaxWidth = 310, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(5, 0, 0, 0) };
         public MenuFlyout Menu { get; } = new();
         public MenuFlyoutItem CopyMenu { get; } = new() { Text = "Nachricht kopieren", Icon = new FontIcon { Glyph = "\uE8C8" } };
-        public MenuFlyoutItem ReadMenu { get; } = new() { Text = "Antwort vorlesen", Icon = new FontIcon { Glyph = "\uE767" } };
+        public MenuFlyoutItem ReadMenu { get; } = new() { Text = "Nachricht vorlesen", Icon = new FontIcon { Glyph = "\uE767" } };
         public MenuFlyoutItem PauseMenu { get; } = new() { Text = "Vorlesen pausieren", Icon = new FontIcon { Glyph = "\uE769" } };
         public MenuFlyoutItem StopMenu { get; } = new() { Text = "Vorlesen beenden", Icon = new FontIcon { Glyph = "\uE71A" } };
     }

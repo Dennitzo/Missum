@@ -1,6 +1,7 @@
-﻿<Page x:Class="Missum.App.Pages.NativeAssistantPage"
+<Page x:Class="Missum.App.Pages.NativeAssistantPage"
  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ xmlns:controls="using:Missum.App.Controls"
  xmlns:primitives="using:Microsoft.UI.Xaml.Controls.Primitives"
  FontFamily="Segoe UI Variable Text" FontWeight="Normal" Background="{ThemeResource MissumWindowBrush}" Loaded="OnLoaded">
  <Page.Resources>
@@ -61,17 +62,6 @@
    <Setter Property="Width" Value="36"/><Setter Property="Height" Value="36"/>
    <Setter Property="MinWidth" Value="36"/><Setter Property="MinHeight" Value="36"/><Setter Property="CornerRadius" Value="18"/>
   </Style>
-  <Style x:Key="ComposerChipStyle" TargetType="Button">
-   <Setter Property="Background" Value="{ThemeResource MissumLayerStrongBrush}"/><Setter Property="BorderBrush" Value="{ThemeResource MissumStrokeBrush}"/>
-   <Setter Property="BorderThickness" Value="1"/><Setter Property="CornerRadius" Value="17"/>
-   <Setter Property="Padding" Value="13,6"/><Setter Property="MinHeight" Value="34"/>
-   <Setter Property="Height" Value="34"/><Setter Property="FontSize" Value="13"/>
-   <Setter Property="VerticalAlignment" Value="Center"/>
-  </Style>
-  <Style x:Key="ActiveComposerChipStyle" TargetType="Button" BasedOn="{StaticResource ComposerChipStyle}">
-   <Setter Property="Background" Value="{ThemeResource MissumAccentSubtleBrush}"/>
-   <Setter Property="BorderBrush" Value="{ThemeResource MissumAccentBrush}"/>
-  </Style>
  </Page.Resources>
  <Grid x:Name="LayoutRoot" Margin="0" ColumnSpacing="0">
   <Grid.ColumnDefinitions><ColumnDefinition x:Name="SidebarColumn" Width="288"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
@@ -87,7 +77,7 @@
     <TextBox x:Name="SearchBox" Grid.Row="1" Margin="0,0,20,0" PlaceholderText="Chats durchsuchen" Visibility="Collapsed" TextChanged="OnSearchChanged"/>
     <!-- Reserve a permanent gutter for the native scrollbar, including its expanded hover state. -->
     <ScrollViewer Grid.Row="2" MinWidth="0" HorizontalContentAlignment="Stretch" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto"><StackPanel Spacing="7" Margin="0,0,20,0" MinWidth="0">
-     <Grid Margin="0,10,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="32"/></Grid.ColumnDefinitions><TextBlock Text="Projekte" FontSize="13" Foreground="{ThemeResource MissumMutedTextBrush}" Margin="10,0,0,0" VerticalAlignment="Center"/><Button Grid.Column="1" Style="{StaticResource RoundIconButtonStyle}" HorizontalAlignment="Right" VerticalAlignment="Center" Click="OnAddProject" ToolTipService.ToolTip="Projekt hinzufügen" AutomationProperties.Name="Projekt hinzufügen"><FontIcon Glyph="&#xE710;" FontSize="13"/></Button></Grid>
+     <Grid x:Name="ProjectsHeader" Background="Transparent" Margin="0,10,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="32"/></Grid.ColumnDefinitions><TextBlock Text="Projekte" FontSize="13" Foreground="{ThemeResource MissumMutedTextBrush}" Margin="10,0,0,0" VerticalAlignment="Center"/><Button x:Name="AddProjectButton" Opacity="0" Grid.Column="1" Style="{StaticResource RoundIconButtonStyle}" HorizontalAlignment="Right" VerticalAlignment="Center" Click="OnAddProject" ToolTipService.ToolTip="Projekt hinzufügen" AutomationProperties.Name="Projekt hinzufügen"><FontIcon Glyph="&#xE710;" FontSize="13"/></Button></Grid>
      <StackPanel x:Name="ProjectsPanel" Spacing="4"/>
     </StackPanel></ScrollViewer>
    </Grid>
@@ -107,7 +97,11 @@
      <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
      <ScrollViewer x:Name="ConversationScroll" SizeChanged="OnConversationSizeChanged" ViewChanged="OnConversationViewChanged" HorizontalContentAlignment="Stretch" VerticalScrollBarVisibility="Hidden" HorizontalScrollBarVisibility="Disabled" HorizontalScrollMode="Disabled" Padding="42,20,42,24">
       <Grid x:Name="ConversationContent" HorizontalAlignment="Stretch">
-       <StackPanel x:Name="MessagesPanel" Spacing="24"/>
+       <StackPanel Spacing="12">
+        <StackPanel x:Name="MessagesPanel" Spacing="24"/>
+        <TextBlock x:Name="StatusText" Visibility="Collapsed" TextWrapping="Wrap" Foreground="{ThemeResource MissumMutedTextBrush}" FontSize="14"/>
+        <InfoBar x:Name="ErrorBar" IsOpen="False" IsClosable="True" Severity="Error" Closed="OnChatErrorClosed"/>
+       </StackPanel>
        <StackPanel x:Name="WelcomePanel" VerticalAlignment="Center" HorizontalAlignment="Center" Spacing="16" Margin="0,130,0,90"><TextBlock Text="Womit kann ich dir helfen?" FontSize="29" FontWeight="SemiBold" HorizontalAlignment="Center"/><TextBlock Text="Schreiben, entdecken, entwickeln." Foreground="{ThemeResource MissumMutedTextBrush}" HorizontalAlignment="Center"/></StackPanel>
       </Grid>
      </ScrollViewer>
@@ -115,19 +109,7 @@
      <Button x:Name="ScrollToBottomButton" Style="{StaticResource RoundIconButtonStyle}" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,12" Background="{ThemeResource MissumLayerStrongBrush}" BorderBrush="{ThemeResource MissumStrokeBrush}" Click="OnScrollToBottom" ToolTipService.ToolTip="Zum neuesten Beitrag" AutomationProperties.Name="Zum neuesten Beitrag">
       <Path Width="16" Height="16" Data="M8,2 L8,14 M3,9 L8,14 L13,9" Stroke="{ThemeResource TextFillColorPrimaryBrush}" StrokeThickness="1.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
      </Button>
-     <InfoBar x:Name="ErrorBar" Grid.Row="1" IsOpen="False" IsClosable="True" Severity="Error" Margin="0,0,0,8"/>
-     <StackPanel Grid.Row="2" MaxWidth="960" HorizontalAlignment="Stretch" Spacing="7">
-      <Grid x:Name="ComposerStatusRow" Visibility="Collapsed" Height="26" Margin="14,0" ColumnSpacing="9"><Grid.ColumnDefinitions><ColumnDefinition Width="18"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-       <ProgressRing x:Name="ActivityRing" Width="16" Height="16" IsActive="False" Foreground="{ThemeResource MissumAccentBrush}"/>
-       <TextBlock x:Name="StatusText" Grid.Column="1" Foreground="{ThemeResource MissumMutedTextBrush}" FontSize="14" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
-      </Grid>
-      <ScrollViewer x:Name="ComposerChipsScroll" HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled" HorizontalScrollMode="Enabled" VerticalScrollMode="Disabled" HorizontalAlignment="Center">
-       <StackPanel Orientation="Horizontal" Spacing="8">
-        <Button x:Name="CaptionChip" Content="Live-Untertitel  ×" Style="{StaticResource ActiveComposerChipStyle}" Visibility="Collapsed" Click="OnStopCaptions" ToolTipService.ToolTip="Live-Untertitel beenden" AutomationProperties.Name="Live-Untertitel beenden"/>
-        <Button x:Name="SelectedToolChip" Style="{StaticResource ActiveComposerChipStyle}" Visibility="Collapsed" Click="OnClearTool" MaxWidth="280"/>
-        <Button x:Name="ChangesSummaryButton" Style="{StaticResource ComposerChipStyle}" Visibility="Collapsed" Click="OnChangesSummaryClick" AutomationProperties.Name="Dateiänderungen überprüfen"/>
-       </StackPanel>
-      </ScrollViewer>
+     <StackPanel Grid.Row="2" MaxWidth="960" HorizontalAlignment="Stretch">
       <Border x:Name="ComposerSurface" Background="{ThemeResource MissumInputBrush}" BorderBrush="{ThemeResource MissumStrokeBrush}" BorderThickness="1" CornerRadius="26" Padding="12,10,10,9">
        <ContentControl x:Name="ComposerInteractionHost" IsTabStop="False" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch">
        <Grid RowSpacing="9"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="36"/></Grid.RowDefinitions>
@@ -145,6 +127,12 @@
         </TextBox>
         <Grid Grid.Row="1" Margin="3,0,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="36"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="48"/><ColumnDefinition Width="36"/></Grid.ColumnDefinitions>
          <Button Style="{StaticResource ComposerRoundIconButtonStyle}" Click="OnToolsClick" ToolTipService.ToolTip="Dateien und Werkzeuge" AutomationProperties.Name="Dateien und Werkzeuge"><FontIcon Glyph="&#xE710;" FontSize="19"/></Button>
+         <ScrollViewer x:Name="ComposerChipsScroll" Grid.Column="1" HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled" HorizontalScrollMode="Enabled" VerticalScrollMode="Disabled" VerticalAlignment="Center" Margin="2,0,6,0">
+          <StackPanel Orientation="Horizontal" Spacing="4">
+           <controls:NativeComposerToolChip x:Name="SelectedToolChip" Visibility="Collapsed" Click="OnClearTool"/>
+           <controls:NativeComposerToolChip x:Name="CaptionChip" Visibility="Collapsed" Click="OnStopCaptions"/>
+          </StackPanel>
+         </ScrollViewer>
          <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="5" Margin="0,0,14,0">
           <Button x:Name="ContextIndicator" Style="{StaticResource ComposerRoundIconButtonStyle}" PointerEntered="OnContextPointerEntered" PointerExited="OnContextPointerExited" Click="OnContextClicked" AutomationProperties.Name="Kontext noch nicht gemessen">
            <ToolTipService.ToolTip><ToolTip x:Name="ContextToolTip" Placement="Top" Content="Kontext noch nicht gemessen"/></ToolTipService.ToolTip>
@@ -168,7 +156,7 @@
     <Border x:Name="Inspector" Visibility="Visible" HorizontalAlignment="Right" VerticalAlignment="Top" Width="304" Background="{ThemeResource MissumLayerStrongBrush}" BorderBrush="{ThemeResource MissumStrokeBrush}" BorderThickness="1" CornerRadius="24" Padding="18,12,18,18" Margin="0,10,22,0" Translation="0,0,32" AutomationProperties.Name="Ausgaben und Quellen">
      <Border.Shadow><ThemeShadow/></Border.Shadow>
      <ScrollViewer HorizontalScrollBarVisibility="Disabled" HorizontalScrollMode="Disabled">
-      <StackPanel Spacing="18"><Grid><TextBlock Text="Ausgaben" FontSize="14" Foreground="{ThemeResource MissumMutedTextBrush}" VerticalAlignment="Center"/><Button HorizontalAlignment="Right" Style="{StaticResource RoundIconButtonStyle}" Click="OnToggleInspector" ToolTipService.ToolTip="Ausgaben schließen" AutomationProperties.Name="Ausgaben schließen"><FontIcon Glyph="&#xE711;" FontSize="12"/></Button></Grid><Grid x:Name="InspectorProjectRow" PointerEntered="OnInspectorProjectEntered" PointerExited="OnInspectorProjectExited" ColumnSpacing="10"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="32"/></Grid.ColumnDefinitions><FontIcon Glyph="&#xE8B7;" FontSize="16"/><TextBlock Grid.Column="1" x:Name="WorkspaceText" Text="Kein Projekt ausgewählt" FontSize="14" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/><Button Grid.Column="2" x:Name="InspectorProjectMenu" Opacity="0" Style="{StaticResource RoundIconButtonStyle}" Click="OnInspectorProjectMenu" GotFocus="OnInspectorProjectEntered" LostFocus="OnInspectorProjectExited" AutomationProperties.Name="Projektoptionen"><FontIcon Glyph="&#xE712;" FontSize="17"/></Button></Grid><StackPanel x:Name="OutputsPanel" Spacing="8"/><TextBlock Text="Quellen" FontSize="14" Foreground="{ThemeResource MissumMutedTextBrush}"/><StackPanel x:Name="SourcesPanel" Spacing="8"/><TextBlock x:Name="SourcesEmpty" Text="Noch keine Quellen" Foreground="{ThemeResource MissumMutedTextBrush}" Opacity="0.75" FontSize="12"/></StackPanel>
+      <StackPanel Spacing="2"><Grid><TextBlock Text="Ausgaben" FontSize="14" Foreground="{ThemeResource MissumMutedTextBrush}" VerticalAlignment="Center"/><Button HorizontalAlignment="Right" Style="{StaticResource RoundIconButtonStyle}" Click="OnToggleInspector" ToolTipService.ToolTip="Ausgaben schließen" AutomationProperties.Name="Ausgaben schließen"><FontIcon Glyph="&#xE711;" FontSize="12"/></Button></Grid><StackPanel Spacing="2"><Grid x:Name="InspectorProjectRow" PointerEntered="OnInspectorProjectEntered" PointerExited="OnInspectorProjectExited" ColumnSpacing="10"><Grid.ColumnDefinitions><ColumnDefinition Width="16"/><ColumnDefinition Width="*"/><ColumnDefinition Width="32"/></Grid.ColumnDefinitions><FontIcon Glyph="&#xE8B7;" FontSize="16"/><TextBlock Grid.Column="1" x:Name="WorkspaceText" Text="Kein Projekt ausgewählt" FontSize="14" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/><Button Grid.Column="2" x:Name="InspectorProjectMenu" Opacity="0" Style="{StaticResource RoundIconButtonStyle}" Click="OnInspectorProjectMenu" GotFocus="OnInspectorProjectEntered" LostFocus="OnInspectorProjectExited" AutomationProperties.Name="Projektoptionen"><FontIcon Glyph="&#xE712;" FontSize="17"/></Button></Grid><Button x:Name="ChangesSummaryButton" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Background="Transparent" BorderThickness="0" CornerRadius="4" Padding="0,6" MinHeight="32" Click="OnChangesSummaryClick" AutomationProperties.Name="Dateiänderungen überprüfen"/></StackPanel><StackPanel x:Name="OutputsPanel" Spacing="2" Visibility="Collapsed"/><TextBlock Text="Quellen" MinHeight="32" Padding="0,6" FontSize="14" Foreground="{ThemeResource MissumMutedTextBrush}"/><StackPanel x:Name="SourcesPanel" Spacing="2" Visibility="Collapsed"/><TextBlock x:Name="SourcesEmpty" MinHeight="32" Padding="0,6" Text="Noch keine Quellen" Foreground="{ThemeResource MissumMutedTextBrush}" Opacity="0.75" FontSize="12"/></StackPanel>
      </ScrollViewer>
     </Border>
     <primitives:ScrollBar x:Name="OuterChatScrollBar" Style="{StaticResource OuterScrollStyle}" Width="12" Margin="0,0,5,5" HorizontalAlignment="Right" Orientation="Vertical" Visibility="Collapsed" SmallChange="48" ValueChanged="OnOuterScrollChanged" AutomationProperties.Name="Chat scrollen"/>
