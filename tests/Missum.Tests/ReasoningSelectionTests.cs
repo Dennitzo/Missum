@@ -96,7 +96,7 @@ public sealed class ReasoningSelectionTests
     }
 
     [Fact]
-    public async Task ChoicesSurviveSettingsReloadAndStayScopedToModelAndRole()
+    public async Task ChoicesSurviveSettingsReloadAndAreGlobalAcrossModes()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         using var store = new JsonSettingsStore(new MissumInfrastructureOptions { DataDirectory = environment.Directory });
@@ -105,7 +105,6 @@ public sealed class ReasoningSelectionTests
             await settings.InitializeAsync();
             await settings.UpdateAsync(current => current with {
                 ReasoningEffortsByModel = new() {
-                    [MissumAiAssistantService.ReasoningKey("Model-A", "coding")] = "low",
                     [MissumAiAssistantService.ReasoningKey("Model-A", "general")] = "high",
                     [MissumAiAssistantService.ReasoningKey("Model-B", "coding")] = "future_level"
                 }
@@ -114,10 +113,10 @@ public sealed class ReasoningSelectionTests
         using var reloadedStore = new JsonSettingsStore(new MissumInfrastructureOptions { DataDirectory = environment.Directory });
         using var reloaded = new SettingsCoordinator(reloadedStore);
         await reloaded.InitializeAsync();
-        Assert.Equal("low", MissumAiAssistantService.StoredReasoning(reloaded.Current, "MODEL-A", "coding"));
+        Assert.Equal("high", MissumAiAssistantService.StoredReasoning(reloaded.Current, "MODEL-A", "coding"));
         Assert.Equal("high", MissumAiAssistantService.StoredReasoning(reloaded.Current, "Model-A", "general"));
         Assert.Equal("future_level", MissumAiAssistantService.StoredReasoning(reloaded.Current, "Model-B", "coding"));
-        Assert.Null(MissumAiAssistantService.StoredReasoning(reloaded.Current, "Model-B", "general"));
+        Assert.Equal("future_level", MissumAiAssistantService.StoredReasoning(reloaded.Current, "Model-B", "general"));
         Assert.Null(MissumAiAssistantService.StoredReasoning(new AppSettings(), "new-model", "coding"));
     }
 

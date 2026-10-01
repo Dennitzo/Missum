@@ -16,7 +16,7 @@ namespace Missum.Tests;
 public sealed class CodingIntegrationTests
 {
     [Fact]
-    public async Task CodingSettingsSurviveRestartIndependentlyFromGeneralModel()
+    public async Task GlobalModelAndWorkspaceSurviveRestart()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var workspace = Path.Combine(environment.Directory, "Projekt mit Leerzeichen");
@@ -36,13 +36,13 @@ public sealed class CodingIntegrationTests
         {
             await restarted.InitializeAsync();
             Assert.Equal("vendor/general-model:q8_0", restarted.Current.SelectedModel);
-            Assert.Equal("local/coder-model:q4_k_m", restarted.Current.SelectedCodingModel);
+            Assert.Equal(restarted.Current.SelectedModel, restarted.Current.SelectedCodingModel);
             Assert.Equal(workspace, restarted.Current.CodingWorkspacePath);
-            await restarted.UpdateAsync(settings => settings with { SelectedCodingModel = "local/another-coder:q6_k" });
+            await restarted.UpdateAsync(settings => settings with { SelectedModel = "local/another-coder:q6_k" });
         }
 
         var persisted = await reopenedStore.LoadAsync();
-        Assert.Equal("vendor/general-model:q8_0", persisted.SelectedModel);
+        Assert.Equal("local/another-coder:q6_k", persisted.SelectedModel);
         Assert.Equal("local/another-coder:q6_k", persisted.SelectedCodingModel);
         Assert.Equal(workspace, persisted.CodingWorkspacePath);
     }
@@ -61,7 +61,7 @@ public sealed class CodingIntegrationTests
 
         var restored = await store.LoadAsync();
         Assert.Equal("vendor/general-model", restored.SelectedModel);
-        Assert.Null(restored.SelectedCodingModel);
+        Assert.Equal(restored.SelectedModel, restored.SelectedCodingModel);
         Assert.Null(restored.CodingWorkspacePath);
     }
 
@@ -75,7 +75,7 @@ public sealed class CodingIntegrationTests
     }
 
     [Fact]
-    public async Task NativeCatalogPopulatesBothTextSelectorsWithoutReplacingTheirSelections()
+    public async Task NativeCatalogRefreshKeepsTheGlobalModelSelection()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
@@ -109,9 +109,9 @@ public sealed class CodingIntegrationTests
         Assert.Equal(new[] { generalId, codingId }, viewModel.Models.Select(model => model.Id));
         Assert.Equal(new[] { generalId, codingId }, viewModel.CodingModels.Select(model => model.Id));
         Assert.Equal(generalId, viewModel.SelectedGeneralModelItem?.Id);
-        Assert.Equal(codingId, viewModel.SelectedCodingModelItem?.Id);
+        Assert.Equal(generalId, viewModel.SelectedCodingModelItem?.Id);
         Assert.Equal(generalId, settings.Current.SelectedModel);
-        Assert.Equal(codingId, settings.Current.SelectedCodingModel);
+        Assert.Equal(generalId, settings.Current.SelectedCodingModel);
     }
 
     [Fact]
@@ -178,7 +178,7 @@ public sealed class CodingIntegrationTests
     }
 
     [Fact]
-    public async Task CodingSnapshotRestoresItsRuntimeContextWindowIndependentlyFromGeneralModel()
+    public async Task GlobalModelContextRemainsStableAcrossCodingAndGeneralModes()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var store = environment.Get<ISettingsStore>();
@@ -193,7 +193,7 @@ public sealed class CodingIntegrationTests
             await settings.UpdateAsync(current => current with
             {
                 ActiveSessionId = session.Id,
-                SelectedModel = "openai/gpt-oss-120b",
+                SelectedModel = codingModel,
                 SelectedCodingModel = codingModel,
             });
             var snapshot = JsonSerializer.SerializeToElement(
@@ -224,8 +224,8 @@ public sealed class CodingIntegrationTests
             return Task.CompletedTask;
         });
         Assert.NotNull(general);
-        Assert.Equal(ModelContextProfiles.GptOss120BMaximum, general.Value.GetProperty("contextLimit").GetInt32());
-        Assert.Equal(AppSettings.DefaultSelectedModel, restartedSettings.Current.SelectedModel);
+        Assert.Equal(ModelContextProfiles.Qwen38Maximum, general.Value.GetProperty("contextLimit").GetInt32());
+        Assert.Equal(codingModel, restartedSettings.Current.SelectedModel);
     }
 
     [Fact]

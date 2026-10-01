@@ -289,6 +289,7 @@ public sealed record AppSettings
     public string MissumAiProtocolVersion { get; init; } = "1.0";
     public string LiveCaptionLanguage { get; init; } = "auto";
     public string? SelectedModel { get; init; } = DefaultSelectedModel;
+    [System.Text.Json.Serialization.JsonIgnore]
     public string? SelectedCodingModel { get; init; }
     public string? CodingWorkspacePath { get; init; }
     public bool CodingToolStepsExpanded { get; init; }

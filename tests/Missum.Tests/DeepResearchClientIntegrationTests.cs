@@ -77,6 +77,22 @@ public sealed class DeepResearchClientIntegrationTests
         Assert.Contains("Wärmepumpen", introductions[0]);
         Assert.Contains("Quellen", introductions[^1]);
         Assert.Single(requests);
+        var scienceRequest = requests[0].Messages[^1].Content[0].Text!;
+        Assert.Contains(prompt, scienceRequest);
+        Assert.Contains("Herleitung und Rechenweg sind ein Pflichtteil der wissenschaftlichen Publikation", scienceRequest);
+        Assert.Contains("vollständigen Rechenschritte bis zum Ergebnis", scienceRequest);
+        Assert.Contains("Führe Einheiten in jedem Rechenschritt mit", scienceRequest);
+        Assert.Contains("Dimensionen beider Seiten", scienceRequest);
+        Assert.Contains("Symbol- und Einheitenlegende", scienceRequest);
+        Assert.Contains("als kurze Liste mit je einem Stichpunkt", scienceRequest);
+        Assert.Contains("Verwende keine Tabellen für die Einheitenlegende", scienceRequest);
+        Assert.DoesNotContain("Markdown-Tabelle ist dafür geeignet", scienceRequest);
+        Assert.Contains("dimensionslose Größen haben die Einheit 1", scienceRequest);
+        Assert.Contains("natürliche Einheiten", scienceRequest);
+        Assert.Contains("Umrechnung zu SI", scienceRequest);
+        Assert.Contains("fehlenden Angaben oder den ungelösten Schritt", scienceRequest);
+        Assert.Contains(@"\mathrm{kg}\,\mathrm{m}^{2}\,\mathrm{s}^{-2}", scienceRequest);
+        Assert.DoesNotContain(@"\\mathrm", scienceRequest);
         var messages = await chats.ListMessagesAsync(session.Id);
         var introduction = Assert.Single(messages[^1].ToolSteps!, step => step.Tool == "assistant.narration");
         Assert.Equal("completed", introduction.Status);
@@ -101,7 +117,7 @@ public sealed class DeepResearchClientIntegrationTests
         {
             MissumAiServerUrl = "http://127.0.0.1:65000",
             ActiveSessionId = session.Id,
-            SelectedModel = GeneralModel,
+            SelectedModel = coding ? CodingModel : GeneralModel,
             SelectedCodingModel = CodingModel,
         });
         using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());

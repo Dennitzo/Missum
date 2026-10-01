@@ -164,17 +164,14 @@ public sealed partial class SettingsViewModel(
             throw new InvalidOperationException("Missum benötigt eine gültige HTTP- oder HTTPS-Adresse zum Docker-Gateway.");
         }
 
-        var generalModel = PreferCurrentSelection(
-            SelectedGeneralModelItem?.Id,
-            SelectedModel,
-            AppSettings.DefaultSelectedModel);
+
         await settings.UpdateAsync(current => current with
         {
             IsAutomaticSpeechEnabled = IsAutomaticSpeechEnabled,
             MissumAiServerUrl = missumAiUri.ToString().TrimEnd('/'),
             LiveCaptionLanguage = string.IsNullOrWhiteSpace(LiveCaptionLanguage) ? "auto" : LiveCaptionLanguage.Trim(),
-            SelectedModel = generalModel,
-            SelectedCodingModel = SelectedCodingModelItem?.Id ?? SelectedCodingModel,
+            SelectedModel = current.SelectedModel,
+            SelectedCodingModel = current.SelectedModel,
             CodingToolStepsExpanded = CodingToolStepsExpanded,
             ReasoningEffort = "auto",
             Theme = Theme,

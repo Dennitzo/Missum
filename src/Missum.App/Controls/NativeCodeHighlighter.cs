@@ -174,7 +174,7 @@ public sealed class NativeCodeHighlighter
                 position = DelimitedEnd(source, position + 2, "#>", limit); kind = TokenKind.Comment;
             }
             else if (!markup && ((hashComments && character == '#') || (cComments && Starts(source, position, "//", limit))
-                || (language == "sql" && Starts(source, position, "--", limit))))
+                || (language is "sql" or "lean" && Starts(source, position, "--", limit))))
             {
                 position = LineEnd(source, position, limit); kind = TokenKind.Comment;
             }
@@ -369,6 +369,7 @@ public sealed class NativeCodeHighlighter
         ["cpp"] = Words("alignas alignof asm auto break case catch class concept const constexpr consteval constinit continue co_await co_return co_yield default delete do else enum explicit export extern false for friend if inline mutable namespace new noexcept nullptr operator private protected public register reinterpret_cast requires return signed sizeof static static_assert static_cast struct switch template this thread_local throw true try typedef typeid typename union unsigned using virtual volatile while"),
         ["java"] = Words("abstract assert break case catch class const continue default do else enum extends final finally for if implements import instanceof interface native new null package private protected public record return sealed static strictfp super switch synchronized this throw throws transient true false try var void volatile while yield"),
         ["go"] = Words("break case chan const continue default defer else fallthrough for func go goto if import interface map package range return select struct switch type var true false nil"),
+        ["lean"] = Words("import open namespace end section variable variables universe universes theorem lemma example def abbrev structure inductive instance class where deriving by have show let in fun match with if then else do return axiom constant opaque noncomputable set_option attribute syntax macro partial unsafe rfl exact intro intros apply constructor cases induction simp simpa rw calc decide omega aesop sorry admit"),
         ["rust"] = Words("as async await break const continue crate dyn else enum extern false fn for if impl in let loop match mod move mut pub ref return self Self static struct super trait true type unsafe use where while"),
         ["kotlin"] = Words("as break class continue do else false for fun if in interface is null object package return super this throw true try typealias typeof val var when while by catch constructor delegate dynamic field file finally get import init param property receiver set setparam where actual abstract annotation companion const crossinline data enum expect external final infix inline inner internal lateinit noinline open operator out override private protected public reified sealed suspend tailrec vararg"),
     };

@@ -21,6 +21,7 @@ internal sealed class NativePublicationView : Grid
     private long _version;
     private uint _index;
     private string? _path;
+    private double _pageAspectRatio = 1.4142;
     internal uint PageCount => _document?.PageCount ?? 0;
     internal bool HasRenderedPage => _page.Source is not null;
 
@@ -34,6 +35,8 @@ internal sealed class NativePublicationView : Grid
         _scroll = new ScrollViewer { Content = _page, Padding = new Thickness(18, 0, 18, 24), HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
             ZoomMode = ZoomMode.Enabled, MinZoomFactor = .5f, MaxZoomFactor = 3f };
         Grid.SetRow(_scroll, 1); Children.Add(_scroll);
+        _scroll.SizeChanged += (_, _) => FitPageToViewport();
+        Loaded += (_, _) => FitPageToViewport();
         AutomationProperties.SetName(_previous, "Vorherige PDF-Seite");
         AutomationProperties.SetName(_next, "Nächste PDF-Seite");
         AutomationProperties.SetName(_page, "Wissenschaftliche Publikation als PDF");
@@ -55,6 +58,15 @@ internal sealed class NativePublicationView : Grid
         if (version == _version) _path = path;
     }
 
+    private void FitPageToViewport()
+    {
+        if (_scroll.ActualWidth <= 36) return;
+        var width = Math.Min(1150, _scroll.ActualWidth - 36);
+        if (double.IsNaN(_page.Width) || Math.Abs(_page.Width - width) > .5) _page.Width = width;
+        var height = width * _pageAspectRatio;
+        if (double.IsNaN(_page.Height) || Math.Abs(_page.Height - height) > .5) _page.Height = height;
+    }
+
     private async Task RenderPageSafelyAsync()
     {
         try { await RenderPageAsync(++_version); }
@@ -72,7 +84,9 @@ internal sealed class NativePublicationView : Grid
         var bitmap = new BitmapImage();
         await bitmap.SetSourceAsync(stream);
         if (version != _version || !ReferenceEquals(document, _document)) return;
+        _pageAspectRatio = bitmap.PixelWidth > 0 ? (double)bitmap.PixelHeight / bitmap.PixelWidth : 1.4142;
         _page.Source = bitmap;
+        FitPageToViewport();
         _counter.Text = $"Seite {_index + 1} von {document.PageCount}";
         _previous.IsEnabled = _index > 0; _next.IsEnabled = _index + 1 < document.PageCount;
         AutomationProperties.SetHelpText(_page, _counter.Text);

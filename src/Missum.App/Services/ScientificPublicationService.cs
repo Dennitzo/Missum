@@ -53,6 +53,12 @@ public sealed class ScientificPublicationService : IDisposable
         {
             var snapshot = await ReadSnapshotAsync(projectId, cancellationToken).ConfigureAwait(false);
             if (snapshot is null) return null;
+            if (string.Equals(Path.GetFullPath(outputDirectory), _defaultDirectory, StringComparison.OrdinalIgnoreCase))
+            {
+                var workspace = _sandbox is null ? snapshot.Project.WorkspacePath
+                    : (await _sandbox.EnsureProjectAsync(projectId, cancellationToken).ConfigureAwait(false)).RootPath;
+                if (!string.IsNullOrWhiteSpace(workspace)) outputDirectory = Path.Combine(Path.GetFullPath(workspace), "publications");
+            }
             var markdown = FormatPublication(snapshot.Project, snapshot.Results, snapshot.Works, snapshot.Evidence, snapshot.Report, snapshot.Manuscript);
             ScientificPublicationImages.PreparedImages? images = null;
             if (_sandbox is not null)

@@ -82,7 +82,7 @@ public sealed class AssistantCoordinator(
         var isCoding = _displayStates.TryGetValue(update.Message.SessionId, out var previous)
             && previous.MessageId == update.Message.Id ? previous.IsCoding
                 : IsCodingAgentSession((await chats.GetSessionAsync(update.Message.SessionId, CancellationToken.None).ConfigureAwait(false))?.ChatMode);
-        var selection = isCoding ? settings.Current.SelectedCodingModel : settings.Current.SelectedModel;
+        var selection = isCoding ? settings.Current.SelectedModel : settings.Current.SelectedModel;
         _displayStates.AddOrUpdate(update.Message.SessionId,
             _ => Merge(new(update.Message.Id, selection, isCoding, true)),
             (_, current) => Merge(current.MessageId == update.Message.Id ? current : new(update.Message.Id, selection, isCoding, true)));
@@ -294,7 +294,7 @@ public sealed class AssistantCoordinator(
         // A snapshot is local UI state. Never make sidebar/session interaction wait for
         // the native model runtime, which may be offline or loading a model.
         var isCodingSession = IsCodingAgentSession(session.ChatMode);
-        var selectedModel = isCodingSession ? settings.Current.SelectedCodingModel : settings.Current.SelectedModel;
+        var selectedModel = isCodingSession ? settings.Current.SelectedModel : settings.Current.SelectedModel;
         var contextLimit = ModelContextProfiles.ResolveMaximum(selectedModel, isCodingSession ? "coding" : "general");
         ContextBuildResult context;
         if (isCodingSession)
@@ -647,13 +647,12 @@ public sealed class AssistantCoordinator(
                 var role = GetOptionalString(envelope.Payload, "role", 16) ?? "general";
                 if (role is not ("coding" or "general")) throw new ArgumentException("Unbekannte Modellrolle.");
                 var modelId = GetOptionalString(envelope.Payload, "modelId", 512) ?? "";
-                var selectedId = role == "coding" ? settings.Current.SelectedCodingModel : settings.Current.SelectedModel;
+                var selectedId = role == "coding" ? settings.Current.SelectedModel : settings.Current.SelectedModel;
                 if (modelId != selectedId) throw new InvalidOperationException("Die Modellauswahl hat sich geändert. Öffne Reasoning erneut.");
                 var options = await missumAi.GetReasoningOptionsAsync(modelId, role, cancellationToken).ConfigureAwait(false);
                 if (envelope.Type == "reasoning.set")
                 {
-                    EnsureContextCanChange();
-                    if (modelId != (role == "coding" ? settings.Current.SelectedCodingModel : settings.Current.SelectedModel))
+                    if (modelId != (role == "coding" ? settings.Current.SelectedModel : settings.Current.SelectedModel))
                         throw new InvalidOperationException("Das ausgewählte Modell hat sich während der Prüfung geändert.");
                     var effort = GetRequiredString(envelope.Payload, "effort", 32).Trim().ToLowerInvariant();
                     if (!options.Available || !options.Levels.Contains(effort))
@@ -666,6 +665,7 @@ public sealed class AssistantCoordinator(
                         return current with { ReasoningEffortsByModel = choices };
                     }, cancellationToken).ConfigureAwait(false);
                     options = options with { Selected = effort };
+                    await missumAi.RequestLiveModelSelectionAsync(cancellationToken).ConfigureAwait(false);
                 }
                 await emit("reasoning.snapshot", options, envelope.RequestId);
                 break;

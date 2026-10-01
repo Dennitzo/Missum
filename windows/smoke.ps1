@@ -138,7 +138,14 @@ try {
         Start-Sleep -Milliseconds 250
     }
     if ($process.HasExited) { throw "Missum exited early: $($process.ExitCode)" }
-    if (-not (Test-Path -LiteralPath $nativeReady)) { throw 'Native WinUI startup did not complete.' }
+    if (-not (Test-Path -LiteralPath $nativeReady)) {
+        $nativeFailure = Join-Path $smokeData 'native-ui-failure.json'
+        if (Test-Path -LiteralPath $nativeFailure -PathType Leaf) {
+            $failureDetails = Get-Content -LiteralPath $nativeFailure -Raw | ConvertFrom-Json
+            throw ("Native WinUI smoke failed: {0}" -f $failureDetails.error)
+        }
+        throw 'Native WinUI startup did not complete.'
+    }
     $readySession = [Guid]::Empty
     if ($null -eq $nativeState -or $nativeState.renderer -ne 'WinUI3' -or
         $nativeState.page -ne 'NativeAssistantPage' -or $nativeState.ready -ne $true -or
@@ -167,6 +174,13 @@ try {
         Copy-Item -LiteralPath $composerPreview -Destination $composerEvidence -Force
     }
     Write-Host 'Native composer footer, removal affordance, narrow layout and session notices verified.'
+    foreach ($sciencePreview in @('native-outputs-preview', 'native-publication-preview', 'native-changes-preview', 'native-tool-icons-preview', 'native-colored-chrome-preview')) {
+        $scienceImage = Join-Path $smokeData ($sciencePreview + '.png')
+        if (Test-Path -LiteralPath $scienceImage -PathType Leaf) {
+            $scienceEvidence = Assert-MissumArtifactPath -Path ($PublishDirectory + '.' + $sciencePreview + '.png')
+            Copy-Item -LiteralPath $scienceImage -Destination $scienceEvidence -Force
+        }
+    }
     $liveMathPreview = Join-Path $smokeData 'native-math-live-preview.png'
     if (Test-Path -LiteralPath $liveMathPreview -PathType Leaf) {
         $liveMathEvidence = Assert-MissumArtifactPath -Path ($PublishDirectory + '.math-live-preview.png')

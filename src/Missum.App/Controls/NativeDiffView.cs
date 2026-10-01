@@ -13,7 +13,7 @@ namespace Missum.App.Controls;
 public sealed partial class NativeDiffView : UserControl
 {
     private readonly StackPanel _rows = new();
-    private readonly ScrollViewer _scroll;
+    private readonly bool _wrapLines;
     private readonly SolidColorBrush _neutralForeground = ColorBrush(0xD7, 0xD7, 0xD7);
     private readonly SolidColorBrush _mutedForeground = ColorBrush(0x8D, 0x8D, 0x8D);
     private readonly SolidColorBrush _neutralBackground = ColorBrush(0x19, 0x19, 0x19);
@@ -24,22 +24,33 @@ public sealed partial class NativeDiffView : UserControl
     private readonly SolidColorBrush _metaBackground = ColorBrush(0x24, 0x24, 0x24);
     private string _diff = "";
 
-    public NativeDiffView(string diff)
+    public NativeDiffView(string diff, bool wrapLines = false)
     {
+        _wrapLines = wrapLines;
         HorizontalContentAlignment = HorizontalAlignment.Stretch;
-        _scroll = new ScrollViewer
+        if (wrapLines)
         {
-            Content = _rows,
-            MaxHeight = 420,
-            HorizontalContentAlignment = HorizontalAlignment.Stretch,
-            HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            HorizontalScrollMode = ScrollMode.Enabled,
-            VerticalScrollMode = ScrollMode.Enabled,
-            Background = _neutralBackground,
-        };
-        AutomationProperties.SetName(_scroll, "Dateiänderungen als Git-Diff");
-        Content = _scroll;
+            // An enclosing review page owns scrolling. No nested viewer can
+            // redirect wheel input or make the user scroll each file separately.
+            Content = _rows;
+            AutomationProperties.SetName(_rows, "Dateiänderungen als Git-Diff");
+        }
+        else
+        {
+            var scroll = new ScrollViewer
+            {
+                Content = _rows,
+                MaxHeight = 420,
+                HorizontalContentAlignment = HorizontalAlignment.Stretch,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollMode = ScrollMode.Enabled,
+                VerticalScrollMode = ScrollMode.Enabled,
+                Background = _neutralBackground,
+            };
+            AutomationProperties.SetName(scroll, "Dateiänderungen als Git-Diff");
+            Content = scroll;
+        }
 
         var copy = new MenuFlyoutItem { Text = "Gesamten Diff kopieren" };
         copy.Click += (_, _) =>
@@ -141,7 +152,7 @@ public sealed partial class NativeDiffView : UserControl
         {
             Background = _metaBackground,
             Padding = new Thickness(12, 4, 12, 4),
-            Child = CodeText(text, _mutedForeground),
+            Child = CodeText(text, _mutedForeground, _wrapLines),
         });
     }
 
@@ -152,7 +163,7 @@ public sealed partial class NativeDiffView : UserControl
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(52) });
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(52) });
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(24) });
-        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = _wrapLines ? new GridLength(1, GridUnitType.Star) : GridLength.Auto });
 
         AddCell(FormatLineNumber(oldLine), 0, _mutedForeground, TextAlignment.Right);
         AddCell(FormatLineNumber(newLine), 1, _mutedForeground, TextAlignment.Right);
@@ -162,7 +173,8 @@ public sealed partial class NativeDiffView : UserControl
 
         void AddCell(string value, int column, SolidColorBrush brush, TextAlignment alignment)
         {
-            var block = CodeText(value, brush);
+            var block = CodeText(value, brush, _wrapLines && column == 3);
+            block.VerticalAlignment = VerticalAlignment.Top;
             block.TextAlignment = alignment;
             block.Margin = column < 2 ? new Thickness(2, 0, 9, 0) : new Thickness(0);
             block.IsTextSelectionEnabled = column == 3;
@@ -172,14 +184,14 @@ public sealed partial class NativeDiffView : UserControl
         }
     }
 
-    private static TextBlock CodeText(string text, SolidColorBrush foreground) => new()
+    private static TextBlock CodeText(string text, SolidColorBrush foreground, bool wrap = false) => new()
     {
         Text = text,
         FontFamily = new FontFamily("Cascadia Mono"),
         FontSize = 13,
         LineHeight = 20,
         Foreground = foreground,
-        TextWrapping = TextWrapping.NoWrap,
+        TextWrapping = wrap ? TextWrapping.Wrap : TextWrapping.NoWrap,
         IsTextSelectionEnabled = true,
     };
 

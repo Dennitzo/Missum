@@ -41,7 +41,6 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     private readonly Dictionary<string, JsonElement> _pendingUserMessages = new(StringComparer.Ordinal);
     private bool _sendPending;
 
-    private Border? _changesCard;
     private string? _dictationPrefix;
     private Guid? _dictationSession;
     private string? _selectedAction;
@@ -88,8 +87,17 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         if (_initialised) { await RefreshForExternalActivationAsync(); return; }
         _initialised = true;
         await CommandAsync("app.ready", new { });
-        var navigationSmokeVisits = string.IsNullOrEmpty(Environment.GetEnvironmentVariable("MISSUM_SMOKE_INSTANCE_KEY"))
-            ? 0 : await VerifyMessageNavigationSmokeAsync();
+        var navigationSmokeVisits = 0;
+        if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("MISSUM_SMOKE_INSTANCE_KEY")))
+        {
+            try { navigationSmokeVisits = await VerifyMessageNavigationSmokeAsync(); }
+            catch (Exception exception)
+            {
+                await File.WriteAllTextAsync(Path.Combine(App.Current.DataDirectory, "native-ui-failure.json"),
+                    JsonSerializer.Serialize(new { error = exception.ToString() }));
+                throw;
+            }
+        }
         await File.WriteAllTextAsync(Path.Combine(App.Current.DataDirectory, "native-ui-ready.json"), JsonSerializer.Serialize(new { renderer = "WinUI3", page = GetType().Name, sessionId = _session, ready = _session != Guid.Empty, navigationSmokeVisits }), _lifetime.Token);
     }
 
@@ -223,7 +231,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                 var changed = next != _session;
                 _snapshot = data;
                 _session = next;
-                if (changed) { ResetConversationViews(); _expandedSteps.Clear(); _changesCard = null; ClearToolSelection(); _contextUsed = 0; _contextLimit = 0; ResetChangesSummary(); }
+                if (changed) { ResetConversationViews(); _expandedSteps.Clear(); ClearToolSelection(); _contextUsed = 0; _contextLimit = 0; ResetChangesSummary(); }
                 var newMode = S(data, "chatMode", "general");
                 if (_mode != newMode) ClearToolSelection();
                 _mode = newMode;
@@ -253,7 +261,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                 var workspace = S(data, "workspacePath");
                 WorkspaceText.Text = string.IsNullOrEmpty(workspace) ? "Kein Projekt ausgewählt" : Path.GetFileName(workspace.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
                 ToolTipService.SetToolTip(InspectorProjectRow, workspace);
-                var modelId = (_mode == "coding" ? _settings.Current.SelectedCodingModel : _settings.Current.SelectedModel); ModelLabel.Text = modelId is null ? "Modell auswählen" : modelId.Split('/').Last().Split('~')[0];
+                var modelId = (_mode == "coding" ? _settings.Current.SelectedModel : _settings.Current.SelectedModel); ModelLabel.Text = modelId is null ? "Modell auswählen" : modelId.Split('/').Last().Split('~')[0];
                 UpdateContext(data);
                 if (_reasoningModel != ModelRole + ":" + modelId) { _reasoningModel = ModelRole + ":" + modelId; _reasoning = null; ReasoningLabel.Text = ""; _ = LoadReasoningAsync(); }
                 if (data.TryGetProperty("changesSummary", out var changes)) RenderChanges(changes);
@@ -282,8 +290,6 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             {
                 if (!_changeReceiptState.ObserveStarted(_session, startedId, ReadConversationRevision(data))) return;
                 ResetChangesSummary();
-                if (_changesCard is not null) MessagesPanel.Children.Remove(_changesCard);
-                _changesCard = null; OutputsPanel.Children.Clear(); OutputsPanel.Visibility = Visibility.Collapsed;
             }
             if (data.TryGetProperty("message", out var message)) { _messages[S(message, "id")] = message; RenderMessages(); }
         }
@@ -375,6 +381,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     private void RenderMessagesNow()
     {
         ReconcilePendingMessages();
+        RenderSources(_snapshot);
         var follow = _conversationSelection?.HasSelection != true && ConversationScroll.ScrollableHeight - ConversationScroll.VerticalOffset < 90;
         var index = 0;
         foreach (var stale in _messageViews.Keys.Where(id => !_messages.ContainsKey(id)).ToArray())
@@ -418,7 +425,6 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             UpdateMessageBlocks(id, message, MessageBody(bubble));
             _messageViews[id] = (signature, bubble); index++;
         }
-        if (_changesCard is not null && !MessagesPanel.Children.Contains(_changesCard)) MessagesPanel.Children.Add(_changesCard);
         ConversationContent.UpdateLayout();
         RenderPromptTimeline();
         if (follow) ConversationScroll.ChangeView(null, ConversationScroll.ScrollableHeight, null, true);
@@ -426,65 +432,21 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     }
     private void RenderSources(JsonElement data)
     {
+        var signature = _session + "|" + ResearchState(_session).Revision + "|"
+            + string.Join("|", _messages.Values.SelectMany(message => Items(message, "toolSteps")).Select(step => S(step, "id") + S(step, "updatedAt") + S(step, "outputJson").GetHashCode(StringComparison.Ordinal)))
+            + string.Join("|", Items(data, "documents").Concat(Items(data, "attachments")).Select(item => S(item, "id")));
+        if (_sourcesSignature == signature) return;
+        _sourcesSignature = signature;
         SourcesPanel.Children.Clear();
-        foreach (var item in Items(data, "documents").Concat(Items(data, "attachments")))
-        {
-            var id = S(item, "id");
-            var document = item.TryGetProperty("pageCount", out _);
-            var button = SidebarButton("\uE8A5", S(item, "fileName"));
-            button.Padding = new Thickness(0, 6, 0, 6);
-            button.BorderThickness = new Thickness(0);
-            button.Height = double.NaN;
-            button.MinHeight = 32;
-            ((TextBlock)((Grid)button.Content).Children[1]).FontSize = 13;
-            ToolTipService.SetToolTip(button, "Anhang entfernen");
-            var menu = new MenuFlyout();
-            var remove = new MenuFlyoutItem { Text = "Anhang entfernen" };
-            remove.Click += async (_, _) => await CommandAsync(document ? "document.remove" : "attachment.remove", document ? new { documentId = id } : (object)new { attachmentId = id });
-            menu.Items.Add(remove); button.ContextFlyout = menu;
-            SourcesPanel.Children.Add(button);
-        }
+        RenderWebSources();
         SourcesEmpty.Visibility = SourcesPanel.Children.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         SourcesPanel.Visibility = SourcesPanel.Children.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
     }
 
-    private void RenderChanges(JsonElement summary)
-    {
-        if (!UpdateChangesSummary(summary)) return;
-        OutputsPanel.Children.Clear(); OutputsPanel.Visibility = Visibility.Collapsed;
-        if (_changesCard is not null) MessagesPanel.Children.Remove(_changesCard);
-        _changesCard = null;
-        var files = Items(summary, "files");
-        if (files.Length == 0) return;
-        var rows = new StackPanel { Spacing = 0 };
-        rows.Children.Add(new TextBlock { Text = files.Length == 1 ? "1 Datei bearbeitet" : $"{files.Length} Dateien bearbeitet", FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Margin = new(12, 14, 12, 14) });
-        foreach (var file in files)
-        {
-            var path = S(file, "path");
-            var added = S(file, "addedLines", "0");
-            var removed = S(file, "removedLines", "0");
-            var line = new Grid { Padding = new(12, 10, 12, 10) };
-            line.ColumnDefinitions.Add(new() { Width = new(1, GridUnitType.Star) });
-            line.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
-            line.Children.Add(new TextBlock { Text = path, FontSize = 13, TextTrimming = TextTrimming.CharacterEllipsis, Foreground = Brush(190) });
-            var count = new TextBlock { FontSize = 13 };
-            count.Inlines.Add(new Run { Text = "+" + added, Foreground = new SolidColorBrush(Color.FromArgb(255, 48, 205, 127)) });
-            count.Inlines.Add(new Run { Text = "  -" + removed, Foreground = new SolidColorBrush(Color.FromArgb(255, 255, 80, 70)) });
-            Grid.SetColumn(count, 1); line.Children.Add(count);
-            var expander = new Expander { Header = line, HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch,
-                Content = new NativeDiffView(S(file, "diff")),
-                Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new(0) };
-            rows.Children.Add(expander);
-            var output = new TextBlock { FontSize = 13, MinHeight = 32, Padding = new Thickness(0, 6, 0, 6), TextWrapping = TextWrapping.Wrap };
-            output.Inlines.Add(new Run { Text = path + "  " });
-            output.Inlines.Add(new Run { Text = "+" + added, Foreground = new SolidColorBrush(Color.FromArgb(255, 48, 205, 127)) });
-            output.Inlines.Add(new Run { Text = "  -" + removed, Foreground = new SolidColorBrush(Color.FromArgb(255, 255, 80, 70)) });
-            OutputsPanel.Children.Add(output);
-            OutputsPanel.Visibility = Visibility.Visible;
-        }
-        _changesCard = new Border { Background = Brush(33), BorderBrush = Brush(48), BorderThickness = new(1), CornerRadius = new(12), Child = rows };
-        MessagesPanel.Children.Add(_changesCard);
-    }
+    // File receipts update the compact output entry and any open review tab.
+    // The full file list belongs exclusively to the review, never after the cursor.
+    private void RenderChanges(JsonElement summary) => UpdateChangesSummary(summary);
+
     public async Task FlushDraftAsync()
     {
         _draftTimer.Stop();
@@ -541,7 +503,13 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         await _settings.UpdateAsync(settings => settings with { AssistantOutputsVisible = visible });
     }
     private bool _syncingScroll;
-    private void OnConversationSizeChanged(object sender, SizeChangedEventArgs e) { ConversationContent.Width = Math.Max(0, e.NewSize.Width - ConversationScroll.Padding.Left - ConversationScroll.Padding.Right); SyncOuterScroll(); }
+    private void OnConversationSizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (BodyGrid.Visibility != Visibility.Visible || e.NewSize.Width <= 0) return;
+        var width = Math.Max(0, e.NewSize.Width - ConversationScroll.Padding.Left - ConversationScroll.Padding.Right);
+        if (double.IsNaN(ConversationContent.Width) || Math.Abs(ConversationContent.Width - width) > .5) ConversationContent.Width = width;
+        SyncOuterScroll();
+    }
     private void OnConversationViewChanged(object sender, ScrollViewerViewChangedEventArgs e)
     {
         SyncOuterScroll();
@@ -589,7 +557,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     {
         if (Inspector is null || BodyGrid is null || AssistantFrame is null || InspectorToggle is null) return;
         Inspector.Width = Math.Min(304, Math.Max(180, AssistantFrame.ActualWidth - 44));
-        Inspector.MaxHeight = Math.Max(80, BodyGrid.ActualHeight - 26);
+        Inspector.MaxHeight = Math.Max(80, AssistantFrame.ActualHeight - 80);
         var label = Inspector.Visibility == Visibility.Visible ? "Ausgaben schließen" : "Ausgaben öffnen";
         ToolTipService.SetToolTip(InspectorToggle, label);
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(InspectorToggle, label);
@@ -600,7 +568,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         var captionRunning = _captionActive && _captionSessionId == _session;
         var stop = !hasText && (_running || _speaking || captionRunning);
 
-        ModelButton.IsEnabled = !_running;
+        ModelButton.IsEnabled = true;
         SendIcon.Glyph = stop ? "\uE71A" : "\uE74A";
         var label = stop ? "Aktivität stoppen" : _running ? "Antwort umlenken" : "Nachricht senden";
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(SendButton, label);
@@ -669,8 +637,6 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         var pendingUserId = AddPendingUserMessage(session, prompt);
         var promptEpoch = _changeReceiptState.BeginPrompt(session);
         ResetChangesSummary();
-        if (_changesCard is not null) MessagesPanel.Children.Remove(_changesCard);
-        _changesCard = null; OutputsPanel.Children.Clear(); OutputsPanel.Visibility = Visibility.Collapsed;
         _draftTimer.Stop(); _rendering = true; Composer.Text = ""; _rendering = false;
         _finishedSessions.Remove(session); _running = true; SetRunning(); _chatErrors.Remove(session); RefreshChatNotices(); ChatStatus = "Anfrage wird vorbereitet …";
         var deepResearch = mode == "claudescience" && string.IsNullOrEmpty(selectedAction);
@@ -792,7 +758,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     private async Task LoadReasoningAsync()
     {
         var role = ModelRole;
-        var modelId = role == "coding" ? _settings.Current.SelectedCodingModel : _settings.Current.SelectedModel;
+        var modelId = role == "coding" ? _settings.Current.SelectedModel : _settings.Current.SelectedModel;
         if (string.IsNullOrEmpty(modelId)) return;
         try
         {
@@ -905,8 +871,8 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             var json = JsonSerializer.SerializeToElement(catalog, JsonOptions);
             var list = new ComboBox { MinWidth = 360, PlaceholderText = "Modell auswählen", Header = "Modell" };
             var levels = new ComboBox { MinWidth = 360, Header = "Denkaufwand", PlaceholderText = "Automatisch" };
-            var models = Items(json, "models").Where(m => S(m, "role") == role && S(m, "downloaded") == "True").ToArray();
-            var currentId = role == "coding" ? _settings.Current.SelectedCodingModel : _settings.Current.SelectedModel;
+            var models = Items(json, "models").Where(m => S(m, "role") is "general" or "coding" && S(m, "downloaded") == "True").GroupBy(m => S(m, "id")).Select(group => group.FirstOrDefault(m => S(m, "role") == role) is { ValueKind: JsonValueKind.Object } matching ? matching : group.First()).ToArray();
+            var currentId = _settings.Current.SelectedModel;
             foreach (var model in models) list.Items.Add(new ComboBoxItem { Content = S(model, "displayName", S(model, "id")), Tag = S(model, "id") });
             list.SelectionChanged += (_, _) =>
             {
@@ -936,9 +902,10 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                     var efforts = new Dictionary<string, string>(s.ReasoningEffortsByModel, StringComparer.OrdinalIgnoreCase);
                     if (levels.SelectedItem is ComboBoxItem selectedEffort && selectedEffort.Tag is string effort)
                         efforts[MissumAiAssistantService.ReasoningKey(id, role)] = effort;
-                    return role == "coding" ? s with { SelectedCodingModel = id, ReasoningEffortsByModel = efforts } : s with { SelectedModel = id, ReasoningEffortsByModel = efforts };
+                    return s with { SelectedModel = id, SelectedCodingModel = id, ReasoningEffortsByModel = efforts };
                 });
                 _reasoningModel = "";
+                await App.Current.GetService<MissumAiAssistantService>().RequestLiveModelSelectionAsync(_lifetime.Token);
                 await RefreshForExternalActivationAsync();
             }
         }        catch (Exception ex) { ShowError(ex.Message); }

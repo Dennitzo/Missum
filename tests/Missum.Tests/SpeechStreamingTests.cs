@@ -7,6 +7,31 @@ namespace Missum.Tests;
 public sealed class SpeechStreamingTests
 {
     [Fact]
+    public async Task ScienceNarrationPlaysBeforeCompletionAndReplayDoesNotRepeatIt()
+    {
+        var initial = Message();
+        var spoken = new ConcurrentQueue<string>();
+        using var signal = new SemaphoreSlim(0);
+        using var session = new SpeechStreamingSession(initial, (text, _) => { spoken.Enqueue(text); signal.Release(); return Task.CompletedTask; });
+        var narration = new AssistantToolStep("science-introduction", "assistant.narration", "running", "Ich untersuche die Frage.");
+        session.Observe(new(MissumAiAssistantUpdateKind.Delta, initial with { ToolSteps = [narration] }));
+        Assert.Empty(spoken);
+        var current = initial with { ToolSteps = [narration with { Status = "completed" }] };
+        session.Observe(new(MissumAiAssistantUpdateKind.Delta, current));
+        Assert.True(await signal.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.False(session.Completion.IsCompleted);
+        session.Observe(new(MissumAiAssistantUpdateKind.Started, current));
+        session.Observe(new(MissumAiAssistantUpdateKind.Delta, current));
+        session.Observe(new(MissumAiAssistantUpdateKind.Completed, current));
+        await session.Completion.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal("Ich untersuche die Frage.", Assert.Single(spoken));
+        using var resumed = new SpeechStreamingSession(current, (text, _) => { spoken.Enqueue(text); return Task.CompletedTask; });
+        resumed.Observe(new(MissumAiAssistantUpdateKind.Completed, current));
+        await resumed.Completion;
+        Assert.Single(spoken);
+    }
+
+    [Fact]
     public async Task AutomaticNarrationWaitsForCompleteBlockAndSpeaksBothSentencesTogether()
     {
         const string first = "Die neuen Tests bestehen.";

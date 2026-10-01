@@ -15,6 +15,7 @@ internal sealed class SpeechStreamingSession : IDisposable
     private readonly CancellationTokenSource _cancellation;
     private readonly CancellationToken _token;
     private bool _finished;
+    private readonly HashSet<string> _spokenNarrations = new(StringComparer.Ordinal);
 
     public SpeechStreamingSession(ChatMessage initialMessage, Func<string, CancellationToken, Task> play,
         CancellationToken cancellationToken = default)
@@ -29,6 +30,8 @@ internal sealed class SpeechStreamingSession : IDisposable
         MessageId = initialMessage.Id;
         SessionId = initialMessage.SessionId;
         _buffer = new(initialMessage.Content);
+        foreach (var step in initialMessage.ToolSteps ?? [])
+            if (step.Tool == "assistant.narration") _spokenNarrations.Add(step.Id);
         _cancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _token = _cancellation.Token;
         Completion = PlayQueuedAsync(play, waitForResume, playbackLifetime);
@@ -59,6 +62,11 @@ internal sealed class SpeechStreamingSession : IDisposable
         lock (_gate)
         {
             if (_finished || _token.IsCancellationRequested) return;
+            foreach (var step in update.Message.ToolSteps ?? [])
+            {
+                if (step.Tool != "assistant.narration" || step.Status != "completed" || !_spokenNarrations.Add(step.Id)) continue;
+                foreach (var chunk in new SpeechStreamingTextBuffer().Take(step.Detail ?? "", complete: true)) _queue.Writer.TryWrite(chunk);
+            }
             var complete = update.Kind == MissumAiAssistantUpdateKind.Completed;
             var chunks = _buffer.Take(update.Message.Content, complete, flushSentence,
                 flushBlock: WaitForActionBoundary && flushSentence);

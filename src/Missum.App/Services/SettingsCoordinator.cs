@@ -17,6 +17,7 @@ public sealed class SettingsCoordinator(ISettingsStore store) : IDisposable
         try
         {
             Current = await store.LoadAsync(cancellationToken).ConfigureAwait(false);
+            Current = Current with { SelectedCodingModel = Current.SelectedModel };
         }
         finally
         {
@@ -33,6 +34,7 @@ public sealed class SettingsCoordinator(ISettingsStore store) : IDisposable
         try
         {
             Current = update(Current);
+            Current = Current with { SelectedCodingModel = Current.SelectedModel };
             await store.SaveAsync(Current, cancellationToken).ConfigureAwait(false);
         }
         finally

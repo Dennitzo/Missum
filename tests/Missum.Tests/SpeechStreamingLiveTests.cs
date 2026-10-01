@@ -15,9 +15,11 @@ public sealed class SpeechStreamingLiveTests(ITestOutputHelper output)
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
-    [Fact]
+    [Theory]
+    [InlineData(ChatMode.General)]
+    [InlineData(ChatMode.ClaudeScience)]
     [Trait("Category", "Live")]
-    public async Task CoordinatorPlaysRealSpeechBeforeCompletionWithMicrophoneDisabledAndExcludesTools()
+    public async Task CoordinatorPlaysRealSpeechBeforeCompletionWithMicrophoneDisabledAndExcludesTools(ChatMode mode)
     {
         if (Environment.GetEnvironmentVariable("MISSUM_AI_STREAMING_SPEECH_LIVE") != "1") return;
         await using var environment = await TestEnvironment.CreateAsync();
@@ -46,7 +48,7 @@ public sealed class SpeechStreamingLiveTests(ITestOutputHelper output)
             environment.Get<IContextAssembler>(), environment.Get<IPromptTriggerRepository>(),
             environment.Get<IAssistantAttachmentRepository>(), environment.Get<IChatArtifactRepository>(),
             environment.Get<IConversationSnapshotRepository>(), service, settings, recent, microphone);
-        var session = await chats.CreateSessionAsync("Isolierte Prüfung der laufenden Sprachausgabe");
+        var session = await chats.CreateSessionAsync("Isolierte Prüfung der laufenden Sprachausgabe", mode);
         await settings.UpdateAsync(value => value with { ActiveSessionId = session.Id });
         var turn = await chats.AddTurnAsync(session.Id, "Erkläre die Aufgabe in kurzen Abschnitten.");
         var current = turn.AssistantMessage;
@@ -69,14 +71,12 @@ public sealed class SpeechStreamingLiveTests(ITestOutputHelper output)
             Assert.False(microphone.Current.IsRecording);
             await coordinator.EmitMissumAiUpdateAsync(new(MissumAiAssistantUpdateKind.Started, current), Emit, "speech-live");
             await Send(MissumAiAssistantUpdateKind.Delta, first + " ", MessageStatus.Streaming);
-            // The native contract seals a narration block at the next main-agent
-            // action boundary. A sentence-ending delta alone is still provisional.
-            await coordinator.EmitMissumAiUpdateAsync(new(MissumAiAssistantUpdateKind.Status, current, ToolStep: tool), Emit, "speech-live");
+            // No tool boundary is needed: a complete sentence already starts audio.
             var firstPlayback = await WaitForPlaybackAsync();
             Assert.Equal(MessageStatus.Streaming, (await chats.GetMessageAsync(current.Id))!.Status);
             Assert.False(microphone.Current.IsRecording);
             Assert.False(done.Task.IsCompleted);
-            output.WriteLine("First real Playing event arrived after the action boundary while the persisted AI message is still streaming.");
+            output.WriteLine("First real Playing event arrived during streaming without a tool boundary while the persisted AI message is still streaming.");
 
             Assert.True((await microphone.ToggleSpeechPauseAsync(timeout.Token)).IsSpeechPaused);
             await Task.Delay(250, timeout.Token);
@@ -86,7 +86,6 @@ public sealed class SpeechStreamingLiveTests(ITestOutputHelper output)
             output.WriteLine("Physical playback paused and resumed without ending the streaming answer.");
 
             await Send(MissumAiAssistantUpdateKind.Delta, first + " " + second + " ", MessageStatus.Streaming);
-            await coordinator.EmitMissumAiUpdateAsync(new(MissumAiAssistantUpdateKind.Status, current, ToolStep: tool), Emit, "speech-live");
             var secondPlayback = await WaitForPlaybackAsync();
             Assert.NotEqual(firstPlayback, secondPlayback);
             Assert.Equal(MessageStatus.Streaming, (await chats.GetMessageAsync(current.Id))!.Status);
@@ -117,7 +116,13 @@ public sealed class SpeechStreamingLiveTests(ITestOutputHelper output)
 
         async Task Send(MissumAiAssistantUpdateKind kind, string content, MessageStatus status)
         {
-            await chats.UpdateMessageWithToolStepsAsync(current.Id, content, status, steps, timeout.Token);
+            var currentSteps = steps;
+            if (mode == ChatMode.ClaudeScience)
+            {
+                currentSteps = [new("live-introduction", "assistant.narration", "completed", first), tool];
+                content = content.StartsWith(first, StringComparison.Ordinal) ? content[first.Length..].TrimStart() : content;
+            }
+            await chats.UpdateMessageWithToolStepsAsync(current.Id, content, status, currentSteps, timeout.Token);
             current = (await chats.GetMessageAsync(current.Id, timeout.Token))!;
             await coordinator.EmitMissumAiUpdateAsync(new(kind, current), Emit, "speech-live");
         }

@@ -184,7 +184,7 @@ public sealed partial class MissumAiAssistantService(
                 sessionAttachments,
                 _activeCancellation.Token).ConfigureAwait(false);
             var assistant = turn.AssistantMessage;
-            var initialModel = UsesCodingAgent(action) ? settings.Current.SelectedCodingModel : settings.Current.SelectedModel;
+            var initialModel = UsesCodingAgent(action) ? settings.Current.SelectedModel : settings.Current.SelectedModel;
             var contextLimit = ModelContextProfiles.ResolveMaximum(initialModel, UsesCodingAgent(action) ? "coding" : "general");
             await update(new(
                 MissumAiAssistantUpdateKind.Started,
@@ -255,6 +255,7 @@ public sealed partial class MissumAiAssistantService(
         {
             await FinishFileChangesAsync().ConfigureAwait(false);
             _activeServerRunId = null;
+            _pendingModelSelection = null;
             _activeCodingWorkspace = null;
             _activeRunAction = null;
             Volatile.Write(ref _activeSessionId, null);
@@ -301,6 +302,7 @@ public sealed partial class MissumAiAssistantService(
                     continue;
                 }
                 _activeServerRunId = run.ServerRunId;
+                await FlushLiveModelSelectionAsync(_activeCancellation.Token).ConfigureAwait(false);
                 if (UsesCodingAgent(run.Action))
                 {
                     try
@@ -354,6 +356,7 @@ public sealed partial class MissumAiAssistantService(
             {
                 await FinishFileChangesAsync().ConfigureAwait(false);
                 _activeServerRunId = null;
+                _pendingModelSelection = null;
                 _activeCodingWorkspace = null;
                 _activeRunAction = null;
                 Volatile.Write(ref _activeSessionId, null);
@@ -1050,7 +1053,7 @@ public sealed partial class MissumAiAssistantService(
                     Status: "Wird erneut versucht",
                     Detail: $"Derselbe Prompt wird nach einem technischen Abbruch erneut ausgeführt · Versuch {retryCount} in {delay.TotalSeconds:0} Sekunden",
                     Model: UsesCodingAgent(trigger?.Trigger.Action)
-                        ? settings.Current.SelectedCodingModel
+                        ? settings.Current.SelectedModel
                         : settings.Current.SelectedModel)).ConfigureAwait(false);
                 await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
             }
@@ -1107,6 +1110,9 @@ public sealed partial class MissumAiAssistantService(
                 if (action != PromptTriggerAction.PlanMode)
                     await CodingWorkspaceGit.EnsureRepositoryAsync(_activeCodingWorkspace, cancellationToken).ConfigureAwait(false);
             }
+            var ownerSession = await chats.GetSessionAsync(assistant.SessionId, cancellationToken).ConfigureAwait(false);
+            if (ownerSession?.ChatMode == ChatMode.ClaudeScience && !string.IsNullOrWhiteSpace(ownerSession.CodingWorkspacePath))
+                await CodingWorkspaceGit.EnsureRepositoryAsync(ownerSession.CodingWorkspacePath, cancellationToken).ConfigureAwait(false);
             var attempt = new MissumAiRunRecord(
                 Guid.NewGuid(), assistant.SessionId, assistant.Id, action, idempotencyKey, null, 0, "queued",
                 null, null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow,
@@ -1168,6 +1174,7 @@ public sealed partial class MissumAiAssistantService(
             localRun = localRun with { ServerRunId = accepted.RunId, State = ToStorage(accepted.State), UpdatedAt = DateTimeOffset.UtcNow };
             await runs.UpdateAsync(localRun.Id, accepted.RunId, 0, localRun.State, cancellationToken: cancellationToken).ConfigureAwait(false);
             _activeServerRunId = accepted.RunId;
+            await FlushLiveModelSelectionAsync(cancellationToken).ConfigureAwait(false);
             RunDiagnostic(logger, accepted.RunId, "accepted", null);
             var result = await StreamRunWithReconnectAsync(
                 localRun,
@@ -1175,6 +1182,8 @@ public sealed partial class MissumAiAssistantService(
                 update,
                 cancellationToken,
                 client).ConfigureAwait(false);
+            if (ownerSession?.ChatMode == ChatMode.ClaudeScience && sciencePresentation is not null)
+                await sciencePresentation.WaitForIdleAsync($"research-{assistant.SessionId:N}", cancellationToken).ConfigureAwait(false);
             return result;
         }
         catch (MissumAiStreamDisconnectedException)
@@ -1641,6 +1650,20 @@ public sealed partial class MissumAiAssistantService(
                 }
                 switch (item.Type)
                 {
+                    case RunModelSelectionEvents.Requested:
+                    case RunModelSelectionEvents.Applied:
+                    case RunModelSelectionEvents.Failed:
+                        var selectionText = item.Type != RunModelSelectionEvents.Requested
+                            ? item.Data.Deserialize<RunModelSelectionApplied>(JsonOptions)?.Message
+                            : "Der Modell-/Reasoning-Wechsel ist vorgemerkt und wird an der nächsten sicheren Arbeitsgrenze übernommen.";
+                        if (!string.IsNullOrWhiteSpace(selectionText))
+                        {
+                            var selectionStep = new AssistantToolStep("model-selection:" + item.Id, "assistant.narration", "completed", selectionText,
+                                ContentOffset: assistant.Content.Length, StartedAt: item.CreatedAt, CompletedAt: item.CreatedAt, UpdatedAt: item.CreatedAt);
+                            assistant = assistant with { ToolSteps = await chats.SaveToolStepAsync(assistant.Id, selectionStep, cancellationToken).ConfigureAwait(false) };
+                            await update(new(MissumAiAssistantUpdateKind.Delta, assistant)).ConfigureAwait(false);
+                        }
+                        break;
                     case RunSteeringEventTypes.Accepted:
                     case RunSteeringEventTypes.Applied:
                         var steering = item.Data.Deserialize<RunSteeringEvent>(JsonOptions)
@@ -2613,7 +2636,7 @@ public sealed partial class MissumAiAssistantService(
             {
                 throw new InvalidOperationException("Wähle in der Projekte-Sidebar eine Sitzung mit vorhandenem Workspace.");
             }
-            var codingModel = settings.Current.SelectedCodingModel?.Trim();
+            var codingModel = settings.Current.SelectedModel?.Trim();
             if (string.IsNullOrWhiteSpace(codingModel))
             {
                 throw new InvalidOperationException("Wähle in den Einstellungen ein lokales Coding-AI-Modell.");

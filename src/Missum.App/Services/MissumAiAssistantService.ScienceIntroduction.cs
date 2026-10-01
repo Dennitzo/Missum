@@ -12,7 +12,7 @@ public sealed partial class MissumAiAssistantService
         if (heading.Length > 120) heading = heading[..120].TrimEnd();
         return [$"**{heading}**\n\n",
             "Ich untersuche deine Frage schrittweise: Zuerst kläre ich die Teilfragen, dann suche und prüfe ich passende Quellen. "
-            + "Die Ergebnisse und ihre Grenzen fließen fortlaufend in die wissenschaftliche Publikation im Tab Forschung ein. "
+            + "Die Ergebnisse und ihre Grenzen fließen fortlaufend in die wissenschaftliche Publikation im Tab Publikation ein. "
             + "Im Tab Simulation werden die dazugehörigen Python-Auswertungen und Abbildungen sichtbar, sobald sie vorliegen.\n\n"];
     }
 

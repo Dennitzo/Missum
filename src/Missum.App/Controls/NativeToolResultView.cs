@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -10,7 +10,7 @@ namespace Missum.App.Controls;
 /// <summary>Native receipt layout: compact wrapping facts and independently labelled output cards.</summary>
 public sealed class NativeToolResultView : StackPanel
 {
-    public NativeToolResultView(JsonElement data, string path, bool input, bool hidePatch)
+    public NativeToolResultView(JsonElement data, string path, bool input, bool hidePatch, string? sourceLanguage = null)
     {
         Spacing = 12;
         var facts = new FactsPanel();
@@ -22,6 +22,8 @@ public sealed class NativeToolResultView : StackPanel
             var value = property.Value;
             if (value.ValueKind == JsonValueKind.Null || value.ValueKind == JsonValueKind.String && string.IsNullOrEmpty(value.GetString())) continue;
             if (!PrimaryFields.Contains(key)) continue;
+            if (key == "source" && sourceLanguage is not null && value.ValueKind == JsonValueKind.String)
+            { cards.Add(CodeCard("Lean-Beweis", value.GetString() ?? "", sourceLanguage)); continue; }
             if (!input && value.ValueKind == JsonValueKind.String && key is "content" or "code" or "text" or "stdout" or "stderr" or "snippet")
             {
                 var language = key is "stdout" or "stderr" || string.IsNullOrEmpty(Path.GetExtension(path)) ? "text" : Path.GetExtension(path).TrimStart('.');

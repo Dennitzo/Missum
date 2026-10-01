@@ -33,7 +33,7 @@ public sealed partial class NativeAssistantPage
             text.Children.Add(new TextBlock { Text = title, FontSize = 15, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
             text.Children.Add(new TextBlock { Text = description, FontSize = 13, Foreground = Brush(160) });
             row.Children.Add(text);
-            if (_mode == mode) row.Children.Add(new FontIcon { Glyph = "\uE73E", FontSize = 14, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Top, Margin = new(0, 5, 0, 0) });
+            if (_mode == mode) row.Children.Add(new FontIcon { Glyph = "\uE73E", FontSize = 14, Foreground = NativeIconPalette.BrushFor("success"), HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Top, Margin = new(0, 5, 0, 0) });
             var button = new Button { Content = row, Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new(0), HorizontalContentAlignment = HorizontalAlignment.Stretch, HorizontalAlignment = HorizontalAlignment.Stretch, Padding = new(8, 8, 8, 8), CornerRadius = new(12) };
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(button, title);
             button.Click += async (_, _) => { flyout.Hide(); await NavigateAsync("mode.switch", new { chatMode = mode }); };
@@ -84,7 +84,7 @@ public sealed partial class NativeAssistantPage
             "plan" => "\uEA80", "web" => "\uE774", "research" => "\uE721", "document" => "\uE8A5",
             "image" => "\uEB9F", "speech" or "audio" => "\uE767", _ => "\uEA86",
         };
-        SelectedToolChip.SetTool(_selectedAction == BuiltInActionIds.PlanMode ? "Planen" : label, glyph);
+        SelectedToolChip.SetTool(_selectedAction == BuiltInActionIds.PlanMode ? "Planen" : label, glyph, ToolGlyphColor(S(action, "iconKey"), _selectedAction ?? ""));
         SelectedToolChip.Visibility = Visibility.Visible;
     }
 
@@ -110,7 +110,7 @@ public sealed partial class NativeAssistantPage
             content.ColumnDefinitions.Add(new() { Width = new(16) });
             content.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
             content.ColumnDefinitions.Add(new() { Width = new(1, GridUnitType.Star) });
-            content.Children.Add(new FontIcon { Glyph = glyph, FontSize = 15, Foreground = color is { } c ? new SolidColorBrush(c) : Brush(205), VerticalAlignment = VerticalAlignment.Center });
+            content.Children.Add(new FontIcon { Glyph = glyph, FontSize = 15, Foreground = color is { } c ? new SolidColorBrush(c) : NativeIconPalette.BrushFor("tool"), VerticalAlignment = VerticalAlignment.Center });
             var label = new TextBlock { Text = name, FontSize = 14, Foreground = Brush(220), VerticalAlignment = VerticalAlignment.Center };
             Grid.SetColumn(label, 1); content.Children.Add(label);
             var detail = new TextBlock { Text = description, FontSize = 14, Foreground = Brush(145), VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
@@ -126,24 +126,24 @@ public sealed partial class NativeAssistantPage
         var document = actions.FirstOrDefault(a => S(a, "iconKey") == "document");
         var plan = actions.FirstOrDefault(a => S(a, "iconKey") == "plan");
         Heading("Hinzufügen");
-        Row("\uE723", "Dateien und Ordner", "", () => ShowFileChoices(), color: Color.FromArgb(255, 91, 156, 246));
+        Row("\uE723", "Dateien und Ordner", "", () => ShowFileChoices(), color: ToolGlyphColor("attachment", ""));
         var workspace = S(_snapshot, "workspacePath");
         if (_mode == "claudescience")
-            Row("\uE9CE", "Forschung öffnen", "Vorhaben, Quellen und Ergebnisse", () => OpenResearchView(), color: Color.FromArgb(255, 168, 132, 246));
+            Row("\uE9CE", "Publikation öffnen", "Vorhaben, Quellen und Ergebnisse", () => OpenResearchView(), color: ToolGlyphColor("research", ""));
         if (plan.ValueKind == JsonValueKind.Object)
-            Row("\uEA80", "Planmodus", "Planmodus einschalten", () => SelectComposerTool(S(plan, "actionId"), "Planmodus"), S(plan, "disabledReason").Length == 0, Color.FromArgb(255, 241, 157, 56));
+            Row("\uEA80", "Planmodus", "Planmodus einschalten", () => SelectComposerTool(S(plan, "actionId"), "Planmodus"), S(plan, "disabledReason").Length == 0, ToolGlyphColor("plan", S(plan, "actionId")));
         if (document.ValueKind == JsonValueKind.Object)
-            Row("\uE8A5", "Dokumente erstellen", "Word, PDF, Tabellen und Präsentationen", () => SelectComposerTool(S(document, "actionId"), "Dokumente erstellen"), S(document, "disabledReason").Length == 0, Color.FromArgb(255, 55, 143, 234));
+            Row("\uE8A5", "Dokumente erstellen", "Word, PDF, Tabellen und Präsentationen", () => SelectComposerTool(S(document, "actionId"), "Dokumente erstellen"), S(document, "disabledReason").Length == 0, ToolGlyphColor("document", S(document, "actionId")));
         foreach (var action in actions.Where(a => !S(a, "actionId").StartsWith("builtin.", StringComparison.Ordinal)))
-            Row("\uEA86", S(action, "displayName"), S(action, "description"), () => SelectComposerTool(S(action, "actionId"), S(action, "displayName")), S(action, "disabledReason").Length == 0, Color.FromArgb(255, 151, 116, 225));
+            Row("\uEA86", S(action, "displayName"), S(action, "description"), () => SelectComposerTool(S(action, "actionId"), S(action, "displayName")), S(action, "disabledReason").Length == 0, ToolGlyphColor("tool", S(action, "actionId")));
         foreach (var action in actions.Where(a => S(a, "actionId").StartsWith("builtin.", StringComparison.Ordinal) && S(a, "actionId") != BuiltInActionIds.DeepResearch && S(a, "iconKey") is not ("plan" or "document")))
-            Row(S(action, "iconKey") switch { "web" => "\uE774", "research" => "\uE721", "image" => "\uEB9F", "audio" or "speech" => "\uE767", _ => "\uEA86" }, S(action, "displayName"), S(action, "description"), () => SelectComposerTool(S(action, "actionId"), S(action, "displayName")), S(action, "disabledReason").Length == 0, ToolGlyphColor(S(action, "iconKey"), S(action, "actionId")));
+            Row(ToolIconGlyph(S(action, "iconKey")), S(action, "displayName"), S(action, "description"), () => SelectComposerTool(S(action, "actionId"), S(action, "displayName")), S(action, "disabledReason").Length == 0, ToolGlyphColor(S(action, "iconKey"), S(action, "actionId")));
         foreach (var action in Items(_snapshot, "actionDescriptors").Where(a =>
                      S(a, "actionKind") == "immediate"
                      && S(a, "actionId") != BuiltInActionIds.AttachFilesAndFolders
                      && (!S(a, "actionId").StartsWith("builtin.", StringComparison.Ordinal)
                          || S(a, "actionId") is BuiltInActionIds.ExportChatPdf or BuiltInActionIds.LiveCaptions)))
-            Row(S(action, "iconKey") switch { "pdf" => "\uEA90", "captions" => "\uE8F2", _ => "\uEA86" }, S(action, "displayName"), S(action, "description"), () => _ = InvokeImmediateActionAsync(S(action, "actionId")), S(action, "disabledReason").Length == 0, ToolGlyphColor(S(action, "iconKey"), S(action, "actionId")));
+            Row(ToolIconGlyph(S(action, "iconKey")), S(action, "displayName"), S(action, "description"), () => _ = InvokeImmediateActionAsync(S(action, "actionId")), S(action, "disabledReason").Length == 0, ToolGlyphColor(S(action, "iconKey"), S(action, "actionId")));
         menu.Content = new ScrollViewer { Content = rows, MaxHeight = 308, HorizontalScrollMode = ScrollMode.Disabled, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
         menu.ShowAt(ComposerSurface);
     }
@@ -151,9 +151,9 @@ public sealed partial class NativeAssistantPage
     private void ShowFileChoices()
     {
         var menu = new MenuFlyout();
-        var files = new MenuFlyoutItem { Text = "Dateien hinzufügen", Icon = new FontIcon { Glyph = "\uE8A5" } };
+        var files = new MenuFlyoutItem { Text = "Dateien hinzufügen", Icon = new FontIcon { Glyph = "\uE8A5", Foreground = NativeIconPalette.BrushFor("attachment") } };
         files.Click += OnAttach;
-        var folder = new MenuFlyoutItem { Text = "Projektordner auswählen", Icon = new FontIcon { Glyph = "\uE8B7" } };
+        var folder = new MenuFlyoutItem { Text = "Projektordner auswählen", Icon = new FontIcon { Glyph = "\uE8B7", Foreground = NativeIconPalette.BrushFor("folder") } };
         folder.Click += OnAddProject;
         menu.Items.Add(files); menu.Items.Add(folder); menu.ShowAt(ComposerSurface);
     }
@@ -172,18 +172,6 @@ public sealed partial class NativeAssistantPage
         }
         catch (Exception ex) { ShowError(ex.Message); }
     }
-
-    private static Color ToolGlyphColor(string iconKey, string actionId) => iconKey switch
-    {
-        "web" => Color.FromArgb(255, 76, 148, 242),
-        "research" => Color.FromArgb(255, 160, 124, 246),
-        "image" => Color.FromArgb(255, 231, 104, 171),
-        "audio" => Color.FromArgb(255, 70, 188, 133),
-        "speech" or "captions" => Color.FromArgb(255, 51, 184, 207),
-        "pdf" => Color.FromArgb(255, 218, 80, 82),
-        _ when actionId.Contains("audiobook", StringComparison.Ordinal) => Color.FromArgb(255, 241, 157, 56),
-        _ => Color.FromArgb(255, 151, 116, 225),
-    };
 
     private async void AttachSketch()
     {

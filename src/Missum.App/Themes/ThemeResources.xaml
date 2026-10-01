@@ -4,6 +4,10 @@
   xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
   xmlns:controls="using:Missum.App.Controls">
 
+  <ResourceDictionary.MergedDictionaries>
+    <controls:NativeIconResources />
+  </ResourceDictionary.MergedDictionaries>
+
   <ResourceDictionary.ThemeDictionaries>
     <ResourceDictionary x:Key="Default">
       <Color x:Key="MissumWindowColor">#181818</Color>

@@ -199,7 +199,7 @@ public sealed class SettingsLoggingAndBackupTests
         Assert.Equal(AppSettings.CurrentVersion, restored.Version);
         Assert.Equal(AiProviderKind.MissumAiServer, restored.AiProvider);
         Assert.Equal(generalModel, restored.SelectedModel);
-        Assert.Equal(codingModel, restored.SelectedCodingModel);
+        Assert.Equal(generalModel, restored.SelectedCodingModel);
         Assert.Equal(workspace, restored.CodingWorkspacePath);
         Assert.Equal(sessionId, restored.ActiveSessionId);
         Assert.Equal("http://localhost:8080", restored.MissumAiServerUrl);

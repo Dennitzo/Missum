@@ -27,7 +27,7 @@ public sealed class ScientificPublicationImagesTests : IDisposable
 
         var image = Assert.Single(prepared.Images);
         Assert.Matches("^figures/[a-f0-9]{64}\\.png$", image.RelativePath);
-        Assert.Equal(2, Regex.Matches(prepared.Markdown, Regex.Escape(image.RelativePath)).Count);
+        Assert.Equal(2, Regex.Count(prepared.Markdown, Regex.Escape(image.RelativePath)));
         await File.WriteAllTextAsync(path, "changed after snapshot");
         var staging = Path.Combine(_root, "staging");
         await prepared.WriteImagesAsync(staging);
@@ -75,7 +75,7 @@ public sealed class ScientificPublicationImagesTests : IDisposable
 
         Assert.Empty(prepared.Images);
         Assert.Empty(unbound.Images);
-        Assert.Equal(4, Regex.Matches(prepared.Markdown, "lokale Bilddatei nicht verfügbar").Count);
+        Assert.Equal(4, Regex.Count(prepared.Markdown, "lokale Bilddatei nicht verfügbar"));
     }
 
     [Fact]

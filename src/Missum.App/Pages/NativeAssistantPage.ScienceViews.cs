@@ -1,4 +1,4 @@
-using Missum.App.Controls;
+﻿using Missum.App.Controls;
 using Missum.App.Services;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
@@ -26,19 +26,18 @@ public sealed partial class NativeAssistantPage
             _simulationTabButton.Height = 32; _simulationTabButton.Padding = new Thickness(10, 0, 10, 0);
             _simulationTabButton.BorderThickness = new Thickness(1);
             var content = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 7 };
-            content.Children.Add(new FontIcon { Glyph = "\uE9D9", FontSize = 13 });
+            content.Children.Add(new FontIcon { Glyph = "\uE9D9", FontSize = 13, Foreground = NativeIconPalette.BrushFor("research") });
             content.Children.Add(new TextBlock { Text = "Simulation", FontSize = 13 });
             _simulationTabButton.Content = content;
             _simulationTabButton.Click += (_, _) =>
             {
-                OpenResearchView(); _simulationView = true; RenderResearchView(); RenderSessionTabs();
+                OpenResearchView(simulation: true);
             };
             AutomationProperties.SetName(_simulationTabButton, "Simulation dieser Sitzung öffnen");
             ToolTipService.SetToolTip(_simulationTabButton, "Python · Simulationen, Plots und Daten");
         }
         var active = _activeResearchSessionId == _session && _simulationView && _activeReviewRunId is null;
-        _simulationTabButton.Background = ThemeBrush(active ? "MissumAccentSubtleBrush" : "MissumLayerStrongBrush", 35);
-        _simulationTabButton.BorderBrush = active ? ThemeBrush("MissumAccentBrush", 72) : new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        ApplyTabAppearance(_simulationTabButton, active);
         _simulationTabButton.IsEnabled = !_sessionTabNavigationBusy;
         if (index < SessionTabsPanel.Children.Count && ReferenceEquals(SessionTabsPanel.Children[index], _simulationTabButton)) return;
         SessionTabsPanel.Children.Remove(_simulationTabButton);
@@ -56,6 +55,9 @@ public sealed partial class NativeAssistantPage
         var signature = $"{owner}|{_simulationView}|{state.SelectedProjectId}|{contentKey}|{state.Error}|{presentation?.PublicationError}|{presentation?.SimulationError}|{state.Loaded}";
         if (signature == _scienceViewSignature) return;
         _scienceViewSignature = signature;
+        // Detach the previous visual tree before moving the cached PDF view.
+        // Switching straight to Simulation must never briefly rebuild Publication.
+        ResearchHost.Content = null;
         var root = new Grid { Padding = new Thickness(24, 16, 24, 0), RowSpacing = 12 };
         root.RowDefinitions.Add(new() { Height = GridLength.Auto }); root.RowDefinitions.Add(new() { Height = GridLength.Auto });
         root.RowDefinitions.Add(new() { Height = new GridLength(1, GridUnitType.Star) });

@@ -225,6 +225,9 @@ public sealed partial class RunProcessor : BackgroundService
         CancellationToken cancellationToken)
     {
         var isCoding = request.Mode == RunMode.Coding;
+        var savedSelection = await _repository.GetCheckpointAsync(runId, cancellationToken).ConfigureAwait(false);
+        if (savedSelection?.SelectedModelId is { } restoredModel)
+            request = request with { PreferredGeneralModelId = restoredModel, PreferredCodingModelId = restoredModel, ReasoningEffort = savedSelection.SelectedReasoningEffort };
         if (isCoding) request = request with { CodingOptions = (request.CodingOptions ?? new CodingRunOptions()) with { UseWorkingState = true, ReasoningPolicy = "maximum" } };
         ModelSelection selection;
         try { selection = await _router.SelectAsync(request, cancellationToken).ConfigureAwait(false); }
@@ -326,6 +329,7 @@ public sealed partial class RunProcessor : BackgroundService
         var preserveSessionPromptPrefix = checkpoint.PreserveSessionPromptPrefix;
         var workingStatePromptIncluded = checkpoint.WorkingStatePromptIncluded;
         var appliedSteeringSequence = checkpoint.AppliedSteeringSequence;
+        var appliedModelSelectionEventId = checkpoint.AppliedModelSelectionEventId;
         var deepResearchCompleted = checkpoint.DeepResearchCompleted;
         if (appliedSteeringSequence > 0)
         {
@@ -469,6 +473,8 @@ public sealed partial class RunProcessor : BackgroundService
 
         while (true)
         {
+            if (pendingProposalId is null && activeCalls is null)
+                await ApplyModelSelectionAsync().ConfigureAwait(false);
             if (pendingProposalId is not null && !await _repository.HasProposalEventAsync(runId, pendingProposalId, cancellationToken).ConfigureAwait(false)
                 && await _repository.HasPendingSteeringAsync(runId, cancellationToken).ConfigureAwait(false))
             {
@@ -680,6 +686,7 @@ public sealed partial class RunProcessor : BackgroundService
                 nextToolIndex = 0;
                 activeCallRound = null;
                 await SaveCheckpointAsync().ConfigureAwait(false);
+                await ApplyModelSelectionAsync().ConfigureAwait(false);
             }
 
             if (isCoding && invalidToolTurnCount >= CodingToolBatchRecovery.MaximumInvalidTurns)
@@ -1355,8 +1362,40 @@ public sealed partial class RunProcessor : BackgroundService
                 WorkingStatePromptIncluded: workingStatePromptIncluded,
                 AppliedSteeringSequence: appliedSteeringSequence,
                 DeepResearchCompleted: deepResearchCompleted,
-                InvalidToolTurnCount: invalidToolTurnCount),
+                InvalidToolTurnCount: invalidToolTurnCount,
+                SelectedModelId: selection.ModelId, SelectedReasoningEffort: request.ReasoningEffort,
+                AppliedModelSelectionEventId: appliedModelSelectionEventId),
             cancellationToken);
+
+        async Task ApplyModelSelectionAsync()
+        {
+            var latest = await _repository.GetLatestModelSelectionAsync(runId, appliedModelSelectionEventId, cancellationToken).ConfigureAwait(false);
+            if (latest is null) return;
+            var candidate = request with { PreferredGeneralModelId = latest.Value.Selection.ModelId,
+                PreferredCodingModelId = latest.Value.Selection.ModelId, ReasoningEffort = latest.Value.Selection.ReasoningEffort };
+            ModelSelection next;
+            try { next = await _router.SelectAsync(candidate, cancellationToken).ConfigureAwait(false); }
+            catch (Exception exception) when (exception is HttpRequestException or InvalidOperationException)
+            {
+                appliedModelSelectionEventId = latest.Value.EventId;
+                await SaveCheckpointAsync().ConfigureAwait(false);
+                await _repository.AppendEventAsync(runId, RunModelSelectionEvents.Failed,
+                    new RunModelSelectionApplied(selection.ModelId, selection.Role, request.ReasoningEffort,
+                        $"Der Modellwechsel konnte nicht übernommen werden. Ich arbeite mit {selection.ModelId} weiter. {exception.Message}"), cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            candidate = candidate with { Limits = (candidate.Limits ?? new()) with { MaximumContextTokens = next.ContextLength } };
+            request = candidate; selection = next;
+            contextLength = Math.Min(next.ContextLength, request.Limits?.MaximumContextTokens ?? next.ContextLength);
+            appliedModelSelectionEventId = latest.Value.EventId;
+            preserveSessionPromptPrefix = false;
+            await SaveCheckpointAsync().ConfigureAwait(false);
+            await _repository.AppendEventAsync(runId, RunEventTypes.ModelSelected,
+                new ModelSelectedEvent(next.ModelId, next.Role), cancellationToken).ConfigureAwait(false);
+            await _repository.AppendEventAsync(runId, RunModelSelectionEvents.Applied,
+                new RunModelSelectionApplied(next.ModelId, next.Role, request.ReasoningEffort,
+                    $"Ich arbeite jetzt mit {next.ModelId}. Reasoning: {request.ReasoningEffort ?? "Automatisch"}."), cancellationToken).ConfigureAwait(false);
+        }
 
         async Task<bool> ApplySteeringAsync()
         {

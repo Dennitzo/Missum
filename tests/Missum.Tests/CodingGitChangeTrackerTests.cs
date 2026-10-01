@@ -6,6 +6,25 @@ namespace Missum.Tests;
 public sealed class CodingGitChangeTrackerTests
 {
     [Fact]
+    public async Task ScienceWorkspaceTracksPublicationBinaryAndPythonSourceInTheSameOverview()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var workspace = Directory.CreateDirectory(Path.Combine(environment.Directory, "science-workspace")).FullName;
+        await CodingWorkspaceGit.EnsureRepositoryAsync(workspace);
+        using var tracker = new CodingGitChangeTracker(workspace, Path.Combine(environment.Directory, "receipt"));
+        Assert.Empty((await tracker.InitializeAsync()).Files);
+        var science = Directory.CreateDirectory(Path.Combine(workspace, "Science", "research-test")).FullName;
+        await File.WriteAllTextAsync(Path.Combine(science, "simulation.py"), "import math\nprint(math.pi)\n");
+        await File.WriteAllBytesAsync(Path.Combine(science, "Publikation.pdf"), [37, 80, 68, 70, 45, 0, 255]);
+        var snapshot = await tracker.RefreshAsync();
+        Assert.False(snapshot.IsPartial);
+        var python = Assert.Single(snapshot.Files, file => file.Path.EndsWith("simulation.py", StringComparison.Ordinal));
+        Assert.Contains("+import math", python.Diff, StringComparison.Ordinal); Assert.Equal(2, python.AddedLines);
+        var pdf = Assert.Single(snapshot.Files, file => file.Path.EndsWith("Publikation.pdf", StringComparison.Ordinal));
+        Assert.True(pdf.IsBinary); Assert.Contains("Binary files", pdf.Diff, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task GitDiffTracksNewEditedDeletedAndRevertedFilesWithoutChangingUserIndex()
     {
         await using var environment = await TestEnvironment.CreateAsync();

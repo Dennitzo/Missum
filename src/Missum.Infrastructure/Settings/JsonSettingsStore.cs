@@ -89,6 +89,13 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
         Alias("goAiProtocolVersion", "missumAiProtocolVersion");
         Alias("protocolVersion", "missumAiProtocolVersion");
         RemoveDeprecated("isAiConnectionEnabled");
+        // Preserve a legacy coding-only choice, but never keep two competing selections.
+        var legacyModel = root.FirstOrDefault(pair => pair.Key.Equals("selectedCodingModel", StringComparison.OrdinalIgnoreCase)).Value;
+        var globalModel = root.FirstOrDefault(pair => pair.Key.Equals("selectedModel", StringComparison.OrdinalIgnoreCase)).Value;
+        if (legacyModel is JsonValue legacy && legacy.TryGetValue<string>(out var oldModel) && !string.IsNullOrWhiteSpace(oldModel)
+            && (globalModel is not JsonValue global || !global.TryGetValue<string>(out var chosen) || string.IsNullOrWhiteSpace(chosen)))
+        { root["selectedModel"] = oldModel; migrated = true; }
+        RemoveDeprecated("selectedCodingModel");
         var provider = root.FirstOrDefault(pair => pair.Key.Equals("aiProvider", StringComparison.OrdinalIgnoreCase)).Value;
         if (provider is JsonValue providerValue && providerValue.TryGetValue<string>(out var providerName)
             && string.Equals(providerName, "goAiServer", StringComparison.OrdinalIgnoreCase)) migrated = true;
@@ -175,7 +182,7 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
                         ? "auto"
                         : settings.LiveCaptionLanguage.Trim(),
             SelectedModel = NormalizeGeneralModel(settings.SelectedModel),
-            SelectedCodingModel = string.IsNullOrWhiteSpace(settings.SelectedCodingModel) ? null : settings.SelectedCodingModel.Trim(),
+            SelectedCodingModel = NormalizeGeneralModel(settings.SelectedModel),
             CodingWorkspacePath = string.IsNullOrWhiteSpace(settings.CodingWorkspacePath) ? null : settings.CodingWorkspacePath.Trim(),
             ReasoningEffort = NormalizeReasoningEffort(settings.Version, settings.ReasoningEffort),
             ReasoningEffortsByModel = (settings.ReasoningEffortsByModel ?? [])

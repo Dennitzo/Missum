@@ -44,9 +44,10 @@ public sealed class NativeComposerToolChip : Button
         Unloaded += (_, _) => { _hovered = false; _keyboardFocused = false; _transition?.Stop(); };
     }
 
-    public void SetTool(string label, string glyph)
+    public void SetTool(string label, string glyph, Windows.UI.Color? color = null)
     {
         _label.Text = label; _icon.Glyph = glyph;
+        _icon.Foreground = color is { } iconColor ? new SolidColorBrush(iconColor) : NativeIconPalette.BrushFor("tool");
         ToolTipService.SetToolTip(this, label + " entfernen");
         AutomationProperties.SetName(this, label + " entfernen");
         UpdateAffordance();

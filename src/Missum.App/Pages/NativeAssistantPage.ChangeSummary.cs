@@ -88,7 +88,7 @@ public sealed partial class NativeAssistantPage
         layout.Children.Add((UIElement)Microsoft.UI.Xaml.Markup.XamlReader.Load("""
             <Path xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
                   Width="14" Height="14" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center"
-                  Stroke="{ThemeResource TextFillColorPrimaryBrush}" StrokeThickness="1.2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                  Stroke="{ThemeResource MissumIconCodeBrush}" StrokeThickness="1.2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
                   Data="M3,1 L11,1 Q13,1 13,3 L13,11 Q13,13 11,13 L3,13 Q1,13 1,11 L1,3 Q1,1 3,1 Z M5,5 L9,5 M7,3 L7,7 M5,10 L9,10"/>
             """));
         var title = Label("Änderungen", Brush(235));

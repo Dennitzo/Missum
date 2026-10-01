@@ -9,7 +9,7 @@ public sealed record ComposerReasoningOptions(string ModelId, string Role, strin
 
 public sealed partial class MissumAiAssistantService
 {
-    internal static string ReasoningKey(string modelId, string role) => role.ToLowerInvariant() + ":" + modelId.ToLowerInvariant();
+    internal static string ReasoningKey(string modelId, string role) => "text:" + modelId.ToLowerInvariant();
 
     private static string? ExplicitReasoningLevel(string? value)
     {
@@ -20,7 +20,9 @@ public sealed partial class MissumAiAssistantService
     }
 
     internal static string? StoredReasoning(AppSettings current, string modelId, string role) =>
-        current.ReasoningEffortsByModel.TryGetValue(ReasoningKey(modelId, role), out var value) ? ExplicitReasoningLevel(value) : null;
+        current.ReasoningEffortsByModel.TryGetValue(ReasoningKey(modelId, role), out var value) ? ExplicitReasoningLevel(value)
+        : current.ReasoningEffortsByModel.TryGetValue("general:" + modelId.ToLowerInvariant(), out value) ? ExplicitReasoningLevel(value)
+        : current.ReasoningEffortsByModel.TryGetValue("coding:" + modelId.ToLowerInvariant(), out value) ? ExplicitReasoningLevel(value) : null;
 
     internal static ComposerReasoningOptions ResolveComposerReasoning(AppSettings current, string modelId,
         string role, ModelStatusSnapshot snapshot)

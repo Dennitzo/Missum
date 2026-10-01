@@ -12,7 +12,7 @@ namespace Missum.App.Services;
 /// in a constrained Docker container. A missing or unbuildable runner is a hard
 /// failure; this service never falls back to host PowerShell or host Python.
 /// </summary>
-public sealed class ResearchSandboxService(AssistantRuntimeProfile profile) : IResearchSandboxService, IDisposable
+public sealed class ResearchSandboxService(AssistantRuntimeProfile profile, Missum.Core.Contracts.IChatRepository? chats = null) : IResearchSandboxService, IDisposable
 {
     public const string RunnerImage = "missum-ai/research-runner:1";
     private const long MaximumProjectBytes = 100L * 1024 * 1024 * 1024;
@@ -23,16 +23,61 @@ public sealed class ResearchSandboxService(AssistantRuntimeProfile profile) : IR
     private string Root => Path.Combine(profile.DataDirectory, "ResearchSandbox");
     private string Trash => Path.Combine(Root, "Trash");
 
+    private async Task<string> ResolveStorageRootAsync(string projectId, CancellationToken cancellationToken)
+    {
+        var storageRoot = Root;
+        if (chats is not null && projectId.StartsWith("research-", StringComparison.Ordinal)
+            && Guid.TryParseExact(projectId[9..], "N", out var sessionId))
+        {
+            var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
+                ?? throw new InvalidOperationException("Die Forschungssitzung wurde nicht gefunden.");
+            var workspace = session.CodingWorkspacePath;
+            if (string.IsNullOrWhiteSpace(workspace) && session.SessionGroupId is { } groupId)
+                workspace = (await chats.ListSessionGroupsAsync(cancellationToken).ConfigureAwait(false)).FirstOrDefault(group => group.Id == groupId)?.WorkspacePath;
+            if (string.IsNullOrWhiteSpace(workspace) || !Path.IsPathFullyQualified(workspace) || !Directory.Exists(workspace))
+                throw new InvalidOperationException("Wähle für Claude Science einen vorhandenen Projektordner in der Sidebar.");
+            storageRoot = Path.Combine(Path.GetFullPath(workspace), "Science");
+        }
+        return storageRoot;
+    }
+
     public async Task<ResearchSandboxLayout> EnsureProjectAsync(string projectId, CancellationToken cancellationToken = default)
     {
         ValidateProjectId(projectId);
-        var root = Path.GetFullPath(Path.Combine(Root, projectId));
-        EnsureBelowRoot(root, Path.GetFullPath(Root));
+        var storageRoot = await ResolveStorageRootAsync(projectId, cancellationToken).ConfigureAwait(false);
+        var root = Path.GetFullPath(Path.Combine(storageRoot, projectId));
+        EnsureBelowRoot(root, Path.GetFullPath(storageRoot));
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            Directory.CreateDirectory(Root);
-            RejectReparsePoint(Path.GetFullPath(Root));
+            Directory.CreateDirectory(storageRoot);
+            RejectReparsePoint(Path.GetFullPath(storageRoot));
+            var legacy = Path.GetFullPath(Path.Combine(Root, projectId));
+            if (!Directory.Exists(root) && Directory.Exists(legacy) && !string.Equals(root, legacy, StringComparison.OrdinalIgnoreCase))
+            {
+                // Copy once; preserve the original research archive until the new
+                // workspace has been used successfully. Never follow junctions.
+                RejectReparsePoint(legacy);
+                var staging = Path.Combine(storageRoot, ".migration-" + Guid.NewGuid().ToString("N"));
+                EnsureBelowRoot(staging, Path.GetFullPath(storageRoot));
+                Directory.CreateDirectory(staging);
+                try
+                {
+                    var pending = new Queue<string>(); pending.Enqueue(legacy);
+                    while (pending.TryDequeue(out var sourceDirectory))
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        RejectReparsePoint(sourceDirectory);
+                        var destination = Path.Combine(staging, Path.GetRelativePath(legacy, sourceDirectory));
+                        Directory.CreateDirectory(destination);
+                        foreach (var file in Directory.EnumerateFiles(sourceDirectory))
+                        { RejectReparsePoint(file); File.Copy(file, Path.Combine(destination, Path.GetFileName(file)), overwrite: false); }
+                        foreach (var child in Directory.EnumerateDirectories(sourceDirectory)) { RejectReparsePoint(child); pending.Enqueue(child); }
+                    }
+                    Directory.Move(staging, root);
+                }
+                finally { if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true); }
+            }
             Directory.CreateDirectory(root);
             RejectReparsePoint(root);
             foreach (var name in new[] { "inputs", "work", "artifacts", "notebooks", "manuscripts", "env", "runs", "snapshots" })
@@ -252,15 +297,19 @@ public sealed class ResearchSandboxService(AssistantRuntimeProfile profile) : IR
     public async Task<string> ArchiveProjectAsync(string projectId, CancellationToken cancellationToken = default)
     {
         ValidateProjectId(projectId);
+        var storage = Path.GetFullPath(await ResolveStorageRootAsync(projectId, cancellationToken).ConfigureAwait(false));
+        var trash = Path.Combine(storage, "Trash");
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var source = Path.Combine(Root, projectId);
+            var source = Path.Combine(storage, projectId);
             if (!Directory.Exists(source)) throw new DirectoryNotFoundException("Das Forschungsprojekt wurde nicht gefunden.");
-            Directory.CreateDirectory(Trash);
+            Directory.CreateDirectory(trash);
             var archiveId = projectId + "_" + DateTimeOffset.UtcNow.ToString("yyyyMMddHHmmssfff", CultureInfo.InvariantCulture);
-            var destination = Path.Combine(Trash, archiveId);
+            var destination = Path.Combine(trash, archiveId);
             await File.WriteAllTextAsync(Path.Combine(source, "archive.json"), JsonSerializer.Serialize(new { projectId, archivedAt = DateTimeOffset.UtcNow, purgeAfter = DateTimeOffset.UtcNow.AddDays(30) }), cancellationToken).ConfigureAwait(false);
+            EnsureBelowRoot(source, storage); EnsureBelowRoot(destination, storage);
+            RejectReparsePoint(source);
             Directory.Move(source, destination);
             return destination;
         }
@@ -270,15 +319,19 @@ public sealed class ResearchSandboxService(AssistantRuntimeProfile profile) : IR
     public async Task RestoreProjectAsync(string projectId, CancellationToken cancellationToken = default)
     {
         ValidateProjectId(projectId);
+        var storage = Path.GetFullPath(await ResolveStorageRootAsync(projectId, cancellationToken).ConfigureAwait(false));
+        var trash = Path.Combine(storage, "Trash");
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var destination = Path.Combine(Root, projectId);
+            var destination = Path.Combine(storage, projectId);
             if (Directory.Exists(destination)) throw new IOException("Das Forschungsprojekt ist bereits aktiv.");
-            if (!Directory.Exists(Trash)) throw new DirectoryNotFoundException("Es gibt keinen Wiederherstellungsbereich.");
-            var matches = Directory.GetDirectories(Trash, projectId + "_*", SearchOption.TopDirectoryOnly)
+            if (!Directory.Exists(trash)) throw new DirectoryNotFoundException("Es gibt keinen Wiederherstellungsbereich.");
+            var matches = Directory.GetDirectories(trash, projectId + "_*", SearchOption.TopDirectoryOnly)
                 .OrderByDescending(Path.GetFileName, StringComparer.Ordinal).ToArray();
             var source = matches.FirstOrDefault() ?? throw new DirectoryNotFoundException("Es wurde kein archiviertes Forschungsprojekt gefunden.");
+            EnsureBelowRoot(source, storage); EnsureBelowRoot(destination, storage);
+            RejectReparsePoint(source);
             Directory.Move(source, destination);
             var metadata = Path.Combine(destination, "archive.json");
             if (File.Exists(metadata)) File.Delete(metadata);

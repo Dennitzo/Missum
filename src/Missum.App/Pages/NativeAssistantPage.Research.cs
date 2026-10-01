@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using Missum.App.Controls;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
@@ -135,6 +135,7 @@ public sealed partial class NativeAssistantPage
             }
         }
         if (_activeResearchSessionId == sessionId) RenderResearchView();
+        if (_session == sessionId) RenderSources(_snapshot);
         return true;
     }
 
@@ -144,15 +145,16 @@ public sealed partial class NativeAssistantPage
             _ = RefreshNativeResearchAsync(_session);
     }
 
-    private void OpenResearchView()
+    private void OpenResearchView(bool simulation = false)
     {
         if (_disposed || _mode != "claudescience") return;
+        _activeSourcesSession = null; _sourcesHost.Visibility = Visibility.Collapsed;
         SaveReviewScrollOffset();
         _activeReviewRunId = null;
         ReviewScroll.Visibility = Visibility.Collapsed;
         BodyGrid.Visibility = Visibility.Collapsed;
         _activeResearchSessionId = _session;
-        _simulationView = false;
+        _simulationView = simulation;
         ResearchHost.Visibility = Visibility.Visible;
         RenderResearchView();
         RenderSessionTabs();
@@ -175,24 +177,21 @@ public sealed partial class NativeAssistantPage
         if (_researchTabButton is null)
         {
             var content = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 7 };
-            content.Children.Add(new FontIcon { Glyph = "\uE9CE", FontSize = 13 });
-            content.Children.Add(new TextBlock { Text = "Forschung", FontSize = 13 });
+            content.Children.Add(new FontIcon { Glyph = "\uE9CE", FontSize = 13, Foreground = NativeIconPalette.BrushFor("research") });
+            content.Children.Add(new TextBlock { Text = "Publikation", FontSize = 13 });
             _researchTabButton = TabButton();
             _researchTabButton.Content = content;
             _researchTabButton.Height = 32;
             _researchTabButton.Padding = new Thickness(10, 0, 10, 0);
             _researchTabButton.BorderThickness = new Thickness(1);
             _researchTabButton.Click += (_, _) => OpenResearchView();
-            AutomationProperties.SetName(_researchTabButton, "Forschung dieser Sitzung öffnen");
+            AutomationProperties.SetName(_researchTabButton, "Publikation dieser Sitzung öffnen");
             ToolTipService.SetToolTip(_researchTabButton, "Wissenschaftliche Publikation · PDF mit mathematischen Formeln");
         }
         var active = _activeResearchSessionId == _session && _activeReviewRunId is null && !_simulationView;
-        _researchTabButton.Background = active
-            ? ResearchThemeBrush("MissumAccentSubtleBrush", 42)
-            : ResearchThemeBrush("MissumLayerStrongBrush", 29);
-        _researchTabButton.BorderBrush = active ? ResearchThemeBrush("MissumAccentBrush", 72) : new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        ApplyTabAppearance(_researchTabButton, active);
         _researchTabButton.IsEnabled = !_sessionTabNavigationBusy;
-        AutomationProperties.SetHelpText(_researchTabButton, active ? "Aktive Forschung" : "Forschung der geöffneten Sitzung");
+        AutomationProperties.SetHelpText(_researchTabButton, active ? "Aktive Publikation" : "Publikation der geöffneten Sitzung");
         if (index < SessionTabsPanel.Children.Count && ReferenceEquals(SessionTabsPanel.Children[index], _researchTabButton)) return;
         SessionTabsPanel.Children.Remove(_researchTabButton);
         SessionTabsPanel.Children.Insert(Math.Min(index, SessionTabsPanel.Children.Count), _researchTabButton);

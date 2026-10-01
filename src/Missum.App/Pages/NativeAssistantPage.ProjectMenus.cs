@@ -1,5 +1,6 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Missum.App.Controls;
 
 namespace Missum.App.Pages;
 
@@ -18,12 +19,12 @@ public sealed partial class NativeAssistantPage
     private MenuFlyout ProjectMenu(string path, string name, string[]? sessions = null, string? groupId = null)
     {
         var menu = new MenuFlyout();
-        var open = new MenuFlyoutItem { Text = "Im Explorer öffnen", Icon = new FontIcon { Glyph = "\uE8B7" }, IsEnabled = Directory.Exists(path) };
+        var open = new MenuFlyoutItem { Text = "Im Explorer öffnen", Icon = new FontIcon { Glyph = "\uE8B7", Foreground = NativeIconPalette.BrushFor("folder") }, IsEnabled = Directory.Exists(path) };
         open.Click += async (_, _) => await OpenProjectFolderAsync(path);
         menu.Items.Add(open);
         if (sessions is not null && groupId is not null)
         {
-            var delete = new MenuFlyoutItem { Text = "Projekt löschen", Icon = new FontIcon { Glyph = "\uE74D" } };
+            var delete = new MenuFlyoutItem { Text = "Projekt löschen", Icon = new FontIcon { Glyph = "\uE74D", Foreground = NativeIconPalette.BrushFor("danger") } };
             delete.Click += async (_, _) =>
             {
                 try
@@ -46,7 +47,7 @@ public sealed partial class NativeAssistantPage
 
     private Button ProjectOptionsButton(string path, string name, string[] sessions, string groupId)
     {
-        var button = new Button { Content = new FontIcon { Glyph = "\uE712", FontSize = 17 },
+        var button = new Button { Content = new FontIcon { Glyph = "\uE712", FontSize = 17, Foreground = NativeIconPalette.BrushFor("settings") },
             Style = (Style)Resources["RoundIconButtonStyle"],
             Width = 32, Height = 32, MinWidth = 32, MinHeight = 32, Padding = new(0), Opacity = 1,
             VerticalAlignment = VerticalAlignment.Center };
@@ -56,11 +57,6 @@ public sealed partial class NativeAssistantPage
         return button;
     }
 
-    private void OnInspectorProjectEntered(object sender, RoutedEventArgs e) => InspectorProjectMenu.Opacity = 1;
-    private void OnInspectorProjectExited(object sender, RoutedEventArgs e)
-    {
-        if (InspectorProjectMenu.FocusState == FocusState.Unfocused) InspectorProjectMenu.Opacity = 0;
-    }
-    private void OnInspectorProjectMenu(object sender, RoutedEventArgs e) =>
-        ProjectMenu(S(_snapshot, "workspacePath"), WorkspaceText.Text).ShowAt(InspectorProjectMenu);
+    private async void OnInspectorWorkspaceClick(object sender, RoutedEventArgs e) =>
+        await OpenProjectFolderAsync(S(_snapshot, "workspacePath"));
 }

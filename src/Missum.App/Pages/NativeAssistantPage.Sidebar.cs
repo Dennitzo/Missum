@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Missum.App.Controls;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
@@ -49,7 +50,6 @@ public sealed partial class NativeAssistantPage
             var expanded = !string.Equals(S(group, "isCollapsed"), "True", StringComparison.OrdinalIgnoreCase);
             var folderButton = SidebarButton("\uE8B7", name);
             ((TextBlock)((Grid)folderButton.Content).Children[1]).Foreground = Brush(180);
-            ((FontIcon)((Grid)folderButton.Content).Children[0]).Foreground = Brush(180);
             var projectChildren = new StackPanel { Visibility = expanded || search.Length > 0 ? Visibility.Visible : Visibility.Collapsed };
             ToolTipService.SetToolTip(folderButton, path.Length == 0 ? name : path);
             folderButton.Click += async (_, _) =>
@@ -71,7 +71,7 @@ public sealed partial class NativeAssistantPage
             var projectMode = S(group, "chatMode", _mode);
             var newChatButton = new Button
             {
-                Content = new FontIcon { Glyph = "\uE70F", FontSize = 15, Foreground = Brush(235) },
+                Content = new FontIcon { Glyph = "\uE70F", FontSize = 15, Foreground = NativeIconPalette.BrushFor("add") },
                 Style = (Style)Resources["RoundIconButtonStyle"],
                 Width = 32, Height = 32, MinWidth = 32, MinHeight = 32,
                 Padding = new Thickness(0), Margin = new Thickness(0),
@@ -164,7 +164,7 @@ public sealed partial class NativeAssistantPage
             catch (Exception exception) { ShowError(exception.Message); }
         };
         var menu = new MenuFlyout();
-        var rename = new MenuFlyoutItem { Text = "Umbenennen" };
+        var rename = new MenuFlyoutItem { Text = "Umbenennen", Icon = new FontIcon { Glyph = "\uE70F", Foreground = NativeIconPalette.BrushFor("code") } };
         rename.Click += async (_, _) =>
         {
             try
@@ -177,7 +177,7 @@ public sealed partial class NativeAssistantPage
             }
             catch (Exception exception) { ShowError(exception.Message); }
         };
-        var delete = new MenuFlyoutItem { Text = "Löschen" };
+        var delete = new MenuFlyoutItem { Text = "Löschen", Icon = new FontIcon { Glyph = "\uE74D", Foreground = NativeIconPalette.BrushFor("danger") } };
         delete.Click += async (_, _) =>
         {
             try
@@ -226,7 +226,18 @@ public sealed partial class NativeAssistantPage
         if (glyph is not null)
         {
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(16) });
-            row.Children.Add(new FontIcon { Glyph = glyph, FontSize = 15, VerticalAlignment = VerticalAlignment.Center });
+            var iconKey = glyph switch
+            {
+                "\uE8B7" => "folder",
+                "\uE774" or "\uE721" => "web",
+                "\uE8A5" => "document",
+                "\uE71B" or "\uE8C8" => "link",
+                "\uE710" or "\uE70F" => "add",
+                "\uE767" => "speech",
+                "\uE74D" or "\uE71A" => "danger",
+                _ => "navigation",
+            };
+            row.Children.Add(new FontIcon { Glyph = glyph, FontSize = 15, Foreground = NativeIconPalette.BrushFor(iconKey), VerticalAlignment = VerticalAlignment.Center });
         }
         var textColumn = row.ColumnDefinitions.Count;
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });

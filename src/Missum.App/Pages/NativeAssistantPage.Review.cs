@@ -100,7 +100,7 @@ public sealed partial class NativeAssistantPage
         var label = new TextBlock { FontSize = 13, MaxWidth = 184, TextTrimming = TextTrimming.CharacterEllipsis,
             VerticalAlignment = VerticalAlignment.Center };
         var content = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 7 };
-        content.Children.Add(new FontIcon { Glyph = "\uE8A5", FontSize = 13 }); content.Children.Add(label);
+        content.Children.Add(new FontIcon { Glyph = "\uE8A5", FontSize = 13, Foreground = NativeIconPalette.BrushFor("code") }); content.Children.Add(label);
         var select = TabButton(); select.Content = content; select.Height = 30; select.MinWidth = 110;
         select.Padding = new Thickness(10, 0, 5, 0);
         var close = TabButton(); close.Content = new FontIcon { Glyph = "\uE711", FontSize = 11 };
@@ -152,6 +152,7 @@ public sealed partial class NativeAssistantPage
 
     private void ShowReviewTab(ChangesReviewTab tab)
     {
+        _activeSourcesSession = null; _sourcesHost.Visibility = Visibility.Collapsed;
         HideResearchView();
         SaveReviewScrollOffset();
         _activeReviewRunId = tab.RunId;
@@ -162,6 +163,7 @@ public sealed partial class NativeAssistantPage
 
     private void ShowChatView()
     {
+        _activeSourcesSession = null; _sourcesHost.Visibility = Visibility.Collapsed;
         HideResearchView();
         SaveReviewScrollOffset();
         _activeReviewRunId = null;
@@ -177,6 +179,7 @@ public sealed partial class NativeAssistantPage
 
     private void SyncReviewSession()
     {
+        if (_activeSourcesSession is { } sourceSession && sourceSession != _session) ShowChatView();
         // Same-session status/snapshot updates preserve the selected review tab.
         if (_activeReviewRunId is { } runId && _reviewTabs.FirstOrDefault(tab => tab.RunId == runId)?.SessionId != _session)
             ShowChatView();
@@ -192,10 +195,7 @@ public sealed partial class NativeAssistantPage
             var tab = visibleTabs[index];
             var active = _activeReviewRunId == tab.RunId && _session == tab.SessionId;
             tab.Label.Text = tab.Title;
-            tab.Container.Background = active ? ThemeBrush("MissumAccentSubtleBrush", 47) : Brush(29);
-            tab.Container.BorderBrush = active ? ThemeBrush("MissumAccentBrush", 87)
-                : new SolidColorBrush(Microsoft.UI.Colors.Transparent);
-            tab.Select.Foreground = Brush(active ? (byte)245 : (byte)170);
+            ApplyTabAppearance(tab.Container, tab.Select, active);
             tab.Close.Foreground = Brush(155);
             tab.Select.IsEnabled = tab.Close.IsEnabled = !_sessionTabNavigationBusy;
             ToolTipService.SetToolTip(tab.Select, tab.Title + (S(tab.Summary, "emptyOverview") == "True" ? "" : "\nLauf " + tab.RunId.ToString("N")[..8]));
@@ -259,15 +259,7 @@ public sealed partial class NativeAssistantPage
                 panel.Children.Add(ReviewNotice("Binärdatei geändert; ein Text-Diff ist für dieses Format nicht verfügbar."));
             else
             {
-                var diff = new NativeDiffView(S(file, "diff"));
-                // The review has one vertical scrollbar for all files; long code lines
-                // retain the diff control's horizontal scrolling.
-                if (diff.Content is ScrollViewer scrolling)
-                {
-                    scrolling.MaxHeight = double.PositiveInfinity;
-                    scrolling.VerticalScrollBarVisibility = ScrollBarVisibility.Disabled;
-                    scrolling.VerticalScrollMode = ScrollMode.Disabled;
-                }
+                var diff = new NativeDiffView(S(file, "diff"), wrapLines: true);
                 panel.Children.Add(diff);
             }
             if (S(file, "diffTruncated") == "True") panel.Children.Add(ReviewNotice("Dieser Diff ist gekürzt. Die Quittung enthält nicht alle geänderten Zeilen."));

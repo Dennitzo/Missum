@@ -1,4 +1,4 @@
-﻿using System.Globalization;
+using System.Globalization;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Missum.App.Controls;
@@ -127,7 +127,15 @@ public sealed partial class NativeAssistantPage
             desired.Add(links);
         }
         var streaming = assistant && S(message, "status") is "streaming" or "pending";
-        var tail = desired.LastOrDefault();
+        // Tool receipts and artifacts can follow the text. Keep an independent
+        // cursor host even when the answer is still empty after navigation.
+        if (streaming)
+        {
+            if (!blocks.TryGetValue("streamCursor", out var cursor))
+                blocks["streamCursor"] = cursor = new NativeStreamingMarkdown("");
+            desired.Add(cursor);
+        }
+        var tail = streaming ? desired.LastOrDefault() : null;
         foreach (var markdown in blocks.Values.OfType<NativeStreamingMarkdown>())
             markdown.SetStreaming(streaming && ReferenceEquals(markdown, tail));
         if (MessageActionsFor(messageId, message) is { } messageActions) desired.Add(messageActions);
@@ -148,7 +156,7 @@ public sealed partial class NativeAssistantPage
         private readonly StackPanel _counts = new() { Orientation = Orientation.Horizontal, Spacing = 7, Visibility = Visibility.Collapsed };
         private readonly FontIcon _chevron = new() { Glyph = "\uE76C", FontSize = 10, Foreground = Brush(140) };
         private readonly TextBlock _status = new();
-        private readonly FontIcon _compactIcon = new() { Glyph = "\uE70F", FontSize = 14, Foreground = Brush(160), VerticalAlignment = VerticalAlignment.Center };
+        private readonly FontIcon _compactIcon = new() { Glyph = "\uE70F", FontSize = 14, Foreground = new SolidColorBrush(ToolGlyphColor("tool", "")), VerticalAlignment = VerticalAlignment.Center };
         private JsonElement _step;
         private string _diff = "";
         private bool _detailsDirty;
@@ -211,8 +219,11 @@ public sealed partial class NativeAssistantPage
                 "coding.gitDiff" => "Änderungen geprüft", "coding.updatePlan" => "Arbeitsplan aktualisiert", "assistant.reasoning" => "Denkprozess",
                 "research.code.write" => "Python-Datei vorbereiten", "research.code.execute" => "Python-Analyse ausführen",
                 "research.code.test" => "Berechnung prüfen", "research.code.benchmark" => "Berechnung vergleichen",
-                "assistant.progress" => "Fortschritt", "web.search" => "Websuche", "web.fetch" => "Webseite lesen", _ => S(step, "label", tool) };
+                "math.formalProof" => "Lean-Beweis prüfen", "assistant.progress" => "Fortschritt", "web.search" => "Websuche", "web.fetch" => "Webseite lesen", _ => S(step, "label", tool) };
             _running = S(step, "status") is "running" or "pending";
+            var iconKey = ToolStepIconKey(tool);
+            _compactIcon.Glyph = ToolIconGlyph(iconKey);
+            _compactIcon.Foreground = new SolidColorBrush(ToolGlyphColor(iconKey, tool));
             _reasoning = tool == "assistant.reasoning";
             _status.Text = S(step, "status") switch { "completed" => "Abgeschlossen", "failed" => "Fehlgeschlagen", "denied" => "Abgelehnt", "cancelled" => "Abgebrochen", "interrupted" => "Unterbrochen", "steered" => "Umgelenkt", "pending" => "Wartet", _ => "In Bearbeitung" };
             if (firstUpdate) _details.Visibility = _initiallyExpanded ? Visibility.Visible : Visibility.Collapsed;
@@ -252,7 +263,6 @@ public sealed partial class NativeAssistantPage
             if (_running) _title.Text += " …";
             if (S(_step, "status") is "failed" or "denied" or "cancelled" or "interrupted") _title.Text += " · " + _status.Text;
             _counts.Visibility = _fileMutation && _hasCounts ? Visibility.Visible : Visibility.Collapsed;
-            _compactIcon.Glyph = _reasoning ? "\uE950" : "\uE70F";
             _title.FontWeight = Microsoft.UI.Text.FontWeights.Normal;
             _title.Foreground = ThemeBrush("MissumMutedTextBrush", 160);
             _chevron.Glyph = expanded ? "\uE70D" : "\uE76C";
@@ -283,7 +293,7 @@ public sealed partial class NativeAssistantPage
                 explanation = S(_step, "tool") == "coding.read" ? $"Ich lese „{_filePath}“." : _fileMutation ? $"Dateiänderungen für „{_filePath}“." : "";
             if (explanation.Length > 0) _details.Children.Add(new NativeStreamingMarkdown(explanation));
             if (input.ValueKind == JsonValueKind.Object)
-                _details.Children.Add(new NativeToolResultView(input, _filePath, true, _fileMutation));
+                _details.Children.Add(new NativeToolResultView(input, _filePath, true, _fileMutation, S(_step, "tool") == "math.formalProof" ? "lean" : null));
             if (_diff.Length > 0)
             {
                 var caption = S(_step, "tool") == "coding.gitDiff" ? "Git-Diff" : S(_step, "status") == "completed" ? "Angewendete Änderung" : "Vorbereitete Änderung";
@@ -318,7 +328,7 @@ public sealed partial class NativeAssistantPage
             return string.Join(" · ", facts);
         }
 
-        private static JsonElement ReadMetadata(string json)
+        internal static JsonElement ReadMetadata(string json)
         {
             if (json.Length == 0) return default;
             try

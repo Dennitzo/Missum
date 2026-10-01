@@ -12,6 +12,37 @@ namespace Missum.Tests;
 
 public sealed class ScientificPublicationTests(ITestOutputHelper output)
 {
+    private const string UnitDerivationMarkdown = """
+        ## Vollständiger Rechenweg: kinetische Energie
+
+        Voraussetzung ist eine konstante Masse bei nichtrelativistischer Geschwindigkeit. Die Werte sind ein ausdrücklich illustratives Rechenbeispiel, keine Messdaten.
+
+        ### Symbol- und Einheitenlegende
+
+        - $E$ ist die kinetische Energie in Joule ($\mathrm{J}$), der SI-Einheit der Energie.
+        - $m$ ist die Masse in Kilogramm ($\mathrm{kg}$), der SI-Basiseinheit der Masse.
+        - $v$ ist die Geschwindigkeit in $\mathrm{m/s}$, also Meter je Sekunde.
+        - $1/2$ ist ein konstanter Faktor mit Einheit $1$, also dimensionslos.
+
+        Rechenschritt 1: Die Definition lautet
+
+        $$E=\frac{1}{2}mv^{2},\qquad [E]=[m][v]^{2}=\mathrm{kg}\,\mathrm{m}^{2}\,\mathrm{s}^{-2}=\mathrm{J}.$$
+
+        Rechenschritt 2: Einsetzen von $m=2\,\mathrm{kg}$ und $v=3\,\mathrm{m}\,\mathrm{s}^{-1}$ einschließlich ihrer Einheiten.
+
+        $$E=\frac{1}{2}(2\,\mathrm{kg})(3\,\mathrm{m}\,\mathrm{s}^{-1})^{2}.$$
+
+        Rechenschritt 3: Quadrieren der Geschwindigkeit, dann Multiplikation; die Einheit wird in jeder Gleichheit mitgeführt.
+
+        $$\begin{aligned}
+        E&=\frac{1}{2}(2\,\mathrm{kg})(9\,\mathrm{m}^{2}\,\mathrm{s}^{-2})\\
+         &=9\,\mathrm{kg}\,\mathrm{m}^{2}\,\mathrm{s}^{-2}\\
+         &=9\,\mathrm{J}.
+        \end{aligned}$$
+
+        Rechenschritt 4: Die Dimensionskontrolle bestätigt Energie auf beiden Seiten: $[E]=\mathrm{J}$. Alle Eingaben und das Ergebnis verwenden SI-Einheiten.
+        """;
+
     [Fact]
     public async Task DraftPublicationExistsBeforeResultsAndReusesUnchangedSnapshot()
     {
@@ -252,6 +283,38 @@ public sealed class ScientificPublicationTests(ITestOutputHelper output)
         Assert.Contains("kein Beweis", text);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void FullDerivationAndUnitLegendRemainIntactInBothReportAndArticlePublication(bool article)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var project = new ScientificResearchProject("unit-derivation", Guid.NewGuid(), "mathematicalInvestigation",
+            "Berechne die kinetische Energie mit vollständigem Rechenweg.", "Kinetische Energie", "sandboxResearch",
+            "multiPath", "verified", 1, 2, now, now);
+        var report = new ResearchStoredReport("unit-report", project.Id, "scientificMarkdown", "verified",
+            article ? "VERALTETESDOSSIER" : UnitDerivationMarkdown, "{}", now);
+        var manuscript = article
+            ? new ChatMessage(Guid.NewGuid(), project.SessionId, ChatRole.Assistant,
+                "# Kinetische Energie\n\n" + UnitDerivationMarkdown, MessageStatus.Completed, now, now)
+            : null;
+
+        var text = ScientificPublicationService.FormatPublication(project, new([], [], [], []), [], [], report, manuscript)
+            .Replace("\r", "", StringComparison.Ordinal);
+
+        // Neither manuscript selection nor fallback heading conversion may drop
+        // individual calculation steps, repeated units or the compact legend.
+        foreach (var line in UnitDerivationMarkdown.Replace("\r", "", StringComparison.Ordinal).Split('\n')
+            .Where(line => !string.IsNullOrWhiteSpace(line) && !line.StartsWith('#')))
+            Assert.Contains(line, text);
+        Assert.DoesNotContain("VERALTETESDOSSIER", text);
+        Assert.DoesNotContain("| Symbol |", text);
+        Assert.Equal(4, text.Split('\n').Count(line => line.StartsWith("- $", StringComparison.Ordinal)));
+        Assert.Single(text.Split('\n'), line => line.StartsWith("# ", StringComparison.Ordinal));
+        Assert.Contains("dimensionslos", text);
+        Assert.Contains(@"&=9\,\mathrm{J}.", text);
+    }
+
     [Fact]
     [Trait("Category", "Live")]
     public async Task RealScientificPublicationRendersMathematicsIntoReadablePdf()
@@ -264,7 +327,7 @@ public sealed class ScientificPublicationTests(ITestOutputHelper output)
             "scientificMarkdown", "verified",
             "## Analytische Lösung\n\nPUBLICATIONMATHCHECK Die Gleichung beschreibt einen gedämpften Oszillator.\n\n"
             + "$$m\\ddot{x}+c\\dot{x}+kx=0$$\n\nDie Eigenfrequenz lautet $\\omega_0=\\sqrt{k/m}$.\n\n"
-            + "## Integration\n\n$$\\int_0^1 x^2\\,dx=\\frac{1}{3}$$\n\nPUBLICATIONENDCHECK",
+            + "## Integration\n\n$$\\int_0^1 x^2\\,dx=\\frac{1}{3}$$\n\n" + UnitDerivationMarkdown + "\n\nPUBLICATIONENDCHECK",
             "{}", "research.result.persisted", "{}", "publication-live", 2, DateTimeOffset.UtcNow));
         using var renderer = new DocumentPdfExporter(NullLogger<DocumentPdfExporter>.Instance);
         using var service = new ScientificPublicationService(repository, renderer);
@@ -276,8 +339,18 @@ public sealed class ScientificPublicationTests(ITestOutputHelper output)
         var content = string.Join('\n', pdf.GetPages().Select(page => page.Text));
         Assert.Contains("PUBLICATIONMATHCHECK", content);
         Assert.Contains("PUBLICATIONENDCHECK", content);
+        Assert.Contains("Kilogramm", content);
+        Assert.Contains("Joule", content);
+        Assert.Contains("dimensionslos", content);
+        Assert.DoesNotContain("| Symbol |", content);
+        for (var step = 1; step <= 4; step++) Assert.Contains("Rechenschritt " + step, content);
+        var markdown = (await File.ReadAllTextAsync(publication.MarkdownPath, timeout.Token)).Replace("\r", "", StringComparison.Ordinal);
+        foreach (var line in UnitDerivationMarkdown.Split('\n').Where(line => !string.IsNullOrWhiteSpace(line) && !line.StartsWith('#')))
+            Assert.Contains(line, markdown);
         Assert.DoesNotContain("\\frac", content);
         Assert.DoesNotContain("\\ddot", content);
+        Assert.DoesNotContain("\\mathrm", content);
+        Assert.DoesNotContain("\\begin", content);
         Assert.DoesNotContain("A4-Buchformat", content);
         Assert.DoesNotContain("DOKUMENT", content);
         output.WriteLine($"Scientific PDF: {pdf.NumberOfPages} pages, {new FileInfo(publication.PdfPath).Length} bytes.");

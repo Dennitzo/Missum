@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using System.Text.Json;
+using Missum.App.Controls;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
@@ -134,7 +135,7 @@ public sealed partial class NativeAssistantPage
         {
             Glyph = "\uE735",
             FontSize = 14,
-            Foreground = ThemeBrush("MissumMutedTextBrush", 0x99),
+            Foreground = NativeIconPalette.BrushFor("plan"),
             VerticalAlignment = VerticalAlignment.Top,
         };
         Grid.SetColumn(bookmark, 1);

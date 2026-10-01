@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Missum.App.Services;
+using Missum.App.Controls;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
@@ -43,6 +44,7 @@ public sealed partial class NativeAssistantPage
         view.SessionId = Guid.TryParse(S(message, "sessionId"), out var sessionId) ? sessionId : _session;
         view.Text = S(message, "content");
         view.IsAssistant = string.Equals(S(message, "role"), "assistant", StringComparison.OrdinalIgnoreCase);
+        view.IsStreaming = view.IsAssistant && S(message, "status").ToLowerInvariant() is "streaming" or "pending";
         view.CanRead = (view.IsAssistant || S(message, "role") == "user") && !string.IsNullOrWhiteSpace(view.Text)
             && S(message, "status").ToLowerInvariant() is "completed" or "cancelled" or "interrupted" or "failed";
         RefreshMessageActionView(view);
@@ -84,10 +86,10 @@ public sealed partial class NativeAssistantPage
             if (!_messages.TryGetValue(id, out var message) || !DateTimeOffset.TryParse(S(message, "updatedAt"), out var updatedAt)) return null;
             var session = _session;
             var menu = new MenuFlyout();
-            var read = new MenuFlyoutItem { Text = "Ab hier vorlesen", Icon = new FontIcon { Glyph = "\uE767" } };
+            var read = new MenuFlyoutItem { Text = "Ab hier vorlesen", Icon = new FontIcon { Glyph = "\uE767", Foreground = NativeIconPalette.BrushFor("speech") } };
             read.Click += async (_, _) => { if (_session == session) await StartMessageSpeechAsync(view, excerpt, updatedAt); };
             menu.Items.Add(read);
-            var copy = new MenuFlyoutItem { Text = "Nachricht kopieren" };
+            var copy = new MenuFlyoutItem { Text = "Nachricht kopieren", Icon = new FontIcon { Glyph = "\uE8C8", Foreground = NativeIconPalette.BrushFor("link") } };
             copy.Click += (_, _) => CopyMessageText(view); menu.Items.Add(copy);
             return menu;
         }
@@ -102,13 +104,21 @@ public sealed partial class NativeAssistantPage
             package.SetText(view.Text);
             Clipboard.SetContent(package);
             var version = ++view.CopyVersion;
-            if (view.Copy.Content is FontIcon icon) icon.Glyph = "\uE73E";
+            if (view.Copy.Content is FontIcon icon)
+            {
+                icon.Glyph = "\uE73E";
+                icon.Foreground = NativeIconPalette.BrushFor("add");
+            }
             ToolTipService.SetToolTip(view.Copy, "Kopiert");
             AutomationProperties.SetName(view.Copy, "Kopiert");
             await Task.Delay(TimeSpan.FromSeconds(2), _lifetime.Token);
             if (version == view.CopyVersion && !_disposed)
             {
-                if (view.Copy.Content is FontIcon restored) restored.Glyph = "\uE8C8";
+                if (view.Copy.Content is FontIcon restored)
+                {
+                    restored.Glyph = "\uE8C8";
+                    restored.Foreground = NativeIconPalette.BrushFor("link");
+                }
                 ToolTipService.SetToolTip(view.Copy, "Nachricht kopieren");
                 AutomationProperties.SetName(view.Copy, "Nachricht kopieren");
             }
@@ -285,11 +295,13 @@ public sealed partial class NativeAssistantPage
     {
         var active = _speaking && IsMessageSpeechSource(view);
         var microphone = _microphone.Current;
-        view.Panel.Visibility = !string.IsNullOrWhiteSpace(view.Text) ? Visibility.Visible : Visibility.Collapsed;
+        view.Panel.Visibility = !view.IsStreaming && !string.IsNullOrWhiteSpace(view.Text) ? Visibility.Visible : Visibility.Collapsed;
         view.Copy.IsEnabled = view.CopyMenu.IsEnabled = !string.IsNullOrWhiteSpace(view.Text);
         view.Read.Visibility = Visibility.Visible;
         view.Read.IsEnabled = active || view.CanRead && !_messageSpeechActionBusy;
-        ((FontIcon)view.Read.Content).Glyph = active ? "\uE71A" : "\uE767";
+        var readIcon = (FontIcon)view.Read.Content;
+        readIcon.Glyph = active ? "\uE71A" : "\uE767";
+        readIcon.Foreground = NativeIconPalette.BrushFor(active ? "danger" : "speech");
         var readLabel = active ? "Vorlesen beenden" : view.CanRead ? "Nachricht vorlesen" : "Nach Abschluss vorlesen";
         ToolTipService.SetToolTip(view.Read, readLabel);
         AutomationProperties.SetName(view.Read, readLabel);
@@ -300,10 +312,17 @@ public sealed partial class NativeAssistantPage
         view.PauseMenu.IsEnabled = view.Pause.IsEnabled;
         view.PauseMenu.Visibility = view.StopMenu.Visibility = active ? Visibility.Visible : Visibility.Collapsed;
         var pauseLabel = microphone.IsSpeechPaused ? "Vorlesen fortsetzen" : "Vorlesen pausieren";
-        ((FontIcon)view.Pause.Content).Glyph = microphone.IsSpeechPaused ? "\uE768" : "\uE769";
+        var pauseIcon = (FontIcon)view.Pause.Content;
+        pauseIcon.Glyph = microphone.IsSpeechPaused ? "\uE768" : "\uE769";
+        pauseIcon.Foreground = NativeIconPalette.BrushFor(microphone.IsSpeechPaused ? "add" : "speech");
         ToolTipService.SetToolTip(view.Pause, pauseLabel);
         AutomationProperties.SetName(view.Pause, pauseLabel);
         view.PauseMenu.Text = pauseLabel;
+        if (view.PauseMenu.Icon is FontIcon pauseMenuIcon)
+        {
+            pauseMenuIcon.Glyph = pauseIcon.Glyph;
+            pauseMenuIcon.Foreground = pauseIcon.Foreground;
+        }
         view.Status.Text = active ? _messageSpeechStatus : "";
         ToolTipService.SetToolTip(view.Status, view.Status.Text);
     }
@@ -330,7 +349,7 @@ public sealed partial class NativeAssistantPage
             Width = 28, Height = 28, MinWidth = 0, MinHeight = 0,
             Padding = new Thickness(0), BorderThickness = new Thickness(0), CornerRadius = new CornerRadius(6),
             Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), Foreground = Brush(154),
-            Content = new FontIcon { Glyph = glyph, FontSize = 15 },
+            Content = new FontIcon { Glyph = glyph, FontSize = 15, Foreground = NativeIconPalette.BrushFor(glyph == "\uE8C8" ? "link" : "speech") },
         };
         ToolTipService.SetToolTip(button, label);
         AutomationProperties.SetName(button, label);
@@ -343,6 +362,7 @@ public sealed partial class NativeAssistantPage
         public Guid SessionId { get; set; }
         public string Text { get; set; } = "";
         public bool IsAssistant { get; set; }
+        public bool IsStreaming { get; set; }
         public bool CanRead { get; set; }
         public long CopyVersion { get; set; }
         public StackPanel Panel { get; } = new() { Orientation = Orientation.Horizontal, Spacing = 3, MinHeight = 28 };
@@ -351,9 +371,9 @@ public sealed partial class NativeAssistantPage
         public Button Pause { get; } = MessageActionButton("\uE769", "Vorlesen pausieren");
         public TextBlock Status { get; } = new() { FontSize = 13, Foreground = Brush(145), MaxWidth = 310, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(5, 0, 0, 0) };
         public MenuFlyout Menu { get; } = new();
-        public MenuFlyoutItem CopyMenu { get; } = new() { Text = "Nachricht kopieren", Icon = new FontIcon { Glyph = "\uE8C8" } };
-        public MenuFlyoutItem ReadMenu { get; } = new() { Text = "Nachricht vorlesen", Icon = new FontIcon { Glyph = "\uE767" } };
-        public MenuFlyoutItem PauseMenu { get; } = new() { Text = "Vorlesen pausieren", Icon = new FontIcon { Glyph = "\uE769" } };
-        public MenuFlyoutItem StopMenu { get; } = new() { Text = "Vorlesen beenden", Icon = new FontIcon { Glyph = "\uE71A" } };
+        public MenuFlyoutItem CopyMenu { get; } = new() { Text = "Nachricht kopieren", Icon = new FontIcon { Glyph = "\uE8C8", Foreground = NativeIconPalette.BrushFor("link") } };
+        public MenuFlyoutItem ReadMenu { get; } = new() { Text = "Nachricht vorlesen", Icon = new FontIcon { Glyph = "\uE767", Foreground = NativeIconPalette.BrushFor("speech") } };
+        public MenuFlyoutItem PauseMenu { get; } = new() { Text = "Vorlesen pausieren", Icon = new FontIcon { Glyph = "\uE769", Foreground = NativeIconPalette.BrushFor("speech") } };
+        public MenuFlyoutItem StopMenu { get; } = new() { Text = "Vorlesen beenden", Icon = new FontIcon { Glyph = "\uE71A", Foreground = NativeIconPalette.BrushFor("danger") } };
     }
 }

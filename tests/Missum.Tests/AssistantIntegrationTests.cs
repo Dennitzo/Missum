@@ -528,7 +528,7 @@ public sealed class AssistantIntegrationTests
     }
 
     [Fact]
-    public void SettingsExposeIndependentGeneralAndCodingModelSelectors()
+    public void SettingsUseTheGlobalPromptModelSelection()
     {
         var settingsPage = File.ReadAllText(Path.Combine(
             FindRepositoryRoot(),
@@ -543,16 +543,12 @@ public sealed class AssistantIntegrationTests
             "ViewModels",
             "SettingsViewModel.cs"));
 
-        Assert.Contains("Header=\"General AI Modell\"", settingsPage, StringComparison.Ordinal);
-        Assert.Contains("ViewModel.Models", settingsPage, StringComparison.Ordinal);
-        Assert.Contains("ViewModel.SelectedGeneralModelItem", settingsPage, StringComparison.Ordinal);
-        Assert.Contains("Header=\"Coding AI Modell\"", settingsPage, StringComparison.Ordinal);
-        Assert.Contains("ViewModel.SelectedCodingModelItem", settingsPage, StringComparison.Ordinal);
-        Assert.Contains("GetCodingModelsAsync", settingsViewModel, StringComparison.Ordinal);
-        Assert.DoesNotContain("IsTerminalOnlyModel", settingsViewModel, StringComparison.Ordinal);
-        Assert.DoesNotContain("LM Studio", settingsPage, StringComparison.Ordinal);
-        Assert.Contains("native Unsloth-Laufzeit", settingsPage, StringComparison.Ordinal);
-        Assert.DoesNotContain("status = await SaveAsync(cancellationToken);", settingsViewModel, StringComparison.Ordinal);
+        Assert.DoesNotContain("Header=\"General AI Modell\"", settingsPage, StringComparison.Ordinal);
+        Assert.DoesNotContain("Header=\"Coding AI Modell\"", settingsPage, StringComparison.Ordinal);
+        Assert.DoesNotContain("SelectedGeneralModelItem", settingsPage, StringComparison.Ordinal);
+        Assert.DoesNotContain("SelectedCodingModelItem", settingsPage, StringComparison.Ordinal);
+        Assert.Contains("Promptfenster", settingsPage, StringComparison.Ordinal);
+        Assert.Contains("SelectedModel = current.SelectedModel", settingsViewModel, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -125,6 +125,7 @@ public sealed partial class NativeArtifactLinks : StackPanel
 
     private sealed class ArtifactLinkView
     {
+        private readonly FontIcon _icon = new() { Glyph = "\uE8A5", FontSize = 20, Foreground = NativeIconPalette.BrushFor("document"), VerticalAlignment = VerticalAlignment.Center };
         private readonly TextBlock _name = new() { FontSize = 14, Foreground = Gray(235), TextTrimming = TextTrimming.CharacterEllipsis };
         private readonly TextBlock _details = new() { FontSize = 12, Foreground = Gray(160), TextTrimming = TextTrimming.CharacterEllipsis };
 
@@ -134,7 +135,7 @@ public sealed partial class NativeArtifactLinks : StackPanel
             row.ColumnDefinitions.Add(new() { Width = new GridLength(24) });
             row.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) });
             row.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
-            row.Children.Add(new FontIcon { Glyph = "\uE8A5", FontSize = 20, Foreground = Gray(195), VerticalAlignment = VerticalAlignment.Center });
+            row.Children.Add(_icon);
             var labels = new StackPanel { Spacing = 3 };
             labels.Children.Add(_name); labels.Children.Add(_details);
             Grid.SetColumn(labels, 1); row.Children.Add(labels);
@@ -158,6 +159,13 @@ public sealed partial class NativeArtifactLinks : StackPanel
         public void Update(string name, string contentType, long? length)
         {
             _name.Text = string.IsNullOrWhiteSpace(name) ? "Erzeugte Datei" : name;
+            var iconKey = NativeIconPalette.FileKey(name);
+            _icon.Foreground = NativeIconPalette.BrushFor(iconKey);
+            _icon.Glyph = iconKey switch
+            {
+                "pdf" => "\uEA90", "image" => "\uEB9F", "audio" => "\uE767", "video" => "\uE714",
+                "code" => "\uE943", _ => "\uE8A5",
+            };
             var extension = Path.GetExtension(name).TrimStart('.');
             var format = extension.Length is > 0 and <= 12 && extension.All(char.IsLetterOrDigit)
                 ? extension.ToUpperInvariant() : string.IsNullOrWhiteSpace(contentType) ? "Datei" : contentType;

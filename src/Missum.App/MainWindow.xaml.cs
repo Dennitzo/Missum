@@ -301,7 +301,7 @@ public sealed partial class MainWindow : Window
             VerticalAlignment = VerticalAlignment.Center,
             Spacing = 12,
         };
-        content.Children.Add(new FontIcon { Glyph = "\uEA39", FontSize = 32 });
+        content.Children.Add(new FontIcon { Glyph = "\uEA39", FontSize = 32, Foreground = Missum.App.Controls.NativeIconPalette.BrushFor("danger") });
         content.Children.Add(new TextBlock
         {
             Text = "Die Seite konnte nicht geladen werden.",

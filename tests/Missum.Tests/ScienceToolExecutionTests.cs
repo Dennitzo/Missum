@@ -132,7 +132,7 @@ public sealed class ScienceToolExecutionTests(ITestOutputHelper output)
         await using var environment = await TestEnvironment.CreateAsync();
         var chats = environment.Get<IChatRepository>();
         var session = await chats.CreateSessionAsync("Formal contract", ChatMode.ClaudeScience);
-        using var sandbox = new ResearchSandboxService(Profile(environment.Directory));
+        using var sandbox = new ResearchSandboxService(Profile(environment.Directory), chats);
         var broker = new LocalToolBroker(null!, null!, null!, chats, researchSandbox: sandbox);
         var result = await broker.ExecuteAsync(Proposal(ClientToolNames.MathFormalProof,
             new { projectId = "research-" + session.Id.ToString("N"), source }), session.Id, null);
@@ -156,8 +156,10 @@ public sealed class ScienceToolExecutionTests(ITestOutputHelper output)
         await using var environment = await TestEnvironment.CreateAsync();
         var chats = environment.Get<IChatRepository>();
         var session = await chats.CreateSessionAsync("Sandbox execution proof", ChatMode.ClaudeScience);
+        var workspace = Path.Combine(environment.Directory, "science-workspace"); Directory.CreateDirectory(workspace);
+        await chats.SetCodingWorkspacePathAsync(session.Id, workspace, activateCoding: false);
         var projectId = "research-" + session.Id.ToString("N");
-        using var sandbox = new ResearchSandboxService(Profile(environment.Directory));
+        using var sandbox = new ResearchSandboxService(Profile(environment.Directory), chats);
         var broker = new LocalToolBroker(null!, null!, null!, chats, researchSandbox: sandbox);
         using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(5));
         var runtime = await sandbox.PrepareRuntimeAsync(deadline.Token);

@@ -38,7 +38,7 @@ public sealed class BrandMigrationTests
         Assert.Equal("http://localhost:18080", settings.MissumAiServerUrl);
         Assert.Equal("2.7", settings.MissumAiProtocolVersion);
         Assert.Equal("custom/general", settings.SelectedModel);
-        Assert.Equal("custom/coding", settings.SelectedCodingModel);
+        Assert.Equal(settings.SelectedModel, settings.SelectedCodingModel);
         Assert.Equal(sessionId, settings.ActiveSessionId);
         using var saved = JsonDocument.Parse(await File.ReadAllTextAsync(store.SettingsPath));
         Assert.Equal("http://localhost:18080", saved.RootElement.GetProperty("missumAiServerUrl").GetString());

@@ -14,6 +14,48 @@ namespace Missum.Ai.Server.Tests;
 public sealed class RunSteeringProcessorTests
 {
     [Theory]
+    [InlineData(RunMode.General)]
+    [InlineData(RunMode.Coding)]
+    public async Task LatestModelSelectionIsAppliedBeforeNextInferenceAndKeepsItsDurableReceipt(RunMode mode)
+    {
+        using var harness = new Harness(mode);
+        var run = await harness.CreateAsync();
+        await harness.Repository.AppendEventAsync(run, RunModelSelectionEvents.Requested,
+            new RunModelSelectionRequest("steering-session", NativeHandler.ModelId));
+        var latest = await harness.Repository.AppendEventAsync(run, RunModelSelectionEvents.Requested,
+            new RunModelSelectionRequest("steering-session", NativeHandler.AlternateModelId));
+        await harness.Processor.ProcessAsync(run, CancellationToken.None);
+        Assert.Equal(NativeHandler.AlternateModelId, Assert.Single(harness.Handler.Models));
+        var applied = Assert.Single(await harness.Repository.GetEventsAfterAsync(run, 0), item => item.Type == RunModelSelectionEvents.Applied);
+        Assert.Equal(NativeHandler.AlternateModelId, applied.Data.GetProperty("modelId").GetString());
+        Assert.True(applied.Id > latest.Id);
+        Assert.Equal(RunState.Completed, (await harness.Repository.GetAsync(run))!.State);
+    }
+
+    [Fact]
+    public async Task ModelSelectionWaitsForPublishedToolReceiptWithoutCancellingIt()
+    {
+        using var harness = new Harness(RunMode.Coding);
+        var run = await harness.CreateAsync();
+        var call = ReadCall("read-selection", "existing.cs");
+        var proposal = new ToolProposal("proposal-selection", run, call.Name, call.Arguments, ToolRiskClass.ReadOnly,
+            "Datei lesen", DateTimeOffset.MaxValue);
+        await harness.Repository.SaveToolProposalAsync(proposal);
+        await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Datei prüfen"), new("assistant", null, ToolCalls: [call])],
+            1, 1, 0, 0, ActiveToolCalls: [call], PendingProposalId: proposal.ProposalId, PendingToolCallId: call.Id));
+        await harness.Repository.EnsureClientToolProposedEventAsync(run, proposal.ProposalId);
+        await harness.Repository.AppendEventAsync(run, RunModelSelectionEvents.Requested,
+            new RunModelSelectionRequest("steering-session", NativeHandler.AlternateModelId));
+        await Assert.ThrowsAsync<RunWaitingForClientException>(() => harness.Processor.ProcessAsync(run, CancellationToken.None));
+        Assert.Empty(harness.Handler.Models);
+        Assert.DoesNotContain(await harness.Repository.GetEventsAfterAsync(run, 0), item => item.Type == RunModelSelectionEvents.Applied);
+        await harness.Repository.SaveClientToolResultAsync(run, new(proposal.ProposalId, "completed", JsonSerializer.SerializeToElement(new { content = "Beleg existing.cs" })));
+        await harness.Processor.ProcessAsync(run, CancellationToken.None);
+        Assert.Equal(NativeHandler.AlternateModelId, Assert.Single(harness.Handler.Models));
+        Assert.Contains(Assert.Single(harness.Handler.Prompts), message => message.ToolCallId == call.Id && message.Content!.Contains("Beleg existing.cs", StringComparison.Ordinal));
+    }
+
+    [Theory]
     [InlineData("Zeile eins\r\nZeile zwei\rEnde", "Zeile eins\nZeile zwei\nEnde")]
     [InlineData("MISSUM_SESSION_TITLE: Versteckt\nErgebnis", "Ergebnis")]
     [InlineData("**MISSUM_SESSION_TITLE:** Versteckt\n\n\nErgebnis", "Ergebnis")]
@@ -188,6 +230,8 @@ public sealed class RunSteeringProcessorTests
     private sealed class NativeHandler(bool blockFirst) : HttpMessageHandler
     {
         internal const string ModelId = "coding/SteerFixture-Q4~abc123";
+        internal const string AlternateModelId = "coding/NextFixture-Q4~def456";
+        internal List<string> Models { get; } = [];
         private static readonly string[] ModelTags = ["missum-context-train:32768"];
         internal List<LmChatMessage[]> Prompts { get; } = [];
         internal TaskCompletionSource Blocked { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -197,11 +241,12 @@ public sealed class RunSteeringProcessorTests
         {
             var path = request.RequestUri!.AbsolutePath;
             if (path is "/sessions/prepare" or "/sessions/save") return new(HttpStatusCode.NotFound);
-            if (path == "/v1/models") return Json(new { data = new[] { new { id = ModelId, tags = ModelTags, status = new { value = "loaded" } } } });
+            if (path == "/v1/models") return Json(new { data = new[] { new { id = ModelId, tags = ModelTags, status = new { value = "loaded" } }, new { id = AlternateModelId, tags = ModelTags, status = new { value = "loaded" } } } });
             if (path == "/props") return Json(new { default_generation_settings = new { n_ctx = 32768 } });
             if (path == "/v1/chat/completions/input_tokens") return Json(new { input_tokens = 32 });
             if (path != "/v1/chat/completions") throw new InvalidOperationException("Unexpected endpoint " + path);
             using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken));
+            Models.Add(body.RootElement.GetProperty("model").GetString()!);
             Prompts.Add(body.RootElement.GetProperty("messages").EnumerateArray().Select(message => new LmChatMessage(
                 message.GetProperty("role").GetString()!, message.TryGetProperty("content", out var content) && content.ValueKind == JsonValueKind.String ? content.GetString() : null,
                 ToolCallId: message.TryGetProperty("tool_call_id", out var id) ? id.GetString() : null)).ToArray());

@@ -1,4 +1,5 @@
-using System.Text.Json;
+﻿using System.Text.Json;
+using Missum.App.Controls;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
@@ -64,11 +65,11 @@ public sealed partial class NativeAssistantPage
             VerticalAlignment = VerticalAlignment.Center,
         };
         var content = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 7, VerticalAlignment = VerticalAlignment.Center };
-        content.Children.Add(new FontIcon { Glyph = "\uE8F2", FontSize = 13 });
+        content.Children.Add(new FontIcon { Glyph = "\uE8F2", FontSize = 13, Foreground = NativeIconPalette.BrushFor(mode == "coding" ? "code" : mode == "claudescience" ? "research" : "navigation") });
         content.Children.Add(label);
         var select = TabButton();
         select.Content = content;
-        select.Padding = new Thickness(10, 0, 5, 0);
+        select.Padding = new Thickness(10, 0, 10, 0);
         select.HorizontalContentAlignment = HorizontalAlignment.Left;
         select.MinWidth = 72;
         select.Height = 30;
@@ -116,11 +117,9 @@ public sealed partial class NativeAssistantPage
 
             var tab = _sessionTabs.FirstOrDefault(item => item.Id == _session);
             if (tab is null) continue;
-            var active = tab.Id == _session && _activeReviewRunId is null && _activeResearchSessionId is null;
+            var active = tab.Id == _session && _activeReviewRunId is null && _activeResearchSessionId is null && _activeSourcesSession is null;
             tab.Label.Text = tab.Title;
-            tab.Container.Background = active ? ThemeBrush("MissumAccentSubtleBrush", 42) : Brush(29);
-            tab.Container.BorderBrush = active ? ThemeBrush("MissumAccentBrush", 72) : new SolidColorBrush(Microsoft.UI.Colors.Transparent);
-            tab.Select.Foreground = Brush(active ? (byte)242 : (byte)170);
+            ApplyTabAppearance(tab.Container, tab.Select, active);
             tab.Select.IsEnabled = !_sessionTabNavigationBusy;
             ToolTipService.SetToolTip(tab.Select, tab.Title);
             AutomationProperties.SetName(tab.Select, $"Chat-Tab: {tab.Title}");
@@ -132,7 +131,7 @@ public sealed partial class NativeAssistantPage
             }
             position++;
         }
-        RenderReviewTabs(position);
+        RenderReviewTabs(RenderSourcesTab(position));
     }
 
     private async Task ActivateSessionTabAsync(Guid sessionId)
@@ -153,6 +152,30 @@ public sealed partial class NativeAssistantPage
             _sessionTabNavigationBusy = false;
             if (!_disposed) SyncSessionTabs();
         }
+    }
+
+    private static void ApplyTabAppearance(Control control, bool active)
+    {
+        control.Height = 32;
+        control.CornerRadius = new CornerRadius(8);
+        control.BorderThickness = new Thickness(1);
+        control.Background = active ? ThemeBrush("MissumAccentSubtleBrush", 42) : Brush(29);
+        control.BorderBrush = active ? ThemeBrush("MissumAccentBrush", 72) : new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        control.Foreground = Brush(active ? (byte)242 : (byte)170);
+        control.FontFamily = new FontFamily("Segoe UI Variable Text");
+        control.FontSize = 13;
+    }
+
+    private static void ApplyTabAppearance(Border container, Button select, bool active)
+    {
+        container.Height = 32;
+        container.CornerRadius = new CornerRadius(8);
+        container.BorderThickness = new Thickness(1);
+        container.Background = active ? ThemeBrush("MissumAccentSubtleBrush", 42) : Brush(29);
+        container.BorderBrush = active ? ThemeBrush("MissumAccentBrush", 72) : new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        select.Foreground = Brush(active ? (byte)242 : (byte)170);
+        select.FontFamily = new FontFamily("Segoe UI Variable Text");
+        select.FontSize = 13;
     }
 
     private static Button TabButton()

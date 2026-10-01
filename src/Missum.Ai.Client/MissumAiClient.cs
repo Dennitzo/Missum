@@ -249,6 +249,9 @@ public sealed class MissumAiClient : IDisposable
     public Task<RunSnapshot> GetRunAsync(string runId, CancellationToken cancellationToken = default) =>
         GetAsync<RunSnapshot>($"v1/runs/{Uri.EscapeDataString(runId)}", cancellationToken);
 
+    public Task<RunEvent> SelectRunModelAsync(string runId, RunModelSelectionRequest request, CancellationToken cancellationToken = default) =>
+        PostAsync<RunModelSelectionRequest, RunEvent>($"v1/runs/{Uri.EscapeDataString(runId)}/selection", request, cancellationToken);
+
     public Task<RunSteeringAccepted> SteerRunAsync(string runId, RunSteeringRequest request, CancellationToken cancellationToken = default) =>
         PostAsync<RunSteeringRequest, RunSteeringAccepted>($"v1/runs/{Uri.EscapeDataString(runId)}/steer", request, cancellationToken);
 

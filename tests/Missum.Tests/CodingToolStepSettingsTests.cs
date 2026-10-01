@@ -30,7 +30,7 @@ public sealed class CodingToolStepSettingsTests
         Assert.False(restored.CodingToolStepsExpanded);
         Assert.Equal(AppSettings.CurrentVersion, restored.Version);
         Assert.Equal("coding/existing-general~1234", restored.SelectedModel);
-        Assert.Equal("coding/existing-coder~5678", restored.SelectedCodingModel);
+        Assert.Equal(restored.SelectedModel, restored.SelectedCodingModel);
     }
 
     [Theory]
@@ -66,7 +66,7 @@ public sealed class CodingToolStepSettingsTests
         Assert.Equal(expanded, reopenedViewModel.CodingToolStepsExpanded);
         Assert.Equal(expanded, restarted.Current.CodingToolStepsExpanded);
         Assert.Equal("coding/existing-general~1234", restarted.Current.SelectedModel);
-        Assert.Equal("coding/existing-coder~5678", restarted.Current.SelectedCodingModel);
+        Assert.Equal(restarted.Current.SelectedModel, restarted.Current.SelectedCodingModel);
         using var savedJson = JsonDocument.Parse(await File.ReadAllTextAsync(reopenedStore.SettingsPath));
         Assert.Equal(expanded, savedJson.RootElement.GetProperty("codingToolStepsExpanded").GetBoolean());
 

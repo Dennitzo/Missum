@@ -50,7 +50,7 @@ public sealed class ClientRestartRequestTests
         {
             MissumAiServerUrl = "http://127.0.0.1:65000",
             ActiveSessionId = session.Id,
-            SelectedModel = GeneralModel,
+            SelectedModel = coding ? CodingModel : GeneralModel,
             SelectedCodingModel = CodingModel,
         });
 

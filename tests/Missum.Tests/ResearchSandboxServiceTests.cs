@@ -1,4 +1,6 @@
 using Missum.App.Services;
+using Missum.Core.Contracts;
+using Missum.Core.Models;
 
 namespace Missum.Tests;
 
@@ -13,6 +15,43 @@ public sealed class ResearchSandboxServiceTests : IDisposable
             new Uri("http://127.0.0.1:8080"), 8081, 8082,
             Path.Combine(_root, "native"), Path.Combine(_root, "llama.exe"), Path.Combine(_root, "stack"), "test");
         _service = new ResearchSandboxService(profile);
+    }
+
+    [Fact]
+    public async Task ScienceUsesSelectedWorkspaceAndMigratesExistingFilesWithRestorableArchive()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var chats = environment.Get<IChatRepository>();
+        var session = await chats.CreateSessionAsync("Workspace research", ChatMode.ClaudeScience);
+        var workspace = Path.Combine(environment.Directory, "selected-workspace"); Directory.CreateDirectory(workspace);
+        await chats.SetCodingWorkspacePathAsync(session.Id, workspace, activateCoding: false);
+        var project = "research-" + session.Id.ToString("N");
+        var profile = new AssistantRuntimeProfile("test", "AI Assistent", _root,
+            new Uri("http://127.0.0.1:8080"), 8081, 8082, Path.Combine(_root, "native"), Path.Combine(_root, "llama.exe"), Path.Combine(_root, "stack"), "test");
+        await _service.WriteTextAsync(project, "existing.py", "print('preserved')");
+        using var relocated = new ResearchSandboxService(profile, chats);
+        var layout = await relocated.EnsureProjectAsync(project);
+        Assert.Equal(Path.Combine(workspace, "Science", project), layout.RootPath);
+        Assert.Equal("print('preserved')", await File.ReadAllTextAsync(Path.Combine(layout.WorkPath, "existing.py")));
+        var change = await relocated.WriteTextAsync(project, "new.py", "print('workspace')");
+        Assert.True(change.IsNewFile);
+        Assert.False(File.Exists(Path.Combine(_root, "ResearchSandbox", project, "work", "new.py")));
+        var archive = await relocated.ArchiveProjectAsync(project);
+        Assert.StartsWith(Path.Combine(workspace, "Science", "Trash"), archive, StringComparison.OrdinalIgnoreCase);
+        await relocated.RestoreProjectAsync(project);
+        Assert.True(File.Exists(Path.Combine(layout.WorkPath, "new.py")));
+    }
+
+    [Fact]
+    public async Task ScienceCannotSilentlyUsePrivateStorageWhenNoWorkspaceIsSelected()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var chats = environment.Get<IChatRepository>();
+        var session = await chats.CreateSessionAsync("Missing workspace", ChatMode.ClaudeScience);
+        var profile = new AssistantRuntimeProfile("test", "AI Assistent", _root,
+            new Uri("http://127.0.0.1:8080"), 8081, 8082, Path.Combine(_root, "native"), Path.Combine(_root, "llama.exe"), Path.Combine(_root, "stack"), "test");
+        using var sandbox = new ResearchSandboxService(profile, chats);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => sandbox.EnsureProjectAsync("research-" + session.Id.ToString("N")));
     }
 
     [Fact]

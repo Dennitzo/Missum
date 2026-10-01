@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using Microsoft.UI.Xaml.Controls;
 
 namespace Missum.App.Pages;
@@ -69,6 +69,9 @@ public sealed partial class NativeAssistantPage
         var activeMessage = JsonSerializer.SerializeToElement(active);
         var body = MessageBody(_messageViews[activeId].View);
         UpdateMessageBlocks(activeId, activeMessage, body);
+        UpdateMessageActions(activeId, activeMessage);
+        if (_messageActionViews[activeId].Panel.Visibility != Microsoft.UI.Xaml.Visibility.Collapsed)
+            throw new InvalidOperationException("The streaming message footer must not appear after the cursor.");
         var header = _messageBlocks[activeId]["header"];
         UpdateMessageHeader(header, activeMessage);
         var label = (TextBlock)((StackPanel)header).Children[0];
@@ -84,6 +87,9 @@ public sealed partial class NativeAssistantPage
             throw new InvalidOperationException("The streaming cursor is not on its own final line.");
         active["status"] = JsonSerializer.SerializeToElement("completed");
         UpdateMessageBlocks(activeId, JsonSerializer.SerializeToElement(active), body);
+        UpdateMessageActions(activeId, JsonSerializer.SerializeToElement(active));
+        if (_messageActionViews[activeId].Panel.Visibility != Microsoft.UI.Xaml.Visibility.Visible)
+            throw new InvalidOperationException("Completion did not restore the message footer actions.");
         if (HasCursor() || !label.Text.Contains("Uhr ·", StringComparison.Ordinal) || !label.Text.EndsWith("lang gearbeitet", StringComparison.Ordinal))
             throw new InvalidOperationException("Completion did not remove the cursor and finalize the header.");
         var readInput = JsonSerializer.SerializeToElement(new { path = "src/example.cs", startLine = 10 });
@@ -127,10 +133,213 @@ public sealed partial class NativeAssistantPage
         await VerifyConversationSelectionSmokeAsync();
         await VerifyComposerFooterSmokeAsync();
         await VerifyMathRenderingSmokeAsync(body);
+        await VerifyToolIconColorsSmokeAsync();
+        await VerifySourcesSmokeAsync(original);
+        await VerifyChangesReviewSmokeAsync();
         await VerifyScienceViewsSmokeAsync();
         ApplyEvent("state.snapshot", original);
         RenderMessagesNow();
         return visits;
+    }
+
+    private async Task VerifySourcesSmokeAsync(JsonElement original)
+    {
+        var owner = Guid.NewGuid(); var now = DateTimeOffset.UtcNow;
+        var webFixture = Environment.GetEnvironmentVariable("MISSUM_SOURCE_SMOKE_JSON_PATH");
+        var actualWebResult = !string.IsNullOrWhiteSpace(webFixture) && File.Exists(webFixture) ? await File.ReadAllTextAsync(webFixture) : null;
+        var snapshot = original.Deserialize<Dictionary<string, JsonElement>>(JsonOptions)!;
+        snapshot["activeSessionId"] = JsonSerializer.SerializeToElement(owner);
+        snapshot["chatMode"] = JsonSerializer.SerializeToElement("general");
+        snapshot["documents"] = snapshot["attachments"] = JsonSerializer.SerializeToElement(Array.Empty<object>());
+        snapshot["messages"] = JsonSerializer.SerializeToElement(new[] { new { id = Guid.NewGuid(), sessionId = owner, role = "assistant", status = "streaming", content = "",
+            createdAt = now, updatedAt = now, toolSteps = Enumerable.Range(0, 4).Select(index => new { id = "search-" + index, tool = "web.search", status = "completed",
+                inputJson = JsonSerializer.Serialize(new { query = "Recherche " + index }),
+                outputJson = actualWebResult ?? JsonSerializer.Serialize(new { results = new[] { new { title = "Wissenschaftliche Quelle " + index,
+                    url = "https://example.org/source-" + index, thumbnailUrl = "https://example.org/preview.png" } } }),
+                updatedAt = now.AddSeconds(index) }).ToArray() } });
+        ApplyEvent("state.snapshot", JsonSerializer.SerializeToElement(snapshot)); RenderMessagesNow();
+        if (SourcesPanel.Children.Count != 4 || _sessionSources[owner].Length != 4 || !_sessionSources[owner][0].Title.EndsWith('3'))
+            throw new InvalidOperationException("Sources must show the newest three web actions and an all-sources action.");
+        var latestSource = _sessionSources[owner][0];
+        // Inspect our labels rather than the FontIcon's internal glyph TextBlock.
+        var sourceLabels = ((Grid)((Button)SourcesPanel.Children[0]).Content).Children.OfType<StackPanel>().Single()
+            .Children.OfType<TextBlock>().ToArray();
+        if (sourceLabels.Length != 2 || sourceLabels[0].Text != SourcePageTitle(latestSource, latestSource.Urls[0])
+            || sourceLabels[1].Text != latestSource.Urls[0] || sourceLabels[1].Opacity >= sourceLabels[0].Opacity
+            || sourceLabels[1].FontSize >= sourceLabels[0].FontSize)
+            throw new InvalidOperationException("Web sources must display the page title above a quieter, smaller URL.");
+        var allSources = (Button)SourcesPanel.Children[^1];
+        var allRow = (Grid)allSources.Content;
+        var allIcon = allRow.Children.OfType<FontIcon>().Single();
+        if (allRow.Children.OfType<TextBlock>().Single().Opacity >= 1 || allIcon.Glyph != "\uE71B" || allIcon.Opacity >= 1)
+            throw new InvalidOperationException("The all-sources action must use the muted link symbol.");
+        VerifyIconBrush(allIcon.Foreground, "link");
+        VerifyIconBrush(((Grid)((Button)SourcesPanel.Children[0]).Content).Children.OfType<FontIcon>().Single().Foreground, "web");
+        VerifyIconBrush(((Grid)InspectorProjectRow.Content).Children.OfType<FontIcon>().Single().Foreground, "folder");
+        VerifyIconBrush(((Grid)ChangesSummaryButton.Content).Children.OfType<Microsoft.UI.Xaml.Shapes.Path>().Single().Stroke, "code");
+        VerifyIconBrush(DictationIcon.Foreground, "speech");
+        var parsedUrls = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var parsedTitles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        CollectSourceUrls(JsonSerializer.Serialize(new { result = JsonSerializer.Serialize(new { results = new[] {
+            new { title = "Feldgleichungen", url = "https://example.org/field", thumbnailUrl = "https://example.org/cover.png" } } }) }), parsedUrls, parsedTitles);
+        CollectSourceUrls(JsonSerializer.Serialize(new { url = "https://example.org/field" }), parsedUrls, parsedTitles);
+        if (parsedUrls.Count != 1 || parsedTitles["https://example.org/field"] != "Feldgleichungen")
+            throw new InvalidOperationException("Source metadata must preserve webpage titles and exclude thumbnail URLs.");
+        var redirected = ResolveSourceTitles([
+            new("fetch", "Webseite", ["https://example.org/final", "https://example.org/field"], now),
+            new("search", "Websuche", ["https://example.org/field"], now.AddSeconds(-1), PageTitles: parsedTitles)
+        ], []);
+        if (SourcePageTitle(redirected[0], "https://example.org/final") != "Feldgleichungen")
+            throw new InvalidOperationException("A webpage fetch must retain a title discovered by the same session's search.");
+        var inspectorVisibility = Inspector.Visibility;
+        Inspector.Visibility = Microsoft.UI.Xaml.Visibility.Visible; UpdateLayout();
+        await SaveMathPreviewAsync(Inspector, "native-outputs-preview.png");
+        await SaveMathPreviewAsync(LayoutRoot, "native-colored-chrome-preview.png");
+        Inspector.Visibility = inspectorVisibility;
+        var cursor = _messageBlocks.Values.SelectMany(blocks => blocks).Single(pair => pair.Key == "streamCursor").Value;
+        for (var iteration = 0; iteration < 4; iteration++)
+        {
+            OpenSourcesTab(); UpdateLayout(); await Task.Delay(30);
+            if (_sourcesHost.Visibility != Microsoft.UI.Xaml.Visibility.Visible) throw new InvalidOperationException("The sources tab did not open.");
+            ShowChatView(); UpdateLayout(); await Task.Delay(30);
+            if (cursor is not Missum.App.Controls.NativeStreamingMarkdown stream || !stream.Children.OfType<TextBlock>().SelectMany(block => block.Inlines)
+                .OfType<Microsoft.UI.Xaml.Documents.Run>().Any(run => run.Text == "▍"))
+                throw new InvalidOperationException("The streaming cursor disappeared after tab navigation.");
+        }
+        ApplyEvent("state.snapshot", original);
+        if (_activeSourcesSession is not null || _sourcesHost.Visibility != Microsoft.UI.Xaml.Visibility.Collapsed || _sourcesTabContainer?.Parent == SessionTabsPanel)
+            throw new InvalidOperationException("Sources leaked across sessions.");
+    }
+
+    private static void VerifyIconBrush(Microsoft.UI.Xaml.Media.Brush brush, string key)
+    {
+        if (brush is not Microsoft.UI.Xaml.Media.SolidColorBrush colorBrush
+            || colorBrush.Color != Missum.App.Controls.NativeIconPalette.ColorFor(key))
+            throw new InvalidOperationException("A native functional icon lost its shared semantic color: " + key);
+    }
+
+    private async Task VerifyToolIconColorsSmokeAsync()
+    {
+        var preview = new StackPanel { Spacing = 6, Padding = new Microsoft.UI.Xaml.Thickness(16), MaxWidth = 740,
+            Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 25, 25, 25)) };
+        MessagesPanel.Children.Add(preview);
+        try
+        {
+            foreach (var (tool, key) in new[] {
+                ("web.search", "web"), ("coding.read", "code"), ("coding.updatePlan", "plan"),
+                ("research.code.execute", "code"), ("research.deep", "research"), ("math.formalProof", "research"),
+                ("math.smt", "research"), ("assistant.reasoning", "research"), ("assistant.progress", "research"),
+                ("document.create", "document"), ("image.generate", "image"), ("speech.synthesize", "speech"),
+                ("audiobook.generate", "audiobook"), ("captions.stream", "captions"), ("extension.custom", "tool") })
+            {
+                var step = new ToolStepView(); preview.Children.Add(step);
+                foreach (var status in new[] { "running", "completed" })
+                foreach (var expanded in new[] { false, true })
+                {
+                    step.Update(JsonSerializer.SerializeToElement(new { tool, status, detail = "Lesbarer Werkzeugschritt" }));
+                    step.SetExpanded(expanded);
+                    // Button templates may not be loaded while an offscreen step
+                    // is being prepared; inspect its actual content icon directly.
+                    var stepBody = (StackPanel)step.Children[0];
+                    var icon = ((Grid)((Button)stepBody.Children[0]).Content).Children.OfType<FontIcon>().First();
+                    var expected = ToolGlyphColor(key, tool);
+                    if (icon.Foreground is not Microsoft.UI.Xaml.Media.SolidColorBrush brush || brush.Color != expected
+                        || brush.Color.A != 255 || Math.Max(brush.Color.R, Math.Max(brush.Color.G, brush.Color.B))
+                            - Math.Min(brush.Color.R, Math.Min(brush.Color.G, brush.Color.B)) < 30)
+                        throw new InvalidOperationException("A tool-step icon lost its menu color during status or disclosure changes: " + tool);
+                }
+                step.SetExpanded(false);
+            }
+            await SaveMathPreviewAsync(preview, "native-tool-icons-preview.png");
+        }
+        finally { MessagesPanel.Children.Remove(preview); }
+    }
+
+    private async Task VerifyChangesReviewSmokeAsync()
+    {
+        var original = _snapshot.Clone();
+        var originalSummary = _currentChangesSummary.ValueKind == JsonValueKind.Object ? _currentChangesSummary.Clone() : default;
+        var previousReview = _reviewTabs.FirstOrDefault(tab => tab.RunId == _activeReviewRunId);
+        var previousSources = _activeSourcesSession;
+        var previousResearch = _activeResearchSessionId;
+        var previousSimulation = _simulationView;
+        var owner = Guid.NewGuid(); var message = Guid.NewGuid(); var run = Guid.NewGuid();
+        var longLine = "var payload = \"" + new string('x', 320) + "\";";
+        var firstDiff = "diff --git a/first.cs b/first.cs\n--- /dev/null\n+++ b/first.cs\n@@ -0,0 +1,81 @@\n+" + longLine + "\n"
+            + string.Join("\n", Enumerable.Range(1, 80).Select(index => $"+var value{index} = {index};"));
+        var summary = JsonSerializer.SerializeToElement(new { sessionId = owner, messageId = message, runId = run, revision = 1,
+            workspacePath = "C:\\Missum-Smoke", files = new[]
+            {
+                new { path = "first.cs", addedLines = 81, removedLines = 0, isBinary = false, diff = firstDiff },
+                new { path = "second.cs", addedLines = 1, removedLines = 0, isBinary = false,
+                    diff = "diff --git a/second.cs b/second.cs\n--- /dev/null\n+++ b/second.cs\n@@ -0,0 +1 @@\n+return 42;" },
+            } });
+        try
+        {
+            var snapshot = original.Deserialize<Dictionary<string, JsonElement>>(JsonOptions)!;
+            snapshot["activeSessionId"] = JsonSerializer.SerializeToElement(owner);
+            snapshot["chatMode"] = JsonSerializer.SerializeToElement("coding");
+            snapshot["conversationRevision"] = JsonSerializer.SerializeToElement(1);
+            snapshot["messages"] = JsonSerializer.SerializeToElement(new[] { new { id = message, sessionId = owner,
+                role = "assistant", status = "completed", content = "Die beiden Dateien wurden geändert.",
+                createdAt = DateTimeOffset.UtcNow, updatedAt = DateTimeOffset.UtcNow } });
+            snapshot.Remove("changesSummary");
+            ApplyEvent("state.snapshot", JsonSerializer.SerializeToElement(snapshot)); RenderMessagesNow();
+            var chatChildren = MessagesPanel.Children.ToArray();
+            RenderChanges(summary); UpdateLayout();
+            if (_currentChangesSummary.ValueKind != JsonValueKind.Object || S(_currentChangesSummary, "runId") != run.ToString()
+                || !ChangesSummaryButton.IsEnabled || !chatChildren.SequenceEqual(MessagesPanel.Children)
+                || Descendants(Inspector).OfType<TextBlock>().Any(text => text.Text.Contains("first.cs", StringComparison.Ordinal)
+                    || text.Text.Contains("second.cs", StringComparison.Ordinal)))
+                throw new InvalidOperationException("A file receipt must only update the overlay summary, without file lists in chat or outputs.");
+
+            OpenChangesReview(summary); UpdateLayout(); await Task.Delay(30);
+            var diffs = Descendants(ReviewChangesPanel).OfType<Missum.App.Controls.NativeDiffView>().ToArray();
+            if (diffs.Length != 2 || ReviewScroll.ScrollableWidth > .5 || ReviewScroll.ScrollableHeight <= 0
+                || diffs.Any(diff => Descendants(diff).OfType<ScrollViewer>().Any()
+                    || diff.ActualWidth > ReviewChangesPanel.ActualWidth + .5))
+                throw new InvalidOperationException("The changes tab must have one vertical scroll area and no nested or horizontal diff scrolling.");
+            var firstRows = diffs[0].Content as StackPanel
+                ?? throw new InvalidOperationException("The review diff is not in its inline layout.");
+            var code = firstRows.Children.OfType<Grid>().SelectMany(row => row.Children.OfType<TextBlock>())
+                .Where(text => Grid.GetColumn(text) == 3).ToArray();
+            if (code.Length != 81 || code.Any(text => text.TextWrapping != Microsoft.UI.Xaml.TextWrapping.Wrap)
+                || code[0].ActualHeight <= code[0].LineHeight * 1.5
+                || firstRows.Children.OfType<Microsoft.UI.Xaml.Controls.Border>()
+                    .Any(row => row.Child is TextBlock { TextWrapping: Microsoft.UI.Xaml.TextWrapping.NoWrap }))
+                throw new InvalidOperationException("Long source and metadata lines must wrap without losing line numbers or source rows.");
+            await SaveMathPreviewAsync(ReviewScroll, "native-changes-preview.png");
+            ReviewScroll.ChangeView(null, ReviewScroll.ScrollableHeight, null, true);
+            UpdateLayout(); await Task.Delay(30);
+            var second = ReviewChangesPanel.Children.Last() as Microsoft.UI.Xaml.FrameworkElement
+                ?? throw new InvalidOperationException("The second changed file is missing.");
+            var bottom = second.TransformToVisual(ReviewScroll).TransformPoint(new Windows.Foundation.Point()).Y + second.ActualHeight;
+            if (ReviewScroll.VerticalOffset <= 0 || bottom > ReviewScroll.ActualHeight + .5)
+                throw new InvalidOperationException("The outer changes scroll area cannot reach the second file.");
+        }
+        finally
+        {
+            ShowChatView();
+            var fixtureTab = _reviewTabs.FirstOrDefault(tab => tab.RunId == run);
+            if (fixtureTab is not null) { _reviewTabs.Remove(fixtureTab); SessionTabsPanel.Children.Remove(fixtureTab.Container); }
+            ApplyEvent("state.snapshot", original); RenderMessagesNow();
+            if (originalSummary.ValueKind == JsonValueKind.Object) RenderChanges(originalSummary);
+            if (previousReview is not null && previousReview.SessionId == _session) ShowReviewTab(previousReview);
+            else if (previousSources == _session) OpenSourcesTab();
+            else if (previousResearch == _session) OpenResearchView(previousSimulation);
+            RenderSessionTabs();
+        }
+
+    }
+
+    private static IEnumerable<Microsoft.UI.Xaml.DependencyObject> Descendants(Microsoft.UI.Xaml.DependencyObject root)
+    {
+        for (var index = 0; index < Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(root); index++)
+        {
+            var child = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(root, index);
+            yield return child;
+            foreach (var descendant in Descendants(child)) yield return descendant;
+        }
     }
 
     private async Task VerifyScienceViewsSmokeAsync()
@@ -155,6 +364,26 @@ public sealed partial class NativeAssistantPage
                 ResearchHost.Content = pdf;
                 await pdf.LoadAsync(fixture);
                 if (pdf.PageCount == 0 || !pdf.HasRenderedPage) throw new InvalidOperationException("Native scientific PDF preview failed.");
+                UpdateLayout(); await SaveMathPreviewAsync(pdf, "native-publication-preview.png");
+                // Exercise real loaded/unloaded PDF visuals, not only an offscreen measurement.
+                for (var iteration = 0; iteration < 12; iteration++)
+                {
+                    ResearchHost.Visibility = Microsoft.UI.Xaml.Visibility.Collapsed; BodyGrid.Visibility = Microsoft.UI.Xaml.Visibility.Visible;
+                    UpdateLayout(); await Task.Delay(30);
+                    BodyGrid.Visibility = Microsoft.UI.Xaml.Visibility.Collapsed; ResearchHost.Visibility = Microsoft.UI.Xaml.Visibility.Visible;
+                    UpdateLayout(); await Task.Delay(30);
+                    if (!pdf.HasRenderedPage) throw new InvalidOperationException("Tab switching lost the rendered publication.");
+                }
+                ResearchHost.Content = null;
+                _publicationViews[_session] = pdf;
+                for (var iteration = 0; iteration < 6; iteration++)
+                {
+                    var container = new Grid(); container.Children.Add(pdf); ResearchHost.Content = container;
+                    UpdateLayout(); await Task.Delay(30);
+                    ResearchHost.Content = null; container.Children.Remove(pdf);
+                    _simulationView = true; _scienceViewSignature = null; RenderResearchView();
+                    UpdateLayout(); await Task.Delay(30);
+                }
             }
         }
         finally
@@ -214,12 +443,13 @@ public sealed partial class NativeAssistantPage
         {
             _running = false;
             ComposerSurface.Width = 600;
-            SelectedToolChip.SetTool("Planen", "\uEA80");
+            SelectedToolChip.SetTool("Planen", "\uEA80", Missum.App.Controls.NativeIconPalette.ColorFor("plan"));
             SelectedToolChip.Visibility = Microsoft.UI.Xaml.Visibility.Visible;
             Composer.Focus(Microsoft.UI.Xaml.FocusState.Programmatic);
             SelectedToolChip.SetPointerState(false);
             ComposerSurface.UpdateLayout();
             var width = SelectedToolChip.ActualWidth;
+            VerifyChipColor(SelectedToolChip, "plan");
             if (width < 50 || SelectedToolChip.ActualHeight != 28 || ComposerChipsScroll.ActualWidth <= 0)
                 throw new InvalidOperationException("The footer tool chip has an invalid layout.");
             await SaveMathPreviewAsync(ComposerSurface, "native-composer-preview.png");
@@ -228,6 +458,7 @@ public sealed partial class NativeAssistantPage
             ComposerSurface.UpdateLayout();
             if (!SelectedToolChip.IsRemoveAffordanceVisible || SelectedToolChip.ActualWidth != width)
                 throw new InvalidOperationException("Hover changed the chip width or did not expose removal.");
+            VerifyChipColor(SelectedToolChip, "plan");
             await SaveMathPreviewAsync(ComposerSurface, "native-composer-hover-preview.png");
             SelectedToolChip.SetPointerState(false);
             // The portable smoke window is hidden, so exercise the same focus-state handler directly.
@@ -236,8 +467,10 @@ public sealed partial class NativeAssistantPage
                 throw new InvalidOperationException("Keyboard focus did not expose chip removal.");
             Composer.Focus(Microsoft.UI.Xaml.FocusState.Programmatic);
             SelectedToolChip.SetKeyboardFocusState(false);
-            SelectedToolChip.SetTool("Ein sehr langer Werkzeugname für die Platzprüfung", "\uE8A5");
-            CaptionChip.SetTool("Live-Untertitel", "\uE7F4");
+            SelectedToolChip.SetTool("Ein sehr langer Werkzeugname für die Platzprüfung", "\uE8A5", Missum.App.Controls.NativeIconPalette.ColorFor("document"));
+            CaptionChip.SetTool("Live-Untertitel", "\uE7F4", Missum.App.Controls.NativeIconPalette.ColorFor("speech"));
+            VerifyChipColor(SelectedToolChip, "document");
+            VerifyChipColor(CaptionChip, "speech");
             CaptionChip.Visibility = Microsoft.UI.Xaml.Visibility.Visible;
             ComposerSurface.Width = 460;
             ComposerSurface.UpdateLayout();
@@ -265,6 +498,8 @@ public sealed partial class NativeAssistantPage
             ComposerSurface.Width = originalWidth;
             ClearToolSelection(); CaptionChip.Visibility = Microsoft.UI.Xaml.Visibility.Collapsed;
         }
+        static void VerifyChipColor(Missum.App.Controls.NativeComposerToolChip chip, string key) =>
+            VerifyIconBrush(((Grid)((Grid)chip.Content).Children[0]).Children.OfType<FontIcon>().Single().Foreground, key);
     }
 
     private static async Task VerifyMathRenderingSmokeAsync(StackPanel body)

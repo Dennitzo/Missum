@@ -26,6 +26,7 @@
           VerticalAlignment="Top"
           AutomationProperties.Name="Zurück zum AI Assistenten"
           Click="OnBackToAssistant"
+          Foreground="{ThemeResource MissumIconNavigationBrush}"
           Style="{StaticResource NavigationBackButtonNormalStyle}"
           ToolTipService.ToolTip="Zurück zum AI Assistenten" />
         <StackPanel Grid.Column="1">
@@ -93,27 +94,7 @@
             <ComboBoxItem Content="Automatisch" Tag="auto" />
           </ComboBox>
 
-          <ComboBox
-            Header="General AI Modell"
-            ItemsSource="{x:Bind ViewModel.Models, Mode=OneWay}"
-            DisplayMemberPath="DisplayName"
-            SelectedItem="{x:Bind ViewModel.SelectedGeneralModelItem, Mode=TwoWay}" />
-          <TextBlock
-            Margin="0,-6,0,0"
-            Foreground="{ThemeResource MissumMutedTextBrush}"
-            Text="Die native Unsloth-Laufzeit erkennt lokale GGUF-Modelle und ihre Fähigkeiten. General und Coding verwenden unabhängig ausgewählte Textmodelle aus demselben Modellordner; Vision und Embedding werden automatisch zugeordnet."
-            TextWrapping="Wrap" />
-
-          <ComboBox
-            Header="Coding AI Modell"
-            ItemsSource="{x:Bind ViewModel.CodingModels, Mode=OneWay}"
-            DisplayMemberPath="DisplayName"
-            SelectedItem="{x:Bind ViewModel.SelectedCodingModelItem, Mode=TwoWay}" />
-          <TextBlock
-            Margin="0,-6,0,0"
-            Foreground="{ThemeResource MissumMutedTextBrush}"
-            Text="{x:Bind ViewModel.CodingModelStatus, Mode=OneWay}"
-            TextWrapping="Wrap" />
+<TextBlock Text="Modell und Reasoning werden global im Promptfenster ausgewählt." TextWrapping="Wrap" Foreground="{ThemeResource MissumMutedTextBrush}" />
 
           <TextBlock FontWeight="SemiBold" Text="Coding · experimentelle Funktionen" />
 
@@ -253,9 +234,10 @@
                 Grid.ColumnSpan="3"
                 AutomationProperties.Name="Prompt-Trigger durchsuchen"
                 PlaceholderText="Tabelle durchsuchen …"
-                QueryIcon="Find"
                 Text="{x:Bind ViewModel.TriggerSearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                TextChanged="OnTriggerSearchTextChanged" />
+                TextChanged="OnTriggerSearchTextChanged">
+                <AutoSuggestBox.QueryIcon><FontIcon Glyph="&#xE721;" Foreground="{ThemeResource MissumIconWebBrush}" /></AutoSuggestBox.QueryIcon>
+              </AutoSuggestBox>
               <TextBlock
                 Grid.Row="1"
                 VerticalAlignment="Center"
@@ -280,7 +262,7 @@
                 IsEnabled="{x:Bind ViewModel.CanDeleteSelectedPromptTrigger, Mode=OneWay}"
                 Style="{StaticResource MissumDangerButtonStyle}">
                 <StackPanel Orientation="Horizontal" Spacing="7">
-                  <SymbolIcon Symbol="Delete" />
+                  <SymbolIcon Symbol="Delete" Foreground="{ThemeResource MissumIconDangerBrush}" />
                   <TextBlock Text="Zeile löschen" />
                 </StackPanel>
               </Button>

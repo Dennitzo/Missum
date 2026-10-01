@@ -29,4 +29,7 @@ public sealed record AgentRunCheckpoint(
     bool WorkingStatePromptIncluded = false,
     long AppliedSteeringSequence = 0,
     bool DeepResearchCompleted = false,
-    int InvalidToolTurnCount = 0);
+    int InvalidToolTurnCount = 0,
+    string? SelectedModelId = null,
+    string? SelectedReasoningEffort = null,
+    long AppliedModelSelectionEventId = 0);

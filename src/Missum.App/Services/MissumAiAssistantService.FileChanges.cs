@@ -25,7 +25,9 @@ public sealed partial class MissumAiAssistantService
     private async Task StartFileChangesAsync(MissumAiRunRecord run, ChatMessage message, bool resume,
         Func<MissumAiAssistantUpdate, Task> update, CancellationToken cancellationToken)
     {
-        if (!UsesCodingAgent(run.Action) || run.WorkspacePath is not { } workspace) return;
+        if (run.WorkspacePath is not { } workspace) return;
+        if (!UsesCodingAgent(run.Action)
+            && (await chats.GetSessionAsync(run.SessionId, cancellationToken).ConfigureAwait(false))?.ChatMode != ChatMode.ClaudeScience) return;
         var directory = CodingChangesMonitor.StorageDirectory(settings.DataDirectory, run.SessionId, run.AssistantMessageId);
         var monitor = new CodingChangesMonitor(workspace, directory, run.SessionId, run.AssistantMessageId, run.Id,
             summary => update(new(MissumAiAssistantUpdateKind.FileChangesChanged, message, ChangesSummary: summary)),

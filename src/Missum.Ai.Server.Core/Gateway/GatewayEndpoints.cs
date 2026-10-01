@@ -38,6 +38,7 @@ internal static class GatewayEndpoints
         endpoints.MapPost("/v1/runs/{runId}/client-tool-results", SubmitClientToolResultAsync);
         endpoints.MapPost("/v1/runs/{runId}/cancel", CancelRunAsync);
         endpoints.MapPost("/v1/runs/{runId}/steer", SteerRunAsync);
+        endpoints.MapPost("/v1/runs/{runId}/selection", SelectRunModelAsync);
 
         endpoints.MapPost("/v1/uploads", CreateUploadAsync);
         endpoints.MapGet("/v1/uploads/{uploadId}", GetUploadAsync);
@@ -303,6 +304,25 @@ internal static class GatewayEndpoints
         await context.RequestServices.GetRequiredService<RunWorkChannel>().EnqueueAsync(runId, CancellationToken.None).ConfigureAwait(false);
         context.Response.StatusCode = accepted.Duplicate ? StatusCodes.Status200OK : StatusCodes.Status202Accepted;
         await WriteJsonAsync(context, accepted).ConfigureAwait(false);
+    }
+
+    private static async Task SelectRunModelAsync(HttpContext context)
+    {
+        var repository = context.RequestServices.GetRequiredService<RunRepository>();
+        var runId = GetRouteString(context, "runId");
+        var selection = await ReadJsonAsync<RunModelSelectionRequest>(context).ConfigureAwait(false);
+        var run = await repository.GetAsync(runId, context.RequestAborted).ConfigureAwait(false)
+            ?? throw new KeyNotFoundException("Der Lauf wurde nicht gefunden.");
+        var request = await repository.GetRequestAsync(runId, context.RequestAborted).ConfigureAwait(false)
+            ?? throw new KeyNotFoundException("Der Laufauftrag wurde nicht gefunden.");
+        if (request.SessionId != selection.SessionId) throw new UnauthorizedAccessException("Die Modellauswahl gehört zu einer anderen Sitzung.");
+        if (IsTerminal(run.State)) throw new InvalidOperationException("Der Lauf ist bereits abgeschlossen.");
+        if (string.IsNullOrWhiteSpace(selection.ModelId) || selection.ModelId.Length > 512 || selection.ModelId.Any(char.IsControl)
+            || selection.ReasoningEffort is { Length: > 32 }
+            || selection.ReasoningEffort is { } effort && (string.IsNullOrWhiteSpace(effort)
+                || effort.Any(character => !char.IsAsciiLetterLower(character) && !char.IsAsciiDigit(character) && character != '_' && character != '-'))) throw new ArgumentException("Ungültige Modellauswahl.");
+        var receipt = await repository.RequestModelSelectionAsync(runId, selection, context.RequestAborted).ConfigureAwait(false);
+        await WriteJsonAsync(context, receipt).ConfigureAwait(false);
     }
 
     private static async Task CancelRunAsync(HttpContext context)

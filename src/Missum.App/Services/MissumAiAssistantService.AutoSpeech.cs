@@ -14,7 +14,8 @@ public sealed partial class MissumAiAssistantService
         if (Volatile.Read(ref _disposed) != 0 || update.Message.Role != ChatRole.Assistant) return;
         lock (_automaticSpeechGate)
         {
-            if (update.Kind == MissumAiAssistantUpdateKind.Started)
+            if (update.Kind == MissumAiAssistantUpdateKind.Started
+                && (_automaticSpeechSession?.MessageId != update.Message.Id || _automaticSpeechSession.WasCancelled))
             {
                 _automaticSpeechSession?.Cancel();
                 SpeechStreamingSession? session = null;
@@ -42,7 +43,7 @@ public sealed partial class MissumAiAssistantService
                         // complete message used by the existing read-from-here highlighter.
                         new(text, "AI-Antwort (live)", null, null, update.Message.ContentProfile), token).ConfigureAwait(false);
                 }, microphone.WaitForSpeechResumeAsync, microphone.BeginSpeechSession(resetPause: true),
-                    _activeCancellation?.Token ?? CancellationToken.None) { WaitForActionBoundary = true };
+                    CancellationToken.None);
                 _automaticSpeechSession = session;
                 _ = ObserveAutomaticSpeechCompletionAsync(session, status);
             }
@@ -58,7 +59,7 @@ public sealed partial class MissumAiAssistantService
     private async Task ObserveAutomaticSpeechCompletionAsync(SpeechStreamingSession session, Func<MissumAiSpeechUpdate, Task> status)
     {
         await session.Completion.ConfigureAwait(false);
-        if (!session.HasPlayed || !IsCurrentAutomaticSpeech(session)) return;
+        if ((!session.HasPlayed && session.Failure is null) || !IsCurrentAutomaticSpeech(session)) return;
         try
         {
             await status(new(false, session.Failure is not null ? "Vorlesen fehlgeschlagen"
