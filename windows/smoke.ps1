@@ -174,7 +174,7 @@ try {
         Copy-Item -LiteralPath $composerPreview -Destination $composerEvidence -Force
     }
     Write-Host 'Native composer footer, removal affordance, narrow layout and session notices verified.'
-    foreach ($sciencePreview in @('native-outputs-preview', 'native-publication-preview', 'native-changes-preview', 'native-tool-icons-preview', 'native-colored-chrome-preview')) {
+    foreach ($sciencePreview in @('native-outputs-preview', 'native-publication-preview', 'native-changes-preview', 'native-tool-icons-preview', 'native-colored-chrome-preview', 'native-continuation-preview')) {
         $scienceImage = Join-Path $smokeData ($sciencePreview + '.png')
         if (Test-Path -LiteralPath $scienceImage -PathType Leaf) {
             $scienceEvidence = Assert-MissumArtifactPath -Path ($PublishDirectory + '.' + $sciencePreview + '.png')

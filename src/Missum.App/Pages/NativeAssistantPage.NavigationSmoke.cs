@@ -134,6 +134,7 @@ public sealed partial class NativeAssistantPage
         await VerifyComposerFooterSmokeAsync();
         await VerifyMathRenderingSmokeAsync(body);
         await VerifyToolIconColorsSmokeAsync();
+        await VerifyContinuationSmokeAsync(original);
         await VerifySourcesSmokeAsync(original);
         await VerifyChangesReviewSmokeAsync();
         await VerifyScienceViewsSmokeAsync();

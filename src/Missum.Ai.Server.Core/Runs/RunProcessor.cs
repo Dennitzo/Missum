@@ -138,85 +138,47 @@ public sealed partial class RunProcessor : BackgroundService
             return;
         if (await _repository.GetProviderRetryTimeAsync(runId, cancellationToken).ConfigureAwait(false) is { } retryTime && retryTime > DateTimeOffset.UtcNow)
             return;
-        var remainingTime = ResolveRemainingRunTime(snapshot.CreatedAt, request.Limits?.TimeoutSeconds ?? (request.Mode == RunMode.Coding ? 0 : 1800), DateTimeOffset.UtcNow);
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        using var stopDeadline = new CancellationTokenSource();
-        var deadlineTask = EnforceRunDeadlineAsync(timeout, remainingTime, stopDeadline.Token);
-        var runCancellationToken = timeout.Token;
-        try
+        // Main runs have no wall-clock deadline. Persisted legacy timeoutSeconds
+        // values must not age out a suspended/recovered research project either.
+        // Cancellation still comes from Stop, steering and service shutdown.
+        var checkpoint = await _repository.GetCheckpointAsync(runId, cancellationToken).ConfigureAwait(false);
+        if (checkpoint?.PendingProposalId is { } proposalId)
         {
-            var checkpoint = await _repository.GetCheckpointAsync(runId, runCancellationToken).ConfigureAwait(false);
-            if (checkpoint?.PendingProposalId is { } proposalId)
-            {
-                var proposal = await _repository.GetToolProposalAsync(proposalId, runId, runCancellationToken).ConfigureAwait(false);
-                if (proposal is not null && proposal.ExpiresAt <= DateTimeOffset.UtcNow
-                    && await _repository.GetClientToolResultAsync(proposalId, runCancellationToken).ConfigureAwait(false) is null)
-                    throw new TimeoutException("Das Zeitlimit des Client-Werkzeugauftrags ist erreicht, ohne dass Missum ein Ergebnis zurückgemeldet hat. Der bisherige Zwischenstand bleibt gespeichert; eine Fortsetzung ist mit einer weiteren Nachricht möglich.");
-            }
-            if (request.Workload?.Kind == RunWorkloadKind.ImageGeneration)
-            {
-                await ProcessImageGenerationAsync(runId, request.Workload, runCancellationToken).ConfigureAwait(false);
-                return;
-            }
-
-            if (request.Workload?.Kind == RunWorkloadKind.MediaAnalysis)
-            {
-                await ProcessMediaAnalysisAsync(runId, request.Workload, request.PreferredGeneralModelId, request.ReasoningEffort, runCancellationToken).ConfigureAwait(false);
-                return;
-            }
-
-            await ProcessConversationAsync(runId, request, runCancellationToken).ConfigureAwait(false);
+            var proposal = await _repository.GetToolProposalAsync(proposalId, runId, cancellationToken).ConfigureAwait(false);
+            if (proposal is not null && proposal.ExpiresAt <= DateTimeOffset.UtcNow
+                && await _repository.GetClientToolResultAsync(proposalId, cancellationToken).ConfigureAwait(false) is null)
+                throw new TimeoutException("Das Zeitlimit des Client-Werkzeugauftrags ist erreicht, ohne dass Missum ein Ergebnis zurückgemeldet hat. Der bisherige Zwischenstand bleibt gespeichert; eine Fortsetzung ist mit einer weiteren Nachricht möglich.");
         }
-        catch (OperationCanceledException exception) when (
-            timeout.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        if (request.Workload?.Kind == RunWorkloadKind.ImageGeneration)
         {
-            throw new TimeoutException("Das gesamte Arbeitszeitlimit dieses Laufs ist erreicht. Der bisherige Zwischenstand bleibt gespeichert; eine Fortsetzung ist mit einer weiteren Nachricht möglich.", exception);
+            await ProcessImageGenerationAsync(runId, request.Workload, cancellationToken).ConfigureAwait(false);
+            return;
         }
-        finally
+
+        if (request.Workload?.Kind == RunWorkloadKind.MediaAnalysis)
         {
-            await stopDeadline.CancelAsync().ConfigureAwait(false);
-            try { await deadlineTask.ConfigureAwait(false); }
-            catch (OperationCanceledException) when (stopDeadline.IsCancellationRequested) { }
+            await ProcessMediaAnalysisAsync(runId, request.Workload, request.PreferredGeneralModelId, request.ReasoningEffort, cancellationToken).ConfigureAwait(false);
+            return;
         }
-    }
 
-    internal static async Task EnforceRunDeadlineAsync(CancellationTokenSource target, TimeSpan remaining, CancellationToken cancellationToken)
-    {
-        if (remaining == Timeout.InfiniteTimeSpan) return;
-        var expiresAt = DateTimeOffset.UtcNow + remaining;
-        while ((remaining = expiresAt - DateTimeOffset.UtcNow) > TimeSpan.Zero)
-            await Task.Delay(remaining > TimeSpan.FromDays(1) ? TimeSpan.FromDays(1) : remaining, cancellationToken).ConfigureAwait(false);
-        cancellationToken.ThrowIfCancellationRequested();
-        await target.CancelAsync().ConfigureAwait(false);
-    }
-
-    internal static TimeSpan ResolveRemainingRunTime(DateTimeOffset createdAt, int timeoutSeconds, DateTimeOffset now)
-    {
-        if (timeoutSeconds == 0) return Timeout.InfiniteTimeSpan;
-        var remaining = TimeSpan.FromSeconds(timeoutSeconds) - (now - createdAt);
-        if (remaining <= TimeSpan.Zero)
-            throw new TimeoutException("Das gesamte Arbeitszeitlimit dieses Laufs ist erreicht. Der bisherige Zwischenstand bleibt gespeichert; eine Fortsetzung ist mit einer weiteren Nachricht möglich.");
-        return remaining > TimeSpan.FromSeconds(timeoutSeconds) ? TimeSpan.FromSeconds(timeoutSeconds) : remaining;
+        await ProcessConversationAsync(runId, request, cancellationToken).ConfigureAwait(false);
     }
 
     internal static int ResolveMaximumToolCalls(RunRequest request, MissumAiServerOptions options,
         IReadOnlyList<AgentToolSpec> effectiveTools)
     {
         if (request.Mode == RunMode.Coding) return CodingRunBudget.FromOptions(options).ToolCalls;
-        return HasScientificPresentationWork(request, effectiveTools)
-            ? Math.Max(options.MaximumToolCalls, CodingDeepResearchPipeline.MaximumToolCalls + ScientificPresentationToolReserve)
-            : options.MaximumToolCalls;
+        return HasUnboundedResearchBudget(request) ? 0 : options.MaximumToolCalls;
     }
 
     internal static int ResolveMaximumModelRounds(RunRequest request, MissumAiServerOptions options,
         IReadOnlyList<AgentToolSpec> effectiveTools)
     {
         if (request.Mode == RunMode.Coding) return CodingRunBudget.FromOptions(options).ModelRounds;
+        if (HasUnboundedResearchBudget(request)) return 0;
         var generalRounds = request.ClientCapabilities?.Contains("workspace", StringComparer.OrdinalIgnoreCase) == true
             ? options.WorkspaceMaximumModelRounds : options.MaximumModelRounds;
-        return HasScientificPresentationWork(request, effectiveTools)
-            ? Math.Max(generalRounds, CodingDeepResearchPipeline.MaximumModelCalls + ScientificPresentationModelReserve)
-            : generalRounds;
+        return generalRounds;
     }
 
     private async Task ProcessConversationAsync(
@@ -231,7 +193,7 @@ public sealed partial class RunProcessor : BackgroundService
         if (isCoding) request = request with { CodingOptions = (request.CodingOptions ?? new CodingRunOptions()) with { UseWorkingState = true, ReasoningPolicy = "maximum" } };
         ModelSelection selection;
         try { selection = await _router.SelectAsync(request, cancellationToken).ConfigureAwait(false); }
-        catch (HttpRequestException exception) when (isCoding)
+        catch (HttpRequestException exception)
         { throw new ModelProviderRequestException("model_selection", 1, exception); }
         var contextLength = Math.Min(
             selection.ContextLength,
@@ -322,7 +284,7 @@ public sealed partial class RunProcessor : BackgroundService
             .Any(call => call.Name == ClientToolNames.CodingRenderHtml && completedIds.Contains(call.Id));
         var compactionCount = checkpoint.CompactionCount;
         var visibleTextLength = checkpoint.VisibleTextLength ?? (isCoding
-            ? CodingTextReconciler.Project(await _repository.GetEventsAfterAsync(runId, 0, cancellationToken).ConfigureAwait(false)).Length : 0);
+            ? CodingTextReconciler.Project(await _repository.GetVisibleTextEventsAsync(runId, 0, cancellationToken).ConfigureAwait(false)).Length : 0);
         var streamingTurnStartEventId = checkpoint.StreamingTurnStartEventId;
         var workingState = checkpoint.WorkingState ?? (isCoding ? CodingWorkingState.Create(ExtractOriginalTask(request)) : null);
         var activeCallRound = checkpoint.ActiveCallRound;
@@ -668,7 +630,7 @@ public sealed partial class RunProcessor : BackgroundService
                         call.Arguments.Clone(),
                         tool.RiskClass,
                         CreateProposalSummary(tool, call.Arguments),
-                        isCoding ? DateTimeOffset.MaxValue : DateTimeOffset.UtcNow.AddMinutes(60));
+                        DateTimeOffset.MaxValue);
                     await _repository.SaveToolProposalAsync(proposal, cancellationToken).ConfigureAwait(false);
                     pendingProposalId = proposal.ProposalId;
                     pendingToolCallId = call.Id;
@@ -815,7 +777,7 @@ public sealed partial class RunProcessor : BackgroundService
             var queueWatch = Stopwatch.StartNew();
             double queueMilliseconds;
             lastNativePrompt = null;
-            var generationVisibleStart = CodingTextReconciler.Project(await _repository.GetEventsAfterAsync(runId, 0, cancellationToken).ConfigureAwait(false)).Length;
+            var generationVisibleStart = CodingTextReconciler.Project(await _repository.GetVisibleTextEventsAsync(runId, 0, cancellationToken).ConfigureAwait(false)).Length;
             await using var steeringCall = _repository.WatchSteering(runId, cancellationToken);
             try
             {
@@ -843,7 +805,7 @@ public sealed partial class RunProcessor : BackgroundService
                             token).ConfigureAwait(false),
                         steeringCall.Token).ConfigureAwait(false);
                 }
-                catch (HttpRequestException exception) when (isCoding)
+                catch (HttpRequestException exception)
                 { throw new ModelProviderRequestException("model_loading", 1, exception); }
                 finally
                 {
@@ -998,11 +960,11 @@ public sealed partial class RunProcessor : BackgroundService
                         // event journal, rather than an asynchronously saved prefix, wins.
                         await SaveCheckpointAsync().ConfigureAwait(false);
                     }
-                    var priorTurnEvents = await _repository.GetEventsAfterAsync(runId, streamingTurnStartEventId.Value, steeringCall.Token).ConfigureAwait(false);
+                    var priorTurnEvents = await _repository.GetVisibleTextEventsAsync(runId, streamingTurnStartEventId.Value, steeringCall.Token).ConfigureAwait(false);
                     codingText = new(visibleTextLength, CodingTextReconciler.Project(priorTurnEvents, visibleTextLength));
-                    reasoningPublished = priorTurnEvents.Any(item => item.Type == RunEventTypes.ReasoningDelta
-                        && item.Data.TryGetProperty("round", out var value) && value.TryGetInt32(out var priorRound)
-                        && priorRound == (int)Math.Min(roundCount + 1, int.MaxValue));
+                    reasoningPublished = await _repository.HasReasoningDeltaAfterAsync(runId,
+                        streamingTurnStartEventId.Value, (int)Math.Min(roundCount + 1, int.MaxValue),
+                        steeringCall.Token).ConfigureAwait(false);
                 }
                 using var heartbeatCancellation = CancellationTokenSource.CreateLinkedTokenSource(steeringCall.Token);
                 var heartbeat = isCoding ? PublishCodingHeartbeatAsync(runId, roundCount + 1, heartbeatCancellation.Token) : Task.CompletedTask;
@@ -1066,7 +1028,7 @@ public sealed partial class RunProcessor : BackgroundService
                 if (reasoningPublished)
                     await _repository.AppendEventAsync(runId, RunEventTypes.ReasoningDelta,
                         new ReasoningDeltaEvent("", (int)Math.Min(roundCount + 1, int.MaxValue), State: "steered"), cancellationToken).ConfigureAwait(false);
-                var visible = CodingTextReconciler.Project(await _repository.GetEventsAfterAsync(runId, 0, cancellationToken).ConfigureAwait(false));
+                var visible = CodingTextReconciler.Project(await _repository.GetVisibleTextEventsAsync(runId, 0, cancellationToken).ConfigureAwait(false));
                 if (visible.Length > generationVisibleStart)
                     messages.Add(new LmChatMessage("assistant", visible[generationVisibleStart..]));
                 visibleTextLength = visible.Length;
@@ -1098,7 +1060,7 @@ public sealed partial class RunProcessor : BackgroundService
                     preserveSessionPromptPrefix = true;
                     workingStatePromptIncluded = workingState is not null;
                 }
-                var visible = CodingTextReconciler.Project(await _repository.GetEventsAfterAsync(runId, 0, cancellationToken).ConfigureAwait(false));
+                var visible = CodingTextReconciler.Project(await _repository.GetVisibleTextEventsAsync(runId, 0, cancellationToken).ConfigureAwait(false));
                 if (visible.Length > generationVisibleStart)
                     messages.Add(new LmChatMessage("assistant", visible[generationVisibleStart..]));
                 var steerInstruction = $"Der Denkprozess hat sich wiederholt ({exception.FailureKind}). Der Lauf wird fortgesetzt und umgelenkt. Triff jetzt eine klare Entscheidung: Benenne den nächsten konkreten Schritt und führe ihn aus, statt weiter zu grübeln. Der gespeicherte Arbeitsstand bleibt erhalten.";
@@ -1300,7 +1262,7 @@ public sealed partial class RunProcessor : BackgroundService
                         response = response with { ToolCalls = [.. batch.Calls, .. deniedCalls] };
                     }
                 }
-                if (!isCoding && toolCallCount > maximumToolCalls)
+                if (!isCoding && maximumToolCalls > 0 && toolCallCount > maximumToolCalls)
                 {
                     throw new AgentRunLimitException(
                         $"Der Agent hat das Werkzeuglimit von {maximumToolCalls} Aufrufen erreicht.");
@@ -1409,7 +1371,7 @@ public sealed partial class RunProcessor : BackgroundService
             if (activeCalls is null && streamingTurnStartEventId is not null)
             {
                 var interruptedText = CodingTextReconciler.Project(
-                    await _repository.GetEventsAfterAsync(runId, streamingTurnStartEventId.Value, cancellationToken).ConfigureAwait(false), visibleTextLength);
+                    await _repository.GetVisibleTextEventsAsync(runId, streamingTurnStartEventId.Value, cancellationToken).ConfigureAwait(false), visibleTextLength);
                 if (!string.IsNullOrWhiteSpace(interruptedText)) messages.Add(new LmChatMessage("assistant", interruptedText));
             }
             if (activeCalls is not null)
@@ -1420,7 +1382,7 @@ public sealed partial class RunProcessor : BackgroundService
             activeCallRound = null;
             selectedToolName = null;
             requiredToolCallRetryCount = emptyResponseRetryCount = incompleteResponseRetryCount = invalidToolTurnCount = 0;
-            visibleTextLength = CodingTextReconciler.Project(await _repository.GetEventsAfterAsync(runId, 0, cancellationToken).ConfigureAwait(false)).Length;
+            visibleTextLength = CodingTextReconciler.Project(await _repository.GetVisibleTextEventsAsync(runId, 0, cancellationToken).ConfigureAwait(false)).Length;
             streamingTurnStartEventId = null;
             stagedWebResearchRequested = false;
             availableTools = effectiveTools;
@@ -1443,7 +1405,7 @@ public sealed partial class RunProcessor : BackgroundService
             if (delta is null) return;
             if (delta.ReplaceFrom is not null)
             {
-                var prior = CodingTextReconciler.Project(await _repository.GetEventsAfterAsync(runId, 0, token).ConfigureAwait(false));
+                var prior = CodingTextReconciler.Project(await _repository.GetVisibleTextEventsAsync(runId, 0, token).ConfigureAwait(false));
                 delta = CodingTextReconciler.ToAuthoritativeRevision(prior, delta);
             }
             await _repository.AppendEventAsync(runId, RunEventTypes.TextDelta, delta, token).ConfigureAwait(false);
@@ -1789,8 +1751,9 @@ public sealed partial class RunProcessor : BackgroundService
             PreferredLanguages: arguments.TryGetProperty("preferredLanguages", out var languages) && languages.ValueKind == JsonValueKind.Array
                 ? languages.EnumerateArray().Select(static value => value.GetString()!).ToArray() : null,
             UpdateSince: arguments.TryGetProperty("updateSince", out var since) ? since.GetDateTimeOffset() : null);
-        var metadataCandidates = await _scientificMetadata.ResolveAsync(researchTask,
-            CodingDeepResearchPipeline.ResolveProfile(researchTask, researchOptions.Profile), cancellationToken).ConfigureAwait(false);
+        var researchQuestion = ResearchQuestionForInterpretation(researchTask);
+        var metadataCandidates = await _scientificMetadata.ResolveAsync(researchQuestion,
+            CodingDeepResearchPipeline.ResolveProfile(researchQuestion, researchOptions.Profile), cancellationToken).ConfigureAwait(false);
         if (researchOptions.MaximumWorks is { } maximumWorks)
             metadataCandidates = metadataCandidates.Take(maximumWorks).ToArray();
         var searchTool = _toolCatalog.Resolve("web.search", effectiveTools);
@@ -1923,19 +1886,6 @@ public sealed partial class RunProcessor : BackgroundService
             },
             cancellationToken).ConfigureAwait(false);
         return result;
-    }
-
-    internal static string ExtractWebResearchTask(RunRequest request)
-    {
-        ArgumentNullException.ThrowIfNull(request);
-        return request.Messages
-            .Reverse()
-            .Where(static message => string.Equals(message.Role, "user", StringComparison.OrdinalIgnoreCase))
-            .SelectMany(static message => message.Content)
-            .Select(static part => part.Text)
-            .FirstOrDefault(static text => !string.IsNullOrWhiteSpace(text))
-            ?.Trim()
-            ?? throw new InvalidDataException("The web research request contains no textual user task.");
     }
 
     internal static List<LmChatMessage> CreateInitialMessages(
@@ -2158,7 +2108,7 @@ public sealed partial class RunProcessor : BackgroundService
             || transport.InnerException is not { } inner
             || !ModelRuntimeClient.IsTransientInferenceFailure(inner)) return false;
         var request = await _repository.GetRequestAsync(runId).ConfigureAwait(false);
-        if (request?.Mode != RunMode.Coding || request.Limits?.TimeoutSeconds is > 0) return false;
+        if (request is null) return false;
         var retry = await _repository.ScheduleProviderRetryAsync(runId, DateTimeOffset.UtcNow).ConfigureAwait(false);
         if (retry is null) return true; // A concurrent cancel is authoritative.
         await _repository.AppendEventAsync(runId, RunEventTypes.ModelGeneration,
@@ -2270,8 +2220,8 @@ public sealed partial class RunProcessor : BackgroundService
 
     internal static string ResolveTimeoutFailureMessage(RunMode mode, string detail)
     {
-        const string genericMessage = "Der AI-Lauf hat sein Zeitlimit erreicht.";
-        if (mode != RunMode.Coding || string.IsNullOrWhiteSpace(detail)) return genericMessage;
+        const string genericMessage = "Eine einzelne Werkzeug- oder Modelloperation hat keinen rechtzeitigen Fortschritt geliefert. Der gespeicherte Arbeitsstand bleibt erhalten.";
+        if (string.IsNullOrWhiteSpace(detail)) return genericMessage;
         var bounded = detail[..Math.Min(detail.Length, 1_000)];
         return string.Concat(bounded.Select(static character => char.IsControl(character) ? ' ' : character)).Trim();
     }

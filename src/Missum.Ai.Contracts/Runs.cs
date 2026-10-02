@@ -174,6 +174,8 @@ public sealed record ContentPart(
     string? MediaType = null,
     string? FileName = null);
 
+/// <summary>Token budgets for a run. TimeoutSeconds is a legacy compatibility
+/// field and does not limit the duration of a main run.</summary>
 public sealed record RunLimits(
     int? MaximumOutputTokens = null,
     int? MaximumContextTokens = null,

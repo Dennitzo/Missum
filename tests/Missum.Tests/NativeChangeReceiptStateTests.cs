@@ -5,6 +5,34 @@ namespace Missum.Tests;
 public sealed class NativeChangeReceiptStateTests
 {
     [Fact]
+    public void ContinuedAssistantAnchorBindsNewRunAndRejectsLatePreviousAttempt()
+    {
+        var state = new NativeChangeReceiptState();
+        var session = Guid.NewGuid(); var message = Guid.NewGuid();
+        var previousRun = Guid.NewGuid(); var nextRun = Guid.NewGuid();
+        state.ObserveStarted(session, message, 10, previousRun);
+        Assert.True(state.AcceptReceipt(session, message, previousRun, 40));
+        Assert.True(state.ObserveStarted(session, message, 11, nextRun));
+        Assert.True(state.AcceptReceipt(session, message, nextRun, 1));
+        Assert.False(state.AcceptReceipt(session, message, previousRun, 100));
+        Assert.False(state.ObserveStarted(session, message, 11, previousRun));
+        Assert.False(state.ObserveStarted(session, message, 10, previousRun));
+        Assert.True(state.AcceptReceipt(session, message, nextRun, 2));
+    }
+
+    [Fact]
+    public void ReattachedRunPreservesReceiptRevisionInsteadOfResettingItsHistory()
+    {
+        var state = new NativeChangeReceiptState();
+        var session = Guid.NewGuid(); var message = Guid.NewGuid(); var run = Guid.NewGuid();
+        state.ObserveStarted(session, message, 10, run);
+        state.AcceptReceipt(session, message, run, 40);
+        Assert.True(state.ObserveStarted(session, message, 11, run));
+        Assert.False(state.AcceptReceipt(session, message, run, 39));
+        Assert.True(state.AcceptReceipt(session, message, run, 40));
+    }
+
+    [Fact]
     public void NewPromptImmediatelyRejectsPreviousRunsReceiptUntilItsOwnAssistantTurnExists()
     {
         var state = new NativeChangeReceiptState();

@@ -142,8 +142,10 @@ public interface IMissumAiRunRepository
 {
     Task<MissumAiRunRecord> CreateAsync(MissumAiRunRecord run, CancellationToken cancellationToken = default);
     Task<MissumAiRunRecord> BeginAttemptAsync(MissumAiRunRecord run, CancellationToken cancellationToken = default);
+    Task<MissumAiRunRecord> BeginContinuationAttemptAsync(MissumAiRunRecord run, CancellationToken cancellationToken = default);
     Task<MissumAiRunRecord?> GetAsync(Guid id, CancellationToken cancellationToken = default);
     Task<MissumAiRunRecord?> GetByServerRunIdAsync(string serverRunId, CancellationToken cancellationToken = default);
+    Task<MissumAiRunRecord?> GetByAssistantMessageIdAsync(Guid assistantMessageId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<MissumAiRunRecord>> ListResumableAsync(CancellationToken cancellationToken = default);
     Task UpdateAsync(
         Guid id,

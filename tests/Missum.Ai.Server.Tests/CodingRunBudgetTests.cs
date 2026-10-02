@@ -17,7 +17,6 @@ namespace Missum.Ai.Server.Tests;
 public sealed class CodingRunBudgetTests
 {
     private const string ModelId = "coding/ProjectFixture-Q4~abc123";
-    private static readonly string[] ModelTags = ["missum-context-train:32768"];
 
     [Fact]
     public void DefaultsAreUnlimitedAndExplicitFiniteBudgetKeepsReservedSummary()
@@ -147,16 +146,87 @@ public sealed class CodingRunBudgetTests
         Assert.Equal(2, harness.Handler.ChatCalls);
     }
 
-    [Fact]
-    public async Task OptionalLongDeadlineCanBeCancelledWithoutTimerRangeOverflow()
+    [Theory]
+    [InlineData(null)]
+    [InlineData(0)]
+    [InlineData(3600)]
+    public async Task SevenDayOldScienceRunStillHonorsCallerCancellation(int? legacyTimeoutSeconds)
     {
-        using var target = new CancellationTokenSource();
-        using var stop = new CancellationTokenSource();
-        var task = RunProcessor.EnforceRunDeadlineAsync(target, TimeSpan.FromDays(100), stop.Token);
-        await stop.CancelAsync();
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => task);
-        Assert.False(target.IsCancellationRequested);
-        Assert.Equal(Timeout.InfiniteTimeSpan, RunProcessor.ResolveRemainingRunTime(DateTimeOffset.UtcNow.AddDays(-10), 0, DateTimeOffset.UtcNow));
+        using var harness = new Harness(readCalls: 1);
+        var runId = await harness.CreateRunAsync(legacyTimeoutSeconds, RunMode.General, science: true);
+        await harness.SetCreatedAtAsync(runId, DateTimeOffset.UtcNow.AddDays(-7));
+        using var cancellation = new CancellationTokenSource();
+        await cancellation.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => harness.Processor.ProcessAsync(runId, cancellation.Token));
+
+        Assert.Equal(0, harness.Handler.Requests);
+        Assert.Equal(0, harness.ExecutedReads);
+        Assert.DoesNotContain(await harness.Repository.GetEventsAfterAsync(runId, 0), item => item.Type == RunEventTypes.RunCompleted);
+    }
+
+    [Fact]
+    public async Task ActiveScienceGenerationCanBeStoppedWithoutWaitingForAnyRunDeadline()
+    {
+        using var harness = new Harness(readCalls: 0);
+        harness.Handler.WaitForCancellation = true;
+        var runId = await harness.CreateRunAsync(3600, RunMode.General, science: true);
+        await harness.SetCreatedAtAsync(runId, DateTimeOffset.UtcNow.AddDays(-7));
+        using var cancellation = new CancellationTokenSource();
+        var processing = harness.Processor.ProcessAsync(runId, cancellation.Token);
+        await harness.Handler.GenerationStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        await cancellation.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => processing.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.NotNull(await harness.Repository.GetCheckpointAsync(runId));
+        Assert.DoesNotContain(await harness.Repository.GetEventsAfterAsync(runId, 0), item => item.Type == RunEventTypes.RunCompleted);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(0)]
+    [InlineData(3600)]
+    public async Task ScienceMainAgentPassesPreviousRoundAndToolLimitsAfterSevenDays(int? legacyTimeoutSeconds)
+    {
+        // This regression exercises run budgets, not exhaustion of a small model's context.
+        using var harness = new Harness(readCalls: 70, contextTokens: 1_048_576);
+        var runId = await harness.CreateRunAsync(legacyTimeoutSeconds, RunMode.General, science: true);
+        await harness.SetCreatedAtAsync(runId, DateTimeOffset.UtcNow.AddDays(-7));
+
+        Assert.Null(await harness.DriveAsync(runId));
+
+        Assert.Equal(70, harness.ExecutedReads);
+        Assert.Equal(141, harness.Handler.ChatCalls);
+        Assert.Equal(RunState.Completed, (await harness.Repository.GetAsync(runId))!.State);
+        var events = await harness.Repository.GetEventsAfterAsync(runId, 0);
+        Assert.Equal(70, events.Count(item => item.Type == RunEventTypes.ClientToolProposed));
+        Assert.DoesNotContain(events, item => item.Type == RunEventTypes.RunFailed);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(0)]
+    [InlineData(3600)]
+    public async Task OfflineScienceProposalRemainsWaitingAndResumesAfterDays(int? legacyTimeoutSeconds)
+    {
+        using var harness = new Harness(readCalls: 1);
+        var runId = await harness.CreateRunAsync(legacyTimeoutSeconds, RunMode.General, science: true);
+        await Assert.ThrowsAsync<RunWaitingForClientException>(() => harness.Processor.ProcessAsync(runId, CancellationToken.None));
+        var checkpoint = (await harness.Repository.GetCheckpointAsync(runId))!;
+        var proposal = (await harness.Repository.GetToolProposalAsync(checkpoint.PendingProposalId!, runId))!;
+        Assert.Equal(DateTimeOffset.MaxValue, proposal.ExpiresAt);
+        await harness.SetCreatedAtAsync(runId, DateTimeOffset.UtcNow.AddDays(-7));
+
+        Assert.Equal(0, await harness.Deadlines.QueueExpiredAsync(DateTimeOffset.UtcNow.AddDays(7)));
+        Assert.Equal(RunState.WaitingForClient, (await harness.Repository.GetAsync(runId))!.State);
+        await harness.Repository.SaveClientToolResultAsync(runId, new ClientToolResult(proposal.ProposalId, "completed",
+            JsonSerializer.SerializeToElement(new { content = "offline work saved" })));
+
+        Assert.Null(await harness.DriveAsync(runId));
+        Assert.Equal(RunState.Completed, (await harness.Repository.GetAsync(runId))!.State);
+        Assert.Equal(3, harness.Handler.ChatCalls);
+        Assert.Single(await harness.Repository.GetEventsAfterAsync(runId, 0), item => item.Type == RunEventTypes.ClientToolProposed);
     }
 
     [Fact]
@@ -299,46 +369,48 @@ public sealed class CodingRunBudgetTests
         Assert.Contains(checkpoint.Messages, message => message.Role == "tool" && message.Content!.Contains("agent.tool_budget", StringComparison.Ordinal));
     }
 
-    [Fact]
-    public void RemainingTimeUsesOriginalCreationInsteadOfFreshBudgetForEveryResume()
+    [Theory]
+    [InlineData(RunMode.Coding, null)]
+    [InlineData(RunMode.Coding, 3600)]
+    [InlineData(RunMode.General, null)]
+    [InlineData(RunMode.General, 0)]
+    [InlineData(RunMode.General, 3600)]
+    public async Task SevenDayOldPersistedRunCompletesDespiteLegacyWallClockLimit(RunMode mode, int? legacyTimeoutSeconds)
     {
-        var createdAt = new DateTimeOffset(2026, 9, 12, 7, 15, 0, TimeSpan.Zero);
-        Assert.Equal(TimeSpan.FromSeconds(1), RunProcessor.ResolveRemainingRunTime(createdAt, 3600, createdAt.AddSeconds(3599)));
-        var error = Assert.Throws<TimeoutException>(() => RunProcessor.ResolveRemainingRunTime(createdAt, 3600, createdAt.AddSeconds(3600)));
-        Assert.Contains("gesamte Arbeitszeitlimit", error.Message);
-        Assert.Equal(TimeSpan.FromHours(1), RunProcessor.ResolveRemainingRunTime(createdAt, 3600, createdAt.AddSeconds(-1)));
-    }
+        using var harness = new Harness(readCalls: 1);
+        var runId = await harness.CreateRunAsync(legacyTimeoutSeconds, mode, science: mode == RunMode.General);
+        await harness.SetCreatedAtAsync(runId, DateTimeOffset.UtcNow.AddDays(-7));
 
-    [Fact]
-    public async Task ExpiredPersistedRunDoesNotContactModelOrStartNewClientTools()
-    {
-        using var harness = new Harness(readCalls: 30);
-        var runId = await harness.CreateRunAsync();
-        await using (var connection = await harness.Context.Database.OpenConnectionAsync())
-        await using (var command = connection.CreateCommand())
-        {
-            command.CommandText = "UPDATE runs SET created_at = $created WHERE run_id = $run;";
-            command.Parameters.AddWithValue("$created", MissumAiDatabase.FormatTimestamp(DateTimeOffset.UtcNow.AddHours(-2)));
-            command.Parameters.AddWithValue("$run", runId);
-            await command.ExecuteNonQueryAsync();
-        }
+        Assert.Null(await harness.DriveAsync(runId));
 
-        await Assert.ThrowsAsync<TimeoutException>(() => harness.Processor.ProcessAsync(runId, CancellationToken.None));
-
-        Assert.Equal(0, harness.Handler.Requests);
-        Assert.Equal(0, harness.ExecutedReads);
+        Assert.Equal(1, harness.ExecutedReads);
+        Assert.Equal(RunState.Completed, (await harness.Repository.GetAsync(runId))!.State);
+        Assert.DoesNotContain(await harness.Repository.GetEventsAfterAsync(runId, 0), item => item.Type == RunEventTypes.RunFailed);
     }
 
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task OrphanedWaitingRunExpiresThroughSingleQueueWithoutClientOrModel(bool overallDeadline)
+    [InlineData(null)]
+    [InlineData(0)]
+    [InlineData(3600)]
+    public async Task NormalGeneralConversationAlsoIgnoresLegacyWallClockLimits(int? legacyTimeoutSeconds)
+    {
+        using var harness = new Harness(readCalls: 0);
+        var runId = await harness.CreateRunAsync(legacyTimeoutSeconds, RunMode.General);
+        await harness.SetCreatedAtAsync(runId, DateTimeOffset.UtcNow.AddDays(-7));
+
+        Assert.Null(await harness.DriveAsync(runId));
+
+        Assert.Equal(RunState.Completed, (await harness.Repository.GetAsync(runId))!.State);
+        Assert.Equal(1, harness.Handler.ChatCalls);
+    }
+
+    [Fact]
+    public async Task ExpiredIndividualClientOperationFailsThroughSingleQueueWithoutModelContact()
     {
         using var harness = new Harness(readCalls: 0);
         var runId = await harness.CreateRunAsync();
-        var proposal = await harness.SaveWaitingProposalAsync(runId,
-            DateTimeOffset.UtcNow.AddMinutes(overallDeadline ? 10 : -1));
-        if (overallDeadline) await harness.SetCreatedAtAsync(runId, DateTimeOffset.UtcNow.AddHours(-2));
+        var proposal = await harness.SaveWaitingProposalAsync(runId, DateTimeOffset.UtcNow.AddMinutes(-1));
+        await harness.SetCreatedAtAsync(runId, DateTimeOffset.UtcNow.AddDays(-7));
         using var cleanup = new StorageCleanupService(harness.Context.Database, harness.Context.WrappedOptions);
         await cleanup.CleanupExpiredAsync();
         Assert.NotNull(await harness.Repository.GetToolProposalAsync(proposal.ProposalId, runId));
@@ -361,17 +433,18 @@ public sealed class CodingRunBudgetTests
         }
         var failure = Assert.Single(await harness.Repository.GetEventsAfterAsync(runId, 0), item => item.Type == RunEventTypes.RunFailed);
         Assert.Equal("run.timeout", failure.Data.GetProperty("errorCode").GetString());
-        Assert.Contains(overallDeadline ? "gesamte Arbeitszeitlimit" : "Client-Werkzeugauftrags", failure.Data.GetProperty("message").GetString());
+        Assert.Contains("Client-Werkzeugauftrags", failure.Data.GetProperty("message").GetString());
         Assert.Equal(0, harness.Handler.Requests);
         Assert.Equal(0, harness.ExecutedReads);
         Assert.NotNull(await harness.Repository.GetCheckpointAsync(runId));
     }
 
     [Fact]
-    public async Task NativeTokenCounterCrashPersistsRealFailureBeforeAnyToolProposal()
+    public async Task PermanentNativeTokenCounterFailureIsPersistedBeforeAnyToolProposal()
     {
         using var harness = new Harness(readCalls: 0);
         harness.Handler.FailTokenCounting = true;
+        harness.Handler.TokenCountingFailureStatus = HttpStatusCode.BadRequest;
         var runId = await harness.CreateRunAsync();
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         using var subscription = harness.Notifier.Subscribe(runId);
@@ -389,8 +462,8 @@ public sealed class CodingRunBudgetTests
         var events = await harness.Repository.GetEventsAfterAsync(runId, 0);
         var failure = Assert.Single(events, item => item.Type == RunEventTypes.RunFailed);
         Assert.Equal("provider.http_failed", failure.Data.GetProperty("errorCode").GetString());
-        Assert.Contains("Prompt-Tokenzählung", failure.Data.GetProperty("message").GetString());
-        Assert.Contains("HTTP 500", failure.Data.GetProperty("message").GetString());
+        Assert.DoesNotContain(events, item => item.Type == RunEventTypes.ModelGeneration
+            && item.Data.GetProperty("state").GetString() == "providerRetryWaiting");
         Assert.DoesNotContain(events, item => item.Type == RunEventTypes.ClientToolProposed || item.Type == RunEventTypes.RunCompleted);
         Assert.Equal(0, harness.Handler.ChatCalls);
     }
@@ -419,7 +492,7 @@ public sealed class CodingRunBudgetTests
     }
 
     [Fact]
-    public async Task StoredClientReceiptSurvivesProposalExpiryUntilOverallDeadline()
+    public async Task StoredClientReceiptSurvivesProposalExpiryAndRunAgeWithoutAnotherQueue()
     {
         using var harness = new Harness(readCalls: 0);
         var runId = await harness.CreateRunAsync();
@@ -430,8 +503,11 @@ public sealed class CodingRunBudgetTests
 
         Assert.Equal(0, await harness.Deadlines.QueueExpiredAsync(now.AddMinutes(2)));
         Assert.Equal(RunState.WaitingForClient, (await harness.Repository.GetAsync(runId))!.State);
-        Assert.Equal(1, await harness.Deadlines.QueueExpiredAsync(now.AddHours(2)));
+        Assert.Equal(0, await harness.Deadlines.QueueExpiredAsync(now.AddDays(7)));
         Assert.NotNull(await harness.Repository.GetClientToolResultAsync(proposal.ProposalId));
+
+        Assert.Null(await harness.DriveAsync(runId));
+        Assert.Equal(RunState.Completed, (await harness.Repository.GetAsync(runId))!.State);
     }
 
     [Fact]
@@ -441,7 +517,7 @@ public sealed class CodingRunBudgetTests
         for (var index = 0; index < 65; index++)
         {
             var runId = await harness.CreateRunAsync();
-            await harness.Repository.UpdateStateAsync(runId, RunState.WaitingForClient);
+            await harness.SaveWaitingProposalAsync(runId, DateTimeOffset.UtcNow.AddMinutes(-1));
         }
         var future = DateTimeOffset.UtcNow.AddHours(2);
 
@@ -450,11 +526,16 @@ public sealed class CodingRunBudgetTests
         Assert.Equal(0, await harness.Deadlines.QueueExpiredAsync(future));
     }
 
-    [Fact]
-    public async Task TemporaryNativeFailureWaitsDurablyAndResumesWithoutRepeatingConsumedClientTool()
+    [Theory]
+    [InlineData(RunMode.Coding, 0)]
+    [InlineData(RunMode.General, null)]
+    [InlineData(RunMode.General, 0)]
+    [InlineData(RunMode.General, 3600)]
+    public async Task TemporaryNativeFailureWaitsDurablyAndResumesWithoutRepeatingConsumedClientTool(RunMode mode, int? legacyTimeoutSeconds)
     {
         using var harness = new Harness(readCalls: 1);
-        var runId = await harness.CreateRunAsync(timeoutSeconds: 0);
+        var runId = await harness.CreateRunAsync(legacyTimeoutSeconds, mode, science: mode == RunMode.General);
+        await harness.SetCreatedAtAsync(runId, DateTimeOffset.UtcNow.AddDays(-7));
         await Assert.ThrowsAsync<RunWaitingForClientException>(() => harness.Processor.ProcessAsync(runId, CancellationToken.None));
         var pending = (await harness.Repository.GetCheckpointAsync(runId))!;
         await harness.Repository.SaveClientToolResultAsync(runId, new ClientToolResult(pending.PendingProposalId!, "completed", JsonSerializer.SerializeToElement(new { content = "already executed" })));
@@ -515,12 +596,14 @@ public sealed class CodingRunBudgetTests
     }
 
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task PersistedCancellationWinsOnEitherSideOfRetryScheduling(bool retryFirst)
+    [InlineData(RunMode.Coding, true)]
+    [InlineData(RunMode.Coding, false)]
+    [InlineData(RunMode.General, true)]
+    [InlineData(RunMode.General, false)]
+    public async Task PersistedCancellationWinsOnEitherSideOfRetryScheduling(RunMode mode, bool retryFirst)
     {
         using var harness = new Harness(readCalls: 0);
-        var runId = await harness.CreateRunAsync(timeoutSeconds: 0);
+        var runId = await harness.CreateRunAsync(3600, mode, science: mode == RunMode.General);
         await harness.Repository.UpdateStateAsync(runId, RunState.Running);
         var failure = new ModelProviderRequestException("generation", 3,
             new HttpRequestException("temporary outage", null, HttpStatusCode.ServiceUnavailable));
@@ -540,8 +623,8 @@ public sealed class CodingRunBudgetTests
 
     [Theory]
     [InlineData(0, HttpStatusCode.BadRequest)]
-    [InlineData(3600, HttpStatusCode.ServiceUnavailable)]
-    public async Task PermanentProviderErrorsAndExplicitFiniteRunsDoNotRetryForever(int timeout, HttpStatusCode status)
+    [InlineData(3600, HttpStatusCode.BadRequest)]
+    public async Task PermanentProviderErrorsDoNotRetryRegardlessOfLegacyTimeLimit(int timeout, HttpStatusCode status)
     {
         using var harness = new Harness(readCalls: 0);
         var runId = await harness.CreateRunAsync(timeout);
@@ -577,6 +660,38 @@ public sealed class CodingRunBudgetTests
         Assert.Equal(0, harness.Handler.Requests);
     }
 
+    [Theory]
+    [InlineData(RunState.Running, null, true)]
+    [InlineData(RunState.Interrupted, "run.gateway_stopped", true)]
+    [InlineData(RunState.Interrupted, "run.gateway_restarted", true)]
+    [InlineData(RunState.Interrupted, "custom.interruption", false)]
+    [InlineData(RunState.Cancelled, "run.cancelled", false)]
+    [InlineData(RunState.Failed, "agent.run_limit", false)]
+    public async Task SevenDayScienceGatewayRecoveryPreservesReceiptAndNeverRestartsUserCancellation(RunState state, string? errorCode, bool recover)
+    {
+        using var harness = new Harness(readCalls: 0);
+        var runId = await harness.CreateRunAsync(3600, RunMode.General, science: true);
+        await harness.SetCreatedAtAsync(runId, DateTimeOffset.UtcNow.AddDays(-7));
+        var proposal = await harness.SaveWaitingProposalAsync(runId, DateTimeOffset.MaxValue);
+        await harness.Repository.SaveClientToolResultAsync(runId,
+            new ClientToolResult(proposal.ProposalId, "completed", JsonSerializer.SerializeToElement(new { applied = true })));
+        await harness.Repository.UpdateStateAsync(runId, state, errorCode: errorCode);
+
+        var recovered = await harness.Repository.RecoverAsync();
+
+        Assert.Equal(recover, recovered.Contains(runId, StringComparer.Ordinal));
+        Assert.Equal(recover ? RunState.Queued : state, (await harness.Repository.GetAsync(runId))!.State);
+        Assert.Equal(proposal.ProposalId, (await harness.Repository.GetCheckpointAsync(runId))!.PendingProposalId);
+        Assert.NotNull(await harness.Repository.GetClientToolResultAsync(proposal.ProposalId));
+        if (recover)
+        {
+            Assert.Null(await harness.DriveAsync(runId));
+            Assert.Equal(RunState.Completed, (await harness.Repository.GetAsync(runId))!.State);
+            Assert.Single(await harness.Repository.GetEventsAfterAsync(runId, 0), item => item.Type == RunEventTypes.RunCompleted);
+        }
+        else Assert.Equal(0, harness.Handler.Requests);
+    }
+
     private sealed class Harness : IDisposable
     {
         internal const string InterimAnswer = "Zwischenstand: Dateien gelesen; Umsetzung und Tests sind noch offen. Nächster Schritt: die erkannte Startfunktion gezielt ändern.";
@@ -593,13 +708,14 @@ public sealed class CodingRunBudgetTests
         public long HighestSavedCompaction { get; private set; }
 
         private readonly string _readContent;
-        public Harness(int readCalls, int batchSize = 1, int maximumRounds = 0, int maximumTools = 0, int readContentCharacters = 0)
+        public Harness(int readCalls, int batchSize = 1, int maximumRounds = 0, int maximumTools = 0, int readContentCharacters = 0,
+            int contextTokens = 32768)
         {
             _readContent = "1: return await LoadAsync();" + new string('x', readContentCharacters);
             Context.Options.ModelRuntimeUri = new Uri("http://native.test");
             Context.Options.CodingMaximumModelRounds = maximumRounds;
             Context.Options.CodingMaximumToolCalls = maximumTools;
-            Handler = new NativeHandler(readCalls, batchSize);
+            Handler = new NativeHandler(readCalls, batchSize, contextTokens);
             _http = new HttpClient(Handler);
             _runtime = new ModelRuntimeClient(_http, Context.WrappedOptions, NullLogger<ModelRuntimeClient>.Instance);
             var services = new ServiceCollection();
@@ -614,11 +730,14 @@ public sealed class CodingRunBudgetTests
             Notifier = _services.GetRequiredService<RunEventNotifier>();
         }
 
-        public async Task<string> CreateRunAsync(int? timeoutSeconds = 3600) => (await Repository.CreateAsync(new RunRequest(
-            MissumAiProtocol.Version, RunMode.Coding,
+        public async Task<string> CreateRunAsync(int? timeoutSeconds = 3600, RunMode mode = RunMode.Coding, bool science = false) => (await Repository.CreateAsync(new RunRequest(
+            MissumAiProtocol.Version, mode,
             [new RunMessage("user", [new ContentPart("text", "Analysiere das Projekt und korrigiere den langsamen Programmstart.")])],
-            ClientCapabilities: ["coding"], Limits: new RunLimits(TimeoutSeconds: timeoutSeconds),
-            AllowedServerTools: [], PreferredCodingModelId: ModelId), null)).Snapshot.RunId;
+            ClientCapabilities: science ? ["coding", "workspace", "research.sandbox"] : ["coding"],
+            Limits: new RunLimits(TimeoutSeconds: timeoutSeconds),
+            AllowedServerTools: [], PreferredCodingModelId: ModelId, PreferredGeneralModelId: ModelId,
+            DeepResearch: science, ResearchOptions: science ? new DeepResearchOptions(
+                ProjectId: "research-fixture", AutonomyLevel: ResearchAutonomyLevel.SandboxResearch) : null), null)).Snapshot.RunId;
 
         public async Task<ToolProposal> SaveWaitingProposalAsync(string runId, DateTimeOffset expiresAt)
         {
@@ -628,7 +747,9 @@ public sealed class CodingRunBudgetTests
                 call.Arguments, ToolRiskClass.ReadOnly, "Datei lesen", expiresAt);
             await Repository.SaveToolProposalAsync(proposal);
             await Repository.SaveCheckpointAsync(runId, new AgentRunCheckpoint(
-                [], 1, 1, 16, 4, ActiveToolCalls: [call], PendingProposalId: proposal.ProposalId, PendingToolCallId: call.Id));
+                [new LmChatMessage("user", "Prüfe den gespeicherten Projektstand."),
+                    new LmChatMessage("assistant", "Ich lese die nächste Datei.", ToolCalls: [call])],
+                1, 1, 16, 4, ActiveToolCalls: [call], PendingProposalId: proposal.ProposalId, PendingToolCallId: call.Id));
             await Repository.UpdateStateAsync(runId, RunState.WaitingForClient);
             return proposal;
         }
@@ -679,7 +800,7 @@ public sealed class CodingRunBudgetTests
         }
     }
 
-    private sealed class NativeHandler(int readCalls, int batchSize) : HttpMessageHandler
+    private sealed class NativeHandler(int readCalls, int batchSize, int contextTokens) : HttpMessageHandler
     {
         // The runtime moves the German reasoning rule to the beginning of the
         // system message. Identify the whole unchanged summary task, not its
@@ -689,6 +810,9 @@ public sealed class CodingRunBudgetTests
         public int ChatCalls { get; private set; }
         public int Requests { get; private set; }
         public bool FailTokenCounting { get; set; }
+        public HttpStatusCode TokenCountingFailureStatus { get; set; } = HttpStatusCode.InternalServerError;
+        public bool WaitForCancellation { get; set; }
+        public TaskCompletionSource GenerationStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public bool LastTurnHadNoTools { get; private set; }
         public int Compactions { get; private set; }
         public JsonElement[] LastMessages { get; private set; } = [];
@@ -700,12 +824,18 @@ public sealed class CodingRunBudgetTests
                 return new HttpResponseMessage(HttpStatusCode.NotFound);
             Requests++;
             var path = request.RequestUri!.AbsolutePath;
-            if (path == "/v1/models") return Json(new { data = new[] { new { id = ModelId, tags = ModelTags, status = new { value = "loaded" } } } });
-            if (path == "/props") return Json(new { default_generation_settings = new { n_ctx = 32768 } });
+            if (path == "/v1/models") return Json(new { data = new[] { new { id = ModelId,
+                tags = new[] { $"missum-context-train:{contextTokens}" }, status = new { value = "loaded" } } } });
+            if (path == "/props") return Json(new { default_generation_settings = new { n_ctx = contextTokens } });
             if (path == "/v1/chat/completions/input_tokens") return FailTokenCounting
-                ? new HttpResponseMessage(HttpStatusCode.InternalServerError) { Content = new StringContent("proxy error: Failed to read connection") }
+                ? new HttpResponseMessage(TokenCountingFailureStatus) { Content = new StringContent("proxy error: Failed to read connection") }
                 : Json(new { input_tokens = 16 });
             if (path != "/v1/chat/completions") throw new InvalidOperationException("Unexpected endpoint " + request.RequestUri);
+            if (WaitForCancellation)
+            {
+                GenerationStarted.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
             using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken));
             LastMessages = body.RootElement.GetProperty("messages").EnumerateArray().Select(item => item.Clone()).ToArray();
             LastTurnHadNoTools = !body.RootElement.TryGetProperty("tools", out var tools) || tools.GetArrayLength() == 0;
@@ -719,6 +849,17 @@ public sealed class CodingRunBudgetTests
                 Compactions++;
                 delta = new { content = "Bisherige Dateien wurden geprüft. Auftrag: langsamen Programmstart korrigieren. Noch offen: weitere Dateien prüfen, Änderung und Tests." };
                 finish = "stop";
+            }
+            else if (!LastTurnHadNoTools && _issuedReads < readCalls
+                && tools.EnumerateArray().Any(tool => tool.GetProperty("function").GetProperty("name").GetString()
+                    == ModelRuntimeClient.ToTransportToolName(AgentToolCatalog.SelectorToolName)))
+            {
+                delta = new { tool_calls = new[] { new { index = 0, id = "select-" + (_issuedReads + 1), type = "function", function = new
+                {
+                    name = ModelRuntimeClient.ToTransportToolName(AgentToolCatalog.SelectorToolName),
+                    arguments = JsonSerializer.Serialize(new { name = ClientToolNames.CodingRead }),
+                } } } };
+                finish = "tool_calls";
             }
             else if (!LastTurnHadNoTools && _issuedReads < readCalls)
             {

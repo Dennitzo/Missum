@@ -143,6 +143,7 @@ public sealed class MissumAiDatabase : IDisposable
             FOREIGN KEY(run_id) REFERENCES runs(run_id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS ix_run_events_run_id_id ON run_events(run_id, id);
+        CREATE INDEX IF NOT EXISTS ix_run_events_run_type_id ON run_events(run_id, event_type, id);
         CREATE INDEX IF NOT EXISTS ix_run_events_proposal ON run_events(run_id, event_type, json_extract(data_json, '$.proposalId'));
         CREATE TABLE IF NOT EXISTS run_steering_inputs (
             sequence INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -48,6 +48,7 @@ public sealed partial class NativeAssistantPage
         view.CanRead = (view.IsAssistant || S(message, "role") == "user") && !string.IsNullOrWhiteSpace(view.Text)
             && S(message, "status").ToLowerInvariant() is "completed" or "cancelled" or "interrupted" or "failed";
         RefreshMessageActionView(view);
+        RefreshContinuationStep(messageId, message);
     }
 
     private MessageActionView CreateMessageActionView(string messageId)

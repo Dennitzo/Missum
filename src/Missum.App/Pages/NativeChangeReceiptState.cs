@@ -35,18 +35,27 @@ internal sealed class NativeChangeReceiptState
         return true;
     }
 
-    public bool ObserveStarted(Guid sessionId, Guid messageId, long revision)
+    public bool ObserveStarted(Guid sessionId, Guid messageId, long revision, Guid runId = default)
     {
         var state = Get(sessionId);
         if (messageId == Guid.Empty || revision < state.ConversationRevision) return false;
+        if (messageId == state.MessageId && runId != Guid.Empty && state.RetiredRuns.Contains(runId)) return false;
         SelectMessage(state, messageId, revision);
+        // Continuation keeps the assistant anchor but can start a new server
+        // attempt. Reattachment to the same attempt keeps its receipt revision.
+        if (runId != Guid.Empty && state.RunId != runId)
+        {
+            if (state.RunId != Guid.Empty) state.RetiredRuns.Add(state.RunId);
+            state.RunId = runId;
+            state.ReceiptRevision = 0;
+        }
         return true;
     }
 
     public bool AcceptReceipt(Guid sessionId, Guid messageId, Guid runId, long revision)
     {
         var state = Get(sessionId);
-        if (state.Pending || messageId == Guid.Empty || runId == Guid.Empty || messageId != state.MessageId
+        if (state.Pending || messageId == Guid.Empty || runId == Guid.Empty || messageId != state.MessageId || state.RetiredRuns.Contains(runId)
             || (state.RunId != Guid.Empty && state.RunId != runId) || revision < state.ReceiptRevision) return false;
         state.RunId = runId;
         state.ReceiptRevision = revision;
@@ -67,6 +76,7 @@ internal sealed class NativeChangeReceiptState
         state.MessageId = messageId;
         state.RunId = Guid.Empty;
         state.ReceiptRevision = 0;
+        state.RetiredRuns.Clear();
     }
 
     private sealed class SessionState
@@ -77,5 +87,6 @@ internal sealed class NativeChangeReceiptState
         public long ReceiptRevision;
         public long Epoch;
         public bool Pending;
+        public HashSet<Guid> RetiredRuns { get; } = [];
     }
 }

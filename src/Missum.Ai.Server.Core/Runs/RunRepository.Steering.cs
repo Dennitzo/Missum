@@ -96,7 +96,7 @@ public sealed partial class RunRepository
 
     internal async Task<string> GetInterruptedResearchReceiptAsync(string runId, long afterEventId, CancellationToken token)
     {
-        var journal = await GetEventsAfterAsync(runId, afterEventId, token).ConfigureAwait(false);
+        var journal = await GetServerToolCompletedEventsAsync(runId, afterEventId, token).ConfigureAwait(false);
         return JsonSerializer.Serialize(new { status = "interrupted", errorCode = "run.steered",
             message = "Recherche durch neue Nutzereingabe umgelenkt. Bereits abgeschlossene Werkzeuge und Belege:",
             completedTools = journal.Where(item => item.Type == RunEventTypes.ServerToolCompleted).Select(item => item.Data) }, _database.JsonOptions);

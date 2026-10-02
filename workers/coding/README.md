@@ -21,13 +21,81 @@ errors are not disguised as VRAM failures. No running model's placement is
 changed by catalog refresh. Decisions and failures are recorded in
 `%USERPROFILE%/.missum/native-runtime/gpu-placement.jsonl`.
 
-Multi-GPU split (measured 20.09.2026, DeepSeek-V4-Flash-Vision IQ1_S, 2x Quadro RTX 8000):
-the default llama `layer` split uses both GPUs for weights, KV and compute (prefill
-216-267 tokens/s fresh and on 12k-30k cached prefixes, SM peaks 98-99 % on both GPUs;
-decode 12-26 tokens/s alternating between the GPUs). The experimental `tensor` split
-loaded but drove only one GPU during inference, so it is not used. The environment
-variable `MISSUM_NATIVE_MULTI_GPU_SPLIT` (`layer`, `row`, `tensor`) still allows a
-measured re-test for other models; it becomes part of the snapshot fingerprint.
+Multi-GPU loads use an explicit `layer` split by default. Layers and their KV
+cache reside on their respective GPUs; single-token decoding traverses those
+layers sequentially, so both GPUs need not show equal utilization at the same
+instant. Utilization alone does not establish token-generation performance.
+
+`MISSUM_NATIVE_MULTI_GPU_SPLIT` (`layer`, `row`, `tensor`) is an optional manual
+override, resolved only before an actual multi-GPU model load. The loaded split,
+context configuration, cache formats, fitting and GPU-layer settings remain
+fixed through catalog refresh, model reuse and session snapshot save/restore.
+Changing the environment takes effect on the next model load and changes the
+cache fingerprint; it cannot relabel an active model's KV snapshot. Placement
+events include these resolved settings without conversation text.
+
+Experimental `tensor` mode requires
+`MISSUM_NATIVE_MULTI_GPU_CONTEXT_LIMIT`, an explicit integer token maximum from
+4096 to 2147483647 chosen after measuring available VRAM and output correctness.
+The effective context is the smaller of that explicit limit and the GGUF's
+training maximum. Missing or invalid limits produce a configuration error before
+the multi-GPU load. Tensor mode uses `fit = off`, all GPU layers and an explicit
+context; unsupported llama automatic fitting is never used, and Missum does not
+invent a smaller context on allocation failure. Current installed native builds
+must support the model architecture and the configured `q8_0` KV cache; verify
+the executable rather than assuming support from a split-mode flag. Single-GPU
+trials and embedding cache/context settings remain unchanged. Historical split
+measurements from other executables do not establish current tensor behavior.
+
+A separately benchmarked configuration can be stored locally in
+`<state-directory>/model-load-policy.json` (schema version 1, `profiles` array).
+This optional file is shared by repository and portable launches using the same
+native state directory; it is not a machine-wide environment setting and is not
+created automatically. Each profile must specify `architecture: deepseek4`,
+`split: layer` or `split: tensor`, `context: model-maximum` and
+`cacheK/cacheV: q8_0`. Tensor profiles also require `allReduce: none`; layer
+profiles leave that field unset. Exact `modelFiles` identities include every shard and the
+projector; `runtimeFiles` identities include the executable and DLLs. Each file
+identity is `[absolute resolved path, bytes, modification time in nanoseconds]`.
+`gpuIdentities` contains exactly two PCI-ordered objects with `pciBusId`, `uuid`,
+`name` and `memoryTotalMiB`; `gpuPciBusIds` repeats their ordered PCI addresses.
+The catalog helpers `model_file_identity`, `runtime_file_identity` and
+`gpu_profile_inventory` produce these values.
+
+Optional profile parameters are `mmprojDevice` (`CUDA0`/`CUDA1`), `batchSize` and
+`ubatchSize` (1–8192, microbatch no larger than batch). They are frozen with the
+load policy and included in profiled snapshot compatibility. Profiles always use
+the complete GGUF context maximum, `fit = off` and all GPU layers. Their exactly
+two validated GPUs are selected explicitly as `CUDA0,CUDA1` in PCI order, with
+`tensor-split = 1,1`, matching the measured equal allocation instead of selecting
+a free-memory-dependent ratio. Both settings are frozen in the profile's cache
+identity. Unprofiled and manual split settings retain automatic allocation.
+Profiles do not
+require the manual context-limit environment variable. Model aliases with the
+same weights/projector can match; different models, changed files and replaced
+GPUs cannot inherit the tuning. Missing, malformed or stale profiles retain the
+normal placement policy and record a concise diagnostic.
+
+The supervisor sets `GGML_CUDA_ALLREDUCE=none` only in its native child process
+environment and only for an exact matching local profile. An explicit human
+AllReduce or CUDA-graphs override is preserved. An incompatible AllReduce value
+or any CUDA-graphs-disable override skips the automatic tensor profile; CUDA
+graphs otherwise keep their native default. Adding a tensor profile after startup
+may require a supervisor restart to apply its process-wide collective setting.
+Layer profiles do not alter collective settings and can match on the next model
+load without a process-environment restart. Existing human AllReduce/graphs
+overrides remain unchanged for layer profiles. Changing a loaded profile's batch
+or projector configuration takes effect only on the next load and changes its
+cache identity; ordinary layer loads without a profile retain their legacy cache
+identity. Profile selection remains a local, measured choice, not a claim that a
+split mode is faster on every model or machine.
+An explicit `MISSUM_NATIVE_MULTI_GPU_SPLIT` overrides automatic profile choice.
+
+A confirmed tensor allocation failure or explicit unsupported tensor-mode error
+allows one layer retry with the same full context, projector placement and batch
+configuration. Other errors are not retried. If full-context layer allocation
+also fails, loading fails visibly instead of cutting the context or retrying
+indefinitely. The existing default layer/single-GPU cache identity is preserved.
 
 Missum starts the shared native runtime when connecting to its local gateway or
 refreshing the local model catalog. The portable package includes the launcher

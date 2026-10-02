@@ -13,13 +13,16 @@ public sealed class RunRequestValidatorTests
     [InlineData(0)]
     [InlineData(604800)]
     [InlineData(int.MaxValue)]
-    public void CodingAcceptsUnlimitedOrOptionalMultiDayDuration(int? timeout)
+    public void AllChatModesAcceptUnlimitedOrLegacyDurationWithoutAnUpperLimit(int? timeout)
     {
-        var request = new RunRequest(MissumAiProtocol.Version, RunMode.Coding,
-            [new RunMessage("user", [new ContentPart("text", "Arbeite am Projekt bis zum Abschluss.")])],
-            ClientCapabilities: ["coding"], Limits: new RunLimits(TimeoutSeconds: timeout));
-        RunRequestValidator.Validate(request);
-        Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(request with { Limits = new RunLimits(TimeoutSeconds: -1) }));
+        foreach (var mode in new[] { RunMode.Auto, RunMode.General, RunMode.Coding })
+        {
+            var request = new RunRequest(MissumAiProtocol.Version, mode,
+                [new RunMessage("user", [new ContentPart("text", "Arbeite am Projekt bis zum Abschluss.")])],
+                ClientCapabilities: ["coding"], Limits: new RunLimits(TimeoutSeconds: timeout));
+            RunRequestValidator.Validate(request);
+            Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(request with { Limits = new RunLimits(TimeoutSeconds: -1) }));
+        }
     }
 
     [Fact]
@@ -71,7 +74,7 @@ public sealed class RunRequestValidatorTests
     }
 
     [Fact]
-    public void GeneralRunMayUseMaximumContextAndTimeoutLimits()
+    public void GeneralRunMayUseMaximumContextAndLegacyMultiDayDuration()
     {
         var request = new RunRequest(
             MissumAiProtocol.Version,
@@ -82,8 +85,8 @@ public sealed class RunRequestValidatorTests
 
         RunRequestValidator.Validate(request);
 
-        Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(
-            request with { Limits = request.Limits! with { TimeoutSeconds = 14_401 } }));
+        RunRequestValidator.Validate(request with { Limits = request.Limits! with { TimeoutSeconds = 14_401 } });
+        RunRequestValidator.Validate(request with { Limits = request.Limits! with { TimeoutSeconds = 604_800 } });
     }
 
     [Fact]

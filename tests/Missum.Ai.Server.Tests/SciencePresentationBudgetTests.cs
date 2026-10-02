@@ -16,12 +16,12 @@ public sealed class SciencePresentationBudgetTests
         var continuationTools = StagedWebResearchPipeline.RemoveFromMainAgentTools(tools);
         Assert.Contains(continuationTools, tool => tool.Name == ClientToolNames.ResearchCodeWrite);
         Assert.Contains(continuationTools, tool => tool.Name == ClientToolNames.ResearchCodeExecute);
-        Assert.True(RunProcessor.ResolveMaximumModelRounds(request, options, tools) - CodingDeepResearchPipeline.MaximumModelCalls >= 12);
-        Assert.True(RunProcessor.ResolveMaximumToolCalls(request, options, tools) - CodingDeepResearchPipeline.MaximumToolCalls >= 8);
+        Assert.Equal(0, RunProcessor.ResolveMaximumModelRounds(request, options, tools));
+        Assert.Equal(0, RunProcessor.ResolveMaximumToolCalls(request, options, tools));
     }
 
     [Fact]
-    public void OrdinaryResearchAndUnavailableSandboxKeepTheirExistingBudgets()
+    public void ResearchRemainsUnboundedWhileOrdinaryChatKeepsItsStepBudget()
     {
         var options = new MissumAiServerOptions { MaximumModelRounds = 12, MaximumToolCalls = 30 };
         foreach (var request in new[]
@@ -32,19 +32,19 @@ public sealed class SciencePresentationBudgetTests
         })
         {
             var tools = new AgentToolCatalog().GetAvailableTools(request);
-            Assert.Equal(12, RunProcessor.ResolveMaximumModelRounds(request, options, tools));
-            Assert.Equal(30, RunProcessor.ResolveMaximumToolCalls(request, options, tools));
+            Assert.Equal(request.DeepResearch ? 0 : 12, RunProcessor.ResolveMaximumModelRounds(request, options, tools));
+            Assert.Equal(request.DeepResearch ? 0 : 30, RunProcessor.ResolveMaximumToolCalls(request, options, tools));
         }
     }
 
     [Fact]
-    public void HigherConfiguredScientificBudgetsArePreserved()
+    public void ConfiguredChatBudgetsDoNotTerminateLongResearch()
     {
         var request = Request(sandbox: true);
         var options = new MissumAiServerOptions { MaximumModelRounds = 80, MaximumToolCalls = 100 };
         var tools = new AgentToolCatalog().GetAvailableTools(request);
-        Assert.Equal(80, RunProcessor.ResolveMaximumModelRounds(request, options, tools));
-        Assert.Equal(100, RunProcessor.ResolveMaximumToolCalls(request, options, tools));
+        Assert.Equal(0, RunProcessor.ResolveMaximumModelRounds(request, options, tools));
+        Assert.Equal(0, RunProcessor.ResolveMaximumToolCalls(request, options, tools));
     }
 
     private static RunRequest Request(bool sandbox) => new(MissumAiProtocol.Version, RunMode.General,

@@ -1860,6 +1860,47 @@ public sealed class AssistantIntegrationTests
     }
 
     [Theory]
+    [InlineData("Abgebrochen", false)]
+    [InlineData("Abgebrochen", true)]
+    [InlineData("Fehlgeschlagen", false)]
+    [InlineData("Fehlgeschlagen", true)]
+    [InlineData("Fertig", false)]
+    [InlineData("Fertig", true)]
+    public async Task ContinuedAnchorSnapshotsReplaceTerminalStatusEvenAfterPreparation(string oldStatus, bool prepare)
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        var chats = environment.Get<IChatRepository>();
+        var session = await chats.CreateSessionAsync("Ursprünglicher Auftrag", ChatMode.General);
+        var turn = await chats.AddTurnAsync(session.Id, "Bearbeite den ursprünglichen Auftrag.");
+        var message = turn.AssistantMessage;
+        var coordinator = CreateCoordinator(environment, settings, CreateRecentActivity(settings));
+        await OpenAndCaptureSnapshotAsync(coordinator, session.Id);
+        var terminal = oldStatus switch
+        {
+            "Abgebrochen" => MissumAiAssistantUpdateKind.Cancelled,
+            "Fehlgeschlagen" => MissumAiAssistantUpdateKind.Failed,
+            _ => MissumAiAssistantUpdateKind.Completed,
+        };
+        await coordinator.EmitMissumAiUpdateAsync(new(terminal, message, Status: oldStatus, Detail: "Vorheriger Versuch"),
+            static (_, _, _) => Task.CompletedTask, "terminal");
+        if (prepare)
+            await coordinator.EmitMissumAiUpdateAsync(new(MissumAiAssistantUpdateKind.Status, message,
+                Status: "Vorbereitung", Detail: "Vorbereitung des neuen Versuchs"), static (_, _, _) => Task.CompletedTask, "prepare");
+        await chats.UpdateMessageAsync(message.Id, "Gespeicherte Teilantwort.", MessageStatus.Streaming);
+        await coordinator.EmitMissumAiUpdateAsync(new(MissumAiAssistantUpdateKind.Started, message with { Status = MessageStatus.Streaming },
+            Status: "Lauf wird fortgesetzt", Detail: "Neuer Versuch desselben Auftrags",
+            ToolStep: new("continuation:test", "assistant.continuation", "completed")), static (_, _, _) => Task.CompletedTask, "continue");
+        var snapshot = JsonSerializer.SerializeToElement(await coordinator.BuildSnapshotAsync(), JsonSerializerOptions.Web);
+        Assert.True(snapshot.GetProperty("isRunning").GetBoolean());
+        Assert.Equal("Lauf wird fortgesetzt", snapshot.GetProperty("runStatus").GetString());
+        Assert.Equal("Neuer Versuch desselben Auftrags", snapshot.GetProperty("runDetail").GetString());
+        Assert.Equal(message.Id, snapshot.GetProperty("runMessageId").GetGuid());
+        Assert.Equal(2, (await chats.ListMessagesAsync(session.Id)).Count);
+    }
+
+    [Theory]
     [InlineData(ChatMode.General)]
     [InlineData(ChatMode.Coding)]
     [InlineData(ChatMode.ClaudeScience)]

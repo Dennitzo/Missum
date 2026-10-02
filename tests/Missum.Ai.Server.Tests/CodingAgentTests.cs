@@ -112,7 +112,7 @@ public sealed class CodingAgentTests
         const string generation = "Der Coding-Modellturn überschritt 180 Sekunden.";
         Assert.Equal(loading, RunProcessor.ResolveTimeoutFailureMessage(RunMode.Coding, loading));
         Assert.Equal(generation, RunProcessor.ResolveTimeoutFailureMessage(RunMode.Coding, generation));
-        Assert.Equal("Der AI-Lauf hat sein Zeitlimit erreicht.", RunProcessor.ResolveTimeoutFailureMessage(RunMode.General, generation));
+        Assert.Equal(generation, RunProcessor.ResolveTimeoutFailureMessage(RunMode.General, generation));
         var bounded = RunProcessor.ResolveTimeoutFailureMessage(RunMode.Coding, "Konkrete Ursache\r\n" + new string('x', 2_000));
         Assert.Equal(1_000, bounded.Length);
         Assert.DoesNotContain(bounded, char.IsControl);

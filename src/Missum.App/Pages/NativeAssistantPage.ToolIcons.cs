@@ -10,12 +10,13 @@ public sealed partial class NativeAssistantPage
         "web" => "\uE774", "research" => "\uE721", "image" => "\uEB9F",
         "audio" or "speech" => "\uE767", "document" => "\uE8A5",
         "pdf" => "\uEA90", "captions" => "\uE8F2", "plan" => "\uEA80",
-        "code" => "\uE943", _ => "\uEA86",
+        "code" => "\uE943", "success" => "\uE768", _ => "\uEA86",
     };
 
     private static string ToolStepIconKey(string tool) => tool switch
     {
         "assistant.reasoning" or "assistant.progress" => "research",
+        "assistant.continuation" => "success",
         "coding.updatePlan" => "plan",
         "web.deepResearch" or "research.deep" => "research",
         "speech.translate" => "translate",

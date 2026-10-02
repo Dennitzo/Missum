@@ -303,7 +303,31 @@ def multi_gpu_split_mode():
     return value if value in ("layer", "row", "tensor") else "layer"
 
 
-def write_presets(root, target, placements=None, managed_gpu=False, fit_target="2048", gpu_layers="auto"):
+def model_runtime_policy(model, placement=None, *, split_mode="layer", fit_target="2048", gpu_layers="auto"):
+    """Resolve once before a load; active KV must not follow later environment changes."""
+    embedding = model["role"] == "embedding"
+    policy = dict(split="none" if placement else "layer" if embedding else split_mode,
+                  fit="off" if placement else "on", fitTargetMiB=int(fit_target),
+                  gpuLayers="999" if placement else str(gpu_layers),
+                  context=model["context"] if placement or embedding else None,
+                  contextMaximum=model["context"], contextPolicy="model-maximum" if embedding or placement else "max-fit",
+                  cacheK="f16" if embedding else "q8_0", cacheV="f16" if embedding else "q8_0",
+                  flashAttention="off" if embedding else "on")
+    if policy["split"] == "tensor":
+        # llama's automatic fitting is unsupported with tensor parallelism.
+        # Never substitute an invented smaller context to make it start.
+        value = os.environ.get("MISSUM_NATIVE_MULTI_GPU_CONTEXT_LIMIT", "").strip()
+        if not re.fullmatch(r"[0-9]{1,10}", value) or not 4096 <= int(value) <= 2_147_483_647:
+            raise ValueError("MISSUM_NATIVE_MULTI_GPU_SPLIT=tensor requires an explicit "
+                             "MISSUM_NATIVE_MULTI_GPU_CONTEXT_LIMIT between 4096 and 2147483647 tokens. "
+                             "Choose a measured VRAM-safe limit, or use split mode layer for automatic fitting.")
+        policy.update(fit="off", gpuLayers="999", context=min(model["context"], int(value)),
+                      contextPolicy="explicit-limit")
+    return policy
+
+
+def write_presets(root, target, placements=None, managed_gpu=False, fit_target="2048", gpu_layers="auto",
+                  resolved_policies=None):
     models = discover_models(root)
     session_directory = Path(target).resolve().parent / "session-cache"
     session_directory.mkdir(parents=True, exist_ok=True)
@@ -341,26 +365,38 @@ def write_presets(root, target, placements=None, managed_gpu=False, fit_target="
                     template_path.write_text(localized, encoding="utf-8")
                 lines += [f"chat-template-file = {template_path.as_posix()}"]
         placement = (placements or {}).get(model_id)
+        policy = (resolved_policies or {}).get(model_id)
+        if policy is None:
+            # Managed catalogs use a neutral unloaded preset. The environment
+            # override is validated/applied only at the next actual load.
+            policy = model_runtime_policy(model, placement, split_mode="layer" if managed_gpu else multi_gpu_split_mode(),
+                                          fit_target=fit_target, gpu_layers=gpu_layers)
         if placement:
-            lines += [f"device = {placement}", "split-mode = none", "main-gpu = 0", "n-gpu-layers = 999", "fit = off"]
-            if model["role"] != "embedding":
-                lines += [f"ctx-size = {model['context']}"]
+            lines += [f"device = {placement}", "main-gpu = 0"]
             if model.get("projector"):
                 lines += [f"mmproj-device = {placement}"]
+        elif policy.get("profileId"):
+            # Match the measured two-device allocation exactly; do not let
+            # free-memory-dependent defaults change the validated split ratio.
+            lines += [f"device = {policy['devices']}", f"tensor-split = {policy['tensorSplit']}"]
+        lines += [f"split-mode = {policy['split']}", f"fit = {policy['fit']}", f"n-gpu-layers = {policy['gpuLayers']}"]
+        if policy["context"] is not None:
+            lines += [f"ctx-size = {policy['context']}"]
+        if policy.get("mmprojDevice") and model.get("projector") and not placement:
+            lines += [f"mmproj-device = {policy['mmprojDevice']}"]
+        for setting, argument in (("batchSize", "batch-size"), ("ubatchSize", "ubatch-size")):
+            if setting in policy:
+                lines += [f"{argument} = {policy[setting]}"]
         if model["role"] == "embedding":
-            lines += [f"ctx-size = {model['context']}", "embedding = true", f"pooling = {model['pooling']}", f"batch-size = {model['context']}",
+            lines += ["embedding = true", f"pooling = {model['pooling']}", f"batch-size = {model['context']}",
                       f"ubatch-size = {model['context']}", "cache-type-k = f16", "cache-type-v = f16", "flash-attn = off"]
         else:
-            # Omit ctx-size entirely. llama starts at the GGUF training maximum,
-            # then --fit can reduce it only when required by device memory.
+            # Automatic layer fitting omits ctx-size: llama starts at the GGUF
+            # maximum and reduces it only when required by device memory.
+            # Manual tensor mode instead has an explicit, validated limit.
             # Explicit ctx-size=0 disables that reduction in llama/common/arg.cpp.
             lines += ["cache-type-k = q8_0", "cache-type-v = q8_0", "flash-attn = on", "predict = -1",
                       "reasoning-budget = -1", "reasoning = on" if model["reasoning"]["enabled"] else "reasoning = auto"]
-            if not placement and multi_gpu_split_mode() != "layer":
-                # A model that does not fit one GPU is split across both. "layer"
-                # (llama default) pipelines the GPUs; "tensor"/"row" run every
-                # layer on both GPUs at once. Chosen by measurement, see README.
-                lines += [f"split-mode = {multi_gpu_split_mode()}"]
             if model["reasoning"]["effort"]:
                 lines += [f"reasoning-effort = {model['reasoning']['effort']}"]
             if model.get("projector"):
@@ -436,6 +472,124 @@ def model_file_bytes(model):
     return sum(item.stat().st_size for item in paths)
 
 
+def file_identity(paths):
+    return [[str(item.resolve()), item.stat().st_size, item.stat().st_mtime_ns]
+            for item in sorted(paths, key=lambda path: str(path.resolve()))]
+
+
+def model_file_identity(model):
+    path = model["path"]
+    match = SHARD.match(path.name)
+    paths = [path] if not match else [path.with_name(f"{match[1]}-{part:05d}-of-{int(match[3]):05d}.gguf")
+                                    for part in range(1, int(match[3]) + 1)]
+    if model.get("projector"):
+        paths.append(model["projector"])
+    return file_identity(paths)
+
+
+def runtime_file_identity(binary):
+    return file_identity([Path(binary), *Path(binary).parent.glob("*.dll")]) if binary else []
+
+
+def gpu_profile_inventory():
+    """Hardware identity for measured profiles, separate from free-memory admission."""
+    try:
+        result = subprocess.run(["nvidia-smi", "--query-gpu=pci.bus_id,uuid,name,memory.total", "--format=csv,noheader,nounits"],
+                                capture_output=True, text=True, timeout=10,
+                                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0, check=True)
+        rows = sorted(csv.reader(result.stdout.splitlines()), key=lambda row: row[0].strip().lower())
+        return [dict(pciBusId=row[0].strip().lower(), uuid=row[1].strip(), name=row[2].strip(),
+                     memoryTotalMiB=int(row[3])) for row in rows]
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        return []
+
+
+def read_model_load_profiles(state):
+    path = Path(state) / "model-load-policy.json"
+    try:
+        if not path.exists():
+            return [], None
+        if path.stat().st_size > 256 * 1024:
+            raise ValueError("profile file exceeds 256 KiB")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or type(data.get("version")) is not int or data["version"] != 1:
+            raise ValueError("expected schema version 1")
+        profiles = data.get("profiles")
+        if not isinstance(profiles, list) or len(profiles) > 16:
+            raise ValueError("expected at most 16 profiles")
+        for profile in profiles:
+            if (not isinstance(profile, dict) or not isinstance(profile.get("id"), str)
+                    or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", profile["id"])):
+                raise ValueError("each profile needs a short id")
+            if (profile.get("architecture") != "deepseek4" or profile.get("split") not in ("layer", "tensor")
+                    or profile.get("context") != "model-maximum" or profile.get("cacheK") != "q8_0"
+                    or profile.get("cacheV") != "q8_0"):
+                raise ValueError("only validated DeepSeek4 layer/tensor/full-context/q8_0 profiles are supported")
+            if ((profile["split"] == "tensor" and profile.get("allReduce") != "none")
+                    or (profile["split"] == "layer" and profile.get("allReduce") is not None)):
+                raise ValueError("tensor profiles require allReduce=none; layer profiles leave AllReduce unset")
+            for key in ("modelFiles", "runtimeFiles"):
+                entries = profile.get(key)
+                if not isinstance(entries, list) or not entries or len(entries) > 256:
+                    raise ValueError(f"{key} must contain exact file identities")
+                for entry in entries:
+                    if (not isinstance(entry, list) or len(entry) != 3 or not isinstance(entry[0], str)
+                            or not Path(entry[0]).is_absolute() or type(entry[1]) is not int or entry[1] < 0
+                            or type(entry[2]) is not int or entry[2] <= 0):
+                        raise ValueError(f"invalid {key} identity")
+            gpus = profile.get("gpuIdentities")
+            if not isinstance(gpus, list) or len(gpus) != 2:
+                raise ValueError("exactly two GPU identities are required")
+            for gpu in gpus:
+                if (not isinstance(gpu, dict) or not isinstance(gpu.get("pciBusId"), str)
+                        or not re.fullmatch(r"[0-9a-f]{4,8}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]", gpu["pciBusId"])
+                        or not isinstance(gpu.get("uuid"), str) or not gpu["uuid"].startswith("GPU-")
+                        or not isinstance(gpu.get("name"), str) or not gpu["name"]
+                        or type(gpu.get("memoryTotalMiB")) is not int or gpu["memoryTotalMiB"] <= 0):
+                    raise ValueError("invalid GPU identity")
+            if profile.get("gpuPciBusIds") != [gpu["pciBusId"] for gpu in gpus]:
+                raise ValueError("GPU PCI list must match the ordered full identities")
+            if profile.get("mmprojDevice", "CUDA0") not in ("CUDA0", "CUDA1"):
+                raise ValueError("mmprojDevice must be CUDA0 or CUDA1")
+            for key in ("batchSize", "ubatchSize"):
+                if key in profile and (type(profile[key]) is not int or not 1 <= profile[key] <= 8192):
+                    raise ValueError(f"{key} must be between 1 and 8192")
+            if "ubatchSize" in profile and profile["ubatchSize"] > profile.get("batchSize", 2048):
+                raise ValueError("ubatchSize exceeds batchSize")
+        return profiles, None
+    except (OSError, UnicodeError, ValueError) as error:
+        return [], f"Local model-load-policy.json ignored: {error}"
+
+
+def matching_model_load_profile(profiles, model, binary, gpus):
+    metadata = model_metadata(model["path"], allow_metadata_only=True) or {}
+    if metadata.get("general.architecture") != "deepseek4" or model["role"] == "embedding":
+        return None
+    try:
+        model_identity, runtime_identity = model_file_identity(model), runtime_file_identity(binary)
+        for profile in profiles:
+            if (profile["modelFiles"] == model_identity and profile["runtimeFiles"] == runtime_identity
+                    and profile["gpuIdentities"] == gpus):
+                return profile
+    except OSError:
+        pass
+    return None
+
+
+def measured_model_policy(model, profile, fit_target):
+    # A measured local profile always retains the native training maximum.
+    policy = model_runtime_policy(model, fit_target=fit_target)
+    policy.update(split=profile["split"], fit="off", gpuLayers="999", context=model["context"],
+                  contextPolicy="model-maximum", profileId=profile["id"],
+                  devices="CUDA0,CUDA1", tensorSplit="1,1")
+    if profile["split"] == "tensor":
+        policy["allReduce"] = "none"
+    for key in ("mmprojDevice", "batchSize", "ubatchSize"):
+        if key in profile:
+            policy[key] = profile[key]
+    return policy
+
+
 def choose_single_gpu(model, devices, reserve_mib=2048):
     # This is only admission to a real full-context allocation trial, not a KV
     # memory estimate. Unknown architectures are validated by llama itself.
@@ -502,6 +656,9 @@ class GpuLoadManager:
         self.root, self.preset, self.state, self.port = root, preset, state, port
         self.fit_target, self.gpu_layers = fit_target, gpu_layers
         self.placements = {}
+        self.policies = {}
+        self.router_allreduce = os.environ.get("GGML_CUDA_ALLREDUCE", "").strip().lower() or None
+        self.router_cuda_graphs_disabled = "GGML_CUDA_DISABLE_GRAPHS" in os.environ
         self.lock = threading.RLock()
         self.binary = Path(binary) if binary else None
         self.sessions = NativeSessionCache(Path(state) / "session-cache", self.router, self.session_fingerprint,
@@ -529,10 +686,21 @@ class GpuLoadManager:
             paths += [self.binary] + sorted(self.binary.parent.glob("*.dll"))
         identity = [(str(item.resolve()), item.stat().st_size, item.stat().st_mtime_ns) for item in paths]
         metadata = model_metadata(path, allow_metadata_only=True) or {}
-        return dict(version=1, files=identity, context=model["context"], cache="q8_0", slots=1,
-                    template=german_reasoning_template(metadata.get("tokenizer.chat_template", "")),
-                    placement=self.placements.get(model_id), fit=self.fit_target, gpuLayers=self.gpu_layers,
-                    split=multi_gpu_split_mode())
+        policy = self.policies.get(model_id) or model_runtime_policy(
+            model, self.placements.get(model_id), fit_target=self.fit_target, gpu_layers=self.gpu_layers)
+        # Preserve the existing default layer/single-GPU snapshot identity:
+        # the same loaded configuration must not force a large prefix re-eval.
+        fingerprint = dict(version=1, files=identity, context=model["context"], cache="q8_0", slots=1,
+                           template=german_reasoning_template(metadata.get("tokenizer.chat_template", "")),
+                           placement=self.placements.get(model_id), fit=self.fit_target, gpuLayers=self.gpu_layers,
+                           split="layer" if policy["split"] == "none" else policy["split"])
+        if policy["split"] == "tensor" or policy.get("profileId") or policy.get("contextPolicy") == "profile-fallback-full-context":
+            # Explicit tensor/profiled loads have distinct fitting, context,
+            # projector and batch settings; include their effective config.
+            fingerprint.update(context=policy["context"], fit="off", gpuLayers=policy["gpuLayers"],
+                               runtimePolicy={key: value for key, value in policy.items()
+                                              if key not in ("profileId", "fallbackReason")})
+        return fingerprint
 
     def session_prepare(self, model, key):
         with self.lock:
@@ -545,7 +713,8 @@ class GpuLoadManager:
     def refresh(self):
         with self.lock:
             return write_presets(self.root, self.preset, self.placements, managed_gpu=True,
-                                 fit_target=self.fit_target, gpu_layers=self.gpu_layers)
+                                 fit_target=self.fit_target, gpu_layers=self.gpu_layers,
+                                 resolved_policies=self.policies)
 
     def router(self, path, body=None, timeout=15):
         request = urllib.request.Request(f"http://127.0.0.1:{self.port}/{path}",
@@ -557,7 +726,62 @@ class GpuLoadManager:
     def record(self, model, device, outcome, detail=None):
         with (self.state / "gpu-placement.jsonl").open("a", encoding="utf-8") as stream:
             stream.write(json.dumps({"time": time.time(), "model": model, "device": device or "multi-gpu-auto",
-                                     "outcome": outcome, "detail": detail}) + "\n")
+                                     "outcome": outcome, "settings": self.policies.get(model), "detail": detail}) + "\n")
+
+    def configure_router_environment(self, source):
+        environment = runtime_environment(source, self.state)
+        self.router_allreduce = environment.get("GGML_CUDA_ALLREDUCE", "").strip().lower() or None
+        self.router_cuda_graphs_disabled = "GGML_CUDA_DISABLE_GRAPHS" in environment
+        profiles, diagnostic = read_model_load_profiles(self.state)
+        if diagnostic:
+            self.record("catalog", None, "profile-ignored", diagnostic)
+        if not profiles:
+            return environment
+        gpus = gpu_profile_inventory()
+        matched = False
+        for model in discover_models(self.root):
+            profile = matching_model_load_profile(profiles, model, self.binary, gpus)
+            if profile:
+                matched = True
+                if profile["split"] == "layer":
+                    self.record(model["id"], None, "profile-environment", {
+                        "profileId": profile["id"], "split": "layer", "environment": "unchanged"})
+                    continue
+                if self.router_cuda_graphs_disabled:
+                    self.record(model["id"], None, "profile-ignored", "Human CUDA graphs-disable override retained; automatic tensor profile skipped.")
+                    break
+                if "GGML_CUDA_ALLREDUCE" not in source:
+                    environment["GGML_CUDA_ALLREDUCE"] = profile["allReduce"]
+                    self.router_allreduce = profile["allReduce"]
+                self.record(model["id"], None, "profile-environment", {
+                    "profileId": profile["id"], "allReduce": self.router_allreduce,
+                    "source": "human-environment" if "GGML_CUDA_ALLREDUCE" in source else "local-profile"})
+                break
+        if not matched:
+            self.record("catalog", None, "profile-ignored", "No exact model/runtime/GPU identity match at startup.")
+        return environment
+
+    def resolve_load_policy(self, model, device):
+        if device or "MISSUM_NATIVE_MULTI_GPU_SPLIT" in os.environ:
+            return model_runtime_policy(model, device, split_mode=multi_gpu_split_mode(),
+                                        fit_target=self.fit_target, gpu_layers=self.gpu_layers)
+        profiles, diagnostic = read_model_load_profiles(self.state)
+        if diagnostic:
+            self.record(model["id"], device, "profile-ignored", diagnostic)
+        if profiles:
+            profile = matching_model_load_profile(profiles, model, self.binary, gpu_profile_inventory())
+            if profile and (profile["split"] == "layer" or
+                            (not self.router_cuda_graphs_disabled and self.router_allreduce == profile["allReduce"])):
+                policy = measured_model_policy(model, profile, self.fit_target)
+                self.record(model["id"], device, "profile-selected", {"profileId": profile["id"]})
+                return policy
+            if profile and self.router_cuda_graphs_disabled:
+                reason = "Human CUDA graphs-disable override retained; restart without it to apply the validated tensor profile."
+            else:
+                reason = ("Matching profile requires a native supervisor restart with its validated AllReduce setting."
+                          if profile else "No exact model/runtime/GPU identity match; default placement retained.")
+            self.record(model["id"], device, "profile-ignored", reason)
+        return model_runtime_policy(model, device, fit_target=self.fit_target, gpu_layers=self.gpu_layers)
 
     def load(self, model_id):
         with self.lock:
@@ -571,11 +795,15 @@ class GpuLoadManager:
                 raise ValueError("Unload the previous model before selecting GPU placement")
             if any(item["id"] == model_id for item in active):
                 return {"success": True, "reused": True}
-            self.sessions.invalidate(model_id)
             device = choose_single_gpu(model, gpu_inventory(), self.fit_target)
             deadline = time.monotonic() + 280
-            for attempt in range(2):
+            forced_policy = None
+            for attempt in range(3):
+                policy = forced_policy or self.resolve_load_policy(model, device)
+                if attempt == 0:
+                    self.sessions.invalidate(model_id)
                 self.placements[model_id] = device
+                self.policies[model_id] = policy
                 self.refresh()
                 self.router("v1/models?reload=1")
                 logs = [self.state / "llama.stderr.log", self.state / "llama.stdout.log"]
@@ -605,6 +833,18 @@ class GpuLoadManager:
                             failure += stream.read(2 * 1024 * 1024).decode("utf-8", errors="replace")
                 memory_failure = re.search(r"out of memory|cudaMalloc.*failed|failed to allocate|unable to allocate|CUDA error.*memory", failure, re.I)
                 self.record(model_id, device, "failed", failure[-4000:])
+                unsupported_tensor = re.search(r"(?:LLAMA_)?SPLIT_MODE_TENSOR[^\n]*(?:not implemented|not supported|requires)|"
+                                               r"tensor (?:parallelism|split mode)[^\n]*(?:not implemented|not supported)", failure, re.I)
+                if policy["split"] == "tensor" and (memory_failure or unsupported_tensor):
+                    # The failed child has exited. Retry exactly once in layer
+                    # mode, retaining the full explicit context and GPU layers.
+                    forced_policy = dict(policy, split="layer", contextPolicy="profile-fallback-full-context",
+                                         fallbackReason="allocation" if memory_failure else "unsupported-tensor")
+                    forced_policy.pop("allReduce", None)
+                    self.record(model_id, device, "profile-fallback", {"reason": forced_policy["fallbackReason"],
+                                                                      "context": forced_policy["context"]})
+                    device = None
+                    continue
                 if not device or attempt or not memory_failure:
                     raise RuntimeError("Native model load failed; see gpu-placement.jsonl and llama.stderr.log")
                 # A failed router child has already exited, releasing its CUDA
@@ -707,7 +947,7 @@ def main():
 
     threading.Thread(target=refresh, daemon=True).start()
     command = runtime_command(binary, preset, args.host, args.port, args.fit_target, args.gpu_layers)
-    environment = runtime_environment(os.environ, state_directory)
+    environment = gpu_manager.configure_router_environment(os.environ)
     # Windows venv launchers can lose inherited redirected handles. Give the
     # actual native process explicit persistent log handles instead.
     runtime_stdout = (state_directory / "llama.stdout.log").open("a", encoding="utf-8")

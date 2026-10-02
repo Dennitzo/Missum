@@ -37,6 +37,8 @@ public sealed class AssistantCoordinator(
     {
         "Neue Sitzung", "Neuer Chat", "Hallo", "Antwort", "Frage", "Allgemeiner Chat",
         "Willkommen", "Missum Assistent", "Missum-Assistent", "Gespräch mit Missum",
+        "Weitermachen", "Weiter", "Fortsetzen", "Mach weiter", "Weiter machen", "Weiterarbeiten",
+        "Continue", "Resume", "Go on",
     };
 
     private static string? DerivePromptSessionTitle(string prompt)
@@ -90,7 +92,8 @@ public sealed class AssistantCoordinator(
         AssistantDisplayState Merge(AssistantDisplayState current)
         {
             var reasoningOnly = update.ToolStep?.Tool == "assistant.reasoning";
-            var resumed = update.Kind == MissumAiAssistantUpdateKind.Started && current.Status is not null;
+            var resumed = update.Kind == MissumAiAssistantUpdateKind.Started && current.IsRunning && current.Status is not null
+                && update.ToolStep?.Tool != MissumAiAssistantService.ContinuationStepTool;
             return current with
             {
                 IsRunning = update.Kind is not (MissumAiAssistantUpdateKind.Completed or MissumAiAssistantUpdateKind.Cancelled or MissumAiAssistantUpdateKind.Failed),
@@ -672,6 +675,18 @@ public sealed class AssistantCoordinator(
             }
             case "chat.send":
                 await SendChatAsync(envelope, emit, cancellationToken);
+                break;
+            case "chat.resume":
+                if (missumAi is null) throw new InvalidOperationException("Der AI-Clientdienst ist nicht verfügbar.");
+                if (_runScheduler?.Snapshot.IsIdle == false)
+                    throw new InvalidOperationException("Es läuft bereits ein geplanter Auftrag. Der gestoppte Lauf wurde nicht nochmals gestartet.");
+                try
+                {
+                    await missumAi.ResumeMessageAsync(GetRequiredGuid(envelope.Payload, "sessionId"),
+                        GetRequiredGuid(envelope.Payload, "messageId"),
+                        update => EmitMissumAiUpdateAsync(update, emit, envelope.RequestId), cancellationToken).ConfigureAwait(false);
+                }
+                catch (MissumAiStreamDetachedException) { }
                 break;
             case "chat.steer":
                 if (missumAi is null) throw new InvalidOperationException("AI-Verbindung ist nicht verfügbar.");
@@ -1451,6 +1466,15 @@ public sealed class AssistantCoordinator(
             throw new InvalidOperationException("Wähle für diese Coding-Sitzung zuerst ein vorhandenes Projekt oder einen Workspace aus.");
         }
         var promptTitle = DerivePromptSessionTitle(prompt);
+        if (promptTitle is null && GenericSessionTitles.Contains(session.Title))
+        {
+            // Repair a formerly overwritten continuation title from user text.
+            // Assistant answers never supply a session name.
+            promptTitle = (await chats.ListMessagesAsync(sessionId, cancellationToken).ConfigureAwait(false))
+                .Where(message => message.Role == ChatRole.User)
+                .OrderBy(message => message.CreatedAt).ThenBy(message => message.Id)
+                .Select(message => DerivePromptSessionTitle(message.Content)).FirstOrDefault(title => title is not null);
+        }
         if (promptTitle is { } derivedTitle
             && !string.Equals(session.Title, derivedTitle, StringComparison.Ordinal))
         {
@@ -1795,6 +1819,7 @@ public sealed class AssistantCoordinator(
                         : ToMessageDto(precedingUserMessage, precedingUserArtifacts),
                     message = ToMessageDto(update.Message, artifactsForMessage),
                     runId = missumAi?.ActiveRunId,
+                    changesRunId = update.LocalRunId,
                     contextUsed = update.ContextUsed,
                     contextLimit = update.ContextLimit,
                     contextWasTruncated = update.ContextWasCompacted,

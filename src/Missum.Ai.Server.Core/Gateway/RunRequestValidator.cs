@@ -250,12 +250,11 @@ public static class RunRequestValidator
         {
             throw new ArgumentException("maximumContextTokens must be at least 2048; the model catalog bounds the effective limit.");
         }
-        var supportsUnlimitedDuration = request.Mode == RunMode.Coding;
-        if (request.Limits?.TimeoutSeconds is { } timeoutSeconds
-            && (timeoutSeconds == 0 ? !supportsUnlimitedDuration
-                : timeoutSeconds < 30 || request.Mode != RunMode.Coding && timeoutSeconds > 14_400))
+        // Keep older clients and persisted requests readable; this legacy field
+        // no longer imposes a deadline on a main run in any mode.
+        if (request.Limits?.TimeoutSeconds is < 0)
         {
-            throw new ArgumentException("timeoutSeconds must be 0 for Coding or at least 30; finite non-Coding limits support up to 14400 seconds.");
+            throw new ArgumentException("The legacy timeoutSeconds field must be nonnegative; main runs have no duration limit.");
         }
     }
 

@@ -824,7 +824,14 @@ public sealed class SqliteMissumAiRunRepository(SqliteDatabase database) : IMiss
 
     public Task<MissumAiRunRecord> BeginAttemptAsync(
         MissumAiRunRecord run,
-        CancellationToken cancellationToken = default) =>
+        CancellationToken cancellationToken = default) => BeginAttemptCoreAsync(run, false, cancellationToken);
+
+    public Task<MissumAiRunRecord> BeginContinuationAttemptAsync(
+        MissumAiRunRecord run,
+        CancellationToken cancellationToken = default) => BeginAttemptCoreAsync(run, true, cancellationToken);
+
+    private Task<MissumAiRunRecord> BeginAttemptCoreAsync(
+        MissumAiRunRecord run, bool preserveContent, CancellationToken cancellationToken) =>
         database.WriteAsync(async (connection, transaction, token) =>
         {
             run = NormalizeForWrite(run) with { WorkspacePath = NormalizeWorkspace(run.WorkspacePath) };
@@ -885,7 +892,7 @@ public sealed class SqliteMissumAiRunRepository(SqliteDatabase database) : IMiss
                 resetAnchor.Transaction = transaction;
                 resetAnchor.CommandText = """
                     UPDATE chat_messages
-                    SET content='',
+                    SET content=CASE WHEN $preserve THEN content ELSE '' END,
                         status='streaming',
                         error=NULL,
                         revision=revision+1,
@@ -895,6 +902,7 @@ public sealed class SqliteMissumAiRunRepository(SqliteDatabase database) : IMiss
                 resetAnchor.Parameters.AddWithValue("$message", run.AssistantMessageId.ToString("D"));
                 resetAnchor.Parameters.AddWithValue("$session", run.SessionId.ToString("D"));
                 resetAnchor.Parameters.AddWithValue("$updated", SqlitePromptTriggerRepository.Format(DateTimeOffset.UtcNow));
+                resetAnchor.Parameters.AddWithValue("$preserve", preserveContent);
                 if (await resetAnchor.ExecuteNonQueryAsync(token).ConfigureAwait(false) != 1)
                 {
                     throw new InvalidDataException("Der AI-Nachrichtenanker konnte nicht zurückgesetzt werden.");
@@ -932,6 +940,15 @@ public sealed class SqliteMissumAiRunRepository(SqliteDatabase database) : IMiss
 
     public Task<MissumAiRunRecord?> GetByServerRunIdAsync(string serverRunId, CancellationToken cancellationToken = default) =>
         ReadSingleAsync("r.server_run_id=$value", serverRunId, cancellationToken);
+
+    public async Task<MissumAiRunRecord?> GetByAssistantMessageIdAsync(Guid assistantMessageId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = SelectSql + " WHERE r.assistant_message_id=$message ORDER BY r.updated_at DESC,r.id DESC LIMIT 1;";
+        command.Parameters.AddWithValue("$message", assistantMessageId.ToString("D"));
+        return (await ReadAsync(command, cancellationToken).ConfigureAwait(false)).SingleOrDefault();
+    }
 
     public async Task<IReadOnlyList<MissumAiRunRecord>> ListResumableAsync(CancellationToken cancellationToken = default)
     {

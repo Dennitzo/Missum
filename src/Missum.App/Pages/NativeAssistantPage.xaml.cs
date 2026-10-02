@@ -288,7 +288,8 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             if (type == "chat.started" && data.TryGetProperty("message", out var startedMessage)
                 && Guid.TryParse(S(startedMessage, "id"), out var startedId))
             {
-                if (!_changeReceiptState.ObserveStarted(_session, startedId, ReadConversationRevision(data))) return;
+                var startedRun = Guid.TryParse(S(data, "changesRunId"), out var parsedRun) ? parsedRun : Guid.Empty;
+                if (!_changeReceiptState.ObserveStarted(_session, startedId, ReadConversationRevision(data), startedRun)) return;
                 ResetChangesSummary();
             }
             if (data.TryGetProperty("message", out var message)) { _messages[S(message, "id")] = message; RenderMessages(); }

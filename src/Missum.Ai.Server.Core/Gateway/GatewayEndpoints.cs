@@ -215,7 +215,9 @@ internal static class GatewayEndpoints
 
         while (!context.RequestAborted.IsCancellationRequested)
         {
-            var events = await repository.GetEventsAfterAsync(runId, cursor, context.RequestAborted).ConfigureAwait(false);
+            // Reconnects may replay several days of durable events. Read one bounded
+            // page at a time and drain it before waiting for another notification.
+            var events = await repository.GetEventsPageAfterAsync(runId, cursor, cancellationToken: context.RequestAborted).ConfigureAwait(false);
             foreach (var runEvent in events)
             {
                 cursor = runEvent.Id;
@@ -228,12 +230,13 @@ internal static class GatewayEndpoints
             if (events.Count > 0)
             {
                 await context.Response.Body.FlushAsync(context.RequestAborted).ConfigureAwait(false);
+                continue;
             }
 
             snapshot = await repository.GetAsync(runId, context.RequestAborted).ConfigureAwait(false);
             if (snapshot is null || IsTerminal(snapshot.State))
             {
-                var trailing = await repository.GetEventsAfterAsync(runId, cursor, context.RequestAborted).ConfigureAwait(false);
+                var trailing = await repository.GetEventsPageAfterAsync(runId, cursor, cancellationToken: context.RequestAborted).ConfigureAwait(false);
                 if (trailing.Count == 0)
                 {
                     break;

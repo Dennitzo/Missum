@@ -18,7 +18,7 @@ public sealed partial class RunProcessor
         options ??= new();
         var arguments = new Dictionary<string, object?>(StringComparer.Ordinal)
         {
-            ["task"] = task.Length <= 4000 ? task : task[..4000],
+            ["task"] = BoundResearchTask(task),
             ["profile"] = JsonNamingPolicy.CamelCase.ConvertName(options.Profile.ToString()),
             ["autonomyLevel"] = JsonNamingPolicy.CamelCase.ConvertName(options.AutonomyLevel.ToString()),
             ["verificationLevel"] = JsonNamingPolicy.CamelCase.ConvertName(options.VerificationLevel.ToString()),

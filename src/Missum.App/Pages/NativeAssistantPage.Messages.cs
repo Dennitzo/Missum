@@ -25,6 +25,7 @@ public sealed partial class NativeAssistantPage
                 UpdateMessageHeader(header, message);
         RefreshContextDisplay();
         RefreshChatNotices();
+        RefreshContinuationSteps();
     }
 
     private void UpdateMessageHeader(FrameworkElement header, JsonElement message)
@@ -33,8 +34,8 @@ public sealed partial class NativeAssistantPage
         if (start == DateTimeOffset.MinValue) return;
         var active = S(message, "status") is "streaming" or "pending";
         var end = active ? DateTimeOffset.UtcNow : DateTimeOffset.TryParse(S(message, "updatedAt"), out var finished) ? finished : start;
-        var elapsed = end > start ? end - start : TimeSpan.Zero;
-        var duration = $"{(int)elapsed.TotalMinutes} Min. {elapsed.Seconds} Sek.";
+        var elapsed = MessageActiveDuration(message, end);
+        var duration = $"{(long)elapsed.TotalMinutes} Min. {elapsed.Seconds} Sek.";
         var text = active
             ? $"Modell generiert {_contextUsed:N0} Token · In Bearbeitung seit {duration}"
             : start.ToLocalTime().ToString("dd.MM.yyyy · HH:mm 'Uhr'", CultureInfo.CurrentCulture) + " · " + duration + " lang gearbeitet";
@@ -112,6 +113,9 @@ public sealed partial class NativeAssistantPage
                 continue;
             }
             if (tool == "assistant.narration") { Text("narration:" + id, detail); continue; }
+            // The preparation receipt stores an idempotent request before the
+            // server accepts it. Only an accepted continuation is a visible step.
+            if (tool == "assistant.continuation" && S(step, "status") != "completed") continue;
             var key = "tool:" + id;
             if (!blocks.TryGetValue(key, out var element)) blocks[key] = element = new ToolStepView(_settings.Current.CodingToolStepsExpanded);
             ((ToolStepView)element).Update(step, tool == "assistant.reasoning" ? toolNumber : ++toolNumber);
@@ -125,6 +129,17 @@ public sealed partial class NativeAssistantPage
             if (!blocks.TryGetValue("artifacts", out var links)) blocks["artifacts"] = links = new NativeArtifactLinks(artifacts, Guid.TryParse(messageId, out var parsed) ? parsed : null);
             else ((NativeArtifactLinks)links).UpdateArtifacts(artifacts);
             desired.Add(links);
+        }
+        if (assistant && IsResumableAssistantStatus(message))
+        {
+            if (!blocks.TryGetValue("continuation", out var continuation))
+            {
+                var step = new ContinuationToolStepView();
+                step.ContinueButton.Click += async (_, _) => await ContinueAssistantMessageAsync(messageId);
+                blocks["continuation"] = continuation = step;
+            }
+            UpdateContinuationStep(messageId, message, (ContinuationToolStepView)continuation);
+            desired.Add(continuation);
         }
         var streaming = assistant && S(message, "status") is "streaming" or "pending";
         // Tool receipts and artifacts can follow the text. Keep an independent
@@ -219,7 +234,7 @@ public sealed partial class NativeAssistantPage
                 "coding.gitDiff" => "Änderungen geprüft", "coding.updatePlan" => "Arbeitsplan aktualisiert", "assistant.reasoning" => "Denkprozess",
                 "research.code.write" => "Python-Datei vorbereiten", "research.code.execute" => "Python-Analyse ausführen",
                 "research.code.test" => "Berechnung prüfen", "research.code.benchmark" => "Berechnung vergleichen",
-                "math.formalProof" => "Lean-Beweis prüfen", "assistant.progress" => "Fortschritt", "web.search" => "Websuche", "web.fetch" => "Webseite lesen", _ => S(step, "label", tool) };
+                "math.formalProof" => "Lean-Beweis prüfen", "assistant.progress" => "Fortschritt", "assistant.continuation" => "Lauf fortgesetzt", "web.search" => "Websuche", "web.fetch" => "Webseite lesen", _ => S(step, "label", tool) };
             _running = S(step, "status") is "running" or "pending";
             var iconKey = ToolStepIconKey(tool);
             _compactIcon.Glyph = ToolIconGlyph(iconKey);
@@ -276,7 +291,7 @@ public sealed partial class NativeAssistantPage
         {
             if (!_detailsDirty) return;
             _detailsDirty = false;
-            if (_reasoning)
+            if (_reasoning || S(_step, "tool") == "assistant.continuation")
             {
                 var text = S(_step, "detail", S(_step, "explanation"));
                 if (_details.Children.FirstOrDefault() is NativeStreamingMarkdown existing) existing.UpdateText(text);

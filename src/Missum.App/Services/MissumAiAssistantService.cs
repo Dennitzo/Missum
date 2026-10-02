@@ -43,7 +43,8 @@ public sealed record MissumAiAssistantUpdate(
     int? LoadedFiles = null,
     bool ContextWasCompacted = false,
     AssistantToolStep? ToolStep = null,
-    CodingChangesSummary? ChangesSummary = null);
+    CodingChangesSummary? ChangesSummary = null,
+    Guid? LocalRunId = null);
 
 public sealed record MissumAiSpeechUpdate(
     bool IsActive,
@@ -1444,6 +1445,7 @@ public sealed partial class MissumAiAssistantService(
         var ownsClient = suppliedClient is null;
         var client = suppliedClient ?? await CreateClientForActionAsync(localRun.Action, cancellationToken).ConfigureAwait(false);
         var content = assistant.Content;
+        var continuationPrefix = RetainedContinuationPrefix(localRun, assistant);
         var model = localRun.SelectedModel;
         var collectedArtifacts = (await artifacts.ListForMessageAsync(
             assistant.Id,
@@ -1509,7 +1511,7 @@ public sealed partial class MissumAiAssistantService(
         {
             // The repository applies this normalization in both modes. Keep the
             // live message and durable steering offsets in the same visible text.
-            var visible = NormalizeCodingNarration(content);
+            var visible = NormalizeContinuationNarration(content, continuationPrefix);
             var previousSteps = assistant.ToolSteps ?? [];
             var rebased = visible.StartsWith(assistant.Content, StringComparison.Ordinal) ? previousSteps : previousSteps.Select(step =>
                 {
@@ -1658,7 +1660,7 @@ public sealed partial class MissumAiAssistantService(
                             : "Der Modell-/Reasoning-Wechsel ist vorgemerkt und wird an der nächsten sicheren Arbeitsgrenze übernommen.";
                         if (!string.IsNullOrWhiteSpace(selectionText))
                         {
-                            var selectionStep = new AssistantToolStep("model-selection:" + item.Id, "assistant.narration", "completed", selectionText,
+                            var selectionStep = new AssistantToolStep("model-selection:" + item.RunId + ":" + item.Id, "assistant.narration", "completed", selectionText,
                                 ContentOffset: assistant.Content.Length, StartedAt: item.CreatedAt, CompletedAt: item.CreatedAt, UpdatedAt: item.CreatedAt);
                             assistant = assistant with { ToolSteps = await chats.SaveToolStepAsync(assistant.Id, selectionStep, cancellationToken).ConfigureAwait(false) };
                             await update(new(MissumAiAssistantUpdateKind.Delta, assistant)).ConfigureAwait(false);
@@ -1671,7 +1673,8 @@ public sealed partial class MissumAiAssistantService(
                         if (!Guid.TryParse(steering.SessionId, out var steeringSession) || steeringSession != assistant.SessionId)
                             throw new InvalidDataException("Die Umlenkung gehört nicht zur aktiven Sitzung.");
                         var steeringId = "steering-" + steering.InputId;
-                        if (steering.VisibleTextOffset is { } visibleOffset) steeringOffsets[steeringId] = visibleOffset;
+                        if (steering.VisibleTextOffset is { } visibleOffset)
+                            steeringOffsets[steeringId] = ShiftContinuationOffset(visibleOffset, continuationPrefix.Length);
                         await RecordToolStepAsync(steeringId, "assistant.steering",
                             item.Type == RunSteeringEventTypes.Applied ? "completed" : "running", steering.Text,
                             inputJson: JsonSerializer.Serialize(new { steering.InputId, steering.Sequence, steering.Text }, JsonOptions),
@@ -1780,7 +1783,7 @@ public sealed partial class MissumAiAssistantService(
                         break;
                     case RunEventTypes.ServerToolStarted:
                         var startedServerStepId = StringProperty(item.Data, "callId") ?? StringProperty(item.Data, "toolCallId")
-                            ?? "server-" + item.Id;
+                            ?? ContinuationFallbackToolStepId(item.RunId, item.Id);
                         activeServerStepId = startedServerStepId;
                         await RecordToolStepAsync(
                             startedServerStepId,
@@ -1800,7 +1803,7 @@ public sealed partial class MissumAiAssistantService(
                         var serverToolName = StringProperty(item.Data, "tool") ?? "web.search";
                         var serverStepId = StringProperty(item.Data, "callId") ?? StringProperty(item.Data, "toolCallId")
                             ?? assistant.ToolSteps?.LastOrDefault(step => step.Tool == serverToolName && step.Status == "running")?.Id
-                            ?? "server-" + item.Id;
+                            ?? ContinuationFallbackToolStepId(item.RunId, item.Id);
                         await RecordToolStepAsync(serverStepId, serverToolName,
                             item.Data.TryGetProperty("success", out var serverSuccess) && serverSuccess.ValueKind == JsonValueKind.False ? "failed" : "completed",
                             FormatToolResultDetail(item.Data.TryGetProperty("result", out var serverResult) ? serverResult : item.Data), appendResult: true,
@@ -1856,10 +1859,10 @@ public sealed partial class MissumAiAssistantService(
                         break;
                     case RunEventTypes.TextDelta:
                         var textDelta = item.Data.Deserialize<TextDeltaEvent>(JsonOptions);
-                        content = ApplyTextDelta(content, textDelta);
+                        content = ApplyContinuationTextDelta(content, textDelta, continuationPrefix);
                         if (textDelta?.ReplaceFrom == 0 && UsesCodingAgent(localRun.Action))
                         {
-                            content = NormalizeCodingNarration(content);
+                            content = NormalizeContinuationNarration(content, continuationPrefix);
                             // Earlier steps belong to the unchanged preceding turns. Their
                             // stored offsets already refer to sanitized, visible narration.
                             foreach (var step in (assistant.ToolSteps ?? []).Where(step => step.Tool != "assistant.steering"))
@@ -2675,7 +2678,7 @@ public sealed partial class MissumAiAssistantService(
                 codingMessages,
                 UploadIds: uploaded.Select(item => item.Upload.UploadId).ToArray(),
                 ClientCapabilities: codingConfiguration.Capabilities.Concat(WorkspaceClientCapabilities).Distinct().ToArray(),
-                Limits: CreateChatRunLimits(availableCodingModel.ContextTokens, unlimitedDuration: true),
+                Limits: CreateChatRunLimits(availableCodingModel.ContextTokens),
                 SessionId: sessionId.ToString("D"),
                 AllowedServerTools: GetAllowedServerTools(action),
                 PreferredCodingModelId: codingModel,
@@ -2698,6 +2701,11 @@ public sealed partial class MissumAiAssistantService(
             throw new InvalidOperationException("In den Einstellungen ist kein General-AI-Modell ausgewählt.");
         }
 
+        var scienceSessionContext = codingSession.ChatMode == ChatMode.ClaudeScience
+            ? await BuildScienceSessionContextAsync(codingSession, cancellationToken).ConfigureAwait(false) : string.Empty;
+        var contextBudgetPrompt = codingSession.ChatMode == ChatMode.ClaudeScience
+            ? BuildSciencePresentationPrompt(scienceSessionContext + originalPrompt, codingSession.Id) : originalPrompt;
+        var scientificPromptOverhead = Math.Max(0, contextBudgetPrompt.Length - originalPrompt.Length);
         var minimumHistoryReserveTokens = CalculateDocumentHistoryReserveTokens(
             historyBeforePrompt,
             contextProfile);
@@ -2724,11 +2732,12 @@ public sealed partial class MissumAiAssistantService(
             client,
             sessionId,
             historyBeforePrompt,
-            originalPrompt,
+            contextBudgetPrompt,
             selectedModel,
             contextProfile,
             knownContextLength: documentContext?.ContextLength,
-            knownHistoryBudgetCharacters: documentContext?.HistoryBudgetCharacters,
+            knownHistoryBudgetCharacters: documentContext is null ? null
+                : Math.Max(1_024, documentContext.HistoryBudgetCharacters - scientificPromptOverhead),
             async progress => await update(new(
                 MissumAiAssistantUpdateKind.Status,
                 assistant,
@@ -2750,6 +2759,13 @@ public sealed partial class MissumAiAssistantService(
             trigger,
             hasDocumentContext: documentContext is not null,
             hasAudiobookHistory);
+        if (codingSession.ChatMode == ChatMode.ClaudeScience
+            && trigger is { DeepResearch: true, Trigger.Action: PromptTriggerAction.WebSearch })
+        {
+            // DeepResearch already selects the staged research pipeline. Keep
+            // its actual user task separate from ordinary web-search instructions.
+            transformed = string.IsNullOrWhiteSpace(trigger.RemainingPrompt) ? originalPrompt : trigger.RemainingPrompt;
+        }
         if (!string.IsNullOrWhiteSpace(projectMemoryContext))
         {
             transformed = projectMemoryContext
@@ -2757,7 +2773,10 @@ public sealed partial class MissumAiAssistantService(
                 + transformed;
         }
         if (codingSession.ChatMode == ChatMode.ClaudeScience)
+        {
+            transformed = scienceSessionContext + transformed;
             transformed = BuildSciencePresentationPrompt(transformed, codingSession.Id);
+        }
         var latestParts = new List<ContentPart> { new("text", Text: transformed) };
         foreach (var item in uploaded)
         {
@@ -2929,12 +2948,15 @@ public sealed partial class MissumAiAssistantService(
             status = document.PreparationStatus.ToString(),
         }), JsonOptions);
 
+    // Context and per-operation limits protect individual steps. A chat or research
+    // job has no wall-clock deadline: it may span days and ends through completion,
+    // an explicit stop, or an actual failure. Zero is the protocol's unlimited value.
     // The gateway and native tokenizer compute the available output window after
     // messages and tools. An omitted output limit must not reintroduce a UI cap.
-    internal static RunLimits CreateChatRunLimits(int contextLength, bool unlimitedDuration = false) => new(
+    internal static RunLimits CreateChatRunLimits(int contextLength) => new(
         MaximumOutputTokens: null,
         MaximumContextTokens: contextLength,
-        TimeoutSeconds: unlimitedDuration ? 0 : 3_600);
+        TimeoutSeconds: 0);
 
     internal static RunLimits CreateGeneralChatRunLimits(int contextLength, PromptTriggerAction? action,
         IReadOnlyCollection<string> capabilities) => CreateChatRunLimits(contextLength);
@@ -3096,12 +3118,15 @@ public sealed partial class MissumAiAssistantService(
             }
         }
         var now = DateTimeOffset.UtcNow;
+        var latestCheckpoint = previousProject?.LatestCheckpointId is null
+            ? await scientificResearch.GetLatestCheckpointAsync(options.ProjectId, cancellationToken).ConfigureAwait(false) : null;
         var project = new ScientificResearchProject(
             options.ProjectId,
             session.Id,
             DeepResearchProfileNames.ToProtocolName(options.Profile),
-            originalQuestion,
-            originalQuestion,
+            previousProject?.OriginalQuestion ?? originalQuestion,
+            previousProject is not null && !IsTechnicalResearchQuestion(previousProject.InterpretedQuestion)
+                ? previousProject.InterpretedQuestion : previousProject?.OriginalQuestion ?? originalQuestion,
             options.AutonomyLevel switch
             {
                 ResearchAutonomyLevel.CodingWorkspaceResearch => "codingWorkspaceResearch",
@@ -3119,7 +3144,8 @@ public sealed partial class MissumAiAssistantService(
             previousProject?.Revision + 1 ?? 1,
             previousProject?.CreatedAt ?? now,
             now,
-            workspacePath is null ? null : Path.GetFullPath(workspacePath));
+            workspacePath is null ? previousProject?.WorkspacePath ?? session.CodingWorkspacePath : Path.GetFullPath(workspacePath),
+            previousProject?.LatestCheckpointId ?? latestCheckpoint?.Id);
         await scientificResearch.UpsertProjectAsync(project, cancellationToken).ConfigureAwait(false);
         sciencePresentation?.Queue(project.Id);
     }

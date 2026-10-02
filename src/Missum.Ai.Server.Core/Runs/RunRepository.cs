@@ -345,6 +345,7 @@ public sealed partial class RunRepository
             interrupt.CommandText = """
                 UPDATE runs SET state = $interrupted, error_code = 'run.gateway_restarted', updated_at = $now
                 WHERE state = $running AND mode != 'Coding'
+                    AND COALESCE(json_extract(request_json, '$.deepResearch'), 0) != 1
                     AND NOT EXISTS (SELECT 1 FROM run_steering_inputs s WHERE s.run_id = runs.run_id);
                 """;
             interrupt.Parameters.AddWithValue("$interrupted", RunState.Interrupted.ToString());
@@ -358,7 +359,9 @@ public sealed partial class RunRepository
             resumeCoding.Transaction = (SqliteTransaction)transaction;
             resumeCoding.CommandText = """
                 UPDATE runs SET state = $queued, error_code = NULL, updated_at = $now
-                WHERE (mode = 'Coding' OR EXISTS (SELECT 1 FROM run_steering_inputs s WHERE s.run_id = runs.run_id)) AND (
+                WHERE (mode = 'Coding'
+                    OR (mode IN ('General', 'Auto') AND json_extract(request_json, '$.deepResearch') = 1)
+                    OR EXISTS (SELECT 1 FROM run_steering_inputs s WHERE s.run_id = runs.run_id)) AND (
                     state = $running OR (state = $interrupted AND error_code IN ('run.gateway_stopped', 'run.gateway_restarted'))
                 );
                 """;
@@ -368,6 +371,8 @@ public sealed partial class RunRepository
             resumeCoding.Parameters.AddWithValue("$now", MissumAiDatabase.FormatTimestamp(DateTimeOffset.UtcNow));
             _ = await resumeCoding.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
+
+        await ExtendLegacyClientProposalLifetimeAsync(connection, (SqliteTransaction)transaction, cancellationToken).ConfigureAwait(false);
 
         await using (var retireRemovedModes = connection.CreateCommand())
         {
@@ -410,6 +415,20 @@ public sealed partial class RunRepository
         CancellationToken cancellationToken = default)
     {
         await using var connection = await _database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using (var receipt = connection.CreateCommand())
+        {
+            // The commit may have succeeded while its HTTP acknowledgement was
+            // lost. Accept the existing receipt even after handoff expiry without
+            // rewriting its result or changing the run's state.
+            receipt.CommandText = "SELECT run_id FROM client_tool_results WHERE proposal_id = $proposal;";
+            receipt.Parameters.AddWithValue("$proposal", result.ProposalId);
+            if (await receipt.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is string owner)
+            {
+                if (string.Equals(owner, runId, StringComparison.Ordinal)) return false;
+                throw new InvalidOperationException("Client tool result belongs to another run.");
+            }
+        }
+        await ExtendLegacyClientProposalLifetimeAsync(connection, null, cancellationToken).ConfigureAwait(false);
         await using (var validate = connection.CreateCommand())
         {
             validate.CommandText = """
@@ -500,6 +519,7 @@ public sealed partial class RunRepository
         CancellationToken cancellationToken = default)
     {
         await using var connection = await _database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await ExtendLegacyClientProposalLifetimeAsync(connection, null, cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         // The conditional UPDATE claims each waiting run only once. Replayed client
         // results and this sweep share the same queue and cannot restart terminal runs.
@@ -514,12 +534,9 @@ public sealed partial class RunRepository
                   ON proposal.run_id = run.run_id
                  AND proposal.proposal_id = json_extract(checkpoint.checkpoint_json, '$.pendingProposalId')
                 WHERE run.state = $waiting AND (
-                    (COALESCE(json_extract(run.request_json, '$.limits.timeoutSeconds'), CASE WHEN run.mode = 'Coding' THEN 0 ELSE 1800 END) > 0
-                     AND julianday(run.created_at)
-                        + COALESCE(json_extract(run.request_json, '$.limits.timeoutSeconds'), CASE WHEN run.mode = 'Coding' THEN 0 ELSE 1800 END) / 86400.0 <= julianday($now))
-                    OR (proposal.expires_at <= $now AND NOT EXISTS (
+                    proposal.expires_at <= $now AND NOT EXISTS (
                         SELECT 1 FROM client_tool_results result WHERE result.proposal_id = proposal.proposal_id
-                    ))
+                    )
                 )
                 ORDER BY run.created_at
                 LIMIT 64
@@ -533,6 +550,65 @@ public sealed partial class RunRepository
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false)) runIds.Add(reader.GetString(0));
         return runIds;
+    }
+
+    private static async Task ExtendLegacyClientProposalLifetimeAsync(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        CancellationToken cancellationToken)
+    {
+        await using var ownedTransaction = transaction is null
+            ? (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false)
+            : null;
+        transaction ??= ownedTransaction;
+        // Before unbounded main runs, every non-Coding proposal received the same
+        // implicit one-hour handoff deadline, independently of its execution limit.
+        // Upgrade only that persisted signature and the current pending proposal;
+        // explicit expirations, completed results and user cancellation stay intact.
+        var changed = new List<(string RunId, string ProposalId)>();
+        await using (var extend = connection.CreateCommand())
+        {
+            extend.Transaction = transaction;
+            extend.CommandText = """
+                UPDATE client_tool_proposals AS proposal
+                SET expires_at = $unlimited,
+                    proposal_json = json_set(proposal_json, '$.expiresAt', $unlimited)
+                WHERE ABS((julianday(expires_at) - julianday(created_at)) * 86400.0 - 3600) <= 2
+                  AND NOT EXISTS (SELECT 1 FROM client_tool_results result WHERE result.proposal_id = proposal.proposal_id)
+                  AND EXISTS (
+                    SELECT 1 FROM runs run
+                    JOIN run_checkpoints checkpoint ON checkpoint.run_id = run.run_id
+                    WHERE run.run_id = proposal.run_id
+                      AND run.mode IN ('General', 'Auto')
+                      AND run.state IN ('Queued', 'Running', 'WaitingForClient')
+                      AND json_extract(checkpoint.checkpoint_json, '$.pendingProposalId') = proposal.proposal_id
+                  )
+                RETURNING run_id, proposal_id;
+                """;
+            extend.Parameters.AddWithValue("$unlimited", MissumAiDatabase.FormatTimestamp(DateTimeOffset.MaxValue));
+            await using var reader = await extend.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                changed.Add((reader.GetString(0), reader.GetString(1)));
+        }
+
+        foreach (var (runId, proposalId) in changed)
+        {
+            await using var replay = connection.CreateCommand();
+            replay.Transaction = transaction;
+            replay.CommandText = """
+                UPDATE run_events
+                SET data_json = json_set(data_json, '$.expiresAt', $unlimited)
+                WHERE run_id = $run AND event_type = $type AND json_extract(data_json, '$.proposalId') = $proposal;
+                """;
+            replay.Parameters.AddWithValue("$unlimited", MissumAiDatabase.FormatTimestamp(DateTimeOffset.MaxValue));
+            replay.Parameters.AddWithValue("$run", runId);
+            replay.Parameters.AddWithValue("$type", RunEventTypes.ClientToolProposed);
+            replay.Parameters.AddWithValue("$proposal", proposalId);
+            _ = await replay.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        if (ownedTransaction is not null)
+            await ownedTransaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 
     internal async Task<bool> CancelAsync(string runId, CancellationToken cancellationToken = default)
@@ -693,7 +769,7 @@ public sealed partial class RunRepository
                 .Any(input => input.Sequence <= checkpoint.AppliedSteeringSequence))
         {
             var rawVisible = Missum.Ai.Server.Core.Coding.CodingTextReconciler.Project(
-                await GetEventsAfterAsync(runId, 0, cancellationToken).ConfigureAwait(false));
+                await GetVisibleTextEventsAsync(runId, 0, cancellationToken).ConfigureAwait(false));
             var rawOffset = Math.Clamp(checkpoint.VisibleTextLength ?? 0, 0, rawVisible.Length);
             visibleSteeringOffset = RunVisibleText.Canonicalize(rawVisible[..rawOffset]).Length;
         }
@@ -780,7 +856,7 @@ public sealed partial class RunRepository
         }
         if (checkpoint is null || !interrupted) return checkpoint;
         return RestoreInterruptedVisibleTail(checkpoint,
-            await GetEventsAfterAsync(previousRun, 0, cancellationToken).ConfigureAwait(false));
+            await GetContinuationEventsAsync(previousRun, 0, cancellationToken).ConfigureAwait(false));
     }
 
     internal async Task<GeneralSessionContextSnapshot?> GetGeneralSessionContextAsync(
@@ -815,7 +891,7 @@ public sealed partial class RunRepository
         }
         if (checkpoint is null || previousRequest is null) return null;
         var text = new System.Text.StringBuilder();
-        var journal = await GetEventsAfterAsync(previousRun, 0, cancellationToken).ConfigureAwait(false);
+        var journal = await GetContinuationEventsAsync(previousRun, 0, cancellationToken).ConfigureAwait(false);
         foreach (var item in journal)
         {
             if (item.Type != RunEventTypes.TextDelta || !item.Data.TryGetProperty("delta", out var delta)
