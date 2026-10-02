@@ -1372,6 +1372,19 @@ public sealed partial class ModelRuntimeClient : IDisposable
         public StreamingAttemptSnapshot Snapshot { get; } = snapshot;
     }
 
+    // The bounded in-request repair loop also handles malformed model JSON.
+    // Only actual transport loss may become an unlimited durable run retry.
+    internal static bool IsRecoverableProviderTransportFailure(Exception exception) =>
+        exception is IncompleteStreamingChatException incomplete
+            ? incomplete.FailureKind switch
+            {
+                "premature_eof" => true,
+                "stream_read_error" => incomplete.InnerException is { } cause
+                    && IsRecoverableProviderTransportFailure(cause),
+                _ => false,
+            }
+            : IsTransientInferenceFailure(exception);
+
     internal static bool IsTransientInferenceFailure(Exception exception)
     {
         if (exception is IOException)

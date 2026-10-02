@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Missum.Core.Contracts;
 using Missum.Core.Models;
 using Missum.Core.Research;
@@ -183,15 +184,17 @@ public sealed class ScientificPublicationService : IDisposable
         ChatMessage? manuscript = null)
     {
         var draft = IsDraft(project, report, manuscript);
-        if (manuscript is not null && TryReadArticle(manuscript.Content, out var articleTitle, out var articleBody, out var precedingFindings))
-            return FormatArticle(project, results, works, evidence, manuscript, draft, articleTitle, articleBody, precedingFindings);
+        var manuscriptText = manuscript?.Content ?? (report?.ReportKind == "scientificMarkdown" ? report.ContentMarkdown : null);
+        if (manuscriptText is not null && TryReadArticle(manuscriptText, out var articleTitle, out var articleBody))
+            return FormatArticle(project, results, works, evidence, manuscript, draft, articleTitle, articleBody);
         var text = new StringBuilder();
-        AppendPublicationHeading(text, QuestionSummary(project, 140), project, manuscript, draft);
+        AppendPublicationHeading(text, "Wissenschaftliche Untersuchung", project, manuscript, draft);
 
         text.AppendLine("## Zusammenfassung").AppendLine();
         if (results.Claims.Count > 0)
         {
-            foreach (var claim in results.Claims.Take(3)) text.AppendLine(claim.Statement).AppendLine();
+            foreach (var claim in results.Claims.Where(claim => !IsOperationalParagraph(claim.Statement)).Take(3))
+                text.AppendLine(claim.Statement).AppendLine();
             text.Append("Aussagenstatus: ").AppendLine(Status(report?.ConclusionStatus ?? project.Status)).AppendLine();
         }
         else
@@ -199,47 +202,33 @@ public sealed class ScientificPublicationService : IDisposable
                 ? "Die Forschungsfrage und die bisher verfügbaren Belege werden im Folgenden dokumentiert. Eine geprüfte Ergebnissynthese liegt noch nicht vor."
                 : "Der dokumentierte Bericht wird nachfolgend wiedergegeben. Darüber hinaus liegen keine separat gespeicherten, geprüften Kernaussagen vor.").AppendLine();
 
-        text.AppendLine("## 1. Fragestellung").AppendLine().AppendLine(QuestionSummary(project, 420)).AppendLine();
-
-        text.AppendLine("## 2. Material und Methode").AppendLine()
+        text.AppendLine("## Material und Methode").AppendLine()
             .Append("Der gespeicherte Forschungsstand umfasst ").Append(works.Count).Append(" Quellen, ").Append(evidence.Count)
             .Append(" Belegstellen und ").Append(results.Experiments.Count).AppendLine(" rechnerische Untersuchungen. Quellen und Prüfstatus werden getrennt ausgewiesen.").AppendLine();
         if (results.Hypotheses.Count > 0)
         {
             text.AppendLine("### Untersuchte Hypothesen").AppendLine();
-            foreach (var hypothesis in results.Hypotheses)
+            foreach (var hypothesis in results.Hypotheses.Where(hypothesis => !IsOperationalParagraph(hypothesis.Statement)))
                 text.Append("- ").Append(hypothesis.Statement).Append(" — ").AppendLine(Status(hypothesis.Status));
             text.AppendLine();
         }
 
-        text.AppendLine("## 3. Ergebnisse").AppendLine();
+        text.AppendLine("## Ergebnisse").AppendLine();
         if (!string.IsNullOrWhiteSpace(manuscript?.Content))
-            text.AppendLine(RemoveReportPreamble(manuscript.Content)).AppendLine();
+            text.AppendLine(RemoveReportPreamble(CleanScientificContent(manuscript.Content))).AppendLine();
         else if (report is not null && report.ReportKind != "researchProgress" && !string.IsNullOrWhiteSpace(report.ContentMarkdown))
-            text.AppendLine(RemoveReportPreamble(report.ContentMarkdown)).AppendLine();
+            text.AppendLine(RemoveReportPreamble(CleanScientificContent(report.ContentMarkdown))).AppendLine();
         else if (results.Claims.Count == 0)
             text.AppendLine("Die Auswertung ist noch offen. Es wird noch kein Ergebnis behauptet.").AppendLine();
         if (results.Claims.Count > 0)
         {
             text.AppendLine("### Dokumentierte Kernaussagen").AppendLine();
-            foreach (var claim in results.Claims)
+            foreach (var claim in results.Claims.Where(claim => !IsOperationalParagraph(claim.Statement)))
                 text.Append("- ").Append(claim.Statement).Append("  \n  **Prüfstatus:** ").AppendLine(Status(claim.ConclusionStatus));
             text.AppendLine();
         }
-        if (results.Experiments.Count > 0)
-        {
-            text.AppendLine("### Rechnerische Untersuchungen").AppendLine();
-            for (var experimentIndex = 0; experimentIndex < results.Experiments.Count; experimentIndex++)
-            {
-                var experiment = results.Experiments[experimentIndex];
-                text.Append("**Untersuchung ").Append(experimentIndex + 1).Append(" · ")
-                    .Append(Status(experiment.VerificationStatus)).AppendLine("**").AppendLine();
-                if (!string.IsNullOrWhiteSpace(experiment.StdoutEvidence))
-                    AppendCode(text, experiment.StdoutEvidence);
-                if (!string.IsNullOrWhiteSpace(experiment.StderrEvidence))
-                    text.Append("Hinweis zur Ausführung: ").AppendLine(OneLine(experiment.StderrEvidence)).AppendLine();
-            }
-        }
+        // Process output and stderr are operational receipts. The manuscript
+        // interprets scientific numerical results; raw tool logs remain in chat.
         if (draft && works.Count > 0)
         {
             text.AppendLine("### Bisherige Beleggrundlage").AppendLine()
@@ -255,7 +244,7 @@ public sealed class ScientificPublicationService : IDisposable
             }
         }
 
-        text.AppendLine("## 4. Einordnung und Grenzen").AppendLine();
+        text.AppendLine("## Einordnung und Grenzen").AppendLine();
         if (draft) text.AppendLine("Diese Arbeitsfassung ist unvollständig. Aussagen können sich durch zusätzliche Quellen, Gegenbeispiele und unabhängige Prüfungen ändern.").AppendLine();
         var verified = results.Verifications.Count(item => item.Status.Equals("verified", StringComparison.OrdinalIgnoreCase)
             || item.Status.Equals("KernelAccepted", StringComparison.OrdinalIgnoreCase));
@@ -288,12 +277,11 @@ public sealed class ScientificPublicationService : IDisposable
     }
 
     private static string FormatArticle(ScientificResearchProject project, ResearchResultSnapshot results,
-        IReadOnlyList<ResearchLiteratureEntry> works, IReadOnlyList<ResearchEvidenceRecord> evidence, ChatMessage manuscript,
-        bool draft, string title, string body, string precedingFindings)
+        IReadOnlyList<ResearchLiteratureEntry> works, IReadOnlyList<ResearchEvidenceRecord> evidence, ChatMessage? manuscript,
+        bool draft, string title, string body)
     {
         var text = new StringBuilder();
         AppendPublicationHeading(text, title, project, manuscript, draft);
-        if (!string.IsNullOrWhiteSpace(precedingFindings)) text.AppendLine(precedingFindings).AppendLine();
         text.AppendLine(body.Trim()).AppendLine();
         var missingSources = works.Where(work => string.IsNullOrWhiteSpace(work.CanonicalUrl)
             || !body.Contains(work.CanonicalUrl, StringComparison.OrdinalIgnoreCase)).ToArray();
@@ -317,66 +305,140 @@ public sealed class ScientificPublicationService : IDisposable
         return text.ToString();
     }
 
-    private static bool TryReadArticle(string content, out string title, out string body, out string precedingFindings)
+    private static bool TryReadArticle(string content, out string title, out string body)
     {
-        title = body = precedingFindings = "";
+        title = body = "";
         var lines = content.Replace("\r", "", StringComparison.Ordinal).Split('\n');
+        var headings = new List<(int Index, int Level, string Title)>();
+        var starts = new List<int>();
+        var ends = new List<int>();
         char fence = '\0';
+        var fenceLength = 0;
         for (var index = 0; index < lines.Length; index++)
         {
             var line = lines[index].Trim();
             if (line.StartsWith("```", StringComparison.Ordinal) || line.StartsWith("~~~", StringComparison.Ordinal))
             {
-                if (fence == '\0') fence = line[0];
-                else if (fence == line[0]) fence = '\0';
+                if (fence == '\0')
+                {
+                    fence = line[0];
+                    fenceLength = line.TakeWhile(character => character == fence).Count();
+                }
+                else if (line[0] == fence && line.Length >= fenceLength && line.All(character => character == fence)) fence = '\0';
                 continue;
             }
-            if (fence != '\0' || !line.StartsWith("# ", StringComparison.Ordinal) || line.Length < 4) continue;
-            title = line[2..].Trim().TrimEnd('#').TrimEnd();
-            body = string.Join('\n', lines.Skip(index + 1));
-            // Remove conversational announcements, but keep factual paragraphs
-            // preceding the article; they can contain results absent from its body.
-            precedingFindings = string.Join("\n\n", string.Join('\n', lines.Take(index)).Split("\n\n", StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
-                .Where(paragraph => !IsProgressAnnouncement(paragraph)));
+            if (fence != '\0') continue;
+            if (line == "<!-- MISSUM_PUBLICATION_BEGIN -->") starts.Add(index);
+            if (line == "<!-- MISSUM_PUBLICATION_END -->") ends.Add(index);
+            var level = line.TakeWhile(static character => character == '#').Count();
+            if (level is >= 1 and <= 6 && line.Length > level && line[level] == ' ')
+                headings.Add((index, level, line[(level + 1)..].Trim().TrimEnd('#').TrimEnd()));
+        }
+        // New snapshots explicitly separate the article from chat. During
+        // streaming keep the latest usable block; an incomplete new title must
+        // not replace an earlier complete article with an empty document.
+        foreach (var start in starts.AsEnumerable().Reverse())
+        {
+            var end = ends.Concat(starts).Where(index => index > start).DefaultIfEmpty(lines.Length).Min();
+            var heading = headings.FirstOrDefault(item => item.Index > start && item.Index < end
+                && item.Level == 1 && IsArticleTitle(item.Title));
+            if (heading.Title is null) continue;
+            var article = CleanScientificContent(string.Join('\n', lines[(heading.Index + 1)..end]));
+            if (!article.Split('\n').Any(line => !string.IsNullOrWhiteSpace(line) && !line.TrimStart().StartsWith('#'))) continue;
+            title = heading.Title;
+            body = article;
             return true;
         }
-        return false;
+        if (starts.Count > 0) return false;
+
+        // Older answers placed the actual manuscript after a long research
+        // narration. Prefer that explicit subsection instead of exporting the
+        // surrounding chat, completed-tool receipts and subsequent recap.
+        var section = headings.LastOrDefault(item => Regex.IsMatch(item.Title,
+            @"^(?:Publikation|Manuskript|Wissenschaftliche Publikation)(?:\s|$|[–—:-])", RegexOptions.IgnoreCase,
+            TimeSpan.FromSeconds(1)));
+        if (section.Title is not null)
+        {
+            var next = headings.FirstOrDefault(item => item.Index > section.Index && item.Level <= section.Level);
+            var end = next.Title is null ? lines.Length : next.Index;
+            title = headings.LastOrDefault(item => item.Index < section.Index && item.Level == 1 && IsArticleTitle(item.Title)).Title
+                ?? "Wissenschaftliche Untersuchung";
+            var articleLines = lines[(section.Index + 1)..end];
+            if (section.Level > 1)
+                articleLines = articleLines.Select((line, index) => headings.Any(heading => heading.Index == section.Index + 1 + index
+                    && heading.Level > section.Level) ? line.TrimStart()[(section.Level - 1)..] : line).ToArray();
+            body = CleanScientificContent(string.Join('\n', articleLines));
+            return !string.IsNullOrWhiteSpace(body);
+        }
+        var first = headings.FirstOrDefault(item => item.Level == 1 && IsArticleTitle(item.Title));
+        if (first.Title is null) return false;
+        title = first.Title;
+        body = CleanScientificContent(string.Join('\n', lines.Skip(first.Index + 1)));
+        return !string.IsNullOrWhiteSpace(body);
     }
 
-    private static bool IsProgressAnnouncement(string paragraph)
-    {
-        string[] beginnings = ["Ich werde ", "Ich recherchiere ", "Ich untersuche ", "Ich erstelle ", "Ich analysiere ",
-            "Ich prüfe ", "Ich simuliere ", "Hier folgt ", "Hier ist die ", "Die Recherche läuft", "Die Recherche startet"];
-        if (!beginnings.Any(value => paragraph.StartsWith(value, StringComparison.OrdinalIgnoreCase))) return false;
-        // A mixed introductory paragraph containing a concrete result is retained.
-        string[] resultMarkers = ["ergibt", "beträgt", "Ergebnis:", "Ergebnis lautet", "Ergebnis ist", "berechnet", "belegt", "Befund", "$$", "\\["];
-        return !resultMarkers.Any(value => paragraph.Contains(value, StringComparison.OrdinalIgnoreCase));
-    }
+    private static bool IsArticleTitle(string title) => !string.IsNullOrWhiteSpace(title)
+        && !IsOperationalParagraph(title) && !Regex.IsMatch(title,
+            @"^(?:Deep Research|Publikation|Manuskript|Fortsetzung|Zwischenstand|Weitermachen|Erstelle|Untersuche|Analysiere)(?:\s|$|[–—:-])",
+            RegexOptions.IgnoreCase, TimeSpan.FromSeconds(1));
 
-    private static string QuestionSummary(ScientificResearchProject project, int maximumLength)
+    private static bool IsOperationalParagraph(string paragraph) => Regex.IsMatch(paragraph,
+        @"SearXNG|host\.docker\.internal|MISSUM_|web\.deepResearch|research\.code\.|SHA-?256|\b(?:HttpRequestException|TimeoutException|Traceback|Network is unreachable|too many requests|unresponsive_engines)\b|HTTP\s+(?:429|5\d\d)\b|\b(?:Schreibwerkzeug|Ausführungswerkzeug|Werkzeugaufruf|Toolaufruf|Nutzerprompt|Rechercheauftrag|Fortschrittsmeldung)\b|PDF-Darstellung wird|Missum erzeugt|(?:^|\n)\s*(?:\*\*)?(?:Nächster Schritt|Ich werde|Ich beginne|Ich fordere|Ich recherchiere|Ich erstelle|Ich führe|Hier folgt|Konkret werde ich)\b",
+        RegexOptions.IgnoreCase, TimeSpan.FromSeconds(1));
+
+    private static string CleanScientificContent(string content)
     {
-        var question = string.IsNullOrWhiteSpace(project.OriginalQuestion) ? project.InterpretedQuestion : project.OriginalQuestion;
-        question = question.Replace("[MISSUM_WEB_RESEARCH_REQUEST]", "", StringComparison.Ordinal)
-            .Replace("MISSUM_WEB_RESEARCH_REQUEST", "", StringComparison.Ordinal).Trim();
-        if (question.StartsWith("Rechercheauftrag:", StringComparison.OrdinalIgnoreCase)) question = question[17..].TrimStart();
-        var paragraphEnd = question.IndexOf("\n\n", StringComparison.Ordinal);
-        if (paragraphEnd >= 0) question = question[..paragraphEnd];
-        question = OneLine(question);
-        // The question introduces the draft; execution instructions remain in chat.
-        var sentenceEnd = -1;
-        for (var index = 0; index < question.Length; index++)
-            if (question[index] is '?' or '!' or '.' && (index + 1 == question.Length || char.IsWhiteSpace(question[index + 1])))
+        var kept = new List<string>();
+        var sourceGap = false;
+        var calculationGap = false;
+        foreach (var paragraph in ReadMarkdownBlocks(content))
+        {
+            if (IsOperationalParagraph(paragraph))
             {
-                sentenceEnd = index;
-                break;
+                sourceGap |= Regex.IsMatch(paragraph, @"nicht (?:abgerufen|gelesen|quellenbelegt)|keine Originalquelle|nicht erfolgreich|unvollständig",
+                    RegexOptions.IgnoreCase, TimeSpan.FromSeconds(1));
+                calculationGap |= Regex.IsMatch(paragraph, @"nicht ausgeführt|nicht ausführbar|kein.{0,30}research\.code\.execute",
+                    RegexOptions.IgnoreCase, TimeSpan.FromSeconds(1));
+                continue;
             }
-        if (sentenceEnd >= 20 && sentenceEnd < maximumLength) question = question[..(sentenceEnd + 1)];
-        if (question.Length <= maximumLength) return string.IsNullOrWhiteSpace(question) ? "Wissenschaftliche Untersuchung" : question;
-        var boundary = question.LastIndexOf(' ', maximumLength - 1, maximumLength);
-        if (boundary < maximumLength / 2) boundary = maximumLength - 1;
-        var shortened = question[..boundary].TrimEnd();
-        if (shortened.Count(character => character == '$') % 2 != 0) shortened = shortened[..shortened.LastIndexOf('$')].TrimEnd();
-        return shortened + " …";
+            kept.Add(paragraph);
+        }
+        if (sourceGap || calculationGap)
+        {
+            kept.Add("## Nachweisgrenzen");
+            if (sourceGap) kept.Add("Die unabhängige Quellenprüfung ist für die betroffenen Aussagen noch offen; diese gelten nicht als durch Originalbelege bestätigt.");
+            if (calculationGap) kept.Add("Eine unabhängige rechnerische Bestätigung der betroffenen Ergebnisse steht noch aus.");
+        }
+        return string.Join("\n\n", kept);
+    }
+
+    private static IEnumerable<string> ReadMarkdownBlocks(string content)
+    {
+        // Keep code fences intact when removing a diagnostic block. Splitting
+        // blindly at blank lines can leave half a fence and swallow later math.
+        var block = new List<string>();
+        char fence = '\0';
+        var fenceLength = 0;
+        foreach (var line in content.Replace("\r", "", StringComparison.Ordinal).Split('\n'))
+        {
+            var trimmed = line.Trim();
+            if (fence == '\0' && string.IsNullOrWhiteSpace(line))
+            {
+                if (block.Count > 0) { yield return string.Join('\n', block).Trim(); block.Clear(); }
+                continue;
+            }
+            if (trimmed.StartsWith("```", StringComparison.Ordinal) || trimmed.StartsWith("~~~", StringComparison.Ordinal))
+            {
+                if (fence == '\0')
+                {
+                    fence = trimmed[0];
+                    fenceLength = trimmed.TakeWhile(character => character == fence).Count();
+                }
+                else if (trimmed[0] == fence && trimmed.Length >= fenceLength && trimmed.All(character => character == fence)) fence = '\0';
+            }
+            block.Add(line);
+        }
+        if (block.Count > 0) yield return string.Join('\n', block).Trim();
     }
 
     private static bool IsDraft(ScientificResearchProject project, ResearchStoredReport? report, ChatMessage? manuscript = null) =>
@@ -391,7 +453,7 @@ public sealed class ScientificPublicationService : IDisposable
             PublicationUpdatedAt(snapshot.Project, snapshot.Manuscript), fingerprint);
 
     private static string Fingerprint(string text) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
-    private static string PublicationFingerprint(string text) => Fingerprint("scientific-publication-v6\n" + text);
+    private static string PublicationFingerprint(string text) => Fingerprint("scientific-publication-v7\n" + text);
     private static string OneLine(string text) => text.Replace('\r', ' ').Replace('\n', ' ').Trim();
     private static string EscapeLabel(string text) => OneLine(text).Replace("*", "\\*", StringComparison.Ordinal)
         .Replace("[", "\\[", StringComparison.Ordinal).Replace("]", "\\]", StringComparison.Ordinal);
@@ -420,13 +482,6 @@ public sealed class ScientificPublicationService : IDisposable
         while (lines.Count > 0 && (string.IsNullOrWhiteSpace(lines[0]) || lines[0].StartsWith("**Status:**", StringComparison.Ordinal))) lines.RemoveAt(0);
         // The report's own sections remain readable inside the results section.
         return string.Join('\n', lines.Select(line => line.StartsWith("## ", StringComparison.Ordinal) ? "#" + line : line));
-    }
-
-    private static void AppendCode(StringBuilder output, string text)
-    {
-        var fence = "~~~~";
-        while (text.Contains(fence, StringComparison.Ordinal)) fence += "~";
-        output.AppendLine(fence).AppendLine(text).AppendLine(fence).AppendLine();
     }
 
     private static async Task<bool> IsValidPdfAsync(string path, CancellationToken token)

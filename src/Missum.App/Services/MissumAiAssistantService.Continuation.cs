@@ -20,9 +20,7 @@ public sealed partial class MissumAiAssistantService
             throw new InvalidOperationException("Es läuft bereits ein AI-Auftrag; dieser Lauf wurde nicht nochmals gestartet.");
         ChatMessage? assistant = null;
         var started = false;
-        Interlocked.Exchange(ref _explicitCancellation, 0);
-        Volatile.Write(ref _activeSessionId, sessionId.ToString("D"));
-        _activeCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var runCompletion = BeginActiveRun(sessionId, null, cancellationToken);
         try
         {
             var token = _activeCancellation.Token;
@@ -210,15 +208,7 @@ public sealed partial class MissumAiAssistantService
         }
         finally
         {
-            await FinishFileChangesAsync().ConfigureAwait(false);
-            _activeServerRunId = null;
-            _pendingModelSelection = null;
-            _activeCodingWorkspace = null;
-            _activeRunAction = null;
-            Volatile.Write(ref _activeSessionId, null);
-            _activeCancellation?.Dispose();
-            _activeCancellation = null;
-            _gate.Release();
+            await FinishActiveRunAsync(runCompletion).ConfigureAwait(false);
         }
     }
 

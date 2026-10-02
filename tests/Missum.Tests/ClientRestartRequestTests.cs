@@ -4,7 +4,6 @@ using Missum.App.ViewModels;
 using Missum.Core.Contracts;
 using Missum.Core.Models;
 using Missum.Infrastructure;
-using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using System.Net;
@@ -58,7 +57,7 @@ public sealed class ClientRestartRequestTests
         // Close all client repositories/settings and reopen the actual same SQLite
         // profile. No copying or rewriting of its history is used for comparison.
         await environment.Services.DisposeAsync();
-        SqliteConnection.ClearAllPools();
+        TestSqlitePools.ClearDatabasePool(environment.DatabasePath);
         var registrations = new ServiceCollection();
         registrations.AddLogging();
         registrations.AddMissumInfrastructure(options => options.DataDirectory = environment.Directory);

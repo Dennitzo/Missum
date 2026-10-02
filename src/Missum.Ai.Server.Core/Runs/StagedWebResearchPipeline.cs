@@ -1009,7 +1009,15 @@ internal sealed class StagedWebResearchPipeline
 
     private static bool IsRecoverableModelFailure(Exception exception, CancellationToken cancellationToken) =>
         !cancellationToken.IsCancellationRequested
-        && exception is not (OutOfMemoryException or RunSteeringBoundaryException);
+        // An unavailable local model needs the durable run retry path. A
+        // deterministic argument fallback cannot repair its network connection.
+        && exception is not (OutOfMemoryException or RunSteeringBoundaryException)
+        && !IsModelTransportFailure(exception);
+
+    internal static bool IsModelTransportFailure(Exception exception) =>
+        exception is ModelProviderRequestException
+        || exception is ModelGenerationTerminatedException { ProviderCode: "transport_retry_exhausted", InnerException: { } inner }
+            && ModelRuntimeClient.IsRecoverableProviderTransportFailure(inner);
 
     private static string NormalizeTask(string task)
     {

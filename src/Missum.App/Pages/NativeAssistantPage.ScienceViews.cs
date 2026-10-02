@@ -51,13 +51,23 @@ public sealed partial class NativeAssistantPage
         var state = ResearchState(owner);
         var presentation = state.SelectedProjectId is { } id ? App.Current.GetService<ScientificPresentationCoordinator>().GetSnapshot(id) : null;
         var contentKey = _simulationView ? string.Join("|", presentation?.Simulation?.Artifacts.Select(item => item.ToString()) ?? [])
-            + presentation?.Simulation?.Status + presentation?.Simulation?.Detail : presentation?.Publication?.PdfPath;
-        var signature = $"{owner}|{_simulationView}|{state.SelectedProjectId}|{contentKey}|{state.Error}|{presentation?.PublicationError}|{presentation?.SimulationError}|{state.Loaded}";
+            : presentation?.Publication?.PdfPath;
+        var signature = _simulationView ? $"{owner}|simulation|{state.SelectedProjectId}|{contentKey}"
+            : $"{owner}|publication|{state.SelectedProjectId}|{contentKey}|{state.Error}|{presentation?.PublicationError}|{state.Loaded}";
         if (signature == _scienceViewSignature) return;
         _scienceViewSignature = signature;
         // Detach the previous visual tree before moving the cached PDF view.
         // Switching straight to Simulation must never briefly rebuild Publication.
         ResearchHost.Content = null;
+        if (_simulationView)
+        {
+            // The tab stays genuinely empty until a successful Python run has
+            // produced a figure; publication progress belongs in the chat.
+            var simulation = new Grid { Padding = new Thickness(24, 16, 24, 0) };
+            simulation.Children.Add(BuildSimulationView(presentation?.Simulation));
+            ResearchHost.Content = simulation;
+            return;
+        }
         var root = new Grid { Padding = new Thickness(24, 16, 24, 0), RowSpacing = 12 };
         root.RowDefinitions.Add(new() { Height = GridLength.Auto }); root.RowDefinitions.Add(new() { Height = GridLength.Auto });
         root.RowDefinitions.Add(new() { Height = new GridLength(1, GridUnitType.Star) });
@@ -111,10 +121,11 @@ public sealed partial class NativeAssistantPage
 
     private FrameworkElement BuildSimulationView(ScientificSimulationSnapshot? snapshot)
     {
-        if (snapshot is null || snapshot.Artifacts.Count == 0) return ScienceEmpty("Noch keine Python-Abbildung vorhanden.",
-            snapshot?.Detail ?? "Simulationen und Plots erscheinen hier, sobald Python die Daten der Forschung ausgewertet hat.");
+        var artifacts = snapshot?.Artifacts.Where(item => item.IsResearchData && File.Exists(item.ImagePath)
+            && item.Provenance.StartsWith("Forschungsexperiment · ", StringComparison.Ordinal)).ToArray() ?? [];
+        if (artifacts.Length == 0) return new Grid();
         var body = new StackPanel { Spacing = 20, MaxWidth = 1150, HorizontalAlignment = HorizontalAlignment.Stretch };
-        foreach (var artifact in snapshot.Artifacts)
+        foreach (var artifact in artifacts)
         {
             var card = new StackPanel { Spacing = 10 };
             card.Children.Add(ScienceText(artifact.Title, 18, true)); card.Children.Add(ScienceText(artifact.Provenance, 13));
@@ -129,7 +140,7 @@ public sealed partial class NativeAssistantPage
             if (!string.IsNullOrEmpty(artifact.DataPath)) card.Children.Add(ScienceSource("Daten", artifact.DataPath, "json", owner));
             body.Children.Add(new Border { Child = card, Padding = new Thickness(20), CornerRadius = new CornerRadius(12), Background = ThemeBrush("MissumLayerBrush", 31) });
         }
-        var scrollKey = _session + "|" + snapshot.ProjectId;
+        var scrollKey = _session + "|" + snapshot!.ProjectId;
         var scroll = new ScrollViewer { Content = body, Padding = new Thickness(0, 0, 12, 24), HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
         scroll.ViewChanged += (_, _) => _simulationScrollOffsets[scrollKey] = scroll.VerticalOffset;
         scroll.Loaded += (_, _) => { if (_simulationScrollOffsets.TryGetValue(scrollKey, out var offset)) scroll.ChangeView(null, offset, null, true); };
@@ -161,13 +172,19 @@ public sealed partial class NativeAssistantPage
 
     private async Task LoadPublicationAsync(NativePublicationView view, string path, Guid owner, string projectId)
     {
-        try { await view.LoadAsync(path); }
+        try { await view.LoadAsync(path, _lifetime.Token); }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested || _disposed) { }
         catch (Exception exception) when (exception is not OutOfMemoryException)
         {
             if (ResearchState(owner).SelectedProjectId == projectId
                 && App.Current.GetService<ScientificPresentationCoordinator>().GetSnapshot(projectId)?.Publication?.PdfPath == path)
                 ShowResearchError(owner, "Das PDF konnte nicht angezeigt werden: " + exception.Message);
         }
+    }
+    private void DisposeScienceViews()
+    {
+        foreach (var viewer in _publicationViews.Values) viewer.Dispose();
+        _publicationViews.Clear();
     }
     private async Task OpenScienceFileAsync(string path, Guid owner)
     {

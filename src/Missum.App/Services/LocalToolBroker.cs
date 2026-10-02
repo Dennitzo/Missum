@@ -23,7 +23,8 @@ public sealed class LocalToolBroker(
     IChatRepository chats,
     IExtensionActionCatalog? extensionActions = null,
     IExtensionRuntimeService? extensionRuntime = null,
-    Missum.Core.Research.IResearchSandboxService? researchSandbox = null)
+    Missum.Core.Research.IResearchSandboxService? researchSandbox = null,
+    ScientificPresentationCoordinator? sciencePresentation = null)
 {
     private const int MaximumResultCharacters = 4 * 1024 * 1024;
     private static readonly JsonSerializerOptions JsonOptions = MissumAiProtocol.CreateJsonOptions();
@@ -48,6 +49,19 @@ public sealed class LocalToolBroker(
                 && !registeredTool.ActionId.StartsWith("builtin.", StringComparison.Ordinal))
                 extensionTool = registeredTool;
             ValidateProposal(proposal, extensionTool: extensionTool);
+            if (proposal.Name == ClientToolNames.ResearchDeliverablesVerify)
+            {
+                var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false);
+                var projectId = "research-" + sessionId.ToString("N");
+                if (session?.ChatMode != ChatMode.ClaudeScience || sciencePresentation is null
+                    || !string.Equals(proposal.Arguments.GetProperty("projectId").GetString(), projectId, StringComparison.Ordinal))
+                    throw new UnauthorizedAccessException("Die Ergebnisprüfung gehört nicht zu dieser Claude-Science-Sitzung.");
+                sciencePresentation.Queue(projectId);
+                await sciencePresentation.WaitForIdleAsync(projectId, cancellationToken).ConfigureAwait(false);
+                var verified = await ScientificDeliverablesVerifier.VerifyAsync(projectId,
+                    sciencePresentation.GetSnapshot(projectId), cancellationToken).ConfigureAwait(false);
+                return Result(proposal, "completed", verified);
+            }
             if (extensionTool is not null)
             {
                 if (extensionRuntime is null)
@@ -368,7 +382,7 @@ public sealed class LocalToolBroker(
             ClientToolNames.MathSymbolic or ClientToolNames.MathNumeric or ClientToolNames.MathSmt
                 or ClientToolNames.MathFormalProof or ClientToolNames.ResearchCodeExecute
                 or ClientToolNames.ResearchCodeTest or ClientToolNames.ResearchCodeBenchmark => ToolRiskClass.Process,
-            WorkspaceTools.ImageInput => ToolRiskClass.ReadOnly,
+            WorkspaceTools.ImageInput or ClientToolNames.ResearchDeliverablesVerify => ToolRiskClass.ReadOnly,
             ClientToolNames.DocumentRead or ClientToolNames.DocumentsList
                 or ClientToolNames.DocumentsSearch or ClientToolNames.DocumentsReadPages => ToolRiskClass.ReadOnly,
             ClientToolNames.DocumentCreate => ToolRiskClass.LocalMutation,
@@ -402,6 +416,10 @@ public sealed class LocalToolBroker(
         }
         switch (proposal.Name)
         {
+            case ClientToolNames.ResearchDeliverablesVerify:
+                ValidateProperties(arguments, ["projectId"], ["projectId"]);
+                ValidateString(arguments, "projectId", 1, 128);
+                break;
             case "coding.readOutput":
                 ValidateProperties(arguments, ["evidenceId"], ["evidenceId", "stream", "offset", "maximumCharacters"]);
                 var evidenceId = ValidateString(arguments, "evidenceId", 35, 35);

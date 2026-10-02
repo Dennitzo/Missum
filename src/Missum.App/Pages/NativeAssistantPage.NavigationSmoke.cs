@@ -130,9 +130,29 @@ public sealed partial class NativeAssistantPage
             throw new InvalidOperationException("Updating a receipt lost the disclosure state.");
         if (ConversationScroll.Padding.Left != ConversationScroll.Padding.Right)
             throw new InvalidOperationException("Conversation margins are not symmetrical.");
+        var python = "import math\n# Fachliche Berechnung\nvalue = math.sqrt(4)\nprint(value)";
+        var scienceReceipt = new ToolStepView(true);
+        body.Children.Add(scienceReceipt);
+        scienceReceipt.Update(JsonSerializer.SerializeToElement(new { tool = "research.code.write", status = "completed",
+            inputJson = JsonSerializer.Serialize(new { projectId = "research-smoke", path = "calculation.py", content = python }),
+            outputJson = JsonSerializer.Serialize(new { success = true, file = "calculation.py" }) }));
+        scienceReceipt.Measure(new Windows.Foundation.Size(700, double.PositiveInfinity));
+        scienceReceipt.UpdateLayout();
+        var pythonBlock = Descendants(scienceReceipt).OfType<TextBlock>().SingleOrDefault(text =>
+            string.Concat(text.Inlines.OfType<Microsoft.UI.Xaml.Documents.Run>().Select(run => run.Text)) == python);
+        if (pythonBlock is null || pythonBlock.FontFamily.Source != "Cascadia Mono" || pythonBlock.Inlines.Count < 4
+            || Descendants(scienceReceipt).OfType<Missum.App.Controls.NativeToolResultView>().Count() != 2)
+            throw new InvalidOperationException("Python research input must use the shared native code card and syntax colors.");
+        await SaveMathPreviewAsync(scienceReceipt, "native-python-receipt-preview.png");
+        scienceReceipt.SetExpanded(false);
+        scienceReceipt.Measure(new Windows.Foundation.Size(700, double.PositiveInfinity));
+        if (scienceReceipt.DesiredSize.Height > 80)
+            throw new InvalidOperationException("A collapsed scientific code receipt is not compact.");
+        body.Children.Remove(scienceReceipt);
         await VerifyConversationSelectionSmokeAsync();
         await VerifyComposerFooterSmokeAsync();
         await VerifyMathRenderingSmokeAsync(body);
+        await VerifyThinkingIndicatorSmokeAsync(original);
         await VerifyToolIconColorsSmokeAsync();
         await VerifyContinuationSmokeAsync(original);
         await VerifySourcesSmokeAsync(original);
@@ -365,7 +385,12 @@ public sealed partial class NativeAssistantPage
                 ResearchHost.Content = pdf;
                 await pdf.LoadAsync(fixture);
                 if (pdf.PageCount == 0 || !pdf.HasRenderedPage) throw new InvalidOperationException("Native scientific PDF preview failed.");
+                if (pdf.PageVisualCount != pdf.PageCount || Descendants(pdf).OfType<Button>().Any())
+                    throw new InvalidOperationException("Native PDF must contain every page in one continuous view without page buttons.");
                 UpdateLayout(); await SaveMathPreviewAsync(pdf, "native-publication-preview.png");
+                await pdf.ScrollToEndAsync();
+                if (!pdf.IsLastPageRendered) throw new InvalidOperationException("Scrolling through the native PDF did not render its final page: " + pdf.ScrollDiagnostics);
+                await SaveMathPreviewAsync(pdf, "native-publication-last-page-preview.png");
                 // Exercise real loaded/unloaded PDF visuals, not only an offscreen measurement.
                 for (var iteration = 0; iteration < 12; iteration++)
                 {

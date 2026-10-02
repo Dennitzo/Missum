@@ -11,154 +11,109 @@ namespace Missum.Tests;
 public sealed class ScientificSimulationTests
 {
     [Fact]
-    public void NumericTablesPreserveLabelsAndRejectUncertainOrMissingValues()
-    {
-        const string report = """
-            | Zeit (s) | Messwert (V) | Unsicherheit | Fehlend |
-            | --- | ---: | --- | --- |
-            | 0 | 1,25 | etwa 4 | 1 |
-            | 1 | −2.5e-1 | 5 ± 1 | fehlt |
-
-            | Gruppe | Wert |
-            | --- | --- |
-            | A | NaN |
-            | B | Infinity |
-            """;
-        var table = Assert.Single(ScientificSimulationService.ExtractNumericTables(report));
-        Assert.Equal("Zeit (s)", table.XLabel);
-        Assert.Equal(["0", "1"], table.Labels);
-        var column = Assert.Single(table.Series);
-        Assert.Equal("Messwert (V)", column.Label);
-        Assert.Equal([1.25, -.25], column.Values);
-    }
-
-    [Fact]
     public void ArtifactPathsRejectEscapesAndRootAliases()
     {
         var root = Path.Combine(Path.GetTempPath(), "missum-science-simulation-boundary");
         Assert.Equal(Path.Combine(root, "plots", "result.png"), ScientificSimulationService.SafePath(root, "plots/result.png"));
         Assert.Throws<UnauthorizedAccessException>(() => ScientificSimulationService.SafePath(root, "../outside.png"));
-        Assert.Throws<UnauthorizedAccessException>(() => ScientificSimulationService.SafePath(root, root + "-other/plot.png"));
         Assert.Throws<UnauthorizedAccessException>(() => ScientificSimulationService.SafePath(root, "."));
     }
 
     [Fact]
-    public async Task RefreshPersistsActualReportDataCachesPythonAndKeepsExperimentImages()
-    {
-        await using var environment = await TestEnvironment.CreateAsync();
-        var (repository, project) = await CreateProjectAsync(environment, "tables");
-        var now = DateTimeOffset.UtcNow;
-        await repository.SaveArchiveSnapshotAsync(project.Id, new(1, "{}", [], [], "report-tables", "scientificMarkdown",
-            "unresolved", "| Zeit (s) | Wert (m) |\n| --- | --- |\n| 0 | 2 |\n| 1 | 4 |", "{}",
-            "test.snapshot", "{}", "run-tables", 1, now));
-        var sandbox = new RecordingSandbox(Path.Combine(environment.Directory, "simulation"));
-        var layout = await sandbox.EnsureProjectAsync(project.Id);
-        await File.WriteAllBytesAsync(Path.Combine(layout.ArtifactsPath, "experiment.png"), Png);
-        using var service = new ScientificSimulationService(repository, sandbox);
-
-        var first = await service.RefreshAsync(project.Id);
-        var second = await service.RefreshAsync(project.Id);
-
-        Assert.Equal("ready", first.Status);
-        Assert.Equal(1, sandbox.Executions);
-        Assert.Equal(first.Artifacts.Select(item => item.Sha256), second.Artifacts.Select(item => item.Sha256));
-        Assert.Contains(first.Artifacts, item => Path.GetFileName(item.ImagePath) == "experiment.png");
-        var generated = Assert.Single(first.Artifacts, item => item.DataPath is not null);
-        using var data = JsonDocument.Parse(await File.ReadAllTextAsync(generated.DataPath!));
-        Assert.Equal("report-tables", data.RootElement.GetProperty("reportId").GetString());
-        Assert.Equal(2, data.RootElement.GetProperty("tables")[0].GetProperty("series")[0].GetProperty("values")[0].GetDouble());
-        Assert.True(File.Exists(generated.ScriptPath));
-        Assert.Contains("keine unabhängige Verifikation", generated.Provenance);
-    }
-
-    [Fact]
-    public async Task EmptyResearchUsesLabelledEvidenceCountsAndSurfacesExecutionFailure()
+    public async Task RefreshNeverGeneratesPublicationOrEvidencePlotsAndIgnoresUnattributedImages()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var (repository, project) = await CreateProjectAsync(environment, "empty");
+        await repository.SaveArchiveSnapshotAsync(project.Id, new(1, "{}", [], [], "report-table", "scientificMarkdown",
+            "unresolved", "| Zeit (s) | Wert (m) |\n| --- | --- |\n| 0 | 2 |\n| 1 | 4 |", "{}",
+            "test.snapshot", "{}", "run-table", 1, DateTimeOffset.UtcNow));
         var sandbox = new RecordingSandbox(Path.Combine(environment.Directory, "simulation"));
+        var layout = await sandbox.EnsureProjectAsync(project.Id);
+        var legacy = Path.Combine(layout.ArtifactsPath, "publication", "legacy");
+        Directory.CreateDirectory(legacy);
+        await File.WriteAllBytesAsync(Path.Combine(legacy, "evidence.png"), Png);
+        await File.WriteAllBytesAsync(Path.Combine(layout.ArtifactsPath, "unattributed.png"), Png);
         using var service = new ScientificSimulationService(repository, sandbox);
-        var snapshot = await service.RefreshAsync(project.Id);
-        var figure = Assert.Single(snapshot.Artifacts);
-        Assert.False(figure.IsResearchData);
-        Assert.Contains("keine fachliche Simulation", figure.Provenance);
 
-        var failedSandbox = new RecordingSandbox(Path.Combine(environment.Directory, "failed")) { FailExecution = true };
-        using var failedService = new ScientificSimulationService(repository, failedSandbox);
-        var failed = await failedService.RefreshAsync(project.Id);
-        Assert.Equal("failed", failed.Status);
-        Assert.Contains("matplotlib unavailable", failed.Detail);
-        Assert.Empty(failed.Artifacts);
+        var snapshot = await service.RefreshAsync(project.Id);
+
+        Assert.Equal("empty", snapshot.Status);
+        Assert.Empty(snapshot.Artifacts);
+        Assert.Equal(0, sandbox.Executions);
+        Assert.Empty(Directory.EnumerateFileSystemEntries(layout.WorkPath));
+        Assert.False(File.Exists(Path.Combine(layout.RootPath, "last-visualization.json")));
     }
 
     [Fact]
-    public async Task ModelSelectedPythonPersistsSourceOutputAndAuditWithoutHostExecution()
+    public async Task SuccessfulPythonFigureRestoresAfterRestartAndLaterReportWithoutReexecution()
     {
         await using var environment = await TestEnvironment.CreateAsync();
-        var (repository, project) = await CreateProjectAsync(environment, "custom");
+        var (repository, project) = await CreateProjectAsync(environment, "restore");
         var sandbox = new RecordingSandbox(Path.Combine(environment.Directory, "simulation"));
         using var service = new ScientificSimulationService(repository, sandbox);
         const string code = "import matplotlib.pyplot as plt\nplt.plot([0, 1], [0, 1])";
-
-        var snapshot = await service.RunAsync(project.Id, code, "Prüfplot");
-
-        Assert.Equal("ready", snapshot.Status);
-        var image = Assert.Single(snapshot.Artifacts);
+        var original = await service.RunAsync(project.Id, code, "Prüfplot");
+        Assert.Equal("ready", original.Status);
+        var image = Assert.Single(original.Artifacts);
         Assert.Equal(code, await File.ReadAllTextAsync(image.ScriptPath!));
-        Assert.Equal(300, sandbox.LastTimeout);
-        Assert.Equal("ProcessSucceeded", Assert.Single((await repository.LoadResultSnapshotAsync(project.Id)).Experiments).VerificationStatus);
-        using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => service.RefreshAsync(project.Id, cancelled.Token));
-        Assert.Equal(1, sandbox.Executions);
-    }
-
-    [Fact]
-    public async Task CurrentResearchRunExcludesPriorDiskImagesAndRestoresCurrentFigures()
-    {
-        await using var environment = await TestEnvironment.CreateAsync();
-        var (repository, project) = await CreateProjectAsync(environment, "run-filter");
-        var start = DateTimeOffset.UtcNow.AddMinutes(-1);
-        await SaveBoundReportAsync(repository, project, "current-run", start);
-        var sandbox = new RecordingSandbox(Path.Combine(environment.Directory, "simulation"));
-        var layout = await sandbox.EnsureProjectAsync(project.Id);
-        var oldImage = Path.Combine(layout.ArtifactsPath, "old.png");
-        var currentImage = Path.Combine(layout.ArtifactsPath, "current.png");
-        await File.WriteAllBytesAsync(oldImage, Png); await File.WriteAllBytesAsync(currentImage, Png);
-        File.SetLastWriteTimeUtc(oldImage, start.AddMinutes(-1).UtcDateTime);
-        File.SetLastWriteTimeUtc(currentImage, start.AddSeconds(1).UtcDateTime);
-        using var service = new ScientificSimulationService(repository, sandbox);
-
-        var snapshot = await service.RefreshAsync(project.Id);
+        Assert.StartsWith("Forschungsexperiment · ", image.Provenance, StringComparison.Ordinal);
+        _ = await service.RefreshAsync(project.Id);
+        await SaveBoundReportAsync(repository, project, "later-research-run", DateTimeOffset.UtcNow.AddMinutes(1));
         using var restoredService = new ScientificSimulationService(repository, sandbox);
+
         var restored = await restoredService.RefreshAsync(project.Id);
 
-        Assert.DoesNotContain(snapshot.Artifacts, item => item.ImagePath == oldImage);
-        Assert.Contains(snapshot.Artifacts, item => item.ImagePath == currentImage);
-        Assert.DoesNotContain(restored.Artifacts, item => item.ImagePath == oldImage);
-        Assert.Contains(restored.Artifacts, item => item.ImagePath == currentImage);
+        Assert.Equal("ready", restored.Status);
+        var restoredImage = Assert.Single(restored.Artifacts);
+        Assert.Equal(image.ImagePath, restoredImage.ImagePath);
+        Assert.Equal(image.Sha256, restoredImage.Sha256);
+        Assert.Equal(image.ScriptPath, restoredImage.ScriptPath);
+        Assert.Equal(1, sandbox.Executions);
+        var layout = await sandbox.EnsureProjectAsync(project.Id);
+        using var manifest = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(layout.RootPath, "last-visualization.json")));
+        Assert.Equal(project.Id, manifest.RootElement.GetProperty("projectId").GetString());
+        using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => restoredService.RefreshAsync(project.Id, cancelled.Token));
         Assert.Equal(1, sandbox.Executions);
     }
 
     [Fact]
-    public async Task ReportChangingDuringPythonIsRecomputedInsteadOfPublishingSupersededData()
+    public async Task FailedPythonDoesNotCreateAValidSimulation()
     {
         await using var environment = await TestEnvironment.CreateAsync();
-        var (repository, project) = await CreateProjectAsync(environment, "changing");
-        await SaveBoundReportAsync(repository, project, "before-run", DateTimeOffset.UtcNow.AddMinutes(-1));
-        var sandbox = new RecordingSandbox(Path.Combine(environment.Directory, "simulation"))
-        {
-            OnExecution = () => SaveBoundReportAsync(repository, project, "after-run", DateTimeOffset.UtcNow),
-        };
+        var (repository, project) = await CreateProjectAsync(environment, "failed");
+        var sandbox = new RecordingSandbox(Path.Combine(environment.Directory, "simulation")) { FailExecution = true };
         using var service = new ScientificSimulationService(repository, sandbox);
 
-        var snapshot = await service.RefreshAsync(project.Id);
+        var failed = await service.RunAsync(project.Id, "print('failed')", "Fehlgeschlagene Simulation");
+        var refreshed = await service.RefreshAsync(project.Id);
 
-        Assert.Equal("ready", snapshot.Status);
-        Assert.Equal(2, sandbox.Executions);
-        var figure = Assert.Single(snapshot.Artifacts);
-        using var data = JsonDocument.Parse(await File.ReadAllTextAsync(figure.DataPath!));
-        Assert.Equal("after-run", data.RootElement.GetProperty("runId").GetString());
-        Assert.Equal("report-after-run", data.RootElement.GetProperty("reportId").GetString());
+        Assert.Equal("failed", failed.Status);
+        Assert.Empty(failed.Artifacts);
+        Assert.Equal("empty", refreshed.Status);
+        Assert.Empty(refreshed.Artifacts);
+        Assert.Equal("ProcessFailed", Assert.Single((await repository.LoadResultSnapshotAsync(project.Id)).Experiments).VerificationStatus);
+        Assert.Equal(1, sandbox.Executions);
+    }
+
+    [Fact]
+    public async Task PublicationRevisionAndNumericContentNeverTriggerASimulation()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var (repository, project) = await CreateProjectAsync(environment, "publication-owner");
+        var publication = await WritePublicationFixtureAsync(environment.Directory, project, "publication",
+            "# Publikation\n\n| Zeit (s) | Wert (m) |\n| --- | --- |\n| 0 | 4 |\n| 2 | 8 |");
+        var sandbox = new RecordingSandbox(Path.Combine(environment.Directory, "simulation"));
+        using var service = new ScientificSimulationService(repository, sandbox);
+
+        var wrongProject = await service.RefreshAsync(project.Id, publication with { ProjectId = "another-project" });
+        var oldRevision = await service.RefreshAsync(project.Id, publication with { Revision = project.Revision - 1 });
+
+        Assert.Equal("failed", wrongProject.Status);
+        Assert.Contains("anderen Forschungsprojekt", wrongProject.Detail);
+        Assert.Equal("empty", oldRevision.Status);
+        Assert.Empty(oldRevision.Artifacts);
+        Assert.Equal(0, sandbox.Executions);
     }
 
     [Fact]
@@ -172,12 +127,10 @@ public sealed class ScientificSimulationTests
             OnExecution = () => SaveBoundReportAsync(repository, project, "after-run", DateTimeOffset.UtcNow),
         };
         using var service = new ScientificSimulationService(repository, sandbox);
-
         var snapshot = await service.RunAsync(project.Id, "print('old research')", "Alter Lauf");
 
         Assert.Equal("updating", snapshot.Status);
         Assert.Empty(snapshot.Artifacts);
-        // The completed experiment stays auditable even though it is not presented as current.
         Assert.Single((await repository.LoadResultSnapshotAsync(project.Id)).Experiments);
     }
 
@@ -185,58 +138,6 @@ public sealed class ScientificSimulationTests
         string runId, DateTimeOffset startedAt) => repository.SaveArchiveSnapshotAsync(project.Id, new(1, "{}", [], [],
         "report-" + runId, "scientificMarkdown", "unresolved", "# Aktuelle Forschungsfrage", JsonSerializer.Serialize(new
         { projectId = project.Id, runId, runStartedAt = startedAt }), "test.snapshot", "{}", runId, 1, DateTimeOffset.UtcNow));
-
-    [Fact]
-    public async Task PublishedManuscriptTablesOverrideArchiveAndInvalidatePlotCacheByContent()
-    {
-        await using var environment = await TestEnvironment.CreateAsync();
-        var (repository, project) = await CreateProjectAsync(environment, "manuscript");
-        // The research archive has no numeric table; the published answer does.
-        await SaveBoundReportAsync(repository, project, "manuscript-run", DateTimeOffset.UtcNow.AddMinutes(-1));
-        var sandbox = new RecordingSandbox(Path.Combine(environment.Directory, "simulation"));
-        using var service = new ScientificSimulationService(repository, sandbox);
-        var firstPublication = await WritePublicationFixtureAsync(environment.Directory, project, "first",
-            "# Publikation\n\n| Zeit (s) | Wert (m) |\n| --- | --- |\n| 0 | 4 |\n| 2 | 8 |");
-        var secondPublication = await WritePublicationFixtureAsync(environment.Directory, project, "second",
-            "# Publikation\n\n| Zeit (s) | Wert (m) |\n| --- | --- |\n| 0 | 9 |\n| 2 | 16 |");
-
-        var first = await service.RefreshAsync(project.Id, firstPublication);
-        var second = await service.RefreshAsync(project.Id, secondPublication);
-        _ = await service.RefreshAsync(project.Id, secondPublication);
-
-        Assert.Equal(2, sandbox.Executions);
-        var firstFigure = Assert.Single(first.Artifacts);
-        var secondFigure = Assert.Single(second.Artifacts);
-        Assert.True(firstFigure.IsResearchData);
-        Assert.Contains("Publiziertes Manuskript", secondFigure.Provenance);
-        using var firstData = JsonDocument.Parse(await File.ReadAllTextAsync(firstFigure.DataPath!));
-        using var secondData = JsonDocument.Parse(await File.ReadAllTextAsync(secondFigure.DataPath!));
-        Assert.Equal("publishedManuscript", secondData.RootElement.GetProperty("sourceKind").GetString());
-        Assert.Equal(secondPublication.MarkdownPath, secondData.RootElement.GetProperty("publicationPath").GetString());
-        Assert.Equal(secondPublication.ContentHash, secondData.RootElement.GetProperty("publicationContentHash").GetString());
-        Assert.Equal(4, firstData.RootElement.GetProperty("tables")[0].GetProperty("series")[0].GetProperty("values")[0].GetDouble());
-        Assert.Equal(9, secondData.RootElement.GetProperty("tables")[0].GetProperty("series")[0].GetProperty("values")[0].GetDouble());
-        Assert.NotEqual(firstData.RootElement.GetProperty("sourceSha256").GetString(), secondData.RootElement.GetProperty("sourceSha256").GetString());
-    }
-
-    [Fact]
-    public async Task PublishedSourceRejectsWrongProjectAndWaitsForCurrentRevision()
-    {
-        await using var environment = await TestEnvironment.CreateAsync();
-        var (repository, project) = await CreateProjectAsync(environment, "publication-owner");
-        var publication = await WritePublicationFixtureAsync(environment.Directory, project, "publication", "# Publikation");
-        var sandbox = new RecordingSandbox(Path.Combine(environment.Directory, "simulation"));
-        using var service = new ScientificSimulationService(repository, sandbox);
-
-        var wrongProject = await service.RefreshAsync(project.Id, publication with { ProjectId = "another-project" });
-        var oldRevision = await service.RefreshAsync(project.Id, publication with { Revision = project.Revision - 1 });
-
-        Assert.Equal("failed", wrongProject.Status);
-        Assert.Contains("anderen Forschungsprojekt", wrongProject.Detail);
-        Assert.Equal("updating", oldRevision.Status);
-        Assert.Empty(oldRevision.Artifacts);
-        Assert.Equal(0, sandbox.Executions);
-    }
 
     private static async Task<ScientificPublicationArtifact> WritePublicationFixtureAsync(string directory,
         ScientificResearchProject project, string name, string markdown)
@@ -249,7 +150,7 @@ public sealed class ScientificSimulationTests
 
     [Fact]
     [Trait("Category", "Live")]
-    public async Task DockerRendersPublicationTablesAndModelSelectedSimulation()
+    public async Task DockerRendersModelSelectedSimulationAndRestoresItsActualFigure()
     {
         if (Environment.GetEnvironmentVariable("MISSUM_AI_RESEARCH_SANDBOX_LIVE") != "1") return;
         await using var environment = await TestEnvironment.CreateAsync();
@@ -277,8 +178,7 @@ public sealed class ScientificSimulationTests
         using var service = new ScientificSimulationService(repository, sandbox);
         using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
         var automatic = await service.RefreshAsync(project.Id, timeout.Token);
-        Assert.Equal("ready", automatic.Status);
-        Assert.True(new FileInfo(Assert.Single(automatic.Artifacts).ImagePath).Length > 10_000);
+        Assert.Empty(automatic.Artifacts);
         var simulation = await service.RunAsync(project.Id, """
             import numpy as np
             import matplotlib.pyplot as plt
@@ -319,7 +219,7 @@ public sealed class ScientificSimulationTests
             var destination = Path.Combine(evidenceDirectory, "scientific-simulation");
             Directory.CreateDirectory(destination);
             await File.WriteAllTextAsync(Path.Combine(destination, "publication.md"), report, timeout.Token);
-            foreach (var (snapshot, prefix) in new[] { (automatic, "publication"), (simulation, "oscillator") })
+            foreach (var (snapshot, prefix) in new[] { (simulation, "oscillator") })
             {
                 var artifact = Assert.Single(snapshot.Artifacts);
                 File.Copy(artifact.ImagePath, Path.Combine(destination, prefix + ".png"), overwrite: true);

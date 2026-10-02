@@ -77,7 +77,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         _draftTimer.Tick += async (_, _) => { try { await FlushDraftAsync(); } catch (Exception ex) { ShowError(ex.Message); } };
         _renderTimer = DispatcherQueue.CreateTimer();
         _renderTimer.Interval = TimeSpan.FromMilliseconds(80);
-        _renderTimer.Tick += (_, _) => { UpdateVoiceVisual(); UpdateRunDurations(); if (_messagesDirty) { _messagesDirty = false; RenderMessagesNow(); } };
+        _renderTimer.Tick += (_, _) => { UpdateVoiceVisual(); UpdateRunDurations(); if (_messagesDirty) { _messagesDirty = false; RenderMessagesNow(); } RefreshThinkingIndicators(); };
         _renderTimer.Start();
         SizeChanged += (_, _) => UpdateResponsiveLayout();
     }
@@ -253,6 +253,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                 _messages.Clear();
                 foreach (var message in Items(data, "messages")) _messages[S(message, "id")] = message;
                 ReconcilePendingMessages();
+                ObserveThinkingProgress(data);
                 UpdateCaptionChip();
                 RenderSidebar();
                 SyncSessionTabs();
@@ -273,6 +274,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         var eventSession = S(data, "sessionId", S(data, "activeSessionId"));
         if (eventSession.Length > 0 && !string.Equals(eventSession, _session.ToString(), StringComparison.OrdinalIgnoreCase)) return;
         UpdateContext(data);
+        ObserveThinkingProgress(data);
         if (type == "reasoning.snapshot" && S(data, "role") + ":" + S(data, "modelId") == _reasoningModel) { _reasoning = data.Deserialize<ComposerReasoningOptions>(JsonOptions); ReasoningLabel.Text = EffortLabel(_reasoning?.Selected); }
         if (type == "conversation.snapshot")
         {
@@ -310,6 +312,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         if (type is "chat.completed" or "chat.cancelled" or "chat.failed")
         {
             _finishedSessions.Add(_session); _running = false; SetRunning(); ChatStatus = "";
+            ClearConversationThinkingState(); RefreshThinkingIndicators();
             _ = RefreshForExternalActivationAsync();
             if (type == "chat.failed") ShowError(S(data, "error", "Die Anfrage ist fehlgeschlagen."));
         }
@@ -317,7 +320,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         {
             var status = S(data, "runStatus");
             var terminal = status is "Fertig" or "Abgebrochen" or "Fehlgeschlagen";
-            if (terminal) { _finishedSessions.Add(_session); _running = false; SetRunning(); }
+            if (terminal) { _finishedSessions.Add(_session); _running = false; SetRunning(); ClearConversationThinkingState(); RefreshThinkingIndicators(); }
             ChatStatus = status.StartsWith("Modell generiert", StringComparison.Ordinal) ? "" : terminal ? "" : status + "  " + S(data, "runDetail");
             var id = S(data, "messageId");
             if (data.TryGetProperty("toolStep", out var step) && step.ValueKind == JsonValueKind.Object && _messages.TryGetValue(id, out var current))
@@ -376,6 +379,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         MessagesPanel.Children.Clear();
         _messageViews.Clear();
         _messageBlocks.Clear();
+        _thinkingIndicators.Clear();
         _messageActionViews.Clear();
     }
 
@@ -386,7 +390,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         var follow = _conversationSelection?.HasSelection != true && ConversationScroll.ScrollableHeight - ConversationScroll.VerticalOffset < 90;
         var index = 0;
         foreach (var stale in _messageViews.Keys.Where(id => !_messages.ContainsKey(id)).ToArray())
-        { MessagesPanel.Children.Remove(_messageViews[stale].View); _messageViews.Remove(stale); _messageBlocks.Remove(stale); _messageActionViews.Remove(stale); }
+        { MessagesPanel.Children.Remove(_messageViews[stale].View); _messageViews.Remove(stale); _messageBlocks.Remove(stale); _messageActionViews.Remove(stale); _thinkingIndicators.Remove(stale); _thinkingStates.Remove(stale); }
         WelcomePanel.Visibility = _messages.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         foreach (var message in _messages.Values.OrderBy(MessageCreatedAt))
         {
@@ -959,6 +963,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         if (_captionSubscribed) App.Current.GetService<SystemAudioCaptionService>().Changed -= OnNativeCaptionChanged;
         _ = StopNativeDictationAsync();
         DisposeMessageActions();
+        DisposeScienceViews();
         _researchRefreshTimer?.Stop();
         _ = CancelNativeMediaCaptureAsync();
         _conversationSelection?.Clear();

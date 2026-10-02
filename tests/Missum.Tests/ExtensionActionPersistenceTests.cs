@@ -218,7 +218,7 @@ public sealed class ExtensionActionPersistenceTests
                 runId = run.Id;
             }
 
-            SqliteConnection.ClearAllPools();
+            TestSqlitePools.ClearDatabasePool(Path.Combine(directory, options.DatabaseFileName));
             await using (var legacy = await OpenAsync(Path.Combine(directory, options.DatabaseFileName)))
             await using (var command = legacy.CreateCommand())
             {
@@ -266,7 +266,8 @@ public sealed class ExtensionActionPersistenceTests
         }
         finally
         {
-            SqliteConnection.ClearAllPools();
+            TestSqlitePools.ClearDatabasePool(Path.Combine(directory, options.DatabaseFileName));
+            TestSqlitePools.ClearDatabaseBackups(Path.Combine(directory, options.DatabaseFileName));
             if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
         }
     }
@@ -298,7 +299,7 @@ public sealed class ExtensionActionPersistenceTests
                 runId = run.Id;
             }
 
-            SqliteConnection.ClearAllPools();
+            TestSqlitePools.ClearDatabasePool(Path.Combine(directory, options.DatabaseFileName));
             await using (var legacy = await OpenAsync(Path.Combine(directory, options.DatabaseFileName)))
             await using (var command = legacy.CreateCommand())
             {
@@ -353,7 +354,8 @@ public sealed class ExtensionActionPersistenceTests
         }
         finally
         {
-            SqliteConnection.ClearAllPools();
+            TestSqlitePools.ClearDatabasePool(Path.Combine(directory, options.DatabaseFileName));
+            TestSqlitePools.ClearDatabaseBackups(Path.Combine(directory, options.DatabaseFileName));
             if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
         }
     }

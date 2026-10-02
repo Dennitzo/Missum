@@ -2033,6 +2033,109 @@ public sealed class AssistantIntegrationTests
     }
 
     [Fact]
+    public async Task ScienceSnapshotRepairsTheStoredCutTitleAndGeneratedIntroductionWithoutChangingTheResearch()
+    {
+        const string legacy = "Erstelle eine wissenschaftliche Publikation: Einsteinsche Feldgl";
+        const string topic = "Einsteinsche Feldgleichungen, Allgemeine Relativitätstheorie und Quantenmechanik";
+        const string prompt = "Erstelle eine wissenschaftliche Publikation:\nEinsteinsche Feldgleichungen, Allgemeine Relativitätstheorie und Quantenmechanik kombinieren und eine allgemeine Gleichung finden. Stelle mehrere verschiedene Hypothesen auf.";
+        await using var environment = await TestEnvironment.CreateAsync();
+        var chats = environment.Get<IChatRepository>();
+        var session = await chats.CreateSessionAsync(legacy, ChatMode.ClaudeScience);
+        var user = await chats.AddMessageAsync(session.Id, ChatRole.User, prompt, MessageStatus.Completed);
+        var answer = await chats.AddMessageAsync(session.Id, ChatRole.Assistant, "Die vollständige Herleitung bleibt erhalten.", MessageStatus.Cancelled);
+        await chats.SaveToolStepAsync(answer.Id, new("science-introduction:" + answer.Id.ToString("N"),
+            "assistant.narration", "completed", "**" + legacy + "**\n\nDie Quellenprüfung bleibt offen.", ContentOffset: 0));
+        await chats.SaveDraftAsync(session.Id, "Entwurf erhalten");
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        await settings.UpdateAsync(current => current with { ActiveSessionId = session.Id,
+            ActiveClaudeScienceSessionId = session.Id, SelectedChatMode = ChatMode.ClaudeScience });
+        var coordinator = CreateCoordinator(environment, settings, CreateRecentActivity(settings));
+
+        var snapshot = JsonSerializer.SerializeToElement(await coordinator.BuildSnapshotAsync(), JsonSerializerOptions.Web);
+
+        Assert.Equal(topic, Assert.Single(snapshot.GetProperty("sessions").EnumerateArray()).GetProperty("title").GetString());
+        var repaired = (await chats.GetSessionAsync(session.Id))!;
+        Assert.Equal(topic, repaired.Title);
+        Assert.Equal("Entwurf erhalten", repaired.Draft);
+        Assert.Equal(prompt, (await chats.GetMessageAsync(user.Id))!.Content);
+        var preserved = (await chats.GetMessageAsync(answer.Id))!;
+        Assert.Equal("Die vollständige Herleitung bleibt erhalten.", preserved.Content);
+        Assert.Equal(MessageStatus.Cancelled, preserved.Status);
+        Assert.Equal("**" + topic + "**\n\nDie Quellenprüfung bleibt offen.", Assert.Single(preserved.ToolSteps!).Detail);
+        await coordinator.BuildSnapshotAsync();
+        var reopened = CreateCoordinator(environment, settings, CreateRecentActivity(settings));
+        await reopened.BuildSnapshotAsync();
+        Assert.Equal(repaired.ConversationRevision, (await chats.GetSessionAsync(session.Id))!.ConversationRevision);
+    }
+
+    [Theory]
+    [InlineData(ChatMode.ClaudeScience, "Mein selbst gewählter Forschungstitel")]
+    [InlineData(ChatMode.General, "Erstelle eine wissenschaftliche Publikation: Einsteinsche Feldgl")]
+    [InlineData(ChatMode.Coding, "Erstelle eine wissenschaftliche Publikation: Einsteinsche Feldgl")]
+    public async Task ScienceTitleRepairPreservesCustomTitlesAndOtherModes(ChatMode mode, string title)
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var chats = environment.Get<IChatRepository>();
+        var session = await chats.CreateSessionAsync(title, mode);
+        await chats.AddMessageAsync(session.Id, ChatRole.User,
+            "Erstelle eine wissenschaftliche Publikation:\nEinsteinsche Feldgleichungen, Allgemeine Relativitätstheorie und Quantenmechanik kombinieren und eine allgemeine Gleichung finden.", MessageStatus.Completed);
+        await chats.AddMessageAsync(session.Id, ChatRole.Assistant, "# Ein anderer AI-Titel darf nicht die Sitzung benennen", MessageStatus.Completed);
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        await settings.UpdateAsync(current => current with { ActiveSessionId = session.Id,
+            ActiveClaudeScienceSessionId = mode == ChatMode.ClaudeScience ? session.Id : current.ActiveClaudeScienceSessionId,
+            ActiveGeneralSessionId = mode == ChatMode.General ? session.Id : current.ActiveGeneralSessionId,
+            ActiveCodingSessionId = mode == ChatMode.Coding ? session.Id : current.ActiveCodingSessionId,
+            SelectedChatMode = mode });
+        var coordinator = CreateCoordinator(environment, settings, CreateRecentActivity(settings));
+
+        await coordinator.BuildSnapshotAsync();
+
+        Assert.Equal(title, (await chats.GetSessionAsync(session.Id))!.Title);
+    }
+
+    [Fact]
+    public async Task NewSciencePromptStoresTheCompleteSubjectBeforeConnectingToTheModel()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var chats = environment.Get<IChatRepository>();
+        var session = await chats.CreateSessionAsync("Neue Sitzung", ChatMode.ClaudeScience);
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        var coordinator = CreateCoordinator(environment, settings, CreateRecentActivity(settings));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => HandleAsync(coordinator, "chat.send", new
+        {
+            sessionId = session.Id,
+            prompt = "Erstelle eine wissenschaftliche Publikation:\nEinsteinsche Feldgleichungen, Allgemeine Relativitätstheorie und Quantenmechanik kombinieren und eine allgemeine Gleichung finden.",
+        }));
+
+        Assert.Equal("Einsteinsche Feldgleichungen, Allgemeine Relativitätstheorie und Quantenmechanik",
+            (await chats.GetSessionAsync(session.Id))!.Title);
+    }
+
+    [Fact]
+    public async Task ScienceFollowupDoesNotReplaceTheOriginalResearchTitle()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var chats = environment.Get<IChatRepository>();
+        const string title = "Quantenfelder in gekrümmter Raumzeit";
+        var session = await chats.CreateSessionAsync(title, ChatMode.ClaudeScience);
+        await chats.AddMessageAsync(session.Id, ChatRole.User, "Erstelle eine wissenschaftliche Publikation: " + title, MessageStatus.Completed);
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        var coordinator = CreateCoordinator(environment, settings, CreateRecentActivity(settings));
+
+        // No model service in this fixture: naming is committed before the
+        // unavailable transport, so the real prompt handler is still exercised.
+        await Assert.ThrowsAsync<InvalidOperationException>(() => HandleAsync(coordinator, "chat.send",
+            new { sessionId = session.Id, prompt = "Ergänze jetzt die mathematischen Grenzfälle ausführlich." }));
+
+        Assert.Equal(title, (await chats.GetSessionAsync(session.Id))!.Title);
+    }
+
+    [Fact]
     public async Task SessionActionsUseTheNewDefaultTitleAndUpdateRecentActivity()
     {
         await using var environment = await TestEnvironment.CreateAsync();

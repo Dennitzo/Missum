@@ -527,11 +527,15 @@ public sealed class CodingRunBudgetTests
     }
 
     [Theory]
-    [InlineData(RunMode.Coding, 0)]
-    [InlineData(RunMode.General, null)]
-    [InlineData(RunMode.General, 0)]
-    [InlineData(RunMode.General, 3600)]
-    public async Task TemporaryNativeFailureWaitsDurablyAndResumesWithoutRepeatingConsumedClientTool(RunMode mode, int? legacyTimeoutSeconds)
+    [InlineData(RunMode.Coding, 0, false)]
+    [InlineData(RunMode.General, null, false)]
+    [InlineData(RunMode.General, 0, false)]
+    [InlineData(RunMode.General, 3600, false)]
+    [InlineData(RunMode.Coding, 0, true)]
+    [InlineData(RunMode.General, null, true)]
+    [InlineData(RunMode.General, 0, true)]
+    [InlineData(RunMode.General, 3600, true)]
+    public async Task TemporaryNativeFailureWaitsDurablyAndResumesWithoutRepeatingConsumedClientTool(RunMode mode, int? legacyTimeoutSeconds, bool partialStream)
     {
         using var harness = new Harness(readCalls: 1);
         var runId = await harness.CreateRunAsync(legacyTimeoutSeconds, mode, science: mode == RunMode.General);
@@ -539,15 +543,19 @@ public sealed class CodingRunBudgetTests
         await Assert.ThrowsAsync<RunWaitingForClientException>(() => harness.Processor.ProcessAsync(runId, CancellationToken.None));
         var pending = (await harness.Repository.GetCheckpointAsync(runId))!;
         await harness.Repository.SaveClientToolResultAsync(runId, new ClientToolResult(pending.PendingProposalId!, "completed", JsonSerializer.SerializeToElement(new { content = "already executed" })));
-        harness.Handler.FailTokenCounting = true;
-        var failure = await Assert.ThrowsAsync<ModelProviderRequestException>(() => harness.Processor.ProcessAsync(runId, CancellationToken.None));
+        harness.Handler.FailTokenCounting = !partialStream;
+        harness.Handler.FailGenerationAfterContent = partialStream;
+        var failure = await Record.ExceptionAsync(() => harness.Processor.ProcessAsync(runId, CancellationToken.None));
+        if (partialStream) Assert.Equal("transport_retry_exhausted", Assert.IsType<ModelGenerationTerminatedException>(failure).ProviderCode);
+        else Assert.IsType<ModelProviderRequestException>(failure);
 
-        Assert.True(await harness.Processor.TryScheduleProviderRetryAsync(runId, failure));
+        Assert.True(await harness.Processor.TryScheduleProviderRetryAsync(runId, failure!));
         var retryAt = (await harness.Repository.GetProviderRetryTimeAsync(runId))!.Value;
         Assert.Equal(RunState.Queued, (await harness.Repository.GetAsync(runId))!.State);
         var saved = (await harness.Repository.GetCheckpointAsync(runId))!;
         Assert.Null(saved.PendingProposalId);
         Assert.Single(saved.Messages, message => message.Role == "tool" && message.Content!.Contains("already executed", StringComparison.Ordinal));
+        Assert.Single(saved.Messages.SelectMany(static message => message.ToolCalls ?? []), call => call.Id == pending.PendingToolCallId);
         Assert.Contains(runId, await harness.Repository.RecoverAsync());
         var requests = harness.Handler.Requests;
         await harness.Processor.ProcessAsync(runId, CancellationToken.None);
@@ -556,6 +564,7 @@ public sealed class CodingRunBudgetTests
         Assert.Equal(1, await harness.Deadlines.QueueExpiredAsync(retryAt.AddSeconds(1)));
         Assert.Equal(0, await harness.Deadlines.QueueExpiredAsync(retryAt.AddSeconds(1)));
         harness.Handler.FailTokenCounting = false;
+        harness.Handler.FailGenerationAfterContent = false;
 
         await harness.Processor.ProcessAsync(runId, CancellationToken.None);
 
@@ -596,17 +605,23 @@ public sealed class CodingRunBudgetTests
     }
 
     [Theory]
-    [InlineData(RunMode.Coding, true)]
-    [InlineData(RunMode.Coding, false)]
-    [InlineData(RunMode.General, true)]
-    [InlineData(RunMode.General, false)]
-    public async Task PersistedCancellationWinsOnEitherSideOfRetryScheduling(RunMode mode, bool retryFirst)
+    [InlineData(RunMode.Coding, true, false)]
+    [InlineData(RunMode.Coding, false, false)]
+    [InlineData(RunMode.General, true, false)]
+    [InlineData(RunMode.General, false, false)]
+    [InlineData(RunMode.Coding, true, true)]
+    [InlineData(RunMode.Coding, false, true)]
+    [InlineData(RunMode.General, true, true)]
+    [InlineData(RunMode.General, false, true)]
+    public async Task PersistedCancellationWinsOnEitherSideOfRetryScheduling(RunMode mode, bool retryFirst, bool partialStream)
     {
         using var harness = new Harness(readCalls: 0);
         var runId = await harness.CreateRunAsync(3600, mode, science: mode == RunMode.General);
         await harness.Repository.UpdateStateAsync(runId, RunState.Running);
-        var failure = new ModelProviderRequestException("generation", 3,
-            new HttpRequestException("temporary outage", null, HttpStatusCode.ServiceUnavailable));
+        var cause = new HttpRequestException("temporary outage", null, HttpStatusCode.ServiceUnavailable);
+        Exception failure = partialStream
+            ? new ModelGenerationTerminatedException("transport_retry_exhausted", cause)
+            : new ModelProviderRequestException("generation", 3, cause);
         if (retryFirst) Assert.True(await harness.Processor.TryScheduleProviderRetryAsync(runId, failure));
         Assert.True(await harness.Repository.CancelAsync(runId));
         Assert.False(await harness.Repository.CancelAsync(runId));
@@ -632,6 +647,26 @@ public sealed class CodingRunBudgetTests
             new ModelProviderRequestException("generation", 3, new HttpRequestException("native error", null, status))));
         Assert.False(await harness.Processor.TryScheduleProviderRetryAsync(runId, new JsonException("invalid tool JSON")));
         Assert.Null(await harness.Repository.GetProviderRetryTimeAsync(runId));
+    }
+
+    [Theory]
+    [InlineData("transport_retry_exhausted", HttpStatusCode.BadRequest)]
+    [InlineData("transport_retry_exhausted", HttpStatusCode.Unauthorized)]
+    [InlineData("model_stall_timeout", HttpStatusCode.ServiceUnavailable)]
+    [InlineData("vision_output_limit", HttpStatusCode.ServiceUnavailable)]
+    public async Task DurableRetryDoesNotRetryOtherTerminationReasonsOrPermanentTransportErrors(string code, HttpStatusCode status)
+    {
+        using var harness = new Harness(readCalls: 0);
+        var runId = await harness.CreateRunAsync(0, RunMode.General, science: true);
+
+        Assert.False(await harness.Processor.TryScheduleProviderRetryAsync(runId,
+            new ModelGenerationTerminatedException(code, new HttpRequestException("native error", null, status))));
+        Assert.False(await harness.Processor.TryScheduleProviderRetryAsync(runId,
+            new ModelGenerationTerminatedException("transport_retry_exhausted")));
+        Assert.False(await harness.Processor.TryScheduleProviderRetryAsync(runId,
+            new ModelGenerationTerminatedException("transport_retry_exhausted", new InvalidDataException("invalid tool payload"))));
+        Assert.Null(await harness.Repository.GetProviderRetryTimeAsync(runId));
+        Assert.Empty(await harness.Repository.GetEventsAfterAsync(runId, 0));
     }
 
     [Theory]
@@ -690,6 +725,26 @@ public sealed class CodingRunBudgetTests
             Assert.Single(await harness.Repository.GetEventsAfterAsync(runId, 0), item => item.Type == RunEventTypes.RunCompleted);
         }
         else Assert.Equal(0, harness.Handler.Requests);
+    }
+
+    [Fact]
+    public async Task CompletedMalformedNativeToolJsonDoesNotScheduleAnUnlimitedRetry()
+    {
+        using var harness = new Harness(readCalls: 0);
+        harness.Handler.MalformedGeneration = true;
+        var runId = await harness.CreateRunAsync(0, RunMode.General, science: true);
+
+        var failure = await Assert.ThrowsAsync<ModelGenerationTerminatedException>(() =>
+            harness.Processor.ProcessAsync(runId, CancellationToken.None));
+
+        Assert.Equal("transport_retry_exhausted", failure.ProviderCode);
+        Assert.Equal(3, harness.Handler.ChatCalls);
+        Assert.False(await harness.Processor.TryScheduleProviderRetryAsync(runId, failure));
+        Assert.Null(await harness.Repository.GetProviderRetryTimeAsync(runId));
+        var events = await harness.Repository.GetEventsAfterAsync(runId, 0);
+        Assert.DoesNotContain(events, item => item.Type == RunEventTypes.ClientToolProposed);
+        Assert.DoesNotContain(events, item => item.Type == RunEventTypes.ModelGeneration
+            && item.Data.GetProperty("state").GetString() == "providerRetryWaiting");
     }
 
     private sealed class Harness : IDisposable
@@ -810,6 +865,8 @@ public sealed class CodingRunBudgetTests
         public int ChatCalls { get; private set; }
         public int Requests { get; private set; }
         public bool FailTokenCounting { get; set; }
+        public bool FailGenerationAfterContent { get; set; }
+        public bool MalformedGeneration { get; set; }
         public HttpStatusCode TokenCountingFailureStatus { get; set; } = HttpStatusCode.InternalServerError;
         public bool WaitForCancellation { get; set; }
         public TaskCompletionSource GenerationStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -840,6 +897,31 @@ public sealed class CodingRunBudgetTests
             LastMessages = body.RootElement.GetProperty("messages").EnumerateArray().Select(item => item.Clone()).ToArray();
             LastTurnHadNoTools = !body.RootElement.TryGetProperty("tools", out var tools) || tools.GetArrayLength() == 0;
             ChatCalls++;
+            if (MalformedGeneration)
+            {
+                var selectedToolName = tools[0].GetProperty("function").GetProperty("name").GetString();
+                var invalid = JsonSerializer.Serialize(new { choices = new[] { new
+                {
+                    index = 0, delta = new { tool_calls = new[] { new { index = 0, id = "broken", type = "function",
+                        function = new { name = selectedToolName, arguments = "{\"path\":" } } } },
+                    finish_reason = "tool_calls",
+                } } });
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("data: " + invalid + "\n\ndata: [DONE]\n\n", Encoding.UTF8, "text/event-stream"),
+                };
+            }
+            if (FailGenerationAfterContent)
+            {
+                var incomplete = JsonSerializer.Serialize(new { choices = new[] { new
+                {
+                    index = 0, delta = new { content = "Der nächste Teil wird vorbereitet." }, finish_reason = (string?)null,
+                } } });
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("data: " + incomplete + "\n\n", Encoding.UTF8, "text/event-stream"),
+                };
+            }
             object delta;
             string finish;
             if (LastMessages.Any(message => message.GetProperty("role").GetString() == "system"

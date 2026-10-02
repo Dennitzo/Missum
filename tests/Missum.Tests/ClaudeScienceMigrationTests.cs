@@ -21,12 +21,17 @@ public sealed class ClaudeScienceMigrationTests
         Directory.CreateDirectory(migrationDirectory);
         var databaseFileName = Path.GetFileName(sourceDatabase.DatabasePath);
         var migrationDatabasePath = Path.Combine(migrationDirectory, databaseFileName);
+        environment.TrackDatabase(migrationDatabasePath);
         File.Copy(preMigrationBackup, migrationDatabasePath);
 
         var alphaId = Guid.NewGuid();
         var betaId = Guid.NewGuid();
         var gammaId = Guid.NewGuid();
-        await using (var legacy = new SqliteConnection($"Data Source={migrationDatabasePath}"))
+        await using (var legacy = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = migrationDatabasePath,
+            Pooling = false,
+        }.ToString()))
         {
             await legacy.OpenAsync();
             await using var command = legacy.CreateCommand();
@@ -45,7 +50,6 @@ public sealed class ClaudeScienceMigrationTests
             command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O"));
             await command.ExecuteNonQueryAsync();
         }
-        SqliteConnection.ClearAllPools();
 
         await using var migrated = new SqliteDatabase(
             new MissumInfrastructureOptions
@@ -62,7 +66,11 @@ public sealed class ClaudeScienceMigrationTests
         Assert.Equal(betaId, betaResult.Id);
         Assert.Equal(gammaId, gammaResult.Id);
 
-        await using var verification = new SqliteConnection($"Data Source={migrationDatabasePath}");
+        await using var verification = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = migrationDatabasePath,
+            Pooling = false,
+        }.ToString());
         await verification.OpenAsync();
         await using var verify = verification.CreateCommand();
         verify.CommandText = "SELECT rowid FROM chat_sessions WHERE id=$id;";

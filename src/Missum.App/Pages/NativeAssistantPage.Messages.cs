@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Missum.App.Controls;
@@ -24,6 +25,7 @@ public sealed partial class NativeAssistantPage
             if (blocks.TryGetValue("header", out var header) && _messages.TryGetValue(id, out var message))
                 UpdateMessageHeader(header, message);
         RefreshContextDisplay();
+        RefreshThinkingIndicators(refreshTokens: true);
         RefreshChatNotices();
         RefreshContinuationSteps();
     }
@@ -39,6 +41,7 @@ public sealed partial class NativeAssistantPage
         var text = active
             ? $"Modell generiert {_contextUsed:N0} Token · In Bearbeitung seit {duration}"
             : start.ToLocalTime().ToString("dd.MM.yyyy · HH:mm 'Uhr'", CultureInfo.CurrentCulture) + " · " + duration + " lang gearbeitet";
+        if (active && (header.Tag is not double displayedTokens || displayedTokens != _contextUsed)) header.Tag = _contextUsed;
         if (active && !string.IsNullOrWhiteSpace(ChatStatus)) text = ChatStatus + " · " + text;
         var label = (TextBlock)((StackPanel)header).Children[0];
         if (label.Text != text) label.Text = text;
@@ -50,6 +53,7 @@ public sealed partial class NativeAssistantPage
         var desired = new List<FrameworkElement>();
         var content = S(message, "content");
         var assistant = S(message, "role") == "assistant";
+        var visibleAnswer = new StringBuilder(content.TrimEnd());
         if (assistant)
         {
             if (!blocks.TryGetValue("header", out var header))
@@ -87,6 +91,7 @@ public sealed partial class NativeAssistantPage
         var offset = 0;
         var sequence = 0;
         var toolNumber = 0;
+        var hasBlockingTool = false;
         void Text(string key, string value)
         {
             if (string.IsNullOrEmpty(value)) return;
@@ -100,6 +105,9 @@ public sealed partial class NativeAssistantPage
             Text("text:" + offset, content[offset..next]); offset = next;
             var id = S(step, "id", "step:" + sequence++);
             var tool = S(step, "tool");
+            if (S(step, "status") is "running" or "pending" && S(step, "agentId").Length == 0
+                && tool is not ("assistant.reasoning" or "assistant.progress" or "assistant.narration" or "assistant.steering"))
+                hasBlockingTool = true;
             var detail = S(step, "detail", S(step, "explanation"));
             if (tool == "assistant.steering")
             {
@@ -112,7 +120,12 @@ public sealed partial class NativeAssistantPage
                 desired.Add(steeringView);
                 continue;
             }
-            if (tool == "assistant.narration") { Text("narration:" + id, detail); continue; }
+            if (tool == "assistant.narration")
+            {
+                Text("narration:" + id, detail);
+                if (!string.IsNullOrWhiteSpace(detail)) visibleAnswer.Append('\0').Append(id).Append('\0').Append(detail.TrimEnd());
+                continue;
+            }
             // The preparation receipt stores an idempotent request before the
             // server accepts it. Only an accepted continuation is a visible step.
             if (tool == "assistant.continuation" && S(step, "status") != "completed") continue;
@@ -122,6 +135,8 @@ public sealed partial class NativeAssistantPage
             desired.Add(element);
         }
         Text("text:" + offset, content[offset..]);
+        if (assistant && _thinkingStates.TryGetValue(messageId, out var thinkingState))
+            thinkingState.ObserveContent(messageId, visibleAnswer.ToString(), DateTimeOffset.UtcNow);
         if (S(message, "error") is { Length: > 0 } error && error != content) Text("error", error);
         var artifacts = Items(message, "artifacts");
         if (artifacts.Length > 0)
@@ -146,10 +161,18 @@ public sealed partial class NativeAssistantPage
         // cursor host even when the answer is still empty after navigation.
         if (streaming)
         {
+            if (!blocks.TryGetValue("thinkingIndicator", out var thinking))
+                blocks["thinkingIndicator"] = thinking = new ThinkingIndicatorView();
+            var indicator = (ThinkingIndicatorView)thinking;
+            indicator.IsMessageActive = true;
+            indicator.HasBlockingTool = hasBlockingTool || liveStatus.Length > 0;
+            _thinkingIndicators[messageId] = indicator;
+            desired.Add(indicator);
             if (!blocks.TryGetValue("streamCursor", out var cursor))
                 blocks["streamCursor"] = cursor = new NativeStreamingMarkdown("");
             desired.Add(cursor);
         }
+        else { _thinkingIndicators.Remove(messageId); _thinkingStates.Remove(messageId); }
         var tail = streaming ? desired.LastOrDefault() : null;
         foreach (var markdown in blocks.Values.OfType<NativeStreamingMarkdown>())
             markdown.SetStreaming(streaming && ReferenceEquals(markdown, tail));
@@ -161,6 +184,7 @@ public sealed partial class NativeAssistantPage
             panel.Children.Remove(desired[i]); panel.Children.Insert(i, desired[i]);
         }
         foreach (var stale in blocks.Where(pair => !desired.Contains(pair.Value)).Select(pair => pair.Key).ToArray()) blocks.Remove(stale);
+        RefreshThinkingIndicators();
     }
 
     private sealed class ToolStepView : Grid
@@ -234,6 +258,7 @@ public sealed partial class NativeAssistantPage
                 "coding.gitDiff" => "Änderungen geprüft", "coding.updatePlan" => "Arbeitsplan aktualisiert", "assistant.reasoning" => "Denkprozess",
                 "research.code.write" => "Python-Datei vorbereiten", "research.code.execute" => "Python-Analyse ausführen",
                 "research.code.test" => "Berechnung prüfen", "research.code.benchmark" => "Berechnung vergleichen",
+                "research.deliverables.verify" => "Forschungsergebnisse prüfen",
                 "math.formalProof" => "Lean-Beweis prüfen", "assistant.progress" => "Fortschritt", "assistant.continuation" => "Lauf fortgesetzt", "web.search" => "Websuche", "web.fetch" => "Webseite lesen", _ => S(step, "label", tool) };
             _running = S(step, "status") is "running" or "pending";
             var iconKey = ToolStepIconKey(tool);
@@ -250,7 +275,7 @@ public sealed partial class NativeAssistantPage
                 diff = storedDiff.ValueKind == JsonValueKind.String ? storedDiff.GetString() ?? "" : S(storedDiff, "stdout");
             var hasDiff = diff.Length > 0;
             _filePath = Regex.Match(detail, @"(?m)^Datei:\s*(.+)$", RegexOptions.CultureInvariant).Groups[1].Value.Trim();
-            if (_filePath.Length == 0) _filePath = S(output, "path");
+            if (_filePath.Length == 0) _filePath = S(output, "path", S(output, "file"));
             if (_filePath.Length == 0) _filePath = S(ReadMetadata(S(step, "inputJson")), "path");
             if (_filePath.Length == 0 && hasDiff) _filePath = DiffPath(diff);
             _hasCounts = false;
@@ -308,7 +333,8 @@ public sealed partial class NativeAssistantPage
                 explanation = S(_step, "tool") == "coding.read" ? $"Ich lese „{_filePath}“." : _fileMutation ? $"Dateiänderungen für „{_filePath}“." : "";
             if (explanation.Length > 0) _details.Children.Add(new NativeStreamingMarkdown(explanation));
             if (input.ValueKind == JsonValueKind.Object)
-                _details.Children.Add(new NativeToolResultView(input, _filePath, true, _fileMutation, S(_step, "tool") == "math.formalProof" ? "lean" : null));
+                _details.Children.Add(new NativeToolResultView(input, _filePath, true, _diff.Length > 0,
+                    S(_step, "tool") switch { "math.formalProof" => "lean", "research.code.write" => "python", _ => null }));
             if (_diff.Length > 0)
             {
                 var caption = S(_step, "tool") == "coding.gitDiff" ? "Git-Diff" : S(_step, "status") == "completed" ? "Angewendete Änderung" : "Vorbereitete Änderung";
@@ -323,7 +349,7 @@ public sealed partial class NativeAssistantPage
 
         internal static string ToolSummary(string tool, JsonElement input, JsonElement output)
         {
-            var path = S(output, "path", S(input, "path"));
+            var path = S(output, "path", S(output, "file", S(input, "path")));
             var target = path.Length > 0 ? path.Replace('\\', '/') : S(input, "query", S(input, "url"));
             if (tool is "coding.command" or "research.code.execute" or "research.code.test" or "research.code.benchmark") target = S(input, "executable") + " " + (input.ValueKind == JsonValueKind.Object && input.TryGetProperty("arguments", out var args) && args.ValueKind == JsonValueKind.Array ? string.Join(" ", args.EnumerateArray().Select(x => x.ToString())) : "");
             var facts = new List<string>();

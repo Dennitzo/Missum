@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -14,9 +13,8 @@ public sealed record ScientificSimulationSnapshot(string ProjectId, long Revisio
     string Detail, IReadOnlyList<ScientificSimulationArtifact> Artifacts, DateTimeOffset UpdatedAt);
 
 /// <summary>
-/// Creates reproducible figures from persisted research data and discovers images made by the
-/// scientific code tools. Automatic figures describe reported tables or the actual evidence base;
-/// they never invent physical measurements or execute code extracted from a publication.
+/// Runs explicitly requested Python simulations and restores actual figures made by the
+/// scientific code tools. Refreshing this view never generates charts from publication metadata.
 /// </summary>
 public sealed partial class ScientificSimulationService(
     IScientificResearchRepository repository, IResearchSandboxService sandbox) : IDisposable
@@ -33,14 +31,7 @@ public sealed partial class ScientificSimulationService(
     public async Task<ScientificSimulationSnapshot> RefreshAsync(string projectId, ScientificPublicationArtifact? publication,
         CancellationToken cancellationToken = default)
     {
-        // A report can advance while Python runs. Retry with fresh input, never publish figures
-        // associated with a superseded question/run as the currently selected research.
-        for (var attempt = 0; attempt < 2; attempt++)
-        {
-            var result = await RefreshCurrentAsync(projectId, publication, cancellationToken).ConfigureAwait(false);
-            if (result.Status != "updating") return result;
-        }
-        return new(projectId, 0, "updating", "Die Forschungsdaten werden gerade ergänzt. Die aktuelle Darstellung wird neu berechnet.", [], DateTimeOffset.UtcNow);
+        return await RefreshCurrentAsync(projectId, publication, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<ScientificSimulationSnapshot> RefreshCurrentAsync(string projectId, ScientificPublicationArtifact? publication,
@@ -50,86 +41,40 @@ public sealed partial class ScientificSimulationService(
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         var artifacts = new List<ScientificSimulationArtifact>();
         long revision = 0;
-        string? inputFingerprint = null;
         try
         {
             var project = await repository.GetProjectAsync(projectId, cancellationToken).ConfigureAwait(false)
                 ?? throw new InvalidOperationException("Das Forschungsprojekt wurde nicht gefunden.");
             revision = project.Revision;
-            var archive = await repository.LoadArchiveSnapshotAsync(projectId, cancellationToken).ConfigureAwait(false);
-            var initialFingerprint = ResearchFingerprint(project, archive);
-            inputFingerprint = initialFingerprint;
             if (publication is not null && publication.ProjectId != project.Id)
                 throw new InvalidDataException("Die Publikation gehört zu einem anderen Forschungsprojekt.");
-            if (publication is not null && publication.Revision != project.Revision) return Superseded(projectId);
-            var scope = RunScope(project, archive.Report);
             var result = await repository.LoadResultSnapshotAsync(projectId, cancellationToken).ConfigureAwait(false);
             var layout = await sandbox.EnsureProjectAsync(projectId, cancellationToken).ConfigureAwait(false);
-            artifacts = await DiscoverExperimentImagesAsync(project, layout, result.Experiments, scope.StartedAt, cancellationToken).ConfigureAwait(false);
-            var publicationMarkdown = publication is null ? null : await ReadPublicationMarkdownAsync(publication, cancellationToken).ConfigureAwait(false);
-            var plotSource = publicationMarkdown ?? archive.Report?.ContentMarkdown ?? "";
-            var sourceHash = Hash(Encoding.UTF8.GetBytes(plotSource));
-            var tables = ExtractNumericTables(plotSource);
-            var dataset = new
+            // Refresh only discovers real Python output. It never derives a chart
+            // from a publication, counts evidence, writes a script or starts Python.
+            artifacts = await DiscoverExperimentImagesAsync(project, layout, result.Experiments, notBefore: null, cancellationToken).ConfigureAwait(false);
+            var restored = new List<ScientificSimulationArtifact>();
+            await RestoreLastVisualizationAsync(project, layout, restored, cancellationToken).ConfigureAwait(false);
+            artifacts = artifacts.Concat(restored).DistinctBy(item => item.ImagePath, StringComparer.OrdinalIgnoreCase)
+                .OrderByDescending(item => File.GetLastWriteTimeUtc(item.ImagePath)).Take(MaximumImages).ToList();
+            var snapshot = Snapshot(project, artifacts, artifacts.Count > 0 ? "ready" : "empty", "");
+            if (artifacts.Count > 0)
             {
-                schemaVersion = 1,
-                projectId,
-                runId = scope.RunId,
-                runStartedAt = scope.StartedAt,
-                question = project.InterpretedQuestion,
-                reportId = archive.Report?.Id,
-                reportSha256 = Hash(Encoding.UTF8.GetBytes(archive.Report?.ContentMarkdown ?? "")),
-                sourceKind = publication is null ? "researchArchive" : "publishedManuscript",
-                publicationPath = publication?.MarkdownPath,
-                publicationContentHash = publication?.ContentHash,
-                sourceSha256 = sourceHash,
-                tables,
-                // These are counts of saved research records, not estimated scientific results.
-                sourceCount = archive.Works.Count,
-                evidenceCount = archive.Evidence.Count,
-                sources = archive.Works.Select(work => new { work.WorkId, work.Title, work.CanonicalUrl }),
-                evidence = archive.Evidence.Select(item => new { item.Id, item.WorkId, item.ContentHash }),
-                sourceEvidenceCounts = archive.Works.Select(work => new { label = work.Title,
-                    value = archive.Evidence.Count(item => item.WorkId == work.WorkId) }).Take(24).ToArray(),
-            };
-            var json = JsonSerializer.Serialize(dataset, JsonOptions);
-            var key = Hash(Encoding.UTF8.GetBytes(PublicationPlotScript + "\n" + json))[..24];
-            var relative = "simulations/publication-" + key;
-            var outputRelative = "publication/" + key;
-            var output = SafePath(layout.ArtifactsPath, outputRelative);
-            var manifest = SafePath(output, "manifest.json");
-            if (!File.Exists(manifest))
-            {
-                await sandbox.WriteTextAsync(projectId, relative + "/data.json", json, cancellationToken: cancellationToken).ConfigureAwait(false);
-                await sandbox.WriteTextAsync(projectId, relative + "/render.py", PublicationPlotScript,
-                    cancellationToken: cancellationToken).ConfigureAwait(false);
-                var execution = await sandbox.RunPythonAsync(projectId, relative + "/render.py",
-                    ["/sandbox/work/" + relative + "/data.json", "/sandbox/artifacts/" + outputRelative],
-                    timeoutSeconds: 120, cancellationToken: cancellationToken).ConfigureAwait(false);
-                if (execution.ExitCode != 0 || execution.TimedOut)
-                    return await FinishAsync("failed", ExecutionError(execution)).ConfigureAwait(false);
+                var manifest = SafePath(layout.RootPath, "last-visualization.json");
+                var temporary = manifest + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                try
+                {
+                    await File.WriteAllTextAsync(temporary, JsonSerializer.Serialize(snapshot, JsonOptions), cancellationToken).ConfigureAwait(false);
+                    File.Move(temporary, manifest, overwrite: true);
+                }
+                finally { if (File.Exists(temporary)) File.Delete(temporary); }
             }
-            var provenance = publication is null ? "Publikation " + archive.Report?.Id + " · Tabelle aus dem gespeicherten Bericht"
-                : "Publiziertes Manuskript · Revision " + publication.Revision + " · SHA-256 " + sourceHash[..12];
-            var generated = await ReadPlotManifestAsync(layout, manifest, relative, provenance, cancellationToken).ConfigureAwait(false);
-            if (generated.Count == 0)
-                return await FinishAsync("failed", "Die Python-Ausgabe enthält keine gültige Abbildung; die Quelldaten bleiben gespeichert.").ConfigureAwait(false);
-            artifacts.AddRange(generated);
-            return await FinishAsync("ready", tables.Count > 0
-                ? "Python-Abbildungen aus den gespeicherten Publikationsdaten. Skript und Quelldaten bleiben nachvollziehbar."
-                : "Evidenzübersicht aus gespeicherten Quellen. Fachliche Simulationen erscheinen hier, sobald die Forschung sie erzeugt.").ConfigureAwait(false);
-
-            async Task<ScientificSimulationSnapshot> FinishAsync(string status, string detail) =>
-                await IsCurrentResearchAsync(projectId, initialFingerprint, cancellationToken).ConfigureAwait(false)
-                    && (publication is null || publicationMarkdown == await ReadPublicationMarkdownAsync(publication, cancellationToken).ConfigureAwait(false))
-                    ? Snapshot(project, artifacts, status, detail) : Superseded(projectId);
+            return snapshot;
         }
         catch (Exception exception) when (exception is IOException or InvalidDataException or InvalidOperationException or UnauthorizedAccessException
                                          or System.ComponentModel.Win32Exception or JsonException)
         {
-            if (inputFingerprint is not null && !await IsCurrentResearchAsync(projectId, inputFingerprint, cancellationToken).ConfigureAwait(false))
-                return Superseded(projectId);
-            return new(projectId, revision, "failed", "Python-Darstellung konnte nicht aktualisiert werden: " + exception.Message,
+            return new(projectId, revision, "failed", "Python-Darstellung konnte nicht geladen werden: " + exception.Message,
                 artifacts, DateTimeOffset.UtcNow);
         }
         finally { _gate.Release(); }
@@ -174,6 +119,10 @@ public sealed partial class ScientificSimulationService(
                 : status == "no-output" ? "Python wurde ausgeführt, hat aber keine darstellbare PNG- oder JPEG-Abbildung erzeugt."
                 : ExecutionError(run);
             await WriteExperimentAsync(project, title, relative, sourceChange.AfterSha256, run, images, layout, cancellationToken).ConfigureAwait(false);
+            images = images.Select(image => image with
+            {
+                Provenance = "Forschungsexperiment · simulation-" + run.RunId + " · ProcessSucceeded",
+            }).ToList();
             return await IsCurrentResearchAsync(projectId, inputFingerprint, cancellationToken).ConfigureAwait(false)
                 ? Snapshot(project, images, status, detail) : Superseded(projectId);
         }
@@ -197,9 +146,8 @@ public sealed partial class ScientificSimulationService(
         DateTimeOffset? notBefore, CancellationToken token)
     {
         var images = new List<ScientificSimulationArtifact>();
-        foreach (var experiment in experiments.OrderByDescending(item => item.UpdatedAt))
+        foreach (var experiment in experiments.Where(IsSuccessfulPythonExperiment).OrderByDescending(item => item.UpdatedAt))
         {
-            if (experiment.VerificationStatus is "ProcessFailed" or "failed" or "cancelled") continue;
             foreach (var root in CandidateRoots(project, layout))
             {
                 var scripts = JsonPaths(experiment.SourceFilesJson).Select(path => ResolveCandidate(root, path))
@@ -233,12 +181,17 @@ public sealed partial class ScientificSimulationService(
             var modified = File.GetLastWriteTimeUtc(image.ImagePath);
             var experiment = experiments.Where(item => ExperimentContainsTimestamp(item, modified))
                 .OrderByDescending(item => item.UpdatedAt).FirstOrDefault();
-            if (experiment is not null && ScriptFromExperiment(experiment, layout) is { } script)
+            if (experiment is not null && IsSuccessfulPythonExperiment(experiment) && ScriptFromExperiment(experiment, layout) is { } script)
                 images[index] = image with { ScriptPath = script,
                     Provenance = "Forschungsexperiment · " + experiment.Id + " · " + experiment.VerificationStatus };
         }
-        return images;
+        return images.Where(image => image.ScriptPath is not null
+            && image.Provenance.StartsWith("Forschungsexperiment · ", StringComparison.Ordinal)).ToList();
     }
+
+    private static bool IsSuccessfulPythonExperiment(ResearchExperiment experiment) =>
+        experiment.VerificationStatus == "ProcessSucceeded" && (experiment.Id.StartsWith("simulation-", StringComparison.Ordinal)
+            || experiment.CommandText.StartsWith("research.code.execute ", StringComparison.Ordinal));
 
     private static bool ExperimentContainsTimestamp(ResearchExperiment experiment, DateTime modified)
     {
@@ -337,6 +290,9 @@ public sealed partial class ScientificSimulationService(
     {
         if (images.Count >= MaximumImages || images.Any(item => item.ImagePath.Equals(path, StringComparison.OrdinalIgnoreCase))) return;
         path = SafePath(root, Path.GetRelativePath(root, path));
+        // Former automatic publication/evidence previews are not Python simulations.
+        if (Path.GetRelativePath(root, path).Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries)
+            .Any(part => part.Equals("publication", StringComparison.OrdinalIgnoreCase))) return;
         var file = new FileInfo(path);
         if (!file.Exists || file.Length is <= 0 or > MaximumImageBytes) return;
         if (notBefore is { } beginning && file.LastWriteTimeUtc < beginning.UtcDateTime) return;
@@ -353,102 +309,32 @@ public sealed partial class ScientificSimulationService(
         images.Add(new(hash[..24], title, path, scriptPath, dataPath, provenance, researchData, hash));
     }
 
-    private static async Task<IReadOnlyList<ScientificSimulationArtifact>> ReadPlotManifestAsync(ResearchSandboxLayout layout,
-        string manifest, string relativeWork, string tableProvenance, CancellationToken token)
+    private static async Task RestoreLastVisualizationAsync(ScientificResearchProject project, ResearchSandboxLayout layout,
+        List<ScientificSimulationArtifact> images, CancellationToken token)
     {
-        if (!File.Exists(manifest)) throw new IOException("Python hat kein Abbildungsverzeichnis geschrieben.");
-        _ = SafePath(layout.ArtifactsPath, Path.GetRelativePath(layout.ArtifactsPath, manifest));
-        if (new FileInfo(manifest).Length > 256_000) throw new InvalidDataException("Das Abbildungsverzeichnis ist zu groß.");
-        using var doc = JsonDocument.Parse(await File.ReadAllTextAsync(manifest, token).ConfigureAwait(false));
-        var artifacts = new List<ScientificSimulationArtifact>();
-        foreach (var item in doc.RootElement.EnumerateArray().Take(12))
+        var manifest = SafePath(layout.RootPath, "last-visualization.json");
+        if (!File.Exists(manifest) || new FileInfo(manifest).Length > 256_000) return;
+        ScientificSimulationSnapshot? saved;
+        try { saved = JsonSerializer.Deserialize<ScientificSimulationSnapshot>(await File.ReadAllTextAsync(manifest, token).ConfigureAwait(false), JsonOptions); }
+        catch (JsonException) { return; }
+        if (saved?.ProjectId != project.Id || saved.Artifacts is null) return;
+        foreach (var artifact in saved.Artifacts.Where(item => item is { IsResearchData: true }
+            && !string.IsNullOrWhiteSpace(item.ImagePath)).Take(MaximumImages))
         {
-            var file = item.GetProperty("file").GetString()!;
-            var researchData = item.GetProperty("isResearchData").GetBoolean();
-            await AddImageAsync(SafePath(Path.GetDirectoryName(manifest)!, file), layout.ArtifactsPath,
-                item.GetProperty("title").GetString()!, SafePath(layout.WorkPath, relativeWork + "/render.py"),
-                SafePath(layout.WorkPath, relativeWork + "/data.json"), researchData
-                    ? tableProvenance + "; keine unabhängige Verifikation."
-                    : "Gezählte Quellen und Belegstellen des Forschungsprojekts · keine fachliche Simulation.",
-                researchData, artifacts, token).ConfigureAwait(false);
-        }
-        return artifacts;
-    }
-
-    private static async Task<string> ReadPublicationMarkdownAsync(ScientificPublicationArtifact publication, CancellationToken token)
-    {
-        var fullPath = Path.GetFullPath(publication.MarkdownPath);
-        var safe = SafePath(Path.GetDirectoryName(fullPath)!, Path.GetFileName(fullPath));
-        if (!Path.GetExtension(safe).Equals(".md", StringComparison.OrdinalIgnoreCase))
-            throw new InvalidDataException("Die Publikationsquelle ist keine Markdown-Datei.");
-        if (new FileInfo(safe).Length > 8 * 1024 * 1024)
-            throw new InvalidDataException("Die Publikationsquelle überschreitet die Darstellungsgrenze von 8 MiB.");
-        return await File.ReadAllTextAsync(safe, token).ConfigureAwait(false);
-    }
-
-    internal static IReadOnlyList<ScientificNumericTable> ExtractNumericTables(string markdown)
-    {
-        var result = new List<ScientificNumericTable>();
-        var lines = markdown.Replace("\r", "", StringComparison.Ordinal).Split('\n');
-        for (var index = 0; index + 2 < lines.Length && result.Count < 6; index++)
-        {
-            if (!lines[index].Contains('|') || !TableSeparator().IsMatch(lines[index + 1])) continue;
-            var headers = Cells(lines[index]);
-            if (headers.Length is < 2 or > 12) continue;
-            var rows = new List<string[]>();
-            var cursor = index + 2;
-            for (; cursor < lines.Length && rows.Count < 200 && lines[cursor].Contains('|'); cursor++)
+            foreach (var root in CandidateRoots(project, layout))
             {
-                var row = Cells(lines[cursor]);
-                if (row.Length == headers.Length) rows.Add(row);
+                var image = ResolveCandidate(root, artifact.ImagePath);
+                if (image is null || !File.Exists(image) || !IsImage(image)) continue;
+                await AddImageAsync(image, root, artifact.Title,
+                    artifact.ScriptPath is null ? null : ResolveCandidate(root, artifact.ScriptPath),
+                    artifact.DataPath is null ? null : ResolveCandidate(root, artifact.DataPath),
+                    artifact.Provenance, true, images, token).ConfigureAwait(false);
             }
-            index = cursor - 1;
-            if (rows.Count < 2) continue;
-            var columns = new List<ScientificNumericColumn>();
-            for (var column = 1; column < headers.Length; column++)
-            {
-                var values = new List<double>();
-                foreach (var row in rows)
-                {
-                    if (!TryNumber(row[column], out var value)) break;
-                    values.Add(value);
-                }
-                if (values.Count == rows.Count) columns.Add(new(headers[column], values));
-            }
-            if (columns.Count > 0) result.Add(new("Tabelle " + (result.Count + 1), headers[0], rows.Select(row => row[0]).ToArray(), columns));
         }
-        return result;
     }
 
-    private static string[] Cells(string line) => line.Trim().Trim('|').Split('|').Select(cell => cell.Trim()).ToArray();
-    private static bool TryNumber(string text, out double value)
-    {
-        var normalized = text.Trim().Replace("−", "-", StringComparison.Ordinal);
-        // Accept decimal comma only when no decimal point exists; mixed/grouped notation stays unplotted.
-        if (normalized.Contains(',') && !normalized.Contains('.')) normalized = normalized.Replace(',', '.');
-        value = 0;
-        return NumericValue().IsMatch(normalized) && double.TryParse(normalized, NumberStyles.Float,
-            CultureInfo.InvariantCulture, out value) && double.IsFinite(value);
-    }
     private static bool IsImage(string path) => Path.GetExtension(path).ToLowerInvariant() is ".png" or ".jpg" or ".jpeg";
     private static string Hash(byte[] bytes) => Convert.ToHexStringLower(SHA256.HashData(bytes));
-    private static (string? RunId, DateTimeOffset? StartedAt) RunScope(ScientificResearchProject project, ResearchStoredReport? report)
-    {
-        if (report is null || report.ProjectId != project.Id || string.IsNullOrWhiteSpace(report.ManifestJson)) return (null, null);
-        try
-        {
-            using var document = JsonDocument.Parse(report.ManifestJson);
-            var root = document.RootElement;
-            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("runId", out var run)
-                || run.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(run.GetString())) return (null, null);
-            if (root.TryGetProperty("projectId", out var owner) && (owner.ValueKind != JsonValueKind.String || owner.GetString() != project.Id))
-                throw new InvalidDataException("Der Simulationsbericht gehört zu einem anderen Forschungsprojekt.");
-            return (run.GetString(), root.TryGetProperty("runStartedAt", out var start) && start.ValueKind == JsonValueKind.String
-                && start.TryGetDateTimeOffset(out var timestamp) ? timestamp : null);
-        }
-        catch (JsonException) { return (null, null); }
-    }
-
     private static string ResearchFingerprint(ScientificResearchProject project,
         (IReadOnlyList<ResearchLiteratureEntry> Works, IReadOnlyList<ResearchEvidenceRecord> Evidence, ResearchStoredReport? Report) archive) =>
         Hash(JsonSerializer.SerializeToUtf8Bytes(new { project, archive.Works, archive.Evidence, archive.Report }, JsonOptions));
@@ -463,7 +349,7 @@ public sealed partial class ScientificSimulationService(
     }
 
     private static ScientificSimulationSnapshot Superseded(string projectId) => new(projectId, 0, "updating",
-        "Der Forschungsstand hat sich geändert. Die Python-Darstellung wird mit den aktuellen Daten erneuert.", [], DateTimeOffset.UtcNow);
+        "Der Forschungsstand hat sich geändert. Dieser Python-Lauf wird nicht als aktuelles Ergebnis dargestellt.", [], DateTimeOffset.UtcNow);
     private static ScientificSimulationSnapshot Snapshot(ScientificResearchProject project,
         IReadOnlyList<ScientificSimulationArtifact> artifacts, string status, string detail) =>
         new(project.Id, project.Revision, status, detail, artifacts, DateTimeOffset.UtcNow);
@@ -494,15 +380,6 @@ public sealed partial class ScientificSimulationService(
     public void Dispose() => _gate.Dispose();
     [GeneratedRegex("^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$", RegexOptions.CultureInvariant)]
     private static partial Regex SafeIdentifier();
-    [GeneratedRegex("^\\s*\\|?\\s*:?-{3,}:?\\s*(\\|\\s*:?-{3,}:?\\s*)+\\|?\\s*$", RegexOptions.CultureInvariant)]
-    private static partial Regex TableSeparator();
-    [GeneratedRegex("^[+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?$", RegexOptions.CultureInvariant)]
-    private static partial Regex NumericValue();
-
-    internal sealed record ScientificNumericColumn(string Label, IReadOnlyList<double> Values);
-    internal sealed record ScientificNumericTable(string Title, string XLabel, IReadOnlyList<string> Labels,
-        IReadOnlyList<ScientificNumericColumn> Series);
-
     internal const string SimulationHarness = """
         import os, sys, pathlib, runpy
         os.environ['MPLCONFIGDIR'] = '/tmp/missum-matplotlib'
@@ -521,54 +398,4 @@ public sealed partial class ScientificSimulationService(
         print('Missum: Python-Abbildungen gespeichert in ' + str(target))
         """;
 
-    internal const string PublicationPlotScript = """
-        import os, sys, json, pathlib, math
-        os.environ['MPLCONFIGDIR'] = '/tmp/missum-matplotlib'
-        import matplotlib
-        matplotlib.use('Agg')
-        import matplotlib.pyplot as plt
-        data = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8-sig'))
-        target = pathlib.Path(sys.argv[2]); target.mkdir(parents=True, exist_ok=True)
-        plt.rcParams.update({'font.family': 'DejaVu Sans', 'font.size': 11,
-            'axes.spines.top': False, 'axes.spines.right': False, 'axes.titleweight': 'bold',
-            'figure.facecolor': '#faf9fc', 'axes.facecolor': '#faf9fc', 'text.color': '#24212b',
-            'axes.labelcolor': '#50485e', 'xtick.color': '#50485e', 'ytick.color': '#50485e'})
-        colors = ['#8057c7', '#27888b', '#cc8644', '#6b78bd', '#b55d85', '#56814c']
-        manifest = []
-        for index, table in enumerate(data['tables']):
-            series = table['series'][:6]
-            fig, axes = plt.subplots(len(series), 1, figsize=(9, max(3.6, 2.9*len(series))), squeeze=False)
-            for number, column in enumerate(series):
-                axis = axes[number][0]
-                try:
-                    positions = [float(str(label).replace(',', '.').replace('−', '-')) for label in table['labels']]
-                    if not all(math.isfinite(value) for value in positions): raise ValueError('nonfinite axis')
-                except ValueError:
-                    positions = list(range(len(table['labels'])))
-                axis.plot(positions, column['values'], color=colors[number % len(colors)], marker='o', markersize=4, linewidth=1.8)
-                stride = max(1, len(positions)//12)
-                axis.set_xticks(positions[::stride], [str(x)[:32] for x in table['labels'][::stride]], rotation=25, ha='right')
-                axis.set_ylabel(column['label']); axis.set_xlabel(table['xLabel'])
-                axis.grid(axis='y', color='#ddd7e5', linewidth=.7, alpha=.7)
-                axis.set_title(column['label'], loc='left', pad=12, fontsize=12)
-            fig.suptitle('Publikationsdaten · ' + table['title'], x=.08, ha='left', fontsize=15)
-            fig.text(.08, .008, 'Quelle: gespeicherte Berichtstabelle. Verbindungslinien dienen nur der Orientierung.', fontsize=9, color='#71697d')
-            fig.tight_layout(rect=(0,.03,1,.95))
-            name = 'table-%02d.png' % (index+1); fig.savefig(target/name, dpi=160); plt.close(fig)
-            manifest.append({'file':name, 'title':table['title'] + ' · ' + ', '.join(s['label'] for s in series), 'isResearchData':True})
-        if not manifest:
-            fig, axis = plt.subplots(figsize=(9,4.8))
-            counts = [data['sourceCount'], data['evidenceCount']]
-            axis.barh(['Quellen', 'Belegstellen'], counts, color=colors[:2], height=.5)
-            axis.set_xlim(0, max(1, max(counts))*1.15)
-            axis.set_xlabel('Gespeicherte Einträge'); axis.set_title('Evidenzbasis der Publikation', loc='left', pad=20)
-            axis.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
-            for y, value in enumerate(counts): axis.text(value + .02*max(1,max(counts)), y, str(value), va='center')
-            axis.spines['left'].set_visible(False); axis.tick_params(axis='y', length=0)
-            fig.text(.09,.025,'Forschungsmetadaten · keine fachliche Simulation oder unabhängige Evidenzprüfung.',fontsize=9,color='#71697d')
-            fig.tight_layout(rect=(0,.06,1,1)); fig.savefig(target/'evidence.png',dpi=160); plt.close(fig)
-            manifest.append({'file':'evidence.png','title':'Evidenzbasis · Quellen und Belegstellen','isResearchData':False})
-        (target/'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False),encoding='utf-8')
-        print(json.dumps({'plots':len(manifest),'reportId':data['reportId']}))
-        """;
 }

@@ -74,7 +74,8 @@ public sealed class DeepResearchClientIntegrationTests
                 return Task.CompletedTask;
             }, deadline.Token);
         Assert.True(introductions.Count >= 2);
-        Assert.Contains("Wärmepumpen", introductions[0]);
+        Assert.Contains("Recherche im bestehenden Projekt", introductions[0]);
+        Assert.Equal(session.Title, (await chats.GetSessionAsync(session.Id))!.Title);
         Assert.Contains("Quellen", introductions[^1]);
         Assert.Single(requests);
         var scienceRequest = requests[0].Messages[^1].Content[0].Text!;

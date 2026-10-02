@@ -6,15 +6,19 @@ namespace Missum.Tests;
 
 internal sealed class TestEnvironment : IAsyncDisposable
 {
+    private readonly HashSet<string> _additionalDatabasePaths = [];
     private TestEnvironment(string directory, ServiceProvider services)
     {
         Directory = directory;
         Services = services;
+        DatabasePath = services.GetRequiredService<IMissumDatabase>().DatabasePath;
     }
 
     internal string Directory { get; }
+    internal string DatabasePath { get; }
     internal ServiceProvider Services { get; }
     internal T Get<T>() where T : notnull => Services.GetRequiredService<T>();
+    internal void TrackDatabase(string databasePath) => _additionalDatabasePaths.Add(databasePath);
 
     internal static async Task<TestEnvironment> CreateAsync()
     {
@@ -31,12 +35,18 @@ internal sealed class TestEnvironment : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         await Services.DisposeAsync().ConfigureAwait(false);
-        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        TestSqlitePools.ClearDatabasePool(DatabasePath);
         try
         {
             var root = Path.GetFullPath(Directory);
             if (Path.GetDirectoryName(root) != Path.TrimEndingDirectorySeparator(Path.GetTempPath())
                 || !Path.GetFileName(root).StartsWith("Missum-tests-", StringComparison.Ordinal)) throw new IOException("Unexpected test directory.");
+            TestSqlitePools.ClearDatabaseBackups(DatabasePath);
+            foreach (var databasePath in _additionalDatabasePaths)
+            {
+                TestSqlitePools.ClearDatabasePool(databasePath);
+                TestSqlitePools.ClearDatabaseBackups(databasePath);
+            }
             foreach (var file in System.IO.Directory.EnumerateFiles(root, "*", new EnumerationOptions
                 { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint }))
                 File.SetAttributes(file, File.GetAttributes(file) & ~FileAttributes.ReadOnly);

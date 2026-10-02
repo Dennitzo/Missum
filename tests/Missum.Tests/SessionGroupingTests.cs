@@ -39,7 +39,11 @@ public sealed class SessionGroupingTests
         await chats.SetCodingWorkspacePathAsync(session.Id, Path.Combine(environment.Directory, "Behalten"));
         var message = await chats.AddMessageAsync(session.Id, ChatRole.User, "Unverändert", MessageStatus.Completed);
         await chats.GetOrCreateSessionGroupForWorkspaceAsync(Path.Combine(environment.Directory, "Leer"));
-        await using (var connection = new SqliteConnection($"Data Source={environment.Get<IMissumDatabase>().DatabasePath}"))
+        await using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = environment.DatabasePath,
+            Pooling = false,
+        }.ToString()))
         {
             await connection.OpenAsync();
             await using var command = connection.CreateCommand();
@@ -129,7 +133,11 @@ public sealed class SessionGroupingTests
         var before = (await chats.ListSessionsAsync()).ToDictionary(session => session.Id);
         var historicGroupId = Guid.NewGuid();
 
-        await using (var connection = new SqliteConnection($"Data Source={environment.Get<IMissumDatabase>().DatabasePath}"))
+        await using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = environment.DatabasePath,
+            Pooling = false,
+        }.ToString()))
         {
             await connection.OpenAsync();
             await using var command = connection.CreateCommand();
@@ -155,7 +163,7 @@ public sealed class SessionGroupingTests
             command.Parameters.AddWithValue("$workspace", workspace);
             await command.ExecuteNonQueryAsync();
         }
-        SqliteConnection.ClearAllPools();
+        TestSqlitePools.ClearDatabasePool(environment.DatabasePath);
 
         await using var reopened = new SqliteDatabase(
             new MissumInfrastructureOptions { DataDirectory = environment.Directory },
@@ -202,7 +210,11 @@ public sealed class SessionGroupingTests
         var firstPath = Path.Combine(environment.Directory, "ab", "c");
         var secondPath = Path.Combine(environment.Directory, "a", "bc");
         const string malformedId = "0123456789abcdef0123456789abcdef-1234-5678-9012-3456-789abcdef012";
-        await using (var connection = new SqliteConnection($"Data Source={environment.Get<IMissumDatabase>().DatabasePath}"))
+        await using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = environment.DatabasePath,
+            Pooling = false,
+        }.ToString()))
         {
             await connection.OpenAsync();
             await using var command = connection.CreateCommand();

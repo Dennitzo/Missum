@@ -12,6 +12,20 @@ public sealed class CodingToolStepTests
     private static readonly string[] PowerShellArguments = ["-NoProfile", "-File", "probe.ps1"];
 
     [Fact]
+    public void ResearchPythonInputUsesACompletePythonCodeBlockAndSeparateMetadata()
+    {
+        const string source = "import numpy as np\n# Originalcode\nvalues = np.array([1, 2, 3])\nprint(values)\n";
+        var proposal = new ToolProposal("proposal-test", "run-test", ClientToolNames.ResearchCodeWrite,
+            JsonSerializer.SerializeToElement(new { projectId = "research-test", path = "calculation.py", content = source }),
+            ToolRiskClass.LocalMutation, "Python-Datei vorbereiten", DateTimeOffset.UtcNow.AddMinutes(1));
+        var formatted = MissumAiAssistantService.FormatToolInputDetail(proposal);
+        Assert.StartsWith("Datei: calculation.py", formatted, StringComparison.Ordinal);
+        Assert.Contains("```python\n" + source + "\n```", formatted, StringComparison.Ordinal);
+        Assert.DoesNotContain("\\n# Originalcode", formatted, StringComparison.Ordinal);
+        Assert.Contains("Parameter:\n```json", formatted, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task LongRunningToolJournalPersistsBeyondPreviousLimitsAndReplaysWithoutDuplicates()
     {
         await using var environment = await TestEnvironment.CreateAsync();

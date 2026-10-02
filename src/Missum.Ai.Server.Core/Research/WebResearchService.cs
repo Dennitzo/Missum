@@ -87,7 +87,7 @@ public sealed partial class WebResearchService : IDisposable
             throw new ArgumentException("Search language may contain at most 16 characters.", nameof(request));
         }
         if (!SearxngSearchProfiles.IsValid(request.Profile))
-            throw new ArgumentException("Search profile must be auto, general, python, web, dotnet or images.", nameof(request));
+            throw new ArgumentException("Search profile must be auto, general, python, web, dotnet, science or images.", nameof(request));
 
         var maximum = Math.Clamp(request.MaximumResults, 1, 20);
         var query = request.Query;
@@ -105,8 +105,9 @@ public sealed partial class WebResearchService : IDisposable
         if (selectedEngines is { Length: 0 }) throw new SearxngEngineUnavailableException(skipped);
         var builder = new UriBuilder(new Uri(_options.SearxngUri, "/search"))
         {
-            Query = $"q={Uri.EscapeDataString(query)}&format=json&language={Uri.EscapeDataString(language)}"
-                + (request.Profile == "images" ? "&categories=images" : string.Empty),
+            // Explicit engines already determine the category. SearXNG unions categories
+            // with engines, which would silently re-enable blocked default image engines.
+            Query = $"q={Uri.EscapeDataString(query)}&format=json&language={Uri.EscapeDataString(language)}",
         };
         if (selectedEngines is not null)
             builder.Query += "&engines=" + Uri.EscapeDataString(string.Join(',', selectedEngines));
@@ -191,7 +192,7 @@ public sealed partial class WebResearchService : IDisposable
         : reason.Contains("429", StringComparison.OrdinalIgnoreCase)
             || reason.Contains("too many requests", StringComparison.OrdinalIgnoreCase)
             || reason.Contains("unusual traffic", StringComparison.OrdinalIgnoreCase)
-            || reason.Contains("403", StringComparison.OrdinalIgnoreCase) ? TimeSpan.FromMinutes(3)
+            || reason.Contains("403", StringComparison.OrdinalIgnoreCase) ? TimeSpan.FromHours(1)
         : TimeSpan.Zero;
 
     private sealed record EngineCooldown(DateTimeOffset Until, string Reason);

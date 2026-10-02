@@ -58,6 +58,7 @@ public static class ClientToolNames
     public const string ResearchCodeTest = "research.code.test";
     public const string ResearchCodeBenchmark = "research.code.benchmark";
     public const string ResearchCodeRestore = "research.code.restore";
+    public const string ResearchDeliverablesVerify = "research.deliverables.verify";
     public const string DocumentRead = "document.read";
     public const string DocumentCreate = "document.create";
     public const string DocumentsList = "documents.list";

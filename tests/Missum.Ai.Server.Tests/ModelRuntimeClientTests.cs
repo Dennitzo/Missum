@@ -897,11 +897,28 @@ public sealed class ModelRuntimeClientTests
                 }));
 
         Assert.Equal("transport_retry_exhausted", exception.ProviderCode);
+        Assert.True(ModelRuntimeClient.IsRecoverableProviderTransportFailure(exception.InnerException!));
         Assert.Equal(3, handler.ChatAttempts);
         Assert.Equal([1, 2, 3], progress
             .Where(item => item.State == "generationRetry")
             .Select(item => item.Attempt)
             .ToArray());
+    }
+
+    [Fact]
+    public async Task CompletedMalformedToolJsonKeepsBoundedRepairButCannotBecomeDurableTransportRetry()
+    {
+        var handler = new NativeRuntimeHandler(malformedStreamingTool: true);
+        using var client = CreateClient(new HttpClient(handler));
+        var schema = JsonSerializer.SerializeToElement(new { type = "object", properties = new { operation = new { type = "string" } } });
+
+        var failure = await Assert.ThrowsAsync<ModelGenerationTerminatedException>(() => client.CompleteChatAsync(
+            "gpt-oss-120b", [new LmChatMessage("user", "Untersuche den Workspace.")],
+            [new LmToolDefinition("workspace.inspect", "Workspace untersuchen", schema)], requireToolCall: true));
+
+        Assert.Equal("transport_retry_exhausted", failure.ProviderCode);
+        Assert.Equal(3, handler.ChatAttempts);
+        Assert.False(ModelRuntimeClient.IsRecoverableProviderTransportFailure(failure.InnerException!));
     }
 
     [Theory]
@@ -964,7 +981,8 @@ public sealed class ModelRuntimeClientTests
         bool streamingToolWithFreeText = false,
         int tokenCountingFailures = 0,
         bool streamingReasoning = false,
-        bool jsonReasoning = false) : HttpMessageHandler
+        bool jsonReasoning = false,
+        bool malformedStreamingTool = false) : HttpMessageHandler
     {
         internal const string ReasoningText = "## Plan\n\n1. Datei prüfen.\n2. `änderung` anwenden.\n\nAbschließend testen.";
         private string? _loadedKey = NativeGeneralId;
@@ -1087,6 +1105,18 @@ public sealed class ModelRuntimeClientTests
                     var selectedToolName = requestBody.RootElement.GetProperty("tools")[0]
                         .GetProperty("function").GetProperty("name").GetString()!;
                     return EventStream(selectedToolName, completeToolWithoutDone, streamingToolWithFreeText);
+                }
+                if (malformedStreamingTool)
+                {
+                    using var requestBody = JsonDocument.Parse(body);
+                    var selectedToolName = requestBody.RootElement.GetProperty("tools")[0].GetProperty("function").GetProperty("name").GetString();
+                    var frame = JsonSerializer.Serialize(new { choices = new[] { new
+                    {
+                        delta = new { tool_calls = new[] { new { index = 0, id = "broken", type = "function",
+                            function = new { name = selectedToolName, arguments = "{\"operation\":" } } } },
+                        finish_reason = "tool_calls",
+                    } } });
+                    return new(HttpStatusCode.OK) { Content = new StringContent("data: " + frame + "\n\ndata: [DONE]\n\n", Encoding.UTF8, "text/event-stream") };
                 }
                 if (reasoningToolCall)
                 {

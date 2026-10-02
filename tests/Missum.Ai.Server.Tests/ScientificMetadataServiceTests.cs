@@ -34,6 +34,59 @@ public sealed class ScientificMetadataServiceTests
         Assert.Empty(handler.Requests);
     }
 
+    [Fact]
+    public async Task MalformedCrossrefTitlesDoNotDiscardHealthyWorksOrOtherProviders()
+    {
+        var handler = new FixtureHandler
+        {
+            CrossrefJson = """
+                {"message":{"items":[
+                  {"DOI":"10.1000/empty","title":[]},
+                  {"DOI":"10.1000/null","title":null},
+                  {"DOI":"10.1000/number","title":[42]},
+                  {"DOI":"10.1000/blank","title":["  ","\t"]},
+                  null,
+                  {"DOI":"10.1000/healthy","title":["Healthy original title"]},
+                  {"DOI":"10.1000/mixed","title":[null,42," ","  Valid alternate title  "]}
+                ]}}
+                """,
+        };
+        var service = new ScientificMetadataService(new FixtureFactory(handler));
+
+        var candidates = await service.ResolveAsync("scientific research", DeepResearchProfile.ScientificEvidence);
+
+        Assert.Collection(candidates.Where(static candidate => candidate.Provider == "crossref"),
+            candidate =>
+            {
+                Assert.Equal("Healthy original title", candidate.Title);
+                Assert.Equal("https://doi.org/10.1000/healthy", candidate.Url);
+            },
+            candidate =>
+            {
+                Assert.Equal("Valid alternate title", candidate.Title);
+                Assert.Equal("10.1000/mixed", candidate.Identifier);
+            });
+        Assert.Equal(4, candidates.Count(static candidate => candidate.Provider != "crossref"));
+        Assert.Equal(5, handler.Requests.Count);
+    }
+
+    [Theory]
+    [InlineData("null")]
+    [InlineData("[]")]
+    [InlineData("{\"message\":null}")]
+    [InlineData("{\"message\":{\"items\":null}}")]
+    [InlineData("{\"message\":{\"items\":{}}}")]
+    public async Task MalformedCrossrefEnvelopeLeavesOtherProvidersAvailable(string response)
+    {
+        var handler = new FixtureHandler { CrossrefJson = response };
+        var service = new ScientificMetadataService(new FixtureFactory(handler));
+
+        var candidates = await service.ResolveAsync("scientific research", DeepResearchProfile.ScientificEvidence);
+
+        Assert.Equal(4, candidates.Count);
+        Assert.DoesNotContain(candidates, static candidate => candidate.Provider == "crossref");
+    }
+
     private sealed class FixtureFactory(HttpMessageHandler handler) : IHttpClientFactory
     {
         public HttpClient CreateClient(string name) => new(handler, disposeHandler: false);
@@ -42,6 +95,7 @@ public sealed class ScientificMetadataServiceTests
     private sealed class FixtureHandler : HttpMessageHandler
     {
         public List<Uri> Requests { get; } = [];
+        public string? CrossrefJson { get; init; }
 
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
@@ -49,7 +103,7 @@ public sealed class ScientificMetadataServiceTests
             var host = request.RequestUri!.Host;
             var content = host switch
             {
-                "api.crossref.org" => "{\"message\":{\"items\":[{\"DOI\":\"10.1000/example\",\"title\":[\"Crossref Work\"],\"URL\":\"https://doi.org/10.1000/example\"}]}}",
+                "api.crossref.org" => CrossrefJson ?? "{\"message\":{\"items\":[{\"DOI\":\"10.1000/example\",\"title\":[\"Crossref Work\"],\"URL\":\"https://doi.org/10.1000/example\"}]}}",
                 "api.openalex.org" => "{\"results\":[{\"id\":\"https://openalex.org/W1\",\"display_name\":\"OpenAlex Work\",\"doi\":\"https://doi.org/10.1000/open\",\"primary_location\":{\"landing_page_url\":\"https://doi.org/10.1000/open\"}}]}",
                 "eutils.ncbi.nlm.nih.gov" => "{\"esearchresult\":{\"idlist\":[\"12345\"]}}",
                 "export.arxiv.org" => "<?xml version=\"1.0\"?><feed xmlns=\"http://www.w3.org/2005/Atom\"><entry><id>https://arxiv.org/abs/2601.00001</id><title>Arxiv Work</title></entry></feed>",

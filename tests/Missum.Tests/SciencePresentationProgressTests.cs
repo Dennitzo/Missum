@@ -9,6 +9,30 @@ namespace Missum.Tests;
 public sealed class SciencePresentationProgressTests
 {
     [Fact]
+    public void PublicationContractSeparatesArticleFromOperationsAndRequiresExecutedScientificEvidence()
+    {
+        var sessionId = Guid.NewGuid();
+        var prompt = MissumAiAssistantService.BuildSciencePresentationPrompt("Untersuche die Modellgrenzen.", sessionId);
+
+        Assert.StartsWith("Untersuche die Modellgrenzen.", prompt);
+        Assert.Contains("research-" + sessionId.ToString("N"), prompt);
+        Assert.Contains("<!-- MISSUM_PUBLICATION_BEGIN -->", prompt);
+        Assert.Contains("<!-- MISSUM_PUBLICATION_END -->", prompt);
+        Assert.Contains("vollständigen aktuellen Manuskriptstand", prompt);
+        Assert.Contains("selbst formulierten fachlichen Titel", prompt);
+        Assert.Contains("Kopiere weder den Nutzerprompt noch das Evidenzdossier", prompt);
+        Assert.Contains("außerhalb des Publikationsblocks in den Chat", prompt);
+        Assert.Contains("## Voraussetzungen und Konventionen", prompt);
+        Assert.Contains("## Herleitungen und Rechenschritte", prompt);
+        Assert.Contains("Einheiten in jedem Rechenschritt", prompt);
+        Assert.Contains("keine Tabellen für die Einheitenlegende", prompt);
+        Assert.Contains("exitCode 0", prompt);
+        Assert.Contains("vorhandenen PNG- oder JPEG-Artefakt", prompt);
+        Assert.Contains("tatsächlich erzeugte Abbildung als Markdown-Bild", prompt);
+        Assert.Contains("keine erfundenen Zwischenwerte", prompt);
+    }
+
+    [Fact]
     public async Task ProgressSurvivesReloadAndCoalescesRepeatedPhaseWithoutLosingParagraphPosition()
     {
         await using var environment = await TestEnvironment.CreateAsync();

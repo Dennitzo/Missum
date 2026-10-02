@@ -234,7 +234,7 @@ public sealed class ScientificPublicationTests(ITestOutputHelper output)
         Assert.DoesNotContain("BENCHMARKINSTRUCTION", text);
         Assert.DoesNotContain("DOSSIERMARKER", text);
         Assert.DoesNotContain("Ich recherchiere zuerst", text);
-        Assert.Contains("Ein erster Befund ergibt eine Periode von 6,4 Sekunden.", text);
+        Assert.DoesNotContain("Ein erster Befund ergibt eine Periode von 6,4 Sekunden.", text);
         Assert.Contains("$$m\\ddot{x}+c\\dot{x}+kx=0$$", text);
         Assert.Contains("ERGEBNISMARKER", text);
         Assert.DoesNotContain("Ergänzende Originalquellen", text);
@@ -242,7 +242,7 @@ public sealed class ScientificPublicationTests(ITestOutputHelper output)
     }
 
     [Fact]
-    public void EarlyDraftHasBoundedQuestionAndTitleWithoutInternalPromptMarkers()
+    public void EarlyDraftWaitsForAnAuthoredTitleInsteadOfCopyingTheUserPrompt()
     {
         var now = DateTimeOffset.UtcNow;
         var question = "Wie entwickelt sich die Amplitude eines gedämpften Oszillators bei verschiedenen Reibungswerten?";
@@ -251,13 +251,201 @@ public sealed class ScientificPublicationTests(ITestOutputHelper output)
             + string.Join(' ', Enumerable.Repeat("PYTHONEXECUTIONDETAILS Erstelle umfangreiche Skripte, Plots und Testartefakte.", 40)),
             "[MISSUM_WEB_RESEARCH_REQUEST] " + new string('y', 1200), "codingWorkspaceResearch", "multiPath", "active", 1, 1, now, now);
         var text = ScientificPublicationService.FormatPublication(project, new([], [], [], []), [], [], null).Replace("\r", "", StringComparison.Ordinal);
-        Assert.StartsWith("# " + question, text);
+        Assert.StartsWith("# Wissenschaftliche Untersuchung\n", text);
         Assert.InRange(text.Split('\n')[0].Length, 1, 144);
         Assert.DoesNotContain("MISSUM_WEB_RESEARCH_REQUEST", text);
         Assert.DoesNotContain("PYTHONEXECUTIONDETAILS", text);
         Assert.Contains("Arbeitsfassung", text);
-        Assert.Contains("## 1. Fragestellung\n\n" + question, text);
+        Assert.DoesNotContain(question, text);
         Assert.Contains("Es wird noch kein Ergebnis behauptet.", text);
+    }
+
+    [Fact]
+    public void LegacyQuantumGravityArticleExcludesSurroundingChatAndOperationsButKeepsScientificLimits()
+    {
+        // Structure of the actual r20 Quantumgravity publication: the first H1
+        // precedes chat/research diagnostics; the article is a later H2 section.
+        var content = """
+            # Quantengravitation: prüfbare Modellannahmen und Grenzen
+
+            Ich recherchiere die Ausgangsgleichungen.
+
+            SearXNG meldet brave: HTTP 404 und Network is unreachable (host.docker.internal:8081).
+
+            ## Publikation – Arbeitsfassung (Entwurf, Stand nach erstem Forschungszyklus)
+
+            **Entwurf:** Die PDF-Darstellung wird von Missum erzeugt.
+
+            ### Kurzfassung
+
+            Untersucht wird die Konsistenz der Modellannahmen, keine bestätigte Vereinheitlichung.
+
+            ### Herleitungen und Rechenschritte
+
+            HERLEITUNG
+
+            ### Ergebnisse
+
+            Eine allgemeine Lösung ist nicht hergeleitet. Der Geltungsbereich bleibt auf die angegebenen Voraussetzungen beschränkt.
+
+            ### Diskussion und Grenzen
+
+            Die Quellenprüfung mit SearXNG war nicht erfolgreich; es wurde keine Originalquelle gelesen.
+
+            Network is unreachable. HTTP 503. HttpRequestException: request failed.
+
+            brave: too many requests.
+
+            Die Gültigkeit außerhalb des betrachteten Grenzfalls ist offen.
+
+            ### Literatur
+
+            Es liegen noch keine unabhängig geprüften Originalbelege vor.
+
+            ## Abschluss des ersten Forschungszyklus
+
+            ABSCHLUSSPROTOKOLL Bitte research.code.write verwenden; SHA256: 12345.
+
+            **Fortschrittsmeldung:** Fortsetzung folgt.
+            """.Replace("HERLEITUNG", string.Join('\n', UnitDerivationMarkdown.Split('\n')
+                .Select(line => line.StartsWith('#') ? "#" + line : line)), StringComparison.Ordinal);
+        var text = FormatManuscript(content);
+
+        Assert.StartsWith("# Quantengravitation: prüfbare Modellannahmen und Grenzen\n", text);
+        Assert.Contains("## Kurzfassung", text);
+        Assert.Contains("Eine allgemeine Lösung ist nicht hergeleitet.", text);
+        Assert.Contains("Die Gültigkeit außerhalb des betrachteten Grenzfalls ist offen.", text);
+        Assert.Contains("Die unabhängige Quellenprüfung", text);
+        Assert.Contains(@"&=9\,\mathrm{J}.", text);
+        Assert.DoesNotContain("SearXNG", text);
+        Assert.DoesNotContain("Network is unreachable", text);
+        Assert.DoesNotContain("HTTP 503", text);
+        Assert.DoesNotContain("too many requests", text);
+        Assert.DoesNotContain("host.docker.internal", text);
+        Assert.DoesNotContain("PDF-Darstellung", text);
+        Assert.DoesNotContain("ABSCHLUSSPROTOKOLL", text);
+        Assert.DoesNotContain("Fortschrittsmeldung", text);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void LatestManuscriptSnapshotExcludesOtherChatAndPreservesMathAndActualFigure(bool streaming)
+    {
+        var content = """
+            Ein außerhalb des Manuskripts genannter Wert ist kein Publikationstext: CHATBEFUND.
+
+            <!-- MISSUM_PUBLICATION_BEGIN -->
+            # Vorheriger Artikel
+
+            VERALTETERBEFUND
+            <!-- MISSUM_PUBLICATION_END -->
+
+            Ich werde nun die Auswertung überarbeiten.
+
+            <!-- MISSUM_PUBLICATION_BEGIN -->
+            # Kinetische Energie unter expliziten Voraussetzungen
+
+            ## Kurzfassung
+
+            Das Rechenbeispiel prüft die Einheiten im nichtrelativistischen Modell.
+
+            HERLEITUNG
+
+            ## Abbildung
+
+            ![Kinetische Energie als Funktion der Geschwindigkeit](artifacts/energie-v2.png)
+
+            Die waagerechte Achse zeigt die Geschwindigkeit in Metern je Sekunde, die senkrechte die Energie in Joule. Dargestellt sind Modellwerte, keine Messdaten.
+            """.Replace("HERLEITUNG", UnitDerivationMarkdown, StringComparison.Ordinal);
+        if (!streaming) content += "\n<!-- MISSUM_PUBLICATION_END -->\n\nCHATFORTSETZUNG: Weiterer Arbeitsauftrag.";
+        var text = FormatManuscript(content, streaming ? MessageStatus.Streaming : MessageStatus.Completed);
+
+        Assert.StartsWith("# Kinetische Energie unter expliziten Voraussetzungen\n", text);
+        Assert.DoesNotContain("CHATBEFUND", text);
+        Assert.DoesNotContain("VERALTETERBEFUND", text);
+        Assert.DoesNotContain("CHATFORTSETZUNG", text);
+        Assert.DoesNotContain("MISSUM_PUBLICATION", text);
+        Assert.Contains("![Kinetische Energie als Funktion der Geschwindigkeit](artifacts/energie-v2.png)", text);
+        Assert.Contains("Modellwerte, keine Messdaten", text);
+        foreach (var line in UnitDerivationMarkdown.Split('\n').Where(line => !string.IsNullOrWhiteSpace(line) && !line.StartsWith('#')))
+            Assert.Contains(line.TrimEnd('\r'), text);
+    }
+
+    [Fact]
+    public void MarkerExamplesInsideCodeCannotTruncateTheArticleAndEmptyNewSnapshotKeepsPreviousArticle()
+    {
+        var content = """
+            ````text
+            <!-- MISSUM_PUBLICATION_BEGIN -->
+            # Falscher Titel im Codebeispiel
+            <!-- MISSUM_PUBLICATION_END -->
+            ````
+
+            <!-- MISSUM_PUBLICATION_BEGIN -->
+            # Einheitenprüfung
+
+            ## Herleitung
+
+            ```text
+            <!-- MISSUM_PUBLICATION_END -->
+
+            DIAGNOSEBEISPIEL
+            ```
+
+            $$E=9\,\mathrm{J}$$
+
+            - $E$ ist die Energie in Joule.
+            <!-- MISSUM_PUBLICATION_END -->
+
+            <!-- MISSUM_PUBLICATION_BEGIN -->
+            # Neuer Artikel
+
+            ## Kurzfassung
+            """;
+        var text = FormatManuscript(content, MessageStatus.Streaming);
+
+        Assert.StartsWith("# Einheitenprüfung\n", text);
+        Assert.Contains(@"$$E=9\,\mathrm{J}$$", text);
+        Assert.Contains("- $E$ ist die Energie in Joule.", text);
+        Assert.DoesNotContain("DIAGNOSEBEISPIEL", text);
+        Assert.DoesNotContain("```", text);
+        Assert.DoesNotContain("Neuer Artikel", text);
+        Assert.DoesNotContain("Falscher Titel", text);
+    }
+
+    [Fact]
+    public void DossierFallbackDoesNotPublishOperationalClaimsOrRawExperimentOutput()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var project = new ScientificResearchProject("diagnostics", Guid.NewGuid(), "mathematicalInvestigation",
+            "NUTZERAUFTRAG Erstelle eine Publikation.", "NUTZERAUFTRAG", "codingWorkspaceResearch", "multiPath", "active", 1, 1, now, now);
+        var report = new ResearchStoredReport("report", project.Id, "scientificMarkdown", "unresolved",
+            "## Grenzen\n\nDie Modellannahme wurde nicht unabhängig bestätigt.\n\nSearXNG war nicht erfolgreich.", "{}", now);
+        var results = new ResearchResultSnapshot([], [new ResearchExperiment("experiment", project.Id,
+            "{}", "[]", "[]", "{}", "python calculation.py", "{}", "RAWSTDOUT", "RAWSTDERR", "[]", "unresolved", now, now)], [],
+            [new("technical", project.Id, "SearXNG meldet brave: too many requests.", "observed", "unresolved", 1, "{}", now),
+             new("scientific", project.Id, "Die Modellannahme gilt nur im betrachteten Grenzfall.", "calculated", "unresolved", 1, "{}", now)]);
+        var text = ScientificPublicationService.FormatPublication(project, results, [], [], report);
+
+        Assert.Contains("Die Modellannahme wurde nicht unabhängig bestätigt.", text);
+        Assert.Contains("Die Modellannahme gilt nur im betrachteten Grenzfall.", text);
+        Assert.Contains("Die unabhängige Quellenprüfung", text);
+        Assert.DoesNotContain("SearXNG", text);
+        Assert.DoesNotContain("RAWSTDOUT", text);
+        Assert.DoesNotContain("RAWSTDERR", text);
+        Assert.DoesNotContain("NUTZERAUFTRAG", text);
+    }
+
+    private static string FormatManuscript(string content, MessageStatus status = MessageStatus.Completed)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var project = new ScientificResearchProject("manuscript", Guid.NewGuid(), "mathematicalInvestigation",
+            "NUTZERAUFTRAG Erstelle ein Paper mit Simulation.", "NUTZERAUFTRAG", "codingWorkspaceResearch", "multiPath", "verified", 1, 1, now, now);
+        var report = new ResearchStoredReport("report", project.Id, "scientificMarkdown", "verified", "ALTESDOSSIER", "{}", now);
+        var manuscript = new ChatMessage(Guid.NewGuid(), project.SessionId, ChatRole.Assistant, content, status, now, now);
+        return ScientificPublicationService.FormatPublication(project, new([], [], [], []), [], [], report, manuscript)
+            .Replace("\r", "", StringComparison.Ordinal);
     }
 
     [Fact]
@@ -327,7 +515,10 @@ public sealed class ScientificPublicationTests(ITestOutputHelper output)
             "scientificMarkdown", "verified",
             "## Analytische Lösung\n\nPUBLICATIONMATHCHECK Die Gleichung beschreibt einen gedämpften Oszillator.\n\n"
             + "$$m\\ddot{x}+c\\dot{x}+kx=0$$\n\nDie Eigenfrequenz lautet $\\omega_0=\\sqrt{k/m}$.\n\n"
-            + "## Integration\n\n$$\\int_0^1 x^2\\,dx=\\frac{1}{3}$$\n\n" + UnitDerivationMarkdown + "\n\nPUBLICATIONENDCHECK",
+            + "## Integration\n\n$$\\int_0^1 x^2\\,dx=\\frac{1}{3}$$\n\n" + UnitDerivationMarkdown
+            + "\n\n## Mehrseitiger Render-Test\n\n"
+            + string.Join("\n\n", Enumerable.Range(1, 6).Select(index => "### Prüffall " + index + "\n\n" + UnitDerivationMarkdown))
+            + "\n\nPUBLICATIONENDCHECK",
             "{}", "research.result.persisted", "{}", "publication-live", 2, DateTimeOffset.UtcNow));
         using var renderer = new DocumentPdfExporter(NullLogger<DocumentPdfExporter>.Instance);
         using var service = new ScientificPublicationService(repository, renderer);
@@ -336,6 +527,7 @@ public sealed class ScientificPublicationTests(ITestOutputHelper output)
         Assert.NotNull(publication);
         Assert.False(publication.IsDraft);
         using var pdf = PdfDocument.Open(publication.PdfPath);
+        Assert.True(pdf.NumberOfPages >= 2, "The native continuous viewer fixture must contain multiple rendered pages.");
         var content = string.Join('\n', pdf.GetPages().Select(page => page.Text));
         Assert.Contains("PUBLICATIONMATHCHECK", content);
         Assert.Contains("PUBLICATIONENDCHECK", content);

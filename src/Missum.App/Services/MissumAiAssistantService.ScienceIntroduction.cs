@@ -9,7 +9,6 @@ public sealed partial class MissumAiAssistantService
         // This is a UI introduction to the research workflow, not a claim that
         // sources were already inspected or that the model found an answer.
         var heading = title.ReplaceLineEndings(" ").Replace("*", "").Replace("#", "").Trim();
-        if (heading.Length > 120) heading = heading[..120].TrimEnd();
         return [$"**{heading}**\n\n",
             "Ich untersuche deine Frage schrittweise: Zuerst kläre ich die Teilfragen, dann suche und prüfe ich passende Quellen. "
             + "Die Ergebnisse und ihre Grenzen fließen fortlaufend in die wissenschaftliche Publikation im Tab Publikation ein. "

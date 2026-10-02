@@ -24,10 +24,11 @@ public sealed class NativeToolResultView : StackPanel
             if (!PrimaryFields.Contains(key)) continue;
             if (key == "source" && sourceLanguage is not null && value.ValueKind == JsonValueKind.String)
             { cards.Add(CodeCard("Lean-Beweis", value.GetString() ?? "", sourceLanguage)); continue; }
-            if (!input && value.ValueKind == JsonValueKind.String && key is "content" or "code" or "text" or "stdout" or "stderr" or "snippet")
+            if (value.ValueKind == JsonValueKind.String && key is "content" or "code" or "text" or "stdout" or "stderr" or "snippet" or "oldText" or "newText")
             {
-                var language = key is "stdout" or "stderr" || string.IsNullOrEmpty(Path.GetExtension(path)) ? "text" : Path.GetExtension(path).TrimStart('.');
-                cards.Add(CodeCard(Label(key), value.GetString() ?? "", language));
+                var language = key is "stdout" or "stderr" ? "text" : sourceLanguage
+                    ?? (string.IsNullOrEmpty(Path.GetExtension(path)) ? "text" : Path.GetExtension(path).TrimStart('.'));
+                cards.Add(CodeCard(Label(key), value.GetString() ?? "", language, path));
                 continue;
             }
             if (value.ValueKind == JsonValueKind.Array && key is "entries" or "matches" or "results" or "sources" or "citations")
@@ -58,7 +59,7 @@ public sealed class NativeToolResultView : StackPanel
 
     private static readonly HashSet<string> PrimaryFields = new(StringComparer.Ordinal)
     {
-        "path", "content", "code", "text", "stdout", "stderr", "snippet", "diff", "entries", "matches", "results", "sources", "citations",
+        "path", "file", "content", "code", "text", "oldText", "newText", "stdout", "stderr", "snippet", "diff", "entries", "matches", "results", "sources", "citations",
         "startLine", "totalLines", "maximumLines", "nextLine", "truncated", "diffTruncated", "exitCode", "workingDirectory", "executable", "arguments",
         "error", "message", "summary", "query", "title", "url", "source", "timedOut"
     };
@@ -108,7 +109,7 @@ public sealed class NativeToolResultView : StackPanel
 
     private static string Label(string key) => key switch
     {
-        "path" => "Pfad", "content" or "text" => "Inhalt", "code" => "Code", "snippet" => "Auszug", "stdout" => "Standardausgabe", "stderr" => "Fehlerausgabe", "exitCode" => "Exitcode",
+        "path" or "file" => "Pfad", "content" or "text" => "Inhalt", "code" => "Code", "oldText" => "Vorher", "newText" => "Nachher", "snippet" => "Auszug", "stdout" => "Standardausgabe", "stderr" => "Fehlerausgabe", "exitCode" => "Exitcode",
         "startLine" => "Ab Zeile", "totalLines" => "Zeilen", "maximumLines" => "Zeilenlimit", "nextLine" => "Fortsetzung ab Zeile", "sha256" => "Prüfsumme", "previousSha256" or "expectedSha256" => "Geprüfte Ausgangsversion",
         "truncated" or "diffTruncated" => "Ausgabe gekürzt", "elapsedMilliseconds" => "Laufzeit (ms)", "workingDirectory" => "Arbeitsordner", "executable" => "Programm", "arguments" => "Argumente",
         "entries" => "Einträge", "matches" or "results" => "Treffer", "sources" or "citations" => "Quellen", "error" => "Fehler", "success" => "Erfolgreich", "summary" => "Zusammenfassung", "toolStatus" => "Status", "query" => "Suchbegriff", "queries" => "Suchbegriffe", "maximumResults" => "Trefferlimit", "title" => "Titel", "url" => "Adresse", "source" => "Quelle", "language" => "Sprache", "profile" => "Profil", "thumbnailUrl" => "Vorschaubild", _ => key

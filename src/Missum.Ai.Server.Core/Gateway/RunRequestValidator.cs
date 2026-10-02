@@ -20,6 +20,7 @@ public static class RunRequestValidator
         "coding.process",
         "workspace.open",
         "research.sandbox",
+        "research.deliverables",
     };
     private static readonly HashSet<string> ServerTools = new(StringComparer.Ordinal)
     {

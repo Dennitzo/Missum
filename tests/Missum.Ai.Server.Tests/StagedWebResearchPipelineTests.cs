@@ -222,6 +222,50 @@ public sealed class StagedWebResearchPipelineTests
         }
     }
 
+    [Theory]
+    [InlineData("web.search", false)]
+    [InlineData("web.fetch", false)]
+    [InlineData("synthesis", false)]
+    [InlineData("web.search", true)]
+    [InlineData("web.fetch", true)]
+    [InlineData("synthesis", true)]
+    public async Task NativeModelOutageEscapesPreparationInsteadOfBecomingACompletedDossier(string phase, bool partialStream)
+    {
+        var catalog = new AgentToolCatalog();
+        var tools = catalog.GetAvailableTools(CreateRequest());
+        var cause = new HttpRequestException("Network is unreachable (host.docker.internal:8081)");
+        Exception failure = partialStream
+            ? new ModelGenerationTerminatedException("transport_retry_exhausted", cause)
+            : new ModelProviderRequestException("inference", 3, cause);
+        var requestedPhases = new List<string>();
+
+        var actual = await Record.ExceptionAsync(() => StagedWebResearchPipeline.ExecuteAsync(
+            "Prüfe die offizielle API-Dokumentation.", "local-model", "general",
+            catalog.Resolve("web.search", tools), catalog.Resolve("web.fetch", tools),
+            (request, _) =>
+            {
+                var currentPhase = request.RequiredToolName ?? "synthesis";
+                requestedPhases.Add(currentPhase);
+                if (currentPhase == phase) throw failure;
+                return Task.FromResult(currentPhase switch
+                {
+                    "web.search" => ToolResult("web.search", new { query = "official API reference" }),
+                    "web.fetch" => ToolResult("web.fetch", new { url = "https://example.com/reference" }),
+                    _ => new LmChatResult("Verified reference.", [], 10, 5),
+                });
+            },
+            (call, _) => Task.FromResult(call.Name == "web.search"
+                ? Result(new WebSearchResponse("official API reference",
+                    [new("Reference", "https://example.com/reference", "Official API")],
+                    "searxng", false, DateTimeOffset.UtcNow))
+                : Result(new WebFetchResponse("https://example.com/reference", "text/html",
+                    "Verified API reference content.", true, DateTimeOffset.UtcNow, []))),
+            catalog.Validate));
+
+        Assert.Same(failure, actual);
+        Assert.Equal(phase, requestedPhases[^1]);
+    }
+
     [Fact]
     public void PersistedDossierPreventsARepeatedResearchPreparation()
     {

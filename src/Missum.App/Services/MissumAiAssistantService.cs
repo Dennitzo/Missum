@@ -44,7 +44,10 @@ public sealed record MissumAiAssistantUpdate(
     bool ContextWasCompacted = false,
     AssistantToolStep? ToolStep = null,
     CodingChangesSummary? ChangesSummary = null,
-    Guid? LocalRunId = null);
+    Guid? LocalRunId = null,
+    string? GenerationState = null,
+    int? GeneratedTokens = null,
+    DateTimeOffset? GenerationUpdatedAt = null);
 
 public sealed record MissumAiSpeechUpdate(
     bool IsActive,
@@ -113,6 +116,8 @@ public sealed partial class MissumAiAssistantService(
         "Projektgedächtnis konnte für Sitzung {SessionId} nicht verarbeitet werden.");
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly SemaphoreSlim _speechGate = new(1, 1);
+    private readonly object _activeRunLock = new();
+    private TaskCompletionSource? _activeRunCompletion;
     private CancellationTokenSource? _activeCancellation;
     private CancellationTokenSource? _activeSpeechCancellation;
     private string? _activeServerRunId;
@@ -161,9 +166,7 @@ public sealed partial class MissumAiAssistantService(
         {
             throw new InvalidOperationException("Es läuft bereits ein Missum-AI-Auftrag.");
         }
-        Interlocked.Exchange(ref _explicitCancellation, 0);
-        Volatile.Write(ref _activeSessionId, sessionId.ToString("D"));
-        _activeCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var runCompletion = BeginActiveRun(sessionId, trigger?.Trigger.Action, cancellationToken);
         try
         {
             var session = await chats.GetSessionAsync(sessionId, _activeCancellation.Token).ConfigureAwait(false)
@@ -254,15 +257,7 @@ public sealed partial class MissumAiAssistantService(
         }
         finally
         {
-            await FinishFileChangesAsync().ConfigureAwait(false);
-            _activeServerRunId = null;
-            _pendingModelSelection = null;
-            _activeCodingWorkspace = null;
-            _activeRunAction = null;
-            Volatile.Write(ref _activeSessionId, null);
-            _activeCancellation?.Dispose();
-            _activeCancellation = null;
-            _gate.Release();
+            await FinishActiveRunAsync(runCompletion).ConfigureAwait(false);
         }
     }
 
@@ -279,10 +274,7 @@ public sealed partial class MissumAiAssistantService(
                 if (_activeCancellation?.IsCancellationRequested != true) return;
                 await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
             }
-            Interlocked.Exchange(ref _explicitCancellation, 0);
-            Volatile.Write(ref _activeSessionId, run.SessionId.ToString("D"));
-            _activeRunAction = run.Action;
-            _activeCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            var runCompletion = BeginActiveRun(run.SessionId, run.Action, cancellationToken);
             try
             {
                 var message = await chats.GetMessageAsync(
@@ -355,15 +347,7 @@ public sealed partial class MissumAiAssistantService(
             }
             finally
             {
-                await FinishFileChangesAsync().ConfigureAwait(false);
-                _activeServerRunId = null;
-                _pendingModelSelection = null;
-                _activeCodingWorkspace = null;
-                _activeRunAction = null;
-                Volatile.Write(ref _activeSessionId, null);
-                _activeCancellation?.Dispose();
-                _activeCancellation = null;
-                _gate.Release();
+                await FinishActiveRunAsync(runCompletion).ConfigureAwait(false);
             }
         }
     }
@@ -483,24 +467,76 @@ public sealed partial class MissumAiAssistantService(
         }
     }
 
-    public async Task CancelCurrentAsync(CancellationToken cancellationToken = default)
+    [System.Diagnostics.CodeAnalysis.MemberNotNull(nameof(_activeCancellation))]
+    private TaskCompletionSource BeginActiveRun(Guid sessionId, PromptTriggerAction? action, CancellationToken cancellationToken)
     {
-        Interlocked.Exchange(ref _explicitCancellation, 1);
-        var serverRunId = _activeServerRunId;
-        try { _activeCancellation?.Cancel(); }
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (_activeRunLock)
+        {
+            _activeCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            _activeRunCompletion = completion;
+            _activeRunAction = action;
+            Interlocked.Exchange(ref _explicitCancellation, 0);
+            Volatile.Write(ref _activeSessionId, sessionId.ToString("D"));
+        }
+        return completion;
+    }
+
+    private async Task FinishActiveRunAsync(TaskCompletionSource completion)
+    {
+        try { await FinishFileChangesAsync().ConfigureAwait(false); }
+        finally
+        {
+            lock (_activeRunLock)
+            {
+                _activeServerRunId = null;
+                _pendingModelSelection = null;
+                _activeCodingWorkspace = null;
+                _activeRunAction = null;
+                Volatile.Write(ref _activeSessionId, null);
+                _activeCancellation?.Dispose();
+                _activeCancellation = null;
+                _activeRunCompletion = null;
+            }
+            try { _gate.Release(); }
+            finally { completion.TrySetResult(); }
+        }
+    }
+
+    private sealed record CapturedRunCancellation(CancellationTokenSource Cancellation, Task Completion,
+        string? ServerRunId, PromptTriggerAction? Action);
+
+    private CapturedRunCancellation? CaptureRunCancellation(Guid? expectedSessionId = null)
+    {
+        lock (_activeRunLock)
+        {
+            if (_activeCancellation is null || _activeRunCompletion is null
+                || (expectedSessionId.HasValue && ActiveSessionId != expectedSessionId.Value)) return null;
+            Interlocked.Exchange(ref _explicitCancellation, 1);
+            return new(_activeCancellation, _activeRunCompletion.Task, _activeServerRunId, _activeRunAction);
+        }
+    }
+
+    public Task CancelCurrentAsync(CancellationToken cancellationToken = default) =>
+        CancelCapturedRunAsync(CaptureRunCancellation(), cancellationToken);
+
+    private async Task CancelCapturedRunAsync(CapturedRunCancellation? run, CancellationToken cancellationToken)
+    {
+        if (run is null) return;
+        try { run.Cancellation.Cancel(); }
         catch (ObjectDisposedException) { }
-        if (!string.IsNullOrWhiteSpace(serverRunId))
+        if (!string.IsNullOrWhiteSpace(run.ServerRunId))
         {
             try
             {
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 timeout.CancelAfter(TimeSpan.FromSeconds(5));
-                using var client = await CreateClientForActionAsync(_activeRunAction, timeout.Token).ConfigureAwait(false);
-                await client.CancelRunAsync(serverRunId, timeout.Token).ConfigureAwait(false);
+                using var client = await CreateClientForActionAsync(run.Action, timeout.Token).ConfigureAwait(false);
+                await client.CancelRunAsync(run.ServerRunId, timeout.Token).ConfigureAwait(false);
             }
             catch (Exception exception) when (exception is not OutOfMemoryException && !cancellationToken.IsCancellationRequested)
             {
-                RunDiagnostic(logger, serverRunId, $"cancel request failed ({exception.GetType().Name})", exception);
+                RunDiagnostic(logger, run.ServerRunId, $"cancel request failed ({exception.GetType().Name})", exception);
             }
         }
     }
@@ -510,11 +546,17 @@ public sealed partial class MissumAiAssistantService(
         CancellationToken cancellationToken) =>
         await connection.CreateClientAsync(cancellationToken).ConfigureAwait(false);
 
-    public async Task CancelCurrentAndWaitAsync(CancellationToken cancellationToken = default)
+    public Task CancelCurrentAndWaitAsync(CancellationToken cancellationToken = default) =>
+        CancelCurrentAndWaitAsync(null, cancellationToken);
+
+    public async Task CancelCurrentAndWaitAsync(Guid? expectedSessionId, CancellationToken cancellationToken = default)
     {
-        await CancelCurrentAsync(CancellationToken.None).ConfigureAwait(false);
-        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        _gate.Release();
+        // Capture one execution. An earlier reattach waiter may acquire the gate
+        // next, but stopping this execution must never wait for that new run.
+        var run = CaptureRunCancellation(expectedSessionId);
+        if (run is null) return;
+        await Task.WhenAll(CancelCapturedRunAsync(run, CancellationToken.None),
+            run.Completion.WaitAsync(cancellationToken)).ConfigureAwait(false);
     }
 
     public async Task CancelSpeechAsync(CancellationToken cancellationToken = default)
@@ -1739,7 +1781,10 @@ public sealed partial class MissumAiAssistantService(
                                     generation,
                                     modelTokenProgress),
                                 Model: model,
-                                ContextUsed: modelTokenProgress.VisibleContextTokens > 0 ? modelTokenProgress.VisibleContextTokens : null)).ConfigureAwait(false);
+                                ContextUsed: modelTokenProgress.VisibleContextTokens > 0 ? modelTokenProgress.VisibleContextTokens : null,
+                                GenerationState: generation.State,
+                                GeneratedTokens: modelTokenProgress.GeneratedTokens,
+                                GenerationUpdatedAt: item.CreatedAt)).ConfigureAwait(false);
                         }
                         break;
                     case RunEventTypes.ContextChanged:
@@ -2127,6 +2172,13 @@ public sealed partial class MissumAiAssistantService(
                 + (StringProperty(args, "workingDirectory") is null ? "\nworkingDirectory: . (ausgewähltes Projekt)" : string.Empty);
         }
         var path = StringProperty(args, "path") ?? ".";
+        if (proposal.Name == ClientToolNames.ResearchCodeWrite)
+        {
+            var metadata = args.EnumerateObject().Where(property => property.Name != "content")
+                .ToDictionary(property => property.Name, property => property.Value, StringComparer.Ordinal);
+            return "Datei: " + path + "\n\n" + ToolCodeBlock("python", StringProperty(args, "content") ?? string.Empty)
+                + "\nParameter:\n" + ToolCodeBlock("json", JsonSerializer.Serialize(metadata, ToolDisplayJsonOptions));
+        }
         if (args.ValueKind == JsonValueKind.Object && proposal.Name is (ClientToolNames.CodingEdit or ClientToolNames.CodingWrite))
         {
             var diff = new StringBuilder();
@@ -2809,29 +2861,23 @@ public sealed partial class MissumAiAssistantService(
                 ? RunMode.General
                 : RunMode.Auto;
         var isScienceSession = codingSession.ChatMode == ChatMode.ClaudeScience;
+        if (isScienceSession && sciencePresentation is not null) capabilities.Add("research.deliverables");
         var scienceResearch = isScienceSession && (trigger?.DeepResearch == true || ShouldAutoResearch(originalPrompt));
         var generalResearchOptions = CreateDeepResearchOptions(trigger, coding: false, sessionId,
             force: scienceResearch, sandboxResearch: isScienceSession);
-        if (isScienceSession && scienceResearch && researchSandbox is not null)
+        if (isScienceSession && researchSandbox is not null)
         {
+            // Temporary runner health must not remove implemented tools or
+            // silently waive the required simulation and publication.
+            capabilities.Add("research.sandbox");
             await update(new(MissumAiAssistantUpdateKind.Status, assistant, Status: "Forschungssandbox vorbereiten",
                 Detail: "Isolierten Runner und Projektbereich prüfen.")).ConfigureAwait(false);
             var sandboxStatus = await researchSandbox.PrepareRuntimeAsync(cancellationToken).ConfigureAwait(false);
-            if (sandboxStatus.IsReady) capabilities.Add("research.sandbox");
-            else await update(new(MissumAiAssistantUpdateKind.Status, assistant, Status: "Forschungssandbox nicht bereit",
+            if (!sandboxStatus.IsReady) await update(new(MissumAiAssistantUpdateKind.Status, assistant, Status: "Forschungssandbox nicht bereit",
                 Detail: sandboxStatus.Detail ?? sandboxStatus.State)).ConfigureAwait(false);
-            if (!sandboxStatus.IsReady && generalResearchOptions is not null)
-                generalResearchOptions = generalResearchOptions with { AutonomyLevel = ResearchAutonomyLevel.ReadOnlyResearch };
         }
         else if (isScienceSession && scienceResearch && generalResearchOptions is not null)
             generalResearchOptions = generalResearchOptions with { AutonomyLevel = ResearchAutonomyLevel.ReadOnlyResearch };
-        if (isScienceSession && researchSandbox is not null)
-        {
-            var sandboxStatus = await researchSandbox.PrepareRuntimeAsync(cancellationToken).ConfigureAwait(false);
-            if (sandboxStatus.IsReady) capabilities.Add("research.sandbox");
-            else await update(new(MissumAiAssistantUpdateKind.Status, assistant, Status: "Forschungssandbox nicht bereit",
-                Detail: sandboxStatus.Detail ?? sandboxStatus.State)).ConfigureAwait(false);
-        }
         await EnsureResearchProjectAsync(generalResearchOptions, codingSession, originalPrompt, null,
             cancellationToken).ConfigureAwait(false);
         return new RunRequest(

@@ -53,6 +53,7 @@ public sealed partial class AgentToolCatalog
                 && (request.Mode == RunMode.Coding || !IsScientificExecutionTool(tool.Name))).Select(static tool => tool.Name));
         if (HasCapability(capabilities, "research.sandbox"))
             names.UnionWith(CodingToolCatalog.CreateTools().Where(tool => IsScientificExecutionTool(tool.Name)).Select(static tool => tool.Name));
+        if (HasCapability(capabilities, "research.deliverables")) names.Add(ClientToolNames.ResearchDeliverablesVerify);
         if (HasCapability(capabilities, "documentIo"))
         {
             names.UnionWith([ClientToolNames.DocumentRead, ClientToolNames.DocumentCreate]);
@@ -213,6 +214,9 @@ public sealed partial class AgentToolCatalog
         }
         switch (name)
         {
+            case ClientToolNames.ResearchDeliverablesVerify:
+                RequireString(value, "projectId", 1, 128);
+                break;
             case CodingDeepResearchPipeline.ToolName:
                 RequireString(value, "task", 1, RunProcessor.MaximumResearchTaskCharacters);
                 OptionalInteger(value, "maximumSearches", 2, 3);
@@ -309,7 +313,7 @@ public sealed partial class AgentToolCatalog
                 OptionalString(value, "language", 2, 16);
                 if (name == "web.search" && value.TryGetProperty("profile", out var searchProfile)
                     && (searchProfile.ValueKind != JsonValueKind.String || !SearxngSearchProfiles.IsValid(searchProfile.GetString())))
-                    throw new ArgumentException("web.search profile must be auto, general, python, web, dotnet or images.");
+                    throw new ArgumentException("web.search profile must be auto, general, python, web, dotnet, science or images.");
                 break;
             case "media.inspect":
             case "media.analyze":
@@ -355,7 +359,7 @@ public sealed partial class AgentToolCatalog
     {
         var tools = new[]
         {
-            Server("web.search", "Durchsuche das Web über die interne SearXNG-Instanz. Für aktuelle Fakten nutze profile=general; für konkrete Bildwünsche nutze profile=images und präzise Motive. Bildtreffer enthalten die Quellseite in url und die Bildadresse in thumbnailUrl; nur passende HTTPS-Bildadressen als Markdown-Bild anzeigen. Für technische API-Fragen nutze profile=auto oder python/web/dotnet mit 2–4 präzisen Schlüsselwörtern zu genau einem Aspekt. Keine Sammelabfragen. Technische Profile suchen sprachübergreifend, die Antwort bleibt deutsch. Alle Profile bleiben bei SearXNG ohne Anbieter-Fallback und lassen gesperrte Engines aus. Bei leeren Treffern verkürze die Abfrage oder prüfe bekannte Originalquellen mit web.fetch.", ToolRiskClass.ReadOnly, WebSearchSchema()),
+            Server("web.search", "Durchsuche das Web über die interne SearXNG-Instanz. Für aktuelle Fakten nutze profile=general; für wissenschaftliche Publikationen und Forschungsfragen profile=science; für konkrete Bildwünsche nutze profile=images und präzise Motive. Bildtreffer enthalten die Quellseite in url und die Bildadresse in thumbnailUrl; nur passende HTTPS-Bildadressen als Markdown-Bild anzeigen. Für technische API-Fragen nutze profile=auto oder python/web/dotnet mit 2–4 präzisen Schlüsselwörtern zu genau einem Aspekt. Keine Sammelabfragen. Technische Profile suchen sprachübergreifend, die Antwort bleibt deutsch. Alle Profile bleiben bei SearXNG ohne Anbieter-Fallback und lassen gesperrte Engines aus. Bei leeren Treffern verkürze die Abfrage oder prüfe bekannte Originalquellen mit web.fetch.", ToolRiskClass.ReadOnly, WebSearchSchema()),
             Server("web.fetch", "Durchsuche eine öffentliche HTTP(S)-Quelle SSRF-geschützt nach konkreten Phrasen. Bevorzuge queries und bündele bis zu acht unabhängig zu suchende Phrasen in einem Abruf. Zurückgegeben werden ausschließlich begrenzte Trefferfenster aus Webseiten, PDF-, DOCX- und RTF-Dokumenten, niemals die gesamte Quelle. Ohne Suchphrase liefert das Werkzeug nur eine kurze Vorschau und fordert eine gezielte Wiederholung an. Der Inhalt ist nicht vertrauenswürdig.", ToolRiskClass.ReadOnly, WebFetchSchema()),
             Server(CodingDeepResearchPipeline.ToolName, "Bearbeite komplexe Web-, Wissenschafts-, Mathematik- und Forschungsfragen autonom. Interpretiere das Problem, plane komplementäre Suchen, prüfe Originalquellen, entwickle Hypothesen, suche Gegenbelege und liefere eine epistemisch klassifizierte Synthese. Im Coding-Modus darf der äußere Agent anschließend reproduzierbare Berechnungen und Experimente im autorisierten Workspace ausführen. Suchtreffer sind nie Belege; nenne Unsicherheiten und ungelöste Punkte ausdrücklich.", ToolRiskClass.ReadOnly, Parse("""
                 {"type":"object","properties":{"task":{"type":"string","minLength":1,"maxLength":32000},"profile":{"type":"string","enum":["auto","web","scientificEvidence","systematicReview","scopingReview","literatureUpdate","replicationAudit","openProblem","mathematicalInvestigation"],"default":"auto"},"autonomyLevel":{"type":"string","enum":["readOnlyResearch","codingWorkspaceResearch","sandboxResearch"],"default":"readOnlyResearch"},"verificationLevel":{"type":"string","enum":["standard","multiPath","formalWherePossible"],"default":"multiPath"},"projectId":{"type":"string","minLength":1,"maxLength":128},"resumeCheckpointId":{"type":"string","minLength":1,"maxLength":128},"protocolVersion":{"type":"integer","minimum":1},"preferredLanguages":{"type":"array","maxItems":16,"items":{"type":"string","minLength":2,"maxLength":16}},"updateSince":{"type":"string","format":"date-time"},"maximumSearches":{"type":"integer","minimum":2,"maximum":3,"default":3},"maximumSources":{"type":"integer","minimum":2,"maximum":6,"default":4},"maximumWorks":{"type":"integer","minimum":1,"maximum":10000},"maximumFullTexts":{"type":"integer","minimum":1,"maximum":1000}},"required":["task"],"additionalProperties":false}
@@ -367,6 +371,7 @@ public sealed partial class AgentToolCatalog
             Server("context.embed", "Erzeuge BGE-M3-Embeddings für begrenzte Textlisten.", ToolRiskClass.ReadOnly, ArraySchema("inputs")),
             Server("context.retrieve", "Ordne Dokumenttexte über BGE-M3 semantisch zu einer Anfrage.", ToolRiskClass.ReadOnly, RetrieveSchema()),
             Client(ClientToolNames.DocumentRead, "Lese Sitzungsdokumente tokeneffizient: zuerst auflisten oder eine Gliederung abrufen, danach nur benötigte Abschnitte, Fortsetzungen oder Suchtreffer.", ToolRiskClass.ReadOnly, DocumentReadSchema()),
+            Client(ClientToolNames.ResearchDeliverablesVerify, "Prüfe die aktuellen Ergebnisse dieser Claude-Science-Sitzung: tatsächlich gerenderte Publikation als PDF und vorhandene Python-Abbildungen mit Dateiprüfsummen. Vor dem Abschluss aufrufen. Fehlende Ergebnisse bearbeiten und anschließend erneut prüfen; diese Prüfung ersetzt keine wissenschaftliche Verifikation.", ToolRiskClass.ReadOnly, Parse("""{"type":"object","properties":{"projectId":{"type":"string","minLength":1,"maxLength":128}},"required":["projectId"],"additionalProperties":false}""")),
             Client(ClientToolNames.DocumentCreate, "Erstelle oder bearbeite ein Sitzungsdokument abschnittsweise über stabile sectionId-Werte. Missum erzeugt ein versioniertes Chat-Artefakt; PDF wird deterministisch mit Missum und KaTeX gerendert.", ToolRiskClass.LocalMutation, DocumentCreateSchema()),
             Client(ClientToolNames.DocumentsList, "Liste alle fertig aufbereiteten Dokumente der aktuellen Missum-Sitzung mit Dateiname und Seitenzahl.", ToolRiskClass.ReadOnly, Parse("""{"type":"object","properties":{},"required":[],"additionalProperties":false}""")),
             Client(ClientToolNames.DocumentsSearch, "Durchsuche den persistenten lokalen Dokumentindex promptbezogen und liefere Originalbelege mit Dateiname und Seite.", ToolRiskClass.ReadOnly, Parse("""{"type":"object","properties":{"query":{"type":"string"},"maximumCharacters":{"type":"integer","minimum":1000,"maximum":200000}},"required":["query"],"additionalProperties":false}""")),
@@ -393,7 +398,7 @@ public sealed partial class AgentToolCatalog
         """);
 
     private static JsonElement WebSearchSchema() => Parse("""
-        {"type":"object","properties":{"query":{"type":"string","description":"Kurze präzise Suchanfrage; technische API-Namen unverändert lassen."},"maximumResults":{"type":"integer","minimum":1,"maximum":20},"language":{"type":"string"},"profile":{"type":"string","enum":["auto","general","python","web","dotnet","images"],"description":"Passende Engines derselben lokalen SearXNG-Instanz; images sucht tatsächliche Bild-URLs."}},"required":["query"],"additionalProperties":false}
+        {"type":"object","properties":{"query":{"type":"string","description":"Kurze präzise Suchanfrage; technische API-Namen unverändert lassen."},"maximumResults":{"type":"integer","minimum":1,"maximum":20},"language":{"type":"string"},"profile":{"type":"string","enum":["auto","general","python","web","dotnet","science","images"],"description":"Passende Engines derselben lokalen SearXNG-Instanz; science durchsucht wissenschaftliche Indizes; images sucht tatsächliche Bild-URLs."}},"required":["query"],"additionalProperties":false}
         """);
 
     private static JsonElement WebFetchSchema() => Parse("""

@@ -49,7 +49,18 @@ public sealed class ScientificPresentationCoordinator(ScientificPublicationServi
                 var simulation = previous.Simulation;
                 string? publicationError = null, simulationError = null;
                 // Separate failures: a failed Python runtime must not suppress the mandatory PDF.
-                try { publication = await publications.EnsureCurrentAsync(projectId, _shutdown.Token).ConfigureAwait(false) ?? publication; }
+                try
+                {
+                    var current = await publications.EnsureCurrentAsync(projectId, _shutdown.Token).ConfigureAwait(false);
+                    if (current is not null) publication = current;
+                    else
+                    {
+                        // Null means this render became stale, not that the old
+                        // PDF is a current deliverable. Keep it for reading only.
+                        publicationError = "Der Forschungsstand hat sich während der PDF-Erstellung geändert. Die aktuelle Publikation wird erneut erstellt; die sichtbare vorherige Fassung ist noch nicht aktuell.";
+                        lock (state) { state.Dirty = true; }
+                    }
+                }
                 catch (Exception exception) when (exception is not OutOfMemoryException && !_shutdown.IsCancellationRequested) { publicationError = exception.Message; }
                 Publish();
                 try

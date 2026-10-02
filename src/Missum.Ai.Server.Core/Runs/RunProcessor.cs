@@ -293,6 +293,7 @@ public sealed partial class RunProcessor : BackgroundService
         var appliedSteeringSequence = checkpoint.AppliedSteeringSequence;
         var appliedModelSelectionEventId = checkpoint.AppliedModelSelectionEventId;
         var deepResearchCompleted = checkpoint.DeepResearchCompleted;
+        var scientificCompletionPending = false;
         if (appliedSteeringSequence > 0)
         {
             stagedWebResearchRequested = false;
@@ -616,7 +617,8 @@ public sealed partial class RunProcessor : BackgroundService
                             var report = RenderExplicitDeepResearchReport(result.Result);
                             if (await CompleteRunAsync(report, textWasStreamed: false).ConfigureAwait(false)) return;
                             cancellationToken.ThrowIfCancellationRequested();
-                            if (!await _repository.HasPendingSteeringAsync(runId, cancellationToken).ConfigureAwait(false)) return;
+                            if (!scientificCompletionPending
+                                && !await _repository.HasPendingSteeringAsync(runId, cancellationToken).ConfigureAwait(false)) return;
                         }
                         await SaveCheckpointAsync().ConfigureAwait(false);
                         if (isCoding) CodingPlanProgressGuard.ThrowIfStalled(workingState);
@@ -891,8 +893,11 @@ public sealed partial class RunProcessor : BackgroundService
                 }
                 try
                 {
-                    contextPlan = ContextPlanner.Prepare(
-                        WithWorkingState(messages, workingState, workingStatePromptIncluded),
+                    var planningMessages = WithWorkingState(messages, workingState, workingStatePromptIncluded);
+                    contextPlan = ScientificRunCompletionPolicy.Applies(request)
+                        ? ScientificRunContextPlanner.Prepare(planningMessages, contextLength, maximumOutputTokens)
+                        : ContextPlanner.Prepare(
+                        planningMessages,
                         contextLength,
                         maximumOutputTokens,
                         allowLossyCompaction: true,
@@ -970,6 +975,14 @@ public sealed partial class RunProcessor : BackgroundService
                 var heartbeat = isCoding ? PublishCodingHeartbeatAsync(runId, roundCount + 1, heartbeatCancellation.Token) : Task.CompletedTask;
                 try
                 {
+                    // The preceding selector turn already made the substantive
+                    // decision with the user's reasoning setting. This turn only
+                    // serializes the chosen call; another private thinking phase
+                    // can spend tens of thousands of tokens before emitting JSON.
+                    // Use the runtime's capability-aware non-thinking selection
+                    // here, without changing the saved preference or later rounds.
+                    if (selectedToolName is not null)
+                        effort = _modelRuntime.ResolveMediaReasoningEffort(selection.ModelId, selection.Role, "none");
                     lastNativePrompt = ModelRuntimeClient.PrepareLanguageBoundMessages(contextPlan.Messages);
                     // Persist the exact evaluated prefix before inference. Stop may
                     // otherwise leave only the pre-tokenization prompt behind.
@@ -1072,6 +1085,33 @@ public sealed partial class RunProcessor : BackgroundService
                 lastNativePrompt = null;
                 roundCount++;
                 await SaveCheckpointAsync().ConfigureAwait(false);
+                continue;
+            }
+            catch (ModelGenerationTerminatedException exception) when (
+                ScientificRunCompletionPolicy.Applies(request)
+                && exception.ProviderCode != "transport_retry_exhausted" && !cancellationToken.IsCancellationRequested)
+            {
+                // A provider turn may end without a usable response. Research is
+                // still recoverable; keep partial text, reject partial calls and
+                // let the deliverables gate drive the next bounded-backoff turn.
+                if (lastNativePrompt is not null)
+                {
+                    messages = lastNativePrompt.ToList();
+                    preserveSessionPromptPrefix = true;
+                    workingStatePromptIncluded = workingState is not null;
+                }
+                var visible = CodingTextReconciler.Project(await _repository.GetVisibleTextEventsAsync(runId, 0, cancellationToken).ConfigureAwait(false));
+                if (visible.Length > generationVisibleStart)
+                    messages.Add(new LmChatMessage("assistant", visible[generationVisibleStart..]));
+                messages.Add(new LmChatMessage("system", $"Die letzte Modellrunde wurde ohne verwertbares Ergebnis beendet ({exception.ProviderCode}). "
+                    + "Der Auftrag bleibt offen. Verwende den vorhandenen Forschungsstand, repariere den konkreten nächsten Arbeitsschritt und gib eine sichtbare fachliche Antwort oder genau den angeforderten strukturierten Werkzeugaufruf aus."));
+                visibleTextLength = visible.Length;
+                streamingTurnStartEventId = null;
+                lastNativePrompt = null;
+                roundCount++;
+                await SaveCheckpointAsync().ConfigureAwait(false);
+                if (await CompleteRunAsync("", textWasStreamed: true).ConfigureAwait(false)) return;
+                cancellationToken.ThrowIfCancellationRequested();
                 continue;
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -1287,12 +1327,19 @@ public sealed partial class RunProcessor : BackgroundService
 
             if (string.IsNullOrWhiteSpace(response.Content))
             {
+                if (ScientificRunCompletionPolicy.Applies(request))
+                {
+                    if (await CompleteRunAsync("", textWasStreamed: true).ConfigureAwait(false)) return;
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (scientificCompletionPending) continue;
+                }
                 throw new InvalidOperationException("Model returned neither text nor a structured tool call.");
             }
 
             if (await CompleteRunAsync(response.Content, liveTextGate.HasStreamed).ConfigureAwait(false)) return;
             // Acceptance won the atomic completion race. Continue this same run.
             cancellationToken.ThrowIfCancellationRequested();
+            if (scientificCompletionPending) continue;
             if (!await _repository.HasPendingSteeringAsync(runId, cancellationToken).ConfigureAwait(false)) return;
         }
 
@@ -1413,6 +1460,57 @@ public sealed partial class RunProcessor : BackgroundService
 
         async Task<bool> CompleteRunAsync(string content, bool textWasStreamed)
         {
+            scientificCompletionPending = false;
+            if (ScientificRunCompletionPolicy.Applies(request))
+            {
+                if (!string.IsNullOrWhiteSpace(content))
+                {
+                    if (!textWasStreamed)
+                        foreach (var delta in SplitDeltas(ParseFinalResponse(content, request).Message))
+                            await _repository.AppendEventAsync(runId, RunEventTypes.TextDelta,
+                                new TextDeltaEvent(delta), cancellationToken).ConfigureAwait(false);
+                    messages.Add(new LmChatMessage("assistant", content, ReasoningContent: lastNativeReasoning));
+                }
+                var assessment = ScientificRunCompletionPolicy.Assess(request, messages, availableTools);
+                if (!assessment.Complete)
+                {
+                    scientificCompletionPending = true;
+                    var diagnosis = assessment.NeedsVerification
+                        ? "Ich prüfe jetzt die aktuelle PDF-Publikation und die tatsächlich ausgeführten Python-Abbildungen vor dem Abschluss."
+                        : "Der Forschungszyklus ist noch unvollständig. " + string.Join(" ", assessment.Missing.Take(3))
+                            + " Ich erhalte den Arbeitsstand und bearbeite den nächsten belegbaren Schritt.";
+                    // Persist the repair before waiting or proposing a client tool.
+                    // Recovery must retain this decision, including its backoff state.
+                    ScientificRunCompletionPolicy.UpsertRecoveryPrompt(messages, assessment);
+                    if (assessment.RepeatedAttempts == 0 || assessment.RepeatedAttempts % 3 == 0)
+                    {
+                        await PublishVisibleDeltaAsync(new TextDeltaEvent("\n\n" + diagnosis + "\n\n"), cancellationToken).ConfigureAwait(false);
+                    }
+                    await SaveCheckpointAsync().ConfigureAwait(false);
+                    var delay = ScientificRunCompletionPolicy.RetryDelay(assessment);
+                    if (delay > TimeSpan.Zero) await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (assessment.NeedsVerification)
+                    {
+                        var call = new LmToolCall("science-verify-" + Guid.NewGuid().ToString("N"),
+                            ScientificRunCompletionPolicy.VerifyTool,
+                            JsonSerializer.SerializeToElement(new { projectId = assessment.ProjectId }));
+                        messages.Add(new LmChatMessage("assistant", null, ToolCalls: [call]));
+                        activeCalls = [call];
+                        activeCallRound = roundCount;
+                        nextToolIndex = 0;
+                        selectedToolName = null;
+                        requiredToolCallRetryCount = 0;
+                        toolCallCount++;
+                        await SaveCheckpointAsync().ConfigureAwait(false);
+                    }
+                    return false;
+                }
+                // The candidate was journaled before verification. Do not append
+                // it twice once the successful finalization becomes admissible.
+                content = "";
+                textWasStreamed = true;
+            }
             var finalResponse = ParseFinalResponse(content, request);
             if (!textWasStreamed)
             {
@@ -1429,7 +1527,8 @@ public sealed partial class RunProcessor : BackgroundService
             {
                 // The exact effective input was retained at response receipt. Append
                 // the generated tail so a new user turn can reuse it as well.
-                messages.Add(new LmChatMessage("assistant", content, ReasoningContent: lastNativeReasoning));
+                if (!string.IsNullOrWhiteSpace(content))
+                    messages.Add(new LmChatMessage("assistant", content, ReasoningContent: lastNativeReasoning));
                 await SaveCheckpointAsync().ConfigureAwait(false);
             }
             var finalized = await _repository.FinalizeConversationAsync(runId, new RunCompletedEvent(
@@ -2104,17 +2203,21 @@ public sealed partial class RunProcessor : BackgroundService
 
     internal async Task<bool> TryScheduleProviderRetryAsync(string runId, Exception exception)
     {
-        if (exception is not ModelProviderRequestException transport
-            || transport.InnerException is not { } inner
-            || !ModelRuntimeClient.IsTransientInferenceFailure(inner)) return false;
+        // Exhausting transport retries after a partial stream is the same
+        // temporary provider outage as failing before its first response. Other
+        // generation termination reasons retain their existing failure behavior.
+        if (exception is not (ModelProviderRequestException
+                or ModelGenerationTerminatedException { ProviderCode: "transport_retry_exhausted" })
+            || exception.InnerException is not { } inner
+            || !ModelRuntimeClient.IsRecoverableProviderTransportFailure(inner)) return false;
         var request = await _repository.GetRequestAsync(runId).ConfigureAwait(false);
         if (request is null) return false;
         var retry = await _repository.ScheduleProviderRetryAsync(runId, DateTimeOffset.UtcNow).ConfigureAwait(false);
         if (retry is null) return true; // A concurrent cancel is authoritative.
         await _repository.AppendEventAsync(runId, RunEventTypes.ModelGeneration,
             new ModelGenerationEvent("providerRetryWaiting", Attempt: (int)Math.Min(retry.Value.Attempt, int.MaxValue),
-                FailureKind: transport.Message, ElapsedSeconds: (int)Math.Ceiling(retry.Value.Delay.TotalSeconds))).ConfigureAwait(false);
-        _runtime.WriteLog("Warning", "run.provider_retry", $"Run {runId} wartet bis {retry.Value.NotBefore:O} auf die native Modellruntime: {transport.Message}");
+                FailureKind: exception.Message, ElapsedSeconds: (int)Math.Ceiling(retry.Value.Delay.TotalSeconds))).ConfigureAwait(false);
+        _runtime.WriteLog("Warning", "run.provider_retry", $"Run {runId} wartet bis {retry.Value.NotBefore:O} auf die native Modellruntime: {exception.Message}");
         return true;
     }
 
@@ -2261,7 +2364,7 @@ public sealed partial class RunProcessor : BackgroundService
             {
                 return new AgentFinalResponse(
                     messageElement.GetString()!,
-                    SanitizeTitle(titleElement.GetString() ?? string.Empty, GetLatestUserText(request)));
+                    SanitizeTitle(ScientificRunCompletionPolicy.Applies(request) ? "" : titleElement.GetString() ?? string.Empty, GetLatestUserText(request)));
             }
         }
         catch (JsonException)
@@ -2274,10 +2377,16 @@ public sealed partial class RunProcessor : BackgroundService
             SanitizeTitle(string.Empty, GetLatestUserText(request)));
     }
 
-    private static string GetLatestUserText(RunRequest request) => request.Messages
-        .LastOrDefault(static message => string.Equals(message.Role, "user", StringComparison.OrdinalIgnoreCase))?
-        .Content.FirstOrDefault(static part => !string.IsNullOrWhiteSpace(part.Text))?.Text
-        ?? string.Empty;
+    private static string GetLatestUserText(RunRequest request)
+    {
+        var prompts = request.Messages.Where(static message => string.Equals(message.Role, "user", StringComparison.OrdinalIgnoreCase))
+            .Select(static message => string.Join("\n", message.Content.Where(static part => !string.IsNullOrWhiteSpace(part.Text)).Select(static part => part.Text)))
+            .Where(static text => !text.TrimStart().StartsWith("[MISSUM_", StringComparison.Ordinal)
+                && !text.TrimStart().StartsWith("Missum-Laufanweisung", StringComparison.Ordinal)).ToArray();
+        if (ScientificRunCompletionPolicy.Applies(request))
+            return prompts.FirstOrDefault() ?? "Wissenschaftliches Forschungsprojekt";
+        return prompts.LastOrDefault() ?? "";
+    }
 
     internal static string SanitizeTitle(string generated, string fallbackText)
     {
@@ -2291,13 +2400,14 @@ public sealed partial class RunProcessor : BackgroundService
         var words = normalized.Split(' ', StringSplitOptions.RemoveEmptyEntries);
         if (words.Length is > 0 and <= 6
             && normalized.Length <= 80
+            && !normalized.Contains("MISSUM_", StringComparison.OrdinalIgnoreCase)
             && !IsGenericTitle(normalized))
         {
             return normalized;
         }
 
         var fallbackWords = fallbackText
-            .Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
             .Select(static word => word.Trim(' ', '.', ',', ':', ';', '!', '?', '-', '#', '"', '\''))
             .Where(static word => !TitleStopWords.Contains(word))
             .Take(6);

@@ -221,7 +221,7 @@ public sealed class ProjectMemoryTests
 
         public ValueTask DisposeAsync()
         {
-            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            TestSqlitePools.ClearDatabasePool(Path.Combine(Directory, new ProjectMemoryOptions().DatabaseFileName));
             if (System.IO.Directory.Exists(Directory))
             {
                 System.IO.Directory.Delete(Directory, recursive: true);

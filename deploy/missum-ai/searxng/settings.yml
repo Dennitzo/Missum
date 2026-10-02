@@ -1,5 +1,9 @@
 use_default_settings: true
 
+# Preserve publisher/DOI URLs. The upstream open-access rewriter attempts to add
+# a doi field to MainResult and fails for ordinary web results containing DOIs.
+default_doi_resolver: ""
+
 general:
   instance_name: "Missum AI Recherche"
   debug: false
@@ -7,6 +11,12 @@ general:
 search:
   safe_search: 1
   autocomplete: ""
+  # Upstream 429/CAPTCHA responses are engine failures, not a reason to retry
+  # immediately. Keep these durations aligned with the gateway cooldowns.
+  suspended_times:
+    SearxEngineAccessDenied: 3600
+    SearxEngineCaptcha: 3600
+    SearxEngineTooManyRequests: 3600
   formats:
     - json
 
@@ -27,14 +37,40 @@ outgoing:
   pool_connections: 50
   pool_maxsize: 10
 
-# Keep independent working web engines available. CAPTCHA-prone defaults must
-# not dominate every general query; the gateway also tracks engine cooldowns.
+# Text and image profiles in SearxngSearchProfiles select their engines explicitly.
+# Do not let the repeatedly blocked Brave defaults silently rejoin a category.
+# Scientific engines remain available independently of general web search.
 engines:
+  # This private instance has no Tor proxy; skip unused onion engines at startup.
+  - name: ahmia
+    inactive: true
+  - name: torch
+    inactive: true
   - name: google cse
     disabled: false
   - name: bing
     disabled: false
+  - name: brave
+    disabled: true
+  - name: brave.images
+    disabled: true
   - name: duckduckgo
     disabled: true
   - name: startpage
     disabled: true
+  - name: arxiv
+    disabled: false
+  - name: crossref
+    engine: missum_crossref
+    disabled: false
+    timeout: 15.0
+  - name: openalex
+    disabled: false
+  - name: semantic scholar
+    disabled: false
+  - name: google cse images
+    disabled: false
+  - name: wikicommons.images
+    disabled: false
+  - name: openverse
+    disabled: false

@@ -42,15 +42,19 @@ public sealed class ScientificMetadataService(IHttpClientFactory httpClientFacto
     private async Task<IReadOnlyList<ScientificWorkCandidate>> CrossrefAsync(string query, CancellationToken token)
     {
         var root = await GetJsonAsync("https://api.crossref.org/works?rows=5&select=DOI,title,URL&query=" + Uri.EscapeDataString(query), token).ConfigureAwait(false);
-        if (!root.TryGetProperty("message", out var message) || !message.TryGetProperty("items", out var items)) return [];
-        return items.EnumerateArray().Take(MaximumCandidatesPerProvider).Select(item =>
+        if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("message", out var message)
+            || message.ValueKind != JsonValueKind.Object || !message.TryGetProperty("items", out var items)
+            || items.ValueKind != JsonValueKind.Array) return [];
+        return items.EnumerateArray().Where(static item => item.ValueKind == JsonValueKind.Object).Select(item =>
         {
             var doi = String(item, "DOI");
             var title = item.TryGetProperty("title", out var titles) && titles.ValueKind == JsonValueKind.Array
-                ? titles.EnumerateArray().FirstOrDefault().GetString() : null;
+                ? titles.EnumerateArray().Where(static value => value.ValueKind == JsonValueKind.String)
+                    .Select(static value => value.GetString()).FirstOrDefault(static value => !string.IsNullOrWhiteSpace(value))
+                : null;
             var url = !string.IsNullOrWhiteSpace(doi) ? "https://doi.org/" + doi : String(item, "URL");
             return Candidate(title, url, "crossref", doi);
-        }).WhereNotNull().ToArray();
+        }).WhereNotNull().Take(MaximumCandidatesPerProvider).ToArray();
     }
 
     private async Task<IReadOnlyList<ScientificWorkCandidate>> OpenAlexAsync(string query, CancellationToken token)

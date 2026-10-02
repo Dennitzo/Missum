@@ -9,86 +9,172 @@ using Windows.Storage.Streams;
 
 namespace Missum.App.Controls;
 
-/// <summary>Native Windows PDF rendering; the publication remains a real, exportable PDF.</summary>
-internal sealed class NativePublicationView : Grid
+/// <summary>Continuous native PDF pages, with bitmaps loaded only near the viewport.</summary>
+internal sealed class NativePublicationView : Grid, IDisposable
 {
-    private readonly Image _page = new() { Stretch = Stretch.Uniform, MaxWidth = 1150, HorizontalAlignment = HorizontalAlignment.Center };
-    private readonly TextBlock _counter = new() { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0, 12, 0) };
-    private readonly Button _previous = new() { Content = "‹", Width = 34 };
-    private readonly Button _next = new() { Content = "›", Width = 34 };
+    private readonly StackPanel _pages = new() { Spacing = 18, HorizontalAlignment = HorizontalAlignment.Center };
     private readonly ScrollViewer _scroll;
+    private readonly List<Image> _images = [];
+    private readonly Dictionary<int, double> _aspectRatios = [];
+    private CancellationTokenSource? _loading, _rendering;
     private PdfDocument? _document;
+    private Task _renderTask = Task.CompletedTask;
     private long _version;
-    private uint _index;
     private string? _path;
-    private double _pageAspectRatio = 1.4142;
+    private bool _renderAgain, _disposed;
     internal uint PageCount => _document?.PageCount ?? 0;
-    internal bool HasRenderedPage => _page.Source is not null;
+    internal bool HasRenderedPage => _images.Any(image => image.Source is not null);
+    internal int PageVisualCount => _images.Count;
+    internal bool IsLastPageRendered => _images.Count > 0 && _images[^1].Source is not null;
+    internal string ScrollDiagnostics => $"offset={_scroll.VerticalOffset:F1}, end={_scroll.ScrollableHeight:F1}, viewport={_scroll.ViewportHeight:F1}, content={_pages.ActualHeight:F1}, pages={PageCount}, rendered={_images.Count(image => image.Source is not null)}";
+
+    internal async Task ScrollToEndAsync()
+    {
+        UpdateLayout();
+        var end = _scroll.ScrollableHeight;
+        if (Math.Abs(_scroll.VerticalOffset - end) > 1)
+        {
+            var changed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            void OnSettled(object? sender, ScrollViewerViewChangedEventArgs args)
+            {
+                if (!args.IsIntermediate) changed.TrySetResult();
+            }
+            _scroll.ViewChanged += OnSettled;
+            try
+            {
+                if (_scroll.ChangeView(null, end, null, true))
+                    await changed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            }
+            finally { _scroll.ViewChanged -= OnSettled; }
+        }
+        UpdateLayout();
+        RequestRendering(); await _renderTask;
+    }
 
     public NativePublicationView()
     {
-        RowDefinitions.Add(new() { Height = GridLength.Auto });
-        RowDefinitions.Add(new() { Height = new GridLength(1, GridUnitType.Star) });
-        var toolbar = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 4, 0, 10) };
-        toolbar.Children.Add(_previous); toolbar.Children.Add(_counter); toolbar.Children.Add(_next);
-        Children.Add(toolbar);
-        _scroll = new ScrollViewer { Content = _page, Padding = new Thickness(18, 0, 18, 24), HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-            ZoomMode = ZoomMode.Enabled, MinZoomFactor = .5f, MaxZoomFactor = 3f };
-        Grid.SetRow(_scroll, 1); Children.Add(_scroll);
-        _scroll.SizeChanged += (_, _) => FitPageToViewport();
-        Loaded += (_, _) => FitPageToViewport();
-        AutomationProperties.SetName(_previous, "Vorherige PDF-Seite");
-        AutomationProperties.SetName(_next, "Nächste PDF-Seite");
-        AutomationProperties.SetName(_page, "Wissenschaftliche Publikation als PDF");
-        _previous.Click += async (_, _) => { if (_index > 0) { _index--; await RenderPageSafelyAsync(); } };
-        _next.Click += async (_, _) => { if (_document is not null && _index + 1 < _document.PageCount) { _index++; await RenderPageSafelyAsync(); } };
-        _previous.IsEnabled = _next.IsEnabled = false;
+        _scroll = new ScrollViewer
+        {
+            Content = _pages, Padding = new Thickness(18, 0, 18, 24),
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, HorizontalScrollMode = ScrollMode.Disabled,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto, ZoomMode = ZoomMode.Enabled,
+            MinZoomFactor = .5f, MaxZoomFactor = 3f,
+        };
+        Children.Add(_scroll);
+        AutomationProperties.SetName(_scroll, "Wissenschaftliche Publikation, alle PDF-Seiten untereinander");
+        _scroll.SizeChanged += (_, _) => { FitPages(); RequestRendering(); };
+        _scroll.ViewChanged += (_, _) => RequestRendering();
+        Loaded += (_, _) => { FitPages(); RequestRendering(); };
+        Unloaded += (_, _) => _rendering?.Cancel();
     }
 
-    internal async Task LoadAsync(string path)
+    internal async Task LoadAsync(string path, CancellationToken cancellationToken = default)
     {
-        if (path == _path) return;
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (path == _path && _document is not null) { RequestRendering(); await _renderTask; return; }
         var version = ++_version;
-        _previous.IsEnabled = _next.IsEnabled = false;
-        var document = await PdfDocument.LoadFromFileAsync(await StorageFile.GetFileFromPathAsync(path));
-        if (version != _version) return;
-        _document = document;
-        _index = Math.Min(_index, document.PageCount == 0 ? 0 : document.PageCount - 1);
-        await RenderPageAsync(version);
-        if (version == _version) _path = path;
+        _loading?.Cancel(); _rendering?.Cancel();
+        using var loading = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        _loading = loading;
+        try
+        {
+            var file = await StorageFile.GetFileFromPathAsync(path).AsTask(loading.Token);
+            var document = await PdfDocument.LoadFromFileAsync(file).AsTask(loading.Token);
+            if (_disposed || version != _version) return;
+            var offset = _scroll.VerticalOffset;
+            _document = document; _path = path; _aspectRatios.Clear(); _images.Clear(); _pages.Children.Clear();
+            for (var index = 0; index < document.PageCount; index++)
+            {
+                var image = new Image { Stretch = Stretch.Uniform, HorizontalAlignment = HorizontalAlignment.Center };
+                AutomationProperties.SetName(image, $"PDF-Seite {index + 1} von {document.PageCount}");
+                _images.Add(image); _pages.Children.Add(image);
+            }
+            FitPages(); UpdateLayout(); _scroll.ChangeView(null, offset, null, true);
+            await _renderTask;
+            if (_disposed || version != _version) return;
+            RequestRendering(); await _renderTask;
+        }
+        catch (OperationCanceledException) when (loading.IsCancellationRequested || version != _version || _disposed) { }
+        finally { if (ReferenceEquals(_loading, loading)) _loading = null; }
     }
 
-    private void FitPageToViewport()
+    private void FitPages()
     {
-        if (_scroll.ActualWidth <= 36) return;
-        var width = Math.Min(1150, _scroll.ActualWidth - 36);
-        if (double.IsNaN(_page.Width) || Math.Abs(_page.Width - width) > .5) _page.Width = width;
-        var height = width * _pageAspectRatio;
-        if (double.IsNaN(_page.Height) || Math.Abs(_page.Height - height) > .5) _page.Height = height;
+        var width = Math.Min(1150, Math.Max(240, _scroll.ActualWidth - 36));
+        for (var index = 0; index < _images.Count; index++)
+        {
+            _images[index].Width = width;
+            _images[index].Height = width * _aspectRatios.GetValueOrDefault(index, 1.4142);
+        }
     }
 
-    private async Task RenderPageSafelyAsync()
+    private void RequestRendering()
     {
-        try { await RenderPageAsync(++_version); }
-        catch (Exception exception) when (exception is not OutOfMemoryException) { _counter.Text = "PDF-Seite konnte nicht geladen werden: " + exception.Message; }
+        if (_disposed || _document is null) return;
+        _renderAgain = true;
+        if (!_renderTask.IsCompleted) return;
+        _renderTask = RenderVisiblePagesSafelyAsync();
     }
 
-    private async Task RenderPageAsync(long version)
+    private async Task RenderVisiblePagesSafelyAsync()
     {
-        if (_document is null || _document.PageCount == 0) return;
-        var document = _document;
-        using var page = document.GetPage(_index);
-        using var stream = new InMemoryRandomAccessStream();
-        await page.RenderToStreamAsync(stream, new PdfPageRenderOptions { DestinationWidth = 1600, BackgroundColor = Microsoft.UI.Colors.White });
-        stream.Seek(0);
-        var bitmap = new BitmapImage();
-        await bitmap.SetSourceAsync(stream);
-        if (version != _version || !ReferenceEquals(document, _document)) return;
-        _pageAspectRatio = bitmap.PixelWidth > 0 ? (double)bitmap.PixelHeight / bitmap.PixelWidth : 1.4142;
-        _page.Source = bitmap;
-        FitPageToViewport();
-        _counter.Text = $"Seite {_index + 1} von {document.PageCount}";
-        _previous.IsEnabled = _index > 0; _next.IsEnabled = _index + 1 < document.PageCount;
-        AutomationProperties.SetHelpText(_page, _counter.Text);
+        using var rendering = new CancellationTokenSource();
+        _rendering = rendering;
+        var version = _version;
+        try
+        {
+            while (_renderAgain && !_disposed && version == _version)
+            {
+                _renderAgain = false;
+                var document = _document;
+                if (document is null) return;
+                var zoom = Math.Max(.5, _scroll.ZoomFactor);
+                var viewport = Math.Max(500, _scroll.ViewportHeight / zoom);
+                var offset = _scroll.VerticalOffset / zoom;
+                double top = 0;
+                for (var index = 0; index < _images.Count; index++)
+                {
+                    rendering.Token.ThrowIfCancellationRequested();
+                    var image = _images[index];
+                    var bottom = top + image.Height;
+                    var near = bottom >= offset - viewport && top <= offset + viewport * 2;
+                    top = bottom + _pages.Spacing;
+                    if (!near) { image.Source = null; continue; }
+                    if (image.Source is not null) continue;
+                    using var page = document.GetPage((uint)index);
+                    using var stream = new InMemoryRandomAccessStream();
+                    await page.RenderToStreamAsync(stream, new PdfPageRenderOptions
+                        { DestinationWidth = 1600, BackgroundColor = Microsoft.UI.Colors.White }).AsTask(rendering.Token);
+                    stream.Seek(0);
+                    var bitmap = new BitmapImage();
+                    await bitmap.SetSourceAsync(stream).AsTask(rendering.Token);
+                    if (_disposed || version != _version || !ReferenceEquals(document, _document)) return;
+                    _aspectRatios[index] = bitmap.PixelWidth > 0 ? (double)bitmap.PixelHeight / bitmap.PixelWidth : 1.4142;
+                    image.Source = bitmap;
+                }
+                if (!_disposed && version == _version) FitPages();
+            }
+        }
+        catch (OperationCanceledException) when (rendering.IsCancellationRequested || _disposed || version != _version) { }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            if (!_disposed && version == _version)
+                AutomationProperties.SetHelpText(_scroll, "PDF-Vorschau konnte nicht geladen werden: " + exception.Message);
+        }
+        finally
+        {
+            if (ReferenceEquals(_rendering, rendering)) _rendering = null;
+            if (!_disposed && _renderAgain && IsLoaded && rendering.IsCancellationRequested)
+                DispatcherQueue.TryEnqueue(RequestRendering);
+        }
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true; ++_version; _loading?.Cancel(); _rendering?.Cancel();
+        _document = null; _path = null;
+        foreach (var image in _images) image.Source = null;
+        _images.Clear(); _pages.Children.Clear();
     }
 }

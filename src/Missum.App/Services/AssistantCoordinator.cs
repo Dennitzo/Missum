@@ -66,6 +66,41 @@ public sealed class AssistantCoordinator(
         return value;
     }
     private int _startupRunsHandled;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, string> _checkedScienceTitles = new();
+
+    private async Task<ChatSession> RepairScienceTitleAsync(ChatSession session, CancellationToken cancellationToken)
+    {
+        if (session.ChatMode != ChatMode.ClaudeScience
+            || _checkedScienceTitles.TryGetValue(session.Id, out var checkedTitle) && checkedTitle == session.Title)
+            return session;
+        var messages = await chats.ListMessagesAsync(session.Id, cancellationToken).ConfigureAwait(false);
+        var original = messages.Where(message => message.Role == ChatRole.User)
+            .OrderBy(message => message.CreatedAt).ThenBy(message => message.Id)
+            .Select(message => message.Content)
+            .FirstOrDefault(prompt => ScientificSessionTitle.FromPrompt(prompt) is not null);
+        var corrected = ScientificSessionTitle.FromPrompt(original);
+        // Repair only our previous automatic name or a default. An independent
+        // user rename is preserved, including across follow-up prompts/restarts.
+        if (corrected is not null && corrected != session.Title
+            && (GenericSessionTitles.Contains(session.Title) || session.Title == DerivePromptSessionTitle(original!)))
+        {
+            await chats.RenameSessionAsync(session.Id, corrected, cancellationToken).ConfigureAwait(false);
+            foreach (var message in messages.Where(message => message.Role == ChatRole.Assistant))
+            {
+                foreach (var step in (message.ToolSteps ?? []).Where(step => step.Id.StartsWith("science-introduction:", StringComparison.Ordinal)
+                    && step.Tool == "assistant.narration" && step.Detail?.StartsWith("**" + session.Title + "**\n\n", StringComparison.Ordinal) == true))
+                {
+                    await chats.SaveToolStepAsync(message.Id, step with
+                    {
+                        Detail = "**" + corrected + "**\n\n" + step.Detail![(session.Title.Length + 6)..],
+                    }, cancellationToken).ConfigureAwait(false);
+                }
+            }
+            session = session with { Title = corrected };
+        }
+        _checkedScienceTitles[session.Id] = session.Title;
+        return session;
+    }
     private Task? _resumeTask;
     private readonly object _resumeLock = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, AssistantDisplayState> _displayStates = new();
@@ -75,7 +110,8 @@ public sealed class AssistantCoordinator(
 
     internal sealed record AssistantDisplayState(Guid MessageId, string? ModelSelection, bool IsCoding,
         bool IsRunning, string? Status = null, string? Detail = null, string? Model = null,
-        int? ContextUsed = null, int? ContextLimit = null, int? LoadedFiles = null, bool ContextWasCompacted = false);
+        int? ContextUsed = null, int? ContextLimit = null, int? LoadedFiles = null, bool ContextWasCompacted = false,
+        string? GenerationState = null, int? GeneratedTokens = null, DateTimeOffset? GenerationUpdatedAt = null);
 
     private async Task ObserveDisplayStateAsync(MissumAiAssistantUpdate update)
     {
@@ -94,6 +130,9 @@ public sealed class AssistantCoordinator(
             var reasoningOnly = update.ToolStep?.Tool == "assistant.reasoning";
             var resumed = update.Kind == MissumAiAssistantUpdateKind.Started && current.IsRunning && current.Status is not null
                 && update.ToolStep?.Tool != MissumAiAssistantService.ContinuationStepTool;
+            // Staged Science streams internal text fragments through model
+            // progress too. They must not replace the last real token pulse.
+            var preserveGeneration = reasoningOnly || resumed || update.GenerationState is "reasoningDelta" or "contentDelta";
             return current with
             {
                 IsRunning = update.Kind is not (MissumAiAssistantUpdateKind.Completed or MissumAiAssistantUpdateKind.Cancelled or MissumAiAssistantUpdateKind.Failed),
@@ -104,6 +143,9 @@ public sealed class AssistantCoordinator(
                 ContextLimit = update.ContextLimit ?? current.ContextLimit,
                 LoadedFiles = update.LoadedFiles ?? current.LoadedFiles,
                 ContextWasCompacted = update.ContextUsed.HasValue ? update.ContextWasCompacted : current.ContextWasCompacted,
+                GenerationState = preserveGeneration ? current.GenerationState : update.GenerationState,
+                GeneratedTokens = preserveGeneration ? current.GeneratedTokens : update.GeneratedTokens,
+                GenerationUpdatedAt = preserveGeneration ? current.GenerationUpdatedAt : update.GenerationUpdatedAt,
             };
         }
     }
@@ -206,9 +248,16 @@ public sealed class AssistantCoordinator(
 
     public async Task CancelCurrentAsync(Guid? sessionId = null)
     {
-        if (_runScheduler is not null)
+        var snapshot = _runScheduler?.Snapshot;
+        // Continuations and reattached SSE readers run outside the queue. Capture
+        // their cancellation before cancelling a ticket, otherwise the linked
+        // scheduler token can detach the reader and clear its server run ID first.
+        var cancelActive = missumAi is not null
+            && (!sessionId.HasValue || missumAi.ActiveSessionId == sessionId.Value)
+                ? missumAi.CancelCurrentAndWaitAsync(sessionId, CancellationToken.None)
+                : Task.CompletedTask;
+        if (_runScheduler is not null && snapshot is not null)
         {
-            var snapshot = _runScheduler.Snapshot;
             if (snapshot.Active is { } active
                 && (!sessionId.HasValue || active.SessionId == sessionId.Value))
             {
@@ -217,21 +266,11 @@ public sealed class AssistantCoordinator(
             else
             {
                 var queued = snapshot.Pending.FirstOrDefault(item => !sessionId.HasValue || item.SessionId == sessionId.Value);
-                if (queued is not null && _runScheduler.TryCancel(queued.TicketId))
-                {
-                    return;
-                }
-                if (sessionId.HasValue)
-                {
-                    return;
-                }
+                if (queued is not null) _runScheduler.TryCancel(queued.TicketId);
             }
         }
 
-        if (missumAi is not null)
-        {
-            await missumAi.CancelCurrentAndWaitAsync(CancellationToken.None).ConfigureAwait(false);
-        }
+        await cancelActive.ConfigureAwait(false);
     }
 
     public async Task AddLiveCaptionResultAsync(
@@ -282,6 +321,9 @@ public sealed class AssistantCoordinator(
     public async Task<object> BuildSnapshotAsync(CancellationToken cancellationToken = default)
     {
         var activeSession = await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false);
+        if (activeSession.ChatMode == ChatMode.ClaudeScience)
+            foreach (var scienceSession in await chats.ListSessionsAsync(ChatMode.ClaudeScience, cancellationToken: cancellationToken).ConfigureAwait(false))
+                _ = await RepairScienceTitleAsync(scienceSession, cancellationToken).ConfigureAwait(false);
         var conversation = await conversationSnapshots.GetAsync(activeSession.Id, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Die aktive Chat-Sitzung wurde nicht gefunden.");
         var session = conversation.Session;
@@ -385,6 +427,9 @@ public sealed class AssistantCoordinator(
             runMessageId = isSessionRunning ? display?.MessageId : null,
             runStatus = isSessionRunning ? display?.Status ?? "Denkt nach" : null,
             runDetail = isSessionRunning ? display?.Detail : null,
+            generationState = isSessionRunning ? display?.GenerationState : null,
+            generatedTokens = isSessionRunning ? display?.GeneratedTokens : null,
+            generationUpdatedAt = isSessionRunning ? display?.GenerationUpdatedAt : null,
             loadedFiles = display?.LoadedFiles,
             model = display?.Model ?? (isCodingSession ? selectedModel ?? "Lokaler AI-Server" : "Lokaler AI-Server"),
             provider = settings.Current.AiProvider.ToString(),
@@ -1200,6 +1245,9 @@ public sealed class AssistantCoordinator(
 
     private async Task CancelScheduledSessionAsync(Guid sessionId, CancellationToken cancellationToken)
     {
+        var cancelActive = missumAi?.ActiveSessionId == sessionId
+            ? missumAi.CancelCurrentAndWaitAsync(sessionId, CancellationToken.None)
+            : Task.CompletedTask;
         var ticketIds = Array.Empty<Guid>();
         if (_runScheduler is not null)
         {
@@ -1218,10 +1266,7 @@ public sealed class AssistantCoordinator(
             }
         }
 
-        if (missumAi?.ActiveSessionId == sessionId)
-        {
-            await missumAi.CancelCurrentAndWaitAsync(CancellationToken.None).ConfigureAwait(false);
-        }
+        await cancelActive.ConfigureAwait(false);
 
         var observers = ticketIds
             .Select(ticketId => _scheduledRunObservers.TryGetValue(ticketId, out var observer) ? observer : null)
@@ -1465,7 +1510,13 @@ public sealed class AssistantCoordinator(
         {
             throw new InvalidOperationException("Wähle für diese Coding-Sitzung zuerst ein vorhandenes Projekt oder einen Workspace aus.");
         }
-        var promptTitle = DerivePromptSessionTitle(prompt);
+        string? promptTitle;
+        if (session.ChatMode == ChatMode.ClaudeScience)
+        {
+            session = await RepairScienceTitleAsync(session, cancellationToken).ConfigureAwait(false);
+            promptTitle = GenericSessionTitles.Contains(session.Title) ? ScientificSessionTitle.FromPrompt(prompt) : null;
+        }
+        else promptTitle = DerivePromptSessionTitle(prompt);
         if (promptTitle is null && GenericSessionTitles.Contains(session.Title))
         {
             // Repair a formerly overwritten continuation title from user text.
@@ -1473,7 +1524,8 @@ public sealed class AssistantCoordinator(
             promptTitle = (await chats.ListMessagesAsync(sessionId, cancellationToken).ConfigureAwait(false))
                 .Where(message => message.Role == ChatRole.User)
                 .OrderBy(message => message.CreatedAt).ThenBy(message => message.Id)
-                .Select(message => DerivePromptSessionTitle(message.Content)).FirstOrDefault(title => title is not null);
+                .Select(message => session.ChatMode == ChatMode.ClaudeScience
+                    ? ScientificSessionTitle.FromPrompt(message.Content) : DerivePromptSessionTitle(message.Content)).FirstOrDefault(title => title is not null);
         }
         if (promptTitle is { } derivedTitle
             && !string.Equals(session.Title, derivedTitle, StringComparison.Ordinal))
@@ -1787,6 +1839,7 @@ public sealed class AssistantCoordinator(
         }
         var artifactsForMessage = update.Artifacts
             ?? await artifacts.ListForMessageAsync(update.Message.Id, CancellationToken.None).ConfigureAwait(false);
+        _displayStates.TryGetValue(update.Message.SessionId, out var generationDisplay);
         switch (update.Kind)
         {
             case MissumAiAssistantUpdateKind.Started:
@@ -1825,6 +1878,9 @@ public sealed class AssistantCoordinator(
                     contextWasTruncated = update.ContextWasCompacted,
                     runStatus = update.Status,
                     runDetail = update.Detail,
+                    generationState = generationDisplay?.GenerationState,
+                    generatedTokens = generationDisplay?.GeneratedTokens,
+                    generationUpdatedAt = generationDisplay?.GenerationUpdatedAt,
                     model = update.Model,
                     loadedFiles = update.LoadedFiles,
                     attachments = pendingAttachments.Select(ToAttachmentDto),
@@ -1847,6 +1903,9 @@ public sealed class AssistantCoordinator(
                     sessionId = update.Message.SessionId,
                     runStatus = update.Status,
                     runDetail = update.Detail,
+                    generationState = generationDisplay?.GenerationState,
+                    generatedTokens = generationDisplay?.GeneratedTokens,
+                    generationUpdatedAt = generationDisplay?.GenerationUpdatedAt,
                     model = update.Model,
                     contextUsed = update.ContextUsed,
                     toolStep = update.ToolStep,
