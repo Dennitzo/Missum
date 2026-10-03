@@ -71,7 +71,7 @@ public sealed partial class NativeAssistantPage
         UpdateMessageBlocks(activeId, activeMessage, body);
         UpdateMessageActions(activeId, activeMessage);
         if (_messageActionViews[activeId].Panel.Visibility != Microsoft.UI.Xaml.Visibility.Collapsed)
-            throw new InvalidOperationException("The streaming message footer must not appear after the cursor.");
+            throw new InvalidOperationException("The streaming message footer must remain hidden until completion.");
         var header = _messageBlocks[activeId]["header"];
         UpdateMessageHeader(header, activeMessage);
         var label = (TextBlock)((StackPanel)header).Children[0];
@@ -81,17 +81,15 @@ public sealed partial class NativeAssistantPage
         active["content"] = JsonSerializer.SerializeToElement("Ein gestreamter Absatz mit weiteren Wörtern");
         UpdateMessageBlocks(activeId, JsonSerializer.SerializeToElement(active), body);
         if (label.Text != stable) throw new InvalidOperationException("A text delta reset the generation header.");
-        var markdown = body.Children.OfType<Missum.App.Controls.NativeStreamingMarkdown>().Last();
-        bool HasCursor() => markdown.Children.OfType<TextBlock>().SelectMany(block => block.Inlines).OfType<Microsoft.UI.Xaml.Documents.Run>().Any(run => run.Text == "▍");
-        if (!HasCursor() || markdown.Children.Last() is not TextBlock cursorLine || cursorLine.Inlines.Count != 1)
-            throw new InvalidOperationException("The streaming cursor is not on its own final line.");
+        AssertChatCursorAbsent(body);
         active["status"] = JsonSerializer.SerializeToElement("completed");
         UpdateMessageBlocks(activeId, JsonSerializer.SerializeToElement(active), body);
         UpdateMessageActions(activeId, JsonSerializer.SerializeToElement(active));
         if (_messageActionViews[activeId].Panel.Visibility != Microsoft.UI.Xaml.Visibility.Visible)
             throw new InvalidOperationException("Completion did not restore the message footer actions.");
-        if (HasCursor() || !label.Text.Contains("Uhr ·", StringComparison.Ordinal) || !label.Text.EndsWith("lang gearbeitet", StringComparison.Ordinal))
-            throw new InvalidOperationException("Completion did not remove the cursor and finalize the header.");
+        AssertChatCursorAbsent(body);
+        if (!label.Text.Contains("Uhr ·", StringComparison.Ordinal) || !label.Text.EndsWith("lang gearbeitet", StringComparison.Ordinal))
+            throw new InvalidOperationException("Completion did not finalize the header.");
         var readInput = JsonSerializer.SerializeToElement(new { path = "src/example.cs", startLine = 10 });
         var readOutput = JsonSerializer.SerializeToElement(new { path = "src/example.cs", totalLines = 500, startLine = 10, content = "10: var x = 1;\n11: return x;\n", truncated = true });
         var summary = ToolStepView.ToolSummary("coding.read", readInput, readOutput);
@@ -220,15 +218,16 @@ public sealed partial class NativeAssistantPage
         await SaveMathPreviewAsync(Inspector, "native-outputs-preview.png");
         await SaveMathPreviewAsync(LayoutRoot, "native-colored-chrome-preview.png");
         Inspector.Visibility = inspectorVisibility;
-        var cursor = _messageBlocks.Values.SelectMany(blocks => blocks).Single(pair => pair.Key == "streamCursor").Value;
         for (var iteration = 0; iteration < 4; iteration++)
         {
             OpenSourcesTab(); UpdateLayout(); await Task.Delay(30);
             if (_sourcesHost.Visibility != Microsoft.UI.Xaml.Visibility.Visible) throw new InvalidOperationException("The sources tab did not open.");
             ShowChatView(); UpdateLayout(); await Task.Delay(30);
-            if (cursor is not Missum.App.Controls.NativeStreamingMarkdown stream || !stream.Children.OfType<TextBlock>().SelectMany(block => block.Inlines)
-                .OfType<Microsoft.UI.Xaml.Documents.Run>().Any(run => run.Text == "▍"))
-                throw new InvalidOperationException("The streaming cursor disappeared after tab navigation.");
+            AssertChatCursorAbsent(ConversationContent);
+            if (_messages.Values.All(message => S(message, "status") != "streaming")
+                || _messageBlocks.Values.Any(blocks => blocks.Values.OfType<Missum.App.Controls.NativeStreamingMarkdown>()
+                    .Any(markdown => markdown.Children.Count == 0)))
+                throw new InvalidOperationException("Tab navigation lost the active run or introduced an empty streaming placeholder.");
         }
         ApplyEvent("state.snapshot", original);
         if (_activeSourcesSession is not null || _sourcesHost.Visibility != Microsoft.UI.Xaml.Visibility.Collapsed || _sourcesTabContainer?.Parent == SessionTabsPanel)
@@ -380,7 +379,49 @@ public sealed partial class NativeAssistantPage
             _simulationView = false; RenderResearchView();
             if (ResearchHost.Content is not Grid) throw new InvalidOperationException("Publication view was not created.");
             _simulationView = true; RenderResearchView();
-            if (ResearchHost.Content is not Grid) throw new InvalidOperationException("Simulation view was not created.");
+            if (ResearchHost.Content is not Grid simulationRoot || simulationRoot.RowDefinitions.Count != 3
+                || simulationRoot.Children[0] is not Grid simulationHeader
+                || !simulationHeader.Children.OfType<StackPanel>().SelectMany(panel => panel.Children.OfType<TextBlock>())
+                    .Any(text => text.Text == "Simulation"))
+                throw new InvalidOperationException("Simulation view must share the publication header and content layout.");
+            foreach (var (projectSelected, loading, heading) in new[]
+            {
+                (false, false, "Stelle im Chat eine Forschungsfrage."),
+                (true, false, "Noch keine Simulation vorhanden."),
+                (true, true, "Simulationen werden geladen."),
+            })
+            {
+                if (BuildSimulationView(null, projectSelected, loading) is not StackPanel empty)
+                    throw new InvalidOperationException("Simulation needs the same informative empty state as Publication.");
+                var texts = empty.Children.OfType<TextBlock>().Select(text => text.Text).ToArray();
+                if (texts.Length != 2 || texts[0] != heading || !texts[1].Contains("Python", StringComparison.Ordinal)
+                    || !texts[1].Contains("Daten", StringComparison.Ordinal) || empty.Children.OfType<Image>().Any())
+                    throw new InvalidOperationException("Simulation needs an informative empty/loading state without synthetic evidence images.");
+            }
+            await SaveMathPreviewAsync(ResearchHost, "native-simulation-empty-preview.png");
+            var loadingAlreadyActive = _researchLoading.Contains(_session);
+            try
+            {
+                _researchLoading.Add(_session); RenderResearchView();
+                if (!ReferenceEquals(ResearchHost.Content, simulationRoot))
+                    throw new InvalidOperationException("Background polling rebuilt the simulation view without a content change.");
+                _researchLoading.Remove(_session); RenderResearchView();
+                if (!ReferenceEquals(ResearchHost.Content, simulationRoot))
+                    throw new InvalidOperationException("Finishing a background poll rebuilt the simulation view without a content change.");
+            }
+            finally { if (loadingAlreadyActive) _researchLoading.Add(_session); }
+            var scienceState = ResearchState(_session);
+            var previousError = scienceState.Error;
+            try
+            {
+                scienceState.Error = "Simulation-Smoke: Darstellung konnte nicht geladen werden.";
+                RenderResearchView();
+                if (ReferenceEquals(ResearchHost.Content, simulationRoot) || ResearchHost.Content is not Grid errorRoot
+                    || errorRoot.Children[1] is not StackPanel errorDescription
+                    || !errorDescription.Children.OfType<InfoBar>().Any(bar => bar.Message == scienceState.Error))
+                    throw new InvalidOperationException("Simulation errors must update the view even when its artifacts have not changed.");
+            }
+            finally { scienceState.Error = previousError; RenderResearchView(); }
             var fixture = Environment.GetEnvironmentVariable("MISSUM_SCIENCE_PDF_SMOKE_PATH");
             if (!string.IsNullOrWhiteSpace(fixture) && File.Exists(fixture))
             {
@@ -531,25 +572,22 @@ public sealed partial class NativeAssistantPage
             VerifyIconBrush(((Grid)((Grid)chip.Content).Children[0]).Children.OfType<FontIcon>().Single().Foreground, key);
     }
 
-    private static async Task VerifyMathRenderingSmokeAsync(StackPanel body)
+    private async Task VerifyMathRenderingSmokeAsync(StackPanel body)
     {
         var math = new Missum.App.Controls.NativeStreamingMarkdown("Ein Bruch $\\frac{1}{2}");
         body.Children.Add(math);
         if (math.Children.OfType<Missum.App.Controls.NativeMathParagraph>().Any())
             throw new InvalidOperationException("An unfinished streamed formula was rendered prematurely.");
-        math.SetStreaming(true);
         math.UpdateText("Ein Bruch $\\frac{1}{2}$ im Satz.");
         var paragraph = math.Children.OfType<Missum.App.Controls.NativeMathParagraph>().Single();
         var formula = paragraph.TrailingInlines.OfType<Microsoft.UI.Xaml.Documents.InlineUIContainer>()
             .Select(inline => inline.Child).OfType<Missum.App.Controls.NativeFormulaView>().Single();
-        if (!formula.IsTypeset || paragraph.TrailingInlines.OfType<Microsoft.UI.Xaml.Documents.Run>().Any(run => run.Text == "▍")
-            || math.Children.Last() is not TextBlock cursorLine || cursorLine.Inlines.Count != 1
-            || cursorLine.Inlines[0] is not Microsoft.UI.Xaml.Documents.Run { Text: "▍" })
-            throw new InvalidOperationException("Inline math or the separate streaming cursor line failed in the native renderer.");
+        AssertChatCursorAbsent(math);
+        if (!formula.IsTypeset || math.Children.Count != 1)
+            throw new InvalidOperationException("Inline math failed or an extra streaming decoration was rendered.");
         math.UpdateText("Ein Bruch $\\frac{1}{2}$ im Satz. Weiterer Text");
         if (!ReferenceEquals(formula, paragraph.TrailingInlines.OfType<Microsoft.UI.Xaml.Documents.InlineUIContainer>().Single().Child))
             throw new InvalidOperationException("A text delta rebuilt an unchanged inline formula.");
-        math.SetStreaming(false);
         math.UpdateText("```latex\n$\\frac{1}{2}$\n```\n`$x^2$` bleibt Code.");
         if (math.Children.OfType<Missum.App.Controls.NativeMathParagraph>().Any() || math.Children.OfType<ScrollViewer>().Any())
             throw new InvalidOperationException("Code examples must preserve their literal LaTeX source.");
@@ -589,7 +627,7 @@ public sealed partial class NativeAssistantPage
         }
     }
 
-    private static async Task VerifyMarkdownTableSmokeAsync(StackPanel body)
+    private async Task VerifyMarkdownTableSmokeAsync(StackPanel body)
     {
         const string source = "## Die wichtigsten Kandidaten und ihre offenen Punkte\n"
             + "Die Planck-Länge $\\ell_P \\approx 1{,}6\\times10^{-35}$ m liegt außerhalb der experimentellen Reichweite.\n\n"
@@ -600,7 +638,6 @@ public sealed partial class NativeAssistantPage
         body.Children.Add(markdown);
         try
         {
-            markdown.SetStreaming(true);
             var table = markdown.RenderedTables.Single();
             if (table.ColumnDefinitions.Count != 3 || table.RowDefinitions.Count != 3 || table.Children.Count != 9)
                 throw new InvalidOperationException("The screenshot's loose Markdown table did not render as native rows and columns.");
@@ -614,13 +651,14 @@ public sealed partial class NativeAssistantPage
                 .Select(inline => inline.Child).OfType<Missum.App.Controls.NativeFormulaView>().Single();
             if (!inlineFormula.IsTypeset || inlineFormula.FontSize != formulaParagraph.FontSize)
                 throw new InvalidOperationException("Inline formulas and answer text must use the same font size.");
+            AssertChatCursorAbsent(markdown);
             await SaveMathPreviewAsync(markdown, "native-table-math-preview.png");
             markdown.Width = 420; markdown.UpdateLayout();
             if (table.ActualWidth > 421 || table.Children.OfType<Microsoft.UI.Xaml.FrameworkElement>().Any(cell => cell.ActualWidth > 421))
                 throw new InvalidOperationException("Table columns failed to wrap inside the narrow chat width.");
             await SaveMathPreviewAsync(markdown, "native-table-narrow-preview.png");
         }
-        finally { markdown.SetStreaming(false); body.Children.Remove(markdown); }
+        finally { body.Children.Remove(markdown); }
     }
 
     private async Task VerifyAnswerStreamingSmokeAsync(JsonElement original)
@@ -645,10 +683,12 @@ public sealed partial class NativeAssistantPage
                         .SelectMany(text => text.Inlines).OfType<Microsoft.UI.Xaml.Documents.Run>().Any(run => run.Text == content)
                     || S(_messages[id], "status") != "streaming")
                     throw new InvalidOperationException("Answer text was not visibly rendered before run completion.");
+                AssertChatCursorAbsent(MessageBody(_messageViews[id].View));
             }
             await File.WriteAllTextAsync(Path.Combine(App.Current.DataDirectory, "native-chat-streaming-validation.json"),
                 JsonSerializer.Serialize(new { renderer = "WinUI3", passed = true, visibleDeltasBeforeCompletion = 3,
-                    tableColumns = 3, tableRows = 4, sharedMathFontSize = 16, reasoningDisclosureDefaultCollapsed = true }));
+                    tableColumns = 3, tableRows = 4, sharedMathFontSize = 16, reasoningDisclosureDefaultCollapsed = true,
+                    chatCursorAbsent = true }));
         }
         finally { ApplyEvent("state.snapshot", original); RenderMessagesNow(); }
     }

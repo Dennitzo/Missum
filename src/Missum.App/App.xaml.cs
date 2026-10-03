@@ -74,6 +74,7 @@ public partial class App : Application
     private string? _lastLoggedAiConnectionState;
     private int _activationReady;
     private int _shutdownStarted;
+    private Uri? _lifecycleGateway;
 
     public App()
     {
@@ -104,6 +105,7 @@ public partial class App : Application
                 services.AddSingleton<Missum.Core.Research.IResearchSandboxService, ResearchSandboxService>();
                 services.AddSingleton<AssistantSessionActivationService>();
                 services.AddSingleton<NativeModelRuntimeService>();
+                services.AddSingleton<MissumAiStackLifecycleService>();
                 services.AddSingleton<MissumAiConnectionService>();
                 services.AddSingleton<ModelCapabilityRegistry>();
                 services.AddSingleton<SystemAudioCaptionService>();
@@ -248,7 +250,12 @@ public partial class App : Application
             var settings = GetService<SettingsCoordinator>();
             await settings.InitializeAsync();
             await settings.UpdateAsync(current => ApplyRuntimeProfile(current, RuntimeProfile));
-            await GetService<MissumAiAssistantService>().StopPersistedRunsAtStartupAsync();
+            _lifecycleGateway = Uri.TryCreate(settings.Current.MissumAiServerUrl, UriKind.Absolute, out var gateway)
+                && gateway.Scheme is "http" or "https" ? gateway : RuntimeProfile.GatewayUri;
+            // Freeze and retire only the jobs found on launch, before the
+            // visible window can accept a new prompt. Remote cancellation can
+            // wait for the local services to become reachable.
+            await GetService<MissumAiAssistantService>().PreparePersistedRunsAtStartupAsync();
             _ = await GetService<IChatRepository>().DeleteEmptyTerminalMessagesAsync();
             await ApplySessionActivationAsync(
                 GetTargetSessionId(activationArguments),
@@ -385,6 +392,20 @@ public partial class App : Application
 
     private async Task MonitorLocalAiAvailabilityAsync(CancellationToken cancellationToken)
     {
+        try
+        {
+            var gateway = _lifecycleGateway ?? RuntimeProfile.GatewayUri;
+            await GetService<MissumAiStackLifecycleService>().EnsureStartedAsync(gateway, cancellationToken).ConfigureAwait(false);
+            await GetService<NativeModelRuntimeService>().EnsureStartedAsync(gateway, cancellationToken).ConfigureAwait(false);
+            await GetService<MissumAiAssistantService>().StopPersistedRunsAtStartupAsync(cancellationToken).ConfigureAwait(false);
+            await RecordAiLifecycleAsync("start", "completed").ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { return; }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            AppLog.LocalAiAvailabilityCheckFailed(GetService<ILogger<App>>(), exception);
+            await RecordAiLifecycleAsync("start", "failed", exception).ConfigureAwait(false);
+        }
         while (!cancellationToken.IsCancellationRequested)
         {
             var hasActiveRuns = await RefreshLocalAiAvailabilityAsync(cancellationToken).ConfigureAwait(false);
@@ -438,6 +459,14 @@ public partial class App : Application
                     currentSettings.MissumAiProtocolVersion,
                     StringComparison.Ordinal);
             serverReady = connected && health.Status is "ready" or "modelLoading" or "modelNotLoaded";
+            if (connected)
+            {
+                // Docker start acknowledgement is earlier than HTTP readiness.
+                // Retry only the captured startup jobs once the gateway answers.
+                await GetService<MissumAiAssistantService>()
+                    .StopPersistedRunsAtStartupAsync(availabilityToken)
+                    .ConfigureAwait(false);
+            }
 
             // Diagnostic endpoints enrich individual service chips but must
             // never downgrade an already authenticated gateway connection.
@@ -600,6 +629,11 @@ public partial class App : Application
 
         try
         {
+            var stack = GetService<MissumAiStackLifecycleService>();
+            var nativeRuntime = GetService<NativeModelRuntimeService>();
+            var gateway = _lifecycleGateway ?? RuntimeProfile.GatewayUri;
+            stack.BeginShutdown();
+            nativeRuntime.BeginShutdown();
             var availabilityCancellation = Interlocked.Exchange(ref _aiAvailabilityCancellation, null);
             var availabilityMonitor = Interlocked.Exchange(ref _aiAvailabilityMonitor, null);
             availabilityCancellation?.Cancel();
@@ -607,21 +641,36 @@ public partial class App : Application
             {
                 try
                 {
-                    await availabilityMonitor;
+                    await availabilityMonitor.WaitAsync(TimeSpan.FromSeconds(5));
                 }
                 catch (OperationCanceledException)
                 {
                     // The availability monitor is expected to stop during shutdown.
                 }
+                catch (Exception exception) when (exception is not OutOfMemoryException)
+                {
+                    AppLog.ShutdownCleanupFailed(GetService<ILogger<App>>(), exception);
+                }
             }
 
             availabilityCancellation?.Dispose();
-            var nativeRuntime = GetService<NativeModelRuntimeService>();
-            nativeRuntime.BeginShutdown();
-            // Missum shares the model runtime with Missum and other local clients.
-            // Closing a window must not terminate that shared service.
-            await GetService<MissumAiAssistantService>().CancelCurrentAsync();
-            await _host.StopAsync(TimeSpan.FromSeconds(4));
+            var assistant = GetService<MissumAiAssistantService>();
+            // Capture the active server run before cancellation drains the queue
+            // and detaches its stream. No queued prompt may start during shutdown.
+            using var runDrain = new CancellationTokenSource(TimeSpan.FromSeconds(25));
+            var activeRun = assistant.CancelCurrentAndWaitAsync(runDrain.Token);
+            var queue = GetService<IAssistantRunScheduler>().DisposeAsync().AsTask();
+            await RunShutdownStepAsync("runs", assistant.StopPersistedRunsForShutdownAsync, TimeSpan.FromSeconds(20));
+            await RunShutdownStepAsync("run-drain", token => Task.WhenAll(activeRun, queue).WaitAsync(token), TimeSpan.FromSeconds(25));
+            // A server acceptance can arrive while the first scan still sees a
+            // queued local attempt. Drain first, then retire its saved identity.
+            await RunShutdownStepAsync("final-runs", assistant.StopPersistedRunsForShutdownAsync, TimeSpan.FromSeconds(20));
+            // Each cleanup stage is independent. An unavailable Docker daemon
+            // must never prevent both native GPU runtimes from being released.
+            await RunShutdownStepAsync("docker", token => stack.StopAsync(gateway, token), TimeSpan.FromSeconds(45));
+            await RunShutdownStepAsync("models", token => nativeRuntime.StopOwnedAsync(gateway, token), TimeSpan.FromSeconds(45));
+            await RunShutdownStepAsync("final-run-drain", token => queue.WaitAsync(token), TimeSpan.FromSeconds(10));
+            await RunShutdownStepAsync("host", _ => _host.StopAsync(TimeSpan.FromSeconds(4)), TimeSpan.FromSeconds(6));
         }
         finally
         {
@@ -726,6 +775,39 @@ public partial class App : Application
         }
 
         ThemeChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private async Task RunShutdownStepAsync(string stage, Func<CancellationToken, Task> action, TimeSpan timeout)
+    {
+        using var cancellation = new CancellationTokenSource(timeout);
+        try
+        {
+            await action(cancellation.Token).WaitAsync(cancellation.Token);
+            await RecordAiLifecycleAsync(stage, "completed");
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            AppLog.ShutdownCleanupFailed(GetService<ILogger<App>>(), new InvalidOperationException("Missum beenden: " + stage, exception));
+            await RecordAiLifecycleAsync(stage, "failed", exception);
+        }
+    }
+
+    private async Task RecordAiLifecycleAsync(string stage, string result, Exception? exception = null)
+    {
+        try
+        {
+            var directory = Path.Combine(DataDirectory, "Diagnostics");
+            Directory.CreateDirectory(directory);
+            var entry = System.Text.Json.JsonSerializer.Serialize(new
+            {
+                at = DateTimeOffset.UtcNow, stage, result, error = exception?.Message,
+            });
+            await File.AppendAllTextAsync(Path.Combine(directory, "ai-lifecycle.jsonl"), entry + Environment.NewLine);
+        }
+        catch (Exception diagnosticException) when (diagnosticException is not OutOfMemoryException)
+        {
+            System.Diagnostics.Debug.WriteLine(diagnosticException);
+        }
     }
 
     private void ApplyHighContrastPalette(HighContrastPalette palette)

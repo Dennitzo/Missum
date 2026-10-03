@@ -170,8 +170,8 @@ try {
     $chatStreamingPath = Join-Path $smokeData 'native-chat-streaming-validation.json'
     if (-not (Test-Path -LiteralPath $chatStreamingPath -PathType Leaf)) { throw 'Missing native chat streaming validation.' }
     $chatStreaming = Get-Content -LiteralPath $chatStreamingPath -Raw | ConvertFrom-Json
-    if ($chatStreaming.passed -ne $true -or $chatStreaming.renderer -ne 'WinUI3' -or $chatStreaming.visibleDeltasBeforeCompletion -lt 3) {
-        throw 'Native chat did not render incremental answer text before completion.'
+    if ($chatStreaming.passed -ne $true -or $chatStreaming.renderer -ne 'WinUI3' -or $chatStreaming.visibleDeltasBeforeCompletion -lt 3 -or $chatStreaming.chatCursorAbsent -ne $true) {
+        throw 'Native chat did not render incremental answer text without a decorative cursor before completion.'
     }
     Copy-Item -LiteralPath $chatStreamingPath -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.chat-streaming-validation.json')) -Force
     foreach ($chatPreviewName in @('native-table-math-preview', 'native-table-narrow-preview', 'native-thinking-expanded-preview')) {
@@ -198,7 +198,7 @@ try {
     if ($subagentValidation.renderer -ne 'WinUI3') {
         throw 'Native subagent validation did not use the real WinUI renderer.'
     }
-    foreach ($subagentCheck in @('passed', 'parentStable', 'childUsesNativeRenderer', 'overlayAboveSources', 'closableAndReopenable', 'parentDraftPreserved', 'parentRunRemainedActive', 'parentCursorPreserved', 'childModelIdentityPreserved', 'compactLifecycleRow', 'lifecycleStartEntryPreserved', 'lifecycleCompletionPostedOnce', 'lifecycleCompletionWaitsForDelivery', 'lifecycleClickOpensChild', 'lifecycleKeyboardAccessible', 'acceptedManagerStepsCoalesced')) {
+    foreach ($subagentCheck in @('passed', 'parentStable', 'childUsesNativeRenderer', 'overlayAboveSources', 'closableAndReopenable', 'parentDraftPreserved', 'parentRunRemainedActive', 'chatCursorAbsent', 'childModelIdentityPreserved', 'compactLifecycleRow', 'lifecycleStartEntryPreserved', 'lifecycleCompletionPostedOnce', 'lifecycleCompletionWaitsForDelivery', 'lifecycleClickOpensChild', 'lifecycleKeyboardAccessible', 'acceptedManagerStepsCoalesced')) {
         if ($subagentValidation.PSObject.Properties.Name -notcontains $subagentCheck -or $subagentValidation.$subagentCheck -ne $true) {
             throw "Native subagent smoke failed its required check: $subagentCheck"
         }
@@ -244,7 +244,7 @@ try {
         }
     }
     Write-Host "Native subagent transcript, tabs, parent stability and output order verified: $subagentValidationEvidence"
-    foreach ($sciencePreview in @('native-outputs-preview', 'native-publication-preview', 'native-publication-last-page-preview', 'native-python-receipt-preview', 'native-changes-preview', 'native-tool-icons-preview', 'native-colored-chrome-preview', 'native-continuation-preview', 'native-thinking-preview')) {
+    foreach ($sciencePreview in @('native-outputs-preview', 'native-publication-preview', 'native-publication-last-page-preview', 'native-simulation-empty-preview', 'native-python-receipt-preview', 'native-changes-preview', 'native-tool-icons-preview', 'native-colored-chrome-preview', 'native-continuation-preview', 'native-thinking-preview')) {
         $scienceImage = Join-Path $smokeData ($sciencePreview + '.png')
         if (Test-Path -LiteralPath $scienceImage -PathType Leaf) {
             $scienceEvidence = Assert-MissumArtifactPath -Path ($PublishDirectory + '.' + $sciencePreview + '.png')

@@ -357,32 +357,60 @@ public sealed partial class MainWindow : Window
         }
 
         _closePreparationStarted = true;
-        if (_assistantPage is { } assistantPage)
-        {
-            await assistantPage.FlushDraftAsync();
-            await assistantPage.CloseSessionToolsAsync();
-        }
-
         try
         {
-            await SaveStateAsync();
-        }
-        catch (Exception exception)
-        {
-            AppLog.WindowStateSaveFailed(_logger, exception);
-        }
-
-        try
-        {
-            DisposeNativeAssistantPage();
-            if (BeforeCloseAsync is not null)
+            if (_assistantPage is { } assistantPage)
             {
-                await BeforeCloseAsync();
+                try
+                {
+                    await assistantPage.FlushDraftAsync();
+                }
+                catch (Exception exception)
+                {
+                    AppLog.ShutdownCleanupFailed(_logger,
+                        new InvalidOperationException("Der Nachrichtenentwurf konnte beim Beenden nicht gespeichert werden.", exception));
+                }
+
+                try
+                {
+                    await assistantPage.CloseSessionToolsAsync();
+                }
+                catch (Exception exception)
+                {
+                    AppLog.ShutdownCleanupFailed(_logger,
+                        new InvalidOperationException("Die Sitzungswerkzeuge konnten beim Beenden nicht vollständig geschlossen werden.", exception));
+                }
             }
-        }
-        catch (Exception exception)
-        {
-            AppLog.ShutdownCleanupFailed(_logger, exception);
+
+            try
+            {
+                await SaveStateAsync();
+            }
+            catch (Exception exception)
+            {
+                AppLog.WindowStateSaveFailed(_logger, exception);
+            }
+
+            try
+            {
+                DisposeNativeAssistantPage();
+            }
+            catch (Exception exception)
+            {
+                AppLog.ShutdownCleanupFailed(_logger, exception);
+            }
+
+            try
+            {
+                if (BeforeCloseAsync is not null)
+                {
+                    await BeforeCloseAsync();
+                }
+            }
+            catch (Exception exception)
+            {
+                AppLog.ShutdownCleanupFailed(_logger, exception);
+            }
         }
         finally
         {

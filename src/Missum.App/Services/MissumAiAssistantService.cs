@@ -120,6 +120,8 @@ public sealed partial class MissumAiAssistantService(
         "Projektgedächtnis konnte für Sitzung {SessionId} nicht verarbeitet werden.");
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly SemaphoreSlim _speechGate = new(1, 1);
+    private readonly SemaphoreSlim _startupCleanupGate = new(1, 1);
+    private readonly HashSet<string> _startupServerRunIds = new(StringComparer.Ordinal);
     private readonly object _activeRunLock = new();
     private TaskCompletionSource? _activeRunCompletion;
     private CancellationTokenSource? _activeCancellation;
@@ -295,7 +297,7 @@ public sealed partial class MissumAiAssistantService(
                     // Preserve the message and tool receipts exactly as cancelled.
                     await runs.UpdateAsync(run.Id, run.ServerRunId, run.LastEventId, "cancelled",
                         run.SelectedModel, "client.run_already_cancelled", CancellationToken.None).ConfigureAwait(false);
-                    await CancelPersistedServerRunsAsync([run.ServerRunId], _activeCancellation.Token).ConfigureAwait(false);
+                    await CancelPersistedServerRunsAsync([run.ServerRunId], cancellationToken: _activeCancellation.Token).ConfigureAwait(false);
                     continue;
                 }
                 _activeServerRunId = run.ServerRunId;
@@ -315,7 +317,7 @@ public sealed partial class MissumAiAssistantService(
                             await chats.SaveToolStepAsync(message.Id, CompleteOpenToolStep(step, "failed", null), CancellationToken.None).ConfigureAwait(false);
                         await chats.UpdateMessageAsync(message.Id, message.Content, MessageStatus.Failed, exception.Message,
                             CancellationToken.None).ConfigureAwait(false);
-                        await CancelPersistedServerRunsAsync([run.ServerRunId], _activeCancellation.Token).ConfigureAwait(false);
+                        await CancelPersistedServerRunsAsync([run.ServerRunId], cancellationToken: _activeCancellation.Token).ConfigureAwait(false);
                         var failed = await chats.GetMessageAsync(message.Id, CancellationToken.None).ConfigureAwait(false) ?? message;
                         await update(new(MissumAiAssistantUpdateKind.Failed, failed, Error: exception.Message, Status: "Projektordner fehlt")).ConfigureAwait(false);
                         continue;
@@ -364,34 +366,62 @@ public sealed partial class MissumAiAssistantService(
         return Path.TrimEndingDirectorySeparator(Path.GetFullPath(run.WorkspacePath));
     }
 
-    public async Task StopPersistedRunsAtStartupAsync(CancellationToken cancellationToken = default)
+    public async Task PreparePersistedRunsAtStartupAsync(CancellationToken cancellationToken = default)
     {
-        if (Interlocked.CompareExchange(ref _startupRunsStopped, 1, 0) != 0)
-        {
-            return;
-        }
-
+        await _startupCleanupGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            if (_startupRunsStopped != 0) return;
+            _startupServerRunIds.UnionWith(await ReadPendingRunCancellationsAsync(cancellationToken).ConfigureAwait(false));
+            // Capture the startup set before the window accepts a new prompt.
+            // Keep those identities even when later local cleanup is interrupted.
+            var staleRuns = await runs.ListResumableAsync(cancellationToken).ConfigureAwait(false);
+            _startupServerRunIds.UnionWith(staleRuns
+                .Where(static run => !UsesCodingAgent(run.Action) && !string.IsNullOrWhiteSpace(run.ServerRunId))
+                .Select(static run => run.ServerRunId!));
             var serverRunIds = await StopPersistedRunsLocallyAsync(
                 runs,
                 chats,
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            _startupServerRunIds.UnionWith(serverRunIds);
             foreach (var serverRunId in serverRunIds)
                 if (await runs.GetByServerRunIdAsync(serverRunId, cancellationToken).ConfigureAwait(false) is { } stoppedRun)
                     await EndResearchProgressAsync(stoppedRun, "cancelled").ConfigureAwait(false);
-            await CancelPersistedServerRunsAsync(serverRunIds, cancellationToken).ConfigureAwait(false);
+            await PersistPendingRunCancellationsAsync(_startupServerRunIds).ConfigureAwait(false);
+            _startupRunsStopped = 1;
         }
-        catch
+        finally
         {
-            Interlocked.Exchange(ref _startupRunsStopped, 0);
-            throw;
+            _startupCleanupGate.Release();
+        }
+    }
+
+    public async Task StopPersistedRunsAtStartupAsync(CancellationToken cancellationToken = default)
+    {
+        await PreparePersistedRunsAtStartupAsync(cancellationToken).ConfigureAwait(false);
+        await _startupCleanupGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (_startupServerRunIds.Count == 0) return;
+            // Only cancel the captured old jobs. Retain failures for retry when
+            // the freshly started gateway becomes reachable; never re-enumerate.
+            var remaining = await CancelPersistedServerRunsAsync(
+                _startupServerRunIds.Order(StringComparer.Ordinal).ToArray(),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            _startupServerRunIds.Clear();
+            _startupServerRunIds.UnionWith(remaining);
+            await PersistPendingRunCancellationsAsync(_startupServerRunIds).ConfigureAwait(false);
+        }
+        finally
+        {
+            _startupCleanupGate.Release();
         }
     }
 
     internal static async Task<IReadOnlyList<string>> StopPersistedRunsLocallyAsync(
         IMissumAiRunRepository runRepository,
         IChatRepository chatRepository,
+        bool applicationShutdown = false,
         CancellationToken cancellationToken = default)
     {
         var staleRuns = await runRepository.ListResumableAsync(cancellationToken).ConfigureAwait(false);
@@ -400,14 +430,14 @@ public sealed partial class MissumAiAssistantService(
         {
             // Coding is a durable job. Reconnect to this exact run and its tool
             // receipts after a client restart instead of cancelling or replaying it.
-            if (UsesCodingAgent(run.Action) && !string.IsNullOrWhiteSpace(run.ServerRunId)) continue;
+            if (!applicationShutdown && UsesCodingAgent(run.Action) && !string.IsNullOrWhiteSpace(run.ServerRunId)) continue;
             await runRepository.UpdateAsync(
                 run.Id,
                 run.ServerRunId,
                 run.LastEventId,
                 "cancelled",
                 run.SelectedModel,
-                "client.run_stopped_on_start",
+                applicationShutdown ? "client.run_stopped_on_close" : "client.run_stopped_on_start",
                 CancellationToken.None).ConfigureAwait(false);
 
             var message = await chatRepository.GetMessageAsync(
@@ -416,13 +446,13 @@ public sealed partial class MissumAiAssistantService(
             if (message?.Status is MessageStatus.Pending or MessageStatus.Streaming or MessageStatus.Interrupted)
             {
                 var content = string.IsNullOrWhiteSpace(message.Content)
-                    ? "Der vorherige AI-Lauf wurde beim Clientstart gestoppt."
+                    ? applicationShutdown ? "Der AI-Lauf wurde beim Beenden von Missum gestoppt." : "Der vorherige AI-Lauf wurde beim Clientstart gestoppt."
                     : message.Content;
                 await chatRepository.UpdateMessageAsync(
                     message.Id,
                     content,
                     MessageStatus.Cancelled,
-                    "Der AI-Lauf wurde beim Clientstart gestoppt.",
+                    applicationShutdown ? "Der AI-Lauf wurde beim Beenden von Missum gestoppt." : "Der AI-Lauf wurde beim Clientstart gestoppt.",
                     CancellationToken.None).ConfigureAwait(false);
             }
 
@@ -435,15 +465,17 @@ public sealed partial class MissumAiAssistantService(
         return [.. serverRunIds];
     }
 
-    private async Task CancelPersistedServerRunsAsync(
-        IReadOnlyList<string> serverRunIds,
-        CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<string>> CancelPersistedServerRunsAsync(
+        string[] serverRunIds,
+        string reason = "startup",
+        CancellationToken cancellationToken = default)
     {
-        if (serverRunIds.Count == 0)
+        if (serverRunIds.Length == 0)
         {
-            return;
+            return [];
         }
 
+        var remaining = new System.Collections.Concurrent.ConcurrentBag<string>();
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(10));
         try
@@ -454,11 +486,18 @@ public sealed partial class MissumAiAssistantService(
                 try
                 {
                     await client.CancelRunAsync(serverRunId, timeout.Token).ConfigureAwait(false);
-                    RunDiagnostic(logger, serverRunId, "cancelled during client startup", null);
+                    RunDiagnostic(logger, serverRunId, "cancelled during client " + reason, null);
+                }
+                catch (MissumAiApiException exception) when (exception.Problem is { Status: 404, ErrorCode: "resource.not_found" })
+                {
+                    // A removed old job cannot resume. Only the gateway's typed
+                    // not-found receipt is terminal; proxy/startup errors retry.
+                    RunDiagnostic(logger, serverRunId, reason + " job no longer exists", null);
                 }
                 catch (Exception exception) when (exception is not OutOfMemoryException)
                 {
-                    RunDiagnostic(logger, serverRunId, $"startup cancel request failed ({exception.GetType().Name})", exception);
+                    remaining.Add(serverRunId);
+                    RunDiagnostic(logger, serverRunId, $"{reason} cancel request failed ({exception.GetType().Name})", exception);
                 }
             })).ConfigureAwait(false);
         }
@@ -466,9 +505,11 @@ public sealed partial class MissumAiAssistantService(
         {
             foreach (var serverRunId in serverRunIds)
             {
-                RunDiagnostic(logger, serverRunId, $"startup cancel connection failed ({exception.GetType().Name})", exception);
+                remaining.Add(serverRunId);
+                RunDiagnostic(logger, serverRunId, $"{reason} cancel connection failed ({exception.GetType().Name})", exception);
             }
         }
+        return remaining.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
     }
 
     [System.Diagnostics.CodeAnalysis.MemberNotNull(nameof(_activeCancellation))]
@@ -1219,8 +1260,30 @@ public sealed partial class MissumAiAssistantService(
             }
 
             localRun = localRun with { ServerRunId = accepted.RunId, State = ToStorage(accepted.State), UpdatedAt = DateTimeOffset.UtcNow };
-            await runs.UpdateAsync(localRun.Id, accepted.RunId, 0, localRun.State, cancellationToken: cancellationToken).ConfigureAwait(false);
-            _activeServerRunId = accepted.RunId;
+            CapturedRunCancellation? acceptedCancellation = null;
+            lock (_activeRunLock)
+            {
+                // Publish the accepted identity atomically with the explicit
+                // cancellation state. A Stop before acceptance had no ID to
+                // cancel; a Stop after this point captures this exact ID itself.
+                _activeServerRunId = accepted.RunId;
+                if (Volatile.Read(ref _explicitCancellation) != 0
+                    && _activeCancellation is not null && _activeRunCompletion is not null)
+                    acceptedCancellation = new(_activeCancellation, _activeRunCompletion.Task,
+                        accepted.RunId, _activeRunAction);
+            }
+            // An accepted server job must remain discoverable even if Stop has
+            // already cancelled the request token or the first shutdown scan.
+            await runs.UpdateAsync(localRun.Id, accepted.RunId, 0, localRun.State,
+                cancellationToken: CancellationToken.None).ConfigureAwait(false);
+            if (acceptedCancellation is not null)
+            {
+                await CancelCapturedRunAsync(acceptedCancellation, CancellationToken.None).ConfigureAwait(false);
+                await runs.UpdateAsync(localRun.Id, accepted.RunId, 0, "cancelled",
+                    errorCode: "client.run_cancelled_during_accept", cancellationToken: CancellationToken.None).ConfigureAwait(false);
+                throw new OperationCanceledException(cancellationToken);
+            }
+            cancellationToken.ThrowIfCancellationRequested();
             await FlushLiveModelSelectionAsync(cancellationToken).ConfigureAwait(false);
             RunDiagnostic(logger, accepted.RunId, "accepted", null);
             var result = await StreamRunWithReconnectAsync(
@@ -4156,6 +4219,7 @@ public sealed partial class MissumAiAssistantService(
         _activeSpeechCancellation?.Dispose();
         _gate.Dispose();
         _speechGate.Dispose();
+        _startupCleanupGate.Dispose();
     }
 
 

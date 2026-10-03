@@ -1,11 +1,33 @@
 using System.Text.Json;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 
 namespace Missum.App.Pages;
 
 public sealed partial class NativeAssistantPage
 {
+    // These fixtures contain no literal cursor glyphs. A caller explicitly
+    // checking user text with such a glyph can still verify the host removal.
+    private void AssertChatCursorAbsent(DependencyObject root, bool allowLiteralCursorGlyphs = false)
+    {
+        if (_messageBlocks.Values.Any(blocks => blocks.ContainsKey("streamCursor")))
+            throw new InvalidOperationException("The chat retained an empty streaming cursor host.");
+        void Inspect(DependencyObject node)
+        {
+            if (!allowLiteralCursorGlyphs && node is TextBlock text
+                && (text.Text == "▍" || text.Inlines.OfType<Microsoft.UI.Xaml.Documents.Run>().Any(run => run.Text == "▍")))
+                throw new InvalidOperationException("The chat rendered a decorative streaming cursor.");
+            if (!allowLiteralCursorGlyphs && node is RichTextBlock rich
+                && rich.Blocks.OfType<Microsoft.UI.Xaml.Documents.Paragraph>().SelectMany(paragraph => paragraph.Inlines)
+                    .OfType<Microsoft.UI.Xaml.Documents.Run>().Any(run => run.Text == "▍"))
+                throw new InvalidOperationException("The chat rendered a decorative rich-text streaming cursor.");
+            for (var index = 0; index < VisualTreeHelper.GetChildrenCount(node); index++)
+                Inspect(VisualTreeHelper.GetChild(node, index));
+        }
+        Inspect(root);
+    }
+
     private async Task VerifyThinkingIndicatorSmokeAsync(JsonElement original)
     {
         var owner = Guid.NewGuid();
@@ -41,12 +63,11 @@ public sealed partial class NativeAssistantPage
 
             var row = _thinkingIndicators[messageId];
             var body = MessageBody(_messageViews[messageId].View);
-            var cursor = _messageBlocks[messageId]["streamCursor"];
+            AssertChatCursorAbsent(body);
             if (!row.IsHitTestVisible || !row.ToggleButton.IsTabStop || row.IsExpanded
-                || body.Children.IndexOf(row) != body.Children.IndexOf(cursor) - 1
-                || body.Children.OfType<FrameworkElement>().Last(child => child.Visibility == Visibility.Visible) != cursor
+                || body.Children.OfType<FrameworkElement>().Last(child => child.Visibility == Visibility.Visible) != row
                 || row.Label.Text != $"Denke nach · {1025:N0} Token")
-                throw new InvalidOperationException("Thinking must be a compact, collapsed disclosure immediately above the final cursor.");
+                throw new InvalidOperationException("Thinking must remain a compact, collapsed disclosure without a cursor host below it.");
 
             // Exercise the real native button, then stream reasoning through the
             // same chat.delta path while retaining its open control and receipt.
@@ -76,6 +97,7 @@ public sealed partial class NativeAssistantPage
                     || !ReferenceEquals(firstParagraph, reasoningView.Children.First())
                     || string.Concat(((TextBlock)firstParagraph).Inlines.OfType<Microsoft.UI.Xaml.Documents.Run>().Select(run => run.Text)) != detail)
                     throw new InvalidOperationException("A reasoning delta rebuilt or failed to incrementally update the opened disclosure.");
+                AssertChatCursorAbsent(body);
             }
             await SaveMathPreviewAsync(LayoutRoot, "native-thinking-expanded-preview.png");
             invoke.Invoke(); await Task.Delay(30);
@@ -88,12 +110,14 @@ public sealed partial class NativeAssistantPage
             }));
 
             var oldLabel = row.Label.Text;
+            var bodyChildCount = body.Children.Count;
             _messagesDirty = false;
             Progress("tokenProgress", 30, 1030);
             RefreshThinkingIndicators();
             if (_messagesDirty || row.Label.Text != oldLabel || !ReferenceEquals(row, _thinkingIndicators[messageId])
-                || !ReferenceEquals(cursor, _messageBlocks[messageId]["streamCursor"]))
+                || body.Children.Count != bodyChildCount)
                 throw new InvalidOperationException("Token progress rebuilt controls or bypassed the throttled label update.");
+            AssertChatCursorAbsent(body);
             var header = _messageBlocks[messageId]["header"];
             UpdateMessageHeader(header, _messages[messageId]);
             RefreshThinkingIndicators(refreshTokens: true);
@@ -132,7 +156,8 @@ public sealed partial class NativeAssistantPage
             ApplyEvent("state.snapshot", original); RenderMessagesNow();
             ApplyEvent("state.snapshot", JsonSerializer.SerializeToElement(paused)); RenderMessagesNow(); RefreshThinkingIndicators();
             row = _thinkingIndicators[messageId];
-            cursor = _messageBlocks[messageId]["streamCursor"];
+            body = MessageBody(_messageViews[messageId].View);
+            AssertChatCursorAbsent(body);
             if (row.Visibility != Visibility.Visible)
                 throw new InvalidOperationException("Returning to a session during a token pause must retain latched thinking.");
 
@@ -143,8 +168,9 @@ public sealed partial class NativeAssistantPage
 
             ApplyEvent("chat.delta", JsonSerializer.SerializeToElement(new { sessionId = owner, messageId, content = "Ein neuer sichtbarer Absatz." }));
             RenderMessagesNow(); RefreshThinkingIndicators();
-            if (row.Visibility != Visibility.Collapsed || !ReferenceEquals(cursor, _messageBlocks[messageId]["streamCursor"]))
-                throw new InvalidOperationException("Visible text must hide thinking without replacing the cursor.");
+            if (row.Visibility != Visibility.Collapsed)
+                throw new InvalidOperationException("Visible text must hide thinking while the answer continues streaming.");
+            AssertChatCursorAbsent(body);
 
             Progress("codingWaiting", 30, 1030);
             await Task.Delay(850);
@@ -196,6 +222,7 @@ public sealed partial class NativeAssistantPage
             if (_thinkingIndicators.ContainsKey(messageId) || _messageBlocks[messageId].ContainsKey("thinkingIndicator")
                 || _messageBlocks[messageId].ContainsKey("streamCursor"))
                 throw new InvalidOperationException("Completion retained the transient thinking row or cursor.");
+            AssertChatCursorAbsent(MessageBody(_messageViews[messageId].View));
 
             ApplyEvent("state.snapshot", original); RenderMessagesNow();
             if (_thinkingIndicators.ContainsKey(messageId) || _thinkingStates.ContainsKey(messageId))

@@ -52,22 +52,21 @@ public sealed partial class NativeAssistantPage
         var presentation = state.SelectedProjectId is { } id ? App.Current.GetService<ScientificPresentationCoordinator>().GetSnapshot(id) : null;
         var contentKey = _simulationView ? string.Join("|", presentation?.Simulation?.Artifacts.Select(item => item.ToString()) ?? [])
             : presentation?.Publication?.PdfPath;
-        var signature = _simulationView ? $"{owner}|simulation|{state.SelectedProjectId}|{contentKey}"
-            : $"{owner}|publication|{state.SelectedProjectId}|{contentKey}|{state.Error}|{presentation?.PublicationError}|{state.Loaded}";
+        var projectKey = System.Text.Json.JsonSerializer.Serialize(state.Projects.Select(project => new
+        {
+            Id = S(project, "id"), Title = S(project, "interpretedQuestion", S(project, "originalQuestion")),
+        }));
+        // Background polling must not rebuild existing cards or collapse their
+        // source disclosures. Only the initial restore needs a loading state.
+        var loading = string.IsNullOrWhiteSpace(state.Error) && string.IsNullOrWhiteSpace(presentation?.SimulationError)
+            && (!state.Loaded || state.SelectedProjectId is not null && presentation?.Simulation is null);
+        var signature = _simulationView ? $"{owner}|simulation|{state.SelectedProjectId}|{contentKey}|{state.Error}|{presentation?.SimulationError}|{presentation?.Simulation?.Status}|{presentation?.Simulation?.Detail}|{loading}|{projectKey}"
+            : $"{owner}|publication|{state.SelectedProjectId}|{contentKey}|{state.Error}|{presentation?.PublicationError}|{state.Loaded}|{projectKey}";
         if (signature == _scienceViewSignature) return;
         _scienceViewSignature = signature;
         // Detach the previous visual tree before moving the cached PDF view.
         // Switching straight to Simulation must never briefly rebuild Publication.
         ResearchHost.Content = null;
-        if (_simulationView)
-        {
-            // The tab stays genuinely empty until a successful Python run has
-            // produced a figure; publication progress belongs in the chat.
-            var simulation = new Grid { Padding = new Thickness(24, 16, 24, 0) };
-            simulation.Children.Add(BuildSimulationView(presentation?.Simulation));
-            ResearchHost.Content = simulation;
-            return;
-        }
         var root = new Grid { Padding = new Thickness(24, 16, 24, 0), RowSpacing = 12 };
         root.RowDefinitions.Add(new() { Height = GridLength.Auto }); root.RowDefinitions.Add(new() { Height = GridLength.Auto });
         root.RowDefinitions.Add(new() { Height = new GridLength(1, GridUnitType.Star) });
@@ -107,7 +106,7 @@ public sealed partial class NativeAssistantPage
         Grid.SetRow(description, 1); root.Children.Add(description);
 
         FrameworkElement body;
-        if (_simulationView) body = BuildSimulationView(presentation?.Simulation);
+        if (_simulationView) body = BuildSimulationView(presentation?.Simulation, state.SelectedProjectId is not null, loading);
         else if (presentation?.Publication is { } pdf)
         {
             if (!_publicationViews.TryGetValue(owner, out var viewer)) _publicationViews[owner] = viewer = new NativePublicationView();
@@ -116,14 +115,26 @@ public sealed partial class NativeAssistantPage
         }
         else body = ScienceEmpty(state.SelectedProjectId is null ? "Stelle im Chat eine Forschungsfrage." : "Die wissenschaftliche Publikation wird erstellt.",
             "Hier erscheint das PDF bereits während der Recherche. Der Arbeitsablauf bleibt im Chat sichtbar.");
+        if (body is StackPanel emptyState)
+            body = new ScrollViewer { Content = emptyState, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalContentAlignment = HorizontalAlignment.Stretch,
+                VerticalContentAlignment = VerticalAlignment.Center, Padding = new Thickness(0, 0, 0, 16) };
         Grid.SetRow(body, 2); root.Children.Add(body); ResearchHost.Content = root;
     }
 
-    private FrameworkElement BuildSimulationView(ScientificSimulationSnapshot? snapshot)
+    private FrameworkElement BuildSimulationView(ScientificSimulationSnapshot? snapshot, bool projectSelected, bool loading)
     {
         var artifacts = snapshot?.Artifacts.Where(item => item.IsResearchData && File.Exists(item.ImagePath)
             && item.Provenance.StartsWith("Forschungsexperiment · ", StringComparison.Ordinal)).ToArray() ?? [];
-        if (artifacts.Length == 0) return new Grid();
+        if (artifacts.Length == 0)
+        {
+            if (loading) return ScienceEmpty("Simulationen werden geladen.",
+                "Gespeicherte Python-Ergebnisse dieser Sitzung werden wiederhergestellt. Hier erscheinen Abbildungen zusammen mit ihrem Quellcode und den zugehörigen Daten.");
+            if (!projectSelected) return ScienceEmpty("Stelle im Chat eine Forschungsfrage.",
+                "Hier erscheinen passende Simulationen, Plots und Graphen aus Python. Jede Darstellung bleibt mit ihrem Quellcode und den zugehörigen Daten nachvollziehbar; der Arbeitsablauf ist im Chat sichtbar.");
+            return ScienceEmpty("Noch keine Simulation vorhanden.",
+                "Sobald eine Python-Auswertung eine Abbildung erzeugt, erscheint sie hier mit Quellcode und verfügbaren Daten. Gespeicherte Ergebnisse werden beim erneuten Öffnen automatisch geladen; der Arbeitsablauf bleibt im Chat sichtbar.");
+        }
         var body = new StackPanel { Spacing = 20, MaxWidth = 1150, HorizontalAlignment = HorizontalAlignment.Stretch };
         foreach (var artifact in artifacts)
         {

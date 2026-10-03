@@ -12,6 +12,9 @@ param(
     # Each GPU keeps this reserve; llama fits from the model's native context maximum.
     [ValidateRange(256, 32768)][int] $FitTargetMiB = 2048,
     [string] $GpuLayers = 'auto',
+    # Explicit application shutdown gives snapshots a bounded grace period.
+    # Shared/manual stops retain their previous allowance for large KV caches.
+    [ValidateRange(1, 600)][int] $ShutdownTimeoutSeconds = 600,
     # GUI callers do not redirect process pipes: the long-lived Python child
     # could inherit them and prevent ReadToEndAsync from ever completing.
     [string] $ErrorFile
@@ -73,6 +76,60 @@ function Get-OwnedSupervisor {
     return $process
 }
 
+function Get-OwnedNativeChildren {
+    param([Diagnostics.Process] $Supervisor)
+    $owner = Get-Content -LiteralPath $ownerFile -Raw | ConvertFrom-Json
+    $expectedBinary = [IO.Path]::GetFullPath([string]$owner.binary)
+    $snapshot = @(Get-CimInstance Win32_Process)
+    $parents = [Collections.Generic.Queue[object]]::new()
+    $parents.Enqueue(@{ Id = $Supervisor.Id; StartedUtcTicks = $Supervisor.StartTime.ToUniversalTime().Ticks })
+    while ($parents.Count -gt 0) {
+        $parent = $parents.Dequeue()
+        foreach ($native in @($snapshot | Where-Object { $_.ParentProcessId -eq $parent.Id })) {
+            $child = Get-Process -Id $native.ProcessId -ErrorAction SilentlyContinue
+            if ($null -eq $child) { continue }
+            try {
+                $started = $child.StartTime.ToUniversalTime().Ticks
+                # A recycled parent PID cannot own a process created before it.
+                if ($started -lt $parent.StartedUtcTicks -or
+                    $child.StartTime.ToUniversalTime().ToString('yyyyMMddHHmmssfff') -ne
+                    $native.CreationDate.ToUniversalTime().ToString('yyyyMMddHHmmssfff')) { continue }
+                $parents.Enqueue(@{ Id = $child.Id; StartedUtcTicks = $started })
+                if (-not [string]::IsNullOrWhiteSpace($child.Path) -and
+                    [IO.Path]::GetFullPath($child.Path).Equals($expectedBinary, [StringComparison]::OrdinalIgnoreCase)) {
+                    [pscustomobject]@{ ProcessId = $child.Id; StartedUtcTicks = $started }
+                }
+            } catch [System.InvalidOperationException] {
+                # A child that completed while the process snapshot was read is
+                # already gone and needs no wait or cleanup.
+                if (-not $child.HasExited) { throw }
+            } finally { $child.Dispose() }
+        }
+    }
+}
+
+function Wait-OwnedNativeChildren {
+    param([object[]] $Children, [DateTime] $Deadline)
+    $remainingChildren = @()
+    foreach ($identity in $Children) {
+        $child = Get-Process -Id $identity.ProcessId -ErrorAction SilentlyContinue
+        if ($null -eq $child) { continue }
+        try {
+            # Wait only for the same captured process. A newly reused PID is not
+            # part of this supervisor's shutdown and must never be touched.
+            if ($child.StartTime.ToUniversalTime().Ticks -ne $identity.StartedUtcTicks) { continue }
+            $remainingMilliseconds = [Math]::Max(0, [Math]::Ceiling(($Deadline - [DateTime]::UtcNow).TotalMilliseconds))
+            if (-not $child.WaitForExit([int]$remainingMilliseconds)) { $remainingChildren += $identity.ProcessId }
+        } catch [System.InvalidOperationException] {
+            if (-not $child.HasExited) { throw }
+        } finally { $child.Dispose() }
+    }
+    if ($remainingChildren.Count -gt 0) {
+        throw ('The owned native model process tree is still closing after 10 seconds (process IDs: ' +
+            ($remainingChildren -join ', ') + '). Inspect ' + (Join-Path $StateDirectory 'llama.stderr.log'))
+    }
+}
+
 function Show-NativeStatus {
     $process = Get-OwnedSupervisor
     $healthy = $false
@@ -96,13 +153,30 @@ if ($Action -eq 'Status') { Show-NativeStatus; return }
 if ($Action -eq 'Stop') {
     $process = Get-OwnedSupervisor
     if ($process) {
+        $ownedChildren = @(Get-OwnedNativeChildren -Supervisor $process)
         [IO.File]::WriteAllText($stopFile, 'stop')
         # A cache prepare may first save and restore under the manager lock;
         # shutdown then checkpoints up to two model slots before terminating.
-        if (-not $process.WaitForExit(600000)) {
+        $childrenDeadline = [DateTime]::MinValue
+        if (-not $process.WaitForExit($ShutdownTimeoutSeconds * 1000)) {
+            $childrenDeadline = [DateTime]::UtcNow.AddSeconds(10)
             $verified = Get-OwnedSupervisor
-            if ($verified) { Stop-Process -Id $verified.Id -Force }
+            if ($verified) {
+                # The supervisor owns a Windows Job Object containing only its
+                # llama router and GPU0/GPU1 children. Closing its process also
+                # closes that Job Object and releases their model allocations.
+                Stop-Process -Id $verified.Id -Force
+                $remainingMilliseconds = [Math]::Max(0, [Math]::Ceiling(($childrenDeadline - [DateTime]::UtcNow).TotalMilliseconds))
+                if (-not $verified.WaitForExit([int]$remainingMilliseconds)) {
+                    throw 'The owned native model supervisor could not be stopped.'
+                }
+            }
         }
+        # Closing the supervisor's Job Object initiates termination of its
+        # model workers, but their CUDA teardown can outlast the supervisor.
+        # Report success only once those captured, verified workers exited.
+        if ($childrenDeadline -eq [DateTime]::MinValue) { $childrenDeadline = [DateTime]::UtcNow.AddSeconds(10) }
+        Wait-OwnedNativeChildren -Children $ownedChildren -Deadline $childrenDeadline
     }
     Show-NativeStatus
     return

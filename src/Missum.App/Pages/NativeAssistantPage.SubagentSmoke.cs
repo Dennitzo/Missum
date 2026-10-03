@@ -102,7 +102,6 @@ public sealed partial class NativeAssistantPage
             ApplyEvent("reasoning.snapshot", parentReasoning);
             var expectedParentEffort = "Hoch";
             var parentBubble = _messageViews[parentMessage].View;
-            var parentCursor = _messageBlocks[parentMessage]["streamCursor"];
             void VerifyOwnerTabInfrastructure(NativeSubagentState? visibleChild = null)
             {
                 if (_mode != ownerChatMode || _sessionTabs.All(tab => tab.Id != session || tab.Mode != ownerChatMode))
@@ -120,11 +119,9 @@ public sealed partial class NativeAssistantPage
                 VerifyOwnerTabInfrastructure();
                 if (!_running || !DisplayRunning || ActiveSubagent is not null || !IsConversationMessageRunning(parentMessage)
                     || ModelLabel.Text != "gpt-oss-120b" || ReasoningLabel.Text != expectedParentEffort || !ModelButton.IsEnabled
-                    || !_messageBlocks[parentMessage].TryGetValue("streamCursor", out var cursor)
-                    || !ReferenceEquals(parentCursor, cursor) || cursor.Parent != MessageBody(parentBubble)
-                    || cursor is not NativeStreamingMarkdown stream || !stream.Children.OfType<TextBlock>().SelectMany(block => block.Inlines)
-                        .OfType<Microsoft.UI.Xaml.Documents.Run>().Any(run => run.Text == "▍"))
-                    throw new InvalidOperationException("The active parent run or its original native streaming cursor was lost during child navigation or completion.");
+                    || !MessageBody(parentBubble).Children.OfType<NativeStreamingMarkdown>().Any(markdown => markdown.Children.Count > 0))
+                    throw new InvalidOperationException("The active parent run or its native streamed text was lost during child navigation or completion.");
+                AssertChatCursorAbsent(MessageBody(parentBubble));
             }
             VerifyParentStillStreaming();
             ApplyEvent("subagent.snapshot", child); UpdateLayout();
@@ -198,9 +195,9 @@ public sealed partial class NativeAssistantPage
                 || !_running || !DisplayRunning
                 || !Composer.IsReadOnly || _messageBlocks[childMessage]["header"] is not StackPanel
                 || !_messageBlocks[childMessage].ContainsKey("tool:child-read")
-                || !_messageBlocks[childMessage].ContainsKey("streamCursor")
                 || PromptTimeline.Visibility != Visibility.Visible || _promptTimelineMarkers.Count != 1)
-                throw new InvalidOperationException("The child tab did not reuse the native message, tool, cursor and timeline renderer.");
+                throw new InvalidOperationException("The child tab did not reuse the native message, tool and timeline renderer.");
+            AssertChatCursorAbsent(MessageBody(_messageViews[childMessage].View));
             void VerifyChildModel(string effort)
             {
                 if (ModelLabel.Text != "qwen3.8-27b" || ReasoningLabel.Text != effort || ModelButton.IsEnabled)
@@ -228,7 +225,7 @@ public sealed partial class NativeAssistantPage
             if (Composer.Text != "Mein Entwurf bleibt erhalten" || Composer.IsReadOnly
                 || !ReferenceEquals(parentBubble, _messageViews[parentMessage].View)
                 || MessagesPanel.Children.Contains(childBubble))
-                throw new InvalidOperationException("Returning from a child discarded the parent draft, cursor or transcript.");
+                throw new InvalidOperationException("Returning from a child discarded the parent draft or transcript.");
             VerifyParentStillStreaming();
             var completed = child.Deserialize<Dictionary<string, JsonElement>>(JsonOptions)!;
             completed["status"] = JsonSerializer.SerializeToElement("completed");
@@ -285,6 +282,7 @@ public sealed partial class NativeAssistantPage
                 || _messageActionViews[childMessage].Panel.Parent != childBody
                 || _messageActionViews[childMessage].Panel.Visibility != Visibility.Visible)
                 throw new InvalidOperationException("Child completion lost its cached native bubble or footer ownership.");
+            AssertChatCursorAbsent(childBody);
             childState.TabOpen = false; ShowParentConversation(); RenderSessionTabs();
             VerifyParentStillStreaming();
             if (childState.Container.Parent is not null || SubagentsPanel.Children.Count != 1)
@@ -361,7 +359,7 @@ public sealed partial class NativeAssistantPage
             await File.WriteAllTextAsync(Path.Combine(App.Current.DataDirectory, "native-subagent-validation.json"),
                 JsonSerializer.Serialize(new { renderer = "WinUI3", passed = true, ownerChatMode, parentStable = true, childUsesNativeRenderer = true,
                     overlayAboveSources = true, closableAndReopenable = true, parentDraftPreserved = true,
-                    parentRunRemainedActive = true, parentCursorPreserved = true,
+                    parentRunRemainedActive = true, chatCursorAbsent = true,
                     childModelIdentityPreserved = true,
                     compactLifecycleRow = true, lifecycleStartEntryPreserved = true, lifecycleCompletionPostedOnce = true, lifecycleClickOpensChild = true,
                     lifecycleKeyboardAccessible = true, acceptedManagerStepsCoalesced = true,

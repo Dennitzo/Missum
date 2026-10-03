@@ -239,6 +239,8 @@ public sealed class ResearchSandboxService(AssistantRuntimeProfile profile, Miss
         var scriptContainerPath = "/sandbox/work/" + Path.GetRelativePath(layout.WorkPath, script).Replace('\\', '/');
         var startInfo = new ProcessStartInfo("docker") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
         Add(startInfo, "run"); Add(startInfo, "--rm"); Add(startInfo, "--init"); Add(startInfo, "--name"); Add(startInfo, containerName);
+        Add(startInfo, "--label"); Add(startInfo, "com.missum.runtime.profile=" + profile.Name);
+        Add(startInfo, "--label"); Add(startInfo, "com.missum.runtime.stack-data-root=" + Path.GetFullPath(profile.StackDataRoot));
         Add(startInfo, "--network"); Add(startInfo, "none"); Add(startInfo, "--read-only"); Add(startInfo, "--cap-drop"); Add(startInfo, "ALL");
         Add(startInfo, "--security-opt"); Add(startInfo, "no-new-privileges:true"); Add(startInfo, "--pids-limit"); Add(startInfo, "256");
         Add(startInfo, "--cpus"); Add(startInfo, "16"); Add(startInfo, "--memory"); Add(startInfo, "48g"); Add(startInfo, "--memory-swap"); Add(startInfo, "48g");

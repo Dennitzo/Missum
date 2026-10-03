@@ -14,6 +14,7 @@ public sealed class NativeModelRuntimeService : IDisposable
     private readonly Func<CancellationToken, Task> _start;
     private readonly Func<DateTimeOffset> _now;
     private readonly Func<CancellationToken, Task> _stop;
+    private readonly Func<CancellationToken, Task> _stopOwned;
     private readonly Func<Uri, CancellationToken, Task<bool?>> _gatewayIdle;
     private readonly TimeSpan _shutdownDrainTimeout;
     private readonly string _runtimeEndpoint;
@@ -32,18 +33,20 @@ public sealed class NativeModelRuntimeService : IDisposable
             token => RunInstalledRuntimeAsync(profile, "Start", token),
             () => DateTimeOffset.UtcNow,
             token => RunInstalledRuntimeAsync(profile, "Stop", token),
-            runtimeEndpoint: $"http://127.0.0.1:{profile.NativePort}") { }
+            runtimeEndpoint: $"http://127.0.0.1:{profile.NativePort}",
+            stopOwned: token => RunInstalledRuntimeAsync(profile, "Stop", token, ownedShutdown: true)) { }
 
     internal NativeModelRuntimeService(Func<Uri, bool> isLocalGateway,
         Func<CancellationToken, Task<bool>> probe, Func<CancellationToken, Task> start,
         Func<DateTimeOffset>? now = null, Func<CancellationToken, Task>? stop = null,
         Func<Uri, CancellationToken, Task<bool?>>? gatewayIdle = null, TimeSpan? shutdownDrainTimeout = null,
-        string runtimeEndpoint = "http://127.0.0.1:8081")
+        string runtimeEndpoint = "http://127.0.0.1:8081", Func<CancellationToken, Task>? stopOwned = null)
     {
         _isLocalGateway = isLocalGateway;
         _probe = probe;
         _start = start;
         _stop = stop ?? StopDefaultRuntimeAsync;
+        _stopOwned = stopOwned ?? _stop;
         _gatewayIdle = gatewayIdle ?? ProbeGatewayIdleAsync;
         _shutdownDrainTimeout = shutdownDrainTimeout ?? TimeSpan.FromSeconds(15);
         if (_shutdownDrainTimeout <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(shutdownDrainTimeout));
@@ -104,6 +107,26 @@ public sealed class NativeModelRuntimeService : IDisposable
             // Unknown status must not kill another portable instance's run.
             if (!await WaitForGatewayIdleAsync(gateway, cancellationToken).ConfigureAwait(false)) return;
             await _stop(cancellationToken).ConfigureAwait(false);
+            _stopped = true;
+        }
+        finally { _gate.Release(); }
+    }
+
+    /// <summary>
+    /// Stops this profile's Windows supervisor after the application has stopped its
+    /// runs and local services. Unlike a shared drain, gateway reachability is not an
+    /// authorization check: the saved supervisor identity confines the stop to this
+    /// profile and its Job Object owns the main and subagent model processes.
+    /// </summary>
+    public async Task StopOwnedAsync(Uri gateway, CancellationToken cancellationToken = default)
+    {
+        BeginShutdown();
+        if (AutostartDisabled() || !_isLocalGateway(gateway)) return;
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (_stopped) return;
+            await _stopOwned(cancellationToken).ConfigureAwait(false);
             _stopped = true;
         }
         finally { _gate.Release(); }
@@ -193,7 +216,8 @@ public sealed class NativeModelRuntimeService : IDisposable
     private static async Task RunInstalledRuntimeAsync(
         AssistantRuntimeProfile profile,
         string action,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool ownedShutdown = false)
     {
         var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         var stateDirectory = profile.NativeStateDirectory;
@@ -238,18 +262,19 @@ public sealed class NativeModelRuntimeService : IDisposable
         // A detached Python/llama descendant can inherit pipe handles even after the
         // PowerShell launcher exits. Never wait for its process-lifetime stdout EOF.
         var errorFile = Path.Combine(stateDirectory, "startup-" + Guid.NewGuid().ToString("N") + ".error.txt");
-        foreach (var argument in BuildRuntimeManagerArguments(profile, action, supportDirectory, errorFile, userProfile))
+        foreach (var argument in BuildRuntimeManagerArguments(profile, action, supportDirectory, errorFile, userProfile,
+                     shutdownTimeoutSeconds: ownedShutdown ? 20 : null))
             info.ArgumentList.Add(argument);
         using var process = new Process { StartInfo = info };
         if (!process.Start()) throw new InvalidOperationException("Der Starthelfer für Windows llama.cpp konnte nicht gestartet werden.");
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(TimeSpan.FromSeconds(action == "Stop" ? 660 : 45));
+        timeout.CancelAfter(TimeSpan.FromSeconds(action == "Stop" ? (ownedShutdown ? 35 : 660) : 45));
         try { await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false); }
         catch (OperationCanceledException)
         {
-            // Only stop this short-lived launcher. A supervisor that already started owns its
-            // own process tree and is discovered on the next probe.
-            if (!process.HasExited) process.Kill();
+            // Confine cancellation to this helper's process tree. An already detached
+            // supervisor remains profile-owned and is stopped by StopOwnedAsync.
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
             if (cancellationToken.IsCancellationRequested) throw;
             throw new InvalidOperationException($"Windows llama.cpp: Aktion {action} hat das Zeitlimit überschritten. Diagnose: {Path.Combine(stateDirectory, "stderr.log")}");
         }
@@ -286,9 +311,10 @@ public sealed class NativeModelRuntimeService : IDisposable
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromMinutes(30));
         try { await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false); }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException)
         {
             if (!process.HasExited) process.Kill(entireProcessTree: true);
+            if (cancellationToken.IsCancellationRequested) throw;
             throw new InvalidOperationException("Das automatische llama.cpp-Update hat das Zeitlimit von 30 Minuten überschritten.");
         }
         if (process.ExitCode != 0 || !File.Exists(resolvedPathFile))
@@ -315,8 +341,11 @@ public sealed class NativeModelRuntimeService : IDisposable
         string action,
         string supportDirectory,
         string errorFile,
-        string userProfile)
+        string userProfile,
+        int? shutdownTimeoutSeconds = null)
     {
+        if (shutdownTimeoutSeconds is <= 0 or > 600)
+            throw new ArgumentOutOfRangeException(nameof(shutdownTimeoutSeconds));
         return
         [
             "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
@@ -327,6 +356,9 @@ public sealed class NativeModelRuntimeService : IDisposable
             "-BinaryPath", profile.NativeBinaryPath,
             "-Port", profile.NativePort.ToString(System.Globalization.CultureInfo.InvariantCulture),
             "-ErrorFile", errorFile,
+            .. (shutdownTimeoutSeconds is { } seconds
+                ? new[] { "-ShutdownTimeoutSeconds", seconds.ToString(System.Globalization.CultureInfo.InvariantCulture) }
+                : Array.Empty<string>()),
         ];
     }
 

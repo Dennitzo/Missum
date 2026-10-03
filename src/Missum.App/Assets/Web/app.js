@@ -1529,7 +1529,6 @@
     } else {
     const content = document.createElement("div");
     content.className = "message-content";
-    if (["streaming", "Streaming"].includes(message.status)) content.classList.add("stream-cursor");
     content.append(globalThis.missumMarkdown.render(sanitizeVisibleMessageContent(contentMessage.content)));
     if (state.chatMode === "coding" || (!state.chatMode && ["coding"].includes(state.selectedToolAction))) enhanceCodingCodeBlocks(content);
     annotateReadableSpeechBlocks(contentMessage, article, content);
@@ -4505,7 +4504,6 @@
     });
     clone.querySelectorAll("button").forEach(button => button.remove());
     clone.querySelectorAll(".message-status-spinner").forEach(spinner => spinner.remove());
-    clone.querySelectorAll(".stream-cursor").forEach(content => content.classList.remove("stream-cursor"));
     clone.querySelectorAll("[data-speech-source-active]").forEach(node => {
       node.removeAttribute("data-speech-source-active");
       node.removeAttribute("aria-current");

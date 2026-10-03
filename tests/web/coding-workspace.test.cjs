@@ -309,7 +309,7 @@ test("assistant headers use the Coding presentation in General and show accurate
   assert.ok(!captionMeta.textContent.includes("Denkt nach"));
 });
 
-test("live delta and committed text updates preserve the status, spinner and streaming cursor nodes", () => {
+test("live delta and committed text updates preserve status and streaming content without a blinking cursor", () => {
   const { context, state, elements } = harness();
   state.selectedToolAction = null;
   state.chatMode = "general";
@@ -328,8 +328,8 @@ test("live delta and committed text updates preserve the status, spinner and str
   const statusLabel = statusHeader.querySelector(".message-status");
   const statusDetail = statusHeader.querySelector(".message-meta__detail");
   const spinner = statusHeader.querySelector(".message-status-spinner");
-  const cursor = article.querySelector(".message-content.stream-cursor");
-  assert.ok(statusHeader && statusActivity && spinner && cursor);
+  const content = article.querySelector(".message-content");
+  assert.ok(statusHeader && statusActivity && spinner && content);
 
   const assertStableLiveDom = expectedText => {
     const current = elements.messageList.querySelector('[data-message-id="answer-1"]');
@@ -339,10 +339,10 @@ test("live delta and committed text updates preserve the status, spinner and str
     assert.equal(current.querySelector(".message-status"), statusLabel, "the live status label keeps its DOM node");
     assert.equal(current.querySelector(".message-meta__detail"), statusDetail, "the token detail keeps its DOM node");
     assert.equal(current.querySelector(".message-status-spinner"), spinner, "the spinner animation keeps its DOM node");
-    assert.equal(current.querySelector(".message-content.stream-cursor"), cursor, "the streaming cursor keeps its DOM node");
+    assert.equal(current.querySelector(".message-content"), content, "the streaming content keeps its DOM node");
     assert.equal(current.querySelectorAll(".message-status-spinner").length, 1);
-    assert.equal(current.querySelectorAll(".message-content.stream-cursor").length, 1);
-    assert.equal(cursor.textContent, expectedText);
+    assert.equal(current.querySelectorAll(".stream-cursor").length, 0);
+    assert.equal(content.textContent, expectedText);
   };
   assertStableLiveDom("Ich");
 

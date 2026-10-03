@@ -15,50 +15,12 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
     internal const double BodyFontSize = 16;
     private readonly List<SectionView> _sections = [];
     private string _text = string.Empty;
-    private bool _streaming;
-    private readonly Run _cursor = new() { Text = "▍" };
-    private readonly SolidColorBrush _cursorBrush = new();
-    private readonly DispatcherTimer _cursorTimer = new() { Interval = TimeSpan.FromMilliseconds(400) };
-    private InlineCollection? _cursorInlines;
-    private readonly TextBlock _cursorHost = new() { FontSize = BodyFontSize, LineHeight = 26, IsHitTestVisible = false };
     internal IReadOnlyList<Grid> RenderedTables => _sections.Where(section => section.Specification.Kind == SectionKind.Table)
         .Select(section => section.Table!.Grid).ToArray();
-
-    public void SetStreaming(bool streaming)
-    {
-        if (_streaming == streaming) return;
-        _streaming = streaming;
-        if (streaming) { AttachCursor(); if (IsLoaded) _cursorTimer.Start(); }
-        else { _cursorTimer.Stop(); DetachCursor(); }
-    }
-
-    private void DetachCursor()
-    {
-        _cursorInlines?.Remove(_cursor);
-        _cursorInlines = null;
-        Children.Remove(_cursorHost);
-    }
-
-    private void AttachCursor()
-    {
-        if (!_streaming) return;
-        if (Application.Current.Resources.TryGetValue("MissumAccentBrush", out var accent) && accent is SolidColorBrush brush)
-            _cursorBrush.Color = brush.Color;
-        else _cursorBrush.Color = Microsoft.UI.Colors.MediumPurple;
-        _cursor.Foreground = _cursorBrush;
-        // Keep the cursor on its own line, including after formulas and code blocks.
-        Children.Add(_cursorHost);
-        _cursorInlines = _cursorHost.Inlines;
-        _cursorInlines.Add(_cursor);
-    }
-
 
     public NativeStreamingMarkdown(string text)
     {
         Spacing = 9;
-        _cursorTimer.Tick += (_, _) => _cursorBrush.Opacity = _cursorBrush.Opacity > 0 ? 0 : 1;
-        Loaded += (_, _) => { if (_streaming) _cursorTimer.Start(); };
-        Unloaded += (_, _) => _cursorTimer.Stop();
         UpdateText(text);
     }
 
@@ -67,7 +29,6 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
     {
         ArgumentNullException.ThrowIfNull(text);
         if (string.Equals(_text, text, StringComparison.Ordinal)) return;
-        DetachCursor();
         _text = text;
         var specifications = ParseSections(text);
         var next = new SectionView?[specifications.Count];
@@ -116,7 +77,6 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
         while (Children.Count > next.Length) Children.RemoveAt(Children.Count - 1);
         _sections.Clear();
         _sections.AddRange(next.Select(section => section!));
-        AttachCursor();
     }
 
     private static SectionView CreateSection(SectionKind kind)

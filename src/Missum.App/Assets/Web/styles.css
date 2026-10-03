@@ -322,7 +322,6 @@ html[data-theme="high-contrast"] tr.speech-source-active--block > td {
 .message-status-spinner { display: inline-block; width: 10px; height: 10px; margin: 0 4px 0 2px; vertical-align: -2px; border: 2px solid color-mix(in srgb, var(--accent) 28%, transparent); border-top-color: var(--accent); border-radius: 50%; animation: message-status-spin .9s linear infinite; }
 @keyframes message-status-spin { to { transform: rotate(360deg); } }
 .message-status.failed { color: var(--danger); }
-.stream-cursor::after { display: inline-block; width: 7px; height: 16px; margin-left: 3px; vertical-align: -2px; background: var(--accent); content: ""; animation: blink .8s steps(2) infinite; }
 .code-block { margin: 13px 0; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-md); background: color-mix(in srgb, var(--background-accent) 6%, #111); color: #eee; }
 .code-header { display: flex; align-items: center; justify-content: space-between; padding: 7px 11px; background: color-mix(in srgb, var(--background-accent) 18%, #201d24); color: #e3dde8; font-size: 12px; }
 .code-header button { border: 0; background: transparent; color: inherit; }
@@ -624,7 +623,6 @@ tr:last-child td { border-bottom: 0; }
   pointer-events: none;
 }
 
-@keyframes blink { 50% { opacity: 0; } }
 
 @media (max-width: 820px) {
   .app-shell, .app-shell.sessions-collapsed { grid-template-columns: 1fr; }

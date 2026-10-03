@@ -14,7 +14,8 @@ public sealed record MissumAiConnectionStatus(
 public sealed class MissumAiConnectionService(
     SettingsCoordinator settings,
     ILogger<MissumAiConnectionService> logger,
-    NativeModelRuntimeService? nativeRuntime = null) : IDisposable
+    NativeModelRuntimeService? nativeRuntime = null,
+    MissumAiStackLifecycleService? stackLifecycle = null) : IDisposable
 {
     public const string DefaultServerUrl = "http://192.168.0.67:8080";
     private static readonly TimeSpan DefaultProbeTimeout = TimeSpan.FromSeconds(12);
@@ -61,6 +62,15 @@ public sealed class MissumAiConnectionService(
             throw new InvalidOperationException("Die Docker-Gatewayadresse ist ungültig.");
         }
 
+        if (ensureProfileNativeRuntime && stackLifecycle is not null)
+        {
+            try { await stackLifecycle.EnsureStartedAsync(baseAddress, cancellationToken).ConfigureAwait(false); }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch (Exception exception) when (exception is not OutOfMemoryException)
+            {
+                ConnectionFailed(logger, "Docker startup", exception);
+            }
+        }
         if (ensureProfileNativeRuntime && nativeRuntime is not null)
         {
             try

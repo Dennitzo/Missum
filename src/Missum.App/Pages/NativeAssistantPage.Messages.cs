@@ -197,8 +197,6 @@ public sealed partial class NativeAssistantPage
             desired.Add(continuation);
         }
         var streaming = assistant && S(message, "status") is "streaming" or "pending";
-        // Tool receipts and artifacts can follow the text. Keep an independent
-        // cursor host even when the answer is still empty after navigation.
         if (streaming)
         {
             if (!blocks.TryGetValue("thinkingIndicator", out var thinking))
@@ -209,14 +207,8 @@ public sealed partial class NativeAssistantPage
             indicator.UpdateReasoning(S(latestReasoning, "id"), S(latestReasoning, "detail"), latestReasoningView);
             _thinkingIndicators[messageId] = indicator;
             desired.Add(indicator);
-            if (!blocks.TryGetValue("streamCursor", out var cursor))
-                blocks["streamCursor"] = cursor = new NativeStreamingMarkdown("");
-            desired.Add(cursor);
         }
         else { _thinkingIndicators.Remove(messageId); _thinkingStates.Remove(messageId); }
-        var tail = streaming ? desired.LastOrDefault() : null;
-        foreach (var markdown in blocks.Values.OfType<NativeStreamingMarkdown>())
-            markdown.SetStreaming(streaming && ReferenceEquals(markdown, tail));
         if (MessageActionsFor(messageId, message) is { } messageActions) desired.Add(messageActions);
         foreach (var old in panel.Children.OfType<FrameworkElement>().Where(child => !desired.Contains(child)).ToArray()) panel.Children.Remove(old);
         for (var i = 0; i < desired.Count; i++)

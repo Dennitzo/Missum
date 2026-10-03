@@ -545,7 +545,7 @@
     function narration(text, key, streaming = false) {
       const visible = options.sanitizeText ? options.sanitizeText(text) : text;
       if (!visible.trim()) return;
-      const block = node("div", `message-content coding-narration${streaming ? " stream-cursor" : ""}`);
+      const block = node("div", "message-content coding-narration");
       block.dataset.timelineKey = key;
       block._codingSignature = [visible, streaming, terminalStates.has(String(message.status).toLowerCase())];
       const previous = previousByKey.get(key);
