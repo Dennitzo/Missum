@@ -32,6 +32,8 @@ public static class RunRequestValidator
     public static void Validate(RunRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
+        if (request.ContextProfileVersion is not (null or "legacy" or "compact-v1"))
+            throw new ArgumentException("Unsupported context profile.");
         if (request.Subagent is not null)
             throw new ArgumentException("Subagent runs are created by the gateway from an existing authorized parent run.");
         if (request.DeepResearch && (request.AllowedServerTools is not { } researchTools

@@ -16,6 +16,7 @@ var options = new MissumAiServerOptions
     CodingMaximumModelRounds = ReadCodingBudget("MISSUM_AI_CODING_MAXIMUM_MODEL_ROUNDS", 0, 2),
     CodingMaximumToolCalls = ReadCodingBudget("MISSUM_AI_CODING_MAXIMUM_TOOL_CALLS", 0, 1),
     ReasoningOnlyTimeoutMinutes = ReadReasoningOnlyTimeout(),
+    EnableCompactContextProfile = ReadCompactContextProfile(),
     SearxngUri = ResolveUri("MISSUM_AI_SEARXNG_URL", "http://searxng:8080"),
     SpeechWorkerUri = ResolveUri("MISSUM_AI_SPEECH_WORKER_URL", "http://speech:8080"),
     MediaWorkerUri = ResolveUri("MISSUM_AI_MEDIA_WORKER_URL", "http://media:8080"),
@@ -45,6 +46,7 @@ var builder = Host.CreateDefaultBuilder(args)
         destination.CodingMaximumModelRounds = options.CodingMaximumModelRounds;
         destination.CodingMaximumToolCalls = options.CodingMaximumToolCalls;
         destination.ReasoningOnlyTimeoutMinutes = options.ReasoningOnlyTimeoutMinutes;
+        destination.EnableCompactContextProfile = options.EnableCompactContextProfile;
         destination.SearxngUri = options.SearxngUri;
         destination.SpeechWorkerUri = options.SpeechWorkerUri;
         destination.MediaWorkerUri = options.MediaWorkerUri;
@@ -88,6 +90,16 @@ static int ReadReasoningOnlyTimeout()
     return int.TryParse(configured, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var value)
         && value is >= 1 and <= 1440 ? value
         : throw new InvalidOperationException($"{variable} must be an integer between 1 and 1440 minutes.");
+}
+
+static bool ReadCompactContextProfile()
+{
+    const string variable = "MISSUM_AI_COMPACT_CONTEXT_PROFILE";
+    var configured = Environment.GetEnvironmentVariable(variable)
+        ?? Environment.GetEnvironmentVariable("MissumAiServer__EnableCompactContextProfile");
+    if (string.IsNullOrWhiteSpace(configured)) return false;
+    return bool.TryParse(configured, out var enabled) ? enabled
+        : throw new InvalidOperationException($"{variable} must be true or false.");
 }
 
 static Uri ResolveUri(string variableName, string fallback)

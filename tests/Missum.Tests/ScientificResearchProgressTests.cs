@@ -61,7 +61,7 @@ public sealed class ScientificResearchProgressTests
     }
 
     [Fact]
-    public async Task FinalCheckpointReplacesIntermediateEvidenceAndCannotBeOverwrittenByLateFetchOrReplay()
+    public async Task FinalCheckpointAddsReviewedEvidenceAndPreservesRetrievedEvidenceAcrossLaterPhases()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var (run, project) = await CreateRunAsync(environment);
@@ -70,6 +70,7 @@ public sealed class ScientificResearchProgressTests
         var store = new ScientificResearchProgressStore(repository, runs);
         await store.ApplyAsync(run, Start(run, project.Id));
         await store.ApplyAsync(run, Fetch(run, 20));
+        var retrievedEvidence = Assert.Single((await repository.LoadArchiveSnapshotAsync(project.Id)).Evidence);
         var result = JsonSerializer.SerializeToElement(new
         {
             projectId = project.Id, profile = "web", conclusionStatus = "provisionallySupported",
@@ -86,8 +87,10 @@ public sealed class ScientificResearchProgressTests
         await service.PersistResearchResultAsync(run, finalEvent, result, CancellationToken.None);
         var finalArchive = await repository.LoadArchiveSnapshotAsync(project.Id);
         Assert.Equal("scientificMarkdown", finalArchive.Report?.ReportKind);
-        Assert.Equal("verifiedExcerpt", Assert.Single(finalArchive.Evidence).EvidenceLevel);
-        Assert.Equal("WAL separates readers and writers.", Assert.Single(finalArchive.Evidence).NormalizedStatement);
+        Assert.Equal(2, finalArchive.Evidence.Count);
+        Assert.Contains(retrievedEvidence, finalArchive.Evidence);
+        var reviewedEvidence = Assert.Single(finalArchive.Evidence, evidence => evidence.EvidenceLevel == "verifiedExcerpt");
+        Assert.Equal("WAL separates readers and writers.", reviewedEvidence.NormalizedStatement);
         var finalCheckpoint = await repository.GetLatestCheckpointAsync(project.Id);
         Assert.Equal("synthesis", finalCheckpoint?.Stage);
         await store.ApplyAsync(run, Fetch(run, 40));
@@ -95,11 +98,12 @@ public sealed class ScientificResearchProgressTests
         await service.PersistResearchResultAsync(run, finalEvent, result, CancellationToken.None);
         Assert.Equal(finalCheckpoint, await repository.GetLatestCheckpointAsync(project.Id));
         Assert.Equal(finalArchive.Report, (await repository.LoadArchiveSnapshotAsync(project.Id)).Report);
+        Assert.Equal(finalArchive.Evidence, (await repository.LoadArchiveSnapshotAsync(project.Id)).Evidence);
 
         // A later explicit research invocation in the same coding run is a new
         // phase, unlike replaying the already stored final tool result.
         await store.ApplyAsync(run, Start(run, project.Id) with { Id = 45 });
-        Assert.Empty((await repository.LoadArchiveSnapshotAsync(project.Id)).Evidence);
+        Assert.Equal(finalArchive.Evidence, (await repository.LoadArchiveSnapshotAsync(project.Id)).Evidence);
         await store.ApplyAsync(run, Fetch(run, 46));
         await service.PersistResearchResultAsync(run,
             Event(run, 48, RunEventTypes.ResearchCheckpointCreated, new { result }), result, CancellationToken.None);
@@ -128,10 +132,11 @@ public sealed class ScientificResearchProgressTests
         var store = new ScientificResearchProgressStore(repository, runs);
         await store.ApplyAsync(run, Start(run, project.Id));
         await store.ApplyAsync(run, Fetch(run, 20));
+        var retainedEvidence = Assert.Single((await repository.LoadArchiveSnapshotAsync(project.Id)).Evidence);
         var retry = run with { ServerRunId = "run-retry-" + Guid.NewGuid().ToString("N") };
         await runs.UpdateAsync(run.Id, retry.ServerRunId, 0, "running");
         await store.ApplyAsync(retry, Start(retry, project.Id));
-        Assert.Empty((await repository.LoadArchiveSnapshotAsync(project.Id)).Evidence);
+        Assert.Equal(retainedEvidence, Assert.Single((await repository.LoadArchiveSnapshotAsync(project.Id)).Evidence));
         await store.ApplyAsync(retry, Fetch(retry, 21));
         var current = await repository.GetLatestCheckpointAsync(project.Id);
         await store.ApplyAsync(run, Fetch(run, 1000));
@@ -139,6 +144,7 @@ public sealed class ScientificResearchProgressTests
         Assert.False(await store.CanPersistResultAsync(run, Event(run, 1001, RunEventTypes.ResearchCheckpointCreated, new { }), project.Id));
         Assert.Equal(retry.ServerRunId, current?.RunId);
         Assert.Equal(current, await repository.GetLatestCheckpointAsync(project.Id));
+        Assert.Equal(retainedEvidence, Assert.Single((await repository.LoadArchiveSnapshotAsync(project.Id)).Evidence));
     }
 
     [Fact]
@@ -153,13 +159,13 @@ public sealed class ScientificResearchProgressTests
         await store.ApplyAsync(oldRun, Fetch(oldRun, 20));
         await store.EndAsync(oldRun, "cancelled");
         Assert.Equal("cancelled", (await repository.GetProjectAsync(project.Id))?.Status);
-        Assert.Single((await repository.LoadArchiveSnapshotAsync(project.Id)).Evidence);
+        var retainedEvidence = Assert.Single((await repository.LoadArchiveSnapshotAsync(project.Id)).Evidence);
         await store.ApplyAsync(oldRun, Fetch(oldRun, 21));
         Assert.Equal("cancelled", (await repository.GetProjectAsync(project.Id))?.Status);
 
         var (newRun, _) = await CreateRunAsync(environment, oldRun.SessionId, oldRun.CreatedAt.AddSeconds(1));
         await store.ApplyAsync(newRun, Start(newRun, project.Id));
-        Assert.Empty((await repository.LoadArchiveSnapshotAsync(project.Id)).Evidence);
+        Assert.Equal(retainedEvidence, Assert.Single((await repository.LoadArchiveSnapshotAsync(project.Id)).Evidence));
         await store.ApplyAsync(newRun, Fetch(newRun, 40));
         var current = await repository.GetLatestCheckpointAsync(project.Id);
         await store.ApplyAsync(oldRun, Start(oldRun, project.Id) with { Id = 1000 });
@@ -171,7 +177,7 @@ public sealed class ScientificResearchProgressTests
         await store.ApplyAsync(newRun, Fetch(otherRun, 1003));
         Assert.False(await store.CanPersistResultAsync(otherRun, Event(otherRun, 1004, RunEventTypes.ResearchCheckpointCreated, new { }), project.Id));
         Assert.Equal(current, await repository.GetLatestCheckpointAsync(project.Id));
-        Assert.Single((await repository.LoadArchiveSnapshotAsync(project.Id)).Evidence);
+        Assert.Equal(retainedEvidence, Assert.Single((await repository.LoadArchiveSnapshotAsync(project.Id)).Evidence));
         await store.ApplyAsync(newRun, Event(newRun, 41, RunEventTypes.RunFailed, new { errorCode = "fixture.failure" }));
         Assert.Equal("blocked", (await repository.GetProjectAsync(project.Id))?.Status);
         Assert.Equal("sources.failed", (await repository.GetLatestCheckpointAsync(project.Id))?.Stage);

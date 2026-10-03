@@ -60,16 +60,7 @@ public sealed partial class ModelRuntimeClient
         ApplyReasoningSettings(prefill, modelId, modelRole, reasoningEffort);
         if (tools.Count > 0)
         {
-            prefill["tools"] = tools.Select(tool => new
-            {
-                type = "function",
-                function = new
-                {
-                    name = ToTransportToolName(tool.Name),
-                    description = tool.Description,
-                    parameters = PrepareToolParameters(modelId, tool),
-                },
-            }).ToArray();
+            prefill["tools"] = PrepareTransportTools(modelId, tools);
             prefill["tool_choice"] = "auto";
         }
         return PrepareSubagentCoreAsync(modelId, parentSessionCacheKey, childSessionCacheKey, prefill, cancellationToken);

@@ -1,5 +1,6 @@
 using Missum.Ai.Server.Core.Models;
 using Missum.Ai.Server.Core.Coding;
+using Missum.Ai.Server.Core.Policies;
 
 namespace Missum.Ai.Server.Core.Runs;
 
@@ -29,10 +30,13 @@ public static class ContextPlanner
             : CompactRepeatedConversationMessages(source, out conversationCompacted);
         var messages = preserveConversationPrefix && EstimateTokens(conversation) <= budget
             ? conversation.ToArray() : CodingEvidenceContext.CompactCompletedCalls(conversation).ToArray();
+        var latestRuntimeIndex = Array.FindLastIndex(messages, IsRuntimeContext);
         var freshReadIds = FreshReadCallIds(messages);
         var compacted = conversationCompacted || !messages.SequenceEqual(conversation);
         var latestUserIndex = Array.FindLastIndex(messages, static message =>
             string.Equals(message.Role, "user", StringComparison.OrdinalIgnoreCase)
+            && !IsRuntimeContext(message)
+            && !IsNativeRuntimeInstruction(message)
             && !ModelRuntimeClient.IsLanguageReminder(message)
             && message.Content?.StartsWith(CodingEvidenceContext.Marker, StringComparison.Ordinal) != true
             && message.Content?.StartsWith(CodingSessionContext.StateMarker, StringComparison.Ordinal) != true
@@ -42,7 +46,7 @@ public static class ContextPlanner
         {
             for (var index = 0; index < messages.Length && EstimateTokens(messages) > budget; index++)
             {
-                if (index == latestUserIndex
+                if (index == latestUserIndex || index == latestRuntimeIndex
                     || string.Equals(messages[index].Role, "system", StringComparison.OrdinalIgnoreCase)
                     || string.Equals(messages[index].Role, "tool", StringComparison.OrdinalIgnoreCase))
                 {
@@ -81,6 +85,7 @@ public static class ContextPlanner
                     Index = index,
                     Length = (message.Content?.Length ?? 0) + (message.ReasoningContent?.Length ?? 0),
                     Protected = freshReadIds.Contains(message.ToolCallId ?? string.Empty) || index == latestUserIndex
+                        || index == latestRuntimeIndex
                         || string.Equals(message.Role, "system", StringComparison.OrdinalIgnoreCase),
                 })
                 .Where(static item => !item.Protected && item.Length > 2_048)
@@ -112,6 +117,14 @@ public static class ContextPlanner
                 ? "Ältere Chat- und Werkzeugdaten wurden verdichtet; aktuelle Quellen und Tool-IDs bleiben erhalten."
                 : null);
     }
+
+    internal static bool IsRuntimeContext(LmChatMessage message) =>
+        string.Equals(message.Role, "user", StringComparison.OrdinalIgnoreCase)
+        && message.Content?.StartsWith(CompactAgentContextPolicy.RuntimeMarker, StringComparison.Ordinal) == true;
+
+    internal static bool IsNativeRuntimeInstruction(LmChatMessage message) =>
+        string.Equals(message.Role, "user", StringComparison.OrdinalIgnoreCase)
+        && message.Content?.StartsWith("Missum-Laufanweisung:\n", StringComparison.Ordinal) == true;
 
     // A read is fresh until an assistant generation follows its result. Preserve every
     // read in that final tool batch, not merely the last file in a parallel batch.

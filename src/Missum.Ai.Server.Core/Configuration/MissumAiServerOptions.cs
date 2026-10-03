@@ -14,6 +14,10 @@ public sealed class MissumAiServerOptions
 
     public int GatewayPort { get; set; } = 8080;
 
+    /// <summary>Advertise compact-v1 for new client runs after the paired runtime acceptance.
+    /// Explicit per-run profile requests remain available for the isolated comparison.</summary>
+    public bool EnableCompactContextProfile { get; set; }
+
     public Uri ModelRuntimeUri { get; set; } = new("http://host.docker.internal:8081", UriKind.Absolute);
 
     public string CodingModelRoot { get; set; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".cache", "huggingface", "hub");

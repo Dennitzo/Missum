@@ -16,20 +16,24 @@ public sealed class SciencePresentationProgressTests
 
         Assert.StartsWith("Untersuche die Modellgrenzen.", prompt);
         Assert.Contains("research-" + sessionId.ToString("N"), prompt);
-        Assert.Contains("<!-- MISSUM_PUBLICATION_BEGIN -->", prompt);
-        Assert.Contains("<!-- MISSUM_PUBLICATION_END -->", prompt);
-        Assert.Contains("vollständigen aktuellen Manuskriptstand", prompt);
-        Assert.Contains("selbst formulierten fachlichen Titel", prompt);
-        Assert.Contains("Kopiere weder den Nutzerprompt noch das Evidenzdossier", prompt);
-        Assert.Contains("außerhalb des Publikationsblocks in den Chat", prompt);
-        Assert.Contains("## Voraussetzungen und Konventionen", prompt);
-        Assert.Contains("## Herleitungen und Rechenschritte", prompt);
-        Assert.Contains("Einheiten in jedem Rechenschritt", prompt);
-        Assert.Contains("keine Tabellen für die Einheitenlegende", prompt);
-        Assert.Contains("exitCode 0", prompt);
-        Assert.Contains("vorhandenen PNG- oder JPEG-Artefakt", prompt);
-        Assert.Contains("tatsächlich erzeugte Abbildung als Markdown-Bild", prompt);
-        Assert.Contains("keine erfundenen Zwischenwerte", prompt);
+        Assert.Contains("research.read", prompt);
+        Assert.Contains("research.update", prompt);
+        Assert.Contains("expectedRevision", prompt);
+        Assert.Contains("fachlichen Titel", prompt);
+        Assert.Contains("niemals das komplette Manuskript", prompt);
+        Assert.DoesNotContain("<!-- MISSUM_PUBLICATION_BEGIN -->", prompt);
+        Assert.DoesNotContain("<!-- MISSUM_PUBLICATION_END -->", prompt);
+        Assert.Contains("Missum übernimmt Speicherung, Layout, Formelsatz und PDF-Erstellung", prompt);
+        Assert.Contains("keine Bedienhinweise, Fortschrittsprotokolle", prompt);
+        Assert.Contains("Im Chat werden Abschnitte nicht vollständig dupliziert", prompt);
+        Assert.Contains("vollständige fachliche Umformungen und Zwischenwerte bis zum Ergebnis", prompt);
+        Assert.Contains("Einheiten bei numerischen Schritten", prompt);
+        Assert.Contains("kurzen Listen, nicht als Tabelle", prompt);
+        Assert.Contains("keinen ausgeführten Test ohne echten Werkzeugbeleg", prompt);
+        Assert.Contains("Eine Simulation ist nur Pflicht, wenn der Nutzer sie verlangt", prompt);
+        Assert.Contains("figureCaptions", prompt);
+        Assert.Contains("tatsächlich entstandene Artefakte", prompt);
+        Assert.Contains("Fehlende Schritte werden offen benannt, nicht erfunden", prompt);
     }
 
     [Fact]

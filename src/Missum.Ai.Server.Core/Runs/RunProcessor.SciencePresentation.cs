@@ -7,5 +7,5 @@ public sealed partial class RunProcessor
     // Individual literature/compute stages keep their own progress guards.
     // The complete research project must not exhaust a small chat-turn reserve.
     private static bool HasUnboundedResearchBudget(RunRequest request) =>
-        request.Mode != RunMode.Coding && request.DeepResearch;
+        ScientificStateCompletionPolicy.Enabled(request) || request.Mode != RunMode.Coding && request.DeepResearch;
 }

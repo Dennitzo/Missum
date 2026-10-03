@@ -108,14 +108,15 @@ internal sealed class ScientificResearchProgressStore(IScientificResearchReposit
             _ => "active",
         };
         var sameResearch = sameRun && archive.Report?.ReportKind == ReportKind;
-        var works = sameResearch ? archive.Works.ToList() : [];
-        var evidence = sameResearch ? archive.Evidence.ToList() : [];
+        var preserveWorkingResearch = project.ProtocolVersion >= 2;
+        var works = sameResearch || preserveWorkingResearch ? archive.Works.ToList() : [];
+        var evidence = sameResearch || preserveWorkingResearch ? archive.Evidence.ToList() : [];
         if (!beginning && status == "active")
         {
             if (!IsTrue(item.Data, "success") || !item.Data.TryGetProperty("result", out var result)
                 || !TryAddSource(project.Id, run.ServerRunId, item.Id, result, works, evidence, subagent)) return;
         }
-        if (beginning && !sameResearch)
+        if (beginning && !sameResearch && !preserveWorkingResearch)
         {
             // Historical reports remain stored. Current claims/verification must
             // not appear to certify the newly started research question.

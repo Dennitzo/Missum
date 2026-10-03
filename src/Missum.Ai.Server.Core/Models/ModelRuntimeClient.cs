@@ -353,16 +353,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
             }
             if (tools.Count > 0)
             {
-                body["tools"] = tools.Select(tool => new
-                {
-                    type = "function",
-                    function = new
-                    {
-                        name = ToTransportToolName(tool.Name),
-                        description = tool.Description,
-                        parameters = PrepareToolParameters(modelId, tool),
-                    },
-                }).ToArray();
+                body["tools"] = PrepareTransportTools(modelId, tools);
                 // native llama's OpenAI-compatible endpoint accepts auto/required/none.
                 // The host uses "required" whenever the current agent protocol
                 // mandates one structured action. Schema validation still decides

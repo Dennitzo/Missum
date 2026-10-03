@@ -146,6 +146,7 @@ public partial class App : Application
                 services.AddSingleton<SessionContextPreparationService>();
                 services.AddSingleton<DocumentPdfExporter>();
                 services.AddSingleton<ScientificPublicationService>();
+                services.AddSingleton<Missum.Core.Research.IScientificPublicationProvider>(provider => provider.GetRequiredService<ScientificPublicationService>());
                 services.AddSingleton<ScientificSimulationService>();
                 services.AddSingleton<ScientificPresentationCoordinator>();
                 services.AddSingleton<LocalDocumentToolService>();

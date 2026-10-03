@@ -33,7 +33,8 @@ public sealed record LmChatMessage(
 
 public sealed record LmToolCall(string Id, string Name, JsonElement Arguments);
 
-public sealed record LmToolDefinition(string Name, string Description, JsonElement Parameters);
+public sealed record LmToolDefinition(string Name, string Description, JsonElement Parameters,
+    string? ContextProfileVersion = null);
 
 public sealed record LmChatResult(
     string? Content,

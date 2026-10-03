@@ -185,6 +185,7 @@ public sealed partial class RunProcessor : BackgroundService
     internal static int ResolveMaximumToolCalls(RunRequest request, MissumAiServerOptions options,
         IReadOnlyList<AgentToolSpec> effectiveTools)
     {
+        if (ScientificStateCompletionPolicy.Enabled(request)) return 0;
         if (request.Mode == RunMode.Coding) return CodingRunBudget.FromOptions(options).ToolCalls;
         return HasUnboundedResearchBudget(request) ? 0 : options.MaximumToolCalls;
     }
@@ -192,6 +193,7 @@ public sealed partial class RunProcessor : BackgroundService
     internal static int ResolveMaximumModelRounds(RunRequest request, MissumAiServerOptions options,
         IReadOnlyList<AgentToolSpec> effectiveTools)
     {
+        if (ScientificStateCompletionPolicy.Enabled(request)) return 0;
         if (request.Mode == RunMode.Coding) return CodingRunBudget.FromOptions(options).ModelRounds;
         if (HasUnboundedResearchBudget(request)) return 0;
         var generalRounds = request.ClientCapabilities?.Contains("workspace", StringComparer.OrdinalIgnoreCase) == true
@@ -206,6 +208,8 @@ public sealed partial class RunProcessor : BackgroundService
     {
         var isCoding = request.Mode == RunMode.Coding;
         var savedSelection = await _repository.GetCheckpointAsync(runId, cancellationToken).ConfigureAwait(false);
+        var contextProfileVersion = savedSelection is null ? ResolveNewContextProfile(request) : savedSelection.ContextProfileVersion;
+        var compactContext = contextProfileVersion == ToolContextProfiles.Current;
         if (savedSelection?.SelectedModelId is { } restoredModel)
             request = request with { PreferredGeneralModelId = restoredModel, PreferredCodingModelId = restoredModel, ReasoningEffort = savedSelection.SelectedReasoningEffort };
         if (isCoding) request = request with { CodingOptions = (request.CodingOptions ?? new CodingRunOptions()) with { UseWorkingState = true, ReasoningPolicy = "maximum" } };
@@ -219,6 +223,7 @@ public sealed partial class RunProcessor : BackgroundService
         var maximumOutputTokens = request.Limits?.MaximumOutputTokens;
         var codingBudget = CodingRunBudget.FromOptions(_options);
         var requestsEarlyDelegation = RequestsEarlyResearchDelegation(request);
+        var canonicalStateEnabled = ScientificStateCompletionPolicy.Enabled(request);
         if (savedSelection is null && requestsEarlyDelegation)
         {
             try
@@ -234,15 +239,18 @@ public sealed partial class RunProcessor : BackgroundService
         // Native templates can place the complete tool schema before all
         // messages. Once enabled, keep this prefix identical across turns and
         // context forks; changing residency only changes dispatch admission.
-        var useStableSubagentToolCatalog = savedSelection?.UseStableSubagentToolCatalog == true || subagentAvailable;
+        var useStableSubagentToolCatalog = compactContext
+            ? savedSelection?.UseStableSubagentToolCatalog ?? CanDescribeSubagents(request)
+            : savedSelection?.UseStableSubagentToolCatalog == true || subagentAvailable;
         var effectiveTools = _toolCatalog.GetAvailableTools(request, useStableSubagentToolCatalog);
         var maximumModelRounds = ResolveMaximumModelRounds(request, _options, effectiveTools);
         var maximumToolCalls = ResolveMaximumToolCalls(request, _options, effectiveTools);
         var researchManagedByAgent = savedSelection?.ResearchManagedByAgent == true
+            || request.Subagent is null && canonicalStateEnabled
             || savedSelection is null && requestsEarlyDelegation && subagentAvailable;
         var stagedWebResearchRequested = request.Subagent is null && !isCoding && !researchManagedByAgent
             && StagedWebResearchPipeline.IsRequested(request, effectiveTools);
-        var availableTools = stagedWebResearchRequested && !useStableSubagentToolCatalog
+        var availableTools = stagedWebResearchRequested && !useStableSubagentToolCatalog && !compactContext
             ? StagedWebResearchPipeline.RemoveFromMainAgentTools(effectiveTools)
             : effectiveTools;
 
@@ -253,7 +261,7 @@ public sealed partial class RunProcessor : BackgroundService
                 CreateInitialMessages(
                     request,
                     selection.Role,
-                    availableTools.Select(static tool => tool.Name).ToArray()),
+                    availableTools.Select(static tool => tool.Name).ToArray(), contextProfileVersion),
                 0,
                 0,
                 0,
@@ -261,7 +269,9 @@ public sealed partial class RunProcessor : BackgroundService
                     ? CodingWorkingState.Create(ExtractOriginalTask(request)) : null,
                 UseStableSubagentToolCatalog: useStableSubagentToolCatalog,
                 ResearchManagedByAgent: researchManagedByAgent,
-                EarlySubagentDelegationPending: researchManagedByAgent);
+                EarlySubagentDelegationPending: researchManagedByAgent && requestsEarlyDelegation && subagentAvailable,
+                CanonicalStateReadRequired: canonicalStateEnabled,
+                ContextProfileVersion: contextProfileVersion);
             if (isCoding && await _repository.GetSessionContextAsync(runId, request, cancellationToken).ConfigureAwait(false) is { } previous)
             {
                 checkpoint = checkpoint with
@@ -277,8 +287,30 @@ public sealed partial class RunProcessor : BackgroundService
             {
                 checkpoint = checkpoint with { Messages = continued, PreserveSessionPromptPrefix = true };
             }
+            if (request.ConversationProfile is not (ConversationProfile.Audiobook or ConversationProfile.ContextPreparation))
+            {
+                // Upgrade narration only at a new run boundary. Continued sessions may
+                // retain an older system prefix; an active checkpoint must stay stable.
+                var initialNarration = checkpoint.Messages.ToList();
+                AgentNarrationPolicy.EnsureInstructions(initialNarration);
+                checkpoint = checkpoint with { Messages = initialNarration };
+            }
             if (isCoding && request.DeepResearch && !researchManagedByAgent)
                 checkpoint = ScheduleExplicitDeepResearch(checkpoint, runId, ExtractOriginalTask(request), request.ResearchOptions);
+            if (compactContext)
+            {
+                var initialMessages = checkpoint.Messages.ToList();
+                AppendRuntimeContext(initialMessages, request, subagentAvailable, beforeLatestUser: true);
+                var initialTools = CreateModelToolDefinitions(availableTools, null, directTools: true, contextProfileVersion);
+                checkpoint = checkpoint with { Messages = initialMessages, ContextTools = initialTools,
+                    ToolCatalogSignature = ToolContextProfiles.Signature(initialTools, selection.ModelId) };
+                await _repository.AppendEventAsync(runId, "context.profile", new
+                {
+                    version = contextProfileVersion, checkpoint.ToolCatalogSignature, toolCount = initialTools.Length,
+                    systemCharacters = initialMessages.Where(message => message.Role == "system").Sum(message => message.Content?.Length ?? 0),
+                    measurement = "characters-not-tokens",
+                }, cancellationToken).ConfigureAwait(false);
+            }
             await _repository.AppendEventAsync(
                 runId,
                 RunEventTypes.QueueChanged,
@@ -307,15 +339,20 @@ public sealed partial class RunProcessor : BackgroundService
             await EnsureEarlyResearchEnrollmentAsync(runId, request, selection, cancellationToken).ConfigureAwait(false);
 
         var messages = checkpoint.Messages.ToList();
-        if (isCoding && request.Subagent is null) CodingAgentPolicy.EnsureCurrentInstructions(messages);
-        if (useStableSubagentToolCatalog && request.Subagent is null)
+        if (!compactContext && isCoding && request.Subagent is null) CodingAgentPolicy.EnsureCurrentInstructions(messages);
+        if (!compactContext && useStableSubagentToolCatalog && request.Subagent is null)
         {
             var systemIndex = messages.FindIndex(static message => message.Role == "system");
             if (systemIndex >= 0 && messages[systemIndex].Content?.Contains(SubagentAgentPolicy.Manager, StringComparison.Ordinal) != true)
                 messages[systemIndex] = messages[systemIndex] with
                 { Content = messages[systemIndex].Content + "\n\n" + SubagentAgentPolicy.Manager };
         }
-        if (researchManagedByAgent) EnsureEarlyResearchInstructions(messages);
+        if (!compactContext && researchManagedByAgent && (!canonicalStateEnabled || checkpoint.EarlySubagentDelegationPending)) EnsureEarlyResearchInstructions(messages);
+        if (!compactContext && canonicalStateEnabled) EnsureScientificStateInstructions(messages);
+        var contextTools = compactContext ? checkpoint.ContextTools?.ToArray()
+            ?? CreateModelToolDefinitions(availableTools, null, directTools: true, contextProfileVersion) : null;
+        var toolCatalogSignature = checkpoint.ToolCatalogSignature;
+        var researchStateStamp = checkpoint.ResearchStateStamp;
         var roundCount = checkpoint.RoundCount;
         var toolCallCount = checkpoint.ToolCallCount;
         var inputTokens = checkpoint.InputTokens;
@@ -325,7 +362,7 @@ public sealed partial class RunProcessor : BackgroundService
         var pendingProposalId = checkpoint.PendingProposalId;
         var pendingToolCallId = checkpoint.PendingToolCallId;
         var selectedToolName = checkpoint.SelectedToolName;
-        if (useStableSubagentToolCatalog) selectedToolName = null;
+        if (compactContext || useStableSubagentToolCatalog || canonicalStateEnabled) selectedToolName = null;
         var requiredToolCallRetryCount = checkpoint.RequiredToolCallRetryCount;
         var emptyResponseRetryCount = checkpoint.EmptyResponseRetryCount;
         var incompleteResponseRetryCount = checkpoint.IncompleteResponseRetryCount;
@@ -348,6 +385,8 @@ public sealed partial class RunProcessor : BackgroundService
         var deepResearchCompleted = checkpoint.DeepResearchCompleted;
         var earlySubagentDelegationPending = checkpoint.EarlySubagentDelegationPending;
         var earlySubagentDelegationRetryCount = checkpoint.EarlySubagentDelegationRetryCount;
+        var canonicalStateReadRequired = checkpoint.CanonicalStateReadRequired;
+        var scientificStateProgress = checkpoint.ScientificStateProgress ?? new ScientificStateRunProgress();
         var scientificCompletionPending = false;
         if (appliedSteeringSequence > 0)
         {
@@ -522,7 +561,7 @@ public sealed partial class RunProcessor : BackgroundService
                         // Return a recoverable tool receipt instead of aborting the entire run.
                         // A pending client operation must still be collected exactly once.
                         if (isCoding
-                            && string.IsNullOrWhiteSpace(pendingProposalId))
+                            && !canonicalStateEnabled && string.IsNullOrWhiteSpace(pendingProposalId))
                             CodingLoopGuard.ThrowIfRepeatedFailure(messages, call, workingState);
                         tool = _toolCatalog.Resolve(call.Name, availableTools);
                         _toolCatalog.Validate(tool, call.Arguments);
@@ -542,8 +581,12 @@ public sealed partial class RunProcessor : BackgroundService
                             status = "failed",
                             errorCode = rejectionCode,
                             message = exception.Message,
+                            toolHelp = compactContext ? RejectedToolHelp(call.Name, availableTools) : null,
                         }, MissumAiProtocol.CreateJsonOptions());
                         messages.Add(new LmChatMessage("tool", invalidReceipt, ToolCallId: call.Id));
+                        scientificStateProgress = await ObserveScientificStateReceiptAsync(runId, request, call,
+                            invalidReceipt, false, scientificStateProgress, messages, inputTokens, outputTokens,
+                            cancellationToken).ConfigureAwait(false);
                         if (workingState is not null)
                             workingState = CodingWorkingStateReducer.ObserveToolResult(workingState, WithOperationIdentity(runId, "main", activeCallRound ?? roundCount, nextToolIndex, call), invalidReceipt);
                         nextToolIndex++;
@@ -571,11 +614,17 @@ public sealed partial class RunProcessor : BackgroundService
                         }
                         messages.Add(new LmChatMessage(
                             "tool",
-                            isCoding
+                            isCoding && call.Name is not (ClientToolNames.ResearchRead or ClientToolNames.ResearchUpdate)
                                 ? CodingLoopGuard.BoundToolResult(SerializeClientToolResult(clientResult), call.Name) : SerializeClientToolResult(clientResult),
                             ToolCallId: call.Id));
                         if (workingState is not null)
                             workingState = CodingWorkingStateReducer.ObserveToolResult(workingState, WithOperationIdentity(runId, "main", activeCallRound ?? roundCount, nextToolIndex, call), SerializeClientToolResult(clientResult));
+                        scientificStateProgress = await ObserveScientificStateReceiptAsync(runId, request, call,
+                            SerializeClientToolResult(clientResult), clientResult.Status == "completed", scientificStateProgress,
+                            messages, inputTokens, outputTokens, cancellationToken).ConfigureAwait(false);
+                        if (compactContext && call.Name == ClientToolNames.ResearchRead && clientResult.Status == "completed"
+                            && ScientificStateCompletionPolicy.Text(clientResult.Result, "stateStamp") is { Length: > 0 } readStamp)
+                            researchStateStamp = readStamp;
                         if (call.Name == ClientToolNames.CodingRenderHtml) htmlRenderUsed = true;
                         pendingProposalId = null;
                         pendingToolCallId = null;
@@ -676,6 +725,12 @@ public sealed partial class RunProcessor : BackgroundService
                             && !await _repository.HasConsumedSubagentResultAsync(runId,
                                 call.Arguments.GetProperty("runId").GetString()!, cancellationToken).ConfigureAwait(false))
                             _ = AppendSubagentResultAcceptanceInstruction(messages, result.Result);
+                        if (canonicalStateEnabled && tool.Name == SubagentToolNames.Wait && result.Succeeded)
+                            canonicalStateReadRequired = true;
+                        scientificStateProgress = await ObserveScientificStateReceiptAsync(runId, request, call,
+                            JsonSerializer.Serialize(new { status = result.Succeeded ? "completed" : "failed", result = result.Result },
+                                MissumAiProtocol.CreateJsonOptions()), result.Succeeded, scientificStateProgress,
+                            messages, inputTokens, outputTokens, cancellationToken).ConfigureAwait(false);
                         if (workingState is not null && tool.Name != CodingWorkingStateTools.PlanTool)
                             workingState = CodingWorkingStateReducer.ObserveToolResult(workingState, WithOperationIdentity(runId, "main", activeCallRound ?? roundCount, nextToolIndex, call), result.Result.GetRawText());
                         nextToolIndex++;
@@ -697,7 +752,7 @@ public sealed partial class RunProcessor : BackgroundService
                         if (tool.Name == SubagentToolNames.Wait)
                             _ = await _repository.TryConsumeSubagentResultAsync(runId,
                                 call.Arguments.GetProperty("runId").GetString()!, cancellationToken).ConfigureAwait(false);
-                        if (isCoding) CodingPlanProgressGuard.ThrowIfStalled(workingState);
+                        if (isCoding && !canonicalStateEnabled) CodingPlanProgressGuard.ThrowIfStalled(workingState);
                         continue;
                     }
 
@@ -729,20 +784,37 @@ public sealed partial class RunProcessor : BackgroundService
                 await ApplyModelSelectionAsync().ConfigureAwait(false);
             }
 
+            if (canonicalStateEnabled && canonicalStateReadRequired && activeCalls is null && pendingProposalId is null)
+            {
+                // Canonical refresh is a durable client operation, not another
+                // inference round. Drain existing proposals/calls first.
+                var read = new LmToolCall("science-state-read-" + Guid.NewGuid().ToString("N"), ClientToolNames.ResearchRead,
+                    CreateResearchStartArguments(request, messages, compactContext));
+                messages.Add(new("assistant", ToolCalls: [read]));
+                activeCalls = [read];
+                activeCallRound = roundCount;
+                nextToolIndex = 0;
+                canonicalStateReadRequired = false;
+                selectedToolName = null;
+                toolCallCount++;
+                await SaveCheckpointAsync().ConfigureAwait(false);
+                continue;
+            }
+
             // The final awaited tool can finish after a durable cancellation.
             // Its index then exits the inner loop without rechecking its guard.
             cancellationToken.ThrowIfCancellationRequested();
             if (await _repository.IsTerminalStateAsync(runId, cancellationToken).ConfigureAwait(false)) return;
-            if (isCoding && invalidToolTurnCount >= CodingToolBatchRecovery.MaximumInvalidTurns)
+            if (isCoding && !canonicalStateEnabled && invalidToolTurnCount >= CodingToolBatchRecovery.MaximumInvalidTurns)
                 throw new CodingInvalidToolLoopException();
-            if (isCoding) CodingPlanProgressGuard.ThrowIfStalled(workingState);
+            if (isCoding && !canonicalStateEnabled) CodingPlanProgressGuard.ThrowIfStalled(workingState);
 
             // A tool call already emitted by the last allowed model turn is still a
             // pending operation. Drain it (including client resumes) before this guard.
             if (maximumModelRounds > 0 && roundCount >= maximumModelRounds)
                 throw new AgentRunLimitException(isCoding ? codingBudget.FailureMessage(roundCount, toolCallCount)
                     : $"Der Agent hat das Modellrundenlimit von {maximumModelRounds} erreicht.");
-            var budgetSummary = isCoding && codingBudget.MustSummarize(roundCount, toolCallCount);
+            var budgetSummary = isCoding && !canonicalStateEnabled && codingBudget.MustSummarize(roundCount, toolCallCount);
             if (isCoding)
             {
                 ApplyCodingBudgetInstruction(messages, codingBudget, roundCount, toolCallCount, preserveSessionPromptPrefix);
@@ -765,9 +837,9 @@ public sealed partial class RunProcessor : BackgroundService
                 }
             }
             var effort = _modelRuntime.ResolveReasoningEffort(selection.ModelId, selection.Role, request.ReasoningEffort);
-            var selectableTools = useStableSubagentToolCatalog ? availableTools.ToArray() : budgetSummary ? [] : isCoding
+            var selectableTools = compactContext || useStableSubagentToolCatalog || canonicalStateEnabled ? availableTools.ToArray() : budgetSummary ? [] : isCoding
                 ? CodingPlanProgressGuard.OfferedTools(availableTools, workingState) : availableTools.ToArray();
-            var modelTools = CreateModelToolDefinitions(selectableTools, selectedToolName, isCoding || useStableSubagentToolCatalog);
+            var modelTools = contextTools ?? CreateModelToolDefinitions(selectableTools, selectedToolName, isCoding || useStableSubagentToolCatalog || canonicalStateEnabled);
             // A turn following assistant.selectTool has exactly one purpose: emit the
             // selected structured call. Some local models narrate that intent
             // before (or instead of) returning JSON. Keep this protocol-only
@@ -910,6 +982,11 @@ public sealed partial class RunProcessor : BackgroundService
                 // constructing the first native prompt and tool definitions.
                 var loadedSubagentAvailable = await CanOfferSubagentToolsAsync(request,
                     selection with { ContextLength = contextLength }, steeringCall.Token).ConfigureAwait(false);
+                if (compactContext && request.Subagent is null && loadedSubagentAvailable != subagentAvailable)
+                {
+                    subagentAvailable = loadedSubagentAvailable;
+                    AppendRuntimeContext(messages, request, subagentAvailable);
+                }
                 if (earlySubagentDelegationPending && !loadedSubagentAvailable)
                 {
                     // Keep the already evaluated full schema stable. Hardware
@@ -922,7 +999,7 @@ public sealed partial class RunProcessor : BackgroundService
                     liveTextGate = new IncrementalVisibleTextGate(enabled: !suppressRequiredToolTurn, bufferUntilComplete: true);
                     await SaveCheckpointAsync().ConfigureAwait(false);
                 }
-                if (loadedSubagentAvailable && !useStableSubagentToolCatalog)
+                if (!compactContext && loadedSubagentAvailable && !useStableSubagentToolCatalog)
                 {
                     useStableSubagentToolCatalog = true;
                     effectiveTools = _toolCatalog.GetAvailableTools(request, subagentAvailable: true);
@@ -1000,8 +1077,8 @@ public sealed partial class RunProcessor : BackgroundService
                     compactionCount++;
                     await PublishCodingMetricsAsync(runId, roundCount, "summarization", condensed, summaryEffort, queueMilliseconds, steeringCall.Token).ConfigureAwait(false);
                     queueMilliseconds = 0; // The following model turn retains this already acquired lease.
-                    budgetSummary = codingBudget.MustSummarize(roundCount, toolCallCount);
-                    if (budgetSummary && !useStableSubagentToolCatalog)
+                    budgetSummary = !canonicalStateEnabled && codingBudget.MustSummarize(roundCount, toolCallCount);
+                    if (budgetSummary && !compactContext && !useStableSubagentToolCatalog && !canonicalStateEnabled)
                     {
                         modelTools = [];
 
@@ -1128,6 +1205,13 @@ public sealed partial class RunProcessor : BackgroundService
                             : BuildRunSessionCacheKey(request, runId, selection.Role),
                         nativeProgress: nativeProgress,
                         runtimeInstanceId: request.Subagent?.RuntimeInstanceId).ConfigureAwait(false);
+                    await _repository.AppendEventAsync(runId, "model.turn.metrics", new
+                    {
+                        round = roundCount + 1, contextProfile = contextProfileVersion ?? "legacy",
+                        modelId = selection.ModelId, reasoningEffort = effort, queueMilliseconds,
+                        metrics = response.Metrics, inputTokens = response.InputTokens, outputTokens = response.OutputTokens,
+                        toolCalls = response.ToolCalls.Count, toolCatalogSignature,
+                    }, steeringCall.Token).ConfigureAwait(false);
                     {
                         // Commit the actual native prompt on every successful turn,
                         // not only the final answer. Tool waits and process recovery
@@ -1251,7 +1335,9 @@ public sealed partial class RunProcessor : BackgroundService
             if (await _repository.IsTerminalStateAsync(runId, cancellationToken).ConfigureAwait(false)) return;
             if (earlySubagentDelegationPending)
             {
-                if (!IsValidEarlyDelegationResponse(response, availableTools, _toolCatalog))
+                var preparingResearchContext = compactContext && canonicalStateEnabled
+                    && IsEarlyResearchContextRead(response, request, availableTools, _toolCatalog);
+                if (!preparingResearchContext && !IsValidEarlyDelegationResponse(response, availableTools, _toolCatalog))
                 {
                     // No source/file/process action may precede the manager's
                     // initial assignment. Close rejected calls in chronological
@@ -1277,8 +1363,11 @@ public sealed partial class RunProcessor : BackgroundService
                 // The ensuing active-call checkpoint stores the exact model
                 // assignment and operation identity. Resume executes that call
                 // idempotently instead of asking for a second assignment.
-                earlySubagentDelegationPending = false;
-                earlySubagentDelegationRetryCount = 0;
+                if (!preparingResearchContext)
+                {
+                    earlySubagentDelegationPending = false;
+                    earlySubagentDelegationRetryCount = 0;
+                }
             }
             if (response.ToolCalls.Count == 0 && request.Subagent is null
                 && await CollectOutstandingSubagentResultsAsync(runId, cancellationToken).ConfigureAwait(false) is { Count: > 0 } delegatedResults)
@@ -1296,6 +1385,7 @@ public sealed partial class RunProcessor : BackgroundService
                     + JsonSerializer.Serialize(delegatedResults, MissumAiProtocol.CreateJsonOptions())));
                 foreach (var delegated in delegatedResults)
                     _ = AppendSubagentResultAcceptanceInstruction(messages, delegated);
+                if (canonicalStateEnabled) canonicalStateReadRequired = true;
                 streamingTurnStartEventId = null;
                 await SaveCheckpointAsync().ConfigureAwait(false);
                 await MarkSubagentResultsConsumedAsync(runId, delegatedResults, cancellationToken).ConfigureAwait(false);
@@ -1319,6 +1409,12 @@ public sealed partial class RunProcessor : BackgroundService
             roundCount++;
             inputTokens += response.InputTokens;
             outputTokens += response.OutputTokens;
+            if (canonicalStateEnabled && request.Subagent is null)
+                await _repository.AppendEventAsync(runId, "research.state.tokens", new
+                {
+                    inputTokens, outputTokens, round = roundCount,
+                    cachedPromptTokensLastTurn = response.Metrics?.CachedPromptTokens,
+                }, cancellationToken).ConfigureAwait(false);
             if (isCoding)
                 await PublishCodingMetricsAsync(runId, roundCount, workingState?.Phase ?? "main", response, effort, queueMilliseconds, cancellationToken).ConfigureAwait(false);
             if (budgetSummary)
@@ -1379,7 +1475,7 @@ public sealed partial class RunProcessor : BackgroundService
             {
                 incompleteResponseRetryCount = 0;
             }
-            if (!isCoding && !useStableSubagentToolCatalog && selectedToolName is null && response.ToolCalls.Count > 0)
+            if (!compactContext && !isCoding && !useStableSubagentToolCatalog && !canonicalStateEnabled && selectedToolName is null && response.ToolCalls.Count > 0)
             {
                 if (response.ToolCalls.Count != 1
                     || !AgentToolCatalog.IsSelectorToolName(response.ToolCalls[0].Name))
@@ -1552,7 +1648,11 @@ public sealed partial class RunProcessor : BackgroundService
                 UseStableSubagentToolCatalog: useStableSubagentToolCatalog,
                 ResearchManagedByAgent: researchManagedByAgent,
                 EarlySubagentDelegationPending: earlySubagentDelegationPending,
-                EarlySubagentDelegationRetryCount: earlySubagentDelegationRetryCount),
+                EarlySubagentDelegationRetryCount: earlySubagentDelegationRetryCount,
+                CanonicalStateReadRequired: canonicalStateReadRequired,
+                ScientificStateProgress: scientificStateProgress,
+                ContextProfileVersion: contextProfileVersion, ToolCatalogSignature: toolCatalogSignature,
+                ContextTools: contextTools, ResearchStateStamp: researchStateStamp),
             cancellationToken);
 
         async Task ApplyModelSelectionAsync()
@@ -1583,16 +1683,22 @@ public sealed partial class RunProcessor : BackgroundService
                         + JsonSerializer.Serialize(delegatedForModelSwitch, MissumAiProtocol.CreateJsonOptions())));
                     foreach (var delegated in delegatedForModelSwitch)
                         _ = AppendSubagentResultAcceptanceInstruction(messages, delegated);
+                    if (canonicalStateEnabled) canonicalStateReadRequired = true;
                 }
             }
             candidate = candidate with { Limits = (candidate.Limits ?? new()) with { MaximumContextTokens = next.ContextLength } };
             request = candidate; selection = next;
             subagentAvailable = await CanOfferSubagentToolsAsync(request, next, cancellationToken).ConfigureAwait(false);
-            useStableSubagentToolCatalog |= subagentAvailable;
+            if (!compactContext) useStableSubagentToolCatalog |= subagentAvailable;
             effectiveTools = _toolCatalog.GetAvailableTools(request, useStableSubagentToolCatalog);
-            availableTools = stagedWebResearchRequested && !useStableSubagentToolCatalog
+            availableTools = stagedWebResearchRequested && !useStableSubagentToolCatalog && !compactContext
                 ? StagedWebResearchPipeline.RemoveFromMainAgentTools(effectiveTools) : effectiveTools;
-            if (useStableSubagentToolCatalog) selectedToolName = null;
+            if (compactContext || useStableSubagentToolCatalog || canonicalStateEnabled) selectedToolName = null;
+            if (compactContext)
+            {
+                AppendRuntimeContext(messages, request, subagentAvailable);
+                toolCatalogSignature = ToolContextProfiles.Signature(contextTools!, selection.ModelId);
+            }
             contextLength = Math.Min(next.ContextLength, request.Limits?.MaximumContextTokens ?? next.ContextLength);
             appliedModelSelectionEventId = latest.Value.EventId;
             preserveSessionPromptPrefix = false;
@@ -1633,6 +1739,7 @@ public sealed partial class RunProcessor : BackgroundService
             stagedWebResearchRequested = false;
             availableTools = effectiveTools;
             preserveSessionPromptPrefix = true;
+            if (canonicalStateEnabled) canonicalStateReadRequired = true;
             foreach (var input in inputs)
             {
                 messages.Add(new LmChatMessage("user", input.Text));
@@ -1675,18 +1782,20 @@ public sealed partial class RunProcessor : BackgroundService
                 {
                     scientificCompletionPending = true;
                     var diagnosis = assessment.NeedsVerification
-                        ? "Ich prüfe jetzt die aktuelle PDF-Publikation und die tatsächlich ausgeführten Python-Abbildungen vor dem Abschluss."
+                        ? canonicalStateEnabled ? "Ich prüfe jetzt den aktuellen kanonischen Forschungsstand und die gerenderte Publikation vor dem Abschluss."
+                            : "Ich prüfe jetzt die aktuelle PDF-Publikation und die tatsächlich ausgeführten Python-Abbildungen vor dem Abschluss."
                         : "Der Forschungszyklus ist noch unvollständig. " + string.Join(" ", assessment.Missing.Take(3))
                             + " Ich erhalte den Arbeitsstand und bearbeite den nächsten belegbaren Schritt.";
                     // Persist the repair before waiting or proposing a client tool.
                     // Recovery must retain this decision, including its backoff state.
-                    ScientificRunCompletionPolicy.UpsertRecoveryPrompt(messages, assessment);
+                    if (canonicalStateEnabled) ScientificStateCompletionPolicy.UpsertRecoveryPrompt(messages, assessment);
+                    else ScientificRunCompletionPolicy.UpsertRecoveryPrompt(messages, assessment);
                     if (assessment.RepeatedAttempts == 0 || assessment.RepeatedAttempts % 3 == 0)
                     {
                         await PublishVisibleDeltaAsync(new TextDeltaEvent("\n\n" + diagnosis + "\n\n"), cancellationToken).ConfigureAwait(false);
                     }
                     await SaveCheckpointAsync().ConfigureAwait(false);
-                    var delay = ScientificRunCompletionPolicy.RetryDelay(assessment);
+                    var delay = canonicalStateEnabled ? TimeSpan.Zero : ScientificRunCompletionPolicy.RetryDelay(assessment);
                     if (delay > TimeSpan.Zero) await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
                     cancellationToken.ThrowIfCancellationRequested();
                     if (assessment.NeedsVerification)
@@ -2193,11 +2302,14 @@ public sealed partial class RunProcessor : BackgroundService
     internal static List<LmChatMessage> CreateInitialMessages(
         RunRequest request,
         string role,
-        IReadOnlyList<string> effectiveTools)
+        IReadOnlyList<string> effectiveTools,
+        string? contextProfileVersion = null)
     {
         var messages = new List<LmChatMessage>
         {
-            new("system", (request.Mode == RunMode.Coding
+            new("system", contextProfileVersion == ToolContextProfiles.Current
+                ? CompactAgentContextPolicy.Build(request, effectiveTools)
+                : (request.Mode == RunMode.Coding
                 ? CodingAgentPolicy.ForWorkingState(true)
                 : GeneralAgentPolicies.ForConversation(role, request, effectiveTools))
                 + (effectiveTools.Contains(SubagentToolNames.Spawn, StringComparer.Ordinal)
@@ -2235,10 +2347,11 @@ public sealed partial class RunProcessor : BackgroundService
     internal static LmToolDefinition[] CreateModelToolDefinitions(
         IReadOnlyList<AgentToolSpec> availableTools,
         string? selectedToolName,
-        bool directTools = false)
+        bool directTools = false,
+        string? contextProfileVersion = null)
     {
         ArgumentNullException.ThrowIfNull(availableTools);
-        if (directTools) return availableTools.Select(static tool => tool.ToLmDefinition()).ToArray();
+        if (directTools) return availableTools.Select(tool => tool.ToLmDefinition() with { ContextProfileVersion = contextProfileVersion }).ToArray();
         if (selectedToolName is null)
         {
             return availableTools.Count == 0

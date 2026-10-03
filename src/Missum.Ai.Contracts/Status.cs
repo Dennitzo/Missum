@@ -20,7 +20,8 @@ public sealed record CapabilitySnapshot(
     LiveCaptionCapability? LiveCaptions = null,
     bool SupportsCodingSessionContext = false,
     bool SupportsRunSteering = false,
-    IReadOnlyList<ExtensionCapability>? Extensions = null);
+    IReadOnlyList<ExtensionCapability>? Extensions = null,
+    IReadOnlyList<string>? ContextProfiles = null);
 
 public sealed record ExtensionCapability(
     string Id,

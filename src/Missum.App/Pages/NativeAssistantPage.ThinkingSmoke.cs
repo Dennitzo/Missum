@@ -64,9 +64,11 @@ public sealed partial class NativeAssistantPage
             var header = _messageBlocks[messageId]["header"];
             UpdateMessageHeader(header, _messages[messageId]);
             RefreshThinkingIndicators(refreshTokens: true);
+            var headerText = ((TextBlock)((StackPanel)header).Children[0]).Text;
             if (row.Label.Text != $"Denke nach · {1030:N0} Token"
-                || !((TextBlock)((StackPanel)header).Children[0]).Text.Contains($"{1030:N0} Token", StringComparison.Ordinal))
-                throw new InvalidOperationException("Thinking and the active header must display the same live token count.");
+                || !headerText.StartsWith("In Bearbeitung seit ", StringComparison.Ordinal)
+                || headerText.Contains("Token", StringComparison.Ordinal))
+                throw new InvalidOperationException("Thinking must display live tokens while the active header displays only elapsed time.");
 
             BodyGrid.Visibility = Visibility.Collapsed; RefreshThinkingIndicators();
             if (row.Visibility != Visibility.Collapsed) throw new InvalidOperationException("Hidden chat tabs must not display thinking.");

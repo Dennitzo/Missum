@@ -8,7 +8,7 @@ namespace Missum.Infrastructure.Storage;
 
 public sealed class SqliteDatabase : IMissumDatabase, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 52;
+    public const int CurrentSchemaVersion = 53;
     private static readonly Action<ILogger, string, Exception?> DatabaseInitialized = LoggerMessage.Define<string>(
         LogLevel.Information, new EventId(1000, nameof(DatabaseInitialized)), "SQLite-Datenbank {DatabasePath} wurde initialisiert.");
     private static readonly Action<ILogger, string?, Exception?> IntegrityCheckFailed = LoggerMessage.Define<string?>(
@@ -104,6 +104,7 @@ public sealed class SqliteDatabase : IMissumDatabase, IAsyncDisposable
             await ApplyMigrationFiftyOneAsync(connection, cancellationToken).ConfigureAwait(false);
             await BackupBeforeWorkflowRemovalMigrationAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationFiftyTwoAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationFiftyThreeAsync(connection, cancellationToken).ConfigureAwait(false);
             await VerifyIntegrityAsync(connection, cancellationToken).ConfigureAwait(false);
             Volatile.Write(ref _initialized, 1);
             DatabaseInitialized(_logger, DatabasePath, null);
@@ -2526,6 +2527,55 @@ public sealed class SqliteDatabase : IMissumDatabase, IAsyncDisposable
         var name = Path.GetFileName(path);
         if (string.IsNullOrWhiteSpace(name)) name = path;
         return name.Length <= 120 ? name : name[..120];
+    }
+
+    private static async Task ApplyMigrationFiftyThreeAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=53;";
+        if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+        {
+            command.CommandText = """
+                CREATE TABLE research_working_states(
+                    project_id TEXT PRIMARY KEY REFERENCES research_projects(id) ON DELETE CASCADE,
+                    revision INTEGER NOT NULL CHECK(revision>=0),
+                    publication_revision INTEGER NOT NULL CHECK(publication_revision>=0),
+                    title TEXT NOT NULL, updated_at TEXT NOT NULL
+                ) STRICT;
+                CREATE TABLE research_working_items(
+                    project_id TEXT NOT NULL REFERENCES research_working_states(project_id) ON DELETE CASCADE,
+                    id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('hypothesis','claim','requirement','section','contribution')),
+                    revision INTEGER NOT NULL CHECK(revision>=1), owner_agent_id TEXT NULL,
+                    data_json TEXT NOT NULL CHECK(json_valid(data_json)), updated_at TEXT NOT NULL,
+                    PRIMARY KEY(project_id,id)
+                ) STRICT;
+                CREATE TABLE research_working_operations(
+                    project_id TEXT NOT NULL REFERENCES research_working_states(project_id) ON DELETE CASCADE,
+                    operation_id TEXT NOT NULL, actor_agent_id TEXT NULL, arguments_sha256 TEXT NOT NULL,
+                    result_json TEXT NOT NULL CHECK(json_valid(result_json)), created_at TEXT NOT NULL,
+                    PRIMARY KEY(project_id,operation_id)
+                ) STRICT;
+                CREATE TABLE research_working_history(
+                    project_id TEXT NOT NULL REFERENCES research_working_states(project_id) ON DELETE CASCADE,
+                    item_id TEXT NOT NULL, revision INTEGER NOT NULL, operation_id TEXT NOT NULL,
+                    actor_agent_id TEXT NULL, kind TEXT NOT NULL, data_json TEXT NOT NULL CHECK(json_valid(data_json)),
+                    updated_at TEXT NOT NULL, PRIMARY KEY(project_id,item_id,revision)
+                ) STRICT;
+                CREATE INDEX ix_research_working_history_operations ON research_working_history(project_id,operation_id);
+                CREATE TABLE research_execution_receipts(
+                    verification_id TEXT PRIMARY KEY REFERENCES research_verifications(id) ON DELETE CASCADE,
+                    project_id TEXT NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+                    receipt_sha256 TEXT NOT NULL, recorded_at TEXT NOT NULL
+                ) STRICT;
+                CREATE INDEX ix_research_execution_receipts_project ON research_execution_receipts(project_id);
+                INSERT INTO schema_migrations(version,applied_at) VALUES(53,$now);
+                """;
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private static async Task ApplyMarkerMigrationAsync(SqliteConnection connection, int version, CancellationToken cancellationToken)

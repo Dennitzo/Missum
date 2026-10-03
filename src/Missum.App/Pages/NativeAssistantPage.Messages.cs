@@ -39,10 +39,9 @@ public sealed partial class NativeAssistantPage
         var elapsed = MessageActiveDuration(message, end);
         var duration = $"{(long)elapsed.TotalMinutes} Min. {elapsed.Seconds} Sek.";
         var text = active
-            ? $"Modell generiert {DisplayContextUsed:N0} Token · In Bearbeitung seit {duration}"
+            ? $"In Bearbeitung seit {duration}"
             : start.ToLocalTime().ToString("dd.MM.yyyy · HH:mm 'Uhr'", CultureInfo.CurrentCulture) + " · " + duration + " lang gearbeitet";
         if (active && (header.Tag is not double displayedTokens || displayedTokens != DisplayContextUsed)) header.Tag = DisplayContextUsed;
-        if (active && !string.IsNullOrWhiteSpace(DisplayChatStatus)) text = DisplayChatStatus + " · " + text;
         var label = (TextBlock)((StackPanel)header).Children[0];
         if (label.Text != text) label.Text = text;
     }
@@ -290,6 +289,7 @@ public sealed partial class NativeAssistantPage
                 "research.code.write" => "Python-Datei vorbereiten", "research.code.execute" => "Python-Analyse ausführen",
                 "research.code.test" => "Berechnung prüfen", "research.code.benchmark" => "Berechnung vergleichen",
                 "research.deliverables.verify" => "Forschungsergebnisse prüfen",
+                "research.read" => "Forschungsstand lesen", "research.update" => "Forschungsstand ergänzen",
                 "math.formalProof" => "Lean-Beweis prüfen", "assistant.progress" => "Fortschritt", "assistant.continuation" => "Lauf fortgesetzt", "web.search" => "Websuche", "web.fetch" => "Webseite lesen", _ => S(step, "label", tool) };
             _running = S(step, "status") is "running" or "pending";
             var iconKey = ToolStepIconKey(tool);
@@ -379,7 +379,18 @@ public sealed partial class NativeAssistantPage
             if (explanation.Length == 0 && _filePath.Length > 0)
                 explanation = S(_step, "tool") == "coding.read" ? $"Ich lese „{_filePath}“." : _fileMutation ? $"Dateiänderungen für „{_filePath}“." : "";
             if (explanation.Length > 0) _details.Children.Add(new NativeStreamingMarkdown(explanation));
-            if (input.ValueKind == JsonValueKind.Object)
+            if (S(_step, "tool") == "research.update" && input.ValueKind == JsonValueKind.Object
+                && input.TryGetProperty("changes", out var changes) && changes.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var change in changes.EnumerateArray())
+                {
+                    if (!change.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Object) continue;
+                    var heading = S(data, "title", S(change, "id"));
+                    var text = S(data, "contentMarkdown", S(data, "statement"));
+                    if (text.Length > 0) _details.Children.Add(new NativeStreamingMarkdown("### " + heading + "\n\n" + text));
+                }
+            }
+            else if (input.ValueKind == JsonValueKind.Object)
                 _details.Children.Add(new NativeToolResultView(input, _filePath, true, _diff.Length > 0,
                     S(_step, "tool") switch { "math.formalProof" => "lean", "research.code.write" => "python", _ => null }));
             if (_diff.Length > 0)
@@ -396,6 +407,15 @@ public sealed partial class NativeAssistantPage
 
         internal static string ToolSummary(string tool, JsonElement input, JsonElement output)
         {
+            if (tool == "research.update" && input.ValueKind == JsonValueKind.Object
+                && input.TryGetProperty("changes", out var changes) && changes.ValueKind == JsonValueKind.Array)
+            {
+                var titles = changes.EnumerateArray().Select(change => change.TryGetProperty("data", out var data)
+                    ? S(data, "title", S(change, "id")) : S(change, "id")).Where(title => title.Length > 0).ToArray();
+                var summary = titles.Length == 1 ? titles[0] : titles.Length.ToString(CultureInfo.CurrentCulture) + " Forschungsobjekte";
+                return summary.Length > 100 ? summary[..97] + "…" : summary;
+            }
+            if (tool == "research.read") return "Hypothesen, offene Prüfungen und Publikationsstand";
             if (tool is "subagent" or "subagent.spawn" or "subagent.wait")
             {
                 var title = S(output, "title", S(input, "title", S(input, "task")));

@@ -3,6 +3,7 @@ using Missum.Ai.Server.Core.Coding;
 using Missum.Ai.Server.Core.Configuration;
 using Missum.Ai.Server.Core.Gateway;
 using Missum.Ai.Server.Core.Models;
+using Missum.Ai.Server.Core.Policies;
 using Missum.Ai.Server.Core.Runs;
 using Microsoft.Extensions.Options;
 using System.Text.Json;
@@ -54,8 +55,8 @@ public sealed class CodingAgentTests
         Assert.Contains("keine Testergebnisse", prompt, StringComparison.Ordinal);
         Assert.Contains("Git-Diffs nur in erkannten Git-Projekten", prompt, StringComparison.Ordinal);
         Assert.Contains("ein reiner Dateiwerkzeug-Auftrag erfordert keinen Git-Prozess", prompt, StringComparison.Ordinal);
-        Assert.Contains("vor jedem Werkzeugaufruf in einem kurzen sichtbaren Satz", prompt, StringComparison.Ordinal);
-        Assert.Contains("kündige keinen Erfolg vor dem Werkzeugergebnis an", prompt, StringComparison.Ordinal);
+        Assert.Contains(AgentNarrationPolicy.Instructions, prompt, StringComparison.Ordinal);
+        Assert.DoesNotContain("vor jedem Werkzeugaufruf in einem kurzen sichtbaren Satz", prompt, StringComparison.Ordinal);
         Assert.DoesNotContain("TGA-Fachplanung", prompt, StringComparison.Ordinal);
     }
 

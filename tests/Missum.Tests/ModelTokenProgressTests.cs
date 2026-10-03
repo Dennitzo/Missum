@@ -6,6 +6,19 @@ namespace Missum.Tests;
 public sealed class ModelTokenProgressTests
 {
     [Fact]
+    public void PartialPrefillDoesNotPromoteAnEstimateToMeasuredContext()
+    {
+        var counter = new MissumAiAssistantService.ModelTokenProgressState { SessionContextTokens = 5000 };
+        _ = MissumAiAssistantService.UpdateSessionTokenProgress(new("promptProcessing", ProcessedPromptTokens: 100), counter);
+        Assert.False(counter.HasMeasuredContext);
+        _ = MissumAiAssistantService.UpdateSessionTokenProgress(new("promptProcessing", PromptTokens: 5100, ProcessedPromptTokens: 100), counter);
+        Assert.True(counter.HasMeasuredContext);
+        _ = MissumAiAssistantService.UpdateSessionTokenProgress(new("tokenProgress", GeneratedTokens: 20), counter);
+        Assert.Equal(5120, counter.VisibleContextTokens);
+        Assert.True(counter.HasMeasuredContext);
+    }
+
+    [Fact]
     public void SessionDisplayIncludesHistoryAndGenerationAcrossToolRoundsAndCompaction()
     {
         var counter = new MissumAiAssistantService.ModelTokenProgressState { SessionContextTokens = 5000 };

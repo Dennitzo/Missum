@@ -16,7 +16,7 @@ namespace Missum.App.Services;
 /// bound to the active run's selected project. Valid tools execute automatically
 /// under the user's standing authorization, including local processes and CAD mutations.
 /// </summary>
-public sealed class LocalToolBroker(
+public sealed partial class LocalToolBroker(
     MissumAiConnectionService connection,
     IDocumentIngestor documents,
     LocalDocumentToolService documentTools,
@@ -24,13 +24,15 @@ public sealed class LocalToolBroker(
     IExtensionActionCatalog? extensionActions = null,
     IExtensionRuntimeService? extensionRuntime = null,
     Missum.Core.Research.IResearchSandboxService? researchSandbox = null,
-    ScientificPresentationCoordinator? sciencePresentation = null)
+    ScientificPresentationCoordinator? sciencePresentation = null,
+    Missum.Core.Research.IScientificResearchRepository? scientificResearch = null,
+    ScientificPublicationService? scientificPublications = null)
 {
     private const int MaximumResultCharacters = 4 * 1024 * 1024;
     private static readonly JsonSerializerOptions JsonOptions = MissumAiProtocol.CreateJsonOptions();
     private static readonly SearchValues<char> EvidenceIdCharacters = SearchValues.Create("0123456789abcdef");
 
-    public async Task<ClientToolResult> ExecuteAsync(
+    public Task<ClientToolResult> ExecuteAsync(
         ToolProposal proposal,
         Guid sessionId,
         Guid? assistantMessageId,
@@ -38,6 +40,18 @@ public sealed class LocalToolBroker(
         Func<CodingCommandProgress, Task>? commandProgress = null,
         CodingRunEvidenceStore? evidenceStore = null,
         PromptTriggerAction? runAction = null,
+        CancellationToken cancellationToken = default) => ExecuteForAgentAsync(proposal, sessionId, assistantMessageId,
+            codingWorkspacePath, commandProgress, evidenceStore, runAction, null, cancellationToken);
+
+    internal async Task<ClientToolResult> ExecuteForAgentAsync(
+        ToolProposal proposal,
+        Guid sessionId,
+        Guid? assistantMessageId,
+        string? codingWorkspacePath = null,
+        Func<CodingCommandProgress, Task>? commandProgress = null,
+        CodingRunEvidenceStore? evidenceStore = null,
+        PromptTriggerAction? runAction = null,
+        string? researchActorAgentId = null,
         CancellationToken cancellationToken = default)
     {
         try
@@ -49,6 +63,8 @@ public sealed class LocalToolBroker(
                 && !registeredTool.ActionId.StartsWith("builtin.", StringComparison.Ordinal))
                 extensionTool = registeredTool;
             ValidateProposal(proposal, extensionTool: extensionTool);
+            if (proposal.Name is ClientToolNames.ResearchRead or ClientToolNames.ResearchUpdate)
+                return await ExecuteResearchStateToolAsync(proposal, sessionId, researchActorAgentId, cancellationToken).ConfigureAwait(false);
             if (proposal.Name == ClientToolNames.ResearchDeliverablesVerify)
             {
                 var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false);
@@ -58,8 +74,14 @@ public sealed class LocalToolBroker(
                     throw new UnauthorizedAccessException("Die Ergebnisprüfung gehört nicht zu dieser Claude-Science-Sitzung.");
                 sciencePresentation.Queue(projectId);
                 await sciencePresentation.WaitForIdleAsync(projectId, cancellationToken).ConfigureAwait(false);
+                var project = scientificResearch is null ? null
+                    : await scientificResearch.GetProjectAsync(projectId, cancellationToken).ConfigureAwait(false);
+                var workingState = project?.ProtocolVersion >= 2 && scientificResearch is Missum.Core.Research.IScientificResearchStateRepository stateRepository
+                    ? await stateRepository.LoadWorkingStateAsync(projectId, cancellationToken).ConfigureAwait(false) : null;
+                var receipts = scientificResearch is null ? null
+                    : await scientificResearch.LoadResultSnapshotAsync(projectId, cancellationToken).ConfigureAwait(false);
                 var verified = await ScientificDeliverablesVerifier.VerifyAsync(projectId,
-                    sciencePresentation.GetSnapshot(projectId), cancellationToken).ConfigureAwait(false);
+                    sciencePresentation.GetSnapshot(projectId), workingState, receipts, cancellationToken).ConfigureAwait(false);
                 return Result(proposal, "completed", verified);
             }
             if (extensionTool is not null)
@@ -239,6 +261,8 @@ public sealed class LocalToolBroker(
             await sandbox.RestoreChangeSetAsync(projectId, changeSetId, cancellationToken).ConfigureAwait(false);
             return new { success = true, projectId, changeSetId, verificationStatus = "restored" };
         }
+        var runtime = await sandbox.PrepareRuntimeAsync(cancellationToken).ConfigureAwait(false);
+        if (!runtime.IsReady) throw new InvalidOperationException(runtime.Detail ?? "Der Forschungsrunner ist derzeit nicht verfügbar.");
         string script;
         var arguments = Array.Empty<string>();
         var workingDirectory = ".";
@@ -335,11 +359,18 @@ public sealed class LocalToolBroker(
             results.Add(await sandbox.RunPythonAsync(projectId, scriptPath, arguments, timeout, workingDirectory, cancellationToken).ConfigureAwait(false));
         }
         var succeeded = results.All(static run => run.ExitCode == 0 && !run.TimedOut);
-        var experimentId = proposal.Arguments.TryGetProperty("experimentId", out var experiment) ? experiment.GetString() : null;
+        var experimentId = proposal.Arguments.TryGetProperty("experimentId", out var experiment) ? experiment.GetString()
+            : "math-" + proposal.ProposalId;
+        var project = scientificResearch is null ? null
+            : await scientificResearch.GetProjectAsync(projectId, cancellationToken).ConfigureAwait(false);
+        // A repeated logical experiment is a new measured attempt, never an overwrite of its earlier evidence.
+        var attemptKey = project?.ProtocolVersion >= 2 ? experimentId + "\n" + proposal.ProposalId : experimentId;
         var experimentRecordId = string.IsNullOrWhiteSpace(experimentId) ? null : "experiment-" + Convert.ToHexStringLower(
-            System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(projectId + "\nexperiment\n" + experimentId)))[..24];
+            System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(projectId + "\nexperiment\n" + attemptKey)))[..24];
+        var verificationRecordId = "verification-" + Convert.ToHexStringLower(
+            System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(projectId + "\nverification\n" + proposal.ProposalId)))[..24];
         var receipt = new { success = succeeded, projectId, repetitions,
-            experimentId, experimentRecordId,
+            experimentId, experimentRecordId, verificationRecordId,
             sourceFiles = results.Select(static run => run.ExecutedScriptPath).OfType<string>().Distinct(StringComparer.Ordinal).ToArray(),
             inputHashes = results[0].InputHashes,
             processIsolation = "Docker cgroup and read-only container filesystem", networkIsolation = "Docker network none",
@@ -387,11 +418,11 @@ public sealed class LocalToolBroker(
                 or "coding.readOutput" or "coding.searchRunEvidence" => ToolRiskClass.ReadOnly,
             "coding.write" or "coding.edit" or "coding.undo" => ToolRiskClass.LocalMutation,
             "coding.command" or WorkspaceTools.Open => ToolRiskClass.Process,
-            ClientToolNames.ResearchCodeWrite or ClientToolNames.ResearchCodeRestore => ToolRiskClass.LocalMutation,
+            ClientToolNames.ResearchCodeWrite or ClientToolNames.ResearchCodeRestore or ClientToolNames.ResearchUpdate => ToolRiskClass.LocalMutation,
             ClientToolNames.MathSymbolic or ClientToolNames.MathNumeric or ClientToolNames.MathSmt
                 or ClientToolNames.MathFormalProof or ClientToolNames.ResearchCodeExecute
                 or ClientToolNames.ResearchCodeTest or ClientToolNames.ResearchCodeBenchmark => ToolRiskClass.Process,
-            WorkspaceTools.ImageInput or ClientToolNames.ResearchDeliverablesVerify => ToolRiskClass.ReadOnly,
+            WorkspaceTools.ImageInput or ClientToolNames.ResearchDeliverablesVerify or ClientToolNames.ResearchRead => ToolRiskClass.ReadOnly,
             ClientToolNames.DocumentRead or ClientToolNames.DocumentsList
                 or ClientToolNames.DocumentsSearch or ClientToolNames.DocumentsReadPages => ToolRiskClass.ReadOnly,
             ClientToolNames.DocumentCreate => ToolRiskClass.LocalMutation,
@@ -425,6 +456,10 @@ public sealed class LocalToolBroker(
         }
         switch (proposal.Name)
         {
+            case ClientToolNames.ResearchRead:
+            case ClientToolNames.ResearchUpdate:
+                ValidateResearchStateArguments(proposal.Name, arguments);
+                break;
             case ClientToolNames.ResearchDeliverablesVerify:
                 ValidateProperties(arguments, ["projectId"], ["projectId"]);
                 ValidateString(arguments, "projectId", 1, 128);

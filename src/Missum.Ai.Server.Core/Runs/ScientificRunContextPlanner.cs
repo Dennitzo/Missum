@@ -1,5 +1,6 @@
 using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Models;
+using Missum.Ai.Server.Core.Policies;
 using System.Text;
 using System.Text.Json;
 
@@ -23,9 +24,13 @@ internal static class ScientificRunContextPlanner
         var publicationChange = -1;
         var lastLanguageReminder = -1;
         var lastPlainAssistant = -1;
+        var lastRuntimeContext = -1;
         var lastNativeInstructions = new Dictionary<string, int>(StringComparer.Ordinal);
         for (var index = 0; index < messages.Length; index++)
+        {
             if (IsNativeRuntimeInstruction(messages[index])) lastNativeInstructions[messages[index].Content!] = index;
+            if (IsRuntimeContext(messages[index])) lastRuntimeContext = index;
+        }
 
         for (var index = 0; index < messages.Length; index++)
         {
@@ -33,6 +38,7 @@ internal static class ScientificRunContextPlanner
             if (message.Role == "system") protect.Add(index);
             if (ModelRuntimeClient.IsLanguageReminder(message)) lastLanguageReminder = index;
             else if (message.Role == "user" && !IsEvidenceDossier(message.Content)
+                && (!IsRuntimeContext(message) || index == lastRuntimeContext)
                 && (!IsNativeRuntimeInstruction(message) || lastNativeInstructions[message.Content!] == index)) protect.Add(index);
             if (message.Role == "assistant" && message.ToolCalls is not { Count: > 0 }) lastPlainAssistant = index;
             if (message.Role != "assistant" || message.Content is not { } content || !TryPublication(content, out var body)) continue;
@@ -97,6 +103,12 @@ internal static class ScientificRunContextPlanner
         // Retain citations and original dossiers until ordinary narration and
         // obsolete execution logs have been removed. No replacement claim or
         // invented semantic summary is inserted into the model's conversation.
+        for (var index = 0; index < lastRuntimeContext; index++)
+            if (IsRuntimeContext(messages[index]))
+            {
+                if (Tokens() <= budget) break;
+                Remove(index);
+            }
         foreach (var index in Enumerable.Range(0, messages.Length).Where(index =>
             messages[index].Role == "assistant" && !pairedIndices.Contains(index) && !HasCitation(messages[index].Content)))
         {
@@ -130,6 +142,8 @@ internal static class ScientificRunContextPlanner
     private static void ProtectCurrentToolEvidence(LmChatMessage[] messages, IReadOnlyList<ToolGroup> groups, HashSet<int> protect)
     {
         var latestWrite = new Dictionary<string, ToolGroup>(StringComparer.Ordinal);
+        var latestStateRead = new Dictionary<string, ToolGroup>(StringComparer.Ordinal);
+        var latestStateUpdate = new Dictionary<string, ToolGroup>(StringComparer.Ordinal);
         var latestPython = new Dictionary<string, ToolGroup>(StringComparer.Ordinal);
         var latestVerify = new Dictionary<string, ToolGroup>(StringComparer.Ordinal);
         var latestVerifyReceipt = new Dictionary<string, ToolGroup>(StringComparer.Ordinal);
@@ -144,6 +158,8 @@ internal static class ScientificRunContextPlanner
                 var project = Text(call.Arguments, "projectId");
                 if (call.Name == "document.create") latestDocumentMutation = group;
                 if (project.Length == 0) continue;
+                if (call.Name == ClientToolNames.ResearchRead) latestStateRead[project] = group;
+                if (call.Name == ClientToolNames.ResearchUpdate) latestStateUpdate[project] = group;
                 if (call.Name == ClientToolNames.ResearchCodeWrite) latestWrite[project] = group;
                 if (call.Name is ClientToolNames.ResearchCodeWrite or ClientToolNames.ResearchCodeExecute
                     or ClientToolNames.ResearchCodeTest or ClientToolNames.ResearchCodeBenchmark) latestMutation[project] = group;
@@ -160,9 +176,86 @@ internal static class ScientificRunContextPlanner
             }
         }
         foreach (var group in latestWrite.Values.Concat(latestPython.Values).Concat(latestVerify.Values)
-            .Concat(latestVerifyReceipt.Values).Concat(latestMutation.Values).Concat(latestMutationReceipt.Values)) protect.UnionWith(group.Indices);
+            .Concat(latestVerifyReceipt.Values).Concat(latestMutation.Values).Concat(latestMutationReceipt.Values)
+            .Concat(latestStateRead.Values).Concat(latestStateUpdate.Values)) protect.UnionWith(group.Indices);
         if (latestDocumentMutation is not null) protect.UnionWith(latestDocumentMutation.Indices);
+        ProtectCanonicalReadContext(messages, groups, protect);
     }
+
+    private static void ProtectCanonicalReadContext(LmChatMessage[] messages, IReadOnlyList<ToolGroup> groups,
+        HashSet<int> protect)
+    {
+        var overviews = new Dictionary<string, ToolGroup>(StringComparer.Ordinal);
+        var taskPages = new Dictionary<(string Project, string Stamp, int Total), Dictionary<int, TaskPage>>();
+        foreach (var group in groups)
+            foreach (var call in group.Calls)
+            {
+                if (call.Name != ClientToolNames.ResearchRead || !group.Receipts.TryGetValue(call.Id, out var receipts)) continue;
+                var project = Text(call.Arguments, "projectId");
+                if (project.Length == 0) continue;
+                foreach (var index in receipts)
+                {
+                    if (!ScientificStateCompletionPolicy.TryReceipt(messages[index].Content, out var result, out var success)
+                        || !success || Text(result, "projectId") != project
+                        || Text(result, "protocol") != ScientificStateCompletionPolicy.Protocol) continue;
+                    var stamp = Text(result, "stateStamp");
+                    if (stamp.Length != 64 || !stamp.All(Uri.IsHexDigit)) continue;
+                    var view = Text(call.Arguments, "view");
+                    if (view != Text(result, "view")) continue;
+                    if (view == "overview"
+                        && (!call.Arguments.TryGetProperty("ids", out var ids) || ids.ValueKind == JsonValueKind.Array && ids.GetArrayLength() == 0)
+                        && !call.Arguments.TryGetProperty("cursor", out _)
+                        && (!call.Arguments.TryGetProperty("offset", out var offset) || offset.ValueKind == JsonValueKind.Number && offset.TryGetInt32(out var number) && number == 0)
+                        && !ScientificStateCompletionPolicy.Boolean(result, "unchanged")
+                        && result.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Array)
+                        overviews[project] = group;
+                    if (view != "task" || !TryNonnegativeInt(result, "characterOffset", out var start)
+                        || !TryNonnegativeInt(result, "totalCharacters", out var total)
+                        || !result.TryGetProperty("originalQuestion", out var content) || content.ValueKind != JsonValueKind.String
+                        || !result.TryGetProperty("nextCursor", out var next) || next.ValueKind is not (JsonValueKind.String or JsonValueKind.Null)) continue;
+                    var length = content.GetString()!.Length;
+                    if (start > total || length > total - start || length == 0 && start != total
+                        || (start + length < total) != (next.ValueKind == JsonValueKind.String && !string.IsNullOrEmpty(next.GetString()))) continue;
+                    var key = (project, stamp, total);
+                    if (!taskPages.TryGetValue(key, out var pages)) taskPages[key] = pages = [];
+                    pages[start] = new TaskPage(start, length, group);
+                }
+            }
+        // An unchanged receipt has no working items. Its last full first overview
+        // must survive even when the last read was only a detail or acknowledgement.
+        foreach (var overview in overviews.Values) protect.UnionWith(overview.Indices);
+        foreach (var project in taskPages.GroupBy(static entry => entry.Key.Project, StringComparer.Ordinal))
+        {
+            var latest = project.MaxBy(static entry => entry.Value.Values.Max(static page => page.Group.AssistantIndex));
+            foreach (var page in latest.Value.Values) protect.UnionWith(page.Group.Indices);
+            // Keep the last complete original task while a newer stamped read is
+            // still paginating. Replace it only once every new character is present.
+            var complete = project.Where(static entry => IsCompleteTask(entry.Value, entry.Key.Total))
+                .OrderByDescending(static entry => entry.Value.Values.Max(static page => page.Group.AssistantIndex)).FirstOrDefault();
+            if (complete.Value is not null)
+                foreach (var page in complete.Value.Values) protect.UnionWith(page.Group.Indices);
+        }
+    }
+
+    private static bool TryNonnegativeInt(JsonElement value, string property, out int number)
+    {
+        number = 0;
+        return value.TryGetProperty(property, out var field) && field.ValueKind == JsonValueKind.Number
+            && field.TryGetInt32(out number) && number >= 0;
+    }
+
+    private static bool IsCompleteTask(Dictionary<int, TaskPage> pages, int total)
+    {
+        var next = 0;
+        foreach (var page in pages.Values.OrderBy(static page => page.Offset))
+        {
+            if (page.Offset != next) return false;
+            next += page.Length;
+        }
+        return next == total;
+    }
+
+    private sealed record TaskPage(int Offset, int Length, ToolGroup Group);
 
     private static List<ToolGroup> BindToolPairs(LmChatMessage[] messages)
     {
@@ -200,6 +293,8 @@ internal static class ScientificRunContextPlanner
         || content?.TrimStart().StartsWith("[MISSUM_WEB_RESEARCH_DOSSIER]", StringComparison.Ordinal) == true;
     private static bool IsNativeRuntimeInstruction(LmChatMessage message) => message.Role == "user"
         && message.Content?.StartsWith("Missum-Laufanweisung:\n", StringComparison.Ordinal) == true;
+    private static bool IsRuntimeContext(LmChatMessage message) => message.Role == "user"
+        && message.Content?.StartsWith(CompactAgentContextPolicy.RuntimeMarker, StringComparison.Ordinal) == true;
     private static bool HasCitation(string? content) => content?.Contains("https://", StringComparison.OrdinalIgnoreCase) == true
         || content?.Contains("http://", StringComparison.OrdinalIgnoreCase) == true || content?.Contains("doi:", StringComparison.OrdinalIgnoreCase) == true;
     private static string Text(JsonElement owner, string name) => owner.ValueKind == JsonValueKind.Object

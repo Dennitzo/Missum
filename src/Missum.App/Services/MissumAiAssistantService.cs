@@ -49,7 +49,8 @@ public sealed record MissumAiAssistantUpdate(
     string? GenerationState = null,
     int? GeneratedTokens = null,
     DateTimeOffset? GenerationUpdatedAt = null,
-    SubagentChatState? Subagent = null);
+    SubagentChatState? Subagent = null,
+    string? ContextSource = null);
 
 public sealed record MissumAiSpeechUpdate(
     bool IsActive,
@@ -103,7 +104,8 @@ public sealed partial class MissumAiAssistantService(
     IExtensionActionCatalog? extensionActions = null,
     IScientificResearchRepository? scientificResearch = null,
     IResearchSandboxService? researchSandbox = null,
-    ScientificPresentationCoordinator? sciencePresentation = null) : IDisposable
+    ScientificPresentationCoordinator? sciencePresentation = null,
+    ScientificPublicationService? sciencePublications = null) : IDisposable
 {
     private const int MaximumPromptRetries = 3;
     private static readonly JsonSerializerOptions JsonOptions = MissumAiProtocol.CreateJsonOptions();
@@ -1373,6 +1375,7 @@ public sealed partial class MissumAiAssistantService(
 
     internal sealed class ModelTokenProgressState
     {
+        public bool HasMeasuredContext { get; set; }
         public int SessionContextTokens { get; set; }
         public int VisibleContextTokens { get; set; }
         public int ActiveTokens { get; set; }
@@ -1465,9 +1468,16 @@ public sealed partial class MissumAiAssistantService(
             counter.SessionContextTokens = Math.Max(counter.SessionContextTokens, counter.VisibleContextTokens);
         var detail = FormatModelTokenProgress(progress, counter);
         if (progress.PromptTokens is > 0)
+        {
             counter.SessionContextTokens = progress.PromptTokens.Value;
+            counter.HasMeasuredContext = true;
+        }
         else if (progress.ProcessedPromptTokens is > 0)
+        {
             counter.SessionContextTokens = Math.Max(counter.SessionContextTokens, progress.ProcessedPromptTokens.Value);
+            // A partial prefill counter is not the complete native context size.
+            // Preserve a known measurement, but do not promote an estimate from it.
+        }
         counter.VisibleContextTokens = Math.Max(counter.SessionContextTokens, counter.ProcessedPromptTokens) + counter.GeneratedTokens;
         if (counter.VisibleContextTokens == 0) counter.VisibleContextTokens = counter.ActiveTokens;
         return progress.State is "generationStarted" or "generationRetry" or "promptProcessing" or "tokenProgress" or "codingWaiting" or "codingLoading"
@@ -1485,6 +1495,8 @@ public sealed partial class MissumAiAssistantService(
         MissumAiClient? suppliedClient = null)
     {
         var isScienceRun = (await chats.GetSessionAsync(localRun.SessionId, cancellationToken).ConfigureAwait(false))?.ChatMode == ChatMode.ClaudeScience;
+        var usesScienceWorkingState = isScienceRun && scientificResearch is IScientificResearchStateRepository
+            && (await scientificResearch.GetProjectAsync($"research-{localRun.SessionId:N}", cancellationToken).ConfigureAwait(false))?.ProtocolVersion >= 2;
         var lastSciencePublicationRefresh = DateTimeOffset.MinValue;
         var ownsClient = suppliedClient is null;
         var client = suppliedClient ?? await CreateClientForActionAsync(localRun.Action, cancellationToken).ConfigureAwait(false);
@@ -1675,14 +1687,19 @@ public sealed partial class MissumAiAssistantService(
                 cancellationToken).ConfigureAwait(false);
             foreach (var incomplete in incompleteExecutions)
             {
-                var unknown = UnknownClientToolOutcome(incomplete.ProposalId);
+                var unknown = await RecoverResearchUpdateAsync(localRun, incomplete, null, cancellationToken).ConfigureAwait(false)
+                    ?? UnknownClientToolOutcome(incomplete.ProposalId);
                 await toolExecutions.CompleteAsync(incomplete.ProposalId, JsonSerializer.Serialize(unknown, JsonOptions),
                     CancellationToken.None).ConfigureAwait(false);
             }
             foreach (var child in subagentStates.Values)
             {
                 foreach (var incomplete in await toolExecutions.ListIncompleteExecutionsAsync(localRun.Id, child.RunId, cancellationToken).ConfigureAwait(false))
-                    await toolExecutions.CompleteAsync(incomplete.ProposalId, JsonSerializer.Serialize(UnknownClientToolOutcome(incomplete.ProposalId), JsonOptions), CancellationToken.None).ConfigureAwait(false);
+                {
+                    var recovered = await RecoverResearchUpdateAsync(localRun, incomplete, child.AgentId, cancellationToken).ConfigureAwait(false)
+                        ?? UnknownClientToolOutcome(incomplete.ProposalId);
+                    await toolExecutions.CompleteAsync(incomplete.ProposalId, JsonSerializer.Serialize(recovered, JsonOptions), CancellationToken.None).ConfigureAwait(false);
+                }
             }
             var pendingSubmissions = await toolExecutions
                 .ListPendingSubmissionsAsync(localRun.Id, null, cancellationToken)
@@ -1734,9 +1751,9 @@ public sealed partial class MissumAiAssistantService(
                 if (isScienceRun)
                 {
                     assistant = await PersistScienceNarrationAsync(localRun, item, assistant, update, cancellationToken).ConfigureAwait(false);
-                    if (ScientificResearchProgressStore.Handles(item) || item.Type.StartsWith("research.", StringComparison.Ordinal)
+                    if (!usesScienceWorkingState && (ScientificResearchProgressStore.Handles(item) || item.Type.StartsWith("research.", StringComparison.Ordinal)
                         || item.Type is RunEventTypes.ServerToolCompleted or RunEventTypes.RunCompleted
-                        || item.Type == RunEventTypes.TextDelta && DateTimeOffset.UtcNow - lastSciencePublicationRefresh > TimeSpan.FromSeconds(8))
+                        || item.Type == RunEventTypes.TextDelta && DateTimeOffset.UtcNow - lastSciencePublicationRefresh > TimeSpan.FromSeconds(8)))
                     {
                         lastSciencePublicationRefresh = DateTimeOffset.UtcNow;
                         sciencePresentation?.Queue($"research-{localRun.SessionId:N}");
@@ -1786,7 +1803,7 @@ public sealed partial class MissumAiAssistantService(
                         if (childItem.Type == RunEventTypes.ServerToolCompleted && StringProperty(childItem.Data, "tool") == "web.fetch")
                         {
                             await PersistSubagentResearchProgressAsync(localRun, item, childState, cancellationToken).ConfigureAwait(false);
-                            if (isScienceRun) sciencePresentation?.Queue($"research-{localRun.SessionId:N}");
+                            if (isScienceRun && !usesScienceWorkingState) sciencePresentation?.Queue($"research-{localRun.SessionId:N}");
                         }
                         await SaveSubagentAsync(childState.Apply(childItem)).ConfigureAwait(false);
                         if (childItem.Type == RunEventTypes.ClientToolProposed)
@@ -1810,11 +1827,10 @@ public sealed partial class MissumAiAssistantService(
                                                 new(childProposal.ProposalId, childProposal.Name, "running", FormatProgressOutputDetail(progress),
                                                     InputJson: childProposal.Arguments.GetRawText(), OutputJson: SerializeToolProgress(progress),
                                                     ContentOffset: old?.ContentOffset ?? current.AssistantMessage.Content.Length, UpdatedAt: at, AgentId: childEvent.AgentId)) }).ConfigureAwait(false);
-                                        }).AsTask(); }, evidenceStore, () => childClaimed.TrySetResult(), token).ConfigureAwait(false);
+                                        }).AsTask(); }, evidenceStore, () => childClaimed.TrySetResult(), token, childEvent.AgentId).ConfigureAwait(false);
                                     await pump.PostAsync(async () =>
                                     {
                                         await RecordSubagentToolResultAsync(childEvent.AgentId, childProposal, result, lastProgress).ConfigureAwait(false);
-                                        await PersistScientificToolResultAsync(assistant.SessionId, childProposal, result, cancellationToken).ConfigureAwait(false);
                                         await client.SubmitClientToolResultAsync(childEvent.RunId, result, cancellationToken).ConfigureAwait(false);
                                         await toolExecutions.MarkSubmittedAsync(childProposal.ProposalId, CancellationToken.None).ConfigureAwait(false);
                                         if (childProposal.Name == ClientToolNames.DocumentCreate)
@@ -1894,6 +1910,8 @@ public sealed partial class MissumAiAssistantService(
                             ContextLimit: loading?.EffectiveContextLength)).ConfigureAwait(false);
                         break;
                     case RunEventTypes.ModelGeneration:
+                        if (usesScienceWorkingState)
+                            sciencePublications?.ObserveResearchTokens($"research-{localRun.SessionId:N}", localRun.CreatedAt, item);
                         var generation = item.Data.Deserialize<ModelGenerationEvent>(JsonOptions);
                         if (generation is not null)
                         {
@@ -1919,15 +1937,21 @@ public sealed partial class MissumAiAssistantService(
                                     modelTokenProgress),
                                 Model: model,
                                 ContextUsed: modelTokenProgress.VisibleContextTokens > 0 ? modelTokenProgress.VisibleContextTokens : null,
+                                ContextSource: modelTokenProgress.HasMeasuredContext ? "measured" : "estimated",
                                 GenerationState: generation.State,
                                 GeneratedTokens: modelTokenProgress.GeneratedTokens,
                                 GenerationUpdatedAt: item.CreatedAt)).ConfigureAwait(false);
                         }
                         break;
+                    case "research.state.tokens":
+                        if (usesScienceWorkingState)
+                            sciencePublications?.ObserveResearchTokens($"research-{localRun.SessionId:N}", localRun.CreatedAt, item);
+                        break;
                     case RunEventTypes.ContextChanged:
                         var context = item.Data.Deserialize<ContextChangedEvent>(JsonOptions);
                         if (context is not null)
                         {
+                            modelTokenProgress.HasMeasuredContext = false;
                             modelTokenProgress.SessionContextTokens = context.EstimatedInputTokens;
                             modelTokenProgress.VisibleContextTokens = context.EstimatedInputTokens;
                             var contextDetail = string.IsNullOrWhiteSpace(context.Detail)
@@ -1942,6 +1966,7 @@ public sealed partial class MissumAiAssistantService(
                                 Detail: contextDetail,
                                 Model: model,
                                 ContextUsed: context.EstimatedInputTokens,
+                                ContextSource: "estimated",
                                 ContextLimit: context.ContextLimit,
                                 LoadedFiles: context.LoadedFiles,
                                 ContextWasCompacted: context.WasCompacted)).ConfigureAwait(false);
@@ -2093,8 +2118,6 @@ public sealed partial class MissumAiAssistantService(
                             FormatClientToolResultDetail(result, finalProgress), appendResult: true,
                             outputJson: SerializeClientToolOutput(result, assistant.ToolSteps?.FirstOrDefault(step => step.Id == proposal.ProposalId)?.OutputJson,
                                 finalProgress)).ConfigureAwait(false);
-                        await PersistScientificToolResultAsync(assistant.SessionId, proposal, result, cancellationToken)
-                            .ConfigureAwait(false);
                         if (proposal.Name == ClientToolNames.DocumentCreate
                             && string.Equals(result.Status, "completed", StringComparison.OrdinalIgnoreCase))
                         {
@@ -2465,7 +2488,8 @@ public sealed partial class MissumAiAssistantService(
         Func<CodingCommandProgress, Task>? commandProgress,
         CodingRunEvidenceStore? evidenceStore,
         Action executionClaimed,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? researchActorAgentId = null)
     {
         var execution = await toolExecutions.GetAsync(proposal.ProposalId, cancellationToken).ConfigureAwait(false);
         if (execution is null)
@@ -2507,7 +2531,7 @@ public sealed partial class MissumAiAssistantService(
             }
             else
             {
-                result = await toolBroker.ExecuteAsync(
+                result = await toolBroker.ExecuteForAgentAsync(
                     proposal,
                     localRun.SessionId,
                     localRun.AssistantMessageId,
@@ -2515,7 +2539,8 @@ public sealed partial class MissumAiAssistantService(
                     commandProgress: commandProgress,
                     evidenceStore: evidenceStore,
                     runAction: localRun.Action,
-                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                    cancellationToken: cancellationToken,
+                    researchActorAgentId: researchActorAgentId).ConfigureAwait(false);
             }
             if (evidenceStore is not null && proposal.Name is not (ClientToolNames.CodingReadOutput or ClientToolNames.CodingSearchRunEvidence))
             {
@@ -2537,6 +2562,9 @@ public sealed partial class MissumAiAssistantService(
                         "Der vollständige Werkzeugbeleg konnte nicht gespeichert werden; das Ausführungsergebnis bleibt erhalten.").Trim() };
                 }
             }
+            // Persist real execution evidence before publishing its durable client receipt.
+            // A reconnect may submit that receipt without replaying the UI event handler.
+            await PersistScientificToolResultAsync(localRun.SessionId, proposal, result, CancellationToken.None).ConfigureAwait(false);
             var json = JsonSerializer.Serialize(result, JsonOptions);
             _ = await toolExecutions.CompleteAsync(proposal.ProposalId, json, CancellationToken.None).ConfigureAwait(false);
             return result;
@@ -2556,14 +2584,30 @@ public sealed partial class MissumAiAssistantService(
                 ?? throw new InvalidDataException("Das gespeicherte Client-Toolergebnis ist ungültig.");
         }
 
-        // Missum may have terminated after starting a local mutation but before its result was
-        // committed. Never repeat an operation with an unknown outcome automatically.
-        var unknown = UnknownClientToolOutcome(proposal.ProposalId);
+        // Canonical updates store the receipt in the same transaction as their objects.
+        // Recover that receipt without executing anything again; other unknown mutations remain non-replayable.
+        var unknown = await RecoverResearchUpdateAsync(localRun, execution, researchActorAgentId, cancellationToken).ConfigureAwait(false)
+            ?? UnknownClientToolOutcome(proposal.ProposalId);
         _ = await toolExecutions.CompleteAsync(
             proposal.ProposalId,
             JsonSerializer.Serialize(unknown, JsonOptions),
             CancellationToken.None).ConfigureAwait(false);
         return unknown;
+    }
+
+    private async Task<ClientToolResult?> RecoverResearchUpdateAsync(MissumAiRunRecord run,
+        ClientToolExecutionRecord execution, string? actorAgentId, CancellationToken cancellationToken)
+    {
+        if (execution.LocalRunId != run.Id || execution.ToolName != ClientToolNames.ResearchUpdate
+            || scientificResearch is not IScientificResearchStateRepository repository) return null;
+        var projectId = "research-" + run.SessionId.ToString("N");
+        var project = await scientificResearch.GetProjectAsync(projectId, cancellationToken).ConfigureAwait(false);
+        if (project?.SessionId != run.SessionId) return null;
+        var receipt = await repository.ReadWorkingOperationAsync(projectId,
+            execution.ServerRunId + ":" + execution.ProposalId, actorAgentId, cancellationToken).ConfigureAwait(false);
+        if (receipt is null) return null;
+        if (receipt.Success && receipt.State.PublicationRevision > 0) sciencePresentation?.Queue(projectId);
+        return LocalToolBroker.ResearchUpdateReceipt(execution.ProposalId, receipt, publicationChanged: false);
     }
 
     private static ClientToolResult UnknownClientToolOutcome(string proposalId) => new(proposalId, "failed",
@@ -2808,6 +2852,8 @@ public sealed partial class MissumAiAssistantService(
         _ = sessionAttachments;
         var codingSession = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Die AI-Sitzung wurde nicht gefunden.");
+        var serverCapabilities = await client.GetCapabilitiesAsync(cancellationToken).ConfigureAwait(false);
+        var compactContext = serverCapabilities.ContextProfiles?.Contains("compact-v1", StringComparer.Ordinal) == true;
         var projectMemoryContext = await BuildProjectMemoryContextAsync(
             codingSession,
             cancellationToken).ConfigureAwait(false);
@@ -2856,7 +2902,6 @@ public sealed partial class MissumAiAssistantService(
                 codingParts.Add(new ContentPart("upload", UploadId: item.Upload.UploadId,
                     MediaType: item.Attachment.ContentType, FileName: item.Attachment.FileName));
             codingMessages.Add(new RunMessage("user", codingParts));
-            var serverCapabilities = await client.GetCapabilitiesAsync(cancellationToken).ConfigureAwait(false);
             var codingConfiguration = NegotiateCodingOptions(serverCapabilities);
             var researchOptions = CreateDeepResearchOptions(trigger, coding: true, sessionId);
             await EnsureResearchProjectAsync(researchOptions, codingSession, originalPrompt, _activeCodingWorkspace,
@@ -2880,7 +2925,8 @@ public sealed partial class MissumAiAssistantService(
                 ReasoningEffort: await ResolveRequestedReasoningAsync(client, codingModel, "coding", cancellationToken).ConfigureAwait(false),
                 DeepResearch: trigger?.DeepResearch == true,
                 ClientTools: extensionClientTools,
-                ResearchOptions: researchOptions);
+                ResearchOptions: researchOptions,
+                ContextProfileVersion: compactContext ? "compact-v1" : null);
         }
         var contextProfile = audiobook
             ? SessionContextProfile.Audiobook
@@ -2891,9 +2937,22 @@ public sealed partial class MissumAiAssistantService(
             throw new InvalidOperationException("In den Einstellungen ist kein General-AI-Modell ausgewählt.");
         }
 
-        var scienceSessionContext = codingSession.ChatMode == ChatMode.ClaudeScience
+        var isScienceSession = codingSession.ChatMode == ChatMode.ClaudeScience;
+        var generalResearchOptions = CreateDeepResearchOptions(trigger, coding: false, sessionId,
+            force: isScienceSession, sandboxResearch: isScienceSession);
+        if (isScienceSession && scientificResearch is IScientificResearchStateRepository && generalResearchOptions is not null)
+            generalResearchOptions = generalResearchOptions with { ProtocolVersion = 2 };
+        if (isScienceSession && researchSandbox is null && generalResearchOptions is not null)
+            generalResearchOptions = generalResearchOptions with { AutonomyLevel = ResearchAutonomyLevel.ReadOnlyResearch };
+        // Import the existing manuscript before choosing its context representation.
+        // A restart must not switch from a legacy snapshot to canonical state only
+        // because the previous request upgraded the project after reading it.
+        await EnsureResearchProjectAsync(generalResearchOptions, codingSession, originalPrompt, null,
+            cancellationToken).ConfigureAwait(false);
+
+        var scienceSessionContext = !compactContext && codingSession.ChatMode == ChatMode.ClaudeScience
             ? await BuildScienceSessionContextAsync(codingSession, cancellationToken).ConfigureAwait(false) : string.Empty;
-        var contextBudgetPrompt = codingSession.ChatMode == ChatMode.ClaudeScience
+        var contextBudgetPrompt = !compactContext && codingSession.ChatMode == ChatMode.ClaudeScience
             ? BuildSciencePresentationPrompt(scienceSessionContext + originalPrompt, codingSession.Id) : originalPrompt;
         var scientificPromptOverhead = Math.Max(0, contextBudgetPrompt.Length - originalPrompt.Length);
         var minimumHistoryReserveTokens = CalculateDocumentHistoryReserveTokens(
@@ -2962,7 +3021,7 @@ public sealed partial class MissumAiAssistantService(
                 + "\n\nAKTUELLER BENUTZERAUFTRAG\n"
                 + transformed;
         }
-        if (codingSession.ChatMode == ChatMode.ClaudeScience)
+        if (!compactContext && codingSession.ChatMode == ChatMode.ClaudeScience)
         {
             transformed = scienceSessionContext + transformed;
             transformed = BuildSciencePresentationPrompt(transformed, codingSession.Id);
@@ -2986,7 +3045,7 @@ public sealed partial class MissumAiAssistantService(
         {
             "documentIo", "documents", "visual-tools",
         };
-        if (!audiobook && (await client.GetCapabilitiesAsync(cancellationToken).ConfigureAwait(false)).ServerTools.Contains("subagent.spawn", StringComparer.Ordinal))
+        if (!audiobook && serverCapabilities.ServerTools.Contains("subagent.spawn", StringComparer.Ordinal))
             capabilities.Add("subagents");
         if (!string.IsNullOrWhiteSpace(codingSession.CodingWorkspacePath) && Directory.Exists(codingSession.CodingWorkspacePath))
             capabilities.UnionWith(["coding", "coding.evidence", "coding.process", "workspace", "workspace.open"]);
@@ -3000,26 +3059,13 @@ public sealed partial class MissumAiAssistantService(
             or PromptTriggerAction.Audiobook
                 ? RunMode.General
                 : RunMode.Auto;
-        var isScienceSession = codingSession.ChatMode == ChatMode.ClaudeScience;
         if (isScienceSession && sciencePresentation is not null) capabilities.Add("research.deliverables");
-        var scienceResearch = isScienceSession && (trigger?.DeepResearch == true || ShouldAutoResearch(originalPrompt));
-        var generalResearchOptions = CreateDeepResearchOptions(trigger, coding: false, sessionId,
-            force: scienceResearch, sandboxResearch: isScienceSession);
         if (isScienceSession && researchSandbox is not null)
         {
-            // Temporary runner health must not remove implemented tools or
-            // silently waive the required simulation and publication.
+            // Keep the stable tool catalog; prepare the runner only when a
+            // scientific execution actually needs it, not before first prose.
             capabilities.Add("research.sandbox");
-            await update(new(MissumAiAssistantUpdateKind.Status, assistant, Status: "Forschungssandbox vorbereiten",
-                Detail: "Isolierten Runner und Projektbereich prüfen.")).ConfigureAwait(false);
-            var sandboxStatus = await researchSandbox.PrepareRuntimeAsync(cancellationToken).ConfigureAwait(false);
-            if (!sandboxStatus.IsReady) await update(new(MissumAiAssistantUpdateKind.Status, assistant, Status: "Forschungssandbox nicht bereit",
-                Detail: sandboxStatus.Detail ?? sandboxStatus.State)).ConfigureAwait(false);
         }
-        else if (isScienceSession && scienceResearch && generalResearchOptions is not null)
-            generalResearchOptions = generalResearchOptions with { AutonomyLevel = ResearchAutonomyLevel.ReadOnlyResearch };
-        await EnsureResearchProjectAsync(generalResearchOptions, codingSession, originalPrompt, null,
-            cancellationToken).ConfigureAwait(false);
         return new RunRequest(
             MissumAiProtocol.Version,
             mode,
@@ -3040,9 +3086,10 @@ public sealed partial class MissumAiAssistantService(
                 && Directory.Exists(codingSession.CodingWorkspacePath)
                 ? Path.GetFullPath(codingSession.CodingWorkspacePath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
                 : null,
-            DeepResearch: trigger?.DeepResearch == true || scienceResearch,
+            DeepResearch: trigger?.DeepResearch == true || isScienceSession,
             ClientTools: extensionClientTools,
-            ResearchOptions: generalResearchOptions);
+            ResearchOptions: generalResearchOptions,
+            ContextProfileVersion: compactContext ? "compact-v1" : null);
     }
 
     private async Task<string> BuildProjectMemoryContextAsync(
@@ -3295,6 +3342,8 @@ public sealed partial class MissumAiAssistantService(
         var previousProject = await scientificResearch.GetProjectAsync(options.ProjectId, cancellationToken).ConfigureAwait(false);
         if (previousProject is not null && previousProject.SessionId != session.Id)
             throw new UnauthorizedAccessException("Das Forschungsprojekt gehört nicht zu dieser Sitzung.");
+        if (previousProject is { ProtocolVersion: < 2 } && options.ProtocolVersion >= 2 && sciencePublications is not null)
+            await sciencePublications.EnsureWorkingStateAsync(options.ProjectId, cancellationToken).ConfigureAwait(false);
         if (session.ChatMode == ChatMode.ClaudeScience)
         {
             if (researchSandbox is not null)
@@ -3351,6 +3400,9 @@ public sealed partial class MissumAiAssistantService(
             .CanPersistResultAsync(localRun, item, projectId, cancellationToken).ConfigureAwait(false)) return;
         var existing = await scientificResearch.GetProjectAsync(projectId, cancellationToken).ConfigureAwait(false);
         if (existing is null || existing.SessionId != sessionId) return;
+        // Versioned working objects are changed only by research.update. An
+        // auxiliary literature dossier cannot replace current theories/checks.
+        if (existing.ProtocolVersion >= 2) return;
         var now = DateTimeOffset.UtcNow;
         var revision = existing.Revision + 1;
         var interpreted = result.TryGetProperty("problem", out var problem)
@@ -3592,6 +3644,7 @@ public sealed partial class MissumAiAssistantService(
         // Process metadata must stay valid JSON and retain the frozen source/data
         // hashes. Truncating it loses the link from a figure to its actual run.
         var processRuns = result.Result.TryGetProperty("runs", out var measuredRuns) && measuredRuns.ValueKind == JsonValueKind.Array
+            && measuredRuns.EnumerateArray().All(run => run.ValueKind == JsonValueKind.Object)
             ? measuredRuns.EnumerateArray().ToArray() : [];
         if (processRuns.Length == 0 && evidence.Length > 100_000) evidence = evidence[..100_000];
         var artifacts = result.Result.TryGetProperty("manifestPath", out var manifest) && manifest.ValueKind == JsonValueKind.String
@@ -3602,8 +3655,10 @@ public sealed partial class MissumAiAssistantService(
                 .Distinct(StringComparer.Ordinal), JsonOptions);
         var startedAt = processRuns.Select(run => run.TryGetProperty("startedAt", out var time) && time.TryGetDateTimeOffset(out var date) ? date : now).DefaultIfEmpty(now).Min();
         var completedAt = processRuns.Select(run => run.TryGetProperty("completedAt", out var time) && time.TryGetDateTimeOffset(out var date) ? date : now).DefaultIfEmpty(now).Max();
+        var experimentRecordId = ResearchRecordId(projectId, "experiment",
+            project.ProtocolVersion >= 2 ? experimentId + "\n" + proposal.ProposalId : experimentId);
         await scientificResearch.SaveExperimentAsync(new(
-            ResearchRecordId(projectId, "experiment", experimentId), projectId,
+            experimentRecordId, projectId,
             StringProperty(result.Result, "environmentLock") ?? StringProperty(result.Result, "toolchain") ?? proposal.Name,
             result.Result.TryGetProperty("sourceFiles", out var sourceFiles) && sourceFiles.ValueKind == JsonValueKind.Array
                 ? sourceFiles.GetRawText() : result.Result.TryGetProperty("generatedSource", out var generated) && generated.ValueKind == JsonValueKind.String
@@ -3614,6 +3669,19 @@ public sealed partial class MissumAiAssistantService(
             result.Message ?? "", artifacts,
             StringProperty(result.Result, "verificationStatus") ?? result.Status,
             startedAt, completedAt), cancellationToken).ConfigureAwait(false);
+        if (processRuns.Length > 0 && scientificResearch is IScientificResearchStateRepository stateRepository)
+        {
+            var succeeded = result.Status == "completed" && result.Result.TryGetProperty("success", out var ok)
+                && ok.ValueKind == JsonValueKind.True && processRuns.Length > 0
+                && processRuns.All(run => run.TryGetProperty("exitCode", out var code) && code.TryGetInt32(out var value) && value == 0
+                    && !(run.TryGetProperty("timedOut", out var timedOut) && timedOut.ValueKind == JsonValueKind.True));
+            await stateRepository.SaveExecutionVerificationAsync(new(
+                ResearchRecordId(projectId, "verification", proposal.ProposalId), projectId,
+                "experiment", experimentRecordId,
+                proposal.Name == ClientToolNames.MathFormalProof ? "formal" : "execution", proposal.Name,
+                succeeded ? "passed" : "failed", evidence, completedAt), cancellationToken).ConfigureAwait(false);
+        }
+        sciencePresentation?.Queue(projectId);
     }
 
     private static bool HasMeasuredExecution(ResearchExperiment experiment)

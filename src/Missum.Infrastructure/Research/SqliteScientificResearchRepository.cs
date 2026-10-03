@@ -5,7 +5,7 @@ using Microsoft.Data.Sqlite;
 
 namespace Missum.Infrastructure.Research;
 
-public sealed class SqliteScientificResearchRepository(SqliteDatabase database) : IScientificResearchRepository
+public sealed partial class SqliteScientificResearchRepository(SqliteDatabase database) : IScientificResearchRepository, IScientificResearchStateRepository
 {
     public async Task<ScientificResearchProject?> GetProjectAsync(string id, CancellationToken cancellationToken = default)
     {
@@ -200,14 +200,20 @@ public sealed class SqliteScientificResearchRepository(SqliteDatabase database) 
         ArgumentNullException.ThrowIfNull(snapshot);
         return database.WriteAsync(async (connection, transaction, token) =>
         {
-            await ReplaceAsync(connection, transaction, "research_verifications", projectId, token).ConfigureAwait(false);
-            await ReplaceAsync(connection, transaction, "research_claims", projectId, token).ConfigureAwait(false);
-            await ReplaceAsync(connection, transaction, "research_hypotheses", projectId, token).ConfigureAwait(false);
+            // Snapshots can be partial progress from a later run. Never erase prior hypotheses,
+            // failed approaches or receipt IDs still referenced by the canonical working state.
             foreach (var item in snapshot.Hypotheses)
             {
                 EnsureProject(projectId, item.ProjectId, nameof(snapshot.Hypotheses));
                 await using var command = connection.CreateCommand(); command.Transaction = transaction;
-                command.CommandText = "INSERT INTO research_hypotheses(id,project_id,node_id,statement,classification,status,confidence,payload_json,updated_at) VALUES($id,$project,$node,$statement,$classification,$status,$confidence,$payload,$updated);";
+                command.CommandText = """
+                    INSERT INTO research_hypotheses(id,project_id,node_id,statement,classification,status,confidence,payload_json,updated_at)
+                    VALUES($id,$project,$node,$statement,$classification,$status,$confidence,$payload,$updated)
+                    ON CONFLICT(id) DO UPDATE SET node_id=excluded.node_id,statement=excluded.statement,
+                        classification=excluded.classification,status=excluded.status,confidence=excluded.confidence,
+                        payload_json=excluded.payload_json,updated_at=excluded.updated_at
+                    WHERE research_hypotheses.project_id=excluded.project_id AND excluded.updated_at>=research_hypotheses.updated_at;
+                    """;
                 command.Parameters.AddWithValue("$id", item.Id); command.Parameters.AddWithValue("$project", projectId);
                 command.Parameters.AddWithValue("$node", (object?)item.NodeId ?? DBNull.Value); command.Parameters.AddWithValue("$statement", item.Statement);
                 command.Parameters.AddWithValue("$classification", item.Classification); command.Parameters.AddWithValue("$status", item.Status);
@@ -226,7 +232,12 @@ public sealed class SqliteScientificResearchRepository(SqliteDatabase database) 
                         random_seeds_json=excluded.random_seeds_json,input_hashes_json=excluded.input_hashes_json,
                         command_text=excluded.command_text,resource_limits_json=excluded.resource_limits_json,
                         stdout_evidence=excluded.stdout_evidence,stderr_evidence=excluded.stderr_evidence,
-                        result_artifacts_json=excluded.result_artifacts_json,verification_status=excluded.verification_status,updated_at=excluded.updated_at;
+                        result_artifacts_json=excluded.result_artifacts_json,verification_status=excluded.verification_status,updated_at=excluded.updated_at
+                    WHERE research_experiments.project_id=excluded.project_id
+                        AND excluded.updated_at>=research_experiments.updated_at
+                        AND NOT EXISTS(SELECT 1 FROM research_execution_receipts r
+                            JOIN research_verifications v ON v.id=r.verification_id AND v.project_id=r.project_id
+                            WHERE r.project_id=research_experiments.project_id AND v.target_type='experiment' AND v.target_id=research_experiments.id);
                     """;
                 command.Parameters.AddWithValue("$id", item.Id); command.Parameters.AddWithValue("$project", projectId);
                 command.Parameters.AddWithValue("$hypothesis", (object?)item.HypothesisId ?? DBNull.Value); command.Parameters.AddWithValue("$environment", item.EnvironmentLock);
@@ -242,7 +253,7 @@ public sealed class SqliteScientificResearchRepository(SqliteDatabase database) 
             {
                 EnsureProject(projectId, item.ProjectId, nameof(snapshot.Verifications));
                 await using var command = connection.CreateCommand(); command.Transaction = transaction;
-                command.CommandText = "INSERT INTO research_verifications(id,project_id,target_type,target_id,dimension,method,status,evidence_json,created_at) VALUES($id,$project,$targetType,$targetId,$dimension,$method,$status,$evidence,$created);";
+                command.CommandText = "INSERT INTO research_verifications(id,project_id,target_type,target_id,dimension,method,status,evidence_json,created_at) VALUES($id,$project,$targetType,$targetId,$dimension,$method,$status,$evidence,$created) ON CONFLICT(id) DO NOTHING;";
                 command.Parameters.AddWithValue("$id", item.Id); command.Parameters.AddWithValue("$project", projectId);
                 command.Parameters.AddWithValue("$targetType", item.TargetType); command.Parameters.AddWithValue("$targetId", item.TargetId);
                 command.Parameters.AddWithValue("$dimension", item.Dimension); command.Parameters.AddWithValue("$method", item.Method);
@@ -254,7 +265,14 @@ public sealed class SqliteScientificResearchRepository(SqliteDatabase database) 
             {
                 EnsureProject(projectId, item.ProjectId, nameof(snapshot.Claims));
                 await using var command = connection.CreateCommand(); command.Transaction = transaction;
-                command.CommandText = "INSERT INTO research_claims(id,project_id,statement,claim_class,conclusion_status,confidence,payload_json,updated_at) VALUES($id,$project,$statement,$class,$status,$confidence,$payload,$updated);";
+                command.CommandText = """
+                    INSERT INTO research_claims(id,project_id,statement,claim_class,conclusion_status,confidence,payload_json,updated_at)
+                    VALUES($id,$project,$statement,$class,$status,$confidence,$payload,$updated)
+                    ON CONFLICT(id) DO UPDATE SET statement=excluded.statement,claim_class=excluded.claim_class,
+                        conclusion_status=excluded.conclusion_status,confidence=excluded.confidence,
+                        payload_json=excluded.payload_json,updated_at=excluded.updated_at
+                    WHERE research_claims.project_id=excluded.project_id AND excluded.updated_at>=research_claims.updated_at;
+                    """;
                 command.Parameters.AddWithValue("$id", item.Id); command.Parameters.AddWithValue("$project", projectId);
                 command.Parameters.AddWithValue("$statement", item.Statement); command.Parameters.AddWithValue("$class", item.ClaimClass);
                 command.Parameters.AddWithValue("$status", item.ConclusionStatus); command.Parameters.AddWithValue("$confidence", item.Confidence);
@@ -266,9 +284,8 @@ public sealed class SqliteScientificResearchRepository(SqliteDatabase database) 
 
     public async Task SaveExperimentAsync(ResearchExperiment experiment, CancellationToken cancellationToken = default)
     {
-        var existing = await LoadResultSnapshotAsync(experiment.ProjectId, cancellationToken).ConfigureAwait(false);
         await SaveResultSnapshotAsync(experiment.ProjectId,
-            new(existing.Hypotheses, [experiment], existing.Verifications, existing.Claims), cancellationToken).ConfigureAwait(false);
+            new([], [experiment], [], []), cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<ResearchResultSnapshot> LoadResultSnapshotAsync(string projectId,
@@ -320,8 +337,7 @@ public sealed class SqliteScientificResearchRepository(SqliteDatabase database) 
                 protocol.Parameters.AddWithValue("$json", snapshot.ProtocolJson); protocol.Parameters.AddWithValue("$created", Format(snapshot.CreatedAt));
                 await protocol.ExecuteNonQueryAsync(token).ConfigureAwait(false);
             }
-            await ReplaceAsync(connection, transaction, "research_evidence", projectId, token).ConfigureAwait(false);
-            await ReplaceAsync(connection, transaction, "research_project_works", projectId, token).ConfigureAwait(false);
+            // An archive update adds observations; absence from a progress batch is not deletion.
             foreach (var work in snapshot.Works)
             {
                 EnsureProject(projectId, work.ProjectId, nameof(snapshot.Works));
@@ -331,7 +347,8 @@ public sealed class SqliteScientificResearchRepository(SqliteDatabase database) 
                     VALUES($id,$doi,$pmid,$pmcid,$arxiv,$datacite,$openalex,$url,$title,'[]',NULL,$version,$metadata,NULL,$updated)
                     ON CONFLICT(id) DO UPDATE SET canonical_url=excluded.canonical_url,title=excluded.title,version_kind=excluded.version_kind,metadata_json=excluded.metadata_json,updated_at=excluded.updated_at;
                     INSERT INTO research_project_works(project_id,work_id,discovery_search_id,screening_status,evidence_level,created_at)
-                    VALUES($project,$id,NULL,$screening,$level,$updated);
+                    VALUES($project,$id,NULL,$screening,$level,$updated)
+                    ON CONFLICT(project_id,work_id) DO UPDATE SET screening_status=excluded.screening_status,evidence_level=excluded.evidence_level;
                     """;
                 command.Parameters.AddWithValue("$id", work.WorkId); command.Parameters.AddWithValue("$project", projectId);
                 command.Parameters.AddWithValue("$doi", (object?)work.Doi ?? DBNull.Value); command.Parameters.AddWithValue("$pmid", (object?)work.Pmid ?? DBNull.Value);
@@ -349,7 +366,8 @@ public sealed class SqliteScientificResearchRepository(SqliteDatabase database) 
                 await using var command = connection.CreateCommand(); command.Transaction = transaction;
                 command.CommandText = """
                     INSERT INTO research_evidence(id,project_id,work_id,page,section,table_or_figure,exact_excerpt,normalized_statement,content_hash,retrieved_at,evidence_level,locator_json)
-                    VALUES($id,$project,$work,$page,$section,$figure,$excerpt,$statement,$hash,$retrieved,$level,$locator);
+                    VALUES($id,$project,$work,$page,$section,$figure,$excerpt,$statement,$hash,$retrieved,$level,$locator)
+                    ON CONFLICT(id) DO NOTHING;
                     """;
                 command.Parameters.AddWithValue("$id", evidence.Id); command.Parameters.AddWithValue("$project", projectId);
                 command.Parameters.AddWithValue("$work", evidence.WorkId); command.Parameters.AddWithValue("$page", (object?)evidence.Page ?? DBNull.Value);
@@ -408,15 +426,6 @@ public sealed class SqliteScientificResearchRepository(SqliteDatabase database) 
             if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false)) report = new(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.GetString(5), Parse(reader.GetString(6)));
         }
         return (works, evidence, report);
-    }
-
-    private static async Task ReplaceAsync(SqliteConnection connection, SqliteTransaction transaction, string table,
-        string projectId, CancellationToken cancellationToken)
-    {
-        await using var command = connection.CreateCommand(); command.Transaction = transaction;
-        command.CommandText = $"DELETE FROM {table} WHERE project_id=$project;";
-        command.Parameters.AddWithValue("$project", projectId);
-        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private static void EnsureProject(string expected, string actual, string parameterName)

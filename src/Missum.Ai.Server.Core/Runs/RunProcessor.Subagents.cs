@@ -80,7 +80,8 @@ public sealed partial class RunProcessor
             request.Mode == RunMode.Coding ? request.CodingOptions?.WorkspacePath : request.WorkspacePath);
 
     /// <summary>Preserves every evaluated parent message and closes outstanding parent-only tool calls.</summary>
-    internal static IReadOnlyList<LmChatMessage> ForkSubagentMessages(IReadOnlyList<LmChatMessage> parentMessages, string task)
+    internal static IReadOnlyList<LmChatMessage> ForkSubagentMessages(IReadOnlyList<LmChatMessage> parentMessages, string task,
+        string? agentId = null)
     {
         var messages = parentMessages.ToList();
         var pendingCalls = new Dictionary<string, LmToolCall>(StringComparer.Ordinal);
@@ -104,7 +105,9 @@ public sealed partial class RunProcessor
             + "Dateien im übernommenen Workspace erstellen oder bearbeiten. Halte dich an die zugewiesenen Schreibpfade, "
             + "damit du und der Hauptagent parallel arbeiten können. Starte keine weiteren Subagenten. "
             + "Berichte dein tatsächlich abgeschlossenes Ergebnis, erzeugte Dateien, Werkzeugbelege und gegebenenfalls offene Punkte. "
-            + "Der Hauptagent verwendet dein Ergebnis direkt ohne Wiederholung deiner abgeschlossenen Aufgabe.\n\n" + task));
+            + "Der Hauptagent verwendet dein Ergebnis direkt ohne Wiederholung deiner abgeschlossenen Aufgabe.\n"
+            + (agentId is null ? "" : "Deine vom Gateway vergebene Agent-ID (JSON-Daten): " + JsonSerializer.Serialize(agentId)
+                + ". Für eigene kanonische Forschungsobjekte verwende diese ID und ':' als Präfix.\n") + "\n" + task));
         return messages;
     }
 
@@ -169,15 +172,24 @@ public sealed partial class RunProcessor
                 // Explicit delegated work uses the ordinary complete tool loop.
                 // Starting a second staged research pipeline would change its assigned scope.
                 DeepResearch = false,
+                ResearchOptions = ScientificStateCompletionPolicy.Enabled(parentRequest)
+                    ? parentRequest.ResearchOptions! with { ProjectId = ScientificStateCompletionPolicy.ProjectId(parentRequest) }
+                    : parentRequest.ResearchOptions,
                 Subagent = new(parentRunId, agentId, task, parentRequest.SessionId, ParentSessionCacheKey: parentCacheKey),
                 Messages = [.. parentRequest.Messages, new("user", [new("text", Text: task)])],
             };
             var childCacheKey = BuildRunSessionCacheKey(childRequest, agentId, selection.Role);
+            var parentCheckpoint = await _repository.GetCheckpointAsync(parentRunId, cancellationToken).ConfigureAwait(false);
+            var childContextProfile = parentCheckpoint?.ContextProfileVersion;
+            childRequest = childRequest with { ContextProfileVersion = childContextProfile };
             var childWorkingState = childRequest.Mode == RunMode.Coding ? CodingWorkingState.Create(task) : null;
-            var childMessages = ModelRuntimeClient.PrepareLanguageBoundMessages(
-                WithWorkingState(ForkSubagentMessages(parentMessages, task), childWorkingState));
-            var childTools = CreateModelToolDefinitions(_toolCatalog.GetAvailableTools(childRequest,
-                subagentAvailable: true), selectedToolName: null, directTools: true);
+            var childContext = WithWorkingState(ForkSubagentMessages(parentMessages, task, agentId), childWorkingState).ToList();
+            if (childContextProfile == ToolContextProfiles.Current)
+                AppendRuntimeContext(childContext, childRequest, subagentAvailable: false);
+            var childMessages = ModelRuntimeClient.PrepareLanguageBoundMessages(childContext);
+            var childTools = parentCheckpoint?.ContextTools?.ToArray()
+                ?? CreateModelToolDefinitions(_toolCatalog.GetAvailableTools(childRequest,
+                    subagentAvailable: true), selectedToolName: null, directTools: true, childContextProfile);
             SubagentRuntimePreparation prepared;
             try
             {
@@ -194,7 +206,11 @@ public sealed partial class RunProcessor
             var checkpoint = new AgentRunCheckpoint(childMessages, 0, 0, 0, 0,
                 WorkingState: childWorkingState, WorkingStatePromptIncluded: childWorkingState is not null,
                 PreserveSessionPromptPrefix: true, SelectedModelId: selection.ModelId,
-                SelectedReasoningEffort: childRequest.ReasoningEffort, UseStableSubagentToolCatalog: true);
+                SelectedReasoningEffort: childRequest.ReasoningEffort, UseStableSubagentToolCatalog: true,
+                CanonicalStateReadRequired: ScientificStateCompletionPolicy.Enabled(childRequest),
+                ContextProfileVersion: childContextProfile, ContextTools: childContextProfile is not null ? childTools : null,
+                ToolCatalogSignature: childContextProfile is not null ? ToolContextProfiles.Signature(childTools, selection.ModelId) : null,
+                ResearchStateStamp: parentCheckpoint?.ResearchStateStamp);
             var child = await _repository.CreateSubagentAsync(childRequest, checkpoint, operationId, cancellationToken).ConfigureAwait(false);
             await EnsureSubagentStartedAsync(child, childRequest, cancellationToken).ConfigureAwait(false);
             await _repository.AppendEventAsync(child.RunId, "subagent.contextForked", new
@@ -360,6 +376,8 @@ public sealed partial class RunProcessor
         RunRequest request, IReadOnlyList<LmChatMessage> messages, IReadOnlyList<AgentToolSpec> tools,
         CancellationToken cancellationToken)
     {
+        if (ScientificStateCompletionPolicy.Enabled(request))
+            return ScientificStateCompletionPolicy.Assess(request, messages, tools);
         var evidence = new Dictionary<string, IReadOnlyList<LmChatMessage>>(StringComparer.Ordinal);
         foreach (var (child, childRequest) in await _repository.GetSubagentRunsAsync(parentRunId,
             cancellationToken: cancellationToken).ConfigureAwait(false))
@@ -449,7 +467,11 @@ public sealed partial class RunProcessor
         // or a repeated wait without marking its result consumed a second time.
         if (messages.Any(message => message.Role == "system"
             && message.Content?.StartsWith(marker, StringComparison.Ordinal) == true)) return false;
-        messages.Add(new LmChatMessage("system", marker + SubagentAgentPolicy.CompletedWork));
+        var compact = messages.FirstOrDefault()?.Role == "system"
+            && messages[0].Content?.StartsWith(CompactAgentContextPolicy.Marker, StringComparison.Ordinal) == true;
+        messages.Add(new LmChatMessage("system", marker + (compact
+            ? "Übernimm das quittierte Ergebnis für deine weitere Arbeit; abgeschlossene Teilaufgaben nicht erneut ausführen."
+            : SubagentAgentPolicy.CompletedWork)));
         return true;
     }
 }

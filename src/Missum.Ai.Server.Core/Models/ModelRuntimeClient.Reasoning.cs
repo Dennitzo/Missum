@@ -17,6 +17,13 @@ public sealed partial class ModelRuntimeClient
     internal static IReadOnlyList<LmChatMessage> PrepareLanguageBoundMessages(IReadOnlyList<LmChatMessage> messages)
     {
         var normalized = NormalizeMessageOrderForNativeRuntime(messages).ToList();
+        // The versioned gateway policy already binds language, instruction
+        // priority and answer/analysis separation. Keep its evaluated prefix
+        // and historical reasoning intact instead of appending legacy reminders.
+        // A marker in user/tool data cannot opt out of language binding.
+        if (normalized.Count > 0 && normalized[0].Role == "system"
+            && normalized[0].Content?.StartsWith(Policies.CompactAgentContextPolicy.Marker, StringComparison.Ordinal) == true)
+            return normalized;
         var rule = Missum.Ai.Server.Core.Coding.CodingAgentPolicy.ReasoningLanguagePrompt;
         const string reminder = "Der Reasoning-Kanal wird dem Nutzer angezeigt. Beginne bereits den ersten Denksatz auf Deutsch. "
             + "Die gewählte Reasoning-Stufe verändert nur die Denkleistung, niemals die Sprache. "

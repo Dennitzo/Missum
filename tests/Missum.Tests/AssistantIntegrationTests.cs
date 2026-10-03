@@ -1803,9 +1803,11 @@ public sealed class AssistantIntegrationTests
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task TabAndSessionSnapshotsRestoreMeasuredContextAndRunningMessageWithoutCrossSessionLeakage(bool coding)
+    [InlineData(false, "measured")]
+    [InlineData(true, "measured")]
+    [InlineData(false, "estimated")]
+    [InlineData(true, "estimated")]
+    public async Task TabAndSessionSnapshotsRestoreContextSourceAndRunningMessageWithoutCrossSessionLeakage(bool coding, string contextSource)
     {
         await using var environment = await TestEnvironment.CreateAsync();
         using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
@@ -1823,14 +1825,14 @@ public sealed class AssistantIntegrationTests
         var coordinator = CreateCoordinator(environment, settings, CreateRecentActivity(settings));
         await coordinator.EmitMissumAiUpdateAsync(new(MissumAiAssistantUpdateKind.Status, message,
             Status: "Denkt nach", Detail: "12.345 Token", Model: coding ? "coding-a" : "general-a",
-            ContextUsed: 12345, ContextLimit: 32768, LoadedFiles: 4), static (_, _, _) => Task.CompletedTask, "progress");
+            ContextUsed: 12345, ContextLimit: 32768, LoadedFiles: 4, ContextSource: contextSource), static (_, _, _) => Task.CompletedTask, "progress");
 
         var first = await OpenAndCaptureSnapshotAsync(coordinator, active.Id);
         Assert.True(first.GetProperty("isRunning").GetBoolean());
         Assert.Equal("Denkt nach", first.GetProperty("runStatus").GetString());
         Assert.Equal("12.345 Token", first.GetProperty("runDetail").GetString());
         Assert.Equal(message.Id, first.GetProperty("runMessageId").GetGuid());
-        Assert.Equal("measured", first.GetProperty("contextSource").GetString());
+        Assert.Equal(contextSource, first.GetProperty("contextSource").GetString());
         Assert.Equal(12345, first.GetProperty("contextUsed").GetInt32());
         Assert.Equal(4, first.GetProperty("loadedFiles").GetInt32());
 
@@ -1840,12 +1842,14 @@ public sealed class AssistantIntegrationTests
         Assert.Equal(JsonValueKind.Null, otherSnapshot.GetProperty("runStatus").ValueKind);
         Assert.Equal("estimated", otherSnapshot.GetProperty("contextSource").GetString());
         var returned = await OpenAndCaptureSnapshotAsync(coordinator, active.Id);
+        Assert.Equal(contextSource, returned.GetProperty("contextSource").GetString());
         Assert.Equal(first.GetProperty("contextUsed").GetInt32(), returned.GetProperty("contextUsed").GetInt32());
         Assert.Equal(first.GetProperty("runDetail").GetString(), returned.GetProperty("runDetail").GetString());
 
         await coordinator.EmitMissumAiUpdateAsync(new(MissumAiAssistantUpdateKind.Started, message,
             Status: "Wird fortgesetzt", Detail: "SSE erneut verbunden"), static (_, _, _) => Task.CompletedTask, "resume");
         var resumed = JsonSerializer.SerializeToElement(await coordinator.BuildSnapshotAsync(), JsonSerializerOptions.Web);
+        Assert.Equal(contextSource, resumed.GetProperty("contextSource").GetString());
         Assert.Equal(12345, resumed.GetProperty("contextUsed").GetInt32());
         Assert.Equal("12.345 Token", resumed.GetProperty("runDetail").GetString());
 

@@ -13,7 +13,7 @@ namespace Missum.App.Services;
 /// Produces immutable, typeset publication snapshots from durable research data.
 /// A new revision never replaces the PDF currently open in the native viewer.
 /// </summary>
-public sealed class ScientificPublicationService : IDisposable
+public sealed partial class ScientificPublicationService : IDisposable, IScientificPublicationProvider
 {
     private readonly IScientificResearchRepository _repository;
     private readonly Func<string, CancellationToken, Task<string?>> _render;
@@ -22,6 +22,43 @@ public sealed class ScientificPublicationService : IDisposable
     private readonly IChatRepository? _chats;
     private readonly IMissumAiRunRepository? _runs;
     private readonly IResearchSandboxService? _sandbox;
+    private readonly Dictionary<string, ScientificPublicationArtifact> _current = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _currentDependencies = new(StringComparer.Ordinal);
+
+    public async Task<ScientificPublicationExportSnapshot?> EnsurePublicationAsync(string projectId,
+        CancellationToken cancellationToken = default)
+    {
+        ScientificPublicationArtifact? artifact;
+        try { artifact = await EnsureCurrentAsync(projectId, cancellationToken).ConfigureAwait(false); }
+        catch (Exception exception) when (exception is IOException or InvalidOperationException or TimeoutException)
+        {
+            // Export the same last valid edition the publication view retains on a render failure.
+            artifact = await RestoreLastPublicationAsync(projectId, cancellationToken).ConfigureAwait(false);
+            if (artifact is null) throw;
+        }
+        artifact ??= await RestoreLastPublicationAsync(projectId, cancellationToken).ConfigureAwait(false);
+        return artifact is null ? null : new(artifact.ProjectId, artifact.Revision, artifact.MarkdownPath,
+            artifact.PdfPath, artifact.ContentHash, artifact.IsDraft);
+    }
+
+    internal async Task<ResearchWorkingState?> GetWorkingStateAsync(string projectId, CancellationToken token, bool canonicalOnly = false)
+    {
+        if (canonicalOnly && (await _repository.GetProjectAsync(projectId, token).ConfigureAwait(false)) is not { ProtocolVersion: >= 2 }) return null;
+        return _repository is IScientificResearchStateRepository state
+            ? await state.LoadWorkingStateAsync(projectId, token).ConfigureAwait(false) : null;
+    }
+
+    public async Task<ResearchWorkingState?> EnsureWorkingStateAsync(string projectId, CancellationToken token = default)
+    {
+        var snapshot = await ReadSnapshotAsync(projectId, token).ConfigureAwait(false);
+        if (snapshot is null) return null;
+        var state = snapshot.WorkingState;
+        if (snapshot.Project.ProtocolVersion < 2 && state is not null
+            && state.Items.All(item => item.Kind is "hypothesis" or "claim")
+            && _repository is IScientificResearchStateRepository states)
+            return await ImportLegacyManuscriptAsync(states, state, snapshot.Manuscript, snapshot.Report, snapshot.Works, token).ConfigureAwait(false);
+        return state;
+    }
 
     public ScientificPublicationService(IScientificResearchRepository repository, DocumentPdfExporter renderer,
         IChatRepository? chats = null, IMissumAiRunRepository? runs = null, IResearchSandboxService? sandbox = null)
@@ -54,30 +91,56 @@ public sealed class ScientificPublicationService : IDisposable
         {
             var snapshot = await ReadSnapshotAsync(projectId, cancellationToken).ConfigureAwait(false);
             if (snapshot is null) return null;
+            // An already running protocol-one attempt keeps its streaming manuscript contract.
+            // Migration is explicit at the next protocol upgrade, never a side effect of rendering.
+            if (snapshot.Project.ProtocolVersion < 2) snapshot = snapshot with { WorkingState = null };
             if (string.Equals(Path.GetFullPath(outputDirectory), _defaultDirectory, StringComparison.OrdinalIgnoreCase))
             {
                 var workspace = _sandbox is null ? snapshot.Project.WorkspacePath
                     : (await _sandbox.EnsureProjectAsync(projectId, cancellationToken).ConfigureAwait(false)).RootPath;
                 if (!string.IsNullOrWhiteSpace(workspace)) outputDirectory = Path.Combine(Path.GetFullPath(workspace), "publications");
             }
-            var markdown = FormatPublication(snapshot.Project, snapshot.Results, snapshot.Works, snapshot.Evidence, snapshot.Report, snapshot.Manuscript);
+            var cacheKey = projectId + "\n" + Path.GetFullPath(outputDirectory);
+            var dependencyHash = snapshot.WorkingState is null ? "" : CanonicalDependencyFingerprint(snapshot);
+            if (snapshot.WorkingState is { } state)
+            {
+                if (!HasCanonicalSections(state)) return null;
+                if (_current.TryGetValue(cacheKey, out var cached) && cached.SectionDelta
+                    && cached.Revision == state.PublicationRevision && File.Exists(cached.MarkdownPath)
+                    && _currentDependencies.GetValueOrDefault(cacheKey) == dependencyHash
+                    && await IsValidPdfAsync(cached.PdfPath, cancellationToken).ConfigureAwait(false))
+                {
+                    await RecordFirstPublicationAsync(snapshot.Project, cached, cancellationToken).ConfigureAwait(false);
+                    return cached;
+                }
+            }
+            var markdown = snapshot.WorkingState is { } canonical
+                ? FormatCanonicalPublication(canonical, snapshot.Works, snapshot.Results)
+                : FormatPublication(snapshot.Project, snapshot.Results, snapshot.Works, snapshot.Evidence, snapshot.Report, snapshot.Manuscript);
             ScientificPublicationImages.PreparedImages? images = null;
             if (_sandbox is not null)
             {
                 images = await ScientificPublicationImages.PrepareAsync(markdown, projectId, _sandbox,
-                    PublicationRunStart(snapshot.Report) ?? snapshot.Manuscript?.CreatedAt, cancellationToken).ConfigureAwait(false);
+                    snapshot.WorkingState is null ? PublicationRunStart(snapshot.Report) ?? snapshot.Manuscript?.CreatedAt
+                        : DateTimeOffset.MinValue, cancellationToken).ConfigureAwait(false);
+                if (snapshot.WorkingState is not null) ValidateCanonicalImages(snapshot, images);
                 markdown = images.Markdown;
             }
-            var fingerprint = PublicationFingerprint(markdown);
+            var fingerprint = PublicationFingerprint(markdown + (dependencyHash.Length == 0 ? "" : "\n" + dependencyHash));
             // Project ids originate in storage but are never accepted as filesystem paths.
             var root = Path.Combine(Path.GetFullPath(outputDirectory), Fingerprint(projectId)[..24]);
-            var version = $"r{snapshot.Project.Revision.ToString(CultureInfo.InvariantCulture)}-{fingerprint[..24]}";
+            var version = $"r{(snapshot.WorkingState?.PublicationRevision ?? snapshot.Project.Revision).ToString(CultureInfo.InvariantCulture)}-{fingerprint[..24]}";
             var directory = Path.Combine(root, version);
             var pdf = Path.Combine(directory, "Publikation.pdf");
             var source = Path.Combine(directory, "Publikation.md");
             if (await IsValidPdfAsync(pdf, cancellationToken).ConfigureAwait(false)
                 && File.Exists(source) && string.Equals(await File.ReadAllTextAsync(source, cancellationToken).ConfigureAwait(false), markdown, StringComparison.Ordinal))
-                return Artifact(snapshot, source, pdf, fingerprint);
+            {
+                _currentDependencies[cacheKey] = dependencyHash;
+                var existing = Artifact(snapshot, source, pdf, fingerprint);
+                await RecordFirstPublicationAsync(snapshot.Project, existing, cancellationToken).ConfigureAwait(false);
+                return _current[cacheKey] = existing;
+            }
 
             Directory.CreateDirectory(root);
             var staging = Path.Combine(root, ".pending-" + Guid.NewGuid().ToString("N"));
@@ -87,7 +150,12 @@ public sealed class ScientificPublicationService : IDisposable
                 var pendingSource = Path.Combine(staging, "Publikation.md");
                 if (images is not null) await images.WriteImagesAsync(staging, cancellationToken).ConfigureAwait(false);
                 await File.WriteAllTextAsync(pendingSource, markdown, new UTF8Encoding(false), cancellationToken).ConfigureAwait(false);
-                var rendered = await _render(pendingSource, cancellationToken).ConfigureAwait(false);
+                string? rendered;
+                try { rendered = await _render(pendingSource, cancellationToken).ConfigureAwait(false); }
+                catch (Exception exception) when (snapshot.WorkingState is not null && IsContentRenderError(exception))
+                {
+                    throw new ScientificPublicationContentException(SectionRepairDiagnostic(snapshot.WorkingState, exception.Message), exception);
+                }
                 if (rendered is null || !await IsValidPdfAsync(rendered, cancellationToken).ConfigureAwait(false))
                     throw new InvalidDataException("Die wissenschaftliche Publikation konnte nicht als gültiges PDF erzeugt werden.");
 
@@ -106,7 +174,10 @@ public sealed class ScientificPublicationService : IDisposable
                 // a usable previous revision, or leave a PDF paired with partial source.
                 File.Move(pendingSource, source, overwrite: true);
                 File.Move(pendingPdf, pdf, overwrite: true);
-                return Artifact(snapshot, source, pdf, fingerprint);
+                _currentDependencies[cacheKey] = dependencyHash;
+                var artifact = Artifact(snapshot, source, pdf, fingerprint);
+                await RecordFirstPublicationAsync(snapshot.Project, artifact, cancellationToken).ConfigureAwait(false);
+                return _current[cacheKey] = artifact;
             }
             finally
             {
@@ -125,9 +196,10 @@ public sealed class ScientificPublicationService : IDisposable
         var results = await _repository.LoadResultSnapshotAsync(projectId, token).ConfigureAwait(false);
         var archive = await _repository.LoadArchiveSnapshotAsync(projectId, token).ConfigureAwait(false);
         var manuscript = await ReadManuscriptAsync(project, archive.Report, token).ConfigureAwait(false);
+        var state = await GetWorkingStateAsync(projectId, token).ConfigureAwait(false);
         var current = await _repository.GetProjectAsync(projectId, token).ConfigureAwait(false);
-        if (current != project) return null;
-        return new(project, results, archive.Works, archive.Evidence, archive.Report, manuscript);
+        if (state is null && current != project) return null;
+        return new(project, results, archive.Works, archive.Evidence, archive.Report, manuscript, state);
     }
 
     private static DateTimeOffset? PublicationRunStart(ResearchStoredReport? report)
@@ -164,6 +236,9 @@ public sealed class ScientificPublicationService : IDisposable
 
     private static bool CanPublishSnapshot(PublicationSnapshot snapshot, PublicationSnapshot current)
     {
+        if (snapshot.WorkingState is { } state)
+            return current.WorkingState?.PublicationRevision == state.PublicationRevision
+                && CanonicalDependencyFingerprint(snapshot) == CanonicalDependencyFingerprint(current);
         var source = FormatPublication(snapshot.Project, snapshot.Results, snapshot.Works, snapshot.Evidence, snapshot.Report);
         var latest = FormatPublication(current.Project, current.Results, current.Works, current.Evidence, current.Report);
         if (!string.Equals(source, latest, StringComparison.Ordinal)) return false;
@@ -449,8 +524,10 @@ public sealed class ScientificPublicationService : IDisposable
         manuscript is not null && manuscript.UpdatedAt > project.UpdatedAt ? manuscript.UpdatedAt : project.UpdatedAt;
 
     private static ScientificPublicationArtifact Artifact(PublicationSnapshot snapshot, string source, string pdf, string fingerprint) =>
-        new(snapshot.Project.Id, snapshot.Project.Revision, source, pdf, IsDraft(snapshot.Project, snapshot.Report, snapshot.Manuscript),
-            PublicationUpdatedAt(snapshot.Project, snapshot.Manuscript), fingerprint);
+        new(snapshot.Project.Id, snapshot.WorkingState?.PublicationRevision ?? snapshot.Project.Revision, source, pdf,
+            snapshot.WorkingState is { } state ? IsCanonicalDraft(state) : IsDraft(snapshot.Project, snapshot.Report, snapshot.Manuscript),
+            snapshot.WorkingState?.UpdatedAt ?? PublicationUpdatedAt(snapshot.Project, snapshot.Manuscript), fingerprint,
+            snapshot.WorkingState is not null);
 
     private static string Fingerprint(string text) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
     private static string PublicationFingerprint(string text) => Fingerprint("scientific-publication-v7\n" + text);
@@ -497,8 +574,8 @@ public sealed class ScientificPublicationService : IDisposable
 
     private sealed record PublicationSnapshot(ScientificResearchProject Project, ResearchResultSnapshot Results,
         IReadOnlyList<ResearchLiteratureEntry> Works, IReadOnlyList<ResearchEvidenceRecord> Evidence, ResearchStoredReport? Report,
-        ChatMessage? Manuscript);
+        ChatMessage? Manuscript, ResearchWorkingState? WorkingState = null);
 }
 
 public sealed record ScientificPublicationArtifact(string ProjectId, long Revision, string MarkdownPath, string PdfPath,
-    bool IsDraft, DateTimeOffset UpdatedAt, string ContentHash);
+    bool IsDraft, DateTimeOffset UpdatedAt, string ContentHash, bool SectionDelta = false);

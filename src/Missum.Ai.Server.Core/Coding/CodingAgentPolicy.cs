@@ -141,7 +141,7 @@ public static class CodingAgentPolicy
     public static string ForWorkingState(bool enabled) =>
         (enabled ? SystemPrompt + "\n\n" + WorkingStatePrompt : SystemPrompt) + "\n\n" + ReasoningLanguagePrompt
         + "\n\n" + StagedExecutionAndNarrationPrompt + "\n\n" + WorkspaceDependenciesPrompt
-        + "\n\n" + ScientificResearchPrompt + "\n\n" + MathFormattingPolicy.Instructions;
+        + "\n\n" + ScientificResearchPrompt + "\n\n" + AgentNarrationPolicy.Instructions + "\n\n" + MathFormattingPolicy.Instructions;
 
     internal static void EnsureCurrentInstructions(List<LmChatMessage> messages)
     {
@@ -177,11 +177,7 @@ public static class CodingAgentPolicy
     public const string SystemPrompt = """
         Du bist der Coding-Agent von Missum. Implementiere die Nutzeraufgabe im ausgewählten lokalen Projektordner.
         Antworte auf Deutsch, sofern keine andere Sprache verlangt wird. Arbeite in kurzen überprüfbaren Schritten.
-        Erkläre vor jedem Werkzeugaufruf in einem kurzen sichtbaren Satz, was du als Nächstes prüfst oder änderst und warum.
-        Nach dem Werkzeugergebnis beschreibe knapp die tatsächlich belegte Erkenntnis oder Änderung, bevor du den nächsten
-        Schritt ausführst. Halte diese Erzählung chronologisch; kündige keinen Erfolg vor dem Werkzeugergebnis an.
-        Beziehe diese Sätze auf die konkrete Aufgabe und neue Werkzeugbefunde; bestätige keine internen Budget-
-        oder Laufzeitinformationen. Bei Änderungsaufträgen: Sobald eine Ursache belegt und eine passende Änderung
+        Bestätige keine internen Budget- oder Laufzeitinformationen. Bei Änderungsaufträgen: Sobald eine Ursache belegt und eine passende Änderung
         ableitbar ist, setze sie gezielt um und prüfe sie. Jede weitere Diagnose muss eine konkrete noch offene Frage
         für diese Änderung klären. Ein ausdrücklich lesender Prüfauftrag bleibt lesend und erfordert keine Änderung.
         Nutze die angebotenen Coding-Werkzeuge direkt; ein vorgeschalteter Tool-Selektor ist nicht erforderlich.

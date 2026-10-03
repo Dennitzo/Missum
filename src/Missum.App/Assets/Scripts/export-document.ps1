@@ -396,6 +396,14 @@ $html = @"
       }
       document.body.dataset.missumPdfReady = 'true';
       document.body.dataset.missumKatexInvalid = String(documentContent.querySelectorAll('.math-selectable.invalid').length);
+      const headings = Array.from(documentContent.querySelectorAll('h2'));
+      document.body.dataset.missumKatexErrors = encodeURIComponent(JSON.stringify(
+        Array.from(documentContent.querySelectorAll('.math-selectable.invalid')).slice(0, 8).map(formula => {
+          const preceding = headings.filter(heading => Boolean(heading.compareDocumentPosition(formula) & Node.DOCUMENT_POSITION_FOLLOWING));
+          const heading = preceding.length ? preceding[preceding.length - 1] : null;
+          return { section: heading ? heading.textContent.trim().slice(0, 500) : '',
+            source: (formula.querySelector('.math-source-text')?.textContent || '').slice(0, 500) };
+        })));
       document.body.dataset.missumKatexRendered = String(documentContent.querySelectorAll('.math-render[data-math-typeset="true"] .katex').length);
       document.body.dataset.missumFigureInvalid = String(Array.from(documentContent.querySelectorAll('.publication-figure img')).filter(image => !image.complete || image.naturalWidth === 0).length);
     };
@@ -437,7 +445,17 @@ try {
         throw 'Der Missum-Markdown-/KaTeX-Renderer wurde vor der PDF-Erzeugung nicht vollständig initialisiert.'
     }
     if ($renderedDom -match 'data-missum-katex-invalid="([1-9][0-9]*)"') {
-        throw "Die PDF wurde nicht erzeugt, weil $($Matches[1]) mathematische Ausdrücke nicht KaTeX-kompatibel sind."
+        $invalidCount = $Matches[1]
+        $formulaDetails = ''
+        if ($renderedDom -match 'data-missum-katex-errors="([^"]*)"') {
+            try {
+                $formulaErrors = [Uri]::UnescapeDataString($Matches[1]) | ConvertFrom-Json
+                $formulaDetails = (@($formulaErrors) | ForEach-Object {
+                    'Abschnitt "' + $_.section + '", Ausdruck: ' + $_.source
+                }) -join '; '
+            } catch { $formulaDetails = '' }
+        }
+        throw "Die PDF wurde nicht erzeugt, weil $invalidCount mathematische Ausdrücke nicht KaTeX-kompatibel sind. $formulaDetails"
     }
     if ($ScientificPublication -and $renderedDom -match 'data-missum-figure-invalid="([1-9][0-9]*)"') {
         throw "Die Publikation enthaelt $($Matches[1]) nicht lesbare Abbildungen. Die bisherige PDF bleibt erhalten."

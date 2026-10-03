@@ -99,6 +99,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             }
         }
         await File.WriteAllTextAsync(Path.Combine(App.Current.DataDirectory, "native-ui-ready.json"), JsonSerializer.Serialize(new { renderer = "WinUI3", page = GetType().Name, sessionId = _session, ready = _session != Guid.Empty, navigationSmokeVisits }), _lifetime.Token);
+        await RunContextEfficiencyBenchmarkAsync();
     }
 
     private static string S(JsonElement value, string name, string fallback = "") =>

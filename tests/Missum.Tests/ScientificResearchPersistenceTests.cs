@@ -4,6 +4,7 @@ using Missum.Core.Models;
 using Missum.App.Services;
 using Missum.App.ViewModels;
 using Missum.Infrastructure.Storage;
+using Missum.Infrastructure.Research;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging.Abstractions;
 using System.Text.Json;
@@ -71,8 +72,11 @@ public sealed class ScientificResearchPersistenceTests
         await connection.OpenAsync();
         await using var command = connection.CreateCommand();
         command.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE 'research_%';";
-        Assert.Equal(20L, (long)(await command.ExecuteScalarAsync())!);
+        // Migration 53 adds four canonical-state tables and the trusted execution receipt table.
+        Assert.Equal(25L, (long)(await command.ExecuteScalarAsync())!);
         command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=49;";
+        Assert.Equal(1L, (long)(await command.ExecuteScalarAsync())!);
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=53;";
         Assert.Equal(1L, (long)(await command.ExecuteScalarAsync())!);
         command.CommandText = "SELECT MAX(version) FROM schema_migrations;";
         Assert.Equal((long)SqliteDatabase.CurrentSchemaVersion, (long)(await command.ExecuteScalarAsync())!);
@@ -107,17 +111,29 @@ public sealed class ScientificResearchPersistenceTests
             [new("evidence-export", project.Id, "work-export", "Original", "Ergebnis", "hash", "verifiedExcerpt", "{}", now)],
             "report-export", "scientificMarkdown", "verified", "# Bericht\n\nErgebnis", "{}", "research.result.persisted", "{}", "run", 2, now));
 
-        var bundle = await environment.Get<IScientificResearchExportService>().ExportAllAsync(project.Id, workspace);
+        // Export copies the same immutable publication shown by the reader. The
+        // renderer fixture isolates this contract from PDF typesetting itself.
+        using var publications = new ScientificPublicationService(repository, async (source, token) =>
+        {
+            var pdf = Path.ChangeExtension(source, ".pdf");
+            await File.WriteAllTextAsync(pdf, "%PDF-1.7\n" + new string(' ', 1200), token);
+            return pdf;
+        }, Path.Combine(workspace, "publications"));
+        var shown = await publications.EnsurePublicationAsync(project.Id);
+        Assert.NotNull(shown);
+        var exports = new ScientificResearchExportService(repository, environment.Get<IDocumentFileCodec>(), publications);
+        var bundle = await exports.ExportAllAsync(project.Id, workspace);
 
         Assert.StartsWith(Path.Combine(workspace, ".assistant", "research", project.Id, "exports"), bundle.Directory, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(12, bundle.Files.Count);
         foreach (var file in bundle.Files) Assert.True(File.Exists(Path.Combine(bundle.Directory, file)), file);
-        Assert.StartsWith("%PDF-1.4", await File.ReadAllTextAsync(Path.Combine(bundle.Directory, "report.pdf")));
+        Assert.Equal(await File.ReadAllBytesAsync(shown.PdfPath), await File.ReadAllBytesAsync(Path.Combine(bundle.Directory, "report.pdf")));
+        Assert.Equal(await File.ReadAllTextAsync(shown.MarkdownPath), await File.ReadAllTextAsync(Path.Combine(bundle.Directory, "report.md")));
         Assert.Contains("Paper", await File.ReadAllTextAsync(Path.Combine(bundle.Directory, "bibliography.bib")));
         Assert.Contains("sha256", await File.ReadAllTextAsync(bundle.ManifestPath), StringComparison.OrdinalIgnoreCase);
         var wrongWorkspace = Path.Combine(environment.Directory, "other"); Directory.CreateDirectory(wrongWorkspace);
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
-            environment.Get<IScientificResearchExportService>().ExportAllAsync(project.Id, wrongWorkspace));
+            exports.ExportAllAsync(project.Id, wrongWorkspace));
     }
 
     [Fact]

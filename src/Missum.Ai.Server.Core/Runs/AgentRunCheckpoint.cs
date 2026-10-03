@@ -36,4 +36,10 @@ public sealed record AgentRunCheckpoint(
     bool UseStableSubagentToolCatalog = false,
     bool ResearchManagedByAgent = false,
     bool EarlySubagentDelegationPending = false,
-    int EarlySubagentDelegationRetryCount = 0);
+    int EarlySubagentDelegationRetryCount = 0,
+    bool CanonicalStateReadRequired = false,
+    ScientificStateRunProgress? ScientificStateProgress = null,
+    string? ContextProfileVersion = null,
+    string? ToolCatalogSignature = null,
+    IReadOnlyList<LmToolDefinition>? ContextTools = null,
+    string? ResearchStateStamp = null);

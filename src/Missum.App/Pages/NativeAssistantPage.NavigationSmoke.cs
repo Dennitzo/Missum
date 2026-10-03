@@ -75,8 +75,8 @@ public sealed partial class NativeAssistantPage
         var header = _messageBlocks[activeId]["header"];
         UpdateMessageHeader(header, activeMessage);
         var label = (TextBlock)((StackPanel)header).Children[0];
-        if (!label.Text.StartsWith("Modell generiert", StringComparison.Ordinal) || !label.Text.Contains("Token · In Bearbeitung seit", StringComparison.Ordinal))
-            throw new InvalidOperationException("The active header does not display session tokens and elapsed time.");
+        if (!label.Text.StartsWith("In Bearbeitung seit ", StringComparison.Ordinal) || label.Text.Contains("Token", StringComparison.Ordinal))
+            throw new InvalidOperationException("The active header must display elapsed time without token counts or status prefixes.");
         var stable = label.Text;
         active["content"] = JsonSerializer.SerializeToElement("Ein gestreamter Absatz mit weiteren Wörtern");
         UpdateMessageBlocks(activeId, JsonSerializer.SerializeToElement(active), body);

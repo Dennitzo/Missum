@@ -59,6 +59,8 @@ public sealed partial class AgentToolCatalog
         if (HasCapability(capabilities, "research.sandbox"))
             names.UnionWith(CodingToolCatalog.CreateTools().Where(tool => IsScientificExecutionTool(tool.Name)).Select(static tool => tool.Name));
         if (HasCapability(capabilities, "research.deliverables")) names.Add(ClientToolNames.ResearchDeliverablesVerify);
+        if (ScientificStateCompletionPolicy.Enabled(request))
+            names.UnionWith([ClientToolNames.ResearchRead, ClientToolNames.ResearchUpdate]);
         if (HasCapability(capabilities, "documentIo"))
         {
             names.UnionWith([ClientToolNames.DocumentRead, ClientToolNames.DocumentCreate]);
@@ -198,6 +200,8 @@ public sealed partial class AgentToolCatalog
 
     private static void ValidateToolSpecific(string name, JsonElement value)
     {
+        if (name is ClientToolNames.ResearchRead or ClientToolNames.ResearchUpdate)
+        { ValidateResearchStateArguments(name, value); return; }
         if (WorkspaceTools.IsLocal(name)) { WorkspaceTools.Validate(name, value); return; }
         if (name == CodingWorkingStateTools.PlanTool)
         {
@@ -380,7 +384,7 @@ public sealed partial class AgentToolCatalog
             Server("media.inspect", "Extrahiere sichere Metadaten, Audio und zeitcodierte Frames eines Uploads.", ToolRiskClass.ReadOnly, MediaSchema()),
             Server("media.analyze", "Analysiere einen Bild- oder Video-Upload mit dem ausgewählten Vision-Modell. Die Analyse erhält das tatsächliche Bild und protokolliert die verwendete Modell-ID. Trenne sichtbare Merkmale klar von Annahmen und beantworte die konkrete Prüffrage.", ToolRiskClass.ReadOnly, MediaSchema()),
             Server("image.generate", "Erzeuge Bilder mit Z-Image-Turbo.", ToolRiskClass.ReadOnly, ImageSchema()),
-            Server("math.evaluate", "Führe deterministische skalare, Vektor- oder Matrixoperationen ohne Skriptausführung aus.", ToolRiskClass.ReadOnly, MathSchema()),
+            Server("math.evaluate", "Führe deterministische skalare, Vektor- oder Matrixoperationen ohne Skriptausführung aus. Skalare sind Ein-Element-Arrays [x]. add/subtract/multiply/divide verknüpfen left und right elementweise; ein Skalar wird auf die Gegenseite verteilt. Ein Array [a,b] ist keine Faktorenkette. Mehrere Faktoren deshalb schrittweise mit Einzelwerten berechnen. dot bildet das Skalarprodukt.", ToolRiskClass.ReadOnly, MathSchema()),
             Server("context.embed", "Erzeuge BGE-M3-Embeddings für begrenzte Textlisten.", ToolRiskClass.ReadOnly, ArraySchema("inputs")),
             Server("context.retrieve", "Ordne Dokumenttexte über BGE-M3 semantisch zu einer Anfrage.", ToolRiskClass.ReadOnly, RetrieveSchema()),
             Client(ClientToolNames.DocumentRead, "Lese Sitzungsdokumente tokeneffizient: zuerst auflisten oder eine Gliederung abrufen, danach nur benötigte Abschnitte, Fortsetzungen oder Suchtreffer.", ToolRiskClass.ReadOnly, DocumentReadSchema()),
@@ -390,7 +394,7 @@ public sealed partial class AgentToolCatalog
             Client(ClientToolNames.DocumentsSearch, "Durchsuche den persistenten lokalen Dokumentindex promptbezogen und liefere Originalbelege mit Dateiname und Seite.", ToolRiskClass.ReadOnly, Parse("""{"type":"object","properties":{"query":{"type":"string"},"maximumCharacters":{"type":"integer","minimum":1000,"maximum":200000}},"required":["query"],"additionalProperties":false}""")),
             Client(ClientToolNames.DocumentsReadPages, "Lese einen konkreten Seitenbereich eines Sitzungsdokuments als zitierfähigen Originalbeleg.", ToolRiskClass.ReadOnly, Parse("""{"type":"object","properties":{"documentId":{"type":"string"},"startPage":{"type":"integer","minimum":1},"endPage":{"type":"integer","minimum":1}},"required":["documentId","startPage","endPage"],"additionalProperties":false}""")),
         };
-        return tools.Concat(WorkspaceToolSpecs()).Concat(CodingToolCatalog.CreateTools()).Concat(CodingWorkingStateTools.CreateTools()).ToDictionary(static tool => tool.Name, StringComparer.Ordinal);
+        return tools.Concat(ResearchStateToolSpecs()).Concat(WorkspaceToolSpecs()).Concat(CodingToolCatalog.CreateTools()).Concat(CodingWorkingStateTools.CreateTools()).ToDictionary(static tool => tool.Name, StringComparer.Ordinal);
     }
 
     private static AgentToolSpec Server(string name, string description, ToolRiskClass risk, JsonElement schema) =>
@@ -504,7 +508,7 @@ public sealed partial class AgentToolCatalog
     private static void OptionalInteger(JsonElement value, string name, int minimum, int maximum)
     {
         if (value.TryGetProperty(name, out var property)
-            && (!property.TryGetInt32(out var number) || number < minimum || number > maximum))
+            && (property.ValueKind != JsonValueKind.Number || !property.TryGetInt32(out var number) || number < minimum || number > maximum))
         {
             throw new ArgumentException($"Property '{name}' must be an integer between {minimum} and {maximum}.");
         }

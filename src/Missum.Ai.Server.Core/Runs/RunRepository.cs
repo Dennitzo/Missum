@@ -346,6 +346,9 @@ public sealed partial class RunRepository
                 UPDATE runs SET state = $interrupted, error_code = 'run.gateway_restarted', updated_at = $now
                 WHERE state = $running AND mode != 'Coding'
                     AND COALESCE(json_extract(request_json, '$.deepResearch'), 0) != 1
+                    AND NOT (COALESCE(json_extract(request_json, '$.researchOptions.protocolVersion'), 0) >= 2
+                        AND EXISTS (SELECT 1 FROM json_each(json_extract(request_json, '$.clientCapabilities'))
+                            WHERE value = 'research.deliverables' COLLATE NOCASE))
                     AND NOT EXISTS (SELECT 1 FROM run_steering_inputs s WHERE s.run_id = runs.run_id);
                 """;
             interrupt.Parameters.AddWithValue("$interrupted", RunState.Interrupted.ToString());
@@ -361,6 +364,9 @@ public sealed partial class RunRepository
                 UPDATE runs SET state = $queued, error_code = NULL, updated_at = $now
                 WHERE (mode = 'Coding'
                     OR (mode IN ('General', 'Auto') AND json_extract(request_json, '$.deepResearch') = 1)
+                    OR (COALESCE(json_extract(request_json, '$.researchOptions.protocolVersion'), 0) >= 2
+                        AND EXISTS (SELECT 1 FROM json_each(json_extract(request_json, '$.clientCapabilities'))
+                            WHERE value = 'research.deliverables' COLLATE NOCASE))
                     OR json_extract(request_json, '$.subagent.parentRunId') IS NOT NULL
                     OR EXISTS (SELECT 1 FROM runs child WHERE json_extract(child.request_json, '$.subagent.parentRunId') = runs.run_id
                         AND child.state IN ('Queued', 'Running', 'WaitingForClient', 'Interrupted'))
@@ -373,6 +379,20 @@ public sealed partial class RunRepository
             resumeCoding.Parameters.AddWithValue("$interrupted", RunState.Interrupted.ToString());
             resumeCoding.Parameters.AddWithValue("$now", MissumAiDatabase.FormatTimestamp(DateTimeOffset.UtcNow));
             _ = await resumeCoding.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await using (var refreshScientificState = connection.CreateCommand())
+        {
+            refreshScientificState.Transaction = (SqliteTransaction)transaction;
+            refreshScientificState.CommandText = """
+                UPDATE run_checkpoints SET checkpoint_json = json_set(checkpoint_json, '$.canonicalStateReadRequired', json('true'))
+                WHERE run_id IN (SELECT run_id FROM runs
+                    WHERE state IN ('Queued', 'WaitingForClient')
+                      AND COALESCE(json_extract(request_json, '$.researchOptions.protocolVersion'), 0) >= 2
+                      AND EXISTS (SELECT 1 FROM json_each(json_extract(request_json, '$.clientCapabilities'))
+                          WHERE value = 'research.deliverables' COLLATE NOCASE));
+                """;
+            _ = await refreshScientificState.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
 
         await ExtendLegacyClientProposalLifetimeAsync(connection, (SqliteTransaction)transaction, cancellationToken).ConfigureAwait(false);

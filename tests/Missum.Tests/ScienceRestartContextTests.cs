@@ -20,6 +20,7 @@ public sealed class ScienceRestartContextTests
     private const string SessionTitle = "Forschungsprojekt: Quantengravitation";
     private const string ContinuePrompt = "Weitermachen";
     private const string InterpretedQuestion = "Prüfe eine effektive Gravitationstheorie mit skalarer Materie und kontrollierter Niedrigenergiegrenze.";
+    private const string ReportTitle = "Quantengravitation";
     private const string Report = "# Zwischenstand der Quantengravitation\n\nDie Einsteinschen Feldgleichungen sind hergeleitet. "
         + "Offen bleibt die dimensionskonsistente Ein-Schleifen-Korrektur; sie ist noch nicht bewiesen.";
     private const string Claim = "Die klassische Niedrigenergiegrenze reproduziert die Einsteinschen Feldgleichungen.";
@@ -106,22 +107,80 @@ public sealed class ScienceRestartContextTests
         var latestText = after.Request.Messages[^1].Content.Single(part => part.Type == "text").Text!;
         var context = ParseScientificContext(latestText);
         Assert.Equal(originalQuestion, context.GetProperty("originalQuestion").GetString());
-        Assert.Equal(InterpretedQuestion, context.GetProperty("interpretedQuestion").GetString());
-        Assert.Equal("verification.pending", context.GetProperty("checkpoint").GetProperty("stage").GetString());
-        Assert.Equal(7, context.GetProperty("checkpoint").GetProperty("revision").GetInt64());
-        Assert.Equal("unresolved", context.GetProperty("report").GetProperty("status").GetString());
-        Assert.Equal(Report, context.GetProperty("report").GetProperty("content").GetString());
-        Assert.Contains(context.GetProperty("claims").EnumerateArray(), claim =>
-            claim.GetProperty("statement").GetString() == Claim
-            && claim.GetProperty("status").GetString() == "provisionallySupported");
-        Assert.Contains(context.GetProperty("experiments").EnumerateArray(), experiment =>
-            experiment.GetProperty("command").GetString() == ExperimentCommand
-            && experiment.GetProperty("status").GetString() == "verified");
+        Assert.Equal("section-delta-v1", context.GetProperty("research").GetProperty("protocol").GetString());
+        Assert.Equal(ReportTitle, context.GetProperty("research").GetProperty("title").GetString());
+        Assert.Equal(2, after.Request.ResearchOptions?.ProtocolVersion);
+        Assert.Contains(context.GetProperty("workingItems").EnumerateArray(), item =>
+            item.GetProperty("kind").GetString() == "claim"
+            && item.GetProperty("data").GetProperty("statement").GetString() == Claim
+            && item.GetProperty("data").GetProperty("status").GetString() == "provisionallySupported");
+        Assert.Contains(context.GetProperty("workingItems").EnumerateArray(), item =>
+            item.GetProperty("kind").GetString() == "section"
+            && item.GetProperty("data").GetProperty("contentPreview").GetString()!.Contains("Ein-Schleifen-Korrektur", StringComparison.Ordinal));
+        // Compact context points at canonical objects without deleting the full
+        // manuscript, prior run checkpoint or actual execution record.
+        var restoredRepository = restarted.GetRequiredService<IScientificResearchRepository>();
+        var checkpoint = await restoredRepository.GetLatestCheckpointAsync(projectId);
+        Assert.Equal("verification.pending", checkpoint?.Stage);
+        Assert.Equal(7, checkpoint?.Revision);
+        var archive = await restoredRepository.LoadArchiveSnapshotAsync(projectId);
+        Assert.Equal("unresolved", archive.Report?.ConclusionStatus);
+        Assert.Equal(Report, archive.Report?.ContentMarkdown);
+        var results = await restoredRepository.LoadResultSnapshotAsync(projectId);
+        Assert.Equal(ExperimentCommand, Assert.Single(results.Experiments).CommandText);
+        Assert.Equal("verified", results.Experiments[0].VerificationStatus);
+        var state = await ((IScientificResearchStateRepository)restoredRepository).LoadWorkingStateAsync(projectId);
+        var section = Assert.Single(state.Items, item => item.Kind == "section");
+        Assert.Equal(Report[(Report.IndexOf("\n\n", StringComparison.Ordinal) + 2)..],
+            section.Data.GetProperty("contentMarkdown").GetString());
         Assert.Contains("AKTUELLER NUTZERAUFTRAG\n" + ContinuePrompt, latestText, StringComparison.Ordinal);
         AssertProjectIdentity(await restarted.GetRequiredService<IScientificResearchRepository>().GetProjectAsync(projectId),
             originalQuestion, researchWorkspace);
         Assert.Equal(SessionTitle, (await restarted.GetRequiredService<IChatRepository>().GetSessionAsync(session.Id))?.Title);
         Assert.Equal(2, (await restarted.GetRequiredService<IChatRepository>().ListMessagesAsync(session.Id)).Count);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task LegacyMigrationUsesTheStoredScientificReportWithoutImportingOperationalChat(bool scientificContent)
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var chats = environment.Get<IChatRepository>();
+        var repository = environment.Get<IScientificResearchRepository>();
+        var runs = environment.Get<IMissumAiRunRepository>();
+        var session = await chats.CreateSessionAsync(SessionTitle, ChatMode.ClaudeScience);
+        var assistant = await chats.AddMessageAsync(session.Id, ChatRole.Assistant,
+            "Ich beginne mit der Recherche.\n\nSearXNG: HTTP 502 beim Werkzeugaufruf.", MessageStatus.Interrupted);
+        var now = DateTimeOffset.UtcNow;
+        var run = new MissumAiRunRecord(Guid.NewGuid(), session.Id, assistant.Id, null, Guid.NewGuid().ToString("N"),
+            "legacy-science-run", 0, "interrupted", Model, null, now, now);
+        await runs.CreateAsync(run);
+        var projectId = $"research-{session.Id:N}";
+        await repository.UpsertProjectAsync(new ScientificResearchProject(projectId, session.Id,
+            "mathematicalInvestigation", "Untersuche Quantengravitation.", InterpretedQuestion, "readOnlyResearch",
+            "multiPath", "unresolved", 1, 1, now, now));
+        const string operational = "SearXNG: HTTP 502 beim Werkzeugaufruf.";
+        var report = scientificContent ? Report + "\n\n" + operational : "# Zwischenstand\n\n" + operational;
+        var manifest = JsonSerializer.Serialize(new { runId = run.ServerRunId, localRunId = run.Id }, Json);
+        await repository.SaveArchiveSnapshotAsync(projectId, new(1, "{}", [], [], "legacy-report", "scientificMarkdown",
+            "unresolved", report, manifest, "research.result.persisted", "{}", run.ServerRunId!, 1, now));
+        using var publications = new ScientificPublicationService(repository,
+            static (_, _) => throw new InvalidOperationException("Import must not render a PDF."), environment.Directory, chats, runs);
+
+        var state = await publications.EnsureWorkingStateAsync(projectId);
+        Assert.NotNull(state);
+        if (scientificContent)
+        {
+            Assert.Equal(ReportTitle, state.Title);
+            var section = Assert.Single(state.Items, item => item.Kind == "section");
+            Assert.Contains("Ein-Schleifen-Korrektur", section.Data.GetProperty("contentMarkdown").GetString());
+            Assert.DoesNotContain("SearXNG", section.Data.GetProperty("contentMarkdown").GetString());
+            Assert.Equal(state.Revision, (await publications.EnsureWorkingStateAsync(projectId))?.Revision);
+        }
+        else Assert.Empty(state.Items);
+        Assert.Equal(report, (await repository.LoadArchiveSnapshotAsync(projectId)).Report?.ContentMarkdown);
+        Assert.Equal(assistant.Content, (await chats.GetMessageAsync(assistant.Id))?.Content);
     }
 
     private static string CreateOriginalQuestion()
@@ -170,6 +229,9 @@ public sealed class ScienceRestartContextTests
         var clientIds = new HashSet<string>(StringComparer.Ordinal);
         using var connection = new MissumAiConnectionService(settings, NullLogger<MissumAiConnectionService>.Instance,
             () => new CatalogHandler(clientIds));
+        using var publications = new ScientificPublicationService(provider.GetRequiredService<IScientificResearchRepository>(),
+            static (_, _) => throw new InvalidOperationException("Context restoration must not render a PDF."),
+            Path.GetTempPath());
         var broker = new LocalToolBroker(connection, documents, null!, chats);
         var recent = new RecentActivityService(settings, new ShellViewModel(), NullLogger<RecentActivityService>.Instance);
         using var service = new MissumAiAssistantService(connection, chats,
@@ -178,7 +240,7 @@ public sealed class ScienceRestartContextTests
             provider.GetRequiredService<IBinaryObjectStore>(), documents, new DocumentContextPreparationService(documents),
             new SessionContextPreparationService(chats), broker, null!, null!, settings, recent,
             NullLogger<MissumAiAssistantService>.Instance,
-            scientificResearch: provider.GetRequiredService<IScientificResearchRepository>());
+            scientificResearch: provider.GetRequiredService<IScientificResearchRepository>(), sciencePublications: publications);
         Assert.Equal(0, await chats.MarkStreamingMessagesInterruptedAsync());
         await service.StopPersistedRunsAtStartupAsync();
         Assert.Equal(0, await chats.DeleteEmptyTerminalMessagesAsync());

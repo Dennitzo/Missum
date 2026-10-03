@@ -46,8 +46,8 @@ public sealed partial class NativeAssistantPage
             var show = _thinkingStates.TryGetValue(id, out var state)
                 && state.ShouldShow(id, IsConversationMessageRunning(id) && view.IsMessageActive, view.HasBlockingTool, visible && DisplayMessages.ContainsKey(id), now);
             var wasVisible = view.Visibility == Visibility.Visible;
-            // Reuse the published header value even when visibility changes
-            // between ticks; the two labels must never display different counts.
+            // Reuse the token snapshot captured by the once-per-second header tick
+            // so visibility changes do not bypass the thinking label's throttling.
             var tokens = _messageBlocks.TryGetValue(id, out var blocks) && blocks.TryGetValue("header", out var header)
                 && header.Tag is double displayedTokens ? displayedTokens : DisplayContextUsed;
             if (show && (refreshTokens || !wasVisible)) view.UpdateTokens(tokens);

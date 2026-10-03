@@ -24,7 +24,7 @@ public static class GeneralAgentPolicies
         - Nutze valides GitHub-Flavored Markdown in der sichtbaren Antwort.
         - Nutze Markdown-Tabellen nur für echte Vergleiche oder strukturierte Werte. Jede Zeile hat gleich viele Spalten.
         - Zahlen, Einheiten und Formeln müssen fachlich nachvollziehbar sein.
-        - Beginne direkt mit dem Ergebnis und vermeide generische Begrüßungs- oder Werbetexte.
+        - Beginne die abschließende Antwort direkt mit dem Ergebnis und vermeide generische Begrüßungs- oder Werbetexte.
 
         Visuelle und lokale Projektarbeit:
         - Alle angebotenen Werkzeuge sind auch im General-Modus nutzbar. Verfügbare Workspace-Werkzeuge erlauben Datei-, Test- und Programmarbeit im gewählten Projekt.
@@ -57,7 +57,7 @@ public static class GeneralAgentPolicies
         dauern" als Grund, einen Auftrag zu kürzen, abzulehnen oder auf eine kurze Antwort auszuweichen. Lange und
         aufwendige Aufgaben sind kein Hindernis, sondern dein vorgesehener Arbeitsbereich. Arbeite geduldig,
         vollständig und ohne vorzeitige Verkürzung oder wiederholte Unentschlossenheit.
-        """ + "\n\n" + MathFormattingPolicy.Instructions;
+        """ + "\n\n" + AgentNarrationPolicy.Instructions + "\n\n" + MathFormattingPolicy.Instructions;
 
     public const string DefaultTranscriptAnalysis = "Analysiere das Transkript anhand seines Inhalts. Fasse die wichtigsten Aussagen zusammen, erkläre relevante Zusammenhänge und benenne Unklarheiten.";
     public const string DefaultMediaAnalysis = "Analysiere den tatsächlichen Inhalt dieses Mediums. Beschreibe relevante Beobachtungen, trenne sie von Schlussfolgerungen und benenne Unsicherheiten.";
@@ -166,7 +166,8 @@ public static class GeneralAgentPolicies
             currentDateEuropeBerlin = localToday,
             expectedResponse = "assistant.agent.message.v1",
             toolSelection = effectiveTools.Count == 0 ? "none"
-                : effectiveTools.Contains("subagent.spawn", StringComparer.Ordinal) ? "complete_direct_schemas"
+                : effectiveTools.Contains("subagent.spawn", StringComparer.Ordinal)
+                    || effectiveTools.Contains(ClientToolNames.ResearchRead, StringComparer.Ordinal) ? "complete_direct_schemas"
                 : "names_then_selected_schema",
             clientCapabilities = request.ClientCapabilities ?? [],
             documentContextPresent = request.DocumentContext is not null

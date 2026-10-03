@@ -111,7 +111,8 @@ public sealed partial class AssistantCoordinator(
     internal sealed record AssistantDisplayState(Guid MessageId, string? ModelSelection, bool IsCoding,
         bool IsRunning, string? Status = null, string? Detail = null, string? Model = null,
         int? ContextUsed = null, int? ContextLimit = null, int? LoadedFiles = null, bool ContextWasCompacted = false,
-        string? GenerationState = null, int? GeneratedTokens = null, DateTimeOffset? GenerationUpdatedAt = null);
+        string? GenerationState = null, int? GeneratedTokens = null, DateTimeOffset? GenerationUpdatedAt = null,
+        string? ContextSource = null);
 
     private async Task ObserveDisplayStateAsync(MissumAiAssistantUpdate update)
     {
@@ -140,6 +141,7 @@ public sealed partial class AssistantCoordinator(
                 Detail = reasoningOnly || resumed ? current.Detail : update.Detail ?? current.Detail,
                 Model = reasoningOnly ? current.Model : update.Model ?? current.Model,
                 ContextUsed = update.ContextUsed ?? current.ContextUsed,
+                ContextSource = update.ContextUsed.HasValue ? update.ContextSource ?? "estimated" : current.ContextSource,
                 ContextLimit = update.ContextLimit ?? current.ContextLimit,
                 LoadedFiles = update.LoadedFiles ?? current.LoadedFiles,
                 ContextWasCompacted = update.ContextUsed.HasValue ? update.ContextWasCompacted : current.ContextWasCompacted,
@@ -438,7 +440,7 @@ public sealed partial class AssistantCoordinator(
             contextLimit = display?.ContextLimit ?? contextLimit,
             contextWasTruncated = display?.ContextUsed is not null ? display.ContextWasCompacted : context.WasTruncated,
             contextNotice = display?.ContextUsed is not null ? null : context.TruncationNotice,
-            contextSource = display?.ContextUsed is not null ? "measured" : "estimated",
+            contextSource = display?.ContextUsed is not null ? display.ContextSource ?? "estimated" : "estimated",
             contextMessageId = display?.ContextUsed is not null ? display.MessageId : (Guid?)null,
             selectedExtensionActionId = session.PersistentExtensionActionId,
             selectedToolAction = LegacyToolAliasFor(session.PersistentExtensionActionId),
@@ -1886,6 +1888,7 @@ public sealed partial class AssistantCoordinator(
                     runId = missumAi?.ActiveRunId,
                     changesRunId = update.LocalRunId,
                     contextUsed = update.ContextUsed,
+                    contextSource = update.ContextSource,
                     contextLimit = update.ContextLimit,
                     contextWasTruncated = update.ContextWasCompacted,
                     runStatus = update.Status,
@@ -1920,6 +1923,7 @@ public sealed partial class AssistantCoordinator(
                     generationUpdatedAt = generationDisplay?.GenerationUpdatedAt,
                     model = update.Model,
                     contextUsed = update.ContextUsed,
+                    contextSource = update.ContextSource,
                     toolStep = update.ToolStep,
                     runId = missumAi?.ActiveRunId,
                     contextLimit = update.ContextLimit,

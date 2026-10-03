@@ -37,7 +37,8 @@ internal static class CodingSessionContext
             + "Wenn der aktuelle Auftrag einen Plan benötigt, lege seine Einträge zuerst mit id, title und status an; "
             + "erst nach erfolgreicher Bestätigung genügen Updates per id. Historische Befunde und Belege bleiben verfügbar. "
             + "Dies beschreibt den Speicherzustand und ändert den folgenden Nutzerauftrag nicht."));
-        result.Add(initial.Last(message => message.Role == "user"));
+        result.Add(initial.Last(message => message.Role == "user" && !ContextPlanner.IsRuntimeContext(message)
+            && !ContextPlanner.IsNativeRuntimeInstruction(message)));
         return result;
 
         void ClosePending()

@@ -18,7 +18,8 @@ public sealed partial class RunRepository
             WHERE EXISTS (
                 SELECT 1 FROM runs run JOIN run_checkpoints checkpoint ON checkpoint.run_id = run.run_id
                 WHERE run.run_id = $run AND run.state IN ('Queued', 'Running', 'WaitingForClient')
-                  AND json_extract(run.request_json, '$.deepResearch') = 1
+                  AND (json_extract(run.request_json, '$.deepResearch') = 1
+                    OR json_extract(run.request_json, '$.researchOptions.protocolVersion') >= 2)
                   AND json_extract(run.request_json, '$.subagent.parentRunId') IS NULL
                   AND json_extract(checkpoint.checkpoint_json, '$.researchManagedByAgent') = 1)
               AND NOT EXISTS (

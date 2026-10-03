@@ -1,26 +1,35 @@
 using System.Security.Cryptography;
 using System.Text.Json;
+using Missum.Core.Research;
 
 namespace Missum.App.Services;
 
 /// <summary>Checks real files behind the current presentation, without treating generated prose as an execution receipt.</summary>
 internal static class ScientificDeliverablesVerifier
 {
+    internal static Task<JsonElement> VerifyAsync(string projectId, ScientificPresentationSnapshot? snapshot,
+        CancellationToken cancellationToken = default) => VerifyAsync(projectId, snapshot, null, null, cancellationToken);
+
     internal static async Task<JsonElement> VerifyAsync(string projectId, ScientificPresentationSnapshot? snapshot,
-        CancellationToken cancellationToken = default)
+        ResearchWorkingState? state, ResearchResultSnapshot? receipts, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var publication = snapshot?.Publication;
         var publicationReady = snapshot?.PublicationError is null && publication is not null && publication.ProjectId == projectId
+            && (state is null || state.ProjectId == projectId && publication.SectionDelta && publication.Revision == state.PublicationRevision
+                && ScientificPublicationService.HasCanonicalSections(state))
             && await HasHeaderAsync(publication.PdfPath, "%PDF-"u8.ToArray(), 1024, cancellationToken).ConfigureAwait(false)
             && File.Exists(publication.MarkdownPath);
         var sourceHash = publicationReady ? await HashAsync(publication!.MarkdownPath, cancellationToken).ConfigureAwait(false) : null;
         var publicationError = snapshot?.PublicationError ?? (publicationReady ? null : publication is null
             ? "Noch kein wissenschaftlicher Manuskriptstand als PDF vorhanden."
             : publication.ProjectId != projectId ? "Die Publikation gehört zu einem anderen Forschungsprojekt."
+            : state is not null && (!publication.SectionDelta || publication.Revision != state.PublicationRevision)
+                ? "Die PDF entspricht noch nicht der aktuellen Publikationsrevision."
             : !File.Exists(publication.MarkdownPath) ? "Die Markdownquelle der Publikation fehlt."
             : "Die PDF-Datei fehlt oder besitzt keinen gültigen PDF-Dateikopf.");
         var files = new List<object>();
+        var verifiedFigureExperiments = new HashSet<string>(StringComparer.Ordinal);
         var rejected = new HashSet<string>(StringComparer.Ordinal);
         var simulation = snapshot?.Simulation;
         if (snapshot?.SimulationError is null && simulation?.ProjectId == projectId && simulation.Status == "ready")
@@ -43,6 +52,7 @@ internal static class ScientificDeliverablesVerifier
                 {
                     var error = await VerifyExecutionAsync(execution, image, experimentRecordId, cancellationToken).ConfigureAwait(false);
                     if (error is not null) { rejected.Add(error); continue; }
+                    verifiedFigureExperiments.Add(execution.ExperimentRecordId);
                     var script = ScientificSimulationService.SafePath(execution.ProjectRoot, execution.ExecutedScriptPath);
                     files.Add(new { path = image.ImagePath, sha256 = hash, experimentRecordId,
                         artifactPath = Path.GetRelativePath(execution.ProjectRoot, image.ImagePath).Replace('\\', '/'),
@@ -59,21 +69,163 @@ internal static class ScientificDeliverablesVerifier
             }
         }
         var simulationReady = files.Count > 0;
+        var simulationRequired = state is null || state.Items.Any(item => item.Kind == "requirement"
+            && Required(item.Data) && Text(item.Data, "status") is not ("withdrawn" or "openLimit") && IsFigureRequirement(item.Data));
         var simulationError = snapshot?.SimulationError ?? (simulationReady ? null : rejected.Count > 0
             ? string.Join(" ", rejected.Take(3)) : "Noch keine darstellbare Abbildung aus einem erfolgreichen Python-Experiment vorhanden.");
+        var missing = state is null ? new List<string>()
+            : await ResearchMissingAsync(state, receipts, publication, verifiedFigureExperiments, cancellationToken).ConfigureAwait(false);
+        if (!publicationReady) missing.Add(publicationError ?? "Die Publikation entspricht noch nicht dem aktuellen fachlichen Stand.");
+        if (simulationRequired && !simulationReady) missing.Add(simulationError ?? "Die erforderliche Darstellung fehlt.");
+        var ready = publicationReady && (!simulationRequired || simulationReady) && missing.Count == 0;
         return JsonSerializer.SerializeToElement(new
         {
-            success = publicationReady && simulationReady,
+            success = ready,
             projectId,
-            message = publicationReady && simulationReady ? "PDF-Publikation und tatsächlich ausgeführte Python-Abbildungen sind vorhanden."
-                : string.Join(" ", new[] { publicationError, simulationError }.Where(static error => !string.IsNullOrWhiteSpace(error))),
+            message = ready ? "Der aktuelle Publikationsstand und die ausdrücklich erforderlichen Nachweise liegen vor."
+                : string.Join(" ", missing),
+            research = state is null ? null : new { protocol = "section-delta-v1", revision = state.Revision,
+                publicationRevision = state.PublicationRevision, ready, missing },
             publication = new { ready = publicationReady, pdfPath = publicationReady ? publication!.PdfPath : null,
-                sourceSha256 = sourceHash, error = publicationError },
-            simulation = new { ready = simulationReady, executed = simulationReady, artifacts = files,
-                error = simulationError },
+                sourceSha256 = sourceHash, revision = publication?.Revision ?? 0, error = publicationError },
+            simulation = new { required = simulationRequired, ready = simulationReady, executed = simulationReady, artifacts = files,
+                error = simulationRequired ? simulationError : null },
             retryable = true,
         });
     }
+
+    private static async Task<List<string>> ResearchMissingAsync(ResearchWorkingState state, ResearchResultSnapshot? receipts,
+        ScientificPublicationArtifact? publication, HashSet<string> verifiedFigureExperiments, CancellationToken token)
+    {
+        var missing = new List<string>();
+        var requirements = state.Items.Where(item => item.Kind == "requirement" && Required(item.Data)
+            && Text(item.Data, "status") != "withdrawn").ToArray();
+        if (requirements.Length == 0) missing.Add("Die fachlichen Ziele des Auftrags sind noch nicht als erforderliche Arbeitsergebnisse dokumentiert.");
+        foreach (var requirement in requirements)
+        {
+            var status = Text(requirement.Data, "status");
+            var experiments = ScientificPublicationService.Ids(requirement.Data, "experimentIds");
+            if (status == "openLimit" && Text(requirement.Data, "reason").Length > 0
+                && (ScientificPublicationService.Ids(requirement.Data, "sourceIds").Count > 0
+                    || ScientificPublicationService.Ids(requirement.Data, "evidenceIds").Count > 0
+                    || receipts?.Experiments.Any(experiment => experiments.Contains(experiment.Id) && HasMeasuredReceipt(experiment, requireSuccess: false)) == true)) continue;
+            if (status is not ("completed" or "supported" or "verified"))
+            {
+                missing.Add($"Arbeitsergebnis {requirement.Id}: noch offen; nächsten fachlichen Schritt oder begründete Nachweisgrenze dokumentieren.");
+                continue;
+            }
+            var formal = HasMethod(requirement.Data, "lean", "formal", "formalproof");
+            var symbolic = HasMethod(requirement.Data, "symbolic", "symbolisch", "symbolische", "sympy", "smt");
+            if (formal || symbolic || HasMethod(requirement.Data, "python", "numeric", "numerical", "numerisch", "numerische", "numerik")
+                || IsFigureRequirement(requirement.Data))
+            {
+                var accepted = false;
+                foreach (var experiment in receipts?.Experiments ?? [])
+                {
+                    if (!experiments.Contains(experiment.Id) || experiment.VerificationStatus != "ProcessSucceeded"
+                        || !HasMeasuredReceipt(experiment)) continue;
+                    if (IsFigureRequirement(requirement.Data) && !verifiedFigureExperiments.Contains(experiment.Id)) continue;
+                    if (formal && (!experiment.CommandText.StartsWith("math.formalProof ", StringComparison.Ordinal)
+                        || !HasKernelReceipt(experiment))) continue;
+                    if (symbolic && !(experiment.CommandText.StartsWith("math.symbolic ", StringComparison.Ordinal)
+                        || experiment.CommandText.StartsWith("math.smt ", StringComparison.Ordinal)
+                        || experiment.CommandText.StartsWith("research.code.execute ", StringComparison.Ordinal))) continue;
+                    if (publication is not null && await VerifyExperimentFilesAsync(experiment, publication.PdfPath, token).ConfigureAwait(false))
+                    { accepted = true; break; }
+                }
+                if (!accepted)
+                    missing.Add($"Arbeitsergebnis {requirement.Id}: ein zugeordneter erfolgreicher Ausführungsbeleg fehlt.");
+            }
+        }
+        // A completed field is a workflow declaration, not certification of a scientific claim.
+        // Only the referenced, durable execution records satisfy machine-checkable requirements.
+        return missing;
+    }
+
+    private static bool HasMeasuredReceipt(ResearchExperiment experiment, bool requireSuccess = true)
+    {
+        try
+        {
+            using var receipt = JsonDocument.Parse(experiment.StdoutEvidence);
+            if (!receipt.RootElement.TryGetProperty("runs", out var runs) || runs.ValueKind != JsonValueKind.Array) return false;
+            return runs.EnumerateArray().Any(run => run.TryGetProperty("exitCode", out var code) && code.TryGetInt32(out var value) && (!requireSuccess || value == 0)
+                && run.TryGetProperty("runId", out var id) && id.ValueKind == JsonValueKind.String
+                && run.TryGetProperty("inputHashes", out var inputs) && inputs.ValueKind == JsonValueKind.Object
+                && run.TryGetProperty("outputHashes", out var outputs) && outputs.ValueKind == JsonValueKind.Object);
+        }
+        catch (Exception exception) when (exception is JsonException or InvalidOperationException) { return false; }
+    }
+
+    private static bool HasKernelReceipt(ResearchExperiment experiment)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(experiment.StdoutEvidence);
+            return Text(document.RootElement, "formalVerification") == "KernelAccepted";
+        }
+        catch (Exception exception) when (exception is JsonException or InvalidOperationException) { return false; }
+    }
+
+    private static async Task<bool> VerifyExperimentFilesAsync(ResearchExperiment experiment, string pdfPath, CancellationToken token)
+    {
+        // The publication lives below <project>/publications/<project hash>/<revision>/Publikation.pdf.
+        var root = new DirectoryInfo(Path.GetDirectoryName(pdfPath)!).Parent?.Parent?.Parent?.FullName;
+        if (root is null) return false;
+        try
+        {
+            using var document = JsonDocument.Parse(experiment.StdoutEvidence);
+            var runs = document.RootElement.GetProperty("runs");
+            foreach (var run in runs.EnumerateArray())
+            {
+                if (!run.TryGetProperty("exitCode", out var code) || !code.TryGetInt32(out var exit) || exit != 0
+                    || run.TryGetProperty("timedOut", out var timeout) && timeout.ValueKind == JsonValueKind.True) return false;
+                var runId = Text(run, "runId");
+                if (runId.Length == 0 || Text(run, "snapshotId") != "execution-" + runId) return false;
+                var script = Text(run, "executedScriptPath");
+                var scriptHash = Text(run, "scriptSha256");
+                var inputs = run.GetProperty("inputHashes");
+                var outputs = run.GetProperty("outputHashes");
+                if (inputs.ValueKind != JsonValueKind.Object || outputs.ValueKind != JsonValueKind.Object
+                    || !inputs.TryGetProperty(script, out var measuredScript) || measuredScript.GetString() != scriptHash
+                    || !Sha256(scriptHash) || !script.StartsWith("work/", StringComparison.Ordinal)) return false;
+                foreach (var input in inputs.EnumerateObject())
+                {
+                    var hash = input.Value.ValueKind == JsonValueKind.String ? input.Value.GetString() : null;
+                    if (!CanonicalPath(input.Name, input: true) || !Sha256(hash)) return false;
+                    var frozen = ScientificSimulationService.SafePath(root, "snapshots/execution-" + runId + "/frozen/" + input.Name);
+                    var current = ScientificSimulationService.SafePath(root, input.Name);
+                    if (!File.Exists(frozen) || await HashAsync(frozen, token).ConfigureAwait(false) != hash || !File.Exists(current)) return false;
+                    var expected = outputs.TryGetProperty(input.Name, out var changed) && changed.ValueKind == JsonValueKind.String
+                        ? changed.GetString() : hash;
+                    if (await HashAsync(current, token).ConfigureAwait(false) != expected) return false;
+                }
+                foreach (var output in outputs.EnumerateObject())
+                {
+                    var hash = output.Value.ValueKind == JsonValueKind.String ? output.Value.GetString() : null;
+                    if (!CanonicalPath(output.Name, input: false) || !Sha256(hash)) return false;
+                    var path = ScientificSimulationService.SafePath(root, output.Name);
+                    if (!File.Exists(path) || await HashAsync(path, token).ConfigureAwait(false) != hash) return false;
+                }
+            }
+            return runs.GetArrayLength() > 0;
+        }
+        catch (Exception exception) when (exception is JsonException or IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or KeyNotFoundException)
+        { return false; }
+    }
+
+    private static bool IsFigureRequirement(JsonElement data) =>
+        HasMethod(data, "simulation", "plot", "figure", "graph", "graphviz", "abbildung", "visualization", "visualisierung");
+
+    private static bool HasMethod(JsonElement data, params string[] choices)
+    {
+        var tokens = System.Text.RegularExpressions.Regex.Split(Text(data, "method").ToLowerInvariant(), @"[^\p{L}\p{N}]+",
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+        return tokens.Any(token => choices.Contains(token, StringComparer.Ordinal));
+    }
+
+    private static bool Required(JsonElement data) => data.ValueKind != JsonValueKind.Object
+        || !data.TryGetProperty("required", out var value) || value.ValueKind != JsonValueKind.False;
+    private static string Text(JsonElement data, string property) => ScientificPublicationService.Text(data, property);
 
     private static async Task<string?> VerifyExecutionAsync(ScientificExecutionEvidence execution,
         ScientificSimulationArtifact image, string? recordId, CancellationToken token)

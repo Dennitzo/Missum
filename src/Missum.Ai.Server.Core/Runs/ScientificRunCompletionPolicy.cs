@@ -17,19 +17,21 @@ internal static class ScientificRunCompletionPolicy
     private static readonly string[] RequiredSections = ["Kurzfassung", "Forschungsfrage", "Voraussetzungen", "Herleitungen", "Ergebnisse", "Diskussion", "Literatur"];
     private static readonly string[] PlotExtensions = [".png", ".jpg", ".jpeg"];
 
-    internal static bool Applies(RunRequest request) => request.Mode is (RunMode.General or RunMode.Auto) && request.DeepResearch
+    internal static bool Applies(RunRequest request) => request.Subagent is null && (ScientificStateCompletionPolicy.Enabled(request)
+        || request.Mode is (RunMode.General or RunMode.Auto) && request.DeepResearch
         && request.ClientCapabilities is { } capabilities
         && (capabilities.Contains("research.deliverables", StringComparer.OrdinalIgnoreCase)
             || capabilities.Contains("research.sandbox", StringComparer.OrdinalIgnoreCase)
                 && request.Messages.SelectMany(static message => message.Content).Any(static part =>
                 part.Text?.Contains(RunProcessor.ScienceSessionContextStart, StringComparison.Ordinal) == true
-                || part.Text?.Contains("CLAUDE SCIENCE – WISSENSCHAFTLICHE DARSTELLUNG", StringComparison.Ordinal) == true));
+                || part.Text?.Contains("CLAUDE SCIENCE – WISSENSCHAFTLICHE DARSTELLUNG", StringComparison.Ordinal) == true)));
 
     internal static ScientificCompletionAssessment Assess(RunRequest request, IReadOnlyList<LmChatMessage> messages,
         IReadOnlyList<AgentToolSpec> tools,
         IReadOnlyDictionary<string, IReadOnlyList<LmChatMessage>>? delegatedEvidence = null)
     {
         if (!Applies(request)) return new(true, false, "", "", [], 0);
+        if (ScientificStateCompletionPolicy.Enabled(request)) return ScientificStateCompletionPolicy.Assess(request, messages, tools);
         var projectId = request.ResearchOptions?.ProjectId;
         if (string.IsNullOrWhiteSpace(projectId) && !string.IsNullOrWhiteSpace(request.SessionId))
             projectId = "research-" + request.SessionId.Replace("-", "", StringComparison.Ordinal);
