@@ -15,12 +15,17 @@ public sealed class NativeFormulaView : Button
     private readonly double _fontSize;
     private bool? _renderedDark;
     internal bool IsTypeset { get; private set; }
+    internal double RenderedHeight { get; private set; }
+    internal double RenderedBaselineOffset { get; private set; }
 
-    public NativeFormulaView(string source, bool display, double fontSize = 18, Uri? linkUri = null)
+    public NativeFormulaView(string source, bool display, double fontSize = 16, Uri? linkUri = null)
     {
         _source = source; _display = display; _fontSize = fontSize;
-        Padding = new Thickness(2, 1, 2, 1);
+        Padding = new Thickness(0);
         MinWidth = 0; MinHeight = 0;
+        FontSize = fontSize;
+        FontFamily = new FontFamily("Segoe UI Variable Text");
+        FontWeight = Microsoft.UI.Text.FontWeights.Normal;
         BorderThickness = new Thickness(0);
         Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
         HorizontalAlignment = HorizontalAlignment.Left;
@@ -55,9 +60,13 @@ public sealed class NativeFormulaView : Button
         var latex = trim.Length >= delimiter * 2 ? trim[delimiter..^delimiter] : trim;
         var bitmap = NativeMathRenderer.Render(latex, _display, _fontSize, dark);
         IsTypeset = bitmap.Error is null && bitmap.Png.Length > 0;
+        RenderedHeight = bitmap.Height;
+        RenderedBaselineOffset = bitmap.BaselineOffset;
         if (!IsTypeset)
         {
-            Content = new TextBlock { Text = _source, TextWrapping = TextWrapping.Wrap, FontSize = 16, IsTextSelectionEnabled = true };
+            Margin = new Thickness(0);
+            Content = new TextBlock { Text = _source, TextWrapping = TextWrapping.Wrap, FontSize = _fontSize,
+                FontFamily = FontFamily, IsTextSelectionEnabled = true };
             ToolTipService.SetToolTip(this, "Formel als LaTeX · " + bitmap.Error);
             return;
         }
@@ -66,5 +75,9 @@ public sealed class NativeFormulaView : Button
         var source = new BitmapImage();
         source.SetSource(stream);
         Content = new Image { Source = source, Width = bitmap.Width, Height = bitmap.Height, Stretch = Stretch.Uniform };
+        // WinUI treats a Button's entire desired height as its inline baseline. Remove the
+        // formula's descent from that layout height so its actual TeX baseline meets the
+        // surrounding text. The image keeps its natural height, including scripts/fractions.
+        Margin = _display ? new Thickness(0) : new Thickness(0, 0, 0, -bitmap.Descent);
     }
 }

@@ -167,6 +167,21 @@ try {
     $mathEvidence = Assert-MissumArtifactPath -Path ($PublishDirectory + '.math-preview.png')
     Copy-Item -LiteralPath $mathPreview -Destination $mathEvidence -Force
     Write-Host "Native math rendering and streaming verified: $mathEvidence"
+    $chatStreamingPath = Join-Path $smokeData 'native-chat-streaming-validation.json'
+    if (-not (Test-Path -LiteralPath $chatStreamingPath -PathType Leaf)) { throw 'Missing native chat streaming validation.' }
+    $chatStreaming = Get-Content -LiteralPath $chatStreamingPath -Raw | ConvertFrom-Json
+    if ($chatStreaming.passed -ne $true -or $chatStreaming.renderer -ne 'WinUI3' -or $chatStreaming.visibleDeltasBeforeCompletion -lt 3) {
+        throw 'Native chat did not render incremental answer text before completion.'
+    }
+    Copy-Item -LiteralPath $chatStreamingPath -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.chat-streaming-validation.json')) -Force
+    foreach ($chatPreviewName in @('native-table-math-preview', 'native-table-narrow-preview', 'native-thinking-expanded-preview')) {
+        $chatPreview = Join-Path $smokeData ($chatPreviewName + '.png')
+        if (-not (Test-Path -LiteralPath $chatPreview -PathType Leaf) -or (Get-Item -LiteralPath $chatPreview).Length -lt 100) {
+            throw "Missing native chat rendering preview: $chatPreviewName"
+        }
+        Copy-Item -LiteralPath $chatPreview -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.' + $chatPreviewName + '.png')) -Force
+    }
+    Write-Host 'Native tables, matching formula sizes, answer streaming and reasoning disclosure verified.'
     foreach ($composerPreviewName in @('native-composer-preview', 'native-composer-hover-preview', 'native-composer-narrow-preview', 'native-selection-preview')) {
         $composerPreview = Join-Path $smokeData ($composerPreviewName + '.png')
         if (-not (Test-Path -LiteralPath $composerPreview -PathType Leaf)) { throw "Missing native composer preview: $composerPreviewName" }

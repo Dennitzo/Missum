@@ -42,11 +42,44 @@ public sealed partial class NativeAssistantPage
             var row = _thinkingIndicators[messageId];
             var body = MessageBody(_messageViews[messageId].View);
             var cursor = _messageBlocks[messageId]["streamCursor"];
-            if (row.IsHitTestVisible || row.Children.OfType<Button>().Any()
+            if (!row.IsHitTestVisible || !row.ToggleButton.IsTabStop || row.IsExpanded
                 || body.Children.IndexOf(row) != body.Children.IndexOf(cursor) - 1
                 || body.Children.OfType<FrameworkElement>().Last(child => child.Visibility == Visibility.Visible) != cursor
                 || row.Label.Text != $"Denke nach · {1025:N0} Token")
-                throw new InvalidOperationException("Thinking must be a compact, noninteractive row immediately above the final cursor.");
+                throw new InvalidOperationException("Thinking must be a compact, collapsed disclosure immediately above the final cursor.");
+
+            // Exercise the real native button, then stream reasoning through the
+            // same chat.delta path while retaining its open control and receipt.
+            var reasoningMessage = _messages[messageId].Deserialize<Dictionary<string, JsonElement>>()!;
+            reasoningMessage["toolSteps"] = JsonSerializer.SerializeToElement(new[] { new
+            {
+                id = "live-reasoning", tool = "assistant.reasoning", status = "running", contentOffset = 0,
+                detail = "Ich untersuche die Voraussetzungen.", updatedAt = DateTimeOffset.UtcNow,
+            } });
+            _messages[messageId] = JsonSerializer.SerializeToElement(reasoningMessage);
+            RenderMessagesNow(); RefreshThinkingIndicators();
+            if (row.IsExpanded || _messageBlocks[messageId]["tool:live-reasoning"].Visibility != Visibility.Collapsed)
+                throw new InvalidOperationException("Live reasoning must start collapsed without a duplicate history row.");
+            if (new Microsoft.UI.Xaml.Automation.Peers.ButtonAutomationPeer(row.ToggleButton)
+                .GetPattern(Microsoft.UI.Xaml.Automation.Peers.PatternInterface.Invoke) is not Microsoft.UI.Xaml.Automation.Provider.IInvokeProvider invoke)
+                throw new InvalidOperationException("Thinking does not expose a native accessible button.");
+            invoke.Invoke(); await Task.Delay(30);
+            if (!row.IsExpanded) throw new InvalidOperationException("The thinking disclosure did not open through its native button.");
+            var reasoningView = row.ReasoningView;
+            var firstParagraph = reasoningView.Children.First();
+            foreach (var detail in new[] { "Ich untersuche die Voraussetzungen. Danach", "Ich untersuche die Voraussetzungen. Danach prüfe ich die Einheiten." })
+            {
+                ApplyEvent("chat.delta", JsonSerializer.SerializeToElement(new { sessionId = owner, messageId, content = "", toolSteps = new[] { new
+                { id = "live-reasoning", tool = "assistant.reasoning", status = "running", detail, contentOffset = 0, updatedAt = DateTimeOffset.UtcNow } } }));
+                RenderMessagesNow(); RefreshThinkingIndicators();
+                if (!row.IsExpanded || !ReferenceEquals(reasoningView, row.ReasoningView)
+                    || !ReferenceEquals(firstParagraph, reasoningView.Children.First())
+                    || string.Concat(((TextBlock)firstParagraph).Inlines.OfType<Microsoft.UI.Xaml.Documents.Run>().Select(run => run.Text)) != detail)
+                    throw new InvalidOperationException("A reasoning delta rebuilt or failed to incrementally update the opened disclosure.");
+            }
+            await SaveMathPreviewAsync(LayoutRoot, "native-thinking-expanded-preview.png");
+            invoke.Invoke(); await Task.Delay(30);
+            if (row.IsExpanded) throw new InvalidOperationException("The thinking disclosure did not close through its native button.");
 
             void Progress(string phase, int tokens, int contextTokens) => ApplyEvent("status.changed", JsonSerializer.SerializeToElement(new
             {

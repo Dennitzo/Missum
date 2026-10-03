@@ -843,9 +843,10 @@ public sealed partial class RunProcessor : BackgroundService
             // A turn following assistant.selectTool has exactly one purpose: emit the
             // selected structured call. Some local models narrate that intent
             // before (or instead of) returning JSON. Keep this protocol-only
-            // turn out of the visible answer, including its private reasoning.
+            // turn out of the visible answer. The separate provider reasoning channel
+            // remains visible without exposing tool arguments as prose.
             var suppressRequiredToolTurn = selectedToolName is not null || earlySubagentDelegationPending;
-            var liveTextGate = new IncrementalVisibleTextGate(enabled: !suppressRequiredToolTurn, bufferUntilComplete: true);
+            var liveTextGate = new IncrementalVisibleTextGate(enabled: !suppressRequiredToolTurn);
             CodingTextReconciler? codingText = null;
             var firstReasoningFragment = true;
             var reasoningPublished = false;
@@ -871,14 +872,11 @@ public sealed partial class RunProcessor : BackgroundService
                         if (!string.IsNullOrEmpty(progress.ReasoningDelta))
                         {
                             interruptedReasoning.Append(progress.ReasoningDelta);
-                            if (!suppressRequiredToolTurn)
-                            {
-                                await _repository.AppendEventAsync(runId, RunEventTypes.ReasoningDelta,
-                                    new ReasoningDeltaEvent(progress.ReasoningDelta, (int)Math.Min(roundCount + 1, int.MaxValue),
-                                        ReplaceFrom: firstReasoningFragment ? 0 : null, State: "running"), token).ConfigureAwait(false);
-                                firstReasoningFragment = false;
-                                reasoningPublished = true;
-                            }
+                            await _repository.AppendEventAsync(runId, RunEventTypes.ReasoningDelta,
+                                new ReasoningDeltaEvent(progress.ReasoningDelta, (int)Math.Min(roundCount + 1, int.MaxValue),
+                                    ReplaceFrom: firstReasoningFragment ? 0 : null, State: "running"), token).ConfigureAwait(false);
+                            firstReasoningFragment = false;
+                            reasoningPublished = true;
                         }
                         return;
                     }
@@ -897,7 +895,7 @@ public sealed partial class RunProcessor : BackgroundService
 
                     if (progress.State == "generationRetry")
                     {
-                        liveTextGate = new IncrementalVisibleTextGate(enabled: !suppressRequiredToolTurn, bufferUntilComplete: true);
+                        liveTextGate = new IncrementalVisibleTextGate(enabled: !suppressRequiredToolTurn);
                         codingText?.RestartAttempt();
                         firstReasoningFragment = true;
                         interruptedContent.Clear();
@@ -996,7 +994,7 @@ public sealed partial class RunProcessor : BackgroundService
                     messages.Add(new LmChatMessage("system", "Die frühe GPU-Delegation ist aktuell nicht verfügbar. "
                         + "Bearbeite den Forschungsauftrag mit den vorhandenen Werkzeugen selbst; erzwinge keinen Subagenten."));
                     suppressRequiredToolTurn = selectedToolName is not null;
-                    liveTextGate = new IncrementalVisibleTextGate(enabled: !suppressRequiredToolTurn, bufferUntilComplete: true);
+                    liveTextGate = new IncrementalVisibleTextGate(enabled: !suppressRequiredToolTurn);
                     await SaveCheckpointAsync().ConfigureAwait(false);
                 }
                 if (!compactContext && loadedSubagentAvailable && !useStableSubagentToolCatalog)
@@ -1009,7 +1007,7 @@ public sealed partial class RunProcessor : BackgroundService
                         selectedToolName = null;
                         requiredToolCallRetryCount = 0;
                         suppressRequiredToolTurn = earlySubagentDelegationPending;
-                        liveTextGate = new IncrementalVisibleTextGate(enabled: !suppressRequiredToolTurn, bufferUntilComplete: true);
+                        liveTextGate = new IncrementalVisibleTextGate(enabled: !suppressRequiredToolTurn);
                     }
                     if (request.Subagent is null)
                     {
@@ -1369,11 +1367,25 @@ public sealed partial class RunProcessor : BackgroundService
                     earlySubagentDelegationRetryCount = 0;
                 }
             }
+            var remainingLiveDelta = liveTextGate.Flush();
+            if (!string.IsNullOrEmpty(remainingLiveDelta))
+            {
+                await PublishVisibleDeltaAsync(codingText is null ? new TextDeltaEvent(remainingLiveDelta)
+                    : codingText.Push(remainingLiveDelta), cancellationToken).ConfigureAwait(false);
+            }
+
+            if (codingText is not null)
+            {
+                await PublishVisibleDeltaAsync(codingText.Complete(), cancellationToken).ConfigureAwait(false);
+                visibleTextLength = codingText.BaseOffset + codingText.VisibleText.Length;
+                streamingTurnStartEventId = null;
+            }
+
             if (response.ToolCalls.Count == 0 && request.Subagent is null
                 && await CollectOutstandingSubagentResultsAsync(runId, cancellationToken).ConfigureAwait(false) is { Count: > 0 } delegatedResults)
             {
-                // Keep the evaluated model tail for KV continuity, but publish
-                // the manager's answer only after it incorporated child results.
+                // Keep the streamed turn and its evaluated tail for KV continuity.
+                // Completion still requires incorporating the actual child results.
                 roundCount++;
                 inputTokens += response.InputTokens;
                 outputTokens += response.OutputTokens;
@@ -1391,20 +1403,6 @@ public sealed partial class RunProcessor : BackgroundService
                 await MarkSubagentResultsConsumedAsync(runId, delegatedResults, cancellationToken).ConfigureAwait(false);
                 continue;
             }
-            var remainingLiveDelta = liveTextGate.Flush();
-            if (!string.IsNullOrEmpty(remainingLiveDelta))
-            {
-                await PublishVisibleDeltaAsync(codingText is null ? new TextDeltaEvent(remainingLiveDelta)
-                    : codingText.Push(remainingLiveDelta), cancellationToken).ConfigureAwait(false);
-            }
-
-            if (codingText is not null)
-            {
-                await PublishVisibleDeltaAsync(codingText.Complete(), cancellationToken).ConfigureAwait(false);
-                visibleTextLength = codingText.BaseOffset + codingText.VisibleText.Length;
-                streamingTurnStartEventId = null;
-            }
-
             await _repository.ClearProviderRetryAsync(runId, cancellationToken).ConfigureAwait(false);
             roundCount++;
             inputTokens += response.InputTokens;
@@ -2760,7 +2758,7 @@ public sealed partial class RunProcessor : BackgroundService
     }
 }
 
-internal sealed class IncrementalVisibleTextGate(bool enabled, bool bufferUntilComplete = false)
+internal sealed class IncrementalVisibleTextGate(bool enabled)
 {
     private static readonly TimeSpan FlushInterval = TimeSpan.FromMilliseconds(160);
     private const int FlushCharacterThreshold = 96;
@@ -2780,26 +2778,19 @@ internal sealed class IncrementalVisibleTextGate(bool enabled, bool bufferUntilC
         _pending.Append(delta);
         if (_decision == StreamDecision.Undecided)
         {
-            var firstVisible = _pending.ToString().FirstOrDefault(static character => !char.IsWhiteSpace(character));
-            if (firstVisible == default)
+            _decision = ClassifyPrefix(_pending.ToString().AsSpan().TrimStart());
+            if (_decision == StreamDecision.Undecided) return null;
+            if (_decision == StreamDecision.Suppressed)
             {
-                return null;
-            }
-
-            // Structured response envelopes and pseudo-tool syntax are parsed
-            // only after completion; they must never flash as visible chat text.
-            if (firstVisible is '{' or '[' or '`' or '<')
-            {
-                _decision = StreamDecision.Suppressed;
                 _pending.Clear();
                 return null;
             }
-            _decision = StreamDecision.Visible;
         }
 
-        // Main-agent narration is committed as a complete model turn before
-        // dispatching its tools. Reasoning/token progress still streams live.
-        return !bufferUntilComplete && (_pending.Length >= FlushCharacterThreshold || _clock.Elapsed >= FlushInterval)
+        // Commit small visible fragments while the provider is still generating.
+        // The durable turn boundary and reconciler handle retries and recovery;
+        // tool dispatch still waits for a complete validated model response.
+        return _pending.Length >= FlushCharacterThreshold || _clock.Elapsed >= FlushInterval
             ? Flush()
             : null;
     }
@@ -2815,6 +2806,54 @@ internal sealed class IncrementalVisibleTextGate(bool enabled, bool bufferUntilC
         _clock.Restart();
         HasStreamed = true;
         return value;
+    }
+
+    private static StreamDecision ClassifyPrefix(ReadOnlySpan<char> text)
+    {
+        if (text.IsEmpty) return StreamDecision.Undecided;
+        // Hold actual response envelopes and pseudo-tool markup, not all Markdown.
+        if (text[0] is '{' or '<') return StreamDecision.Suppressed;
+        if (text[0] == '`')
+        {
+            var ticks = 1;
+            while (ticks < text.Length && text[ticks] == '`') ticks++;
+            if (ticks == text.Length) return StreamDecision.Undecided;
+            if (ticks < 3) return StreamDecision.Visible; // Inline code.
+            var lineEnd = text.IndexOf('\n');
+            if (lineEnd < 0) return StreamDecision.Undecided;
+            var info = text[ticks..lineEnd].Trim();
+            var separator = info.IndexOfAny(' ', '\t');
+            var language = separator < 0 ? info : info[..separator];
+            if (language.Equals("json", StringComparison.OrdinalIgnoreCase)
+                || language.Equals("jsonc", StringComparison.OrdinalIgnoreCase)
+                || language.Equals("json5", StringComparison.OrdinalIgnoreCase)
+                || language.StartsWith("tool", StringComparison.OrdinalIgnoreCase)
+                || language.StartsWith("function", StringComparison.OrdinalIgnoreCase))
+                return StreamDecision.Suppressed;
+            // An unlabelled fence can still wrap a model's JSON/tool envelope.
+            // A language-labelled code fence is ordinary Markdown and streams.
+            return info.IsEmpty ? ClassifyPrefix(text[(lineEnd + 1)..].TrimStart()) : StreamDecision.Visible;
+        }
+        if (text[0] != '[') return StreamDecision.Visible;
+        var inside = text[1..].TrimStart();
+        if (inside.IsEmpty) return StreamDecision.Undecided;
+        if (inside[0] is '{' or '[' or '"') return StreamDecision.Suppressed;
+        var close = text.IndexOf(']');
+        if (close < 0) return StreamDecision.Undecided;
+        var after = text[(close + 1)..];
+        if (after.IsEmpty) return StreamDecision.Undecided;
+        // Both inline and reference links may use numeric labels such as [1].
+        var target = after.TrimStart();
+        if (!target.IsEmpty && target[0] is '(' or '[') return StreamDecision.Visible;
+        var label = text[1..close].Trim();
+        if (char.IsWhiteSpace(after[0]) && (label.IsEmpty || label.Equals("x", StringComparison.OrdinalIgnoreCase)))
+            return StreamDecision.Visible; // Markdown checklist.
+        if (label.IsEmpty || char.IsDigit(label[0]) || label[0] == '-'
+            || label.Equals("true", StringComparison.Ordinal) || label.Equals("false", StringComparison.Ordinal)
+            || label.Equals("null", StringComparison.Ordinal)) return StreamDecision.Suppressed;
+        if (label.StartsWith("tool", StringComparison.OrdinalIgnoreCase)
+            || label.StartsWith("function", StringComparison.OrdinalIgnoreCase)) return StreamDecision.Suppressed;
+        return StreamDecision.Visible;
     }
 
     private enum StreamDecision

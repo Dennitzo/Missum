@@ -10,6 +10,8 @@ internal sealed class NativeThinkingIndicatorState
     private DateTimeOffset? _lastContentAt;
     private DateTimeOffset? _contentProgressAt;
     private string? _content;
+    private string? _reasoningId;
+    private string? _reasoning;
     private int _generatedTokens;
     private bool _generating;
     private bool _shown;
@@ -24,9 +26,29 @@ internal sealed class NativeThinkingIndicatorState
         _lastContentAt = null;
         _contentProgressAt = null;
         _content = null;
+        _reasoningId = null;
+        _reasoning = null;
         _generatedTokens = 0;
         _generating = false;
         _shown = false;
+    }
+
+    public void ObserveReasoning(string messageId, string reasoningId, string text, DateTimeOffset updatedAt)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return;
+        if (!string.Equals(MessageId, messageId, StringComparison.Ordinal))
+        {
+            Reset();
+            MessageId = messageId;
+        }
+        if (_reasoningId == reasoningId && _reasoning == text) return;
+        _reasoningId = reasoningId;
+        _reasoning = text;
+        // A real reasoning delta is generation evidence even when the provider
+        // does not send separate token-progress pulses. Replay keeps its age.
+        if (_contentProgressAt.HasValue && updatedAt <= _contentProgressAt) return;
+        _lastTokenProgressAt = updatedAt;
+        _generating = true;
     }
 
     public void ObserveProgress(string messageId, string? generationState, int? generatedTokens, DateTimeOffset? progressAt)

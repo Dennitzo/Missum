@@ -7,6 +7,35 @@ public sealed class NativeThinkingIndicatorStateTests
     private static readonly DateTimeOffset Start = new(2026, 10, 2, 12, 0, 0, TimeSpan.Zero);
 
     [Fact]
+    public void RealReasoningStartsThinkingWithoutProviderTokenPulses()
+    {
+        var state = new NativeThinkingIndicatorState();
+        state.ObserveReasoning("answer", "round-1", "Ich untersuche die Voraussetzungen.", Start);
+        state.ObserveContent("answer", "", Start);
+        Assert.True(Show(state, Start));
+        Assert.True(Show(state, Start.AddMinutes(5)));
+        state.ObserveContent("answer", "Das Ergebnis lautet", Start.AddMinutes(5));
+        Assert.False(Show(state, Start.AddMinutes(5)));
+        state.ObserveReasoning("answer", "round-1", "Ich untersuche die Voraussetzungen.", Start.AddMinutes(6));
+        Assert.False(Show(state, Start.AddMinutes(6)));
+        state.ObserveReasoning("answer", "round-2", "Eine weitere Voraussetzung prüfen.", Start.AddMinutes(7));
+        Assert.True(Show(state, Start.AddMinutes(7)));
+    }
+
+    [Fact]
+    public void OldReasoningReplayCannotStartThinkingAndMetadataDoesNotRenewIt()
+    {
+        var state = new NativeThinkingIndicatorState();
+        state.ObserveReasoning("answer", "round-1", "Bereits gespeicherter Denkprozess.", Start);
+        Assert.False(Show(state, Start.AddMinutes(1)));
+        state.ObserveReasoning("answer", "round-1", "Bereits gespeicherter Denkprozess.", Start.AddMinutes(1));
+        Assert.False(Show(state, Start.AddMinutes(1)));
+        state.ObserveReasoning("answer", "round-1", "Bereits gespeicherter Denkprozess. Neue Überlegung.", Start.AddMinutes(2));
+        Assert.True(Show(state, Start.AddMinutes(2)));
+        Assert.False(state.ShouldShow("answer", active: false, blocked: false, visible: true, Start.AddMinutes(3)));
+    }
+
+    [Fact]
     public void FreshActualTokensShowAnEmptyAnswerAndRemainVisibleThroughLongPauses()
     {
         var state = Generating();

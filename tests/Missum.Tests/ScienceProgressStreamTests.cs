@@ -52,6 +52,12 @@ public sealed class ScienceProgressStreamTests
         var narration = (restored.ToolSteps ?? []).Where(step => step.Tool == "assistant.narration").ToArray();
         Assert.Equal(expectedParagraphs, narration.Length);
         Assert.Contains(restored.ToolSteps!, step => step.Tool == "web.fetch" && step.Status == "completed");
+        var reasoning = Assert.Single(restored.ToolSteps!, step => step.Tool == MissumAiAssistantService.ReasoningStepTool);
+        Assert.Equal("Ich prüfe zuerst die Einheiten. Danach die Herleitung.", reasoning.Detail);
+        Assert.Equal("completed", reasoning.Status);
+        Assert.Contains(updates, update => update.ToolStep?.Tool == MissumAiAssistantService.ReasoningStepTool
+            && update.ToolStep.Status == "running" && update.ToolStep.Detail == "Ich prüfe zuerst die Einheiten.");
+        Assert.DoesNotContain("Ich prüfe zuerst", restored.Content, StringComparison.Ordinal);
         if (mode == ChatMode.ClaudeScience)
         {
             Assert.Contains(narration, step => step.Detail!.Contains("Quellenabruf 2", StringComparison.Ordinal));
@@ -84,6 +90,9 @@ public sealed class ScienceProgressStreamTests
                     (RunEventTypes.ResearchEvidenceExtracted, new { projectId, completed = 2 }),
                     (RunEventTypes.ResearchVerificationUpdated, new { projectId, completed = 2 }),
                     (RunEventTypes.ResearchReportCompleted, new { projectId, completed = 2 }),
+                    (RunEventTypes.ReasoningDelta, new ReasoningDeltaEvent("Ich prüfe zuerst die Einheiten.", 1, ReplaceFrom: 0)),
+                    (RunEventTypes.ReasoningDelta, new ReasoningDeltaEvent(" Danach die Herleitung.", 1)),
+                    (RunEventTypes.ReasoningDelta, new ReasoningDeltaEvent("", 1, State: "completed")),
                     (RunEventTypes.TextDelta, new TextDeltaEvent(Report)),
                     (RunEventTypes.RunCompleted, new RunCompletedEvent(null, "fixture-model", 20, 5)),
                 };

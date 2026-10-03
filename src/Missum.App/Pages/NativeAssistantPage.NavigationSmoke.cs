@@ -152,6 +152,8 @@ public sealed partial class NativeAssistantPage
         await VerifyConversationSelectionSmokeAsync();
         await VerifyComposerFooterSmokeAsync();
         await VerifyMathRenderingSmokeAsync(body);
+        await VerifyMarkdownTableSmokeAsync(body);
+        await VerifyAnswerStreamingSmokeAsync(original);
         await VerifyThinkingIndicatorSmokeAsync(original);
         await VerifyToolIconColorsSmokeAsync();
         await VerifyContinuationSmokeAsync(original);
@@ -585,6 +587,70 @@ public sealed partial class NativeAssistantPage
                 throw new InvalidOperationException("The real model response could not be typeset in the portable runtime.");
             await SaveMathPreviewAsync(math, "native-math-live-preview.png");
         }
+    }
+
+    private static async Task VerifyMarkdownTableSmokeAsync(StackPanel body)
+    {
+        const string source = "## Die wichtigsten Kandidaten und ihre offenen Punkte\n"
+            + "Die Planck-Länge $\\ell_P \\approx 1{,}6\\times10^{-35}$ m liegt außerhalb der experimentellen Reichweite.\n\n"
+            + "| Theorie | Stärken | Offene Lücken |\n\n|---|---|---|\n\n"
+            + "| **Stringtheorie** | Vereinheitlicht alle Kräfte; enthält Gravitation | Keine eindeutige Vorhersage |\n\n"
+            + "| **Loop-Quantengravitation** | Diskrete Geometrie | Klassischer Grenzfall und Materiekopplung |";
+        var markdown = new Missum.App.Controls.NativeStreamingMarkdown(source) { MaxWidth = 920 };
+        body.Children.Add(markdown);
+        try
+        {
+            markdown.SetStreaming(true);
+            var table = markdown.RenderedTables.Single();
+            if (table.ColumnDefinitions.Count != 3 || table.RowDefinitions.Count != 3 || table.Children.Count != 9)
+                throw new InvalidOperationException("The screenshot's loose Markdown table did not render as native rows and columns.");
+            var cells = table.Children.ToArray();
+            markdown.UpdateText(source + "\n\n| **AdS/CFT** | Exakte Dualität | Übertragung auf de-Sitter-Räume |\n\nFormeln und Text verwenden dieselbe Schriftgröße.");
+            if (!ReferenceEquals(table, markdown.RenderedTables.Single()) || table.RowDefinitions.Count != 4
+                || cells.Where((cell, index) => !ReferenceEquals(cell, table.Children[index])).Any())
+                throw new InvalidOperationException("A streamed table row replaced existing cells or lost its table layout.");
+            var formulaParagraph = markdown.Children.OfType<Missum.App.Controls.NativeMathParagraph>().Single();
+            var inlineFormula = formulaParagraph.TrailingInlines.OfType<Microsoft.UI.Xaml.Documents.InlineUIContainer>()
+                .Select(inline => inline.Child).OfType<Missum.App.Controls.NativeFormulaView>().Single();
+            if (!inlineFormula.IsTypeset || inlineFormula.FontSize != formulaParagraph.FontSize)
+                throw new InvalidOperationException("Inline formulas and answer text must use the same font size.");
+            await SaveMathPreviewAsync(markdown, "native-table-math-preview.png");
+            markdown.Width = 420; markdown.UpdateLayout();
+            if (table.ActualWidth > 421 || table.Children.OfType<Microsoft.UI.Xaml.FrameworkElement>().Any(cell => cell.ActualWidth > 421))
+                throw new InvalidOperationException("Table columns failed to wrap inside the narrow chat width.");
+            await SaveMathPreviewAsync(markdown, "native-table-narrow-preview.png");
+        }
+        finally { markdown.SetStreaming(false); body.Children.Remove(markdown); }
+    }
+
+    private async Task VerifyAnswerStreamingSmokeAsync(JsonElement original)
+    {
+        var session = Guid.NewGuid(); var id = Guid.NewGuid().ToString();
+        var snapshot = original.Deserialize<Dictionary<string, JsonElement>>(JsonOptions)!;
+        snapshot["activeSessionId"] = JsonSerializer.SerializeToElement(session);
+        snapshot["isRunning"] = JsonSerializer.SerializeToElement(true);
+        snapshot["messages"] = JsonSerializer.SerializeToElement(new[] { new { id, sessionId = session, role = "assistant", content = "",
+            status = "streaming", createdAt = DateTimeOffset.UtcNow, updatedAt = DateTimeOffset.UtcNow } });
+        try
+        {
+            ApplyEvent("state.snapshot", JsonSerializer.SerializeToElement(snapshot));
+            foreach (var content in new[] { "Die Antwort beginnt bereits", "Die Antwort beginnt bereits während des Laufs.",
+                "Die Antwort beginnt bereits während des Laufs. Weitere Textteile erscheinen fortlaufend." })
+            {
+                ApplyEvent("chat.delta", JsonSerializer.SerializeToElement(new { sessionId = session, messageId = id, content }));
+                // Do not force a render: verify the production render timer.
+                await Task.Delay(180);
+                if (!_messageBlocks.TryGetValue(id, out var blocks) || !blocks.TryGetValue("text:0", out var view)
+                    || view is not Missum.App.Controls.NativeStreamingMarkdown markdown || !markdown.Children.OfType<TextBlock>()
+                        .SelectMany(text => text.Inlines).OfType<Microsoft.UI.Xaml.Documents.Run>().Any(run => run.Text == content)
+                    || S(_messages[id], "status") != "streaming")
+                    throw new InvalidOperationException("Answer text was not visibly rendered before run completion.");
+            }
+            await File.WriteAllTextAsync(Path.Combine(App.Current.DataDirectory, "native-chat-streaming-validation.json"),
+                JsonSerializer.Serialize(new { renderer = "WinUI3", passed = true, visibleDeltasBeforeCompletion = 3,
+                    tableColumns = 3, tableRows = 4, sharedMathFontSize = 16, reasoningDisclosureDefaultCollapsed = true }));
+        }
+        finally { ApplyEvent("state.snapshot", original); RenderMessagesNow(); }
     }
 
     private static async Task SaveMathPreviewAsync(Microsoft.UI.Xaml.FrameworkElement math, string filename)

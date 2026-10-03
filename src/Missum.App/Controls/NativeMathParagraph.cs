@@ -13,6 +13,7 @@ public sealed class NativeMathParagraph : UserControl
     private readonly List<(NativeStreamingMarkdown.MathInlineSpec Spec, Inline Inline, Run? Run)> _runs = [];
     private double _renderedFontSize;
     internal InlineCollection TrailingInlines => _paragraph.Inlines;
+    internal TextAlignment TextAlignment { get => _text.TextAlignment; set => _text.TextAlignment = value; }
 
     public NativeMathParagraph()
     {
@@ -54,7 +55,7 @@ public sealed class NativeMathParagraph : UserControl
             Run? run = null;
             Inline content;
             if (piece.IsMath)
-                content = new InlineUIContainer { Child = new NativeFormulaView(piece.Text, piece.Display, FontSize + 1, piece.Uri) { VerticalAlignment = VerticalAlignment.Center } };
+                content = new InlineUIContainer { Child = new NativeFormulaView(piece.Text, piece.Display, FontSize, piece.Uri) };
             else
             {
                 run = new Run { Text = piece.Text, FontFamily = new FontFamily(piece.Kind == NativeStreamingMarkdown.InlineKind.Code ? "Cascadia Mono" : "Segoe UI Variable Text") };
@@ -71,5 +72,16 @@ public sealed class NativeMathParagraph : UserControl
             else { _paragraph.Inlines.Add(inline); _runs.Add((piece, inline, run)); }
         }
         while (_runs.Count > pieces.Count) { _paragraph.Inlines.RemoveAt(_runs.Count - 1); _runs.RemoveAt(_runs.Count - 1); }
+        // A fraction may need more depth than a text glyph. Reserve its natural height
+        // after baseline alignment rather than shrinking or clipping the formula image.
+        var formulaHeight = _runs.Select(run => FormulaHeight(run.Inline)).DefaultIfEmpty().Max();
+        _text.LineHeight = Math.Max(FontSize * 26 / 16, formulaHeight + FontSize * 0.2);
     }
+
+    private static double FormulaHeight(Inline inline) => inline switch
+    {
+        InlineUIContainer { Child: NativeFormulaView formula } => formula.RenderedHeight,
+        Span span => span.Inlines.Select(FormulaHeight).DefaultIfEmpty().Max(),
+        _ => 0
+    };
 }

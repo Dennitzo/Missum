@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Missum.App.Controls;
+using Missum.App.Services;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -99,6 +100,8 @@ public sealed partial class NativeAssistantPage
             desired.Add(element);
         }
         var messageSteps = Items(message, "toolSteps");
+        var latestReasoning = messageSteps.LastOrDefault(step => S(step, "tool") == "assistant.reasoning" && S(step, "agentId").Length == 0);
+        FrameworkElement? latestReasoningView = null;
         var subagentReceipts = messageSteps.Where(step => S(step, "tool") == "subagent").ToArray();
         foreach (var step in messageSteps)
         {
@@ -152,7 +155,7 @@ public sealed partial class NativeAssistantPage
             var key = "tool:" + id;
             if (!blocks.TryGetValue(key, out var element))
             {
-                var view = new ToolStepView(_settings.Current.CodingToolStepsExpanded);
+                var view = new ToolStepView(tool != "assistant.reasoning" && _settings.Current.CodingToolStepsExpanded);
                 view.SubagentRequested += async agentId =>
                 {
                     if (_subagents.TryGetValue(agentId, out var child)) await ActivateSubagentTabAsync(child);
@@ -160,9 +163,18 @@ public sealed partial class NativeAssistantPage
                 blocks[key] = element = view;
             }
             ((ToolStepView)element).Update(step, tool == "assistant.reasoning" ? toolNumber : ++toolNumber);
+            if (tool == "assistant.reasoning") element.Visibility = Visibility.Visible;
+            if (latestReasoning.ValueKind == JsonValueKind.Object && S(latestReasoning, "id") == id) latestReasoningView = element;
             desired.Add(element);
         }
         Text("text:" + offset, content[offset..]);
+        if (assistant && latestReasoning.ValueKind == JsonValueKind.Object && S(latestReasoning, "status") is "running" or "pending"
+            && DateTimeOffset.TryParse(S(latestReasoning, "updatedAt"), out var reasoningUpdatedAt))
+        {
+            if (!_thinkingStates.TryGetValue(messageId, out var reasoningState))
+                _thinkingStates[messageId] = reasoningState = new NativeThinkingIndicatorState();
+            reasoningState.ObserveReasoning(messageId, S(latestReasoning, "id"), S(latestReasoning, "detail"), reasoningUpdatedAt);
+        }
         if (assistant && _thinkingStates.TryGetValue(messageId, out var thinkingState))
             thinkingState.ObserveContent(messageId, visibleAnswer.ToString(), DateTimeOffset.UtcNow);
         if (S(message, "error") is { Length: > 0 } error && error != content) Text("error", error);
@@ -194,6 +206,7 @@ public sealed partial class NativeAssistantPage
             var indicator = (ThinkingIndicatorView)thinking;
             indicator.IsMessageActive = true;
             indicator.HasBlockingTool = hasBlockingTool || liveStatus.Length > 0;
+            indicator.UpdateReasoning(S(latestReasoning, "id"), S(latestReasoning, "detail"), latestReasoningView);
             _thinkingIndicators[messageId] = indicator;
             desired.Add(indicator);
             if (!blocks.TryGetValue("streamCursor", out var cursor))

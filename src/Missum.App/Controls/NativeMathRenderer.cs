@@ -6,7 +6,12 @@ using System.Text;
 namespace Missum.App.Controls;
 
 /// <summary>A transparent, two-pixel-per-DIP formula image. Treat Png as read-only.</summary>
-public sealed record NativeMathBitmap(byte[] Png, double Width, double Height, string? Error);
+public sealed record NativeMathBitmap(byte[] Png, double Width, double Height, string? Error)
+{
+    /// <summary>Distance from the bitmap's top to the TeX baseline, in DIPs.</summary>
+    public double BaselineOffset { get; init; }
+    public double Descent => Math.Max(0, Height - BaselineOffset);
+}
 
 /// <summary>Typesets LaTeX without a browser or a network dependency.</summary>
 public static class NativeMathRenderer
@@ -19,7 +24,8 @@ public static class NativeMathRenderer
     private const int MaximumCacheEntries = 64;
     private const int MaximumCacheBytes = 8 * 1024 * 1024;
     private const float PixelScale = 2;
-    private const float Padding = 3;
+    // A one-DIP transparent guard preserves antialiasing without inflating inline spacing.
+    private const float Padding = 1;
     private static readonly object Gate = new();
     private static readonly Dictionary<CacheKey, LinkedListNode<CacheItem>> Cache = [];
     private static readonly LinkedList<CacheItem> Recency = new();
@@ -27,7 +33,7 @@ public static class NativeMathRenderer
         LaTeXSettings.Commands.Select(pair => pair.Key).ToHashSet(StringComparer.Ordinal));
     private static int _cachedBytes;
 
-    public static NativeMathBitmap Render(string latex, bool display, double fontSize = 18, bool dark = true)
+    public static NativeMathBitmap Render(string latex, bool display, double fontSize = 16, bool dark = true)
     {
         if (string.IsNullOrWhiteSpace(latex)) return Failure("Die Formel ist leer.");
         if (latex.Length > MaximumFormulaLength) return Failure("Die Formel ist zu lang für die Vorschau.");
@@ -96,7 +102,10 @@ public static class NativeMathRenderer
             using var snapshot = surface.Snapshot();
             using var encoded = snapshot.Encode(SKEncodedImageFormat.Png, 100);
             if (encoded is null) return Failure("Die Formelvorschau konnte nicht gespeichert werden.");
-            return new NativeMathBitmap(encoded.ToArray(), width / PixelScale, height / PixelScale, null);
+            return new NativeMathBitmap(encoded.ToArray(), width / PixelScale, height / PixelScale, null)
+            {
+                BaselineOffset = Padding - bounds.Top
+            };
         }
         catch (Exception exception) when (exception is not OutOfMemoryException)
         {

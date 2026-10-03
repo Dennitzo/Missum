@@ -2051,8 +2051,7 @@ public sealed partial class MissumAiAssistantService(
                         }
                         break;
                     case RunEventTypes.ReasoningDelta:
-                        if (UsesCodingAgent(localRun.Action)
-                            && item.Data.Deserialize<ReasoningDeltaEvent>(JsonOptions) is { } reasoning)
+                        if (item.Data.Deserialize<ReasoningDeltaEvent>(JsonOptions) is { } reasoning)
                         {
                             var reasoningId = $"reasoning-{item.RunId}-{reasoning.Phase}-{reasoning.Round}";
                             var priorReasoning = assistant.ToolSteps?.FirstOrDefault(step => step.Id == reasoningId);

@@ -56,8 +56,10 @@ public sealed class CodingTextReconcilerTests
             && item.Data.GetProperty("state").GetString() == "generationRetry");
         var revisions = events.Where(item => item.Type == RunEventTypes.TextDelta
             && item.Data.TryGetProperty("replaceFrom", out var value) && value.ValueKind == JsonValueKind.Number).ToArray();
-        // Failed attempts stay private; only the complete successful turn is published.
-        Assert.Empty(revisions);
+        // Already streamed fragments are reconciled against the successful retry.
+        if (diverge)
+            Assert.Contains(revisions, item => item.Data.GetProperty("replaceFrom").GetInt32() == 0);
+        else Assert.Empty(revisions);
         Assert.DoesNotContain(events, item => item.Type == RunEventTypes.ClientToolProposed);
         Assert.Equal(RunState.Completed, (await harness.Repository.GetAsync(runId))!.State);
     }
@@ -128,7 +130,7 @@ public sealed class CodingTextReconcilerTests
         var checkpoint = (await harness.Repository.GetCheckpointAsync(runId))!;
         Assert.NotNull(checkpoint.StreamingTurnStartEventId);
         Assert.Equal(Harness.Previous.Length, checkpoint.VisibleTextLength);
-        Assert.Equal(Harness.Previous,
+        Assert.Equal(Harness.Previous + NativeHandler.FirstText,
             CodingTextReconciler.Project(await harness.Repository.GetEventsAfterAsync(runId, 0)));
         Assert.Equal("read-completed", Assert.Single(checkpoint.Messages, item => item.Role == "tool").ToolCallId);
 
@@ -140,6 +142,34 @@ public sealed class CodingTextReconcilerTests
         Assert.Equal(3, harness.Handler.ChatCalls);
         Assert.Equal(RunState.Completed, (await harness.Repository.GetAsync(runId))!.State);
         Assert.Null(await harness.Repository.GetCheckpointAsync(runId));
+    }
+
+    [Theory]
+    [InlineData(RunMode.General)]
+    [InlineData(RunMode.Coding)]
+    public async Task DurableTextAndReasoningArePublishedWhileTheNativeResponseIsStillOpen(RunMode mode)
+    {
+        using var harness = new Harness(diverge: false, streamReasoning: true);
+        harness.Handler.HoldFirstTail = true;
+        var runId = await harness.CreateRunAsync(mode);
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var processing = harness.Processor.ProcessAsync(runId, stop.Token);
+        try
+        {
+            await harness.Handler.FirstTailRead.Task.WaitAsync(stop.Token);
+            Assert.False(processing.IsCompleted);
+            var live = await harness.Repository.GetEventsAfterAsync(runId, 0);
+            Assert.Equal(Harness.Previous + NativeHandler.FirstText, CodingTextReconciler.Project(live));
+            Assert.Equal(NativeHandler.FirstReasoning, ProjectReasoning(live));
+            Assert.DoesNotContain(live, item => item.Type is RunEventTypes.RunCompleted or "model.turn.metrics");
+            Assert.Equal("running", live.Last(item => item.Type == RunEventTypes.ReasoningDelta).Data.GetProperty("state").GetString());
+        }
+        finally { harness.Handler.ReleaseFirstTail.TrySetResult(); }
+        await processing.WaitAsync(stop.Token);
+        var completed = await harness.Repository.GetEventsAfterAsync(runId, 0);
+        Assert.Equal(Harness.Previous + harness.Handler.FinalText, CodingTextReconciler.Project(completed));
+        Assert.Equal("completed", completed.Last(item => item.Type == RunEventTypes.ReasoningDelta).Data.GetProperty("state").GetString());
+        Assert.Equal(RunState.Completed, (await harness.Repository.GetAsync(runId))!.State);
     }
 
     private sealed class Harness : IDisposable
@@ -168,12 +198,13 @@ public sealed class CodingTextReconcilerTests
             Processor = _services.GetRequiredService<RunProcessor>();
         }
 
-        internal async Task<string> CreateRunAsync()
+        internal async Task<string> CreateRunAsync(RunMode mode = RunMode.Coding)
         {
             const string prompt = "Setze die Projektprüfung fort und fasse das Ergebnis zusammen.";
-            var runId = (await Repository.CreateAsync(new RunRequest(MissumAiProtocol.Version, RunMode.Coding,
+            var runId = (await Repository.CreateAsync(new RunRequest(MissumAiProtocol.Version, mode,
                 [new RunMessage("user", [new ContentPart("text", prompt)])], ClientCapabilities: ["coding"],
-                Limits: new RunLimits(TimeoutSeconds: 0), AllowedServerTools: [], PreferredCodingModelId: NativeHandler.ModelId), null)).Snapshot.RunId;
+                Limits: new RunLimits(TimeoutSeconds: 0), AllowedServerTools: [], PreferredCodingModelId: NativeHandler.ModelId,
+                PreferredGeneralModelId: NativeHandler.ModelId, SessionId: "stream-fixture-" + Guid.NewGuid().ToString("N")), null)).Snapshot.RunId;
             var call = new LmToolCall("read-completed", ClientToolNames.CodingRead, JsonSerializer.SerializeToElement(new { path = "sample.cs" }));
             await Repository.AppendEventAsync(runId, RunEventTypes.TextDelta, new TextDeltaEvent(Previous));
             await Repository.SaveCheckpointAsync(runId, new AgentRunCheckpoint(
@@ -200,7 +231,10 @@ public sealed class CodingTextReconcilerTests
         internal string FinalReasoning { get; } = diverge ? "## Korrigierter Plan\n\nDie Ursache ist nun bestätigt." : FirstReasoning + "\nJetzt testen.";
         internal int ChatCalls { get; private set; }
         internal bool HoldRetry { get; set; }
+        internal bool HoldFirstTail { get; set; }
         internal TaskCompletionSource RetryEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal TaskCompletionSource FirstTailRead { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal TaskCompletionSource ReleaseFirstTail { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
@@ -230,6 +264,17 @@ public sealed class CodingTextReconcilerTests
                 choices = new[] { new { index = 0, delta = new { content = incomplete ? FirstText : FinalText }, finish_reason = incomplete ? null : "stop" } },
                 usage = new { prompt_tokens = 32, completion_tokens = 32 },
             });
+            if (HoldFirstTail)
+            {
+                var tail = "data: " + JsonSerializer.Serialize(new
+                {
+                    choices = new[] { new { delta = new { content = FinalText[FirstText.Length..] }, finish_reason = "stop" } },
+                }) + "\n\ndata: [DONE]\n\n";
+                var content = new StreamContent(new PausedTailStream(reasoningFrames + "data: " + frame + "\n\n", tail,
+                    FirstTailRead, ReleaseFirstTail));
+                content.Headers.ContentType = new("text/event-stream");
+                return new(HttpStatusCode.OK) { Content = content };
+            }
             return new(HttpStatusCode.OK)
             {
                 Content = new StringContent(reasoningFrames + "data: " + frame + "\n\n" + (incomplete ? "" : "data: [DONE]\n\n"), Encoding.UTF8, "text/event-stream"),
@@ -238,5 +283,39 @@ public sealed class CodingTextReconcilerTests
 
         private static HttpResponseMessage Json(object value) => new(HttpStatusCode.OK)
         { Content = new StringContent(JsonSerializer.Serialize(value), Encoding.UTF8, "application/json") };
+    }
+
+    private sealed class PausedTailStream(string prefix, string tail, TaskCompletionSource entered, TaskCompletionSource release) : Stream
+    {
+        private readonly byte[] _prefix = Encoding.UTF8.GetBytes(prefix);
+        private readonly byte[] _tail = Encoding.UTF8.GetBytes(tail);
+        private int _offset;
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => _offset; set => throw new NotSupportedException(); }
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (_offset < _prefix.Length)
+            {
+                var count = Math.Min(buffer.Length, _prefix.Length - _offset);
+                _prefix.AsMemory(_offset, count).CopyTo(buffer);
+                _offset += count;
+                return count;
+            }
+            entered.TrySetResult();
+            await release.Task.WaitAsync(cancellationToken);
+            var tailOffset = _offset - _prefix.Length;
+            var remaining = Math.Min(buffer.Length, _tail.Length - tailOffset);
+            _tail.AsMemory(tailOffset, remaining).CopyTo(buffer);
+            _offset += remaining;
+            return remaining;
+        }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override void Flush() => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 }
