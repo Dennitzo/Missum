@@ -32,4 +32,8 @@ public sealed record AgentRunCheckpoint(
     int InvalidToolTurnCount = 0,
     string? SelectedModelId = null,
     string? SelectedReasoningEffort = null,
-    long AppliedModelSelectionEventId = 0);
+    long AppliedModelSelectionEventId = 0,
+    bool UseStableSubagentToolCatalog = false,
+    bool ResearchManagedByAgent = false,
+    bool EarlySubagentDelegationPending = false,
+    int EarlySubagentDelegationRetryCount = 0);

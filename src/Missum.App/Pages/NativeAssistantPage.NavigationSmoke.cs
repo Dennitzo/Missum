@@ -158,6 +158,7 @@ public sealed partial class NativeAssistantPage
         await VerifySourcesSmokeAsync(original);
         await VerifyChangesReviewSmokeAsync();
         await VerifyScienceViewsSmokeAsync();
+        await VerifySubagentSmokeAsync(original);
         ApplyEvent("state.snapshot", original);
         RenderMessagesNow();
         return visits;

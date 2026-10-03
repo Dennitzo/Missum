@@ -55,6 +55,7 @@ public sealed class CapabilityService
             "web.search", "web.fetch", "web.deepResearch", "media.inspect", "media.analyze",
             "image.generate", "speech.synthesize", "math.evaluate", "context.embed", "context.retrieve",
             "coding.updatePlan",
+            "subagent.spawn", "subagent.wait",
         ],
         [
             ClientToolNames.CodingList,

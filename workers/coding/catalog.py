@@ -21,6 +21,7 @@ import threading
 import time
 import urllib.request
 import urllib.error
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from session_cache import NativeSessionCache
 
@@ -92,7 +93,8 @@ def model_metadata(path, allow_metadata_only=False):
             elif key.endswith((".context_length", ".pooling_type", ".block_count", ".embedding_length",
                                ".attention.head_count", ".attention.head_count_kv", ".attention.key_length",
                                ".attention.value_length", ".attention.indexer.key_length", ".ssm.state_size", ".ssm.inner_size",
-                               ".ssm.group_count", ".ssm.conv_kernel")) and kind == 4:
+                               ".ssm.group_count", ".ssm.conv_kernel", ".full_attention_interval",
+                               ".nextn_predict_layers")) and kind == 4:
                 metadata[key] = struct.unpack("<I", read_exact(stream, 4))[0]
             else:
                 skip_value(stream, kind)
@@ -223,8 +225,10 @@ def discover_models(root):
             found.append({"id": f"coding/{safe_name}~{digest}", "path": path, "role": "general", "context": context,
                           "contextPolicy": "max-fit", "reasoning": reasoning})
             projector = matching_projector(path, root)
-            if projector and architecture.startswith("deepseek"):
-                # Keep DeepSeek's text/tools and vision in the same native instance.
+            if projector:
+                # A matching projector makes this exact text/tool model vision
+                # capable. Keep media requests on the same agent GPU/instance
+                # instead of switching its weights to a second model role.
                 found[-1]["projector"] = projector
             if projector:
                 found.append({"id": f"vision/{safe_name}~{digest}", "path": path, "role": "vision",
@@ -327,8 +331,11 @@ def model_runtime_policy(model, placement=None, *, split_mode="layer", fit_targe
 
 
 def write_presets(root, target, placements=None, managed_gpu=False, fit_target="2048", gpu_layers="auto",
-                  resolved_policies=None):
+                  resolved_policies=None, agent_instances=False):
     models = discover_models(root)
+    if agent_instances:
+        models += [dict(model, id=model["id"] + "@subagent", baseModel=model["id"], instance="subagent")
+                   for model in list(models) if model["role"] != "embedding"]
     session_directory = Path(target).resolve().parent / "session-cache"
     session_directory.mkdir(parents=True, exist_ok=True)
     # Session persistence addresses slot 0. Omitting this internal limit lets
@@ -594,10 +601,31 @@ def choose_single_gpu(model, devices, reserve_mib=2048):
     # This is only admission to a real full-context allocation trial, not a KV
     # memory estimate. Unknown architectures are validated by llama itself.
     minimum = model_file_bytes(model) + int(reserve_mib) * 1024 ** 2
-    candidates = [gpu for gpu in devices if gpu["free"] >= minimum]
-    prefer_one = "qwen3.8-27b" in model["id"].lower()
-    candidates.sort(key=lambda gpu: (prefer_one and gpu["index"] == 1, gpu["free"], gpu["index"] == 1), reverse=True)
+    candidates = [gpu for gpu in devices if gpu["index"] == 0 and gpu["free"] >= minimum]
+    # The primary agent always owns physical GPU0 when a single device can
+    # accommodate it. Secondary placement is explicit and never model-specific.
+    candidates.sort(key=lambda gpu: (gpu["index"] == 0, gpu["free"]), reverse=True)
     return candidates[0]["device"] if candidates else None
+
+
+def estimate_replica_bytes(model, context):
+    """Admission estimate from GGUF dimensions; native allocation is final authority.
+
+    Hybrid attention intervals and prediction-only layers are explicit GGUF
+    metadata, so a full-context replica does not reserve dense KV for recurrent
+    layers. This policy works for future models carrying the same dimensions.
+    """
+    metadata = dict(model_metadata(Path(model["path"]), allow_metadata_only=True) or {})
+    architecture = metadata.get("general.architecture", "")
+    layers = metadata.get(architecture + ".block_count")
+    interval = metadata.get(architecture + ".full_attention_interval")
+    if isinstance(layers, int) and isinstance(interval, int) and interval > 1:
+        prediction = metadata.get(architecture + ".nextn_predict_layers", 0)
+        metadata[architecture + ".block_count"] = max(1, (layers - prediction) // interval)
+    kv = estimate_q8_session_bytes(metadata, context)
+    # Additional runtime buffers plus per-device reserve cover CUDA graphs and
+    # batching. Unknown layouts still undergo an isolated allocation trial.
+    return int(model_file_bytes(model) * 1.05) + (kv or 0) + 512 * 1024**2
 
 
 def estimate_q8_session_bytes(metadata, tokens):
@@ -608,7 +636,7 @@ def estimate_q8_session_bytes(metadata, tokens):
     Unknown/variable dimensions use the cache manager's explicit fallback.
     """
     architecture = metadata.get("general.architecture", "")
-    if architecture not in ("llama", "deepseek4") and not architecture.startswith("qwen"):
+    if not architecture:
         return None
     def number(suffix):
         value = metadata.get(architecture + "." + suffix)
@@ -657,6 +685,8 @@ class GpuLoadManager:
         self.fit_target, self.gpu_layers = fit_target, gpu_layers
         self.placements = {}
         self.policies = {}
+        self.allocations = {}
+        self.agent_failures = {}
         self.router_allreduce = os.environ.get("GGML_CUDA_ALLREDUCE", "").strip().lower() or None
         self.router_cuda_graphs_disabled = "GGML_CUDA_DISABLE_GRAPHS" in os.environ
         self.lock = threading.RLock()
@@ -667,7 +697,7 @@ class GpuLoadManager:
     def session_model(self, model_id):
         # This lookup is read-only: fingerprint checks do not rewrite/reload
         # active presets on each inference round.
-        base_id = model_id
+        base_id = model_id.removesuffix("@subagent")
         model = next((item for item in discover_models(self.root) if item["id"] == base_id), None)
         if model is None:
             raise ValueError("Model is not in the local catalog")
@@ -682,6 +712,8 @@ class GpuLoadManager:
         path = Path(model["path"])
         shard = SHARD.match(path.name)
         paths = sorted(path.parent.glob(shard.group(1) + "-*.gguf")) if shard else [path]
+        if model.get("projector"):
+            paths += [Path(model["projector"])]
         if self.binary:
             paths += [self.binary] + sorted(self.binary.parent.glob("*.dll"))
         identity = [(str(item.resolve()), item.stat().st_size, item.stat().st_mtime_ns) for item in paths]
@@ -710,11 +742,15 @@ class GpuLoadManager:
         with self.lock:
             return self.sessions.save(model, key, prompt_tokens)
 
+    def session_fork(self, source_model, source_key, model, key):
+        with self.lock:
+            return self.sessions.fork(source_model, source_key, model, key)
+
     def refresh(self):
         with self.lock:
             return write_presets(self.root, self.preset, self.placements, managed_gpu=True,
                                  fit_target=self.fit_target, gpu_layers=self.gpu_layers,
-                                 resolved_policies=self.policies)
+                                 resolved_policies=self.policies, agent_instances=True)
 
     def router(self, path, body=None, timeout=15):
         request = urllib.request.Request(f"http://127.0.0.1:{self.port}/{path}",
@@ -783,6 +819,101 @@ class GpuLoadManager:
             self.record(model["id"], device, "profile-ignored", reason)
         return model_runtime_policy(model, device, fit_target=self.fit_target, gpu_layers=self.gpu_layers)
 
+    @staticmethod
+    def _argument(item, name):
+        arguments = item.get("status", {}).get("args", [])
+        try:
+            return arguments[arguments.index(name) + 1]
+        except (ValueError, IndexError):
+            return None
+
+    def agent_status(self, model_id, context_length=None):
+        with self.lock:
+            model = self.session_model(model_id)
+            base = model["id"]
+            replica = base + "@subagent"
+            result = dict(allowed=False, reason=None, modelId=base, instanceId=replica, gpuIndex=1)
+            if model["role"] == "embedding":
+                return dict(result, reason="subagent.model_not_language")
+            current = self.router("v1/models")["data"]
+            active = [item for item in current if item.get("status", {}).get("value") in ("loaded", "loading", "sleeping")]
+            parent = next((item for item in active if item["id"] == base), None)
+            if parent is None:
+                return dict(result, reason="subagent.primary_not_loaded")
+            devices = gpu_inventory()
+            primary_gpu = next((item for item in devices if item["index"] == 0), None)
+            secondary_gpu = next((item for item in devices if item["index"] == 1), None)
+            if not primary_gpu or not secondary_gpu:
+                return dict(result, reason="subagent.second_gpu_unavailable")
+            parent_device = self._argument(parent, "--device") or self.placements.get(base)
+            parent_split = self._argument(parent, "--split-mode") or self.policies.get(base, {}).get("split")
+            if parent_split != "none" or parent_device != primary_gpu["device"]:
+                return dict(result, reason="subagent.primary_uses_multiple_gpus" if parent_split != "none"
+                            or parent_device and "," in parent_device else "subagent.primary_not_gpu0")
+            if any(item["id"] not in (base, replica) for item in active):
+                return dict(result, reason="subagent.other_model_resident")
+            if base in self.agent_failures:
+                return dict(result, reason=self.agent_failures[base])
+            existing = next((item for item in active if item["id"] == replica), None)
+            props = self.router("props?model=" + urllib.parse.quote(base, safe=""))
+            context = props.get("default_generation_settings", {}).get("n_ctx")
+            if type(context) is not int or context < 2048:
+                return dict(result, reason="subagent.context_unavailable")
+            if context_length is not None and context_length > context:
+                return dict(result, reason="subagent.context_too_large")
+            if existing and existing.get("status", {}).get("value") in ("loaded", "sleeping"):
+                child_device = self._argument(existing, "--device") or self.placements.get(replica)
+                if child_device and child_device != secondary_gpu["device"]:
+                    return dict(result, reason="subagent.secondary_not_gpu1")
+                child_props = self.router("props?model=" + urllib.parse.quote(replica, safe=""))
+                child_context = child_props.get("default_generation_settings", {}).get("n_ctx")
+                if type(child_context) is not int or child_context < 2048:
+                    return dict(result, reason="subagent.context_unavailable")
+                if child_context != context:
+                    return dict(result, reason="subagent.context_mismatch", contextLength=context,
+                                replicaContextLength=child_context)
+                return dict(result, allowed=True, contextLength=context)
+            required = self.allocations.get(base) or estimate_replica_bytes(model, context)
+            required += int(self.fit_target) * 1024**2
+            result.update(contextLength=context, requiredBytes=required, freeBytes=secondary_gpu["free"])
+            if secondary_gpu["free"] < required:
+                return dict(result, reason="subagent.vram_insufficient")
+            return dict(result, allowed=True)
+
+    def agent_prepare(self, model_id, source_key=None, key=None, prefill=None):
+        with self.lock:
+            availability = self.agent_status(model_id)
+            if not availability["allowed"]:
+                return availability
+            base, replica = availability["modelId"], availability["instanceId"]
+            self.load(replica)
+            cache = (self.sessions.fork(base, source_key, replica, key, prefill)
+                     if source_key and key else self.sessions.prepare(replica, key))
+            return dict(availability, cacheStatus=cache["status"], cachedTokens=cache.get("restoredTokens", 0),
+                **{name: cache[name] for name in ("sourceCachedTokens", "preparationSampledTokens",
+                    "evaluatedGeneratedTokens", "preparedPromptTokens", "detail") if name in cache})
+
+    def _preload_subagent(self, model_id):
+        """Finish an ordinary primary load with its eligible GPU1 replica.
+
+        Admission failures do not invalidate a usable primary. A native replica
+        allocation failure is sticky until the primary is actually reloaded;
+        ordinary free-memory rejection is rechecked on the next primary reuse.
+        """
+        replica = model_id + "@subagent"
+        try:
+            availability = self.agent_status(model_id)
+            if not availability["allowed"]:
+                return dict(availability, loaded=False, reused=False)
+            result = self.load(replica)
+            return dict(availability, loaded=True, reused=result.get("reused", False))
+        except (OSError, RuntimeError, ValueError) as error:
+            reason = self.agent_failures.get(model_id) or "subagent.runtime_load_failed"
+            self.agent_failures[model_id] = reason
+            self.record(replica, self.placements.get(replica), "preload-failed", str(error)[-4000:])
+            return dict(allowed=False, reason=reason, modelId=model_id, instanceId=replica,
+                        gpuIndex=1, loaded=False, reused=False)
+
     def load(self, model_id):
         with self.lock:
             models = self.refresh()
@@ -791,15 +922,46 @@ class GpuLoadManager:
                 raise ValueError("Model is not in the local catalog")
             current = self.router("v1/models")["data"]
             active = [item for item in current if item.get("status", {}).get("value") in ("loaded", "loading", "sleeping")]
-            if any(item["id"] != model_id for item in active):
+            replica = model.get("instance") == "subagent"
+            base = model.get("baseModel", model_id)
+            if any(item["id"] not in (base, base + "@subagent") for item in active):
                 raise ValueError("Unload the previous model before selecting GPU placement")
-            if any(item["id"] == model_id for item in active):
-                return {"success": True, "reused": True}
-            device = choose_single_gpu(model, gpu_inventory(), self.fit_target)
+            existing = next((item for item in active if item["id"] == model_id), None)
+            if existing:
+                # Never rewrite the placement of an instance already loading.
+                # The pair is ready only after the parent has its actual n_ctx.
+                deadline = time.monotonic() + 280
+                while existing.get("status", {}).get("value") == "loading":
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("Native model load exceeded its time limit")
+                    time.sleep(0.25)
+                    existing = next((item for item in self.router("v1/models")["data"]
+                                     if item["id"] == model_id), {})
+                status = existing.get("status", {})
+                if status.get("value") not in ("loaded", "sleeping") or status.get("failed"):
+                    raise RuntimeError("Native model load failed; see gpu-placement.jsonl and llama.stderr.log")
+                result = {"success": True, "reused": True}
+                if not replica:
+                    result["subagent"] = self._preload_subagent(base)
+                return result
+            devices = gpu_inventory()
+            if replica:
+                availability = self.agent_status(base)
+                if not availability["allowed"]:
+                    raise ValueError(availability["reason"])
+                device = next(item["device"] for item in devices if item["index"] == 1)
+            else:
+                device = choose_single_gpu(model, devices, self.fit_target)
+                self.agent_failures.pop(base, None)
             deadline = time.monotonic() + 280
             forced_policy = None
             for attempt in range(3):
                 policy = forced_policy or self.resolve_load_policy(model, device)
+                if replica:
+                    # Both instances use the same physical KV dimensions and
+                    # template. A child never spills onto its parent's device.
+                    props = self.router("props?model=" + urllib.parse.quote(base, safe=""))
+                    policy = dict(policy, context=props["default_generation_settings"]["n_ctx"])
                 if attempt == 0:
                     self.sessions.invalidate(model_id)
                 self.placements[model_id] = device
@@ -814,8 +976,15 @@ class GpuLoadManager:
                     item = next(item for item in self.router("v1/models")["data"] if item["id"] == model_id)
                     status = item.get("status", {})
                     if status.get("value") in ("loaded", "sleeping") and not status.get("failed"):
+                        after = next((item for item in gpu_inventory() if item["device"] == device), None)
+                        before = next((item for item in devices if item["device"] == device), None)
+                        if after and before and before["free"] > after["free"]:
+                            self.allocations[model_id] = before["free"] - after["free"]
                         self.record(model_id, device, "loaded")
-                        return {"success": True, "device": device, "fallback": attempt > 0}
+                        result = {"success": True, "device": device, "fallback": attempt > 0}
+                        if not replica:
+                            result["subagent"] = self._preload_subagent(base)
+                        return result
                     if status.get("failed") or status.get("value") == "failed":
                         break
                     time.sleep(0.25)
@@ -833,6 +1002,9 @@ class GpuLoadManager:
                             failure += stream.read(2 * 1024 * 1024).decode("utf-8", errors="replace")
                 memory_failure = re.search(r"out of memory|cudaMalloc.*failed|failed to allocate|unable to allocate|CUDA error.*memory", failure, re.I)
                 self.record(model_id, device, "failed", failure[-4000:])
+                if replica:
+                    self.agent_failures[base] = "subagent.vram_allocation_failed" if memory_failure else "subagent.runtime_load_failed"
+                    raise RuntimeError(self.agent_failures[base])
                 unsupported_tensor = re.search(r"(?:LLAMA_)?SPLIT_MODE_TENSOR[^\n]*(?:not implemented|not supported|requires)|"
                                                r"tensor (?:parallelism|split mode)[^\n]*(?:not implemented|not supported)", failure, re.I)
                 if policy["split"] == "tensor" and (memory_failure or unsupported_tensor):
@@ -858,14 +1030,23 @@ def start_gpu_control(manager, host, port):
         def do_POST(self):
             try:
                 length = int(self.headers.get("Content-Length", "0"))
-                if self.path not in ("/models/load", "/sessions/prepare", "/sessions/save") or not 0 < length <= 8192:
+                if self.path not in ("/models/load", "/sessions/prepare", "/sessions/save", "/sessions/fork",
+                                     "/agents/status", "/agents/prepare") or not 0 < length <= (
+                                         16 * 1024**2 if self.path == "/agents/prepare" else 8192):
                     raise ValueError("Invalid GPU control request")
                 body = json.loads(self.rfile.read(length))
                 if self.path.startswith("/sessions/"):
                     if self.path == "/sessions/prepare":
                         result = manager.session_prepare(body["model"], body.get("sessionKey"))
-                    else:
+                    elif self.path == "/sessions/save":
                         result = manager.session_save(body["model"], body.get("sessionKey"), body.get("promptTokens"))
+                    else:
+                        result = manager.session_fork(body["sourceModel"], body["sourceSessionKey"], body["model"], body["sessionKey"])
+                elif self.path == "/agents/status":
+                    result = manager.agent_status(body["model"], body.get("contextLength"))
+                elif self.path == "/agents/prepare":
+                    result = manager.agent_prepare(body["model"], body.get("parentSessionCacheKey"),
+                        body.get("childSessionCacheKey"), body.get("prefill"))
                 else:
                     result = manager.load(body["model"])
                 status = 200

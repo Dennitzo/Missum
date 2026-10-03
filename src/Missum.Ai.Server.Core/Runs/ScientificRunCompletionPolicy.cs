@@ -26,7 +26,8 @@ internal static class ScientificRunCompletionPolicy
                 || part.Text?.Contains("CLAUDE SCIENCE – WISSENSCHAFTLICHE DARSTELLUNG", StringComparison.Ordinal) == true));
 
     internal static ScientificCompletionAssessment Assess(RunRequest request, IReadOnlyList<LmChatMessage> messages,
-        IReadOnlyList<AgentToolSpec> tools)
+        IReadOnlyList<AgentToolSpec> tools,
+        IReadOnlyDictionary<string, IReadOnlyList<LmChatMessage>>? delegatedEvidence = null)
     {
         if (!Applies(request)) return new(true, false, "", "", [], 0);
         var projectId = request.ResearchOptions?.ProjectId;
@@ -36,15 +37,14 @@ internal static class ScientificRunCompletionPolicy
         var calls = new Dictionary<string, (LmToolCall Call, long Epoch)>(StringComparer.Ordinal);
         long epoch = 0;
         string? publication = null;
-        var successfulPython = false;
-        var successfulExperimentRecordId = "";
-        IReadOnlyList<(DateTimeOffset Start, DateTimeOffset End)> successfulExperimentWindows = [];
+        var executions = new List<PythonExecutionEvidence>();
+        var unfinishedWrites = new HashSet<string>(StringComparer.Ordinal);
         var latestPythonError = "";
         var lastMutation = "";
         JsonElement? verification = null;
         long verifiedEpoch = -1;
         var verificationFailure = "";
-        foreach (var message in messages)
+        foreach (var message in WithDelegatedEvidence(messages, delegatedEvidence))
         {
             if (message.Role == "assistant" && message.Content is { } content
                 && TryLatestPublication(content, out var next))
@@ -55,12 +55,7 @@ internal static class ScientificRunCompletionPolicy
             {
                 if (IsMutation(call.Name) && (SameProject(call.Arguments, projectId) || call.Name == "document.create")) epoch++;
                 if (call.Name == "research.code.write" && SameProject(call.Arguments, projectId))
-                {
-                    successfulPython = false;
-                    successfulExperimentRecordId = "";
-                    successfulExperimentWindows = [];
-                    latestPythonError = "Der zuletzt geschriebene Forschungsdateistand wurde noch nicht erfolgreich mit Python ausgeführt. Führe research.code.execute aus und kontrolliere Exitcode und Abbildungen.";
-                }
+                    unfinishedWrites.Add(call.Id);
                 calls[call.Id] = (call, epoch);
             }
             if (message.Role != "tool" || message.ToolCallId is null || !calls.TryGetValue(message.ToolCallId, out var pending)
@@ -68,6 +63,24 @@ internal static class ScientificRunCompletionPolicy
             if (!TryReadReceipt(message.Content, out var receipt, out var successful, out var failure)) continue;
             if (IsMutation(pending.Call.Name))
                 lastMutation = pending.Call.Name + ":" + Hash(pending.Call.Arguments.GetRawText()) + ":" + successful + ":" + failure;
+            if (pending.Call.Name == "research.code.write")
+            {
+                unfinishedWrites.Remove(pending.Call.Id);
+                if (successful)
+                    executions.RemoveAll(execution => !PreservesExecution(receipt, execution));
+                else
+                {
+                    // A rejected write need not have changed any dependency.
+                    // Keep only measured candidates provisionally: the write
+                    // already advanced epoch, so a fresh real verification must
+                    // recheck every frozen input/current output before admission.
+                    // Legacy receipts cannot prove those unchanged dependencies.
+                    executions.RemoveAll(static execution => execution.RunId is null
+                        || execution.InputHashes is null || execution.OutputHashes is null);
+                }
+                if (executions.Count == 0)
+                    latestPythonError = "Der zuletzt geschriebene Forschungsdateistand wurde noch nicht erfolgreich mit Python ausgeführt. Führe research.code.execute aus und kontrolliere Exitcode und Abbildungen.";
+            }
             if (pending.Call.Name is "research.code.execute" or "research.code.test" or "research.code.benchmark"
                 && Path.GetFileName(Text(pending.Call.Arguments, "executable").Replace('\\', '/')).StartsWith("python", StringComparison.OrdinalIgnoreCase))
             {
@@ -76,10 +89,27 @@ internal static class ScientificRunCompletionPolicy
                 var experimentId = Text(pending.Call.Arguments, "experimentId");
                 var executed = Path.GetFileName(executable).StartsWith("python", StringComparison.OrdinalIgnoreCase)
                     && experimentId.Length > 0 && successful && ProcessSucceeded(receipt);
-                successfulPython = executed;
-                successfulExperimentRecordId = executed ? "experiment-" + Hash(projectId + "\nexperiment\n" + experimentId)[..24] : "";
-                successfulExperimentWindows = executed ? ProcessWindows(receipt) : [];
-                latestPythonError = executed ? "" : failure.Length > 0 ? failure : "Die letzte Python-Ausführung ist nicht erfolgreich belegt.";
+                var recordId = "experiment-" + Hash(projectId + "\nexperiment\n" + experimentId)[..24];
+                if (TryMeasuredExecutions(receipt, recordId, out var measured))
+                {
+                    // A separate inspection process must not replace the actual
+                    // figure-producing process. Rerunning the same experiment
+                    // still supersedes its earlier successful/failed attempt.
+                    executions.RemoveAll(execution => execution.RecordId == recordId);
+                    if (executed) executions.AddRange(measured);
+                }
+                else
+                {
+                    // Older receipts have no dependency/output measurement.
+                    // Preserve their original conservative latest-only policy.
+                    // Unknown independent helpers cannot establish new measured
+                    // work, but a fresh verifier can still prove that an earlier
+                    // measured run's complete inputs/outputs remain unchanged.
+                    executions.RemoveAll(execution => execution.RunId is null || execution.RecordId == recordId);
+                    if (executed && !HasMeasuredProvenance(receipt))
+                        executions.Add(new(recordId, null, null, null, null, null, ProcessWindows(receipt)));
+                }
+                latestPythonError = executions.Count > 0 ? "" : failure.Length > 0 ? failure : "Die letzte Python-Ausführung ist nicht erfolgreich belegt.";
             }
             if (pending.Call.Name != VerifyTool) continue;
             verification = receipt;
@@ -87,6 +117,8 @@ internal static class ScientificRunCompletionPolicy
             verificationFailure = successful ? "" : failure.Length > 0 ? failure : "Die Prüfung der Forschungsartefakte ist noch nicht erfolgreich.";
         }
 
+        if (unfinishedWrites.Count > 0) executions.Clear();
+        var successfulPython = executions.Count > 0;
         var missing = new List<string>();
         if (projectId.Length == 0) missing.Add("Die eindeutige Forschungsprojekt-ID fehlt.");
         if (!ValidPublication(publication)) missing.Add("Ein vollständiges fachliches Publikationsmanuskript mit Titel, Kurzfassung, Forschungsfrage, Voraussetzungen, Herleitungen, Ergebnissen, Diskussion/Grenzen und Literatur fehlt. Markiere die vollständige aktuelle Fassung mit MISSUM_PUBLICATION_BEGIN/END.");
@@ -95,8 +127,7 @@ internal static class ScientificRunCompletionPolicy
         var verifierAvailable = tools.Any(static tool => tool.Name == VerifyTool);
         if (!verifierAvailable) missing.Add("Das Werkzeug research.deliverables.verify ist im verbundenen Client noch nicht verfügbar. Der Lauf bleibt offen; die PDF- und Simulationsprüfung darf nicht durch eine Behauptung ersetzt werden.");
         var currentVerification = verification is { } verified && verifiedEpoch == epoch;
-        var ready = currentVerification && verificationFailure.Length == 0 && Ready(verification!.Value, projectId, successfulExperimentRecordId,
-            successfulExperimentWindows);
+        var ready = currentVerification && verificationFailure.Length == 0 && Ready(verification!.Value, projectId, executions);
         if (!ready && currentVerification)
         {
             missing.Add(verificationFailure.Length > 0 ? verificationFailure : VerificationDiagnosis(verification!.Value));
@@ -107,9 +138,53 @@ internal static class ScientificRunCompletionPolicy
         var needsVerification = verifierAvailable && projectId.Length > 0 && ValidPublication(publication) && successfulPython
             && !currentVerification;
         var verificationSignature = verification is { } value ? VerificationSignature(value) : "unverified";
-        var fingerprint = Hash((publication ?? "") + "\n" + lastMutation + "\n" + successfulExperimentRecordId + "\n" + verificationSignature);
+        var executionSignature = string.Join("|", executions.Select(static execution => execution.RecordId + ":" + execution.RunId + ":" + execution.ScriptSha256));
+        var fingerprint = Hash((publication ?? "") + "\n" + lastMutation + "\n" + executionSignature + "\n" + verificationSignature);
         var repeats = RecoveryAttempts(messages, fingerprint);
         return new(missing.Count == 0 && ready, needsVerification, projectId, fingerprint, missing, repeats);
+    }
+
+    private static IEnumerable<LmChatMessage> WithDelegatedEvidence(IReadOnlyList<LmChatMessage> messages,
+        IReadOnlyDictionary<string, IReadOnlyList<LmChatMessage>>? delegatedEvidence)
+    {
+        var calls = new Dictionary<string, LmToolCall>(StringComparer.Ordinal);
+        var ownedChildren = new HashSet<string>(StringComparer.Ordinal);
+        var imported = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var message in messages)
+        {
+            yield return message;
+            if (delegatedEvidence is null || delegatedEvidence.Count == 0) continue;
+            foreach (var call in message.ToolCalls ?? []) calls[call.Id] = call;
+            IReadOnlyList<string> referencedChildren = [];
+            if (message.Role == "tool" && message.ToolCallId is { } callId && calls.TryGetValue(callId, out var pending))
+            {
+                if (pending.Name == SubagentToolNames.Spawn && TryJson(message.Content, out var spawn)
+                    && Text(spawn, "status") == "started" && Text(spawn, "runId") is { Length: > 0 } spawnedId)
+                    ownedChildren.Add(spawnedId);
+                else if (pending.Name == SubagentToolNames.Wait && TryJson(message.Content, out var receipt)
+                    && Text(receipt, "status") == "completed" && Text(receipt, "runId") is { Length: > 0 } childId
+                    && Text(pending.Arguments, "runId") == childId)
+                    referencedChildren = [childId];
+            }
+            else if (message.Role == "user" && message.Content?.StartsWith(SubagentToolNames.ResultContextMarker, StringComparison.Ordinal) == true)
+            {
+                var arrayStart = message.Content.IndexOf('[', SubagentToolNames.ResultContextMarker.Length);
+                if (arrayStart >= 0 && TryJson(message.Content[arrayStart..], out var results) && results.ValueKind == JsonValueKind.Array)
+                    referencedChildren = results.EnumerateArray().Where(static result => Text(result, "status") == "completed")
+                        .Select(static result => Text(result, "runId")).Where(ownedChildren.Contains).ToArray();
+            }
+            foreach (var childId in referencedChildren)
+                if (delegatedEvidence.TryGetValue(childId, out var evidence) && imported.Add(childId))
+                    foreach (var receipt in evidence) yield return receipt;
+        }
+    }
+
+    private static bool TryJson(string? content, out JsonElement value)
+    {
+        value = default;
+        if (string.IsNullOrWhiteSpace(content)) return false;
+        try { value = JsonSerializer.Deserialize<JsonElement>(content); return value.ValueKind is JsonValueKind.Object or JsonValueKind.Array; }
+        catch (JsonException) { return false; }
     }
 
     internal static void UpsertRecoveryPrompt(List<LmChatMessage> messages, ScientificCompletionAssessment assessment)
@@ -174,6 +249,7 @@ internal static class ScientificRunCompletionPolicy
             + "Die gespeicherte Arbeit wird bis zum tatsächlichen Abschluss oder manuellen Stop fortgesetzt.";
     }
 
+    internal static bool IsEvidenceTool(string tool) => IsMutation(tool) || tool == VerifyTool;
     private static bool IsMutation(string tool) => tool is "research.code.write" or "research.code.execute" or "research.code.test" or "research.code.benchmark" or "document.create";
     private static bool SameProject(JsonElement arguments, string projectId) => Text(arguments, "projectId") == projectId;
 
@@ -305,17 +381,107 @@ internal static class ScientificRunCompletionPolicy
             && resultExit == 0 && !Boolean(result, "timedOut");
     }
 
-    private static bool Ready(JsonElement result, string projectId, string experimentRecordId,
-        IReadOnlyList<(DateTimeOffset Start, DateTimeOffset End)> experimentWindows) => Boolean(result, "success") && Text(result, "projectId") == projectId
+    private sealed record PythonExecutionEvidence(string RecordId, string? RunId, string? ScriptPath, string? ScriptSha256,
+        Dictionary<string, string>? InputHashes, Dictionary<string, string>? OutputHashes,
+        List<(DateTimeOffset Start, DateTimeOffset End)> Windows);
+
+    private static bool TryMeasuredExecutions(JsonElement receipt, string recordId, out List<PythonExecutionEvidence> executions)
+    {
+        executions = [];
+        if (Text(receipt, "experimentRecordId") != recordId
+            || !receipt.TryGetProperty("runs", out var runs) || runs.ValueKind != JsonValueKind.Array || runs.GetArrayLength() == 0)
+            return false;
+        foreach (var run in runs.EnumerateArray())
+        {
+            var id = Text(run, "runId");
+            var script = CanonicalProjectPath(Text(run, "executedScriptPath"));
+            var sha256 = Text(run, "scriptSha256");
+            if (id.Length == 0 || script.Length == 0 || !ValidHash(sha256)
+                || Date(run, "startedAt") is not { } start || Date(run, "completedAt") is not { } end || end < start
+                || !TryHashMap(run, "inputHashes", out var inputs) || !inputs.TryGetValue(script, out var frozenScript)
+                || !string.Equals(frozenScript, sha256, StringComparison.OrdinalIgnoreCase)
+                || !TryHashMap(run, "outputHashes", out var outputs))
+            { executions.Clear(); return false; }
+            executions.Add(new(recordId, id, script, sha256, inputs, outputs, [(start, end)]));
+        }
+        return true;
+    }
+
+    private static bool HasMeasuredProvenance(JsonElement receipt) => receipt.TryGetProperty("experimentRecordId", out _)
+        || receipt.TryGetProperty("runs", out var runs) && runs.ValueKind == JsonValueKind.Array
+        && runs.EnumerateArray().Any(static run => run.ValueKind == JsonValueKind.Object
+            && (run.TryGetProperty("inputHashes", out _) || run.TryGetProperty("outputHashes", out _)
+                || run.TryGetProperty("executedScriptPath", out _)));
+
+    private static bool PreservesExecution(JsonElement writeReceipt, PythonExecutionEvidence execution)
+    {
+        if (execution.InputHashes is null || execution.OutputHashes is null) return false;
+        var path = CanonicalProjectPath(Text(writeReceipt, "root").TrimEnd('/') + "/" + Text(writeReceipt, "file"));
+        var hash = Text(writeReceipt, "afterSha256");
+        if (path.Length == 0 || !ValidHash(hash) || !writeReceipt.TryGetProperty("isNewFile", out var created)
+            || created.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) return false;
+        if (execution.OutputHashes.TryGetValue(path, out var output))
+            return string.Equals(output, hash, StringComparison.OrdinalIgnoreCase);
+        if (execution.InputHashes.TryGetValue(path, out var input))
+            return string.Equals(input, hash, StringComparison.OrdinalIgnoreCase);
+        // The measured input set and changed outputs did not include this file.
+        // This requires complete, untruncated manifests; the fresh verifier
+        // rechecks every frozen input and current output before admission.
+        return true;
+    }
+
+    private static bool TryHashMap(JsonElement owner, string name, out Dictionary<string, string> hashes)
+    {
+        hashes = new(StringComparer.OrdinalIgnoreCase);
+        if (owner.ValueKind != JsonValueKind.Object || !owner.TryGetProperty(name, out var map) || map.ValueKind != JsonValueKind.Object)
+            return false;
+        foreach (var property in map.EnumerateObject())
+        {
+            var path = CanonicalProjectPath(property.Name);
+            if (hashes.Count >= 4096 || path.Length == 0 || property.Value.ValueKind != JsonValueKind.String || property.Value.GetString() is not { } hash
+                || !ValidHash(hash) || !hashes.TryAdd(path, hash)) return false;
+        }
+        return true;
+    }
+
+    private static string CanonicalProjectPath(string path)
+    {
+        path = path.Replace('\\', '/');
+        if (path.Length == 0 || path.StartsWith('/') || path.Contains(':')
+            || path.Split('/').Any(static segment => segment.Length == 0 || segment is "." or "..")) return "";
+        return path;
+    }
+
+    private static bool MatchesArtifact(JsonElement artifact, PythonExecutionEvidence execution)
+    {
+        if (Text(artifact, "experimentRecordId") != execution.RecordId || Text(artifact, "scriptPath").Length == 0
+            || !ValidHash(Text(artifact, "scriptSha256"))) return false;
+        if (execution.RunId is not null)
+        {
+            if (Text(artifact, "runId") != execution.RunId
+                || CanonicalProjectPath(Text(artifact, "executedScriptPath")) != execution.ScriptPath
+                || !string.Equals(Text(artifact, "scriptSha256"), execution.ScriptSha256, StringComparison.OrdinalIgnoreCase)
+                || !MatchesHashMap(artifact, "inputHashes", execution.InputHashes!)
+                || !MatchesHashMap(artifact, "outputHashes", execution.OutputHashes!)
+                || !execution.OutputHashes!.TryGetValue(CanonicalProjectPath(Text(artifact, "artifactPath")), out var output)
+                || !string.Equals(Text(artifact, "sha256"), output, StringComparison.OrdinalIgnoreCase)) return false;
+        }
+        return execution.Windows.Count == 0 || Date(artifact, "lastModifiedAt") is { } modified
+            && execution.Windows.Any(window => modified >= window.Start.AddSeconds(-2) && modified <= window.End.AddSeconds(2));
+    }
+
+    private static bool MatchesHashMap(JsonElement owner, string name, Dictionary<string, string> expected) =>
+        TryHashMap(owner, name, out var hashes) && hashes.Count == expected.Count
+        && hashes.All(pair => expected.TryGetValue(pair.Key, out var hash)
+            && string.Equals(pair.Value, hash, StringComparison.OrdinalIgnoreCase));
+
+    private static bool Ready(JsonElement result, string projectId, List<PythonExecutionEvidence> executions) => Boolean(result, "success") && Text(result, "projectId") == projectId
         && result.TryGetProperty("publication", out var publication) && Boolean(publication, "ready")
         && Text(publication, "pdfPath").EndsWith(".pdf", StringComparison.OrdinalIgnoreCase) && ValidHash(Text(publication, "sourceSha256"))
         && result.TryGetProperty("simulation", out var simulation) && Boolean(simulation, "ready") && Boolean(simulation, "executed")
         && simulation.TryGetProperty("artifacts", out var artifacts) && artifacts.ValueKind == JsonValueKind.Array
-        && experimentRecordId.Length > 0 && artifacts.EnumerateArray().Any(artifact => ValidHash(Text(artifact, "sha256"))
-            && Text(artifact, "experimentRecordId") == experimentRecordId
-            && Text(artifact, "scriptPath").Length > 0 && ValidHash(Text(artifact, "scriptSha256"))
-            && (experimentWindows.Count == 0 || Date(artifact, "lastModifiedAt") is { } modified
-                && experimentWindows.Any(window => modified >= window.Start.AddSeconds(-2) && modified <= window.End.AddSeconds(2)))
+        && artifacts.EnumerateArray().Any(artifact => ValidHash(Text(artifact, "sha256"))
+            && executions.Any(execution => MatchesArtifact(artifact, execution))
             && PlotExtensions.Any(extension => Text(artifact, "path").EndsWith(extension, StringComparison.OrdinalIgnoreCase)));
 
     private static List<(DateTimeOffset Start, DateTimeOffset End)> ProcessWindows(JsonElement result)

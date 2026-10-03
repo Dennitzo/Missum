@@ -165,7 +165,9 @@ public static class GeneralAgentPolicies
             conversationProfile = request.ConversationProfile?.ToString().ToLowerInvariant() ?? "general",
             currentDateEuropeBerlin = localToday,
             expectedResponse = "assistant.agent.message.v1",
-            toolSelection = effectiveTools.Count == 0 ? "none" : "names_then_selected_schema",
+            toolSelection = effectiveTools.Count == 0 ? "none"
+                : effectiveTools.Contains("subagent.spawn", StringComparer.Ordinal) ? "complete_direct_schemas"
+                : "names_then_selected_schema",
             clientCapabilities = request.ClientCapabilities ?? [],
             documentContextPresent = request.DocumentContext is not null
                 || request.Messages

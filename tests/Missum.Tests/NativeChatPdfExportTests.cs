@@ -13,6 +13,79 @@ namespace Missum.Tests;
 public sealed class NativeChatPdfExportTests(ITestOutputHelper output)
 {
     [Fact]
+    public void ExportErrorKeepsTheWrappedHumanDiagnosticInsteadOfPowerShellMetadata()
+    {
+        const string error = "\r\nDie PDF wurde nicht erzeugt, weil 1 mathematische Ausdrücke\r\n"
+            + "nicht KaTeX-kompatibel sind.\r\nIn C:\\Assets\\export-document.ps1:440 Zeichen:9\r\n"
+            + "+ throw ...\r\n+ CategoryInfo : OperationStopped\r\n"
+            + "+ FullyQualifiedErrorId : Die PDF wurde nicht erzeugt\r\n   .\r\n";
+
+        Assert.Equal("Die PDF wurde nicht erzeugt, weil 1 mathematische Ausdrücke nicht KaTeX-kompatibel sind.",
+            DocumentPdfExporter.ExportErrorDetail(error));
+    }
+
+    [Theory]
+    [InlineData("Microsoft Edge hat keine PDF-Datei erzeugt.\nAt C:\\Assets\\export-document.ps1:444 char:9\n+ throw ...",
+        "Microsoft Edge hat keine PDF-Datei erzeugt.")]
+    [InlineData("Das Ziel ist schreibgeschützt.\n\nWeitere PowerShell-Metadaten.", "Das Ziel ist schreibgeschützt.")]
+    [InlineData("  \r\n  ", null)]
+    public void ExportErrorReportsOnlyTheActualDiagnostic(string text, string? expected)
+    {
+        Assert.Equal(expected, DocumentPdfExporter.ExportErrorDetail(text));
+    }
+
+    [Fact]
+    public void ExportErrorBoundsTheDiagnosticLength()
+    {
+        Assert.Equal(4096, DocumentPdfExporter.ExportErrorDetail(new string('x', 8192))!.Length);
+    }
+
+    [Fact]
+    [Trait("Category", "Live")]
+    public async Task DocumentExportPublishesLongPathsAtomicallyAndReportsTheActualFailure()
+    {
+        if (Environment.GetEnvironmentVariable("MISSUM_NATIVE_PDF_EXPORT_LIVE") != "1") return;
+        await using var environment = await TestEnvironment.CreateAsync();
+        var directory = environment.Directory;
+        while (directory.Length < 280)
+            directory = Path.Combine(directory, "publication-" + new string('p', 32));
+        Directory.CreateDirectory(directory);
+        var source = Path.Combine(directory, "Publikation.md");
+        var target = Path.ChangeExtension(source, ".pdf");
+        await File.WriteAllTextAsync(source, "# LONGPATHPDFMARKER\n\nDie Gleichung lautet $x^2 + y^2 = z^2$.\n");
+        await File.WriteAllTextAsync(target, "Previously published PDF must be replaced atomically.");
+        using var renderer = new DocumentPdfExporter(NullLogger<DocumentPdfExporter>.Instance);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+
+        Assert.Equal(target, await renderer.EnsureCurrentAsync(source, sourceChanged: true,
+            scientificPublication: true, cancellationToken: deadline.Token));
+        var published = await File.ReadAllBytesAsync(target, deadline.Token);
+        using (var pdf = PdfDocument.Open(published))
+            Assert.Contains("LONGPATHPDFMARKER", string.Join('\n', pdf.GetPages().Select(page => page.Text)), StringComparison.Ordinal);
+        Assert.True(target.Length > 260);
+
+        await File.WriteAllTextAsync(source, "# Invalid mathematics\n\n$$\\MissumUnknownCommand{1}$$\n", deadline.Token);
+        var mathFailure = await Assert.ThrowsAsync<InvalidOperationException>(() => renderer.EnsureCurrentAsync(
+            source, sourceChanged: true, scientificPublication: true, cancellationToken: deadline.Token));
+        Assert.Contains("KaTeX", mathFailure.Message, StringComparison.Ordinal);
+        Assert.Equal(published, await File.ReadAllBytesAsync(target, deadline.Token));
+        Assert.Empty(Directory.EnumerateFiles(directory, ".*.tmp.pdf"));
+        Assert.Empty(Directory.EnumerateFiles(directory, ".*.bak.pdf"));
+
+        // A filesystem publish error after valid mathematics is not a KaTeX error.
+        var blockedSource = Path.Combine(directory, "blocked.md");
+        Directory.CreateDirectory(Path.ChangeExtension(blockedSource, ".pdf"));
+        await File.WriteAllTextAsync(blockedSource, "# Valid mathematics\n\n$x = 1$\n", deadline.Token);
+        var publishFailure = await Assert.ThrowsAsync<InvalidOperationException>(() => renderer.EnsureCurrentAsync(
+            blockedSource, sourceChanged: true, scientificPublication: true, cancellationToken: deadline.Token));
+        Assert.DoesNotContain("KaTeX", publishFailure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(published, await File.ReadAllBytesAsync(target, deadline.Token));
+        Assert.Empty(Directory.EnumerateFiles(directory, ".*.tmp.pdf"));
+        Assert.Empty(Directory.EnumerateFiles(directory, ".*.bak.pdf"));
+        output.WriteLine($"Long-path PDF: {target.Length} characters, {published.Length} bytes; failed math and filesystem publication preserved the prior PDF.");
+    }
+
+    [Fact]
     [Trait("Category", "Live")]
     public async Task NativeChatExportRendersTheCompleteConversationAndStoresTheExactPdfArtifact()
     {

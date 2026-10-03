@@ -112,14 +112,18 @@
              CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <PropertyGroup>
+    <_ExtensionHostArtifactPlatformPrefix Condition="'$(Platform)' != '' and '$(Platform)' != 'AnyCPU' and '$(Platform)' != 'Any CPU'">$(Platform)\</_ExtensionHostArtifactPlatformPrefix>
+  </PropertyGroup>
+
   <Target Name="CopyExtensionHostArtifacts" AfterTargets="Build">
     <ItemGroup>
-      <_ExtensionHostArtifacts Include="..\ExtensionHost\bin\$(Platform)\$(Configuration)\net10.0\ExtensionHost.*" />
-      <_ExtensionHostArtifacts Include="..\ExtensionHost\bin\$(Platform)\$(Configuration)\net10.0\Missum.Core.dll"
-                               Condition="Exists('..\ExtensionHost\bin\$(Platform)\$(Configuration)\net10.0\Missum.Core.dll')" />
-      <_ExtensionHostArtifacts Include="..\ExtensionHost\bin\$(Platform)\$(Configuration)\net10.0\$(RuntimeIdentifier)\ExtensionHost.*" />
-      <_ExtensionHostArtifacts Include="..\ExtensionHost\bin\$(Platform)\$(Configuration)\net10.0\$(RuntimeIdentifier)\Missum.Core.dll"
-                               Condition="Exists('..\ExtensionHost\bin\$(Platform)\$(Configuration)\net10.0\$(RuntimeIdentifier)\Missum.Core.dll')" />
+      <_ExtensionHostArtifacts Include="..\ExtensionHost\bin\$(_ExtensionHostArtifactPlatformPrefix)$(Configuration)\net10.0\ExtensionHost.*" />
+      <_ExtensionHostArtifacts Include="..\ExtensionHost\bin\$(_ExtensionHostArtifactPlatformPrefix)$(Configuration)\net10.0\Missum.Core.dll"
+                               Condition="Exists('..\ExtensionHost\bin\$(_ExtensionHostArtifactPlatformPrefix)$(Configuration)\net10.0\Missum.Core.dll')" />
+      <_ExtensionHostArtifacts Include="..\ExtensionHost\bin\$(_ExtensionHostArtifactPlatformPrefix)$(Configuration)\net10.0\$(RuntimeIdentifier)\ExtensionHost.*" />
+      <_ExtensionHostArtifacts Include="..\ExtensionHost\bin\$(_ExtensionHostArtifactPlatformPrefix)$(Configuration)\net10.0\$(RuntimeIdentifier)\Missum.Core.dll"
+                               Condition="Exists('..\ExtensionHost\bin\$(_ExtensionHostArtifactPlatformPrefix)$(Configuration)\net10.0\$(RuntimeIdentifier)\Missum.Core.dll')" />
     </ItemGroup>
     <Copy SourceFiles="@(_ExtensionHostArtifacts)"
           DestinationFolder="$(OutDir)ExtensionHost"
@@ -129,12 +133,12 @@
 
   <Target Name="CopyPublishedExtensionHostArtifacts" AfterTargets="Publish" Condition="'$(PublishDir)' != '' and '$(Configuration)' != 'Portable'">
     <ItemGroup>
-      <_PublishedExtensionHostArtifacts Include="..\ExtensionHost\bin\$(Platform)\$(Configuration)\net10.0\ExtensionHost.*" />
-      <_PublishedExtensionHostArtifacts Include="..\ExtensionHost\bin\$(Platform)\$(Configuration)\net10.0\Missum.Core.dll"
-                                         Condition="Exists('..\ExtensionHost\bin\$(Platform)\$(Configuration)\net10.0\Missum.Core.dll')" />
-      <_PublishedExtensionHostArtifacts Include="..\ExtensionHost\bin\$(Platform)\$(Configuration)\net10.0\$(RuntimeIdentifier)\ExtensionHost.*" />
-      <_PublishedExtensionHostArtifacts Include="..\ExtensionHost\bin\$(Platform)\$(Configuration)\net10.0\$(RuntimeIdentifier)\Missum.Core.dll"
-                                         Condition="Exists('..\ExtensionHost\bin\$(Platform)\$(Configuration)\net10.0\$(RuntimeIdentifier)\Missum.Core.dll')" />
+      <_PublishedExtensionHostArtifacts Include="..\ExtensionHost\bin\$(_ExtensionHostArtifactPlatformPrefix)$(Configuration)\net10.0\ExtensionHost.*" />
+      <_PublishedExtensionHostArtifacts Include="..\ExtensionHost\bin\$(_ExtensionHostArtifactPlatformPrefix)$(Configuration)\net10.0\Missum.Core.dll"
+                                         Condition="Exists('..\ExtensionHost\bin\$(_ExtensionHostArtifactPlatformPrefix)$(Configuration)\net10.0\Missum.Core.dll')" />
+      <_PublishedExtensionHostArtifacts Include="..\ExtensionHost\bin\$(_ExtensionHostArtifactPlatformPrefix)$(Configuration)\net10.0\$(RuntimeIdentifier)\ExtensionHost.*" />
+      <_PublishedExtensionHostArtifacts Include="..\ExtensionHost\bin\$(_ExtensionHostArtifactPlatformPrefix)$(Configuration)\net10.0\$(RuntimeIdentifier)\Missum.Core.dll"
+                                         Condition="Exists('..\ExtensionHost\bin\$(_ExtensionHostArtifactPlatformPrefix)$(Configuration)\net10.0\$(RuntimeIdentifier)\Missum.Core.dll')" />
     </ItemGroup>
     <Copy SourceFiles="@(_PublishedExtensionHostArtifacts)"
           DestinationFolder="$(PublishDir)ExtensionHost"

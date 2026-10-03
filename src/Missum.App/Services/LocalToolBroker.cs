@@ -335,13 +335,22 @@ public sealed class LocalToolBroker(
             results.Add(await sandbox.RunPythonAsync(projectId, scriptPath, arguments, timeout, workingDirectory, cancellationToken).ConfigureAwait(false));
         }
         var succeeded = results.All(static run => run.ExitCode == 0 && !run.TimedOut);
-        return new { success = succeeded, projectId, repetitions,
-            experimentId = proposal.Arguments.TryGetProperty("experimentId", out var experiment) ? experiment.GetString() : null,
+        var experimentId = proposal.Arguments.TryGetProperty("experimentId", out var experiment) ? experiment.GetString() : null;
+        var experimentRecordId = string.IsNullOrWhiteSpace(experimentId) ? null : "experiment-" + Convert.ToHexStringLower(
+            System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(projectId + "\nexperiment\n" + experimentId)))[..24];
+        var receipt = new { success = succeeded, projectId, repetitions,
+            experimentId, experimentRecordId,
+            sourceFiles = results.Select(static run => run.ExecutedScriptPath).OfType<string>().Distinct(StringComparer.Ordinal).ToArray(),
+            inputHashes = results[0].InputHashes,
             processIsolation = "Docker cgroup and read-only container filesystem", networkIsolation = "Docker network none",
             resourceLimits = new { cpuCores = 16, memory = "48g", projectStorage = "100g", maximumStageSeconds = 7200 },
             verificationStatus = succeeded ? "ProcessSucceeded" : "ProcessFailed",
             formalVerification = proposal.Name == ClientToolNames.MathFormalProof ? (succeeded ? "KernelAccepted" : "NotEstablished") : null,
-            runs = results.Select(static run => new { run.RunId, run.ExitCode, run.TimedOut, run.StandardOutput, run.StandardError, run.StartedAt, run.CompletedAt, run.Command }) };
+            runs = results.Select(static run => new { run.RunId, run.ExitCode, run.TimedOut, run.StandardOutput, run.StandardError,
+                run.StartedAt, run.CompletedAt, run.Command, run.ExecutedScriptPath, run.ScriptSha256, run.SnapshotId, run.InputHashes, run.OutputHashes }) };
+        if (JsonSerializer.SerializeToUtf8Bytes(receipt, JsonOptions).Length >= AssistantToolStep.MaximumStructuredJsonCharacters - 1024)
+            throw new InvalidOperationException("Der vollständige Python-Ausführungsbeleg überschreitet das gespeicherte Toolergebnislimit; es wird kein gekürzter Beleg als Erfolg übernommen.");
+        return receipt;
     }
 
     private static int CodingResultLimit(JsonElement arguments) => arguments.TryGetProperty("maximumResults", out var maximum) ? maximum.GetInt32() : 5;

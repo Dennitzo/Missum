@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Windows.System;
@@ -15,14 +15,31 @@ public sealed partial class NativeAssistantPage
     private Border? _sourcesTabContainer;
     private string? _sourcesSignature;
     private string? _sourcesContentSignature;
+    private string? _childSourcesSignature;
     private Guid? _sourcesContentOwner;
     private Guid? _activeSourcesSession;
     private readonly ContentControl _sourcesHost = new() { Visibility = Visibility.Collapsed, HorizontalContentAlignment = HorizontalAlignment.Stretch, VerticalContentAlignment = VerticalAlignment.Stretch };
 
+    private IEnumerable<JsonElement> OwnerSourceMessages() => _messages.Values.Concat(_subagents.Values
+        .Where(child => child.SessionId == _session).SelectMany(child => child.Messages.Values));
+
+    private void RefreshSubagentSources()
+    {
+        var signature = _session + "|" + string.Join("|", _subagents.Values.Where(child => child.SessionId == _session)
+            .SelectMany(child => child.Messages.Values).SelectMany(message => Items(message, "toolSteps"))
+            .Where(step => S(step, "tool").StartsWith("web.", StringComparison.Ordinal) || S(step, "tool").StartsWith("research.", StringComparison.Ordinal))
+            .Select(step => S(step, "id") + S(step, "updatedAt") + S(step, "inputJson").GetHashCode(StringComparison.Ordinal)
+                + S(step, "outputJson").GetHashCode(StringComparison.Ordinal)));
+        if (_childSourcesSignature == signature) return;
+        _childSourcesSignature = signature;
+        _sourcesSignature = null;
+        RenderSources(_snapshot);
+    }
+
     private SourceAction[] WebSourceActions()
     {
         var actions = new List<SourceAction>();
-        foreach (var message in _messages.Values)
+        foreach (var message in OwnerSourceMessages())
         foreach (var step in Items(message, "toolSteps"))
         {
             var tool = S(step, "tool");
@@ -39,10 +56,11 @@ public sealed partial class NativeAssistantPage
                 urls.ToArray(), DateTimeOffset.TryParse(S(step, "updatedAt", S(step, "startedAt")), out var time) ? time : MessageCreatedAt(message), PageTitles: pageTitles));
         }
         var state = ResearchState(_session);
-        foreach (var item in actions.Count == 0 ? Items(state.Detail, "works") : [])
+        var actionUrls = actions.SelectMany(action => action.Urls).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in Items(state.Detail, "works"))
         {
             var url = S(item, "url", S(item, "canonicalUrl"));
-            if (Uri.TryCreate(url, UriKind.Absolute, out var uri) && uri.Scheme is "http" or "https")
+            if (Uri.TryCreate(url, UriKind.Absolute, out var uri) && uri.Scheme is "http" or "https" && actionUrls.Add(uri.AbsoluteUri))
                 actions.Add(new("research-source:" + uri.AbsoluteUri, S(item, "title", uri.Host), [uri.AbsoluteUri], DateTimeOffset.TryParse(S(item, "updatedAt"), out var updated) ? updated : DateTimeOffset.MinValue,
                     PageTitles: new Dictionary<string, string> { [uri.AbsoluteUri] = S(item, "title", uri.Host) }));
         }

@@ -21,6 +21,7 @@ public static class RunRequestValidator
         "workspace.open",
         "research.sandbox",
         "research.deliverables",
+        "subagents",
     };
     private static readonly HashSet<string> ServerTools = new(StringComparer.Ordinal)
     {
@@ -31,6 +32,8 @@ public static class RunRequestValidator
     public static void Validate(RunRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
+        if (request.Subagent is not null)
+            throw new ArgumentException("Subagent runs are created by the gateway from an existing authorized parent run.");
         if (request.DeepResearch && (request.AllowedServerTools is not { } researchTools
             || !researchTools.Contains("web.search", StringComparer.Ordinal)
             || !researchTools.Contains("web.fetch", StringComparer.Ordinal)

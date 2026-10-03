@@ -37,6 +37,15 @@ function Convert-ToFileUri([string]$Path) {
     return ([Uri](Resolve-Path -LiteralPath $Path).Path).AbsoluteUri
 }
 
+function Convert-ToExtendedFilePath([string]$Path) {
+    $absolute = [IO.Path]::GetFullPath($Path)
+    if ($absolute.StartsWith('\\?\', [StringComparison]::Ordinal)) { return $absolute }
+    if ($absolute.StartsWith('\\', [StringComparison]::Ordinal)) {
+        return '\\?\UNC\' + $absolute.Substring(2)
+    }
+    return '\\?\' + $absolute
+}
+
 function Invoke-EdgeProcess {
     param(
         [Parameter(Mandatory = $true)]
@@ -69,7 +78,8 @@ $source = (Resolve-Path -LiteralPath $SourcePath).Path
 $webAssets = (Resolve-Path -LiteralPath $WebAssetsPath).Path
 $output = [IO.Path]::GetFullPath($OutputPath)
 $outputDirectory = Split-Path -Parent $output
-[IO.Directory]::CreateDirectory($outputDirectory) | Out-Null
+$outputFilePath = Convert-ToExtendedFilePath $output
+[IO.Directory]::CreateDirectory((Convert-ToExtendedFilePath $outputDirectory)) | Out-Null
 
 $stylesUri = Convert-ToFileUri (Join-Path $webAssets 'styles.css')
 $markdownUri = Convert-ToFileUri (Join-Path $webAssets 'markdown.js')
@@ -127,8 +137,12 @@ $validationProfilePath = Join-Path $temporaryRoot 'edge-profile-validation'
 $printProfilePath = Join-Path $temporaryRoot 'edge-profile-print'
 [IO.Directory]::CreateDirectory($validationProfilePath) | Out-Null
 [IO.Directory]::CreateDirectory($printProfilePath) | Out-Null
-$temporaryPdf = Join-Path $outputDirectory ('.' + [IO.Path]::GetFileNameWithoutExtension($output) + '.' + [Guid]::NewGuid().ToString('N') + '.tmp.pdf')
-$backupPdf = Join-Path $outputDirectory ('.' + [IO.Path]::GetFileNameWithoutExtension($output) + '.' + [Guid]::NewGuid().ToString('N') + '.bak.pdf')
+# Chromium's PDF writer can silently fail at MAX_PATH even though the .NET
+# publication service accepts the longer destination. Print to the short local
+# renderer directory, then stage on the destination volume for atomic publish.
+$temporaryPdf = Join-Path $temporaryRoot 'document.pdf'
+$stagedPdf = Convert-ToExtendedFilePath (Join-Path $outputDirectory ('.' + [IO.Path]::GetFileNameWithoutExtension($output) + '.' + [Guid]::NewGuid().ToString('N') + '.tmp.pdf'))
+$backupPdf = Convert-ToExtendedFilePath (Join-Path $outputDirectory ('.' + [IO.Path]::GetFileNameWithoutExtension($output) + '.' + [Guid]::NewGuid().ToString('N') + '.bak.pdf'))
 
 $bodyClass = 'pdf-exporting'
 $publicationStyles = ''
@@ -449,12 +463,13 @@ try {
         throw 'Die erzeugte Datei ist kein gültiges, nicht leeres PDF.'
     }
 
-    if (Test-Path -LiteralPath $output -PathType Leaf) {
-        [IO.File]::Replace($temporaryPdf, $output, $backupPdf, $true)
+    [IO.File]::Copy($temporaryPdf, $stagedPdf, $false)
+    if ([IO.File]::Exists($outputFilePath)) {
+        [IO.File]::Replace($stagedPdf, $outputFilePath, $backupPdf, $true)
         [IO.File]::Delete($backupPdf)
     }
     else {
-        [IO.File]::Move($temporaryPdf, $output)
+        [IO.File]::Move($stagedPdf, $outputFilePath)
     }
     Write-Output $output
 }
@@ -462,8 +477,11 @@ finally {
     if (Test-Path -LiteralPath $temporaryPdf -PathType Leaf) {
         Remove-Item -LiteralPath $temporaryPdf -Force -ErrorAction SilentlyContinue
     }
-    if (Test-Path -LiteralPath $backupPdf -PathType Leaf) {
-        Remove-Item -LiteralPath $backupPdf -Force -ErrorAction SilentlyContinue
+    if ([IO.File]::Exists($stagedPdf)) {
+        [IO.File]::Delete($stagedPdf)
+    }
+    if ([IO.File]::Exists($backupPdf)) {
+        [IO.File]::Delete($backupPdf)
     }
     if (Test-Path -LiteralPath $temporaryRoot -PathType Container) {
         Remove-Item -LiteralPath $temporaryRoot -Recurse -Force -ErrorAction SilentlyContinue

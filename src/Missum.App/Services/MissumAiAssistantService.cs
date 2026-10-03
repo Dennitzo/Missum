@@ -27,6 +27,7 @@ public enum MissumAiAssistantUpdateKind
     Completed,
     Cancelled,
     Failed,
+    SubagentChanged,
 }
 
 public sealed record MissumAiAssistantUpdate(
@@ -47,7 +48,8 @@ public sealed record MissumAiAssistantUpdate(
     Guid? LocalRunId = null,
     string? GenerationState = null,
     int? GeneratedTokens = null,
-    DateTimeOffset? GenerationUpdatedAt = null);
+    DateTimeOffset? GenerationUpdatedAt = null,
+    SubagentChatState? Subagent = null);
 
 public sealed record MissumAiSpeechUpdate(
     bool IsActive,
@@ -1503,6 +1505,36 @@ public sealed partial class MissumAiAssistantService(
         // The server tool step that last started owns any following artifact. Media
         // analysis thumbnails stay anchored to their action instead of the message end.
         var activeServerStepId = (string?)null;
+        var subagentStates = SubagentChatState.Read([assistant], settings.DataDirectory).ToDictionary(state => state.AgentId, StringComparer.Ordinal);
+
+        async Task SaveSubagentAsync(SubagentChatState child)
+        {
+            subagentStates[child.AgentId] = child;
+            var previous = assistant.ToolSteps?.FirstOrDefault(step => step.Id == child.ReceiptId);
+            var now = NextToolStepUpdate(previous);
+            var step = new AssistantToolStep(child.ReceiptId, SubagentChatState.ReceiptTool,
+                child.IsRunning ? "running" : child.Status, child.UserMessage.Content,
+                OutputJson: await child.PersistAsync(settings.DataDirectory).ConfigureAwait(false),
+                Explanation: "Delegierte Aufgabe mit eigenem Chatverlauf",
+                ContentOffset: previous?.ContentOffset ?? assistant.Content.Length,
+                StartedAt: previous?.StartedAt ?? child.AssistantMessage.CreatedAt,
+                CompletedAt: child.IsRunning ? null : child.AssistantMessage.UpdatedAt, UpdatedAt: now);
+            assistant = assistant with { ToolSteps = await chats.SaveToolStepAsync(assistant.Id, step, CancellationToken.None).ConfigureAwait(false) };
+            await update(new(MissumAiAssistantUpdateKind.SubagentChanged, assistant, ToolStep: step, Subagent: child)).ConfigureAwait(false);
+        }
+
+        async Task RecordSubagentToolResultAsync(string agentId, ToolProposal proposal, ClientToolResult result, CodingCommandProgress? progress = null)
+        {
+            var child = subagentStates[agentId];
+            var now = DateTimeOffset.UtcNow;
+            var old = child.AssistantMessage.ToolSteps?.FirstOrDefault(step => step.Id == proposal.ProposalId);
+            var message = SubagentChatState.AddStep(child.AssistantMessage, new(proposal.ProposalId, proposal.Name,
+                GetToolResultStatus(result), FormatClientToolResultDetail(result, progress), InputJson: proposal.Arguments.GetRawText(),
+                OutputJson: SerializeClientToolOutput(result, old?.OutputJson, progress), Explanation: proposal.Summary,
+                ContentOffset: old?.ContentOffset ?? child.AssistantMessage.Content.Length, StartedAt: old?.StartedAt ?? now,
+                CompletedAt: now, UpdatedAt: now, AgentId: agentId));
+            await SaveSubagentAsync(child with { AssistantMessage = message, RunStatus = "Werkzeug abgeschlossen" }).ConfigureAwait(false);
+        }
 
         async Task RecordToolStepAsync(string id, string tool, string status, string? detail, bool appendResult = false,
             string? previewHtml = null, string? inputJson = null, string? outputJson = null, string? explanation = null,
@@ -1540,6 +1572,11 @@ public sealed partial class MissumAiAssistantService(
 
         async Task FinishOpenToolStepsAsync(string status)
         {
+            if (status is "completed" or "failed" || Volatile.Read(ref _explicitCancellation) != 0)
+                foreach (var child in subagentStates.Values.Where(child => child.IsRunning).ToArray())
+                    await SaveSubagentAsync(child with { Status = status, AssistantMessage = SubagentChatState.Finish(child.AssistantMessage,
+                        status == "completed" ? MessageStatus.Completed : status == "failed" ? MessageStatus.Failed : MessageStatus.Cancelled,
+                        DateTimeOffset.UtcNow) }).ConfigureAwait(false);
             foreach (var step in (assistant.ToolSteps ?? []).Where(step => step.Status == "running").ToArray())
             {
                 commandProgressByStep.Remove(step.Id, out var progress);
@@ -1642,8 +1679,13 @@ public sealed partial class MissumAiAssistantService(
                 await toolExecutions.CompleteAsync(incomplete.ProposalId, JsonSerializer.Serialize(unknown, JsonOptions),
                     CancellationToken.None).ConfigureAwait(false);
             }
+            foreach (var child in subagentStates.Values)
+            {
+                foreach (var incomplete in await toolExecutions.ListIncompleteExecutionsAsync(localRun.Id, child.RunId, cancellationToken).ConfigureAwait(false))
+                    await toolExecutions.CompleteAsync(incomplete.ProposalId, JsonSerializer.Serialize(UnknownClientToolOutcome(incomplete.ProposalId), JsonOptions), CancellationToken.None).ConfigureAwait(false);
+            }
             var pendingSubmissions = await toolExecutions
-                .ListPendingSubmissionsAsync(localRun.Id, localRun.ServerRunId, cancellationToken)
+                .ListPendingSubmissionsAsync(localRun.Id, null, cancellationToken)
                 .ConfigureAwait(false);
             foreach (var pending in pendingSubmissions)
             {
@@ -1656,10 +1698,18 @@ public sealed partial class MissumAiAssistantService(
                 await toolExecutions.MarkSubmittedAsync(
                     pending.ProposalId,
                     CancellationToken.None).ConfigureAwait(false);
-                await RecordToolStepAsync(pending.ProposalId, pending.ToolName,
-                    GetToolResultStatus(pendingResult),
-                    FormatClientToolResultDetail(pendingResult), appendResult: true,
-                    outputJson: SerializeClientToolOutput(pendingResult, assistant.ToolSteps?.FirstOrDefault(step => step.Id == pending.ProposalId)?.OutputJson)).ConfigureAwait(false);
+                if (pending.ServerRunId == localRun.ServerRunId)
+                    await RecordToolStepAsync(pending.ProposalId, pending.ToolName,
+                        GetToolResultStatus(pendingResult), FormatClientToolResultDetail(pendingResult), appendResult: true,
+                        outputJson: SerializeClientToolOutput(pendingResult, assistant.ToolSteps?.FirstOrDefault(step => step.Id == pending.ProposalId)?.OutputJson)).ConfigureAwait(false);
+                else if (subagentStates.Values.FirstOrDefault(child => child.RunId == pending.ServerRunId) is { } pendingChild)
+                {
+                    var old = pendingChild.AssistantMessage.ToolSteps?.FirstOrDefault(step => step.Id == pending.ProposalId);
+                    var now = DateTimeOffset.UtcNow;
+                    await SaveSubagentAsync(pendingChild with { AssistantMessage = SubagentChatState.AddStep(pendingChild.AssistantMessage,
+                        new(pending.ProposalId, pending.ToolName, GetToolResultStatus(pendingResult), FormatClientToolResultDetail(pendingResult),
+                            OutputJson: SerializeClientToolOutput(pendingResult, old?.OutputJson), UpdatedAt: now, CompletedAt: now, AgentId: pendingChild.AgentId)) }).ConfigureAwait(false);
+                }
                 // Pending results may follow unacknowledged events; replay from the durable cursor.
                 localRun = localRun with
                 {
@@ -1694,6 +1744,93 @@ public sealed partial class MissumAiAssistantService(
                 }
                 switch (item.Type)
                 {
+                    case RunEventTypes.SubagentStarted:
+                    case RunEventTypes.SubagentUpdated:
+                    case RunEventTypes.SubagentCompleted:
+                        var childInfo = item.Data.Deserialize<SubagentRunEvent>(JsonOptions)
+                            ?? throw new InvalidDataException("Ungültiger Subagent-Status.");
+                        if (childInfo.ParentRunId != localRun.ServerRunId) throw new InvalidDataException("Der Subagent gehört nicht zu diesem Lauf.");
+                        if (!subagentStates.TryGetValue(childInfo.AgentId, out var lifecycleChild))
+                            lifecycleChild = SubagentChatState.Create(childInfo, assistant.SessionId, item.CreatedAt);
+                        var childStatus = SubagentChatState.StateName(childInfo.State);
+                        lifecycleChild = lifecycleChild with { Status = childStatus, Model = childInfo.ModelId };
+                        if (!lifecycleChild.IsRunning)
+                            lifecycleChild = lifecycleChild with { AssistantMessage = SubagentChatState.Finish(lifecycleChild.AssistantMessage,
+                                childInfo.State == RunState.Completed ? MessageStatus.Completed : childInfo.State == RunState.Cancelled ? MessageStatus.Cancelled : MessageStatus.Failed, item.CreatedAt) };
+                        await SaveSubagentAsync(lifecycleChild).ConfigureAwait(false);
+                        break;
+                    case "subagent.resultConsumed":
+                        var deliveredAgent = StringProperty(item.Data, "agentId") ?? "";
+                        if (item.RunId != localRun.ServerRunId
+                            || StringProperty(item.Data, "parentRunId") is { Length: > 0 } consumedParent && consumedParent != localRun.ServerRunId
+                            || !subagentStates.TryGetValue(deliveredAgent, out var deliveredChild)
+                            || StringProperty(item.Data, "runId") != deliveredChild.RunId
+                            || deliveredChild.ParentRunId != localRun.ServerRunId || deliveredChild.SessionId != assistant.SessionId)
+                            throw new InvalidDataException("Das Subagent-Ergebnis gehört nicht zum delegierten Lauf.");
+                        var consumedChild = deliveredChild.MarkResultDelivered(item);
+                        if (!ReferenceEquals(consumedChild, deliveredChild)) await SaveSubagentAsync(consumedChild).ConfigureAwait(false);
+                        if (consumedChild.CompletionReceipt(assistant.Content.Length, item.CreatedAt) is { } completionReceipt
+                            && !(assistant.ToolSteps ?? []).Any(step => step.Id == completionReceipt.Id))
+                        {
+                            assistant = assistant with { ToolSteps = await chats.SaveToolStepAsync(assistant.Id, completionReceipt, CancellationToken.None).ConfigureAwait(false) };
+                            await update(new(MissumAiAssistantUpdateKind.Delta, assistant)).ConfigureAwait(false);
+                        }
+                        break;
+                    case RunEventTypes.SubagentEvent:
+                        var childEvent = item.Data.Deserialize<SubagentForwardedEvent>(JsonOptions)
+                            ?? throw new InvalidDataException("Ungültiges Subagent-Ereignis.");
+                        if (childEvent.ParentRunId != localRun.ServerRunId || childEvent.Event.RunId != childEvent.RunId
+                            || !subagentStates.TryGetValue(childEvent.AgentId, out var childState) || childState.RunId != childEvent.RunId)
+                            throw new InvalidDataException("Das Subagent-Ereignis gehört nicht zum delegierten Lauf.");
+                        var childItem = childEvent.Event;
+                        if (childItem.Type == RunEventTypes.ServerToolCompleted && StringProperty(childItem.Data, "tool") == "web.fetch")
+                        {
+                            await PersistSubagentResearchProgressAsync(localRun, item, childState, cancellationToken).ConfigureAwait(false);
+                            if (isScienceRun) sciencePresentation?.Queue($"research-{localRun.SessionId:N}");
+                        }
+                        await SaveSubagentAsync(childState.Apply(childItem)).ConfigureAwait(false);
+                        if (childItem.Type == RunEventTypes.ClientToolProposed)
+                        {
+                            var childProposal = childItem.Data.Deserialize<ToolProposal>(JsonOptions)
+                                ?? throw new InvalidDataException("Ungültiger Subagent-Werkzeugvorschlag.");
+                            if (childProposal.RunId != childEvent.RunId) throw new InvalidDataException("Der Werkzeugvorschlag gehört nicht zum Subagenten.");
+                            var childClaimed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                            if (pump.Start(childProposal.ProposalId, async token =>
+                            {
+                                try
+                                {
+                                    CodingCommandProgress? lastProgress = null;
+                                    var result = await ExecuteClientToolOnceAsync(client, localRun, childItem, childProposal,
+                                        progress => { lastProgress = progress; return pump.PostAsync(async () =>
+                                        {
+                                            var current = subagentStates[childEvent.AgentId];
+                                            var old = current.AssistantMessage.ToolSteps?.FirstOrDefault(step => step.Id == childProposal.ProposalId);
+                                            var at = DateTimeOffset.UtcNow;
+                                            await SaveSubagentAsync(current with { AssistantMessage = SubagentChatState.AddStep(current.AssistantMessage,
+                                                new(childProposal.ProposalId, childProposal.Name, "running", FormatProgressOutputDetail(progress),
+                                                    InputJson: childProposal.Arguments.GetRawText(), OutputJson: SerializeToolProgress(progress),
+                                                    ContentOffset: old?.ContentOffset ?? current.AssistantMessage.Content.Length, UpdatedAt: at, AgentId: childEvent.AgentId)) }).ConfigureAwait(false);
+                                        }).AsTask(); }, evidenceStore, () => childClaimed.TrySetResult(), token).ConfigureAwait(false);
+                                    await pump.PostAsync(async () =>
+                                    {
+                                        await RecordSubagentToolResultAsync(childEvent.AgentId, childProposal, result, lastProgress).ConfigureAwait(false);
+                                        await PersistScientificToolResultAsync(assistant.SessionId, childProposal, result, cancellationToken).ConfigureAwait(false);
+                                        await client.SubmitClientToolResultAsync(childEvent.RunId, result, cancellationToken).ConfigureAwait(false);
+                                        await toolExecutions.MarkSubmittedAsync(childProposal.ProposalId, CancellationToken.None).ConfigureAwait(false);
+                                        if (childProposal.Name == ClientToolNames.DocumentCreate)
+                                            await update(new(MissumAiAssistantUpdateKind.ArtifactsChanged, assistant)).ConfigureAwait(false);
+                                    }).ConfigureAwait(false);
+                                }
+                                catch (Exception exception) { childClaimed.TrySetException(exception); throw; }
+                            })) await childClaimed.Task.ConfigureAwait(false);
+                        }
+                        else if (childItem.Type == RunEventTypes.ArtifactCreated && childItem.Data.Deserialize<ArtifactDescriptor>(JsonOptions) is { } childArtifact)
+                        {
+                            var importedChild = await DownloadArtifactAsync(client, assistant.Id, childArtifact, childState.Model ?? "Subagent", childArtifact.StepId, cancellationToken).ConfigureAwait(false);
+                            var currentChild = subagentStates[childEvent.AgentId];
+                            await SaveSubagentAsync(currentChild with { Artifacts = (currentChild.Artifacts ?? []).Where(artifact => artifact.Id != importedChild.Id).Append(importedChild).ToArray() }).ConfigureAwait(false);
+                        }
+                        break;
                     case RunModelSelectionEvents.Requested:
                     case RunModelSelectionEvents.Applied:
                     case RunModelSelectionEvents.Failed:
@@ -2729,7 +2866,8 @@ public sealed partial class MissumAiAssistantService(
                 RunMode.Coding,
                 codingMessages,
                 UploadIds: uploaded.Select(item => item.Upload.UploadId).ToArray(),
-                ClientCapabilities: codingConfiguration.Capabilities.Concat(WorkspaceClientCapabilities).Distinct().ToArray(),
+                ClientCapabilities: codingConfiguration.Capabilities.Concat(WorkspaceClientCapabilities)
+                    .Concat(serverCapabilities.ServerTools.Contains("subagent.spawn", StringComparer.Ordinal) ? ["subagents"] : Array.Empty<string>()).Distinct().ToArray(),
                 Limits: CreateChatRunLimits(availableCodingModel.ContextTokens),
                 SessionId: sessionId.ToString("D"),
                 AllowedServerTools: GetAllowedServerTools(action),
@@ -2848,6 +2986,8 @@ public sealed partial class MissumAiAssistantService(
         {
             "documentIo", "documents", "visual-tools",
         };
+        if (!audiobook && (await client.GetCapabilitiesAsync(cancellationToken).ConfigureAwait(false)).ServerTools.Contains("subagent.spawn", StringComparer.Ordinal))
+            capabilities.Add("subagents");
         if (!string.IsNullOrWhiteSpace(codingSession.CodingWorkspacePath) && Directory.Exists(codingSession.CodingWorkspacePath))
             capabilities.UnionWith(["coding", "coding.evidence", "coding.process", "workspace", "workspace.open"]);
         if (documentContext?.Descriptor.DocumentCount > 0)
@@ -3267,8 +3407,15 @@ public sealed partial class MissumAiAssistantService(
             }
             if (nodes.Count > 0) await scientificResearch.SaveGraphAsync(projectId, nodes, edges, cancellationToken).ConfigureAwait(false);
         }
-        await scientificResearch.SaveResultSnapshotAsync(projectId,
-            CreateResearchResultSnapshot(projectId, result, conclusion, now), cancellationToken).ConfigureAwait(false);
+        var projected = CreateResearchResultSnapshot(projectId, result, conclusion, now);
+        var stored = await scientificResearch.LoadResultSnapshotAsync(projectId, cancellationToken).ConfigureAwait(false);
+        var measuredIds = stored.Experiments.Where(HasMeasuredExecution).Select(experiment => experiment.Id).ToHashSet(StringComparer.Ordinal);
+        // A model's final description cannot overwrite the locally measured
+        // source, inputs, outputs and process window under the same experiment ID.
+        await scientificResearch.SaveResultSnapshotAsync(projectId, projected with
+        {
+            Experiments = projected.Experiments.Where(experiment => !measuredIds.Contains(experiment.Id)).ToArray(),
+        }, cancellationToken).ConfigureAwait(false);
         if (!string.IsNullOrWhiteSpace(checkpointId))
         {
             await scientificResearch.SaveCheckpointAsync(new(checkpointId, projectId, runId, revision,
@@ -3427,7 +3574,7 @@ public sealed partial class MissumAiAssistantService(
         return builder.ToString();
     }
 
-    private async Task PersistScientificToolResultAsync(Guid sessionId, ToolProposal proposal,
+    internal async Task PersistScientificToolResultAsync(Guid sessionId, ToolProposal proposal,
         ClientToolResult result, CancellationToken cancellationToken)
     {
         if (scientificResearch is null || proposal.Name is not (ClientToolNames.MathSymbolic
@@ -3442,20 +3589,43 @@ public sealed partial class MissumAiAssistantService(
         var commandText = proposal.Name + " " + proposal.Arguments.GetRawText();
         if (commandText.Length > 16_000) commandText = commandText[..16_000];
         var evidence = result.Result.GetRawText();
-        if (evidence.Length > 100_000) evidence = evidence[..100_000];
+        // Process metadata must stay valid JSON and retain the frozen source/data
+        // hashes. Truncating it loses the link from a figure to its actual run.
+        var processRuns = result.Result.TryGetProperty("runs", out var measuredRuns) && measuredRuns.ValueKind == JsonValueKind.Array
+            ? measuredRuns.EnumerateArray().ToArray() : [];
+        if (processRuns.Length == 0 && evidence.Length > 100_000) evidence = evidence[..100_000];
         var artifacts = result.Result.TryGetProperty("manifestPath", out var manifest) && manifest.ValueKind == JsonValueKind.String
             ? JsonSerializer.Serialize(new[] { manifest.GetString() }, JsonOptions) : "[]";
+        if (processRuns.Length > 0)
+            artifacts = JsonSerializer.Serialize(processRuns.SelectMany(run => run.TryGetProperty("outputHashes", out var hashes)
+                    && hashes.ValueKind == JsonValueKind.Object ? hashes.EnumerateObject().Select(item => item.Name) : [])
+                .Distinct(StringComparer.Ordinal), JsonOptions);
+        var startedAt = processRuns.Select(run => run.TryGetProperty("startedAt", out var time) && time.TryGetDateTimeOffset(out var date) ? date : now).DefaultIfEmpty(now).Min();
+        var completedAt = processRuns.Select(run => run.TryGetProperty("completedAt", out var time) && time.TryGetDateTimeOffset(out var date) ? date : now).DefaultIfEmpty(now).Max();
         await scientificResearch.SaveExperimentAsync(new(
             ResearchRecordId(projectId, "experiment", experimentId), projectId,
             StringProperty(result.Result, "environmentLock") ?? StringProperty(result.Result, "toolchain") ?? proposal.Name,
-            result.Result.TryGetProperty("generatedSource", out var generated) && generated.ValueKind == JsonValueKind.String
+            result.Result.TryGetProperty("sourceFiles", out var sourceFiles) && sourceFiles.ValueKind == JsonValueKind.Array
+                ? sourceFiles.GetRawText() : result.Result.TryGetProperty("generatedSource", out var generated) && generated.ValueKind == JsonValueKind.String
                 ? JsonSerializer.Serialize(new[] { generated.GetString() }, JsonOptions) : "[]",
             proposal.Arguments.TryGetProperty("randomSeed", out var seed) ? "[" + seed.GetRawText() + "]" : "[]",
-            "{}", commandText,
+            JsonProperty(result.Result, "inputHashes", "{}"), commandText,
             JsonProperty(result.Result, "resourceLimits", "{}"), evidence,
             result.Message ?? "", artifacts,
             StringProperty(result.Result, "verificationStatus") ?? result.Status,
-            now, now), cancellationToken).ConfigureAwait(false);
+            startedAt, completedAt), cancellationToken).ConfigureAwait(false);
+    }
+
+    private static bool HasMeasuredExecution(ResearchExperiment experiment)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(experiment.StdoutEvidence);
+            return document.RootElement.ValueKind == JsonValueKind.Object && document.RootElement.TryGetProperty("runs", out var runs)
+                && runs.ValueKind == JsonValueKind.Array && runs.EnumerateArray().Any(run => run.ValueKind == JsonValueKind.Object
+                    && run.TryGetProperty("snapshotId", out var snapshot) && snapshot.ValueKind == JsonValueKind.String);
+        }
+        catch (JsonException) { return false; }
     }
 
     private static string? FindGraphNodeId(JsonElement result, string nodeType, string title, string projectId)

@@ -17,13 +17,13 @@ public sealed partial class NativeAssistantPage
     private void RefreshChatNotices()
     {
         if (StatusText is null || ErrorBar is null) return;
-        var hasActiveHeader = _messages.Values.Any(message => S(message, "role") == "assistant" && S(message, "status") is "streaming" or "pending");
-        StatusText.Text = ChatStatus;
-        StatusText.Visibility = string.IsNullOrWhiteSpace(ChatStatus) || (_running && hasActiveHeader) ? Visibility.Collapsed : Visibility.Visible;
+        var hasActiveHeader = DisplayMessages.Values.Any(message => S(message, "role") == "assistant" && S(message, "status") is "streaming" or "pending");
+        StatusText.Text = DisplayChatStatus;
+        StatusText.Visibility = string.IsNullOrWhiteSpace(DisplayChatStatus) || (DisplayRunning && hasActiveHeader) ? Visibility.Collapsed : Visibility.Visible;
         _refreshingChatNotices = true;
         try
         {
-            ErrorBar.Message = _chatErrors.GetValueOrDefault(_session, "");
+            ErrorBar.Message = ActiveSubagent is { } child ? S(child.Snapshot, "error") : _chatErrors.GetValueOrDefault(_session, "");
             ErrorBar.IsOpen = !string.IsNullOrEmpty(ErrorBar.Message);
             if (StatusText.Visibility == Visibility.Visible || ErrorBar.IsOpen) WelcomePanel.Visibility = Visibility.Collapsed;
         }
@@ -32,6 +32,6 @@ public sealed partial class NativeAssistantPage
 
     private void OnChatErrorClosed(InfoBar sender, InfoBarClosedEventArgs args)
     {
-        if (!_refreshingChatNotices) _chatErrors.Remove(_session);
+        if (!_refreshingChatNotices && ActiveSubagent is null) _chatErrors.Remove(_session);
     }
 }

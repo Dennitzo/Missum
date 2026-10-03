@@ -6,6 +6,8 @@ param(
 
     [switch] $SkipTests,
 
+    [switch] $SkipSmoke,
+
     [switch] $SkipPublish,
 
     [ValidateSet('win-x64')]
@@ -66,7 +68,8 @@ if (-not $SkipPublish) {
     & (Join-Path $PSScriptRoot 'publish.ps1') `
         -Mode SingleFile `
         -RuntimeIdentifier $RuntimeIdentifier `
-        -OutputDirectory $PortableOutputDirectory
+        -OutputDirectory $PortableOutputDirectory `
+        -SkipSmoke:$SkipSmoke
 
     $portableExecutable = Join-Path $PortableOutputDirectory 'Missum.exe'
     $portableManifest = Assert-MissumArtifactPath -Path ($PortableOutputDirectory + '.manifest.json')

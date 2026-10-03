@@ -109,6 +109,69 @@ public sealed class ScientificRunCompletionPolicyTests
         Assert.True(ScientificRunCompletionPolicy.Assess(Request(), messages, Tools()).Complete);
     }
 
+    [Fact]
+    public void AMeasuredDelegatedExecutionSurvivesRejectedCopyAndCorrectedNewFileOnlyAfterFreshVerification()
+    {
+        var (messages, evidence) = MeasuredChildWithRejectedCopy();
+        var pending = ScientificRunCompletionPolicy.Assess(Request(), messages, Tools(), evidence);
+
+        Assert.False(pending.Complete);
+        Assert.True(pending.NeedsVerification);
+        Assert.DoesNotContain(pending.Missing, problem => problem.Contains("Python", StringComparison.Ordinal));
+        AddMeasuredVerification(messages);
+
+        Assert.True(ScientificRunCompletionPolicy.Assess(Request(), messages, Tools(), evidence).Complete);
+        Assert.DoesNotContain(messages.SelectMany(static message => message.ToolCalls ?? []),
+            call => call.Name == ClientToolNames.ResearchCodeExecute);
+
+        // A later failed parent write also invalidates the already accepted
+        // check without forcing repetition of the unchanged child process.
+        AddReceipt(messages, ClientToolNames.ResearchCodeWrite,
+            new { projectId = Project, path = "/sandbox/artifacts/source-copy.py" },
+            new { success = false, error = "Der Arbeitsordner muss relativ zu work sein." }, status: "failed");
+        var afterFailure = ScientificRunCompletionPolicy.Assess(Request(), messages, Tools(), evidence);
+        Assert.False(afterFailure.Complete);
+        Assert.True(afterFailure.NeedsVerification);
+        AddMeasuredVerification(messages);
+        Assert.True(ScientificRunCompletionPolicy.Assess(Request(), messages, Tools(), evidence).Complete);
+    }
+
+    [Theory]
+    [InlineData("input")]
+    [InlineData("output")]
+    [InlineData("script")]
+    [InlineData("run")]
+    [InlineData("time")]
+    public void FreshVerificationAfterAFailedWriteStillRejectsChangedMeasuredDependenciesAndProvenance(string mismatch)
+    {
+        var (messages, evidence) = MeasuredChildWithRejectedCopy();
+        AddMeasuredVerification(messages, mismatch);
+
+        var assessment = ScientificRunCompletionPolicy.Assess(Request(), messages, Tools(), evidence);
+
+        Assert.False(assessment.Complete);
+        Assert.False(assessment.NeedsVerification);
+        Assert.Contains(assessment.Missing, problem => problem.Contains("Artefakt", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AFailedWriteCannotRetainAnUnmeasuredLegacyExecutionEvenWithFreshVerification()
+    {
+        var messages = SuccessfulWork();
+        AddVerification(messages, success: true);
+        Assert.True(ScientificRunCompletionPolicy.Assess(Request(), messages, Tools()).Complete);
+        AddReceipt(messages, ClientToolNames.ResearchCodeWrite,
+            new { projectId = Project, path = "/sandbox/artifacts/source-copy.py" },
+            new { success = false, error = "Der Arbeitsordner muss relativ zu work sein." }, status: "failed");
+        AddVerification(messages, success: true);
+
+        var assessment = ScientificRunCompletionPolicy.Assess(Request(), messages, Tools());
+
+        Assert.False(assessment.Complete);
+        Assert.False(assessment.NeedsVerification);
+        Assert.Contains(assessment.Missing, problem => problem.Contains("Python", StringComparison.Ordinal));
+    }
+
     [Theory]
     [InlineData(false, 0, false)]
     [InlineData(true, 1, false)]
@@ -356,10 +419,74 @@ public sealed class ScientificRunCompletionPolicyTests
                     lastModifiedAt = artifactModifiedAt,
                     scriptPath = "work/model.py", scriptSha256 = hashes ? new string('c', 64) : "" } } } });
 
-    private static void AddReceipt(List<LmChatMessage> messages, string tool, object arguments, object result)
+    private static (List<LmChatMessage> Messages, Dictionary<string, IReadOnlyList<LmChatMessage>> Evidence) MeasuredChildWithRejectedCopy()
+    {
+        const string child = "run-measured-child";
+        var messages = new List<LmChatMessage> { new("assistant", Manuscript) };
+        // This earlier check cannot certify the subsequently imported process
+        // and its failed/corrected writes; a fresh check is mandatory.
+        AddMeasuredVerification(messages);
+        messages.Add(new("assistant", ToolCalls: [new("spawn", SubagentToolNames.Spawn,
+            JsonSerializer.SerializeToElement(new { task = "Independent numeric experiment" }))]));
+        messages.Add(new("tool", JsonSerializer.Serialize(new { status = "started", runId = child }), ToolCallId: "spawn"));
+        messages.Add(new("assistant", ToolCalls: [new("wait", SubagentToolNames.Wait,
+            JsonSerializer.SerializeToElement(new { runId = child }))]));
+        messages.Add(new("tool", JsonSerializer.Serialize(new { status = "completed", runId = child }), ToolCallId: "wait"));
+        var evidence = new List<LmChatMessage>();
+        var start = new DateTimeOffset(2026, 10, 3, 9, 45, 28, TimeSpan.Zero);
+        AddReceipt(evidence, ClientToolNames.ResearchCodeExecute,
+            new { projectId = Project, experimentId = Experiment, executable = "python", arguments = PythonArguments },
+            new { success = true, experimentRecordId = MeasuredRecordId(), runs = new[] { new
+            {
+                runId = "numeric-run", exitCode = 0, timedOut = false, startedAt = start, completedAt = start.AddSeconds(4),
+                executedScriptPath = "work/model.py", scriptSha256 = new string('c', 64),
+                inputHashes = MeasuredInputs(), outputHashes = MeasuredOutputs(),
+            } } });
+        AddReceipt(evidence, ClientToolNames.ResearchCodeWrite,
+            new { projectId = Project, path = "/sandbox/artifacts/source-copy.py" },
+            new { success = false, error = "Der Arbeitsordner muss relativ zu work sein." }, status: "failed");
+        AddReceipt(evidence, ClientToolNames.ResearchCodeWrite,
+            new { projectId = Project, path = "sandbox/artifacts/source-copy.py" },
+            new { success = true, root = "work/", file = "sandbox/artifacts/source-copy.py", isNewFile = true,
+                afterSha256 = new string('c', 64) });
+        return (messages, new(StringComparer.Ordinal) { [child] = evidence });
+    }
+
+    private static Dictionary<string, string> MeasuredInputs() => new()
+        { ["work/model.py"] = new string('c', 64), ["inputs/data.json"] = new string('d', 64) };
+
+    private static Dictionary<string, string> MeasuredOutputs() => new()
+        { ["artifacts/result.png"] = new string('b', 64) };
+
+    private static string MeasuredRecordId() => "experiment-" + Convert.ToHexString(SHA256.HashData(
+        Encoding.UTF8.GetBytes(Project + "\nexperiment\n" + Experiment))).ToLowerInvariant()[..24];
+
+    private static void AddMeasuredVerification(List<LmChatMessage> messages, string? mismatch = null)
+    {
+        var inputs = MeasuredInputs();
+        var outputs = MeasuredOutputs();
+        if (mismatch == "input") inputs["inputs/data.json"] = new string('e', 64);
+        if (mismatch == "output") outputs["artifacts/result.png"] = new string('e', 64);
+        AddReceipt(messages, ClientToolNames.ResearchDeliverablesVerify, new { projectId = Project }, new
+        {
+            success = true, projectId = Project,
+            publication = new { ready = true, pdfPath = "publications/Publikation.pdf", sourceSha256 = new string('a', 64) },
+            simulation = new { ready = true, executed = true, artifacts = new[] { new
+            {
+                path = "artifacts/result.png", artifactPath = "artifacts/result.png", sha256 = new string('b', 64),
+                experimentRecordId = MeasuredRecordId(), runId = mismatch == "run" ? "other-run" : "numeric-run",
+                scriptPath = "work/model.py", executedScriptPath = "work/model.py",
+                scriptSha256 = mismatch == "script" ? new string('e', 64) : new string('c', 64),
+                inputHashes = inputs, outputHashes = outputs,
+                lastModifiedAt = new DateTimeOffset(2026, 10, 3, 9, 45, mismatch == "time" ? 0 : 29, TimeSpan.Zero),
+            } } },
+        });
+    }
+
+    private static void AddReceipt(List<LmChatMessage> messages, string tool, object arguments, object result, string status = "completed")
     {
         var id = "call-" + Guid.NewGuid().ToString("N");
         messages.Add(new("assistant", null, ToolCalls: [new(id, tool, JsonSerializer.SerializeToElement(arguments))]));
-        messages.Add(new("tool", JsonSerializer.Serialize(new { status = "completed", result }), ToolCallId: id));
+        messages.Add(new("tool", JsonSerializer.Serialize(new { status, result }), ToolCallId: id));
     }
 }

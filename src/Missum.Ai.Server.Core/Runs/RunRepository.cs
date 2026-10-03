@@ -361,6 +361,9 @@ public sealed partial class RunRepository
                 UPDATE runs SET state = $queued, error_code = NULL, updated_at = $now
                 WHERE (mode = 'Coding'
                     OR (mode IN ('General', 'Auto') AND json_extract(request_json, '$.deepResearch') = 1)
+                    OR json_extract(request_json, '$.subagent.parentRunId') IS NOT NULL
+                    OR EXISTS (SELECT 1 FROM runs child WHERE json_extract(child.request_json, '$.subagent.parentRunId') = runs.run_id
+                        AND child.state IN ('Queued', 'Running', 'WaitingForClient', 'Interrupted'))
                     OR EXISTS (SELECT 1 FROM run_steering_inputs s WHERE s.run_id = runs.run_id)) AND (
                     state = $running OR (state = $interrupted AND error_code IN ('run.gateway_stopped', 'run.gateway_restarted'))
                 );

@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using Missum.App.Services;
 using Missum.App.Controls;
@@ -121,7 +121,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         var navigation = NativeNavigationState.IsNavigationCommand(type);
         var generation = navigation ? _navigationState.BeginNavigation() : _navigationState.Generation;
         var draftSession = _session;
-        var draft = !_rendering ? Composer.Text : null;
+        var draft = !_rendering ? (ActiveSubagent is null ? Composer.Text : _parentComposerDraft) : null;
         if (navigation) { _draftTimer.Stop(); UpdateComposerNavigationState(); }
         var arguments = JsonSerializer.SerializeToElement(payload, JsonOptions);
         Guid? requestSession = Guid.TryParse(S(arguments, "sessionId"), out var parsedSession) ? parsedSession : null;
@@ -209,6 +209,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
 
     private void ApplyEvent(string type, JsonElement data)
     {
+        if (ApplySubagentEvent(type, data)) return;
         if (ApplyResearchEvent(type, data)) return;
         if (type == "chat.started" && S(data, "sessionId") == _session.ToString()
             && data.TryGetProperty("userMessage", out var userMessage) && userMessage.ValueKind == JsonValueKind.Object)
@@ -246,13 +247,14 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                     var action = Items(data, "actionDescriptors").FirstOrDefault(a => S(a, "actionId") == _persistentAction);
                     _selectedAction = _persistentAction; UpdateSelectedToolChip(S(action, "displayName", _persistentAction));
                 }
-                Composer.PlaceholderText = _mode switch { "coding" => "Leg einfach los", "claudescience" => "Stelle eine Forschungsfrage", _ => "Frag etwas" };
+                if (ActiveSubagent is null) Composer.PlaceholderText = _mode switch { "coding" => "Leg einfach los", "claudescience" => "Stelle eine Forschungsfrage", _ => "Frag etwas" };
                 _rendering = true;
                 if (changed) Composer.Text = S(data, "draft");
                 _rendering = false;
                 _messages.Clear();
                 foreach (var message in Items(data, "messages")) _messages[S(message, "id")] = message;
                 ReconcilePendingMessages();
+                SyncSubagents(data, changed);
                 ObserveThinkingProgress(data);
                 UpdateCaptionChip();
                 RenderSidebar();
@@ -262,9 +264,10 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                 var workspace = S(data, "workspacePath");
                 WorkspaceText.Text = string.IsNullOrEmpty(workspace) ? "Kein Projekt ausgewählt" : Path.GetFileName(workspace.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
                 ToolTipService.SetToolTip(InspectorProjectRow, workspace);
-                var modelId = (_mode == "coding" ? _settings.Current.SelectedModel : _settings.Current.SelectedModel); ModelLabel.Text = modelId is null ? "Modell auswählen" : modelId.Split('/').Last().Split('~')[0];
+                var modelId = _settings.Current.SelectedModel;
                 UpdateContext(data);
-                if (_reasoningModel != ModelRole + ":" + modelId) { _reasoningModel = ModelRole + ":" + modelId; _reasoning = null; ReasoningLabel.Text = ""; _ = LoadReasoningAsync(); }
+                if (_reasoningModel != ModelRole + ":" + modelId) { _reasoningModel = ModelRole + ":" + modelId; _reasoning = null; _ = LoadReasoningAsync(); }
+                RefreshComposerModelDisplay();
                 if (data.TryGetProperty("changesSummary", out var changes)) RenderChanges(changes);
                 SetRunning();
                 SyncResearchSession();
@@ -275,13 +278,15 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         if (eventSession.Length > 0 && !string.Equals(eventSession, _session.ToString(), StringComparison.OrdinalIgnoreCase)) return;
         UpdateContext(data);
         ObserveThinkingProgress(data);
-        if (type == "reasoning.snapshot" && S(data, "role") + ":" + S(data, "modelId") == _reasoningModel) { _reasoning = data.Deserialize<ComposerReasoningOptions>(JsonOptions); ReasoningLabel.Text = EffortLabel(_reasoning?.Selected); }
+        if (type == "reasoning.snapshot" && S(data, "role") + ":" + S(data, "modelId") == _reasoningModel) { _reasoning = data.Deserialize<ComposerReasoningOptions>(JsonOptions); RefreshComposerModelDisplay(); }
         if (type == "conversation.snapshot")
         {
             if (!ObserveChangesConversation(_session, data)) return;
             _messages.Clear();
             foreach (var message in Items(data, "messages")) _messages[S(message, "id")] = message;
             ReconcilePendingMessages();
+            SyncSubagents(data, sessionChanged: false);
+            RenderSessionTabs();
             RenderMessages();
             if (data.TryGetProperty("changesSummary", out var conversationChanges)) RenderChanges(conversationChanges);
         }
@@ -389,10 +394,12 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         RenderSources(_snapshot);
         var follow = _conversationSelection?.HasSelection != true && ConversationScroll.ScrollableHeight - ConversationScroll.VerticalOffset < 90;
         var index = 0;
-        foreach (var stale in _messageViews.Keys.Where(id => !_messages.ContainsKey(id)).ToArray())
+        foreach (var stale in _messageViews.Keys.Where(id => !IsKnownConversationMessage(id)).ToArray())
         { MessagesPanel.Children.Remove(_messageViews[stale].View); _messageViews.Remove(stale); _messageBlocks.Remove(stale); _messageActionViews.Remove(stale); _thinkingIndicators.Remove(stale); _thinkingStates.Remove(stale); }
-        WelcomePanel.Visibility = _messages.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        foreach (var message in _messages.Values.OrderBy(MessageCreatedAt))
+        foreach (var hidden in _messageViews.Where(pair => !DisplayMessages.ContainsKey(pair.Key)).Select(pair => pair.Value.View).ToArray())
+            MessagesPanel.Children.Remove(hidden);
+        WelcomePanel.Visibility = DisplayMessages.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        foreach (var message in DisplayMessages.Values.OrderBy(MessageCreatedAt))
         {
             var id = S(message, "id");
             UpdateMessageActions(id, message);
@@ -437,8 +444,8 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     }
     private void RenderSources(JsonElement data)
     {
-        var signature = _session + "|" + ResearchState(_session).Revision + "|"
-            + string.Join("|", _messages.Values.SelectMany(message => Items(message, "toolSteps")).Select(step => S(step, "id") + S(step, "updatedAt") + S(step, "outputJson").GetHashCode(StringComparison.Ordinal)))
+        var signature = ConversationViewKey + "|" + ResearchState(_session).Revision + "|"
+            + string.Join("|", DisplayMessages.Values.SelectMany(message => Items(message, "toolSteps")).Select(step => S(step, "id") + S(step, "updatedAt") + S(step, "outputJson").GetHashCode(StringComparison.Ordinal)))
             + string.Join("|", Items(data, "documents").Concat(Items(data, "attachments")).Select(item => S(item, "id")));
         if (_sourcesSignature == signature) return;
         _sourcesSignature = signature;
@@ -455,7 +462,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     public async Task FlushDraftAsync()
     {
         _draftTimer.Stop();
-        if (_session != Guid.Empty && !_rendering) await _coordinator.SaveDraftAsync(_session, Composer.Text);
+        if (_session != Guid.Empty && !_rendering) await _coordinator.SaveDraftAsync(_session, ActiveSubagent is null ? Composer.Text : _parentComposerDraft ?? "");
     }
     public async Task RefreshForExternalActivationAsync()
     {
@@ -573,7 +580,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         var captionRunning = _captionActive && _captionSessionId == _session;
         var stop = !hasText && (_running || _speaking || captionRunning);
 
-        ModelButton.IsEnabled = true;
+        ModelButton.IsEnabled = ActiveSubagent is null;
         SendIcon.Glyph = stop ? "\uE71A" : "\uE74A";
         var label = stop ? "Aktivität stoppen" : _running ? "Antwort umlenken" : "Nachricht senden";
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(SendButton, label);
@@ -583,7 +590,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     private async void OnSendClick(object sender, RoutedEventArgs e) => await SendAsync();
     private async Task SendAsync()
     {
-        if (!_navigationState.CanEditComposer || _disposed || _sendPending) return;
+        if (!_navigationState.CanEditComposer || ActiveSubagent is not null || _disposed || _sendPending) return;
         if (_dictationCapture is not null)
         {
             var dictationOwner = _session;
@@ -660,8 +667,8 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     private void UpdateComposerNavigationState()
     {
         if (_disposed) return;
-        ComposerInteractionHost.IsEnabled = _navigationState.CanEditComposer;
-        Composer.IsReadOnly = !_navigationState.CanEditComposer;
+        ComposerInteractionHost.IsEnabled = _navigationState.CanEditComposer && ActiveSubagent is null;
+        Composer.IsReadOnly = !_navigationState.CanEditComposer || ActiveSubagent is not null;
     }
     private async Task<string?> FinishDictationForNavigationAsync(Guid sessionId, string? draft)
     {
@@ -752,8 +759,8 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
 
     private void RefreshContextDisplay()
     {
-        ContextRing.Value = _contextLimit > 0 ? Math.Clamp(_contextUsed / _contextLimit * 100, 0, 100) : 0;
-        var description = _contextLimit > 0 ? $"Kontext: {_contextUsed:N0} / {_contextLimit:N0} Token ({ContextRing.Value:0.0} %)" : "Kontext noch nicht verfügbar";
+        ContextRing.Value = DisplayContextLimit > 0 ? Math.Clamp(DisplayContextUsed / DisplayContextLimit * 100, 0, 100) : 0;
+        var description = DisplayContextLimit > 0 ? $"Kontext: {DisplayContextUsed:N0} / {DisplayContextLimit:N0} Token ({ContextRing.Value:0.0} %)" : "Kontext noch nicht verfügbar";
         ContextToolTip.Content = description;
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(ContextIndicator, description);
     }
@@ -771,15 +778,20 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             if (_disposed || _reasoningModel != role + ":" + modelId) return;
             if (!_running) UpdateContext(JsonSerializer.SerializeToElement(new { contextLimit = Missum.Ai.Contracts.ModelContextProfiles.ResolveMaximum(modelId, role) }));
             _reasoning = options;
-            ReasoningLabel.Text = options.Available ? EffortLabel(options.Selected) : "";
+            RefreshComposerModelDisplay();
         }
         catch (OperationCanceledException) { }
-        catch { _reasoning = null; }
+        catch
+        {
+            if (!_disposed && _reasoningModel == role + ":" + modelId)
+            { _reasoning = null; RefreshComposerModelDisplay(); }
+        }
     }
     private async void OnReasoningClick(object sender, RoutedEventArgs e)
     {
+        if (ActiveSubagent is not null) return;
         await LoadReasoningAsync();
-        if (_disposed) return;
+        if (_disposed || ActiveSubagent is not null) return;
         var options = _reasoning;
         var flyout = new Flyout { Placement = Microsoft.UI.Xaml.Controls.Primitives.FlyoutPlacementMode.Top, AreOpenCloseAnimationsEnabled = true };
         var presenter = new Style(typeof(FlyoutPresenter));
@@ -849,7 +861,8 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             slider.ValueChanged += (_, args) =>
             {
                 selected = levels[Math.Clamp((int)Math.Round(args.NewValue), 0, levels.Length - 1)];
-                caption.Text = "Reasoning: " + EffortLabel(selected); ReasoningLabel.Text = EffortLabel(selected);
+                caption.Text = "Reasoning: " + EffortLabel(selected);
+                if (ActiveSubagent is null) ReasoningLabel.Text = EffortLabel(selected);
                 UpdateTrack();
                 for (var i = 0; i < dots.Children.Count; i++) dots.Children[i].Visibility = i == (int)slider.Value ? Visibility.Collapsed : Visibility.Visible;
                 var animation = new Microsoft.UI.Xaml.Media.Animation.DoubleAnimation { From = .45, To = 1, Duration = new Duration(TimeSpan.FromMilliseconds(160)) };

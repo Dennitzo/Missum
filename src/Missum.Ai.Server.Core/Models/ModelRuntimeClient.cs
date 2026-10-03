@@ -25,6 +25,10 @@ public sealed partial class ModelRuntimeClient : IDisposable
         LogLevel.Warning,
         new EventId(4102, "ModelInferenceRetry"),
         "Transient model inference failure; retrying before any tool is executed.");
+    private static readonly Action<ILogger, string, Exception?> LogSubagentPreloadUnavailable = LoggerMessage.Define<string>(
+        LogLevel.Warning,
+        new EventId(4104, "SubagentPreloadUnavailable"),
+        "The primary model {ModelId} remains loaded, but its companion preload could not be reconciled.");
     private static readonly Action<ILogger, int, string, int, string, int, bool, Exception?> LogStreamingAttempt =
         LoggerMessage.Define<int, string, int, string, int, bool>(
             LogLevel.Warning,
@@ -32,12 +36,14 @@ public sealed partial class ModelRuntimeClient : IDisposable
             "Model inference attempt {Attempt}/3 ended ({FailureKind}); fragments={GeneratedFragments}, tool={ToolName}, argumentCharacters={ArgumentCharacters}, argumentJsonComplete={ArgumentJsonComplete}.");
     private static readonly TimeSpan StatusCacheDuration = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan ModelLoadTimeout = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan ManagedPairLoadTimeout = TimeSpan.FromMinutes(10);
     private static readonly TimeSpan ModelTurnTimeout = TimeSpan.FromMinutes(20);
     private readonly HttpClient _httpClient;
     private readonly MissumAiServerOptions _options;
     private readonly ILogger<ModelRuntimeClient> _logger;
     private readonly SemaphoreSlim _modelGate = new(1, 1);
     private readonly SemaphoreSlim _turnGate = new(1, 1);
+    private readonly SemaphoreSlim _subagentTurnGate = new(1, 1);
     private readonly object _cacheLock = new();
     private readonly Dictionary<string, RuntimeModel> _runtimeCatalog = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _modelTransitions = new(StringComparer.OrdinalIgnoreCase);
@@ -113,41 +119,102 @@ public sealed partial class ModelRuntimeClient : IDisposable
         CancellationToken cancellationToken = default) =>
         (await EnsureModelPreparedAsync(modelId, contextLength, null, cancellationToken).ConfigureAwait(false)).InstanceId;
 
+    internal Task<ModelPreparation> EnsureModelPreparedAsync(
+        string modelId, int contextLength, Func<CancellationToken, Task>? loadingStarted,
+        CancellationToken cancellationToken = default) =>
+        EnsureModelPreparedAsync(modelId, contextLength, loadingStarted, runtimeInstanceId: null, cancellationToken);
+
     internal async Task<ModelPreparation> EnsureModelPreparedAsync(
         string modelId, int contextLength, Func<CancellationToken, Task>? loadingStarted,
-        CancellationToken cancellationToken = default)
+        string? runtimeInstanceId, CancellationToken cancellationToken = default)
     {
-        var turnGate = await AcquireTurnAsync(modelId, cancellationToken).ConfigureAwait(false);
-        try { return await PrepareNativeModelAsync(modelId, contextLength, loadingStarted, cancellationToken).ConfigureAwait(false); }
+        var turnGate = await AcquireTurnAsync(runtimeInstanceId ?? modelId, cancellationToken).ConfigureAwait(false);
+        try { return await PrepareNativeModelAsync(modelId, contextLength, loadingStarted, cancellationToken, runtimeInstanceId).ConfigureAwait(false); }
         finally { turnGate.Release(); }
     }
 
     private async Task<ModelPreparation> PrepareNativeModelAsync(
-        string modelId, int contextLength, Func<CancellationToken, Task>? loadingStarted, CancellationToken cancellationToken)
+        string modelId, int contextLength, Func<CancellationToken, Task>? loadingStarted, CancellationToken cancellationToken,
+        string? runtimeInstanceId = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(modelId);
+        var loadTimeout = ModelLoadTimeout;
         await _modelGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(ModelLoadTimeout);
             var runtimeModels = await GetRuntimeModelsAsync(timeout.Token).ConfigureAwait(false);
-            var selected = ResolveInstalledModel(runtimeModels, modelId)
+            var selected = ResolveInstalledModel(runtimeModels, runtimeInstanceId ?? modelId)
                 ?? throw new FileNotFoundException($"Das lokale Unsloth-Modell '{modelId}' ist nicht installiert.");
+            if (runtimeInstanceId is not null && (!selected.IsSubagent
+                || !string.Equals(selected.BaseModelId, ResolveInstalledModel(runtimeModels, modelId)?.Id, StringComparison.Ordinal)))
+                throw new ArgumentException("Die Subagent-Instanz muss dasselbe installierte Modell wie der Hauptagent verwenden.", nameof(runtimeInstanceId));
+            var restoresManagedPair = selected.IsSubagent && selected.BaseModelId is { } restoredBase
+                && ResolveInstalledModel(runtimeModels, restoredBase) is { ManagedGpuPlacement: true, State: not ("loaded" or "sleeping") };
+            if (selected.ManagedGpuPlacement && !selected.IsSubagent || restoresManagedPair)
+            {
+                // The controller may load two independent 280-second native
+                // processes in sequence. This bounds model startup, not AI runs.
+                loadTimeout = ManagedPairLoadTimeout;
+                timeout.CancelAfter(loadTimeout);
+            }
             if (contextLength > selected.MaximumContextLength)
                 throw new ModelContextLengthException(selected.Id, contextLength, selected.MaximumContextLength);
-            if (selected.State is "loaded" or "sleeping") return new ModelPreparation(selected.Id, WasAlreadyLoaded: true, selected.LoadedContextLength);
-            BeginModelTransition(runtimeModels.Where(model => model.Id != selected.Id && model.State is "loaded" or "loading" or "sleeping"), selected.Id);
+            if (selected.State is "loaded" or "sleeping")
+            {
+                if (selected.ManagedGpuPlacement && !selected.IsSubagent)
+                {
+                    // The idempotent Windows load controller also warms the
+                    // admitted GPU1 companion. Reconcile a resident primary
+                    // after app/gateway restart without evicting either KV slot.
+                    try
+                    {
+                        await LoadRuntimeModelWithControlRetryAsync(selected.Id, managedGpuPlacement: true, timeout.Token).ConfigureAwait(false);
+                        InvalidateStatus();
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+                    catch (Exception exception) when (exception is HttpRequestException or IOException or OperationCanceledException)
+                    {
+                        // An optional replica/control failure must not discard
+                        // the usable resident primary or abort its ordinary run.
+                        LogSubagentPreloadUnavailable(_logger, selected.Id, exception);
+                    }
+                }
+                return new ModelPreparation(selected.Id, WasAlreadyLoaded: true, selected.LoadedContextLength);
+            }
+            var unloadingModels = runtimeModels.Where(model => model.Id != selected.Id
+                && model.State is "loaded" or "loading" or "sleeping"
+                && !(selected.IsSubagent ? model.Id == selected.BaseModelId : model.IsSubagent && model.BaseModelId == selected.Id)).ToArray();
+            BeginModelTransition(unloadingModels, selected.Id);
             if (loadingStarted is not null) await loadingStarted(cancellationToken).ConfigureAwait(false);
             // Change residency only when the selected model actually needs loading. A resumed tool round reuses it.
-            foreach (var loaded in runtimeModels.Where(model => model.Id != selected.Id && model.State is "loaded" or "loading" or "sleeping"))
+            foreach (var loaded in unloadingModels)
                 await UnloadRuntimeInstanceAsync(loaded.Id, timeout.Token).ConfigureAwait(false);
+            if (selected.IsSubagent && selected.BaseModelId is { } baseModelId)
+            {
+                var primary = ResolveInstalledModel(runtimeModels, baseModelId)
+                    ?? throw new FileNotFoundException("Das Hauptmodell der Subagent-Instanz ist nicht installiert.");
+                if (primary.State is not ("loaded" or "sleeping"))
+                {
+                    // An exclusive media/embedding tool or a supervisor restart
+                    // can evict both slots. Restore the same primary first;
+                    // the secondary load then rechecks its actual VRAM policy.
+                    await LoadRuntimeModelWithControlRetryAsync(primary.Id, primary.ManagedGpuPlacement, timeout.Token).ConfigureAwait(false);
+                    await WaitForNativeModelLoadedAsync(primary.Id, timeout.Token).ConfigureAwait(false);
+                }
+            }
             try { await LoadRuntimeModelAsync(selected.Id, timeout.Token, selected.ManagedGpuPlacement).ConfigureAwait(false); }
             catch (Exception exception) when (IsTransientInferenceFailure(exception) && !timeout.IsCancellationRequested)
             {
                 // A dropped load response can follow a successful native allocation. Reconcile once before retrying anything.
                 var recovered = (await GetRuntimeModelsAsync(timeout.Token).ConfigureAwait(false)).FirstOrDefault(model => model.Id == selected.Id);
                 if (recovered?.State is not ("loaded" or "sleeping" or "loading")) throw;
+                // A lost control response can arrive between primary and
+                // companion allocation. Reconcile the idempotent pair operation
+                // before declaring startup complete from the primary alone.
+                if (selected.ManagedGpuPlacement && !selected.IsSubagent)
+                    await LoadRuntimeModelAsync(selected.Id, timeout.Token, managedGpuPlacement: true).ConfigureAwait(false);
             }
             while (true)
             {
@@ -163,7 +230,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
         }
         catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
         {
-            throw new TimeoutException($"Das Modell '{modelId}' wurde nicht innerhalb von 5 Minuten geladen.", exception);
+            throw new TimeoutException($"Das Modell '{modelId}' wurde nicht innerhalb von {loadTimeout.TotalMinutes:0} Minuten geladen.", exception);
         }
         finally { EndModelTransition(); _modelGate.Release(); }
     }
@@ -223,6 +290,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
         bool structuredToolOnly = false,
         string? sessionCacheKey = null,
         JsonElement? responseSchema = null,
+        string? runtimeInstanceId = null,
         CancellationToken cancellationToken = default)
     {
         ValidateToolChoice(tools, requireToolCall, requiredToolName);
@@ -232,7 +300,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
             throw new ArgumentException("Coding requires an installed model from the Coding model catalog.", nameof(modelId));
         }
         var turnClock = Stopwatch.StartNew();
-        var turnGate = await AcquireTurnAsync(modelId, cancellationToken).ConfigureAwait(false);
+        var turnGate = await AcquireTurnAsync(runtimeInstanceId ?? modelId, cancellationToken).ConfigureAwait(false);
         var queueMilliseconds = turnClock.Elapsed.TotalMilliseconds;
         string? preparedInstanceId = null;
         int? evaluatedPromptTokens = null;
@@ -240,7 +308,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
         {
             // The preset chooses the model's maximum that fits. A request limit is
             // an upper bound; it must not require a larger allocation after fitting.
-            var preparation = await PrepareNativeModelAsync(modelId, 0, null, cancellationToken).ConfigureAwait(false);
+            var preparation = await PrepareNativeModelAsync(modelId, 0, null, cancellationToken, runtimeInstanceId).ConfigureAwait(false);
             preparedInstanceId = preparation.InstanceId;
             await UpdateSessionCacheAsync("prepare", preparation.InstanceId, sessionCacheKey, cancellationToken).ConfigureAwait(false);
             var context = requiredContextLength is { } requested
@@ -432,15 +500,25 @@ public sealed partial class ModelRuntimeClient : IDisposable
         CancellationToken cancellationToken = default) =>
         AnalyzeImagesAsync(modelId, prompt, imagePaths, reasoningEffort: null, cancellationToken);
 
+    public Task<string> AnalyzeImagesAsync(
+        string modelId,
+        string prompt,
+        IReadOnlyList<string> imagePaths,
+        string? reasoningEffort,
+        CancellationToken cancellationToken = default) =>
+        AnalyzeImagesAsync(modelId, prompt, imagePaths, reasoningEffort, runtimeInstanceId: null, cancellationToken);
+
     public async Task<string> AnalyzeImagesAsync(
         string modelId,
         string prompt,
         IReadOnlyList<string> imagePaths,
         string? reasoningEffort,
+        string? runtimeInstanceId,
         CancellationToken cancellationToken = default)
     {
         var result = await AnalyzeImagesResultAsync(modelId, prompt, imagePaths, reasoningEffort,
-            responseSchema: null, maximumOutputTokens: int.MaxValue, cancellationToken: cancellationToken).ConfigureAwait(false);
+            responseSchema: null, maximumOutputTokens: int.MaxValue, cancellationToken: cancellationToken,
+            runtimeInstanceId: runtimeInstanceId).ConfigureAwait(false);
         if (string.Equals(result.FinishReason, "length", StringComparison.OrdinalIgnoreCase))
             throw new ModelGenerationTerminatedException("vision_output_limit");
         return string.IsNullOrWhiteSpace(result.Content)
@@ -473,20 +551,20 @@ public sealed partial class ModelRuntimeClient : IDisposable
         string? reasoningEffort,
         JsonElement? responseSchema,
         int maximumOutputTokens,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, string? runtimeInstanceId = null)
     {
         if (imagePaths.Count is < 1 or > 48)
         {
             throw new ArgumentOutOfRangeException(nameof(imagePaths));
         }
-        var turnGate = await AcquireTurnAsync(modelId, cancellationToken).ConfigureAwait(false);
+        var turnGate = await AcquireTurnAsync(runtimeInstanceId ?? modelId, cancellationToken).ConfigureAwait(false);
         try
         {
         var preparation = await PrepareNativeModelAsync(
             modelId,
             0,
             loadingStarted: null,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken, runtimeInstanceId).ConfigureAwait(false);
         var content = new List<object> { new { type = "text", text = prompt } };
         foreach (var path in imagePaths)
         {
@@ -648,6 +726,20 @@ public sealed partial class ModelRuntimeClient : IDisposable
             }
         }
         return models;
+    }
+
+    private async Task LoadRuntimeModelWithControlRetryAsync(string modelId, bool managedGpuPlacement,
+        CancellationToken cancellationToken)
+    {
+        try { await LoadRuntimeModelAsync(modelId, cancellationToken, managedGpuPlacement).ConfigureAwait(false); }
+        catch (Exception exception) when (managedGpuPlacement && IsTransientInferenceFailure(exception)
+            && !cancellationToken.IsCancellationRequested)
+        {
+            // A resident primary or restored child can also lose the response
+            // between the two allocations. One idempotent reconciliation keeps
+            // resident KV slots intact and finishes the admitted companion.
+            await LoadRuntimeModelAsync(modelId, cancellationToken, managedGpuPlacement).ConfigureAwait(false);
+        }
     }
 
     private async Task LoadRuntimeModelAsync(string modelId, CancellationToken cancellationToken, bool managedGpuPlacement = false)
@@ -1972,17 +2064,23 @@ public sealed partial class ModelRuntimeClient : IDisposable
             if (hash > 0) name = name[..hash];
             var reasoning = embedding ? new ModelReasoningProfile(ModelReasoningProfiles.UnknownFamily, ["none"], "none")
                 : ReadReasoningMetadata(item) ?? ModelReasoningProfiles.Resolve(id, vision ? "vision" : "general");
+            var tags = item.TryGetProperty("tags", out var instanceTags) && instanceTags.ValueKind == JsonValueKind.Array
+                ? instanceTags.EnumerateArray().Where(static tag => tag.ValueKind == JsonValueKind.String).Select(static tag => tag.GetString()!).ToArray()
+                : [];
+            var isSubagent = tags.Contains("missum-agent-instance:subagent", StringComparer.Ordinal);
+            var baseModelId = tags.FirstOrDefault(static tag => tag.StartsWith("missum-base-model:", StringComparison.Ordinal))?["missum-base-model:".Length..];
             models.Add(new RuntimeModel(id, embedding ? "embedding" : "llm", state, state is "loaded" or "sleeping" ? id : null,
                 context, state is "loaded" or "sleeping" ? context : 0, name, null, null, !embedding, vision, reasoning.SupportedEfforts, reasoning.DefaultEffort, reasoning.Family,
                 item.TryGetProperty("tags", out var gpuTags) && gpuTags.ValueKind == JsonValueKind.Array
-                    && gpuTags.EnumerateArray().Any(tag => tag.ValueKind == JsonValueKind.String && tag.GetString() is "missum-gpu-policy:single-preferred-v1" or "go-gpu-policy:single-preferred-v1"))); // Legacy catalog read alias.
+                    && gpuTags.EnumerateArray().Any(tag => tag.ValueKind == JsonValueKind.String && tag.GetString() is "missum-gpu-policy:single-preferred-v1" or "go-gpu-policy:single-preferred-v1"),
+                isSubagent, baseModelId)); // Legacy catalog read alias.
         }
         return [.. models];
     }
 
     private static RuntimeModel? ResolveInstalledModel(IReadOnlyList<RuntimeModel> models, string requestedId) =>
         models.FirstOrDefault(model => string.Equals(model.Id, requestedId, StringComparison.OrdinalIgnoreCase))
-        ?? models.Where(model => LegacyModelMatches(model.Id, requestedId)).OrderByDescending(static model => model.State is "loaded" or "sleeping").ThenBy(static model => model.Id, StringComparer.Ordinal).FirstOrDefault();
+        ?? models.Where(model => !model.IsSubagent && LegacyModelMatches(model.Id, requestedId)).OrderByDescending(static model => model.State is "loaded" or "sleeping").ThenBy(static model => model.Id, StringComparer.Ordinal).FirstOrDefault();
 
     internal static ModelRuntimeStatus? ResolveModelStatus(IReadOnlyList<ModelRuntimeStatus> models, string requestedId, string role) =>
         models.Where(model => model.Downloaded && string.Equals(model.Role, role, StringComparison.OrdinalIgnoreCase))
@@ -2012,6 +2110,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
         var statuses = new List<ModelRuntimeStatus>(runtimeModels.Length * 2);
         foreach (var model in runtimeModels)
         {
+            if (model.IsSubagent) continue; // Replicas are agent execution instances, not selectable models.
             var context = model.LoadedContextLength > 0 ? model.LoadedContextLength
                 : model.MaximumContextLength > 0 ? model.MaximumContextLength : 2_048;
             var displayName = string.IsNullOrWhiteSpace(model.Quantization)
@@ -2115,15 +2214,30 @@ public sealed partial class ModelRuntimeClient : IDisposable
         }
     }
 
-    private sealed class TurnLease(SemaphoreSlim first)
+    private sealed class TurnLease(SemaphoreSlim first, SemaphoreSlim? second = null)
     {
-        public void Release() { first.Release(); }
+        public void Release() { second?.Release(); first.Release(); }
     }
 
     private async Task<TurnLease> AcquireTurnAsync(string? modelId, CancellationToken token)
     {
+        if (modelId?.EndsWith("@subagent", StringComparison.Ordinal) == true
+            && TryGetRuntimeModel(modelId, out var secondary) && secondary.State is "loaded" or "sleeping")
+        {
+            await _subagentTurnGate.WaitAsync(token).ConfigureAwait(false);
+            return new TurnLease(_subagentTurnGate);
+        }
         await _turnGate.WaitAsync(token);
-        return new TurnLease(_turnGate);
+        // Stateless/model-switch operations own both instances. A resident
+        // primary turn only owns GPU0 and may overlap its child's GPU1 turn.
+        if (modelId is not null && TryGetRuntimeModel(modelId, out var model) && model.State is "loaded" or "sleeping")
+            return new TurnLease(_turnGate);
+        try
+        {
+            await _subagentTurnGate.WaitAsync(token).ConfigureAwait(false);
+            return new TurnLease(_turnGate, _subagentTurnGate);
+        }
+        catch { _turnGate.Release(); throw; }
     }
 
     private static Uri EnsureTrailingSlash(Uri uri) => uri.AbsoluteUri.EndsWith('/')
@@ -2134,6 +2248,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
     {
         _modelGate.Dispose();
         _turnGate.Dispose();
+        _subagentTurnGate.Dispose();
     }
 
     internal sealed record RuntimeModel(
@@ -2151,5 +2266,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
         IReadOnlyList<string> ReasoningEfforts,
         string? DefaultReasoningEffort,
         string? ReasoningFamily = null,
-        bool ManagedGpuPlacement = false);
+        bool ManagedGpuPlacement = false,
+        bool IsSubagent = false,
+        string? BaseModelId = null);
 }

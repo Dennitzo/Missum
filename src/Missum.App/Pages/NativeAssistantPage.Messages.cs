@@ -22,7 +22,7 @@ public sealed partial class NativeAssistantPage
         if (_lastHeaderSecond == second) return;
         _lastHeaderSecond = second;
         foreach (var (id, blocks) in _messageBlocks)
-            if (blocks.TryGetValue("header", out var header) && _messages.TryGetValue(id, out var message))
+            if (blocks.TryGetValue("header", out var header) && DisplayMessages.TryGetValue(id, out var message))
                 UpdateMessageHeader(header, message);
         RefreshContextDisplay();
         RefreshThinkingIndicators(refreshTokens: true);
@@ -39,10 +39,10 @@ public sealed partial class NativeAssistantPage
         var elapsed = MessageActiveDuration(message, end);
         var duration = $"{(long)elapsed.TotalMinutes} Min. {elapsed.Seconds} Sek.";
         var text = active
-            ? $"Modell generiert {_contextUsed:N0} Token · In Bearbeitung seit {duration}"
+            ? $"Modell generiert {DisplayContextUsed:N0} Token · In Bearbeitung seit {duration}"
             : start.ToLocalTime().ToString("dd.MM.yyyy · HH:mm 'Uhr'", CultureInfo.CurrentCulture) + " · " + duration + " lang gearbeitet";
-        if (active && (header.Tag is not double displayedTokens || displayedTokens != _contextUsed)) header.Tag = _contextUsed;
-        if (active && !string.IsNullOrWhiteSpace(ChatStatus)) text = ChatStatus + " · " + text;
+        if (active && (header.Tag is not double displayedTokens || displayedTokens != DisplayContextUsed)) header.Tag = DisplayContextUsed;
+        if (active && !string.IsNullOrWhiteSpace(DisplayChatStatus)) text = DisplayChatStatus + " · " + text;
         var label = (TextBlock)((StackPanel)header).Children[0];
         if (label.Text != text) label.Text = text;
     }
@@ -99,12 +99,33 @@ public sealed partial class NativeAssistantPage
             else ((NativeStreamingMarkdown)element).UpdateText(value);
             desired.Add(element);
         }
-        foreach (var step in Items(message, "toolSteps"))
+        var messageSteps = Items(message, "toolSteps");
+        var subagentReceipts = messageSteps.Where(step => S(step, "tool") == "subagent").ToArray();
+        foreach (var step in messageSteps)
         {
             var next = step.TryGetProperty("contentOffset", out var position) && position.TryGetInt32(out var n) ? Math.Clamp(n, offset, content.Length) : offset;
             Text("text:" + offset, content[offset..next]); offset = next;
             var id = S(step, "id", "step:" + sequence++);
             var tool = S(step, "tool");
+            // The persisted child receipt owns its lifecycle row. Keep rejected
+            // manager calls visible, and coalesce only calls for an accepted child.
+            if (IsAcceptedSubagentManagementStep(step, subagentReceipts)) continue;
+            if (tool is "subagent" or "subagent.completed")
+            {
+                var lifecycleKey = "tool:" + id;
+                if (!blocks.TryGetValue(lifecycleKey, out var lifecycle) || lifecycle is not SubagentLifecycleView)
+                {
+                    var view = new SubagentLifecycleView();
+                    view.SubagentRequested += async agentId =>
+                    {
+                        if (_subagents.TryGetValue(agentId, out var child)) await ActivateSubagentTabAsync(child);
+                    };
+                    blocks[lifecycleKey] = lifecycle = view;
+                }
+                ((SubagentLifecycleView)lifecycle).Update(step, FindSubagentForStep(step));
+                desired.Add(lifecycle);
+                continue;
+            }
             if (S(step, "status") is "running" or "pending" && S(step, "agentId").Length == 0
                 && tool is not ("assistant.reasoning" or "assistant.progress" or "assistant.narration" or "assistant.steering"))
                 hasBlockingTool = true;
@@ -130,7 +151,15 @@ public sealed partial class NativeAssistantPage
             // server accepts it. Only an accepted continuation is a visible step.
             if (tool == "assistant.continuation" && S(step, "status") != "completed") continue;
             var key = "tool:" + id;
-            if (!blocks.TryGetValue(key, out var element)) blocks[key] = element = new ToolStepView(_settings.Current.CodingToolStepsExpanded);
+            if (!blocks.TryGetValue(key, out var element))
+            {
+                var view = new ToolStepView(_settings.Current.CodingToolStepsExpanded);
+                view.SubagentRequested += async agentId =>
+                {
+                    if (_subagents.TryGetValue(agentId, out var child)) await ActivateSubagentTabAsync(child);
+                };
+                blocks[key] = element = view;
+            }
             ((ToolStepView)element).Update(step, tool == "assistant.reasoning" ? toolNumber : ++toolNumber);
             desired.Add(element);
         }
@@ -189,6 +218,7 @@ public sealed partial class NativeAssistantPage
 
     private sealed class ToolStepView : Grid
     {
+        internal event Action<string>? SubagentRequested;
         private readonly TextBlock _title = new() { FontSize = 14, Foreground = Brush(160), TextTrimming = TextTrimming.CharacterEllipsis };
         private readonly TextBlock _added = new() { FontSize = 13, Foreground = new SolidColorBrush(Color.FromArgb(255, 0x31, 0xC7, 0x7D)) };
         private readonly TextBlock _removed = new() { FontSize = 13, Foreground = new SolidColorBrush(Color.FromArgb(255, 0xFF, 0x62, 0x5A)) };
@@ -253,6 +283,7 @@ public sealed partial class NativeAssistantPage
             var tool = S(step, "tool");
             _fileMutation = tool is "coding.write" or "coding.edit" or "coding.undo";
             _label = tool switch {
+                "subagent" or "subagent.spawn" => "Subagent", "subagent.wait" => "Subagent-Ergebnis",
                 "coding.read" => "Datei lesen", "coding.write" or "coding.edit" or "coding.undo" => "Datei bearbeiten",
                 "coding.command" => "Befehl ausgeführt", "coding.list" => "Dateien aufgelistet", "coding.search" => "Dateien durchsucht",
                 "coding.gitDiff" => "Änderungen geprüft", "coding.updatePlan" => "Arbeitsplan aktualisiert", "assistant.reasoning" => "Denkprozess",
@@ -328,6 +359,22 @@ public sealed partial class NativeAssistantPage
             copy.HorizontalAlignment = HorizontalAlignment.Right;
             var input = ReadMetadata(S(_step, "inputJson"));
             var output = ReadMetadata(S(_step, "outputJson"));
+            if (S(_step, "tool") is "subagent" or "subagent.spawn" or "subagent.wait")
+            {
+                var task = S(input, "task", S(output, "title"));
+                if (task.Length > 0) _details.Children.Add(new NativeStreamingMarkdown(task));
+                var result = S(output, "result");
+                if (result.Length > 0) _details.Children.Add(new NativeStreamingMarkdown(result));
+                var agentId = S(output, "agentId", S(input, "agentId", S(_step, "agentId")));
+                if (agentId.Length > 0 && SubagentRequested is not null)
+                {
+                    var open = new Button { Content = "Subagent öffnen", HorizontalAlignment = HorizontalAlignment.Left };
+                    open.Click += (_, _) => SubagentRequested?.Invoke(agentId);
+                    _details.Children.Add(open);
+                }
+                _details.Children.Add(copy);
+                return;
+            }
             var explanation = S(_step, "explanation");
             if (explanation.Length == 0 && _filePath.Length > 0)
                 explanation = S(_step, "tool") == "coding.read" ? $"Ich lese „{_filePath}“." : _fileMutation ? $"Dateiänderungen für „{_filePath}“." : "";
@@ -349,6 +396,11 @@ public sealed partial class NativeAssistantPage
 
         internal static string ToolSummary(string tool, JsonElement input, JsonElement output)
         {
+            if (tool is "subagent" or "subagent.spawn" or "subagent.wait")
+            {
+                var title = S(output, "title", S(input, "title", S(input, "task")));
+                return title.Length > 80 ? title[..77] + "…" : title;
+            }
             var path = S(output, "path", S(output, "file", S(input, "path")));
             var target = path.Length > 0 ? path.Replace('\\', '/') : S(input, "query", S(input, "url"));
             if (tool is "coding.command" or "research.code.execute" or "research.code.test" or "research.code.benchmark") target = S(input, "executable") + " " + (input.ValueKind == JsonValueKind.Object && input.TryGetProperty("arguments", out var args) && args.ValueKind == JsonValueKind.Array ? string.Join(" ", args.EnumerateArray().Select(x => x.ToString())) : "");

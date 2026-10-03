@@ -21,7 +21,7 @@ public sealed partial class NativeAssistantPage
     private void RenderPromptTimeline()
     {
         if (PromptTimeline is null || ConversationContent is null || _disposed) return;
-        var messages = _messages.Values.OrderBy(MessageCreatedAt).ToArray();
+        var messages = DisplayMessages.Values.OrderBy(MessageCreatedAt).ToArray();
         var prompts = messages.Where(message => S(message, "role") == "user"
             && !string.IsNullOrWhiteSpace(S(message, "content"))).ToArray();
         PromptTimeline.Visibility = prompts.Length > 0 ? Visibility.Visible : Visibility.Collapsed;

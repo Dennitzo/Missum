@@ -3,9 +3,11 @@ using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Wordprocessing;
 using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Configuration;
+using Missum.Ai.Server.Core.Gateway;
 using Missum.Ai.Server.Core.Research;
 using Missum.Ai.Server.Core.Runs;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.DependencyInjection;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -17,6 +19,29 @@ namespace Missum.Ai.Server.Tests;
 
 public sealed class WebResearchServiceTests
 {
+    [Theory]
+    [InlineData("x")]
+    [InlineData("file:///C:/private.txt")]
+    [InlineData("https://user:password@example.com/reference")]
+    public async Task MalformedModelFetchReturnsACorrectableToolReceiptInsteadOfFailingTheRun(string url)
+    {
+        using var context = new TestServerContext();
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddMissumAiServerServices(context.Options, includeHostedServices: false);
+        services.AddSingleton(context.Database);
+        using var provider = services.BuildServiceProvider();
+        var executor = provider.GetRequiredService<AgentToolExecutor>();
+
+        var result = await executor.ExecuteAsync("web.fetch", JsonSerializer.SerializeToElement(new { url }), "invalid-fetch-test");
+
+        Assert.False(result.Succeeded);
+        Assert.Equal("web.fetch.invalid_arguments", result.ErrorCode);
+        Assert.False(result.Result.GetProperty("retryable").GetBoolean());
+        Assert.Contains("korrigiere", result.Result.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.Empty(result.Artifacts);
+    }
+
     [Fact]
     public void HtmlInlineMarkupPreservesExactApiNamesForTargetedFetch()
     {

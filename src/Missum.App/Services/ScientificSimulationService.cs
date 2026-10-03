@@ -7,7 +7,12 @@ using Missum.Core.Research;
 namespace Missum.App.Services;
 
 public sealed record ScientificSimulationArtifact(string Id, string Title, string ImagePath,
-    string? ScriptPath, string? DataPath, string Provenance, bool IsResearchData, string Sha256);
+    string? ScriptPath, string? DataPath, string Provenance, bool IsResearchData, string Sha256,
+    ScientificExecutionEvidence? Execution = null);
+
+public sealed record ScientificExecutionEvidence(string ProjectRoot, string ExperimentRecordId, string RunId,
+    string ExecutedScriptPath, string ScriptSha256, string SnapshotId, IReadOnlyDictionary<string, string> InputHashes,
+    IReadOnlyDictionary<string, string> OutputHashes, DateTimeOffset StartedAt, DateTimeOffset CompletedAt);
 
 public sealed record ScientificSimulationSnapshot(string ProjectId, long Revision, string Status,
     string Detail, IReadOnlyList<ScientificSimulationArtifact> Artifacts, DateTimeOffset UpdatedAt);
@@ -122,6 +127,7 @@ public sealed partial class ScientificSimulationService(
             images = images.Select(image => image with
             {
                 Provenance = "Forschungsexperiment · simulation-" + run.RunId + " · ProcessSucceeded",
+                Execution = ExecutionFromRun(layout, "simulation-" + run.RunId, run),
             }).ToList();
             return await IsCurrentResearchAsync(projectId, inputFingerprint, cancellationToken).ConfigureAwait(false)
                 ? Snapshot(project, images, status, detail) : Superseded(projectId);
@@ -135,8 +141,9 @@ public sealed partial class ScientificSimulationService(
     {
         await repository.SaveExperimentAsync(new("simulation-" + run.RunId, project.Id, ResearchSandboxService.RunnerImage,
             JsonSerializer.Serialize(new[] { SafePath(layout.WorkPath, relative + "/simulation.py") }), "[]",
-            JsonSerializer.Serialize(new Dictionary<string, string> { [relative + "/simulation.py"] = sourceHash }),
-            title + "\n" + run.Command, "{\"network\":\"none\",\"timeoutSeconds\":300}", run.StandardOutput,
+            JsonSerializer.Serialize(run.InputHashes ?? new Dictionary<string, string> { [relative + "/simulation.py"] = sourceHash }),
+            title + "\n" + run.Command, "{\"network\":\"none\",\"timeoutSeconds\":300}", run.SnapshotId is null
+                ? run.StandardOutput : JsonSerializer.Serialize(new { runs = new[] { run } }, JsonOptions),
             run.StandardError, JsonSerializer.Serialize(artifacts.Select(item => item.ImagePath)),
             run.ExitCode == 0 && !run.TimedOut ? "ProcessSucceeded" : "ProcessFailed", run.StartedAt, run.CompletedAt), token).ConfigureAwait(false);
     }
@@ -148,6 +155,24 @@ public sealed partial class ScientificSimulationService(
         var images = new List<ScientificSimulationArtifact>();
         foreach (var experiment in experiments.Where(IsSuccessfulPythonExperiment).OrderByDescending(item => item.UpdatedAt))
         {
+            if (MeasuredExecutions(experiment, layout) is { } measured)
+            {
+                foreach (var execution in measured.OrderByDescending(item => item.CompletedAt))
+                    foreach (var pair in execution.OutputHashes)
+                    {
+                        var candidate = ResolveCandidate(layout.RootPath, pair.Key);
+                        if (candidate is null || !File.Exists(candidate) || !IsImage(candidate)) continue;
+                        var script = ResolveCandidate(layout.RootPath, execution.ExecutedScriptPath);
+                        if (script is null || !File.Exists(script)) continue;
+                        var before = images.Count;
+                        await AddImageAsync(candidate, layout.RootPath, Path.GetFileNameWithoutExtension(candidate), script, null,
+                            "Forschungsexperiment · " + experiment.Id + " · " + experiment.VerificationStatus,
+                            true, images, token, notBefore).ConfigureAwait(false);
+                        if (images.Count > before)
+                            images[^1] = images[^1] with { Sha256 = pair.Value, Execution = execution };
+                    }
+                continue;
+            }
             foreach (var root in CandidateRoots(project, layout))
             {
                 var scripts = JsonPaths(experiment.SourceFilesJson).Select(path => ResolveCandidate(root, path))
@@ -179,7 +204,7 @@ public sealed partial class ScientificSimulationService(
             var image = images[index];
             if (image.ScriptPath is not null) continue;
             var modified = File.GetLastWriteTimeUtc(image.ImagePath);
-            var experiment = experiments.Where(item => ExperimentContainsTimestamp(item, modified))
+            var experiment = experiments.Where(item => MeasuredExecutions(item, layout) is null && ExperimentContainsTimestamp(item, modified))
                 .OrderByDescending(item => item.UpdatedAt).FirstOrDefault();
             if (experiment is not null && IsSuccessfulPythonExperiment(experiment) && ScriptFromExperiment(experiment, layout) is { } script)
                 images[index] = image with { ScriptPath = script,
@@ -192,6 +217,33 @@ public sealed partial class ScientificSimulationService(
     private static bool IsSuccessfulPythonExperiment(ResearchExperiment experiment) =>
         experiment.VerificationStatus == "ProcessSucceeded" && (experiment.Id.StartsWith("simulation-", StringComparison.Ordinal)
             || experiment.CommandText.StartsWith("research.code.execute ", StringComparison.Ordinal));
+
+    private static ScientificExecutionEvidence? ExecutionFromRun(ResearchSandboxLayout layout, string recordId, ResearchSandboxRunResult run) =>
+        run.ExecutedScriptPath is { Length: > 0 } script && run.ScriptSha256 is { Length: > 0 } hash
+        && run.SnapshotId is { Length: > 0 } snapshot && run.InputHashes is not null && run.OutputHashes is not null
+            ? new(layout.RootPath, recordId, run.RunId, script, hash, snapshot, run.InputHashes, run.OutputHashes, run.StartedAt, run.CompletedAt) : null;
+
+    private static List<ScientificExecutionEvidence>? MeasuredExecutions(ResearchExperiment experiment, ResearchSandboxLayout layout)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(experiment.StdoutEvidence);
+            if (document.RootElement.ValueKind != JsonValueKind.Object || !document.RootElement.TryGetProperty("runs", out var runs)
+                || runs.ValueKind != JsonValueKind.Array) return null;
+            var measured = new List<ScientificExecutionEvidence>();
+            var hasMeasured = false;
+            foreach (var item in runs.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.Object || !item.TryGetProperty("snapshotId", out var snapshot) || snapshot.ValueKind != JsonValueKind.String) continue;
+                hasMeasured = true;
+                var run = item.Deserialize<ResearchSandboxRunResult>(JsonOptions);
+                if (run is { ExitCode: 0, TimedOut: false } && ExecutionFromRun(layout, experiment.Id, run) is { } evidence)
+                    measured.Add(evidence);
+            }
+            return hasMeasured ? measured : null;
+        }
+        catch (JsonException) { return null; }
+    }
 
     private static bool ExperimentContainsTimestamp(ResearchExperiment experiment, DateTime modified)
     {
@@ -325,10 +377,17 @@ public sealed partial class ScientificSimulationService(
             {
                 var image = ResolveCandidate(root, artifact.ImagePath);
                 if (image is null || !File.Exists(image) || !IsImage(image)) continue;
+                var before = images.Count;
                 await AddImageAsync(image, root, artifact.Title,
                     artifact.ScriptPath is null ? null : ResolveCandidate(root, artifact.ScriptPath),
                     artifact.DataPath is null ? null : ResolveCandidate(root, artifact.DataPath),
                     artifact.Provenance, true, images, token).ConfigureAwait(false);
+                if (images.Count > before)
+                {
+                    // Restoring a preview never turns changed files into fresh process evidence.
+                    if (images[^1].Sha256 != artifact.Sha256) images.RemoveAt(images.Count - 1);
+                    else images[^1] = images[^1] with { Execution = artifact.Execution };
+                }
             }
         }
     }

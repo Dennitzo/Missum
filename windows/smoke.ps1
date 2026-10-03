@@ -174,6 +174,61 @@ try {
         Copy-Item -LiteralPath $composerPreview -Destination $composerEvidence -Force
     }
     Write-Host 'Native composer footer, removal affordance, narrow layout and session notices verified.'
+    $subagentValidationPath = Join-Path $smokeData 'native-subagent-validation.json'
+    if (-not (Test-Path -LiteralPath $subagentValidationPath -PathType Leaf) -or
+        (Get-Item -LiteralPath $subagentValidationPath).LastWriteTimeUtc -lt $startedAt.AddSeconds(-1)) {
+        throw 'Native subagent smoke did not produce a fresh validation report.'
+    }
+    $subagentValidation = Get-Content -LiteralPath $subagentValidationPath -Raw | ConvertFrom-Json
+    if ($subagentValidation.renderer -ne 'WinUI3') {
+        throw 'Native subagent validation did not use the real WinUI renderer.'
+    }
+    foreach ($subagentCheck in @('passed', 'parentStable', 'childUsesNativeRenderer', 'overlayAboveSources', 'closableAndReopenable', 'parentDraftPreserved', 'parentRunRemainedActive', 'parentCursorPreserved', 'childModelIdentityPreserved', 'compactLifecycleRow', 'lifecycleStartEntryPreserved', 'lifecycleCompletionPostedOnce', 'lifecycleCompletionWaitsForDelivery', 'lifecycleClickOpensChild', 'lifecycleKeyboardAccessible', 'acceptedManagerStepsCoalesced')) {
+        if ($subagentValidation.PSObject.Properties.Name -notcontains $subagentCheck -or $subagentValidation.$subagentCheck -ne $true) {
+            throw "Native subagent smoke failed its required check: $subagentCheck"
+        }
+    }
+    $expectsLiveSubagent = -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('MISSUM_SMOKE_SUBAGENT_INPUT', 'Process'))
+    if ($subagentValidation.PSObject.Properties.Name -notcontains 'liveTranscriptRendered' -or
+        $subagentValidation.liveTranscriptRendered -ne $expectsLiveSubagent -or
+        $subagentValidation.PSObject.Properties.Name -notcontains 'liveLifecycleClickOpensChild' -or
+        $subagentValidation.liveLifecycleClickOpensChild -ne $expectsLiveSubagent) {
+        throw 'Native subagent validation does not match the supplied real-model transcript.'
+    }
+    $subagentValidationEvidence = Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-subagent-validation.json')
+    Copy-Item -LiteralPath $subagentValidationPath -Destination $subagentValidationEvidence -Force
+    if ((Get-FileHash -LiteralPath $subagentValidationPath -Algorithm SHA256).Hash -ne
+        (Get-FileHash -LiteralPath $subagentValidationEvidence -Algorithm SHA256).Hash) {
+        throw 'Native subagent validation evidence was not copied intact.'
+    }
+    $subagentPreviewNames = @('native-subagents-outputs-preview', 'native-subagent-chat-preview', 'native-subagent-lifecycle-preview')
+    if ($expectsLiveSubagent) {
+        $subagentPreviewNames += @('native-subagent-live-chat-preview', 'native-subagent-live-response-preview', 'native-subagent-live-outputs-preview', 'native-subagent-live-lifecycle-preview')
+    }
+    foreach ($subagentPreviewName in $subagentPreviewNames) {
+        $subagentPreviewPath = Join-Path $smokeData ($subagentPreviewName + '.png')
+        if (-not (Test-Path -LiteralPath $subagentPreviewPath -PathType Leaf) -or
+            (Get-Item -LiteralPath $subagentPreviewPath).Length -lt 100 -or
+            (Get-Item -LiteralPath $subagentPreviewPath).LastWriteTimeUtc -lt $startedAt.AddSeconds(-1)) {
+            throw "Missing or stale rendered native subagent preview: $subagentPreviewName"
+        }
+        $subagentPreviewBytes = [IO.File]::ReadAllBytes($subagentPreviewPath)
+        if ([Convert]::ToBase64String($subagentPreviewBytes, 0, 8) -ne 'iVBORw0KGgo=') {
+            throw "Native subagent preview is not a PNG: $subagentPreviewName"
+        }
+        $subagentPreviewWidth = ([int]$subagentPreviewBytes[16] -shl 24) -bor ([int]$subagentPreviewBytes[17] -shl 16) -bor ([int]$subagentPreviewBytes[18] -shl 8) -bor [int]$subagentPreviewBytes[19]
+        $subagentPreviewHeight = ([int]$subagentPreviewBytes[20] -shl 24) -bor ([int]$subagentPreviewBytes[21] -shl 16) -bor ([int]$subagentPreviewBytes[22] -shl 8) -bor [int]$subagentPreviewBytes[23]
+        if ($subagentPreviewWidth -lt 100 -or $subagentPreviewHeight -lt 60) {
+            throw "Native subagent preview has no visible layout: $subagentPreviewName"
+        }
+        $subagentPreviewEvidence = Assert-MissumArtifactPath -Path ($PublishDirectory + '.' + $subagentPreviewName + '.png')
+        Copy-Item -LiteralPath $subagentPreviewPath -Destination $subagentPreviewEvidence -Force
+        if ((Get-FileHash -LiteralPath $subagentPreviewPath -Algorithm SHA256).Hash -ne
+            (Get-FileHash -LiteralPath $subagentPreviewEvidence -Algorithm SHA256).Hash) {
+            throw "Native subagent preview evidence was not copied intact: $subagentPreviewName"
+        }
+    }
+    Write-Host "Native subagent transcript, tabs, parent stability and output order verified: $subagentValidationEvidence"
     foreach ($sciencePreview in @('native-outputs-preview', 'native-publication-preview', 'native-publication-last-page-preview', 'native-python-receipt-preview', 'native-changes-preview', 'native-tool-icons-preview', 'native-colored-chrome-preview', 'native-continuation-preview', 'native-thinking-preview')) {
         $scienceImage = Join-Path $smokeData ($sciencePreview + '.png')
         if (Test-Path -LiteralPath $scienceImage -PathType Leaf) {

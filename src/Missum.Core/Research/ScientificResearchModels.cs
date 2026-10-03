@@ -187,7 +187,12 @@ public sealed record ResearchSandboxRunResult(
     string StandardError,
     DateTimeOffset StartedAt,
     DateTimeOffset CompletedAt,
-    string Command);
+    string Command,
+    string? ExecutedScriptPath = null,
+    string? ScriptSha256 = null,
+    string? SnapshotId = null,
+    IReadOnlyDictionary<string, string>? InputHashes = null,
+    IReadOnlyDictionary<string, string>? OutputHashes = null);
 
 public sealed record ResearchSandboxRuntimeStatus(bool IsReady, string State, string? Detail = null);
 

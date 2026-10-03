@@ -29,7 +29,7 @@ public sealed partial class NativeAssistantPage
 
     private bool IsNewestAssistantContinuation(string messageId, JsonElement message)
     {
-        if (!IsResumableAssistantStatus(message)) return false;
+        if (ActiveSubagent is not null || !IsResumableAssistantStatus(message)) return false;
         var conversation = _messages.Values.Where(item => S(item, "role") is "user" or "assistant")
             .OrderBy(MessageCreatedAt).ToArray();
         var user = conversation.TakeWhile(item => S(item, "id") != messageId)

@@ -6,6 +6,7 @@ param(
     [string] $NativeModelRoot,
     [string] $ServerIp = '192.168.0.67',
     [string] $ImageVersion = '2.0.0',
+    [switch] $SkipTests,
     [switch] $Pull
 )
 
@@ -16,10 +17,12 @@ $ErrorActionPreference = 'Stop'
 $paths = Get-MissumAiStackDefaults -DataRoot $DataRoot -ModelRoot $ModelRoot -NativeModelRoot $NativeModelRoot
 Write-MissumAiStackEnvironment -Paths $paths -ServerIp $ServerIp -ImageVersion $ImageVersion
 
-Invoke-MissumDotNet -CommandArguments @(
-    'test', (Resolve-MissumRepositoryPath -RelativePath 'tests\Missum.Ai.Server.Tests\Missum.Ai.Server.Tests.csproj'),
-    '--configuration', 'Release', '--nologo'
-)
+if (-not $SkipTests) {
+    Invoke-MissumDotNet -CommandArguments @(
+        'test', (Resolve-MissumRepositoryPath -RelativePath 'tests\Missum.Ai.Server.Tests\Missum.Ai.Server.Tests.csproj'),
+        '--configuration', 'Release', '--nologo'
+    )
+}
 Invoke-MissumAiCompose -Paths $paths -Arguments @('config', '--quiet')
 $arguments = @('build')
 if ($Pull) { $arguments += '--pull' }

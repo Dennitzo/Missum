@@ -61,7 +61,30 @@ public sealed record RunRequest(
     [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] string? WorkspacePath = null,
     bool DeepResearch = false,
     [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<ToolDescriptor>? ClientTools = null,
-    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] DeepResearchOptions? ResearchOptions = null);
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] DeepResearchOptions? ResearchOptions = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] SubagentRunContext? Subagent = null);
+
+/// <summary>Gateway-created branch of an existing run. Permissions and model selection are inherited.</summary>
+public sealed record SubagentRunContext(
+    string ParentRunId,
+    string AgentId,
+    string AssignedTask,
+    string? ParentSessionId,
+    string? RuntimeInstanceId = null,
+    string? ParentSessionCacheKey = null);
+
+public sealed record SubagentRunEvent(
+    string ParentRunId,
+    string RunId,
+    string AgentId,
+    string Task,
+    string ModelId,
+    RunState State,
+    string? SessionId = null,
+    string? ErrorCode = null);
+
+/// <summary>Durably relayed child event on the parent's event stream.</summary>
+public sealed record SubagentForwardedEvent(string AgentId, string ParentRunId, string RunId, RunEvent Event);
 
 public enum DeepResearchProfile
 {
@@ -225,6 +248,10 @@ public static class RunEventTypes
     public const string RunCompleted = "run.completed";
     public const string RunFailed = "run.failed";
     public const string RunCancelled = "run.cancelled";
+    public const string SubagentStarted = "subagent.started";
+    public const string SubagentUpdated = "subagent.updated";
+    public const string SubagentCompleted = "subagent.completed";
+    public const string SubagentEvent = "subagent.event";
     public const string CodingMetrics = "coding.metrics";
     public const string ResearchProfileSelected = "research.profile.selected";
     public const string ResearchProblemInterpreted = "research.problem.interpreted";

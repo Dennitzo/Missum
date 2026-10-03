@@ -261,6 +261,140 @@ class NativeSessionCache:
         except Exception as error:
             return self._record(model, "save", dict(status="unavailable", detail=str(error)[:500]))
 
+    @staticmethod
+    def _snapshot_tokens(path):
+        """Read only the bounded text-token vector, never the KV tensors."""
+        with path.open("rb") as stream:
+            magic, version, packed_count = struct.unpack("<III", stream.read(12))
+            if magic != 0x67677371 or version != 3 or not 0 < packed_count <= 1_048_580:
+                raise ValueError("Unsupported native session token vector")
+            marker = struct.unpack("<i", stream.read(4))[0]
+            if marker == -1:
+                server_version, token_count = struct.unpack("<II", stream.read(8))
+                if server_version != 1 or not 0 < token_count <= packed_count - 4:
+                    raise ValueError("Unsupported native server token vector")
+            else:
+                token_count = packed_count
+                stream.seek(12)
+            encoded = stream.read(token_count * 4)
+            if len(encoded) != token_count * 4:
+                raise ValueError("Incomplete native session token vector")
+            tokens = list(struct.unpack("<" + "i" * token_count, encoded))
+            if any(token < 0 for token in tokens):
+                raise ValueError("Canonical cache preparation requires text tokens")
+            return tokens
+
+    def _prefill_fork(self, source_model, target, temporary, prefill):
+        """Evaluate a canonical branch on the source's live rollback checkpoints.
+
+        llama's slot file contains the final recurrent state, but not its earlier
+        rollback checkpoints. Re-rendered tool calls can otherwise force a restored
+        child to start cold. The sampled terminal token is never decoded into KV;
+        verify the serialized vector rather than assuming n_predict=0 means no
+        sampling (current native servers still sample one token with that value).
+        """
+        body = dict(prefill, model=source_model, add_generation_prompt=False)
+        rendered = self.router("apply-template", body, timeout=120).get("prompt")
+        if not isinstance(rendered, str) or not rendered:
+            raise ValueError("Native template did not return a text prefix")
+        tokens = self.router("tokenize", dict(model=source_model, content=rendered,
+            add_special=True, parse_special=True), timeout=120).get("tokens")
+        if (not isinstance(tokens, list) or not 1 <= len(tokens) <= 1_048_576
+                or any(type(token) is not int or token < 0 for token in tokens)):
+            raise ValueError("Native tokenizer did not return a bounded text prefix")
+        first_prompt = self.router("apply-template", dict(body, add_generation_prompt=True), timeout=120).get("prompt")
+        if not isinstance(first_prompt, str) or not first_prompt:
+            raise ValueError("Native template did not return the first inference prompt")
+        first_tokens = self.router("tokenize", dict(model=source_model, content=first_prompt,
+            add_special=True, parse_special=True), timeout=120).get("tokens")
+        if (not isinstance(first_tokens, list) or not len(tokens) < len(first_tokens) <= 1_048_576
+                or first_tokens[:len(tokens)] != tokens):
+            raise ValueError("The first inference prompt does not append to the canonical KV prefix")
+        estimate = self.estimate_bytes(source_model, len(tokens)) if self.estimate_bytes else None
+        estimate = estimate if type(estimate) is int and estimate > 0 else len(tokens) * 256 * 1024
+        self._prune(required=max(target.stat().st_size if target.exists() else 0, estimate), protected=[target.name])
+        response = self.router("completion", dict(model=source_model, prompt=tokens,
+            n_predict=1, stream=False, cache_prompt=True, id_slot=0, temperature=0), timeout=300)
+        # Raw /completion's tokens_cached is the final slot length, not reuse.
+        # Native timings separately count reused and newly evaluated tokens.
+        processed = response.get("timings", {}).get("prompt_n")
+        cached = response.get("timings", {}).get("cache_n")
+        sampled = response.get("tokens_predicted")
+        if (type(cached) is not int or cached <= 0 or type(processed) is not int
+                or processed < 0 or cached + processed != len(tokens)):
+            raise RuntimeError("Canonical branch preparation did not reuse the source KV cache")
+        if type(sampled) is not int or sampled != 1:
+            raise RuntimeError("Native preparation did not honor its single sampled token limit")
+        self._idle_slot(source_model)
+        saved = self.router("slots/0?action=save", dict(model=source_model, filename=temporary.name), timeout=120)
+        if not temporary.is_file() or saved.get("n_saved") != len(tokens) or self._snapshot_tokens(temporary) != tokens:
+            raise RuntimeError("Prepared snapshot differs from the canonical prefix or contains generated tokens")
+        if temporary.stat().st_size > self.maximum_bytes:
+            raise OSError("Native session cache exceeds its disk allowance")
+        temporary.replace(target)
+        target.with_suffix(".json").write_text(json.dumps(dict(bytes=target.stat().st_size,
+            tokens=len(tokens))), encoding="utf-8")
+        return dict(sourceCachedTokens=cached, preparationSampledTokens=sampled,
+                    evaluatedGeneratedTokens=0, preparedPromptTokens=len(tokens), firstInferencePromptTokens=len(first_tokens))
+
+    def fork(self, source_model, source_key, model, key, prefill=None):
+        """Copy a compatible prefix into an independent, atomic child snapshot.
+
+        CUDA placement is not serialized model/KV geometry. Every other
+        fingerprint component must match. Native restore and prompt comparison
+        remain authoritative; a failed fork falls back to the saved messages.
+        The caller owns the manager lock and both instance turn leases.
+        """
+        temporary = None
+        try:
+            if not source_key or not key:
+                raise ValueError("Cache fork requires source and child session keys")
+            if source_model.removesuffix("@subagent") != model.removesuffix("@subagent"):
+                raise ValueError("Cache fork requires the exact same base model")
+            source_fingerprint = dict(self.fingerprint(source_model))
+            target_fingerprint = dict(self.fingerprint(model))
+            source_fingerprint.pop("placement", None)
+            target_fingerprint.pop("placement", None)
+            if source_fingerprint != target_fingerprint:
+                raise ValueError("Native session cache fingerprints are incompatible")
+            source_identity = self._identity(source_model, source_key)
+            target_identity = self._identity(model, key)
+            if source_identity == target_identity:
+                raise ValueError("Cache fork requires an independent child snapshot")
+            source = self.directory / (source_identity + ".bin")
+            target = self.directory / (target_identity + ".bin")
+            # Restart/retry must restore the child's own progressed state.
+            if target.is_file():
+                return self.prepare(model, key)
+            saved = self.save(source_model, source_key)
+            if saved["status"] == "unavailable" or not source.is_file():
+                raise RuntimeError(saved.get("detail", "Parent KV snapshot is not available"))
+            self._prune(required=source.stat().st_size, protected=[source.name, target.name])
+            temporary = self.directory / (target_identity + "." + uuid.uuid4().hex + ".pending")
+            metrics = {}
+            if prefill is not None:
+                if not isinstance(prefill, dict) or not isinstance(prefill.get("messages"), list):
+                    raise ValueError("Canonical cache preparation requires chat messages")
+                # The source's durable snapshot stays unchanged. Keep its live
+                # checkpoints for the main agent's next turn; restoring the old
+                # file here would erase those checkpoints again.
+                metrics = self._prefill_fork(source_model, target, temporary, prefill)
+            else:
+                shutil.copyfile(source, temporary)
+                temporary.replace(target)
+                source_metadata = source.with_suffix(".json")
+                if source_metadata.exists():
+                    shutil.copyfile(source_metadata, target.with_suffix(".json"))
+            result = self.prepare(model, key)
+            if result["status"] == "restored":
+                result = dict(result, status="forked", sourceModel=source_model, **metrics)
+            return self._record(model, "fork", result)
+        except Exception as error:
+            return self._record(model, "fork", dict(status="unavailable", detail=str(error)[:500]))
+        finally:
+            if temporary:
+                temporary.unlink(missing_ok=True)
+
     def save_all(self):
         for model in list(self.resident):
             self._save(model)

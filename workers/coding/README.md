@@ -9,8 +9,7 @@ GPU placement is negotiated through the supervisor on port 8082 (router port
 plus one), advertised with the `missum-gpu-policy:single-preferred-v1` catalog tag.
 Before loading an unloaded model, Missum reads current physical GPU free memory.
 Weights (all GGUF shards and any projector) plus the configured VRAM reserve
-must fit before attempting one GPU. Qwen3.8-27B prefers physical GPU1; other
-models choose the eligible GPU with most free memory. CUDA device indices are
+must fit before attempting physical GPU0 for the main agent. CUDA device indices are
 mapped using PCI bus order, independently of physical NVIDIA indices.
 
 The single-GPU trial uses the full training context, all GPU layers, one device
@@ -20,6 +19,87 @@ existing multi-GPU fitting policy after the failed child has exited. Other
 errors are not disguised as VRAM failures. No running model's placement is
 changed by catalog refresh. Decisions and failures are recorded in
 `%USERPROFILE%/.missum/native-runtime/gpu-placement.jsonl`.
+
+Subagents use a separate router preset `<exact-native-model-id>@subagent` and
+one native slot on physical GPU1. The main agent keeps its GPU0 model and slot.
+The replica uses the same GGUF files, template, cache types and actual loaded
+context as its parent. `/agents/status` deterministically checks the actual
+parent placement, other resident models, measured free memory and replica
+allocation estimate. GGUF attention intervals distinguish recurrent layers
+from full-attention KV allocations. Multi-GPU parents, insufficient GPU1 VRAM
+or a failed secondary allocation disable delegation for that model without a
+model-name blacklist. A secondary allocation never retries across both GPUs.
+Ordinary supervisor `/models/load` calls synchronously preload an eligible GPU1
+replica after the main model finishes loading, before returning success. Calling
+the same control endpoint for an already loaded main model also prepares a
+missing replica; an existing compatible pair is reused without resetting either
+slot or its KV state. The response retains the main model's `success`/`reused`
+fields and includes a `subagent` object with admission, load and reuse status.
+A blocked or failed secondary load leaves the main model available. A native
+secondary allocation failure is retained until an actual main-model unload/load;
+ordinary insufficient free VRAM is checked again on subsequent model reuse.
+An already resident replica with a different actual context is rejected without
+changing its placement, context or cache. Model refresh alone loads nothing.
+`/agents/prepare` accepts the child's exact messages,
+tool schemas and reasoning settings as `prefill`. It evaluates that canonical
+branch prefix on the parent's live rollback checkpoints before saving an
+independent child snapshot. This also handles recurrent models whose snapshot
+files do not contain earlier rollback checkpoints. The exact saved token vector
+must match the canonical prefix: the native preparation samples one terminal
+token but evaluates zero generated tokens into the saved KV state. The parent's
+durable snapshot remains unchanged. Parent and child then own independent leases.
+
+Run the real replica gate only after selecting a model on GPU0 with no active
+gateway/native generation:
+
+```powershell
+python workers/coding/verify_dual_gpu_subagents.py --model '<exact-native-model-id>' --report artifacts/dual-gpu-native.json
+```
+
+It requires equal loaded context, physical GPU0/GPU1 placement, measured cached
+tokens in both requests, and both native slots observed processing concurrently.
+
+The gateway exposes asynchronous `subagent.spawn` and `subagent.wait` operations
+after native resource admission. A child inherits the parent's authorized tools,
+workspace, model, reasoning setting and evaluated conversation prefix. Both use
+the same ordered, direct tool schemas: changing an early tool header would discard
+the inherited KV prefix in templates which put tools before conversation text.
+Nested delegation is rejected at execution; the GPU1 slot belongs to one child
+at a time. The parent continues its own work and incorporates the child's result
+without repeating the delegated task.
+
+Child checkpoints and events survive gateway restarts. Original proposal IDs
+route local operations through the parent's ordinary client executor; reads may
+use absolute system paths and file writes stay within the inherited workspace.
+Native child tabs reuse the chat renderer and remain scoped to their parent
+session. Closing a tab preserves its transcript and its reopening entry above
+sources in the output overlay.
+
+The opt-in `SubagentLiveTests` gate submits a real public run, executes actual
+file tools, requires direct result reuse and checks native cache counters from
+the first child inference. Set `MISSUM_SUBAGENT_LIVE=1`,
+`MISSUM_AI_LIVE_GENERAL_MODEL=<exact-native-model-id>`,
+`MISSUM_AI_SERVER_URL=http://127.0.0.1:8080` and
+`MISSUM_SUBAGENT_EVIDENCE_DIRECTORY=<absolute-evidence-directory>`, then run:
+
+```powershell
+dotnet test tests/Missum.Tests/Missum.Tests.csproj -p:Platform=x64 --filter FullyQualifiedName~SubagentLiveTests
+```
+
+The gate writes `native-subagent-live-input.json`. Supply its absolute path as
+`MISSUM_SMOKE_SUBAGENT_INPUT` for `windows/build.ps1` or `windows/smoke.ps1` to
+render the real transcript in native controls and preserve its screenshots.
+Unset `MISSUM_SUBAGENT_LIVE` before the ordinary full release regression suite.
+
+`ClaudeScienceSubagentLiveTests` exercises automatic delegation through the real
+Science coordinator, local SearXNG, Python sandbox, numerical figure and PDF.
+Use the same model/server/evidence variables with `MISSUM_SCIENCE_SUBAGENT_LIVE=1`
+and filter `FullyQualifiedName~ClaudeScienceSubagentLiveTests`. Its caller deadline
+is configurable through `MISSUM_SCIENCE_SUBAGENT_TIMEOUT_MINUTES`; it does not
+introduce a research-run deadline. The gate requires measured cache reuse in the
+first child inference, concurrent GPU0/GPU1 processing, successful scientific
+deliverables and direct reuse without parent repetition. Its native fixture
+preserves the Science publication and simulation tabs alongside the child tab.
 
 Multi-GPU loads use an explicit `layer` split by default. Layers and their KV
 cache reside on their respective GPUs; single-token decoding traverses those
@@ -212,6 +292,9 @@ authoritative when a snapshot is missing or incompatible.
 
 Snapshots use hashed model/session keys and model-file, native-binary, template,
 and GPU-configuration fingerprints.
+For a subagent fork, only the physical placement may differ; every model,
+binary, template and KV geometry component must match. The atomic child copy
+has its own filename and subsequent child snapshots cannot replace the parent.
 
 Stop and follow-up prompts: the DeepSeek chat template is rewritten so historical
 assistant turns replay by their stored `reasoning_content`, not by the current
@@ -270,7 +353,8 @@ python workers/coding/catalog.py --model-root C:\Users\AMD\.cache\huggingface\hu
 dotnet test tests/Missum.Ai.Server.Tests/Missum.Ai.Server.Tests.csproj --filter CodingModelRuntimeTests
 ```
 
-The inspected native build is Unsloth `b10840-mix-d5c17a0`, commit `58670d128`,
-Windows CUDA13 older-GPU bundle including SM75 support. Model architecture and
-quantization support must be checked against the chosen installed binary.
+The current canonical-fork acceptance was measured with native `b11146`, commit
+`7fe450e19`. An earlier inspected SM75/CUDA13 build was Unsloth
+`b10840-mix-d5c17a0`, commit `58670d128`. Model architecture, quantization and
+snapshot semantics must be checked against the chosen installed binary.
 See the [llama.cpp server protocol](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md).

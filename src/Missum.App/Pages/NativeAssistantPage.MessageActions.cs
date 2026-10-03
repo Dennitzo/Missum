@@ -84,7 +84,7 @@ public sealed partial class NativeAssistantPage
             var blocks = MessageBody(entry.View).Children.OfType<Missum.App.Controls.NativeStreamingMarkdown>().Cast<FrameworkElement>().ToArray();
             var excerpt = Missum.App.Controls.NativeConversationSelection.ReadableSuffix(blocks, target);
             if (excerpt.Length == 0) continue;
-            if (!_messages.TryGetValue(id, out var message) || !DateTimeOffset.TryParse(S(message, "updatedAt"), out var updatedAt)) return null;
+            if (!DisplayMessages.TryGetValue(id, out var message) || !DateTimeOffset.TryParse(S(message, "updatedAt"), out var updatedAt)) return null;
             var session = _session;
             var menu = new MenuFlyout();
             var read = new MenuFlyoutItem { Text = "Ab hier vorlesen", Icon = new FontIcon { Glyph = "\uE767", Foreground = NativeIconPalette.BrushFor("speech") } };
@@ -169,7 +169,9 @@ public sealed partial class NativeAssistantPage
         try
         {
             // Supplying the stored message ID makes the service validate and load its persisted text.
-            await service.SpeakAsync(sessionId, explicitText: null, sourceMessageId: messageId,
+            var childMessage = _subagents.Values.Any(child => child.SessionId == sessionId && child.Messages.ContainsKey(messageId.ToString()));
+            var explicitText = childMessage && _messageActionViews.TryGetValue(messageId.ToString(), out var childView) ? excerpt ?? childView.Text : null;
+            await service.SpeakAsync(sessionId, explicitText: explicitText, sourceMessageId: childMessage ? null : messageId,
                 update => DispatchMessageActionAsync(() =>
                 {
                     if (request != _messageSpeechRequest) return;
@@ -182,11 +184,11 @@ public sealed partial class NativeAssistantPage
                 {
                     if (request != _messageSpeechRequest) return;
                     _messageSpeechSessionId = progress.SessionId;
-                    _messageSpeechMessageId = progress.SourceMessageId;
+                    _messageSpeechMessageId = childMessage ? messageId : progress.SourceMessageId;
                     if (progress.State == SpeechPlaybackState.Paused) _messageSpeechStatus = "Vorlesen pausiert";
                     RefreshAllMessageActions();
                 }),
-                cancellationToken: cancellation.Token, messageExcerpt: excerpt, expectedMessageUpdatedAt: expectedUpdatedAt);
+                cancellationToken: cancellation.Token, messageExcerpt: childMessage ? null : excerpt, expectedMessageUpdatedAt: childMessage ? null : expectedUpdatedAt);
         }
         catch (OperationCanceledException) { }
         catch (Exception exception) when (exception is not OutOfMemoryException)
@@ -283,7 +285,7 @@ public sealed partial class NativeAssistantPage
     private void RefreshAllMessageActions()
     {
         if (_disposed || _messageActionsDisposed) return;
-        foreach (var stale in _messageActionViews.Where(pair => pair.Value.SessionId != _session || !_messages.ContainsKey(pair.Key)).Select(pair => pair.Key).ToArray())
+        foreach (var stale in _messageActionViews.Where(pair => pair.Value.SessionId != _session || !IsKnownConversationMessage(pair.Key)).Select(pair => pair.Key).ToArray())
             _messageActionViews.Remove(stale);
         foreach (var view in _messageActionViews.Values) RefreshMessageActionView(view);
         SetRunning();

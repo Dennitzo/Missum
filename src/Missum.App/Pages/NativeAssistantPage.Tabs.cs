@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using Missum.App.Controls;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
@@ -117,7 +117,7 @@ public sealed partial class NativeAssistantPage
 
             var tab = _sessionTabs.FirstOrDefault(item => item.Id == _session);
             if (tab is null) continue;
-            var active = tab.Id == _session && _activeReviewRunId is null && _activeResearchSessionId is null && _activeSourcesSession is null;
+            var active = ActiveSubagent is null && tab.Id == _session && _activeReviewRunId is null && _activeResearchSessionId is null && _activeSourcesSession is null;
             tab.Label.Text = tab.Title;
             ApplyTabAppearance(tab.Container, tab.Select, active);
             tab.Select.IsEnabled = !_sessionTabNavigationBusy;
@@ -131,13 +131,14 @@ public sealed partial class NativeAssistantPage
             }
             position++;
         }
-        RenderReviewTabs(RenderSourcesTab(position));
+        RenderReviewTabs(RenderSourcesTab(RenderSubagentTabs(position)));
     }
 
     private async Task ActivateSessionTabAsync(Guid sessionId)
     {
         if (_sessionTabNavigationBusy || _disposed) return;
         ShowChatView();
+        ShowParentConversation();
         if (sessionId == _session) { RenderSessionTabs(); return; }
         _sessionTabNavigationBusy = true;
         RenderSessionTabs();

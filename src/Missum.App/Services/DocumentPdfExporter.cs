@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using Microsoft.Extensions.Logging;
 
 namespace Missum.App.Services;
@@ -102,12 +103,7 @@ public sealed partial class DocumentPdfExporter(ILogger<DocumentPdfExporter> log
             var errorText = await standardError.ConfigureAwait(false);
             if (process.ExitCode != 0 || !File.Exists(output) || new FileInfo(output).Length < 1024)
             {
-                var detail = LastMeaningfulLine(errorText) ?? LastMeaningfulLine(outputText) ?? "Unbekannter Exportfehler.";
-                if (!detail.Contains("KaTeX", StringComparison.OrdinalIgnoreCase)
-                    && SourceLikelyContainsMathematics(source))
-                {
-                    detail += " KaTeX-Pruefung oder mathematisches Rendering wurde nicht erfolgreich abgeschlossen.";
-                }
+                var detail = ExportErrorDetail(errorText) ?? ExportErrorDetail(outputText) ?? "Unbekannter Exportfehler.";
                 throw new InvalidOperationException($"Die Dokument-PDF konnte nicht erzeugt werden: {detail}");
             }
 
@@ -120,23 +116,31 @@ public sealed partial class DocumentPdfExporter(ILogger<DocumentPdfExporter> log
         }
     }
 
-    private static string? LastMeaningfulLine(string value) =>
-        value.Split(['\r', '\n'], StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).LastOrDefault();
-
-    private static bool SourceLikelyContainsMathematics(string sourcePath)
+    internal static string? ExportErrorDetail(string value)
     {
-        try
+        // Redirected Windows PowerShell wraps its final FullyQualifiedErrorId;
+        // the last line can be a lone period. Keep the actual first diagnostic
+        // paragraph instead of reporting formatting metadata to the agent.
+        const int maximumLength = 4096;
+        var detail = new StringBuilder();
+        foreach (var rawLine in value.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n').Split('\n'))
         {
-            var text = File.ReadAllText(sourcePath);
-            return text.Contains('$', StringComparison.Ordinal)
-                || text.Contains("\\(", StringComparison.Ordinal)
-                || text.Contains("\\[", StringComparison.Ordinal)
-                || text.Contains("\\begin{", StringComparison.Ordinal);
+            var line = rawLine.Trim();
+            if (line.Length == 0)
+            {
+                if (detail.Length > 0) break;
+                continue;
+            }
+            if (line.StartsWith("In ", StringComparison.Ordinal)
+                || line.StartsWith("At ", StringComparison.Ordinal)
+                || line.StartsWith('+')
+                || line.StartsWith("CategoryInfo", StringComparison.Ordinal)
+                || line.StartsWith("FullyQualifiedErrorId", StringComparison.Ordinal)) break;
+            if (detail.Length > 0) detail.Append(' ');
+            detail.Append(line.AsSpan(0, Math.Min(line.Length, maximumLength - detail.Length)));
+            if (detail.Length >= maximumLength) break;
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-        {
-            return false;
-        }
+        return detail.Length == 0 ? null : detail.ToString();
     }
 
     internal static async Task WaitForExportExitAsync(Process process, TimeSpan maximumDuration,

@@ -7,7 +7,7 @@ public sealed partial class NativeAssistantPage
 {
     private static string ToolIconGlyph(string key) => key switch
     {
-        "web" => "\uE774", "research" => "\uE721", "image" => "\uEB9F",
+        "subagent" => "\uE8D4", "web" => "\uE774", "research" => "\uE721", "image" => "\uEB9F",
         "audio" or "speech" => "\uE767", "document" => "\uE8A5",
         "pdf" => "\uEA90", "captions" => "\uE8F2", "plan" => "\uEA80",
         "code" => "\uE943", "success" => "\uE768", _ => "\uEA86",
@@ -15,6 +15,7 @@ public sealed partial class NativeAssistantPage
 
     private static string ToolStepIconKey(string tool) => tool switch
     {
+        "subagent" or "subagent.completed" or "subagent.spawn" or "subagent.wait" => "subagent",
         "assistant.reasoning" or "assistant.progress" => "research",
         "assistant.continuation" => "success",
         "coding.updatePlan" => "plan",

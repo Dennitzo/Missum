@@ -11,7 +11,7 @@ public static class NativeIconPalette
     {
         "attachment" or "navigation" or "link" => Color.FromArgb(255, 91, 156, 246),
         "web" => Color.FromArgb(255, 76, 148, 242),
-        "research" => Color.FromArgb(255, 160, 124, 246),
+        "research" or "subagent" => Color.FromArgb(255, 160, 124, 246),
         "image" or "video" => Color.FromArgb(255, 231, 104, 171),
         "audio" or "add" or "success" => Color.FromArgb(255, 70, 188, 133),
         "speech" or "captions" or "translate" => Color.FromArgb(255, 51, 184, 207),
@@ -49,7 +49,7 @@ public sealed class NativeIconResources : ResourceDictionary
         foreach (var key in new[]
         {
             "Web", "Research", "Image", "Audio", "Speech", "Pdf", "Document", "Plan", "Code", "Folder",
-            "Navigation", "Link", "Add", "Danger", "Settings",
+            "Navigation", "Link", "Add", "Danger", "Settings", "Subagent",
         })
             this["MissumIcon" + key + "Brush"] = NativeIconPalette.BrushFor(key);
     }

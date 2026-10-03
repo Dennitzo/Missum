@@ -37,6 +37,21 @@ public sealed partial class MissumAiAssistantService
             RunDiagnostic(logger, run.ServerRunId ?? "", "Der Forschungszwischenstand konnte nicht beendet werden.", exception);
         }
     }
+
+    private async Task PersistSubagentResearchProgressAsync(MissumAiRunRecord run, RunEvent outer,
+        SubagentChatState child, CancellationToken token)
+    {
+        if (scientificResearch is null) return;
+        try
+        {
+            await new ScientificResearchProgressStore(scientificResearch, runs)
+                .ApplySubagentFetchAsync(run, outer, child, token).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException && !token.IsCancellationRequested)
+        {
+            RunDiagnostic(logger, outer.RunId, "Die gelesene Subagent-Quelle konnte nicht gespeichert werden.", exception);
+        }
+    }
 }
 
 /// <summary>Stores actual fetched excerpts; a fetch never becomes a verified claim.</summary>
@@ -50,7 +65,28 @@ internal sealed class ScientificResearchProgressStore(IScientificResearchReposit
         or RunEventTypes.RunCancelled or RunEventTypes.RunFailed
         || item.Type == RunEventTypes.ServerToolCompleted && Text(item.Data, "tool") == "web.fetch";
 
-    internal async Task ApplyAsync(MissumAiRunRecord run, RunEvent item, CancellationToken token = default)
+    internal Task ApplyAsync(MissumAiRunRecord run, RunEvent item, CancellationToken token = default) =>
+        ApplyCoreAsync(run, item, null, token);
+
+    internal Task ApplySubagentFetchAsync(MissumAiRunRecord run, RunEvent outer, SubagentChatState child,
+        CancellationToken token = default)
+    {
+        if (outer.Type != RunEventTypes.SubagentEvent || outer.RunId != run.ServerRunId
+            || child.ParentRunId != run.ServerRunId || child.SessionId != run.SessionId) return Task.CompletedTask;
+        var forwarded = outer.Data.Deserialize<SubagentForwardedEvent>(Json);
+        if (forwarded is null || forwarded.ParentRunId != run.ServerRunId || forwarded.AgentId != child.AgentId
+            || forwarded.RunId != child.RunId || forwarded.Event.RunId != child.RunId
+            || forwarded.Event.Id <= child.LastEventId || outer.Id <= 0
+            || forwarded.Event.Type != RunEventTypes.ServerToolCompleted || Text(forwarded.Event.Data, "tool") != "web.fetch")
+            return Task.CompletedTask;
+        // The parent's authenticated envelope is the durable replay cursor.
+        // Child starts/checkpoints never enroll or replace the owner's dossier.
+        var projected = forwarded.Event with { Id = outer.Id, RunId = outer.RunId, CreatedAt = outer.CreatedAt };
+        return ApplyCoreAsync(run, projected,
+            new(child.AgentId, child.RunId, forwarded.Event.Id, forwarded.Event.CreatedAt), token);
+    }
+
+    private async Task ApplyCoreAsync(MissumAiRunRecord run, RunEvent item, SourceSubagent? subagent, CancellationToken token)
     {
         if (run.ServerRunId != item.RunId || string.IsNullOrWhiteSpace(run.ServerRunId)) return;
         if (!await IsCurrentAttemptAsync(run, token).ConfigureAwait(false)) return;
@@ -77,7 +113,7 @@ internal sealed class ScientificResearchProgressStore(IScientificResearchReposit
         if (!beginning && status == "active")
         {
             if (!IsTrue(item.Data, "success") || !item.Data.TryGetProperty("result", out var result)
-                || !TryAddSource(project.Id, run.ServerRunId, item.Id, result, works, evidence)) return;
+                || !TryAddSource(project.Id, run.ServerRunId, item.Id, result, works, evidence, subagent)) return;
         }
         if (beginning && !sameResearch)
         {
@@ -176,7 +212,7 @@ internal sealed class ScientificResearchProgressStore(IScientificResearchReposit
     }
 
     private static bool TryAddSource(string projectId, string runId, long eventId, JsonElement result,
-        List<ResearchLiteratureEntry> works, List<ResearchEvidenceRecord> evidence)
+        List<ResearchLiteratureEntry> works, List<ResearchEvidenceRecord> evidence, SourceSubagent? subagent)
     {
         if (!IsTrue(result, "found") || !IsTrue(result, "isUntrusted")
             || !Uri.TryCreate(Text(result, "url"), UriKind.Absolute, out var uri)
@@ -192,7 +228,8 @@ internal sealed class ScientificResearchProgressStore(IScientificResearchReposit
         if (string.IsNullOrWhiteSpace(title)) title = uri.Host + uri.AbsolutePath;
         works.RemoveAll(work => work.WorkId == workId);
         works.Add(new(workId, projectId, title, canonical, "retrievedSource",
-            JsonSerializer.Serialize(new { runId, eventId, retrievedAt, isIntermediate = true }, Json),
+            subagent is null ? JsonSerializer.Serialize(new { runId, eventId, retrievedAt, isIntermediate = true }, Json)
+                : JsonSerializer.Serialize(new { runId, eventId, retrievedAt, isIntermediate = true, subagent }, Json),
             "awaitingReview", EvidenceLevel, retrievedAt));
         foreach (var match in excerpts)
         {
@@ -202,7 +239,8 @@ internal sealed class ScientificResearchProgressStore(IScientificResearchReposit
             var id = Id(projectId, "evidence", workId + "\n" + hash);
             if (evidence.Any(item => item.Id == id)) continue;
             evidence.Add(new(id, projectId, workId, excerpt, "Gelesener Originalauszug · noch nicht geprüft", hash,
-                EvidenceLevel, JsonSerializer.Serialize(new { url = canonical, runId, eventId, match }, Json), retrievedAt));
+                EvidenceLevel, subagent is null ? JsonSerializer.Serialize(new { url = canonical, runId, eventId, match }, Json)
+                    : JsonSerializer.Serialize(new { url = canonical, runId, eventId, match, subagent }, Json), retrievedAt));
         }
         return true;
     }
@@ -216,4 +254,5 @@ internal sealed class ScientificResearchProgressStore(IScientificResearchReposit
         && value.TryGetProperty(name, out var property) && property.ValueKind == JsonValueKind.True;
     private static long Number(JsonElement value, string name) => value.ValueKind == JsonValueKind.Object
         && value.TryGetProperty(name, out var property) && property.TryGetInt64(out var number) ? number : 0;
+    private sealed record SourceSubagent(string AgentId, string RunId, long EventId, DateTimeOffset CreatedAt);
 }

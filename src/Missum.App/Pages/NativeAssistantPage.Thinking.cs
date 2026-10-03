@@ -44,12 +44,12 @@ public sealed partial class NativeAssistantPage
         foreach (var (id, view) in _thinkingIndicators)
         {
             var show = _thinkingStates.TryGetValue(id, out var state)
-                && state.ShouldShow(id, _running && view.IsMessageActive, view.HasBlockingTool, visible, now);
+                && state.ShouldShow(id, IsConversationMessageRunning(id) && view.IsMessageActive, view.HasBlockingTool, visible && DisplayMessages.ContainsKey(id), now);
             var wasVisible = view.Visibility == Visibility.Visible;
             // Reuse the published header value even when visibility changes
             // between ticks; the two labels must never display different counts.
             var tokens = _messageBlocks.TryGetValue(id, out var blocks) && blocks.TryGetValue("header", out var header)
-                && header.Tag is double displayedTokens ? displayedTokens : _contextUsed;
+                && header.Tag is double displayedTokens ? displayedTokens : DisplayContextUsed;
             if (show && (refreshTokens || !wasVisible)) view.UpdateTokens(tokens);
             if (show == wasVisible) continue;
             view.Visibility = show ? Visibility.Visible : Visibility.Collapsed;

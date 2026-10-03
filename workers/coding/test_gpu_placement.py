@@ -22,9 +22,7 @@ class GpuPlacementTests(unittest.TestCase):
         self.gpus = [{"index": 0, "device": "CUDA0", "free": 48 * 1024**3},
                      {"index": 1, "device": "CUDA1", "free": 40 * 1024**3}]
 
-    def test_qwen_prefers_physical_gpu_one_and_respects_actual_free_memory(self):
-        self.assertEqual(catalog.choose_single_gpu(self.model, self.gpus), "CUDA1")
-        self.gpus[1]["free"] = 0
+    def test_primary_uses_physical_gpu_zero_and_respects_actual_free_memory(self):
         self.assertEqual(catalog.choose_single_gpu(self.model, self.gpus), "CUDA0")
         self.gpus[0]["free"] = 0
         self.assertIsNone(catalog.choose_single_gpu(self.model, self.gpus))
@@ -62,9 +60,10 @@ class GpuPlacementTests(unittest.TestCase):
         with patch.object(catalog, "gpu_inventory", return_value=self.gpus):
             result = manager.load(self.model["id"])
         self.assertTrue(result["fallback"])
-        self.assertEqual(attempts, ["CUDA1", None])
-        self.assertNotIn("device =", manager.preset.read_text())
-        self.assertNotIn("ctx-size", manager.preset.read_text())
+        self.assertEqual(attempts, ["CUDA0", None])
+        block = manager.preset.read_text().split("[" + self.model["id"] + "]")[1].split("\n[")[0]
+        self.assertNotIn("device =", block)
+        self.assertNotIn("ctx-size", block)
         self.assertIn('"outcome": "failed"', (self.root / "gpu-placement.jsonl").read_text())
 
     def test_non_memory_failure_does_not_repeat(self):
@@ -72,9 +71,9 @@ class GpuPlacementTests(unittest.TestCase):
         with patch.object(catalog, "gpu_inventory", return_value=self.gpus):
             with self.assertRaises(RuntimeError):
                 manager.load(self.model["id"])
-        self.assertEqual(attempts, ["CUDA1"])
+        self.assertEqual(attempts, ["CUDA0"])
         text = manager.preset.read_text()
-        self.assertIn("device = CUDA1", text)
+        self.assertIn("device = CUDA0", text)
         self.assertIn("split-mode = none", text)
         self.assertIn("fit = off", text)
         self.assertIn("ctx-size = 32768", text)
@@ -89,16 +88,22 @@ class GpuPlacementTests(unittest.TestCase):
 
     def successful_manager(self):
         manager = catalog.GpuLoadManager(self.root, self.root / "models.ini", self.root, 8081)
-        state, calls = {"loaded": False}, []
+        state, calls = {"loaded": False, "replicas": set()}, []
 
         def router(path, body=None):
             calls.append((path, body))
             if path == "models/load":
-                state["loaded"] = True
+                if body["model"] == self.model["id"]:
+                    state["loaded"] = True
+                else:
+                    state["replicas"].add(body["model"])
                 return {}
             if path.startswith("v1/models"):
                 return {"data": [{"id": self.model["id"], "status": {
-                    "value": "loaded" if state["loaded"] else "unloaded"}}]}
+                    "value": "loaded" if state["loaded"] else "unloaded"}}]
+                    + [{"id": model, "status": {"value": "loaded"}} for model in state["replicas"]]}
+            if path.startswith("props?"):
+                return {"default_generation_settings": {"n_ctx": self.model["context"]}}
             raise AssertionError(path)
 
         manager.router = router
@@ -139,7 +144,7 @@ class GpuPlacementTests(unittest.TestCase):
         self.assertNotEqual(first, second)
 
     def test_default_layer_and_single_gpu_keep_existing_snapshot_identity(self):
-        for devices, placement in (([], None), (self.gpus, "CUDA1")):
+        for devices, placement in (([], None), (self.gpus, "CUDA0")):
             with self.subTest(placement=placement):
                 manager, _, _ = self.successful_manager()
                 with patch.object(catalog, "gpu_inventory", return_value=devices), patch.dict(
@@ -164,7 +169,7 @@ class GpuPlacementTests(unittest.TestCase):
                              ("tensor", "off", 16384, "999"))
             self.assertEqual((policy["cacheK"], policy["cacheV"]), ("q8_0", "q8_0"))
             preset = manager.preset.read_text()
-            block = preset.split("[" + self.model["id"] + "]", 1)[1]
+            block = preset.split("[" + self.model["id"] + "]", 1)[1].split("\n[")[0]
             self.assertIn("split-mode = tensor\nfit = off\nn-gpu-layers = 999\nctx-size = 16384", block)
             self.assertNotIn("fit = on", block)
             with patch.dict(catalog.os.environ, {"MISSUM_NATIVE_MULTI_GPU_CONTEXT_LIMIT": "8192"}):

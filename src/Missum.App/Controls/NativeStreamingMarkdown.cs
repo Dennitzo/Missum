@@ -291,6 +291,9 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
                 code.Append(line).Append('\n');
                 continue;
             }
+            // Publication delimiters are transport metadata, including in a
+            // delegated Science answer. Literal examples inside code stay visible.
+            if (line.Trim() is "<!-- MISSUM_PUBLICATION_BEGIN -->" or "<!-- MISSUM_PUBLICATION_END -->") continue;
             if (string.IsNullOrWhiteSpace(line)) continue;
             var heading = HeadingPattern().Match(line);
             var source = heading.Success ? heading.Groups[2].Value : BulletPattern().Replace(line, "•  ");

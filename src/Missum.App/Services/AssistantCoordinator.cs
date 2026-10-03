@@ -11,7 +11,7 @@ using System.Text.Json;
 
 namespace Missum.App.Services;
 
-public sealed class AssistantCoordinator(
+public sealed partial class AssistantCoordinator(
     IChatRepository chats,
     IDocumentIngestor documents,
     IContextAssembler contextAssembler,
@@ -393,6 +393,7 @@ public sealed class AssistantCoordinator(
             messages = messages.Select(message => ToMessageDto(
                 message,
                 artifactItems.TryGetValue(message.Id, out var messageArtifacts) ? messageArtifacts : null)),
+            subagents = SubagentChatState.Read(messages, settings.DataDirectory).Select(ToSubagentDto).ToArray(),
             conversationRevision = session.ConversationRevision,
             documents = documentItems.Select(ToDocumentDto),
             attachments = attachmentItems.Select(ToAttachmentDto),
@@ -530,6 +531,7 @@ public sealed class AssistantCoordinator(
         return new
         {
             activeSessionId = sessionId,
+            subagents = SubagentChatState.Read(conversation.Messages, settings.DataDirectory).Select(ToSubagentDto).ToArray(),
             chatMode = ChatModeName(conversation.Session.ChatMode),
             conversationRevision = conversation.Session.ConversationRevision,
             codingToolStepsExpanded = settings.Current.CodingToolStepsExpanded,
@@ -1816,6 +1818,16 @@ public sealed class AssistantCoordinator(
         Func<string, object, string?, Task> emit,
         string requestId)
     {
+        if (update.Kind == MissumAiAssistantUpdateKind.SubagentChanged && update.Subagent is { } subagent)
+        {
+            await emit("subagent.snapshot", ToSubagentDto(subagent), requestId).ConfigureAwait(false);
+            await emit("chat.delta", new
+            {
+                messageId = update.Message.Id, sessionId = update.Message.SessionId,
+                content = update.Message.Content, toolSteps = update.Message.ToolSteps ?? [],
+            }, requestId).ConfigureAwait(false);
+            return;
+        }
         await ObserveDisplayStateAsync(update).ConfigureAwait(false);
         if (update.Kind == MissumAiAssistantUpdateKind.FileChangesChanged)
         {
