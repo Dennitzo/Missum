@@ -11,7 +11,7 @@ public sealed record MissumAiConnectionStatus(
     CapabilitySnapshot? Capabilities = null,
     HealthSnapshot? Health = null);
 
-public sealed class MissumAiConnectionService(
+public sealed partial class MissumAiConnectionService(
     SettingsCoordinator settings,
     ILogger<MissumAiConnectionService> logger,
     NativeModelRuntimeService? nativeRuntime = null,

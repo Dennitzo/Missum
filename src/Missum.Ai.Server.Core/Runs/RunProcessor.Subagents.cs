@@ -196,7 +196,8 @@ public sealed partial class RunProcessor
                 prepared = await _modelRuntime.PrepareSubagentAsync(selection.ModelId, parentCacheKey, childCacheKey,
                     childMessages, childTools, selection.Role,
                     _modelRuntime.ResolveReasoningEffort(selection.ModelId, selection.Role, childRequest.ReasoningEffort),
-                    cancellationToken).ConfigureAwait(false);
+                    cancellationToken: cancellationToken, childSessionId: childSessionId,
+                    parentSessionId: parentRequest.SessionId ?? parentRunId).ConfigureAwait(false);
             }
             catch (Exception exception) when (exception is HttpRequestException or InvalidOperationException)
             {

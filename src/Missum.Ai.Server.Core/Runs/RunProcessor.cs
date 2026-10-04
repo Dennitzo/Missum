@@ -261,7 +261,7 @@ public sealed partial class RunProcessor : BackgroundService
                 CreateInitialMessages(
                     request,
                     selection.Role,
-                    availableTools.Select(static tool => tool.Name).ToArray(), contextProfileVersion),
+                    availableTools.Select(static tool => tool.Name).ToArray(), contextProfileVersion, researchManagedByAgent),
                 0,
                 0,
                 0,
@@ -845,7 +845,9 @@ public sealed partial class RunProcessor : BackgroundService
             // before (or instead of) returning JSON. Keep this protocol-only
             // turn out of the visible answer. The separate provider reasoning channel
             // remains visible without exposing tool arguments as prose.
-            var suppressRequiredToolTurn = selectedToolName is not null || earlySubagentDelegationPending;
+            // Early delegation is ordinary scientific work: its introduction must
+            // stream like other tool turns. Only the internal selector is prose-free.
+            var suppressRequiredToolTurn = selectedToolName is not null;
             var liveTextGate = new IncrementalVisibleTextGate(enabled: !suppressRequiredToolTurn);
             CodingTextReconciler? codingText = null;
             var firstReasoningFragment = true;
@@ -1006,7 +1008,7 @@ public sealed partial class RunProcessor : BackgroundService
                     {
                         selectedToolName = null;
                         requiredToolCallRetryCount = 0;
-                        suppressRequiredToolTurn = earlySubagentDelegationPending;
+                        suppressRequiredToolTurn = false;
                         liveTextGate = new IncrementalVisibleTextGate(enabled: !suppressRequiredToolTurn);
                     }
                     if (request.Subagent is null)
@@ -1188,10 +1190,12 @@ public sealed partial class RunProcessor : BackgroundService
                     workingStatePromptIncluded = workingState is not null;
                     await SaveCheckpointAsync().ConfigureAwait(false);
                     if (await _repository.IsTerminalStateAsync(runId, steeringCall.Token).ConfigureAwait(false)) return;
-                    response = await _modelRuntime.CompleteChatAsync(
+                    response = await _modelRuntime.CompleteChatWithCacheOwnershipAsync(
                         selection.ModelId,
                         lastNativePrompt ?? contextPlan.Messages,
                         modelTools,
+                        request.SessionId ?? runId,
+                        request.Subagent?.ParentSessionId,
                         maximumOutputTokens,
                         modelRole: selection.Role,
                         reasoningEffort: effort,
@@ -1333,7 +1337,7 @@ public sealed partial class RunProcessor : BackgroundService
             if (await _repository.IsTerminalStateAsync(runId, cancellationToken).ConfigureAwait(false)) return;
             if (earlySubagentDelegationPending)
             {
-                var preparingResearchContext = compactContext && canonicalStateEnabled
+                var preparingResearchContext = canonicalStateEnabled
                     && IsEarlyResearchContextRead(response, request, availableTools, _toolCatalog);
                 if (!preparingResearchContext && !IsValidEarlyDelegationResponse(response, availableTools, _toolCatalog))
                 {
@@ -2301,7 +2305,8 @@ public sealed partial class RunProcessor : BackgroundService
         RunRequest request,
         string role,
         IReadOnlyList<string> effectiveTools,
-        string? contextProfileVersion = null)
+        string? contextProfileVersion = null,
+        bool researchManagedByAgent = false)
     {
         var messages = new List<LmChatMessage>
         {
@@ -2309,7 +2314,7 @@ public sealed partial class RunProcessor : BackgroundService
                 ? CompactAgentContextPolicy.Build(request, effectiveTools)
                 : (request.Mode == RunMode.Coding
                 ? CodingAgentPolicy.ForWorkingState(true)
-                : GeneralAgentPolicies.ForConversation(role, request, effectiveTools))
+                : GeneralAgentPolicies.ForConversation(role, request, effectiveTools, researchManagedByAgent))
                 + (effectiveTools.Contains(SubagentToolNames.Spawn, StringComparer.Ordinal)
                     ? "\n\n" + SubagentAgentPolicy.Manager : "")),
         };

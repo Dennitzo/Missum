@@ -5,6 +5,7 @@ still compares prompt tokens before reusing it. No model is loaded by this modul
 """
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -31,6 +32,166 @@ class NativeSessionCache:
         self.maximum_bytes, self.free_reserve = maximum_bytes, free_reserve
         self.estimate_bytes = estimate_bytes
         self.resident = {}
+        self.owners = {}
+        self.deleted_keys = set()
+        self.deleted_sessions = set()
+        self.lifecycle_error = None
+        self._read_ownership()
+
+    @staticmethod
+    def _canonical_key(key):
+        if isinstance(key, str) and re.fullmatch(r"missum-session-v2-[0-9a-f]{64}", key):
+            return "go-session-v2-" + key[len("missum-session-v2-"):]
+        return key
+
+    def _read_ownership(self):
+        path = self.directory / "ownership.json"
+        if not path.exists():
+            return
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(value, dict) or value.get("version") != 1 or not isinstance(value.get("entries"), dict):
+                raise ValueError("Invalid native cache ownership ledger")
+            self.owners = {identity: entry for identity, entry in value["entries"].items()
+                           if re.fullmatch(r"[0-9a-f]{64}", identity)
+                           and isinstance(entry, dict) and any(isinstance(entry.get(field), str)
+                               for field in ("sessionKey", "sessionId", "parentSessionId"))}
+            if not isinstance(value.get("deletedSessionKeys", []), list) or not isinstance(value.get("deletedSessionIds", []), list):
+                raise ValueError("Invalid native cache deletion tombstones")
+            self.deleted_keys = set(value.get("deletedSessionKeys", []))
+            self.deleted_sessions = set(value.get("deletedSessionIds", []))
+            if any(not isinstance(item, str) for item in self.deleted_keys | self.deleted_sessions):
+                raise ValueError("Invalid native cache deletion tombstones")
+        except (OSError, ValueError, TypeError) as error:
+            # A damaged ledger must never revive deleted state. Inference can
+            # continue cold, but snapshot reuse/writes wait for ledger repair.
+            self.lifecycle_error = str(error)
+
+    def _write_ownership(self):
+        target = self.directory / "ownership.json"
+        temporary = self.directory / ("ownership." + uuid.uuid4().hex + ".pending")
+        try:
+            with temporary.open("w", encoding="utf-8") as stream:
+                json.dump(dict(version=1, entries=self.owners,
+                               deletedSessionKeys=sorted(self.deleted_keys),
+                               deletedSessionIds=sorted(self.deleted_sessions)), stream, sort_keys=True)
+                stream.flush()
+                os.fsync(stream.fileno())
+            temporary.replace(target)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _remember(self, model, key, identity, session_id=None, parent_session_id=None, parent_key=None):
+        if self.lifecycle_error:
+            raise RuntimeError("Native cache ownership is unavailable: " + self.lifecycle_error)
+        if key is None:
+            return
+        key = self._canonical_key(key)
+        if key in self.deleted_keys or session_id in self.deleted_sessions or parent_session_id in self.deleted_sessions:
+            raise ValueError("Native cache session was deleted")
+        entry = dict(self.owners.get(identity, {}), model=model, sessionKey=key)
+        if session_id is not None and entry.get("sessionId") not in (None, session_id):
+            raise ValueError("Native cache key is already bound to a different session owner")
+        if session_id is not None and entry.get("sessionId") != session_id:
+            if any(owner.get("sessionId") not in (None, session_id)
+                   for owner in self.owners.values() if self._canonical_key(owner.get("sessionKey")) == key):
+                raise ValueError("Native cache key is already bound to a different session owner")
+        if (parent_session_id is not None and entry.get("parentSessionId") not in (None, parent_session_id)):
+            raise ValueError("Native cache session is already bound to a different parent owner")
+        for name, value in (("sessionId", session_id), ("parentSessionId", parent_session_id),
+                            ("parentSessionKey", self._canonical_key(parent_key))):
+            if value is not None:
+                if not isinstance(value, str) or not 1 <= len(value) <= 2048:
+                    raise ValueError("Invalid native cache owner")
+                entry[name] = value
+        if entry.get("sessionId") in self.deleted_sessions or entry.get("parentSessionId") in self.deleted_sessions:
+            raise ValueError("Native cache session was deleted")
+        if self.owners.get(identity) != entry:
+            self.owners[identity] = entry
+            self._write_ownership()
+
+    def delete(self, session_ids=(), session_keys=(), known_models=()):
+        """Erase only the selected logical owners, including all delegated forks.
+
+        Tombstones commit before files or resident slots are touched. A delayed
+        cancelled turn therefore cannot recreate its snapshot after deletion.
+        Fingerprint/model revisions remain addressable through the owner ledger.
+        """
+        if self.lifecycle_error:
+            raise RuntimeError("Native cache ownership is unavailable: " + self.lifecycle_error)
+        if not isinstance(session_ids, (list, tuple)) or not isinstance(session_keys, (list, tuple)):
+            raise ValueError("Cache deletion requires owner/key lists")
+        if not 0 < len(session_ids) + len(session_keys) <= 4096:
+            raise ValueError("Cache deletion requires 1..4096 owners/keys")
+        if any(not isinstance(item, str) or not 1 <= len(item) <= 2048 for item in (*session_ids, *session_keys)):
+            raise ValueError("Invalid native cache deletion owner")
+        selected_sessions = set(session_ids)
+        selected_keys = {self._canonical_key(key) for key in session_keys}
+        # Metadata is a second ownership record, including snapshots recovered
+        # after a ledger write failed. Never turn arbitrary JSON paths into files.
+        for path in self.directory.glob("*.json"):
+            if not re.fullmatch(r"[0-9a-f]{64}\.json", path.name):
+                continue
+            try:
+                entry = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(entry, dict) and any(isinstance(entry.get(field), str)
+                        for field in ("sessionKey", "sessionId", "parentSessionId")):
+                    self.owners.setdefault(path.stem, entry)
+            except (OSError, ValueError):
+                pass
+        while True:
+            previous = (len(selected_sessions), len(selected_keys))
+            for entry in self.owners.values():
+                if (entry.get("sessionId") in selected_sessions or entry.get("parentSessionId") in selected_sessions
+                        or self._canonical_key(entry.get("sessionKey")) in selected_keys
+                        or self._canonical_key(entry.get("parentSessionKey")) in selected_keys):
+                    if isinstance(entry.get("sessionKey"), str):
+                        selected_keys.add(self._canonical_key(entry["sessionKey"]))
+                    if entry.get("sessionId"):
+                        selected_sessions.add(entry["sessionId"])
+            if previous == (len(selected_sessions), len(selected_keys)):
+                break
+        identities = {identity for identity, entry in self.owners.items()
+                      if entry.get("sessionId") in selected_sessions or entry.get("parentSessionId") in selected_sessions
+                      or self._canonical_key(entry.get("sessionKey")) in selected_keys}
+        # Existing v2 snapshots predate owner metadata. The exact currently
+        # installed fingerprint can still be removed without broad directory wipes.
+        for model in known_models:
+            try:
+                fingerprint = self.fingerprint(model)
+            except (OSError, ValueError):
+                continue
+            for key in selected_keys:
+                identities.add(hashlib.sha256(json.dumps([model, self._canonical_key(key), fingerprint],
+                                   sort_keys=True).encode()).hexdigest())
+        self.deleted_sessions.update(selected_sessions)
+        self.deleted_keys.update(selected_keys)
+        self._write_ownership()
+        pending_models, removed, removed_bytes = [], 0, 0
+        for model, current in list(self.resident.items()):
+            if current["identity"] not in identities and self._canonical_key(current["key"]) not in selected_keys:
+                continue
+            current["deleted"] = True
+            try:
+                self._idle_slot(model)
+                self.router("slots/0?action=erase", dict(model=model))
+                self.resident.pop(model, None)
+            except Exception:
+                # Do not kill another request/model to clear a busy slot. A
+                # subsequent save or prepare drains it before any cache reuse.
+                pending_models.append(model)
+        for identity in identities:
+            for path in (self.directory / (identity + ".bin"), self.directory / (identity + ".json"),
+                         *self.directory.glob(identity + ".*.pending")):
+                if path.exists():
+                    size = path.stat().st_size
+                    path.unlink()
+                    removed_bytes += size
+                    if path.suffix == ".bin":
+                        removed += 1
+        return self._record(None, "delete", dict(status="pending" if pending_models else "deleted",
+                            removedSnapshots=removed, removedBytes=removed_bytes, pendingModels=pending_models,
+                            sessionIds=sorted(selected_sessions), sessionKeys=sorted(selected_keys)))
 
     def invalidate(self, model):
         self.resident.pop(model, None)
@@ -42,8 +203,7 @@ class NativeSessionCache:
             raise ValueError("Invalid native session cache key")
         # Legacy hash compatibility: only the wire prefix changed. Reuse the exact
         # existing opaque snapshot filenames, including cached interrupted turns.
-        if re.fullmatch(r"missum-session-v2-[0-9a-f]{64}", key):
-            key = "go-session-v2-" + key[len("missum-session-v2-"):]
+        key = self._canonical_key(key)
         return hashlib.sha256(json.dumps([model, key, self.fingerprint(model)],
                             sort_keys=True).encode()).hexdigest()
 
@@ -77,13 +237,19 @@ class NativeSessionCache:
                 raise RuntimeError("Native slot is not idle")
             time.sleep(0.05)
 
-    def prepare(self, model, key):
+    def prepare(self, model, key, session_id=None, parent_session_id=None):
         try:
             identity = self._identity(model, key)
+            self._remember(model, key, identity, session_id, parent_session_id)
             current = self.resident.get(model)
             # A model can also disappear through an external router unload. A
             # fresh empty slot must restore even when its logical key is equal.
             slot = self._idle_slot(model)
+            if current and current.get("deleted"):
+                self.router("slots/0?action=erase", dict(model=model))
+                self.resident.pop(model, None)
+                current = None
+                slot = self._idle_slot(model)
             tokens = slot.get("n_prompt_tokens", slot.get("n_past", slot.get("n_tokens", 0)))
             if current and current["identity"] == identity and tokens > 0:
                 current["dirty"] = True
@@ -193,6 +359,16 @@ class NativeSessionCache:
         current = self.resident.get(model)
         if not current or not current["dirty"]:
             return dict(status="unchanged")
+        if (self.lifecycle_error or current.get("deleted")
+                or self._canonical_key(current["key"]) in self.deleted_keys):
+            if current.get("deleted"):
+                try:
+                    self._idle_slot(model)
+                    self.router("slots/0?action=erase", dict(model=model))
+                    self.resident.pop(model, None)
+                except Exception:
+                    pass
+            return dict(status="deleted" if not self.lifecycle_error else "unavailable")
         identity = current["identity"]
         target = self.directory / (identity + ".bin")
         temporary = self.directory / (identity + "." + uuid.uuid4().hex + ".pending")
@@ -223,7 +399,8 @@ class NativeSessionCache:
             if temporary.stat().st_size > self.maximum_bytes:
                 raise OSError("Native session cache exceeds its disk allowance")
             temporary.replace(target)
-            metadata.write_text(json.dumps(dict(bytes=target.stat().st_size, tokens=response["n_saved"])), encoding="utf-8")
+            metadata.write_text(json.dumps(dict(self.owners.get(identity, {}), bytes=target.stat().st_size,
+                                               tokens=response["n_saved"])), encoding="utf-8")
             current["dirty"] = False
             self._prune(protected=[target.name])
             result = self._record(model, "save", dict(status="saved", savedTokens=response["n_saved"],
@@ -337,7 +514,7 @@ class NativeSessionCache:
         return dict(sourceCachedTokens=cached, preparationSampledTokens=sampled,
                     evaluatedGeneratedTokens=0, preparedPromptTokens=len(tokens), firstInferencePromptTokens=len(first_tokens))
 
-    def fork(self, source_model, source_key, model, key, prefill=None):
+    def fork(self, source_model, source_key, model, key, prefill=None, session_id=None, parent_session_id=None):
         """Copy a compatible prefix into an independent, atomic child snapshot.
 
         CUDA placement is not serialized model/KV geometry. Every other
@@ -359,6 +536,8 @@ class NativeSessionCache:
                 raise ValueError("Native session cache fingerprints are incompatible")
             source_identity = self._identity(source_model, source_key)
             target_identity = self._identity(model, key)
+            self._remember(source_model, source_key, source_identity, session_id=parent_session_id)
+            self._remember(model, key, target_identity, session_id, parent_session_id, parent_key=source_key)
             if source_identity == target_identity:
                 raise ValueError("Cache fork requires an independent child snapshot")
             source = self.directory / (source_identity + ".bin")
@@ -384,7 +563,9 @@ class NativeSessionCache:
                 temporary.replace(target)
                 source_metadata = source.with_suffix(".json")
                 if source_metadata.exists():
-                    shutil.copyfile(source_metadata, target.with_suffix(".json"))
+                    metadata = json.loads(source_metadata.read_text(encoding="utf-8"))
+                    target.with_suffix(".json").write_text(json.dumps(dict(metadata,
+                        **self.owners[target_identity])), encoding="utf-8")
             result = self.prepare(model, key)
             if result["status"] == "restored":
                 result = dict(result, status="forked", sourceModel=source_model, **metrics)

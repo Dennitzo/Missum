@@ -152,6 +152,7 @@ public sealed partial class NativeAssistantPage
 
     private void ShowReviewTab(ChangesReviewTab tab)
     {
+        HideSubagentOverview();
         _activeSourcesSession = null; _sourcesHost.Visibility = Visibility.Collapsed;
         HideResearchView();
         SaveReviewScrollOffset();
@@ -163,6 +164,7 @@ public sealed partial class NativeAssistantPage
 
     private void ShowChatView()
     {
+        HideSubagentOverview();
         _activeSourcesSession = null; _sourcesHost.Visibility = Visibility.Collapsed;
         HideResearchView();
         SaveReviewScrollOffset();
@@ -179,6 +181,7 @@ public sealed partial class NativeAssistantPage
 
     private void SyncReviewSession()
     {
+        if (_activeSubagentOverviewSession is { } overviewSession && overviewSession != _session) ShowChatView();
         if (_activeSourcesSession is { } sourceSession && sourceSession != _session) ShowChatView();
         // Same-session status/snapshot updates preserve the selected review tab.
         if (_activeReviewRunId is { } runId && _reviewTabs.FirstOrDefault(tab => tab.RunId == runId)?.SessionId != _session)

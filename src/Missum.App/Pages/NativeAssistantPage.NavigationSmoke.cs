@@ -151,6 +151,8 @@ public sealed partial class NativeAssistantPage
         await VerifyComposerFooterSmokeAsync();
         await VerifyMathRenderingSmokeAsync(body);
         await VerifyMarkdownTableSmokeAsync(body);
+        await VerifyMarkdownHeadingSmokeAsync(original);
+        await VerifyLooseMathSmokeAsync(original);
         await VerifyAnswerStreamingSmokeAsync(original);
         await VerifyThinkingIndicatorSmokeAsync(original);
         await VerifyToolIconColorsSmokeAsync();
@@ -159,6 +161,7 @@ public sealed partial class NativeAssistantPage
         await VerifyChangesReviewSmokeAsync();
         await VerifyScienceViewsSmokeAsync();
         await VerifySubagentSmokeAsync(original);
+        await VerifyPlanetPaletteSmokeAsync();
         ApplyEvent("state.snapshot", original);
         RenderMessagesNow();
         return visits;
@@ -180,8 +183,9 @@ public sealed partial class NativeAssistantPage
                     url = "https://example.org/source-" + index, thumbnailUrl = "https://example.org/preview.png" } } }),
                 updatedAt = now.AddSeconds(index) }).ToArray() } });
         ApplyEvent("state.snapshot", JsonSerializer.SerializeToElement(snapshot)); RenderMessagesNow();
-        if (SourcesPanel.Children.Count != 4 || _sessionSources[owner].Length != 4 || !_sessionSources[owner][0].Title.EndsWith('3'))
-            throw new InvalidOperationException("Sources must show the newest three web actions and an all-sources action.");
+        if (SourcesPanel.Children.Count != 2 || _sessionSources[owner].Length != 4 || !_sessionSources[owner][0].Title.EndsWith('3')
+            || !_sessionSources[owner].Select(action => action.Id).SequenceEqual(Enumerable.Range(0, 4).Reverse().Select(index => "search-" + index)))
+            throw new InvalidOperationException("Sources must show only the latest web action and an all-sources action, while retaining the complete ordered history.");
         var latestSource = _sessionSources[owner][0];
         // Inspect our labels rather than the FontIcon's internal glyph TextBlock.
         var sourceLabels = ((Grid)((Button)SourcesPanel.Children[0]).Content).Children.OfType<StackPanel>().Single()
@@ -193,7 +197,8 @@ public sealed partial class NativeAssistantPage
         var allSources = (Button)SourcesPanel.Children[^1];
         var allRow = (Grid)allSources.Content;
         var allIcon = allRow.Children.OfType<FontIcon>().Single();
-        if (allRow.Children.OfType<TextBlock>().Single().Opacity >= 1 || allIcon.Glyph != "\uE71B" || allIcon.Opacity >= 1)
+        if (allRow.Children.OfType<TextBlock>().Single().Opacity >= 1 || allIcon.Glyph != "\uE71B" || allIcon.Opacity >= 1
+            || Microsoft.UI.Xaml.Automation.AutomationProperties.GetName(allSources) != "Alle Quellen anzeigen")
             throw new InvalidOperationException("The all-sources action must use the muted link symbol.");
         VerifyIconBrush(allIcon.Foreground, "link");
         VerifyIconBrush(((Grid)((Button)SourcesPanel.Children[0]).Content).Children.OfType<FontIcon>().Single().Foreground, "web");
@@ -221,7 +226,12 @@ public sealed partial class NativeAssistantPage
         for (var iteration = 0; iteration < 4; iteration++)
         {
             OpenSourcesTab(); UpdateLayout(); await Task.Delay(30);
-            if (_sourcesHost.Visibility != Microsoft.UI.Xaml.Visibility.Visible) throw new InvalidOperationException("The sources tab did not open.");
+            if (_sourcesHost.Visibility != Microsoft.UI.Xaml.Visibility.Visible
+                || _sourcesHost.Content is not ScrollViewer { Content: StackPanel sourceBody }
+                || sourceBody.Children.Count != _sessionSources[owner].Length + 1
+                || !sourceBody.Children.OfType<StackPanel>().Select(group => group.Children.OfType<TextBlock>().Single().Text)
+                    .SequenceEqual(_sessionSources[owner].Select(action => action.Title)))
+                throw new InvalidOperationException("The sources tab must open the complete ordered source history, independently of the single overlay entry.");
             ShowChatView(); UpdateLayout(); await Task.Delay(30);
             AssertChatCursorAbsent(ConversationContent);
             if (_messages.Values.All(message => S(message, "status") != "streaming")

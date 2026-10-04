@@ -18,6 +18,7 @@ public sealed class NativeModelRuntimeService : IDisposable
     private readonly Func<Uri, CancellationToken, Task<bool?>> _gatewayIdle;
     private readonly TimeSpan _shutdownDrainTimeout;
     private readonly string _runtimeEndpoint;
+    private readonly NativeSessionCacheCleanupService? _cacheCleanup;
     private int _stopping;
     private bool _stopped;
     private DateTimeOffset _nextProbe;
@@ -34,13 +35,17 @@ public sealed class NativeModelRuntimeService : IDisposable
             () => DateTimeOffset.UtcNow,
             token => RunInstalledRuntimeAsync(profile, "Stop", token),
             runtimeEndpoint: $"http://127.0.0.1:{profile.NativePort}",
-            stopOwned: token => RunInstalledRuntimeAsync(profile, "Stop", token, ownedShutdown: true)) { }
+            stopOwned: token => RunInstalledRuntimeAsync(profile, "Stop", token, ownedShutdown: true))
+    {
+        _cacheCleanup = new(profile);
+    }
 
     internal NativeModelRuntimeService(Func<Uri, bool> isLocalGateway,
         Func<CancellationToken, Task<bool>> probe, Func<CancellationToken, Task> start,
         Func<DateTimeOffset>? now = null, Func<CancellationToken, Task>? stop = null,
         Func<Uri, CancellationToken, Task<bool?>>? gatewayIdle = null, TimeSpan? shutdownDrainTimeout = null,
-        string runtimeEndpoint = "http://127.0.0.1:8081", Func<CancellationToken, Task>? stopOwned = null)
+        string runtimeEndpoint = "http://127.0.0.1:8081", Func<CancellationToken, Task>? stopOwned = null,
+        NativeSessionCacheCleanupService? cacheCleanup = null)
     {
         _isLocalGateway = isLocalGateway;
         _probe = probe;
@@ -52,6 +57,7 @@ public sealed class NativeModelRuntimeService : IDisposable
         if (_shutdownDrainTimeout <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(shutdownDrainTimeout));
         _now = now ?? (() => DateTimeOffset.UtcNow);
         _runtimeEndpoint = runtimeEndpoint;
+        _cacheCleanup = cacheCleanup;
     }
 
     public async Task EnsureStartedAsync(Uri gateway, CancellationToken cancellationToken)
@@ -69,6 +75,7 @@ public sealed class NativeModelRuntimeService : IDisposable
             {
                 if (_lastFailure is not null)
                     throw new InvalidOperationException(_lastFailure.Message, _lastFailure);
+                await FlushDeletedSessionCachesAsync(cancellationToken).ConfigureAwait(false);
                 return;
             }
             if (!await _probe(cancellationToken).ConfigureAwait(false))
@@ -77,6 +84,7 @@ public sealed class NativeModelRuntimeService : IDisposable
                 if (!await _probe(cancellationToken).ConfigureAwait(false))
                     throw new InvalidOperationException($"Windows llama.cpp wurde gestartet, ist auf {_runtimeEndpoint} aber noch nicht erreichbar.");
             }
+            await FlushDeletedSessionCachesAsync(cancellationToken).ConfigureAwait(false);
             _lastFailure = null;
             _nextProbe = _now().AddSeconds(5);
         }
@@ -91,6 +99,12 @@ public sealed class NativeModelRuntimeService : IDisposable
     }
 
     public void BeginShutdown() => Interlocked.Exchange(ref _stopping, 1);
+
+    private async Task FlushDeletedSessionCachesAsync(CancellationToken cancellationToken)
+    {
+        if (_cacheCleanup is not null && !await _cacheCleanup.FlushAsync(cancellationToken).ConfigureAwait(false))
+            throw new InvalidOperationException("Die native Runtime bereinigt noch KV-Caches gelöschter Sitzungen. Der Auftrag bleibt gespeichert.");
+    }
 
     public async Task StopAsync(Uri gateway, CancellationToken cancellationToken = default)
     {

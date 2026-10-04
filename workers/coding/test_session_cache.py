@@ -118,7 +118,7 @@ class SessionCacheTests(unittest.TestCase):
             saved = self.cache.save("model", "session")
         self.assertEqual("saved", saved["status"])
         self.assertEqual(500, saved["savedTokens"])
-        metadata = json.loads(next(self.root.glob("*.json")).read_text())
+        metadata = json.loads(next(self.root.glob("*.bin")).with_suffix(".json").read_text())
         self.assertEqual(500, metadata["tokens"])
 
     def test_interrupted_save_waits_for_a_long_native_batch_to_drain(self):

@@ -11,6 +11,22 @@ public sealed partial class NativeAssistantPage
 {
     private bool _continuationRequestPending;
     private string? _continuationMessageId;
+    private Guid? _continuationSessionId;
+    private bool _continuationServerStarted;
+    private bool IsContinuationPreparing => _continuationRequestPending && _continuationSessionId == _session
+        && !_continuationServerStarted && ActiveSubagent is null;
+
+    private void ObserveContinuationAdmission(string type, JsonElement data)
+    {
+        if (!_continuationRequestPending || _continuationServerStarted || _continuationSessionId is not { } owner) return;
+        if (type == "chat.started" && S(data, "sessionId") == owner.ToString()
+            && data.TryGetProperty("message", out var message) && S(message, "id") == _continuationMessageId)
+            _continuationServerStarted = true;
+        if ((type is "state.snapshot" or "session.changed" or "document.changed")
+            && S(data, "activeSessionId") == owner.ToString() && S(data, "activeRunId").Length > 0
+            && S(data, "runMessageId") == _continuationMessageId)
+            _continuationServerStarted = true;
+    }
 
     private static bool IsResumableAssistantStatus(JsonElement message)
     {
@@ -81,7 +97,11 @@ public sealed partial class NativeAssistantPage
         var session = _session;
         _continuationRequestPending = true;
         _continuationMessageId = messageId;
+        _continuationSessionId = session;
+        _continuationServerStarted = false;
+        _chatErrors.Remove(session); RefreshChatNotices();
         RefreshContinuationSteps();
+        SetRunning();
         try
         {
             // The coordinator resumes the existing assistant anchor. Neither the
@@ -98,7 +118,10 @@ public sealed partial class NativeAssistantPage
         {
             _continuationRequestPending = false;
             _continuationMessageId = null;
+            _continuationSessionId = null;
+            _continuationServerStarted = false;
             RefreshContinuationSteps();
+            SetRunning();
         }
     }
 

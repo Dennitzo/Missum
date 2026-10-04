@@ -55,7 +55,7 @@ public sealed class NativeMathParagraph : UserControl
             Run? run = null;
             Inline content;
             if (piece.IsMath)
-                content = new InlineUIContainer { Child = new NativeFormulaView(piece.Text, piece.Display, FontSize, piece.Uri) };
+                content = new InlineUIContainer { Child = new NativeFormulaView(piece.Text, piece.Display, FontSize, piece.Uri, piece.RenderLatex) };
             else
             {
                 run = new Run { Text = piece.Text, FontFamily = new FontFamily(piece.Kind == NativeStreamingMarkdown.InlineKind.Code ? "Cascadia Mono" : "Segoe UI Variable Text") };

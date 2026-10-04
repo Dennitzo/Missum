@@ -29,11 +29,14 @@ public sealed class ScienceRestartContextTests
     private static readonly JsonSerializerOptions Json = MissumAiProtocol.CreateJsonOptions();
 
     [Theory]
-    [InlineData(MessageStatus.Completed)]
-    [InlineData(MessageStatus.Cancelled)]
-    [InlineData(MessageStatus.Interrupted)]
+    [InlineData(MessageStatus.Completed, false)]
+    [InlineData(MessageStatus.Cancelled, false)]
+    [InlineData(MessageStatus.Interrupted, false)]
+    [InlineData(MessageStatus.Completed, true)]
+    [InlineData(MessageStatus.Cancelled, true)]
+    [InlineData(MessageStatus.Interrupted, true)]
     public async Task ContinueAfterSqliteReopenRestoresScientificQuestionReportAndCheckpoint(
-        MessageStatus previousStatus)
+        MessageStatus previousStatus, bool gatewayOwnsContext)
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var chats = environment.Get<IChatRepository>();
@@ -80,7 +83,7 @@ public sealed class ScienceRestartContextTests
             SelectedModel = Model,
         });
 
-        var before = await CaptureContinuationAsync(environment.Services, session.Id, assistant.Id);
+        var before = await CaptureContinuationAsync(environment.Services, session.Id, assistant.Id, gatewayOwnsContext);
         AssertProjectIdentity(await repository.GetProjectAsync(projectId), originalQuestion, researchWorkspace);
         await environment.Services.DisposeAsync();
         TestSqlitePools.ClearDatabasePool(environment.DatabasePath);
@@ -89,7 +92,7 @@ public sealed class ScienceRestartContextTests
         registrations.AddMissumInfrastructure(options => options.DataDirectory = environment.Directory);
         await using var restarted = registrations.BuildServiceProvider(validateScopes: true);
         await restarted.GetRequiredService<IMissumDatabase>().InitializeAsync();
-        var after = await CaptureContinuationAsync(restarted, session.Id, assistant.Id);
+        var after = await CaptureContinuationAsync(restarted, session.Id, assistant.Id, gatewayOwnsContext);
 
         Assert.NotEqual(before.ClientId, after.ClientId);
         Assert.Equal(before.RequestJson, after.RequestJson);
@@ -105,20 +108,32 @@ public sealed class ScienceRestartContextTests
             && message.Content.Any(part => part.Text?.Contains("Ein-Schleifen-Korrektur", StringComparison.Ordinal) == true));
         Assert.DoesNotContain(ForeignQuestion, after.RequestJson, StringComparison.Ordinal);
         var latestText = after.Request.Messages[^1].Content.Single(part => part.Type == "text").Text!;
-        var context = ParseScientificContext(latestText);
-        Assert.Equal(originalQuestion, context.GetProperty("originalQuestion").GetString());
-        Assert.Equal("section-delta-v1", context.GetProperty("research").GetProperty("protocol").GetString());
-        Assert.Equal(ReportTitle, context.GetProperty("research").GetProperty("title").GetString());
         Assert.Equal(2, after.Request.ResearchOptions?.ProtocolVersion);
-        Assert.Contains(context.GetProperty("workingItems").EnumerateArray(), item =>
-            item.GetProperty("kind").GetString() == "claim"
-            && item.GetProperty("data").GetProperty("statement").GetString() == Claim
-            && item.GetProperty("data").GetProperty("status").GetString() == "provisionallySupported");
-        Assert.Contains(context.GetProperty("workingItems").EnumerateArray(), item =>
-            item.GetProperty("kind").GetString() == "section"
-            && item.GetProperty("data").GetProperty("contentPreview").GetString()!.Contains("Ein-Schleifen-Korrektur", StringComparison.Ordinal));
-        // Compact context points at canonical objects without deleting the full
-        // manuscript, prior run checkpoint or actual execution record.
+        if (gatewayOwnsContext)
+        {
+            Assert.Equal(ContinuePrompt, latestText);
+            Assert.Contains("research.deliverables", after.Request.ClientCapabilities!);
+            Assert.DoesNotContain("MISSUM_SCIENCE_SESSION_CONTEXT", latestText, StringComparison.Ordinal);
+            Assert.DoesNotContain("CLAUDE SCIENCE", latestText, StringComparison.Ordinal);
+            Assert.Null(after.Request.ContextProfileVersion); // No global compact-profile activation.
+        }
+        else
+        {
+            var context = ParseScientificContext(latestText);
+            Assert.Equal(originalQuestion, context.GetProperty("originalQuestion").GetString());
+            Assert.Equal("section-delta-v1", context.GetProperty("research").GetProperty("protocol").GetString());
+            Assert.Equal(ReportTitle, context.GetProperty("research").GetProperty("title").GetString());
+            Assert.Contains(context.GetProperty("workingItems").EnumerateArray(), item =>
+                item.GetProperty("kind").GetString() == "claim"
+                && item.GetProperty("data").GetProperty("statement").GetString() == Claim
+                && item.GetProperty("data").GetProperty("status").GetString() == "provisionallySupported");
+            Assert.Contains(context.GetProperty("workingItems").EnumerateArray(), item =>
+                item.GetProperty("kind").GetString() == "section"
+                && item.GetProperty("data").GetProperty("contentPreview").GetString()!.Contains("Ein-Schleifen-Korrektur", StringComparison.Ordinal));
+            Assert.Contains("AKTUELLER NUTZERAUFTRAG\n" + ContinuePrompt, latestText, StringComparison.Ordinal);
+        }
+        // Gateway-managed requests read the same complete durable objects instead
+        // of embedding a duplicate snapshot. The fallback remains compatible.
         var restoredRepository = restarted.GetRequiredService<IScientificResearchRepository>();
         var checkpoint = await restoredRepository.GetLatestCheckpointAsync(projectId);
         Assert.Equal("verification.pending", checkpoint?.Stage);
@@ -133,7 +148,11 @@ public sealed class ScienceRestartContextTests
         var section = Assert.Single(state.Items, item => item.Kind == "section");
         Assert.Equal(Report[(Report.IndexOf("\n\n", StringComparison.Ordinal) + 2)..],
             section.Data.GetProperty("contentMarkdown").GetString());
-        Assert.Contains("AKTUELLER NUTZERAUFTRAG\n" + ContinuePrompt, latestText, StringComparison.Ordinal);
+        var readSnapshot = await ((IScientificResearchStateRepository)restoredRepository).LoadWorkingReadSnapshotAsync(projectId);
+        var task = ResearchReadProjection.Create(readSnapshot,
+            JsonSerializer.SerializeToElement(new { projectId, view = "task" }));
+        Assert.Equal(originalQuestion, task.GetProperty("originalQuestion").GetString());
+        Assert.Equal(JsonValueKind.Null, task.GetProperty("nextCursor").ValueKind);
         AssertProjectIdentity(await restarted.GetRequiredService<IScientificResearchRepository>().GetProjectAsync(projectId),
             originalQuestion, researchWorkspace);
         Assert.Equal(SessionTitle, (await restarted.GetRequiredService<IChatRepository>().GetSessionAsync(session.Id))?.Title);
@@ -183,6 +202,59 @@ public sealed class ScienceRestartContextTests
         Assert.Equal(assistant.Content, (await chats.GetMessageAsync(assistant.Id))?.Content);
     }
 
+    [Fact]
+    public async Task CanonicalNextRequestKeepsLongCorrectionAndOriginalTaskCompleteWithoutClientGuideOrSnapshot()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var chats = environment.Get<IChatRepository>();
+        var repository = environment.Get<IScientificResearchRepository>();
+        var session = await chats.CreateSessionAsync(SessionTitle, ChatMode.ClaudeScience);
+        const string originalMiddle = "MITTLERE_ORIGINALANFORDERUNG: Der Grenzfall muss dimensionskonsistent bleiben.";
+        const string correctionMiddle = "MITTLERE_KORREKTUR: Ändere nur die Kopplung; bewahre die bisherigen Gegenbeispiele.";
+        var original = "Ursprüngliches Forschungsvorhaben\n" + new string('a', 12_000) + "\n" + originalMiddle
+            + "\n" + new string('b', 12_000) + "\nPrüfe die klassische Grenze.";
+        var correction = "Aktuelle Änderung\n" + new string('c', 12_000) + "\n" + correctionMiddle
+            + "\n" + new string('d', 12_000) + "\nFahre mit den offenen Prüfungen fort.";
+        await chats.AddMessageAsync(session.Id, ChatRole.User, original, MessageStatus.Completed);
+        var assistant = await chats.AddMessageAsync(session.Id, ChatRole.Assistant,
+            "Die erste Herleitung ist gespeichert; eine Gegenhypothese bleibt offen.", MessageStatus.Interrupted);
+        var now = DateTimeOffset.UtcNow;
+        var projectId = $"research-{session.Id:N}";
+        await repository.UpsertProjectAsync(new(projectId, session.Id, "mathematicalInvestigation", original,
+            InterpretedQuestion, "readOnlyResearch", "multiPath", "unresolved", 2, 1, now, now));
+        await environment.Get<ISettingsStore>().SaveAsync(new AppSettings
+        {
+            MissumAiServerUrl = "http://127.0.0.1:65000", ActiveSessionId = session.Id, SelectedModel = Model,
+        });
+
+        var capture = await CaptureContinuationAsync(environment.Services, session.Id, assistant.Id,
+            gatewayOwnsContext: true, prompt: correction);
+
+        Assert.Equal(correction, capture.Request.Messages[^1].Content.Single().Text);
+        Assert.Contains(capture.Request.Messages, message => message.Role == "user"
+            && message.Content.Any(part => part.Text == original));
+        Assert.Contains("research.deliverables", capture.Request.ClientCapabilities!);
+        Assert.Equal(2, capture.Request.ResearchOptions?.ProtocolVersion);
+        Assert.Null(capture.Request.ContextProfileVersion);
+        Assert.DoesNotContain("MISSUM_SCIENCE_SESSION_CONTEXT", capture.RequestJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("CLAUDE SCIENCE", capture.RequestJson, StringComparison.Ordinal);
+        var snapshot = await ((IScientificResearchStateRepository)repository).LoadWorkingReadSnapshotAsync(projectId);
+        var restored = new StringBuilder();
+        string? cursor = null;
+        do
+        {
+            var page = ResearchReadProjection.Create(snapshot,
+                JsonSerializer.SerializeToElement(new { projectId, view = "task", cursor }, Json));
+            Assert.True(page.GetProperty("success").GetBoolean());
+            restored.Append(page.GetProperty("originalQuestion").GetString());
+            cursor = page.GetProperty("nextCursor").GetString();
+        } while (cursor is not null);
+        Assert.Equal(original, restored.ToString());
+        Assert.Contains(originalMiddle, restored.ToString(), StringComparison.Ordinal);
+        Assert.Equal(capture.HistoryJson,
+            JsonSerializer.Serialize(await chats.ListMessagesAsync(session.Id), Json));
+    }
+
     private static string CreateOriginalQuestion()
     {
         const string introduction = "Forschungsprojekt: Quantengravitation – von Einsteins Feldgleichungen zu einem überprüfbaren Vereinheitlichungsansatz.\n\n";
@@ -219,7 +291,8 @@ public sealed class ScienceRestartContextTests
         return document.RootElement.Clone();
     }
 
-    private static async Task<Capture> CaptureContinuationAsync(ServiceProvider provider, Guid sessionId, Guid assistantId)
+    private static async Task<Capture> CaptureContinuationAsync(ServiceProvider provider, Guid sessionId, Guid assistantId,
+        bool gatewayOwnsContext = false, string prompt = ContinuePrompt)
     {
         var chats = provider.GetRequiredService<IChatRepository>();
         var documents = provider.GetRequiredService<IDocumentIngestor>();
@@ -232,6 +305,10 @@ public sealed class ScienceRestartContextTests
         using var publications = new ScientificPublicationService(provider.GetRequiredService<IScientificResearchRepository>(),
             static (_, _) => throw new InvalidOperationException("Context restoration must not render a PDF."),
             Path.GetTempPath());
+        using var presentation = gatewayOwnsContext ? new ScientificPresentationCoordinator(publications, null!) : null;
+        // This request-only fixture advertises the production capability without
+        // running its unrelated PDF/simulation background work.
+        presentation?.Dispose();
         var broker = new LocalToolBroker(connection, documents, null!, chats);
         var recent = new RecentActivityService(settings, new ShellViewModel(), NullLogger<RecentActivityService>.Instance);
         using var service = new MissumAiAssistantService(connection, chats,
@@ -240,7 +317,8 @@ public sealed class ScienceRestartContextTests
             provider.GetRequiredService<IBinaryObjectStore>(), documents, new DocumentContextPreparationService(documents),
             new SessionContextPreparationService(chats), broker, null!, null!, settings, recent,
             NullLogger<MissumAiAssistantService>.Instance,
-            scientificResearch: provider.GetRequiredService<IScientificResearchRepository>(), sciencePublications: publications);
+            scientificResearch: provider.GetRequiredService<IScientificResearchRepository>(), sciencePresentation: presentation,
+            sciencePublications: publications);
         Assert.Equal(0, await chats.MarkStreamingMessagesInterruptedAsync());
         await service.StopPersistedRunsAtStartupAsync();
         Assert.Equal(0, await chats.DeleteEmptyTerminalMessagesAsync());
@@ -255,7 +333,7 @@ public sealed class ScienceRestartContextTests
         var history = await chats.ListMessagesAsync(sessionId);
         var assistant = (await chats.GetMessageAsync(assistantId))!;
         using var client = await connection.CreateClientAsync();
-        var trigger = AssistantCoordinator.CreateToolMatch("webSearch", ContinuePrompt) with
+        var trigger = AssistantCoordinator.CreateToolMatch("webSearch", prompt) with
         {
             DeepResearch = true,
             DeepResearchProfile = "mathematicalInvestigation",
@@ -267,7 +345,7 @@ public sealed class ScienceRestartContextTests
         var uploadedType = builder.GetParameters()[6].ParameterType.GenericTypeArguments.Single();
         var requestTask = (Task<RunRequest>)builder.Invoke(service,
         [
-            client, sessionId, ContinuePrompt, trigger, Array.Empty<AssistantAttachment>(), history,
+            client, sessionId, prompt, trigger, Array.Empty<AssistantAttachment>(), history,
             Array.CreateInstance(uploadedType, 0), assistant,
             (Func<MissumAiAssistantUpdate, Task>)(static _ => Task.CompletedTask), CancellationToken.None,
         ])!;

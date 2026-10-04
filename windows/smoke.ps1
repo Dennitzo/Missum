@@ -182,6 +182,48 @@ try {
         Copy-Item -LiteralPath $chatPreview -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.' + $chatPreviewName + '.png')) -Force
     }
     Write-Host 'Native tables, matching formula sizes, answer streaming and reasoning disclosure verified.'
+    $headingValidationPath = Join-Path $smokeData 'native-markdown-headings-validation.json'
+    if (-not (Test-Path -LiteralPath $headingValidationPath -PathType Leaf) -or
+        (Get-Item -LiteralPath $headingValidationPath).LastWriteTimeUtc -lt $startedAt.AddSeconds(-1)) {
+        throw 'Missing or stale native Markdown heading validation.'
+    }
+    $headingValidation = Get-Content -LiteralPath $headingValidationPath -Raw | ConvertFrom-Json
+    foreach ($headingCheck in @('passed', 'answerHeadings', 'reasoningHeadings', 'headingStreamRetainsControl', 'indentedModelDraft', 'mathHeadingTypeset', 'fencedCodePreserved')) {
+        if ($headingValidation.PSObject.Properties.Name -notcontains $headingCheck -or $headingValidation.$headingCheck -ne $true) {
+            throw "Native Markdown heading validation failed: $headingCheck"
+        }
+    }
+    Copy-Item -LiteralPath $headingValidationPath -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-markdown-headings-validation.json')) -Force
+    $headingPreview = Join-Path $smokeData 'native-markdown-headings-preview.png'
+    if (-not (Test-Path -LiteralPath $headingPreview -PathType Leaf) -or (Get-Item -LiteralPath $headingPreview).Length -lt 100) {
+        throw 'Missing native Markdown heading preview.'
+    }
+    Copy-Item -LiteralPath $headingPreview -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-markdown-headings-preview.png')) -Force
+    Write-Host 'Native headings in streamed answers and reasoning verified.'
+    $looseMathValidationPath = Join-Path $smokeData 'native-loose-math-validation.json'
+    if (-not (Test-Path -LiteralPath $looseMathValidationPath -PathType Leaf) -or
+        (Get-Item -LiteralPath $looseMathValidationPath).LastWriteTimeUtc -lt $startedAt.AddSeconds(-1)) {
+        throw 'Missing or stale native loose-math validation.'
+    }
+    $looseMathValidation = Get-Content -LiteralPath $looseMathValidationPath -Raw | ConvertFrom-Json
+    if ($looseMathValidation.renderer -ne 'WinUI3' -or $looseMathValidation.visibleStreamingDeltas -lt 3) {
+        throw 'Loose scientific formulas were not rendered by the native streaming path.'
+    }
+    foreach ($looseMathCheck in @('passed', 'answerMath', 'reasoningMath', 'formulaControlRetained', 'reasoningDisclosureRetained', 'incompleteFormulaPreserved', 'codePathsUrlsProtected', 'formulaFontMatchesText', 'chatCursorAbsent')) {
+        if ($looseMathValidation.PSObject.Properties.Name -notcontains $looseMathCheck -or $looseMathValidation.$looseMathCheck -ne $true) {
+            throw "Native loose-math validation failed: $looseMathCheck"
+        }
+    }
+    Copy-Item -LiteralPath $looseMathValidationPath -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-loose-math-validation.json')) -Force
+    foreach ($looseMathPreviewName in @('native-loose-math-answer-preview', 'native-loose-math-reasoning-preview')) {
+        $looseMathPreview = Join-Path $smokeData ($looseMathPreviewName + '.png')
+        if (-not (Test-Path -LiteralPath $looseMathPreview -PathType Leaf) -or (Get-Item -LiteralPath $looseMathPreview).Length -lt 100 -or
+            (Get-Item -LiteralPath $looseMathPreview).LastWriteTimeUtc -lt $startedAt.AddSeconds(-1)) {
+            throw "Missing or stale native loose-math preview: $looseMathPreviewName"
+        }
+        Copy-Item -LiteralPath $looseMathPreview -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.' + $looseMathPreviewName + '.png')) -Force
+    }
+    Write-Host 'Loose scientific formulas, protected literals, matching sizes and answer/reasoning streaming verified.'
     foreach ($composerPreviewName in @('native-composer-preview', 'native-composer-hover-preview', 'native-composer-narrow-preview', 'native-selection-preview')) {
         $composerPreview = Join-Path $smokeData ($composerPreviewName + '.png')
         if (-not (Test-Path -LiteralPath $composerPreview -PathType Leaf)) { throw "Missing native composer preview: $composerPreviewName" }
@@ -198,7 +240,7 @@ try {
     if ($subagentValidation.renderer -ne 'WinUI3') {
         throw 'Native subagent validation did not use the real WinUI renderer.'
     }
-    foreach ($subagentCheck in @('passed', 'parentStable', 'childUsesNativeRenderer', 'overlayAboveSources', 'closableAndReopenable', 'parentDraftPreserved', 'parentRunRemainedActive', 'chatCursorAbsent', 'childModelIdentityPreserved', 'compactLifecycleRow', 'lifecycleStartEntryPreserved', 'lifecycleCompletionPostedOnce', 'lifecycleCompletionWaitsForDelivery', 'lifecycleClickOpensChild', 'lifecycleKeyboardAccessible', 'acceptedManagerStepsCoalesced')) {
+    foreach ($subagentCheck in @('passed', 'parentStable', 'childUsesNativeRenderer', 'overlayAboveSources', 'closableAndReopenable', 'parentDraftPreserved', 'parentRunRemainedActive', 'chatCursorAbsent', 'childModelIdentityPreserved', 'compactLifecycleRow', 'lifecycleStartEntryPreserved', 'lifecycleCompletionPostedOnce', 'lifecycleCompletionWaitsForDelivery', 'lifecycleClickOpensChild', 'lifecycleKeyboardAccessible', 'acceptedManagerStepsCoalesced', 'compactSubagentSummary', 'activeInactiveCountsCorrect', 'summaryControlsStable', 'summaryClickOpensOverview', 'noSubagentAllLink', 'completeSubagentOverview', 'overviewSessionIsolated', 'uniquePlanetIcons', 'planetIdentityConsistent')) {
         if ($subagentValidation.PSObject.Properties.Name -notcontains $subagentCheck -or $subagentValidation.$subagentCheck -ne $true) {
             throw "Native subagent smoke failed its required check: $subagentCheck"
         }
@@ -216,9 +258,9 @@ try {
         (Get-FileHash -LiteralPath $subagentValidationEvidence -Algorithm SHA256).Hash) {
         throw 'Native subagent validation evidence was not copied intact.'
     }
-    $subagentPreviewNames = @('native-subagents-outputs-preview', 'native-subagent-chat-preview', 'native-subagent-lifecycle-preview')
+    $subagentPreviewNames = @('native-subagents-outputs-preview', 'native-subagents-active-summary-preview', 'native-subagents-finished-summary-preview', 'native-subagent-chat-preview', 'native-subagent-lifecycle-preview', 'native-subagent-overview-preview')
     if ($expectsLiveSubagent) {
-        $subagentPreviewNames += @('native-subagent-live-chat-preview', 'native-subagent-live-response-preview', 'native-subagent-live-outputs-preview', 'native-subagent-live-lifecycle-preview')
+        $subagentPreviewNames += @('native-subagent-live-chat-preview', 'native-subagent-live-response-preview', 'native-subagent-live-outputs-preview', 'native-subagent-live-lifecycle-preview', 'native-subagent-live-overview-preview')
     }
     foreach ($subagentPreviewName in $subagentPreviewNames) {
         $subagentPreviewPath = Join-Path $smokeData ($subagentPreviewName + '.png')
@@ -244,7 +286,25 @@ try {
         }
     }
     Write-Host "Native subagent transcript, tabs, parent stability and output order verified: $subagentValidationEvidence"
-    foreach ($sciencePreview in @('native-outputs-preview', 'native-publication-preview', 'native-publication-last-page-preview', 'native-simulation-empty-preview', 'native-python-receipt-preview', 'native-changes-preview', 'native-tool-icons-preview', 'native-colored-chrome-preview', 'native-continuation-preview', 'native-thinking-preview')) {
+    $planetValidationPath = Join-Path $smokeData 'native-planet-palette-validation.json'
+    $planetPreviewPath = Join-Path $smokeData 'native-planet-palette-preview.png'
+    foreach ($planetEvidencePath in @($planetValidationPath, $planetPreviewPath)) {
+        if (-not (Test-Path -LiteralPath $planetEvidencePath -PathType Leaf) -or
+            (Get-Item -LiteralPath $planetEvidencePath).LastWriteTimeUtc -lt $startedAt.AddSeconds(-1)) {
+            throw 'Native planet palette smoke did not produce fresh rendered evidence.'
+        }
+    }
+    $planetValidation = Get-Content -LiteralPath $planetValidationPath -Raw | ConvertFrom-Json
+    if ($planetValidation.renderer -ne 'WinUI3' -or $planetValidation.passed -ne $true -or
+        $planetValidation.nativeVectors -ne $true -or $planetValidation.paletteVersion -ne 'planets-v1' -or
+        $planetValidation.paletteCount -lt 4096 -or $planetValidation.renderedSamples -ne 128 -or
+        $planetValidation.distinctSmallIcons -ne $planetValidation.renderedSamples -or $planetValidation.smallIconDip -ne 14) {
+        throw 'Native planet palette failed its small-icon uniqueness checks.'
+    }
+    Copy-Item -LiteralPath $planetValidationPath -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-planet-palette-validation.json')) -Force
+    Copy-Item -LiteralPath $planetPreviewPath -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-planet-palette-preview.png')) -Force
+    Write-Host 'Native planet palette: 128 distinct rendered planets at 14 DIP verified.'
+    foreach ($sciencePreview in @('native-outputs-preview', 'native-publication-preview', 'native-publication-last-page-preview', 'native-simulation-empty-preview', 'native-python-receipt-preview', 'native-changes-preview', 'native-tool-icons-preview', 'native-colored-chrome-preview', 'native-continuation-preview', 'native-continuation-preparing-preview', 'native-continuation-loading-preview', 'native-thinking-preview')) {
         $scienceImage = Join-Path $smokeData ($sciencePreview + '.png')
         if (Test-Path -LiteralPath $scienceImage -PathType Leaf) {
             $scienceEvidence = Assert-MissumArtifactPath -Path ($PublishDirectory + '.' + $sciencePreview + '.png')

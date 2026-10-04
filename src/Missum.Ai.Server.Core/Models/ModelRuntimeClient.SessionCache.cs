@@ -14,7 +14,8 @@ public sealed partial class ModelRuntimeClient
         // the slot while its interrupted prefix is being snapshotted.
         return string.IsNullOrEmpty(preparedModelId) || string.IsNullOrEmpty(sessionCacheKey)
             ? Task.FromResult<string?>(null)
-            : UpdateSessionCacheAsync("save", preparedModelId, sessionCacheKey, CancellationToken.None, promptTokens);
+            : UpdateSessionCacheAsync("save", preparedModelId, sessionCacheKey, interruptedPromptTokens: promptTokens,
+                cancellationToken: CancellationToken.None);
     }
 
     internal static string BuildSessionCacheKey(string sessionId, string role, string? workspacePath = null)

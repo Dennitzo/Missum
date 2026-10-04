@@ -131,7 +131,7 @@ class SessionCacheTailTests(unittest.TestCase):
                 result = json.load(response)
             self.assertIn("status", result)
         manager.session_save.assert_called_once_with("model", "session", 123)
-        manager.session_prepare.assert_called_once_with("model", "session")
+        manager.session_prepare.assert_called_once_with("model", "session", None, None)
 
 
 if __name__ == "__main__":

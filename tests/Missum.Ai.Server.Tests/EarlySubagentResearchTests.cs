@@ -17,6 +17,44 @@ public sealed class EarlySubagentResearchTests
     private const string ModelId = "coding/Qwen-Early-Fixture-Q4~123456";
     private static readonly string[] ResearchTools = ["web.search", "web.fetch", "web.deepResearch"];
 
+    [Fact]
+    public void ResumeKeepsTheExistingDelegationPolicyPrefixAcrossPolicyUpdates()
+    {
+        const string existing = "Existing instructions\nFrühe Arbeitsteilung für den aktuellen Forschungsauftrag:\nEarlier policy text.";
+        var messages = new List<LmChatMessage> { new("system", existing), new("user", "Fortsetzen") };
+        RunProcessor.EnsureEarlyResearchInstructions(messages);
+        Assert.Equal(existing, messages[0].Content);
+        var fresh = new List<LmChatMessage> { new("system", "Base") };
+        RunProcessor.EnsureEarlyResearchInstructions(fresh);
+        Assert.Contains("Halte diese erste Zuweisung klein", fresh[0].Content, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CanonicalLegacyProfileCanReadTheFullOriginalTaskBeforeAssigningAChild()
+    {
+        using var fixture = new Fixture(readTaskBeforeSpawn: true);
+        var request = Request() with { ClientCapabilities = ["workspace", "coding", "subagents", "research.deliverables"],
+            ResearchOptions = new(ProjectId: "research-canonical-context", ProtocolVersion: 2) };
+        var parent = await fixture.Repository.CreateAsync(request, null);
+        var tools = new AgentToolCatalog().GetAvailableTools(request, subagentAvailable: true);
+        await fixture.Repository.SaveCheckpointAsync(parent.Snapshot.RunId, new(
+            RunProcessor.CreateInitialMessages(request, "general", tools.Select(static tool => tool.Name).ToArray()),
+            1, 1, 100, 20, SelectedModelId: ModelId, UseStableSubagentToolCatalog: true,
+            ResearchManagedByAgent: true, EarlySubagentDelegationPending: true));
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        await Assert.ThrowsAsync<RunWaitingForClientException>(
+            () => fixture.Processor.ProcessAsync(parent.Snapshot.RunId, timeout.Token));
+        var proposed = Assert.Single(await fixture.Repository.GetEventsAfterAsync(parent.Snapshot.RunId, 0),
+            item => item.Type == RunEventTypes.ClientToolProposed);
+        var taskRead = proposed.Data.Deserialize<ToolProposal>(MissumAiProtocol.CreateJsonOptions())!;
+        Assert.Equal(ClientToolNames.ResearchRead, taskRead.Name);
+        Assert.Equal("task", taskRead.Arguments.GetProperty("view").GetString());
+        var checkpoint = (await fixture.Repository.GetCheckpointAsync(parent.Snapshot.RunId))!;
+        Assert.True(checkpoint.EarlySubagentDelegationPending);
+        Assert.Null(checkpoint.ContextProfileVersion);
+        Assert.Empty(await fixture.Repository.GetSubagentRunsAsync(parent.Snapshot.RunId));
+    }
+
     [Theory]
     [InlineData(RunMode.General)]
     [InlineData(RunMode.Coding)]
@@ -77,6 +115,9 @@ public sealed class EarlySubagentResearchTests
         Assert.Equal(RunState.Completed, child.Snapshot.State);
         var completedParent = (await fixture.Repository.GetAsync(parent.Snapshot.RunId))!;
         Assert.Equal(RunState.Completed, completedParent.State);
+        var introEvents = (await fixture.Repository.GetEventsAfterAsync(parent.Snapshot.RunId, 0))
+            .Where(item => item.Type == RunEventTypes.TextDelta);
+        Assert.Contains(introEvents, item => item.Data.GetRawText().Contains("Ich teile die Forschung", StringComparison.Ordinal));
         Assert.Equal(RunProcessor.SanitizeTitle("", request.Messages[^1].Content[0].Text!), completedParent.SessionTitle);
         Assert.DoesNotContain(await fixture.Repository.GetEventsAfterAsync(child.Snapshot.RunId, 0),
             item => item.Type == RunEventTypes.ResearchProblemInterpreted);
@@ -343,9 +384,9 @@ public sealed class EarlySubagentResearchTests
         internal RunProcessor Processor { get; }
 
         internal Fixture(bool initiallyUnloaded = false, bool rejectFirstAssignment = false,
-            bool pauseParent = false, bool denySubagent = false, bool completeWithoutChild = false)
+            bool pauseParent = false, bool denySubagent = false, bool completeWithoutChild = false, bool readTaskBeforeSpawn = false)
         {
-            Handler = new(initiallyUnloaded, rejectFirstAssignment, pauseParent, denySubagent, completeWithoutChild);
+            Handler = new(initiallyUnloaded, rejectFirstAssignment, pauseParent, denySubagent, completeWithoutChild, readTaskBeforeSpawn);
             var services = new ServiceCollection();
             services.AddLogging();
             services.AddMissumAiServerServices(_context.Options, includeHostedServices: false);
@@ -369,7 +410,7 @@ public sealed class EarlySubagentResearchTests
     }
 
     private sealed class ResearchHandler(bool initiallyUnloaded, bool rejectFirstAssignment, bool pauseParent,
-        bool denySubagent, bool completeWithoutChild) : HttpMessageHandler
+        bool denySubagent, bool completeWithoutChild, bool readTaskBeforeSpawn) : HttpMessageHandler
     {
         private static readonly string[] ParentTags = ["missum-context-train:131072", "missum-reasoning-mode:qwen3.8",
             "missum-reasoning-levels:none|low|medium|xhigh", "missum-reasoning-default:xhigh"];
@@ -449,6 +490,8 @@ public sealed class EarlySubagentResearchTests
             ParentStarted.TrySetResult();
             if (pauseParent) await ContinueParent.Task.WaitAsync(token);
             if (completeWithoutChild) return Text("Hallo. Der vorhandene Auftrag ist abgeschlossen.");
+            if (readTaskBeforeSpawn && parentTurn == 1)
+                return Tool(ClientToolNames.ResearchRead, new { projectId = "research-canonical-context", view = "task" });
             // Fail at the actual fixture contract problem instead of emitting
             // hundreds of identical spawn retries and reaching compaction.
             var preparationFailure = messages.Where(static item => item.GetProperty("role").GetString() == "tool")
@@ -464,7 +507,8 @@ public sealed class EarlySubagentResearchTests
             if (receipt is null)
             {
                 SpawnDecisions++;
-                return Tool(SubagentToolNames.Spawn, new { task = "Quellenanalyse\nRecherchiere den unabhängigen ersten Quellenbereich und lies child.txt. Erwartet: belegtes EARLY_CHILD_RESULT. Nur child.txt schreiben. Ich recherchiere gleichzeitig den zweiten Quellenbereich." });
+                return Tool(SubagentToolNames.Spawn, new { task = "Quellenanalyse\nRecherchiere den unabhängigen ersten Quellenbereich und lies child.txt. Erwartet: belegtes EARLY_CHILD_RESULT. Nur child.txt schreiben. Ich recherchiere gleichzeitig den zweiten Quellenbereich." },
+                    "Ich teile die Forschung auf und bearbeite gleichzeitig meine eigene Teilfrage.");
             }
             if (!messages.Any(static item => item.GetProperty("role").GetString() == "tool"
                 && item.GetProperty("content").GetString()?.Contains("parent-original-sources", StringComparison.Ordinal) == true))
@@ -482,7 +526,7 @@ public sealed class EarlySubagentResearchTests
             return Text("Eigene Quellenrecherche und EARLY_CHILD_RESULT sind direkt zusammengeführt. Die Arbeit ist abgeschlossen.");
         }
 
-        private static HttpResponseMessage Tool(string name, object arguments) => Sse(new { tool_calls = new[]
+        private static HttpResponseMessage Tool(string name, object arguments, string? content = null) => Sse(new { content, tool_calls = new[]
         {
             new { index = 0, id = Guid.NewGuid().ToString("N"), type = "function", function = new
             { name = ModelRuntimeClient.ToTransportToolName(name), arguments = JsonSerializer.Serialize(arguments) } },

@@ -167,18 +167,24 @@ public sealed partial class NativeAssistantPage
     private void RenderWebSources()
     {
         var sources = WebSourceActions(); _sessionSources[_session] = sources;
-        foreach (var item in sources.Take(3)) SourcesPanel.Children.Add(SourceActionButton(item));
+        foreach (var item in sources.Take(1)) SourcesPanel.Children.Add(SourceActionButton(item));
         if (sources.Length > 0)
-        {
-            var all = SidebarButton("\uE71B", "Alle anzeigen"); all.Padding = new(0, 6, 0, 6);
-            all.Foreground = ThemeBrush("MissumMutedTextBrush", 145);
-            var allRow = (Grid)all.Content;
-            allRow.Children.OfType<TextBlock>().Single().Opacity = .75;
-            allRow.Children.OfType<FontIcon>().Single().Foreground = Missum.App.Controls.NativeIconPalette.BrushFor("link");
-            allRow.Children.OfType<FontIcon>().Single().Opacity = .75;
-            all.Click += (_, _) => OpenSourcesTab(); SourcesPanel.Children.Add(all);
-        }
+            SourcesPanel.Children.Add(AllOutputsButton("Alle Quellen anzeigen", OpenSourcesTab));
         if (_activeSourcesSession == _session) RenderSourcesContent();
+    }
+
+    private static Button AllOutputsButton(string name, Action open)
+    {
+        var all = SidebarButton("\uE71B", "Alle anzeigen"); all.Padding = new(0, 6, 0, 6);
+        all.Foreground = ThemeBrush("MissumMutedTextBrush", 145);
+        var row = (Grid)all.Content;
+        row.Children.OfType<TextBlock>().Single().Opacity = .75;
+        var icon = row.Children.OfType<FontIcon>().Single();
+        icon.Foreground = Missum.App.Controls.NativeIconPalette.BrushFor("link"); icon.Opacity = .75;
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(all, name);
+        ToolTipService.SetToolTip(all, name);
+        all.Click += (_, _) => open();
+        return all;
     }
 
     private void OpenSourcesTab()

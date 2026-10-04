@@ -117,7 +117,7 @@ public sealed partial class NativeAssistantPage
                 var lifecycleKey = "tool:" + id;
                 if (!blocks.TryGetValue(lifecycleKey, out var lifecycle) || lifecycle is not SubagentLifecycleView)
                 {
-                    var view = new SubagentLifecycleView();
+                    var view = new SubagentLifecycleView(PlanetIdentities.GetOrAssign);
                     view.SubagentRequested += async agentId =>
                     {
                         if (_subagents.TryGetValue(agentId, out var child)) await ActivateSubagentTabAsync(child);
@@ -295,7 +295,13 @@ public sealed partial class NativeAssistantPage
                 "research.code.test" => "Berechnung prüfen", "research.code.benchmark" => "Berechnung vergleichen",
                 "research.deliverables.verify" => "Forschungsergebnisse prüfen",
                 "research.read" => "Forschungsstand lesen", "research.update" => "Forschungsstand ergänzen",
-                "math.formalProof" => "Lean-Beweis prüfen", "assistant.progress" => "Fortschritt", "assistant.continuation" => "Lauf fortgesetzt", "web.search" => "Websuche", "web.fetch" => "Webseite lesen", _ => S(step, "label", tool) };
+                "math.formalProof" => "Lean-Beweis prüfen", "assistant.progress" => "Fortschritt",
+                "assistant.continuation" => S(step, "status") switch
+                {
+                    "completed" => "Lauf fortgesetzt", "failed" or "denied" => "Fortsetzen fehlgeschlagen",
+                    "cancelled" or "interrupted" => "Fortsetzung abgebrochen", _ => "Fortsetzung wird vorbereitet",
+                },
+                "web.search" => "Websuche", "web.fetch" => "Webseite lesen", _ => S(step, "label", tool) };
             _running = S(step, "status") is "running" or "pending";
             var iconKey = ToolStepIconKey(tool);
             _compactIcon.Glyph = ToolIconGlyph(iconKey);

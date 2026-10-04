@@ -74,7 +74,7 @@ public sealed partial class RunProcessor
     internal static void EnsureEarlyResearchInstructions(List<LmChatMessage> messages)
     {
         var index = messages.FindIndex(static message => message.Role == "system");
-        if (index >= 0 && messages[index].Content?.Contains(SubagentAgentPolicy.EarlyResearchDelegation,
+        if (index >= 0 && messages[index].Content?.Contains("Frühe Arbeitsteilung für den aktuellen Forschungsauftrag:",
             StringComparison.Ordinal) != true)
             messages[index] = messages[index] with
             { Content = messages[index].Content + "\n\n" + SubagentAgentPolicy.EarlyResearchDelegation };

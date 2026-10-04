@@ -1,7 +1,11 @@
 namespace Missum.App.Controls;
 
 /// <summary>A lossless Markdown fragment. Math text includes its original delimiters.</summary>
-public readonly record struct MathSegment(string Text, bool IsMath, bool Display);
+public readonly record struct MathSegment(string Text, bool IsMath, bool Display)
+{
+    /// <summary>Optional presentation for conservatively recognized legacy notation; Text remains lossless.</summary>
+    public string? RenderLatex { get; init; }
+}
 
 /// <summary>
 /// Recognizes the same inline and display delimiters as the Go-WinUI chat renderer.
@@ -11,12 +15,17 @@ public static class NativeMathSyntax
 {
     public static bool ContainsMath(string text) => Split(text).Any(static segment => segment.IsMath);
 
-    public static IReadOnlyList<MathSegment> Split(string text)
+    public static IReadOnlyList<MathSegment> Split(string text) => SplitCore(text, recognizeLegacy: false);
+
+    internal static IReadOnlyList<MathSegment> SplitForRendering(string text) => SplitCore(text, recognizeLegacy: true);
+
+    private static List<MathSegment> SplitCore(string text, bool recognizeLegacy)
     {
         ArgumentNullException.ThrowIfNull(text);
         List<MathSegment> result = [];
         var plainStart = 0;
         var index = 0;
+        var legacyBlockedUntil = 0;
         while (index < text.Length)
         {
             // Protect Markdown code before looking for TeX. An unfinished code block is also
@@ -32,8 +41,25 @@ public static class NativeMathSyntax
                 continue;
             }
 
+            if (recognizeLegacy && NativeLooseMath.TrySkipLiteral(text, index, out var literalEnd))
+            {
+                index = literalEnd;
+                continue;
+            }
+
             if (!TryDelimiter(text, index, out var opening, out var closing, out var display))
             {
+                var legacyEnd = index;
+                if (recognizeLegacy && index >= legacyBlockedUntil
+                    && NativeLooseMath.TryRead(text, index, out var legacy, out legacyEnd))
+                {
+                    if (index > plainStart) result.Add(new(text[plainStart..index], false, false));
+                    result.Add(legacy);
+                    index = plainStart = legacyEnd;
+                    continue;
+                }
+                // A malformed legacy expression must not hide later explicit TeX on this line.
+                if (recognizeLegacy && legacyEnd > index) legacyBlockedUntil = legacyEnd;
                 index++;
                 continue;
             }
@@ -41,6 +67,7 @@ public static class NativeMathSyntax
             var closeIndex = FindClosing(text, index + opening.Length, closing, display);
             if (closeIndex < 0)
             {
+                if (recognizeLegacy) legacyBlockedUntil = EndOfLine(text, index + opening.Length);
                 // An unfinished display block is one literal fragment, including any inner
                 // single dollars. A possible price must not hide a later explicit formula.
                 index = display ? text.Length : opening == "$" && char.IsDigit(text[index + 1])
@@ -50,6 +77,7 @@ public static class NativeMathSyntax
             var body = text.AsSpan(index + opening.Length, closeIndex - index - opening.Length);
             if (body.IsWhiteSpace() || (opening == "$" && !IsInlineDollarBody(body, text, closeIndex)))
             {
+                if (recognizeLegacy) legacyBlockedUntil = EndOfLine(text, index + opening.Length);
                 index += opening.Length;
                 continue;
             }

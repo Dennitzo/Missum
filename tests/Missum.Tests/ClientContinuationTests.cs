@@ -86,6 +86,130 @@ public sealed class ClientContinuationTests
     }
 
     [Fact]
+    public async Task PreparationIsReportedBeforeGatewayLookupWithoutAnOptimisticStartReceipt()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var seeded = await SeedAsync(environment, MessageStatus.Cancelled);
+        var handler = new ContinuationHandler(RunState.Cancelled) { BlockLookup = true };
+        using var host = await Host.CreateAsync(environment, handler);
+        var updates = new List<MissumAiAssistantUpdate>();
+        var continuation = host.Service.ResumeMessageAsync(seeded.Session.Id, seeded.Message.Id,
+            update => { updates.Add(update); return Task.CompletedTask; });
+        await handler.LookupReached.Task.WaitAsync(TimeSpan.FromSeconds(15));
+        var preparing = Assert.Single(updates);
+        Assert.Equal(MissumAiAssistantUpdateKind.Status, preparing.Kind);
+        Assert.Equal("AI-Modell und Dienste werden vorbereitet", preparing.Status);
+        Assert.Equal(seeded.Message.Id, preparing.Message.Id);
+        Assert.Null(preparing.ToolStep);
+        Assert.Empty(handler.Requests);
+        Assert.Null(host.Service.ActiveRunId);
+        Assert.DoesNotContain((await environment.Get<IChatRepository>().GetMessageAsync(seeded.Message.Id))!.ToolSteps!,
+            step => step.Tool == MissumAiAssistantService.ContinuationStepTool);
+        handler.ReleaseLookup.TrySetResult();
+        Assert.Equal(MessageStatus.Completed, (await continuation).Status);
+        Assert.Single(updates, update => update.Kind == MissumAiAssistantUpdateKind.Started);
+    }
+
+    [Fact]
+    public async Task CancellingGatewayPreparationPreservesStoppedAnswerAndCreatesNoServerAttempt()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var seeded = await SeedAsync(environment, MessageStatus.Cancelled);
+        var handler = new ContinuationHandler(RunState.Cancelled) { BlockLookup = true };
+        using var host = await Host.CreateAsync(environment, handler);
+        var updates = new List<MissumAiAssistantUpdate>();
+        var continuation = host.Service.ResumeMessageAsync(seeded.Session.Id, seeded.Message.Id,
+            update => { updates.Add(update); return Task.CompletedTask; });
+        await handler.LookupReached.Task.WaitAsync(TimeSpan.FromSeconds(15));
+        await host.Service.CancelCurrentAndWaitAsync(seeded.Session.Id);
+        var stopped = await continuation;
+        Assert.Equal(MessageStatus.Cancelled, stopped.Status);
+        Assert.Equal(Partial, stopped.Content);
+        Assert.Null(stopped.Error);
+        Assert.Empty(handler.Requests);
+        Assert.DoesNotContain(updates, update => update.Kind is MissumAiAssistantUpdateKind.Started or MissumAiAssistantUpdateKind.Failed);
+        Assert.Contains(updates, update => update.Kind == MissumAiAssistantUpdateKind.Cancelled);
+        Assert.Equal(2, (await environment.Get<IChatRepository>().ListMessagesAsync(seeded.Session.Id)).Count);
+        Assert.Equal("run-old", (await environment.Get<IMissumAiRunRepository>().GetByAssistantMessageIdAsync(seeded.Message.Id))!.ServerRunId);
+    }
+
+    [Fact]
+    public async Task GenuinePreparationFailureClearsWaitingStatusButPreservesResumableAnswer()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var seeded = await SeedAsync(environment, MessageStatus.Cancelled);
+        var handler = new ContinuationHandler(RunState.Cancelled) { LookupFailureStatus = HttpStatusCode.InternalServerError };
+        using var host = await Host.CreateAsync(environment, handler);
+        var updates = new List<MissumAiAssistantUpdate>();
+        await Assert.ThrowsAnyAsync<HttpRequestException>(() => host.Service.ResumeMessageAsync(seeded.Session.Id, seeded.Message.Id,
+            update => { updates.Add(update); return Task.CompletedTask; }));
+        Assert.Equal(MissumAiAssistantUpdateKind.Status, updates[0].Kind);
+        var failure = Assert.Single(updates, update => update.Kind == MissumAiAssistantUpdateKind.Failed);
+        Assert.Equal("Fortsetzen fehlgeschlagen", failure.Status);
+        Assert.Equal(MessageStatus.Cancelled, failure.Message.Status);
+        Assert.Equal(Partial, failure.Message.Content);
+        Assert.NotNull(failure.Error);
+        Assert.DoesNotContain(updates, update => update.Kind == MissumAiAssistantUpdateKind.Started);
+        Assert.Empty(handler.Requests);
+        Assert.False(host.Service.IsRunning);
+        Assert.Equal(2, (await environment.Get<IChatRepository>().ListMessagesAsync(seeded.Session.Id)).Count);
+    }
+
+    [Fact]
+    public async Task GatewayStartup502WaitsThenContinuesWithExactlyOneCreateAndPreservedPrefix()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var seeded = await SeedAsync(environment, MessageStatus.Cancelled);
+        var handler = new ContinuationHandler(RunState.Cancelled) { InitialUnavailableHealthProbes = 1 };
+        using var host = await Host.CreateAsync(environment, handler);
+        var updates = new List<MissumAiAssistantUpdate>();
+        var final = await host.Service.ResumeMessageAsync(seeded.Session.Id, seeded.Message.Id,
+            update => { updates.Add(update); return Task.CompletedTask; });
+        Assert.Equal(2, handler.HealthProbeCount);
+        Assert.Single(handler.Requests);
+        Assert.Single(updates, update => update.Kind == MissumAiAssistantUpdateKind.Started);
+        Assert.DoesNotContain(updates, update => update.Kind == MissumAiAssistantUpdateKind.Failed);
+        Assert.Equal("AI-Modell und Dienste werden vorbereitet", updates[0].Status);
+        Assert.Equal(MessageStatus.Completed, final.Status);
+        Assert.StartsWith(Partial + "\n\n", final.Content);
+        Assert.Contains("Neue Fortsetzung.", final.Content);
+        Assert.Equal(seeded.Message.Id, final.Id);
+        Assert.Equal(2, (await environment.Get<IChatRepository>().ListMessagesAsync(seeded.Session.Id)).Count);
+    }
+
+    [Fact]
+    public async Task CancellingUncertainCreateClosesPreparationButRetainsFrozenRecoveryKey()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var seeded = await SeedAsync(environment, MessageStatus.Cancelled);
+        var handler = new ContinuationHandler(RunState.Cancelled) { BlockCreate = true };
+        using var host = await Host.CreateAsync(environment, handler);
+        var updates = new List<MissumAiAssistantUpdate>();
+        var continuation = host.Service.ResumeMessageAsync(seeded.Session.Id, seeded.Message.Id,
+            update => { updates.Add(update); return Task.CompletedTask; });
+        await handler.CreateReached.Task.WaitAsync(TimeSpan.FromSeconds(15));
+        await host.Service.CancelCurrentAndWaitAsync(seeded.Session.Id);
+        var stopped = await continuation;
+        var preparation = Assert.Single(stopped.ToolSteps!, step => step.Tool == MissumAiAssistantService.ContinuationStepTool);
+        Assert.Equal("cancelled", preparation.Status);
+        Assert.NotNull(preparation.InputJson);
+        Assert.StartsWith(Partial, stopped.Content);
+        Assert.Equal(MessageStatus.Cancelled, stopped.Status);
+        Assert.DoesNotContain(updates, update => update.Kind == MissumAiAssistantUpdateKind.Started);
+        var pending = (await environment.Get<IMissumAiRunRepository>().GetByAssistantMessageIdAsync(seeded.Message.Id))!;
+        Assert.Null(pending.ServerRunId);
+        Assert.Equal("queued", pending.State);
+        handler.ReleaseCreate.TrySetResult();
+        var recovered = await host.Service.ResumeMessageAsync(seeded.Session.Id, seeded.Message.Id, _ => Task.CompletedTask);
+        Assert.Equal(MessageStatus.Completed, recovered.Status);
+        Assert.Equal(2, handler.RawRequests.Count);
+        Assert.Equal(handler.RawRequests[0], handler.RawRequests[1]);
+        Assert.Equal(handler.IdempotencyKeys[0], handler.IdempotencyKeys[1]);
+        Assert.Equal(pending.IdempotencyKey, handler.IdempotencyKeys[1]);
+        Assert.Equal(2, (await environment.Get<IChatRepository>().ListMessagesAsync(seeded.Session.Id)).Count);
+    }
+
+    [Fact]
     public async Task LostCreateAcceptanceKeepsPartialAndRetriesExactlySameFrozenRequestAndKey()
     {
         await using var environment = await TestEnvironment.CreateAsync();
@@ -213,6 +337,12 @@ public sealed class ClientContinuationTests
         internal List<string> IdempotencyKeys { get; } = [];
         internal bool FailFirstCreate { get; init; }
         internal bool BlockCreate { get; init; }
+        internal bool BlockLookup { get; init; }
+        internal HttpStatusCode? LookupFailureStatus { get; init; }
+        internal int InitialUnavailableHealthProbes { get; init; }
+        internal int HealthProbeCount { get; private set; }
+        internal TaskCompletionSource LookupReached { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal TaskCompletionSource ReleaseLookup { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal TaskCompletionSource CreateReached { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal TaskCompletionSource ReleaseCreate { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal string? LastEventCursor { get; private set; }
@@ -221,9 +351,23 @@ public sealed class ClientContinuationTests
         {
             var path = request.RequestUri!.AbsolutePath;
             var now = DateTimeOffset.UtcNow;
+            if (path == "/v1/health/live")
+            {
+                HealthProbeCount++;
+                if (HealthProbeCount <= InitialUnavailableHealthProbes)
+                    return new(HttpStatusCode.BadGateway) { Content = new StringContent("Gateway is still starting.") };
+                return Response(new HealthSnapshot("live", MissumAiProtocol.Version, now));
+            }
             if (path == "/v1/models/status") return Response(new ModelStatusSnapshot(true, "fixture", [new("fixture/model", "general", true, true, "loaded", 131_072)], now));
             if (path == "/v1/capabilities") return Response(new CapabilitySnapshot(MissumAiProtocol.Version, "fixture", [], ["web.search", "web.fetch"], [], new Dictionary<string, long>(), [], true, MissumAiProtocol.UploadChunkSize));
-            if (path == "/v1/runs/run-old") return Response(new RunSnapshot("run-old", oldState, RunMode.General, "fixture/model", "Ignorierter AI-Titel", 10, now, now));
+            if (path == "/v1/runs/run-old")
+            {
+                LookupReached.TrySetResult();
+                if (BlockLookup) await ReleaseLookup.Task.WaitAsync(token);
+                if (LookupFailureStatus is { } failure)
+                    return new(failure) { Content = new StringContent("{}", Encoding.UTF8, "application/json") };
+                return Response(new RunSnapshot("run-old", oldState, RunMode.General, "fixture/model", "Ignorierter AI-Titel", 10, now, now));
+            }
             if (path == "/v1/runs" && request.Method == HttpMethod.Post)
             {
                 var raw = await request.Content!.ReadAsStringAsync(token);

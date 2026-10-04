@@ -734,9 +734,15 @@ class GpuLoadManager:
                                               if key not in ("profileId", "fallbackReason")})
         return fingerprint
 
-    def session_prepare(self, model, key):
+    def session_prepare(self, model, key, session_id=None, parent_session_id=None):
         with self.lock:
-            return self.sessions.prepare(model, key)
+            return self.sessions.prepare(model, key, session_id, parent_session_id)
+
+    def session_delete(self, session_ids, session_keys):
+        with self.lock:
+            models = [instance for item in discover_models(self.root)
+                      for instance in (item["id"], item["id"] + "@subagent")]
+            return self.sessions.delete(session_ids, session_keys, models)
 
     def session_save(self, model, key, prompt_tokens=None):
         with self.lock:
@@ -880,15 +886,15 @@ class GpuLoadManager:
                 return dict(result, reason="subagent.vram_insufficient")
             return dict(result, allowed=True)
 
-    def agent_prepare(self, model_id, source_key=None, key=None, prefill=None):
+    def agent_prepare(self, model_id, source_key=None, key=None, prefill=None, session_id=None, parent_session_id=None):
         with self.lock:
             availability = self.agent_status(model_id)
             if not availability["allowed"]:
                 return availability
             base, replica = availability["modelId"], availability["instanceId"]
             self.load(replica)
-            cache = (self.sessions.fork(base, source_key, replica, key, prefill)
-                     if source_key and key else self.sessions.prepare(replica, key))
+            cache = (self.sessions.fork(base, source_key, replica, key, prefill, session_id, parent_session_id)
+                     if source_key and key else self.sessions.prepare(replica, key, session_id, parent_session_id))
             return dict(availability, cacheStatus=cache["status"], cachedTokens=cache.get("restoredTokens", 0),
                 **{name: cache[name] for name in ("sourceCachedTokens", "preparationSampledTokens",
                     "evaluatedGeneratedTokens", "preparedPromptTokens", "detail") if name in cache})
@@ -1030,23 +1036,27 @@ def start_gpu_control(manager, host, port):
         def do_POST(self):
             try:
                 length = int(self.headers.get("Content-Length", "0"))
-                if self.path not in ("/models/load", "/sessions/prepare", "/sessions/save", "/sessions/fork",
+                if self.path not in ("/models/load", "/sessions/prepare", "/sessions/save", "/sessions/fork", "/sessions/delete",
                                      "/agents/status", "/agents/prepare") or not 0 < length <= (
-                                         16 * 1024**2 if self.path == "/agents/prepare" else 8192):
+                                         16 * 1024**2 if self.path == "/agents/prepare" else 1024**2 if self.path == "/sessions/delete" else 8192):
                     raise ValueError("Invalid GPU control request")
                 body = json.loads(self.rfile.read(length))
                 if self.path.startswith("/sessions/"):
                     if self.path == "/sessions/prepare":
-                        result = manager.session_prepare(body["model"], body.get("sessionKey"))
+                        result = manager.session_prepare(body["model"], body.get("sessionKey"),
+                            body.get("sessionId"), body.get("parentSessionId"))
                     elif self.path == "/sessions/save":
                         result = manager.session_save(body["model"], body.get("sessionKey"), body.get("promptTokens"))
+                    elif self.path == "/sessions/delete":
+                        result = manager.session_delete(body.get("sessionIds", []), body.get("sessionKeys", []))
                     else:
                         result = manager.session_fork(body["sourceModel"], body["sourceSessionKey"], body["model"], body["sessionKey"])
                 elif self.path == "/agents/status":
                     result = manager.agent_status(body["model"], body.get("contextLength"))
                 elif self.path == "/agents/prepare":
                     result = manager.agent_prepare(body["model"], body.get("parentSessionCacheKey"),
-                        body.get("childSessionCacheKey"), body.get("prefill"))
+                        body.get("childSessionCacheKey"), body.get("prefill"),
+                        body.get("childSessionId"), body.get("parentSessionId"))
                 else:
                     result = manager.load(body["model"])
                 status = 200

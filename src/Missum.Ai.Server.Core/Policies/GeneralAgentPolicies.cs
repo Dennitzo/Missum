@@ -1,4 +1,5 @@
 using Missum.Ai.Contracts;
+using Missum.Ai.Server.Core.Runs;
 using System.Text.Json;
 
 namespace Missum.Ai.Server.Core.Policies;
@@ -149,7 +150,8 @@ public static class GeneralAgentPolicies
     public static string ForConversation(
         string role,
         RunRequest request,
-        IReadOnlyList<string> effectiveTools)
+        IReadOnlyList<string> effectiveTools,
+        bool researchManagedByAgent = false)
     {
         if (request.ConversationProfile == ConversationProfile.ContextPreparation)
         {
@@ -190,7 +192,7 @@ public static class GeneralAgentPolicies
         return string.Join(
             Environment.NewLine + Environment.NewLine,
             isAudiobook ? AudiobookAuthor : ForRole(role),
-            WebResearchPolicy(role, request, effectiveTools),
+            WebResearchPolicy(role, request, effectiveTools, researchManagedByAgent),
             "Bei zeitbezogenen Nutzerfragen bedeutet ‚heute‘ das im Lauf-Envelope genannte Datum in Europe/Berlin. "
                 + "Vergleiche Veröffentlichungsdaten ausdrücklich mit diesem Datum; ein älterer Artikel im Futur beweist nicht, dass eine für heute angekündigte Veröffentlichung noch aussteht.",
             DocumentPolicy(request),
@@ -208,7 +210,8 @@ public static class GeneralAgentPolicies
         offenen Aufgaben und Hypothesen. Gib ausschließlich die angeforderte Verdichtung als normalen Text aus.
         """;
 
-    private static string WebResearchPolicy(string role, RunRequest request, IReadOnlyList<string> effectiveTools)
+    private static string WebResearchPolicy(string role, RunRequest request, IReadOnlyList<string> effectiveTools,
+        bool researchManagedByAgent)
     {
         if (role != "general"
             || !effectiveTools.Contains("web.search", StringComparer.Ordinal)
@@ -217,10 +220,17 @@ public static class GeneralAgentPolicies
             return string.Empty;
         }
 
-        if (!request.Messages.SelectMany(static message => message.Content)
+        // The processor supplies its actual pipeline decision at the new-run
+        // boundary. Canonical state and child requests are also always direct.
+        // Historic client wrappers must not promise a pipeline that is skipped.
+        var directResearch = researchManagedByAgent || request.Subagent is not null
+            || ScientificStateCompletionPolicy.Enabled(request);
+        if (directResearch || !request.Messages.SelectMany(static message => message.Content)
             .Any(static part => part.Text?.StartsWith("[MISSUM_WEB_RESEARCH_REQUEST]", StringComparison.Ordinal) == true))
         {
-            return """
+            return (directResearch
+                ? "Dieser Forschungsagent nutzt die angebotenen Web-Werkzeuge direkt. Frühere MISSUM_WEB_RESEARCH_REQUEST-Hinweise im Verlauf sind historische Transportdaten; es folgt keine isolierte SDK-Vorab-Recherche und kein automatisch bereitgestelltes Evidenzdossier.\n"
+                : string.Empty) + """
                 Eigenständige Webrecherche:
                 - Entscheide selbst, ob der Nutzerauftrag aktuelle, unbekannte oder überprüfungsbedürftige Fakten benötigt. Rufe dann web.search auf, auch ohne ausdrücklichen Suchbefehl. Für zeitabhängige Fragen prüfe Quellen statt aus Modellwissen zu raten.
                 - Nutze web.fetch für wichtige Treffer mit kurzen, tatsächlich vorkommenden Suchphrasen. Wenn eine Phrase nicht gefunden wird, lies zuerst die kurze Vorschau und suche anschließend einen dort vorhandenen Begriff.

@@ -37,7 +37,11 @@ public sealed partial class MissumAiAssistantService
             _activeRunAction = trigger?.Trigger.Action;
             if (UsesCodingAgent(_activeRunAction))
                 _activeCodingWorkspace = persisted is null ? session.CodingWorkspacePath : ResolvePersistedCodingWorkspace(persisted);
+            await update(new(MissumAiAssistantUpdateKind.Status, assistant, Session: session,
+                Status: "AI-Modell und Dienste werden vorbereitet",
+                Detail: "Fortsetzung wird vorbereitet; die Verbindung zum Gateway wird hergestellt.")).ConfigureAwait(false);
             using var client = await CreateClientForActionAsync(_activeRunAction, token).ConfigureAwait(false);
+            await connection.WaitForGatewayAsync(client, token).ConfigureAwait(false);
 
             var snapshot = await ReadContinuationServerSnapshotAsync(client, persisted, token).ConfigureAwait(false);
             if (snapshot is not null && (IsActiveContinuationRun(snapshot.State) || snapshot.State == RunState.Completed))
@@ -185,6 +189,8 @@ public sealed partial class MissumAiAssistantService
         {
             var current = await chats.GetMessageAsync(assistant.Id, CancellationToken.None).ConfigureAwait(false) ?? assistant;
             await chats.UpdateMessageAsync(current.Id, current.Content, MessageStatus.Cancelled, cancellationToken: CancellationToken.None).ConfigureAwait(false);
+            foreach (var preparation in (current.ToolSteps ?? []).Where(step => step.Tool == ContinuationStepTool && step.Status == "running"))
+                await chats.SaveToolStepAsync(current.Id, CompleteOpenToolStep(preparation, "cancelled", null), CancellationToken.None).ConfigureAwait(false);
             current = await chats.GetMessageAsync(current.Id, CancellationToken.None).ConfigureAwait(false) ?? current;
             await update(new(MissumAiAssistantUpdateKind.Cancelled, current, Status: "Abgebrochen")).ConfigureAwait(false);
             return current;
@@ -199,6 +205,9 @@ public sealed partial class MissumAiAssistantService
                 await chats.UpdateMessageAsync(current.Id, current.Content, assistant.Status, exception.Message, CancellationToken.None).ConfigureAwait(false);
                 foreach (var preparation in (current.ToolSteps ?? []).Where(step => step.Tool == ContinuationStepTool && step.Status == "running"))
                     await chats.SaveToolStepAsync(current.Id, CompleteOpenToolStep(preparation, "failed", null), CancellationToken.None).ConfigureAwait(false);
+                current = await chats.GetMessageAsync(current.Id, CancellationToken.None).ConfigureAwait(false) ?? current;
+                await update(new(MissumAiAssistantUpdateKind.Failed, current,
+                    Status: "Fortsetzen fehlgeschlagen", Error: exception.Message)).ConfigureAwait(false);
                 throw;
             }
             await chats.UpdateMessageAsync(current.Id, current.Content, MessageStatus.Failed, exception.Message, CancellationToken.None).ConfigureAwait(false);

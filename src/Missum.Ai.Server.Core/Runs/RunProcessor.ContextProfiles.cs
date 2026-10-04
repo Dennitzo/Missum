@@ -79,7 +79,8 @@ public sealed partial class RunProcessor
         bool compactContext)
     {
         var projectId = ScientificStateCompletionPolicy.ProjectId(request);
-        if (!compactContext) return JsonSerializer.SerializeToElement(new { projectId });
+        if (!compactContext && !ScientificStateCompletionPolicy.Enabled(request))
+            return JsonSerializer.SerializeToElement(new { projectId });
         var arguments = new Dictionary<string, object?> { ["projectId"] = projectId, ["view"] = "overview" };
         if (FindResearchOverviewStamp(messages, projectId) is { } stamp) arguments["knownStateStamp"] = stamp;
         return JsonSerializer.SerializeToElement(arguments);

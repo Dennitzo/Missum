@@ -148,6 +148,7 @@ public sealed partial class NativeAssistantPage
     private void OpenResearchView(bool simulation = false)
     {
         if (_disposed || _mode != "claudescience") return;
+        HideSubagentOverview();
         _activeSourcesSession = null; _sourcesHost.Visibility = Visibility.Collapsed;
         SaveReviewScrollOffset();
         _activeReviewRunId = null;

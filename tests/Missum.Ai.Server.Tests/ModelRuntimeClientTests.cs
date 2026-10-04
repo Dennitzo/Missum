@@ -19,6 +19,19 @@ public sealed class ModelRuntimeClientTests
     private static readonly string[] RequiredOperation = ["operation"];
 
     [Fact]
+    public async Task SessionOwnershipIsRegisteredBeforeGenerationIncludingTheDelegatingParent()
+    {
+        var handler = new NativeRuntimeHandler();
+        using var client = CreateClient(new HttpClient(handler));
+        await client.CompleteChatWithCacheOwnershipAsync("gpt-oss-120b", [new("user", "Arbeite an der Aufgabe")], [],
+            sessionCacheKey: "child-key", sessionCacheOwnerId: "child-owner", sessionCacheParentOwnerId: "project-owner");
+        var prepare = handler.CacheBodies[0];
+        Assert.Equal("child-owner", prepare.GetProperty("sessionId").GetString());
+        Assert.Equal("project-owner", prepare.GetProperty("parentSessionId").GetString());
+        Assert.True(handler.RequestPaths.IndexOf("/sessions/prepare") < handler.RequestPaths.IndexOf("/v1/chat/completions"));
+    }
+
+    [Fact]
     public async Task SessionCacheIsPreparedBeforeInferenceAndSavedBeforeReleasingTurn()
     {
         var handler = new NativeRuntimeHandler();

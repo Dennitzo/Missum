@@ -109,6 +109,19 @@ public sealed class CompactContextLifecycleTests
     }
 
     [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void CanonicalScienceStartsWithOneCompactStateViewWithoutChangingItsProfile(bool compactContext)
+    {
+        var request = Request() with { ClientCapabilities = ["research.deliverables"],
+            ResearchOptions = new(ProtocolVersion: 2, ProjectId: "research-one") };
+        var arguments = RunProcessor.CreateResearchStartArguments(request, [], compactContext);
+        Assert.Equal("research-one", arguments.GetProperty("projectId").GetString());
+        Assert.Equal("overview", arguments.GetProperty("view").GetString());
+        Assert.Null(RunProcessor.ResolveNewContextProfile(request));
+    }
+
+    [Theory]
     [InlineData("task", "research-one", true)]
     [InlineData("objects", "research-one", true)]
     [InlineData("overview", "research-one", true)]

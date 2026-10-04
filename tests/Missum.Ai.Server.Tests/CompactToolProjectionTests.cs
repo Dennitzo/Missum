@@ -98,10 +98,14 @@ public sealed class CompactToolProjectionTests
         var update = transport.EnumerateArray().Single(item => item.GetProperty("function").GetProperty("name").GetString()
             == ModelRuntimeClient.ToTransportToolName(ClientToolNames.ResearchUpdate)).GetProperty("function").GetProperty("parameters");
         Assert.Equal(32, update.GetProperty("properties").GetProperty("changes").GetProperty("maxItems").GetInt32());
-        var data = update.GetProperty("properties").GetProperty("changes").GetProperty("items").GetProperty("properties").GetProperty("data");
-        Assert.Equal(64000, data.GetProperty("properties").GetProperty("contentMarkdown").GetProperty("maxLength").GetInt32());
-        Assert.True(data.GetProperty("properties").TryGetProperty("description", out _));
-        Assert.Equal(0, update.GetProperty("properties").GetProperty("changes").GetProperty("items").GetProperty("properties").GetProperty("expectedRevision").GetProperty("minimum").GetInt32());
+        foreach (var alternative in update.GetProperty("properties").GetProperty("changes").GetProperty("items").GetProperty("anyOf").EnumerateArray())
+        {
+            var fields = alternative.GetProperty("properties");
+            var data = fields.GetProperty("data");
+            Assert.Equal(64000, data.GetProperty("properties").GetProperty("contentMarkdown").GetProperty("maxLength").GetInt32());
+            Assert.True(data.GetProperty("properties").TryGetProperty("description", out _));
+            Assert.Equal(0, fields.GetProperty("expectedRevision").GetProperty("minimum").GetInt32());
+        }
         Assert.False(update.GetProperty("additionalProperties").GetBoolean());
     }
 

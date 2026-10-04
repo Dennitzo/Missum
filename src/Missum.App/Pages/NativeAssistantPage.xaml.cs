@@ -212,6 +212,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     {
         if (ApplySubagentEvent(type, data)) return;
         if (ApplyResearchEvent(type, data)) return;
+        ObserveContinuationAdmission(type, data);
         if (type == "chat.started" && S(data, "sessionId") == _session.ToString()
             && data.TryGetProperty("userMessage", out var userMessage) && userMessage.ValueKind == JsonValueKind.Object)
         {
@@ -424,9 +425,12 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                     var layout = new Grid { ColumnSpacing = 12 };
                     layout.ColumnDefinitions.Add(new() { Width = new GridLength(28) });
                     layout.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) });
+                    var childAgent = ActiveSubagent;
                     layout.Children.Add(new Border { Width = 28, Height = 28, CornerRadius = new(14), VerticalAlignment = VerticalAlignment.Top,
-                        Background = ThemeBrush("MissumAccentSubtleBrush", 42),
-                        Child = new FontIcon { Glyph = "\uE99A", FontSize = 15, Foreground = ThemeBrush("MissumAccentBrush", 176) } });
+                        Background = childAgent is null ? ThemeBrush("MissumAccentSubtleBrush", 42) : new SolidColorBrush(Microsoft.UI.Colors.Transparent),
+                        Child = childAgent is null
+                            ? new FontIcon { Glyph = "\uE99A", FontSize = 15, Foreground = ThemeBrush("MissumAccentBrush", 176) }
+                            : SubagentIcon(childAgent.AgentId, 26, childAgent.PlanetIndex) });
                     bubble.Child = null;
                     Grid.SetColumn(messageBody, 1); layout.Children.Add(messageBody); bubble.Child = layout;
                 }
@@ -446,7 +450,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     private void RenderSources(JsonElement data)
     {
         var signature = ConversationViewKey + "|" + ResearchState(_session).Revision + "|"
-            + string.Join("|", DisplayMessages.Values.SelectMany(message => Items(message, "toolSteps")).Select(step => S(step, "id") + S(step, "updatedAt") + S(step, "outputJson").GetHashCode(StringComparison.Ordinal)))
+            + string.Join("|", OwnerSourceMessages().SelectMany(message => Items(message, "toolSteps")).Select(step => S(step, "id") + S(step, "updatedAt") + S(step, "outputJson").GetHashCode(StringComparison.Ordinal)))
             + string.Join("|", Items(data, "documents").Concat(Items(data, "attachments")).Select(item => S(item, "id")));
         if (_sourcesSignature == signature) return;
         _sourcesSignature = signature;
@@ -550,7 +554,8 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     }
     private void OnAssistantPointerWheelChanged(object sender, PointerRoutedEventArgs e)
     {
-        if (_activeResearchSessionId == _session) return;
+        if (_activeResearchSessionId == _session || _activeSourcesSession == _session
+            || _activeSubagentOverviewSession == _session) return;
         // Only unhandled wheel input reaches this frame. Nested text/diff viewers
         // consume their own scrolling; blank inspector/header surfaces scroll chat.
         var point = e.GetCurrentPoint(AssistantFrame);
@@ -579,11 +584,12 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     {
         var hasText = !string.IsNullOrWhiteSpace(Composer.Text);
         var captionRunning = _captionActive && _captionSessionId == _session;
-        var stop = !hasText && (_running || _speaking || captionRunning);
+        var preparingContinuation = IsContinuationPreparing;
+        var stop = preparingContinuation || (!hasText && (_running || _speaking || captionRunning));
 
         ModelButton.IsEnabled = ActiveSubagent is null;
         SendIcon.Glyph = stop ? "\uE71A" : "\uE74A";
-        var label = stop ? "Aktivität stoppen" : _running ? "Antwort umlenken" : "Nachricht senden";
+        var label = preparingContinuation ? "Vorbereitung stoppen" : stop ? "Aktivität stoppen" : _running ? "Antwort umlenken" : "Nachricht senden";
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(SendButton, label);
         ToolTipService.SetToolTip(SendButton, label);
         UpdateSidebarActivity();
@@ -600,6 +606,11 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             finally { _sendPending = false; }
             _dictationSession = null;
             if (_disposed || !_navigationState.CanEditComposer || _session != dictationOwner) return;
+        }
+        if (IsContinuationPreparing)
+        {
+            await CommandAsync("chat.cancel", new { sessionId = _session });
+            return;
         }
         var prompt = Composer.Text.Trim();
         if (prompt.Length == 0 && _captionActive && _captionSessionId == _session) { OnStopCaptions(this, new RoutedEventArgs()); return; }

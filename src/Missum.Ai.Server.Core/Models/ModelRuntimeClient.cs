@@ -276,10 +276,32 @@ public sealed partial class ModelRuntimeClient : IDisposable
         finally { turnGate.Release(); }
     }
 
-    public async Task<LmChatResult> CompleteChatAsync(
+    public Task<LmChatResult> CompleteChatAsync(
         string modelId,
         IReadOnlyList<LmChatMessage> messages,
         IReadOnlyList<LmToolDefinition> tools,
+        int? maximumOutputTokens = null,
+        string modelRole = "general",
+        string? reasoningEffort = null,
+        bool requireToolCall = false,
+        string? requiredToolName = null,
+        int? requiredContextLength = null,
+        Func<ModelRuntimeProgress, CancellationToken, ValueTask>? nativeProgress = null,
+        bool structuredToolOnly = false,
+        string? sessionCacheKey = null,
+        JsonElement? responseSchema = null,
+        string? runtimeInstanceId = null,
+        CancellationToken cancellationToken = default) =>
+        CompleteChatWithCacheOwnershipAsync(modelId, messages, tools, null, null, maximumOutputTokens,
+            modelRole, reasoningEffort, requireToolCall, requiredToolName, requiredContextLength, nativeProgress,
+            structuredToolOnly, sessionCacheKey, responseSchema, runtimeInstanceId, cancellationToken);
+
+    internal async Task<LmChatResult> CompleteChatWithCacheOwnershipAsync(
+        string modelId,
+        IReadOnlyList<LmChatMessage> messages,
+        IReadOnlyList<LmToolDefinition> tools,
+        string? sessionCacheOwnerId,
+        string? sessionCacheParentOwnerId,
         int? maximumOutputTokens = null,
         string modelRole = "general",
         string? reasoningEffort = null,
@@ -310,7 +332,9 @@ public sealed partial class ModelRuntimeClient : IDisposable
             // an upper bound; it must not require a larger allocation after fitting.
             var preparation = await PrepareNativeModelAsync(modelId, 0, null, cancellationToken, runtimeInstanceId).ConfigureAwait(false);
             preparedInstanceId = preparation.InstanceId;
-            await UpdateSessionCacheAsync("prepare", preparation.InstanceId, sessionCacheKey, cancellationToken).ConfigureAwait(false);
+            await UpdateSessionCacheAsync("prepare", preparation.InstanceId, sessionCacheKey,
+                sessionId: sessionCacheOwnerId, parentSessionId: sessionCacheParentOwnerId,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
             var context = requiredContextLength is { } requested
                 ? Math.Min(requested, preparation.ContextLength) : preparation.ContextLength;
             if (nativeProgress is not null)
@@ -411,7 +435,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
             // Persist every completed round, including tool calls. Long coding
             // runs must survive a process restart before their final response.
             if (!string.IsNullOrEmpty(sessionCacheKey))
-                await UpdateSessionCacheAsync("save", preparation.InstanceId, sessionCacheKey, cancellationToken).ConfigureAwait(false);
+                await UpdateSessionCacheAsync("save", preparation.InstanceId, sessionCacheKey, cancellationToken: cancellationToken).ConfigureAwait(false);
             return result with { Metrics = (result.Metrics ?? new ModelTurnMetrics()) with
             {
                 RuntimeQueueMilliseconds = queueMilliseconds,
@@ -592,7 +616,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
                 json_schema = new { name = "visual_scene_spec", strict = true, schema },
             };
         }
-        await UpdateSessionCacheAsync("prepare", preparation.InstanceId, null, cancellationToken).ConfigureAwait(false);
+        await UpdateSessionCacheAsync("prepare", preparation.InstanceId, null, cancellationToken: cancellationToken).ConfigureAwait(false);
         ApplyReasoningSettings(body, preparation.InstanceId, "vision", reasoningEffort);
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(ModelTurnTimeout);
@@ -744,7 +768,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
 
     private async Task UnloadRuntimeInstanceAsync(string modelId, CancellationToken cancellationToken)
     {
-        await UpdateSessionCacheAsync("save", modelId, null, cancellationToken).ConfigureAwait(false);
+        await UpdateSessionCacheAsync("save", modelId, null, cancellationToken: cancellationToken).ConfigureAwait(false);
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromMinutes(1));
         using var response = await SendJsonAsync(HttpMethod.Post, "models/unload", new { model = modelId }, timeout.Token).ConfigureAwait(false);
@@ -756,8 +780,9 @@ public sealed partial class ModelRuntimeClient : IDisposable
             await Task.Delay(TimeSpan.FromMilliseconds(100), timeout.Token).ConfigureAwait(false);
     }
 
-    private async Task<string?> UpdateSessionCacheAsync(string operation, string model, string? sessionKey, CancellationToken cancellationToken,
-        int? interruptedPromptTokens = null)
+    private async Task<string?> UpdateSessionCacheAsync(string operation, string model, string? sessionKey,
+        int? interruptedPromptTokens = null, string? sessionId = null, string? parentSessionId = null,
+        CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         lock (_cacheLock)
@@ -784,7 +809,8 @@ public sealed partial class ModelRuntimeClient : IDisposable
         string? generatedTail = null;
         try
         {
-            using var response = await SendJsonAsync(HttpMethod.Post, path, new { model, sessionKey, promptTokens = interruptedPromptTokens }, timeout.Token,
+            using var response = await SendJsonAsync(HttpMethod.Post, path, new { model, sessionKey, promptTokens = interruptedPromptTokens,
+                sessionId, parentSessionId }, timeout.Token,
                 bufferContent: true).ConfigureAwait(false);
             using var result = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(false),
                 cancellationToken: timeout.Token).ConfigureAwait(false);

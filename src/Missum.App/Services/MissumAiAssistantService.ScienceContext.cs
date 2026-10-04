@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Missum.Ai.Contracts;
 using Missum.Core.Models;
 using Missum.Core.Research;
 
@@ -6,6 +7,10 @@ namespace Missum.App.Services;
 
 public sealed partial class MissumAiAssistantService
 {
+    internal static bool GatewayOwnsScienceContext(ChatMode mode, DeepResearchOptions? options,
+        bool researchDeliverablesAvailable) => mode == ChatMode.ClaudeScience
+        && options?.ProtocolVersion >= 2 && researchDeliverablesAvailable;
+
     private async Task<string> BuildScienceSessionContextAsync(ChatSession session, CancellationToken cancellationToken)
     {
         if (scientificResearch is null) return string.Empty;
@@ -16,6 +21,8 @@ public sealed partial class MissumAiAssistantService
 
         if (project.ProtocolVersion >= 2 && scientificResearch is IScientificResearchStateRepository stateRepository)
         {
+            // Compatibility only when this request cannot advertise research.deliverables.
+            // Canonical requests obtain this state through the gateway's initial read.
             var state = await stateRepository.LoadWorkingStateAsync(project.Id, cancellationToken).ConfigureAwait(false);
             var summary = JsonSerializer.Serialize(new
             {

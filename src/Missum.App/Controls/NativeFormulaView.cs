@@ -13,14 +13,15 @@ public sealed class NativeFormulaView : Button
     private readonly string _source;
     private readonly bool _display;
     private readonly double _fontSize;
+    private readonly string? _renderLatex;
     private bool? _renderedDark;
     internal bool IsTypeset { get; private set; }
     internal double RenderedHeight { get; private set; }
     internal double RenderedBaselineOffset { get; private set; }
 
-    public NativeFormulaView(string source, bool display, double fontSize = 16, Uri? linkUri = null)
+    public NativeFormulaView(string source, bool display, double fontSize = 16, Uri? linkUri = null, string? renderLatex = null)
     {
-        _source = source; _display = display; _fontSize = fontSize;
+        _source = source; _display = display; _fontSize = fontSize; _renderLatex = renderLatex;
         Padding = new Thickness(0);
         MinWidth = 0; MinHeight = 0;
         FontSize = fontSize;
@@ -30,18 +31,19 @@ public sealed class NativeFormulaView : Button
         Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
         HorizontalAlignment = HorizontalAlignment.Left;
         AutomationProperties.SetName(this, "Formel: " + source);
-        var tooltip = linkUri is null ? "LaTeX kopieren" : "Link öffnen: " + linkUri + " · Rechtsklick: LaTeX kopieren";
+        var copyLabel = renderLatex is null ? "LaTeX kopieren" : "Formeltext kopieren";
+        var tooltip = linkUri is null ? copyLabel : "Link öffnen: " + linkUri + " · Rechtsklick: " + copyLabel;
         ToolTipService.SetToolTip(this, tooltip);
         void CopySource() { var package = new DataPackage(); package.SetText(_source); Clipboard.SetContent(package); }
         var menu = new MenuFlyout();
-        var copyItem = new MenuFlyoutItem { Text = "LaTeX kopieren" };
+        var copyItem = new MenuFlyoutItem { Text = copyLabel };
         copyItem.Click += (_, _) => CopySource();
         menu.Items.Add(copyItem); ContextFlyout = menu;
         Click += async (_, _) =>
         {
             if (linkUri is not null) { await Windows.System.Launcher.LaunchUriAsync(linkUri); return; }
             CopySource();
-            ToolTipService.SetToolTip(this, "✓ LaTeX kopiert");
+            ToolTipService.SetToolTip(this, renderLatex is null ? "✓ LaTeX kopiert" : "✓ Formeltext kopiert");
             await Task.Delay(2000);
             ToolTipService.SetToolTip(this, tooltip);
         };
@@ -56,8 +58,11 @@ public sealed class NativeFormulaView : Button
         if (_renderedDark == dark) return;
         _renderedDark = dark;
         var trim = _source.Trim();
-        var delimiter = trim.StartsWith("$$", StringComparison.Ordinal) || trim.StartsWith(@"\(", StringComparison.Ordinal) || trim.StartsWith(@"\[", StringComparison.Ordinal) ? 2 : 1;
-        var latex = trim.Length >= delimiter * 2 ? trim[delimiter..^delimiter] : trim;
+        var delimiter = (trim.StartsWith("$$", StringComparison.Ordinal) && trim.EndsWith("$$", StringComparison.Ordinal))
+            || (trim.StartsWith(@"\(", StringComparison.Ordinal) && trim.EndsWith(@"\)", StringComparison.Ordinal))
+            || (trim.StartsWith(@"\[", StringComparison.Ordinal) && trim.EndsWith(@"\]", StringComparison.Ordinal)) ? 2
+            : trim.StartsWith('$') && trim.EndsWith('$') ? 1 : 0;
+        var latex = _renderLatex ?? (delimiter > 0 && trim.Length >= delimiter * 2 ? trim[delimiter..^delimiter] : trim);
         var bitmap = NativeMathRenderer.Render(latex, _display, _fontSize, dark);
         IsTypeset = bitmap.Error is null && bitmap.Png.Length > 0;
         RenderedHeight = bitmap.Height;

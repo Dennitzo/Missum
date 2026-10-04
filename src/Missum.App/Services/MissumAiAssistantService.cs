@@ -3012,9 +3012,15 @@ public sealed partial class MissumAiAssistantService(
         await EnsureResearchProjectAsync(generalResearchOptions, codingSession, originalPrompt, null,
             cancellationToken).ConfigureAwait(false);
 
-        var scienceSessionContext = !compactContext && codingSession.ChatMode == ChatMode.ClaudeScience
+        // Decide only while constructing a new request. Existing server checkpoints
+        // retain their evaluated prompt and cache. Canonical research uses one gateway
+        // policy and initial research.read, independently of the compact-context flag.
+        var researchDeliverablesAvailable = isScienceSession && sciencePresentation is not null;
+        var includeClientScienceContext = !compactContext && isScienceSession
+            && !GatewayOwnsScienceContext(codingSession.ChatMode, generalResearchOptions, researchDeliverablesAvailable);
+        var scienceSessionContext = includeClientScienceContext
             ? await BuildScienceSessionContextAsync(codingSession, cancellationToken).ConfigureAwait(false) : string.Empty;
-        var contextBudgetPrompt = !compactContext && codingSession.ChatMode == ChatMode.ClaudeScience
+        var contextBudgetPrompt = includeClientScienceContext
             ? BuildSciencePresentationPrompt(scienceSessionContext + originalPrompt, codingSession.Id) : originalPrompt;
         var scientificPromptOverhead = Math.Max(0, contextBudgetPrompt.Length - originalPrompt.Length);
         var minimumHistoryReserveTokens = CalculateDocumentHistoryReserveTokens(
@@ -3070,20 +3076,14 @@ public sealed partial class MissumAiAssistantService(
             trigger,
             hasDocumentContext: documentContext is not null,
             hasAudiobookHistory);
-        if (codingSession.ChatMode == ChatMode.ClaudeScience
-            && trigger is { DeepResearch: true, Trigger.Action: PromptTriggerAction.WebSearch })
-        {
-            // DeepResearch already selects the staged research pipeline. Keep
-            // its actual user task separate from ordinary web-search instructions.
-            transformed = string.IsNullOrWhiteSpace(trigger.RemainingPrompt) ? originalPrompt : trigger.RemainingPrompt;
-        }
+        transformed = ResolveScientificResearchPrompt(codingSession.ChatMode, originalPrompt, trigger, transformed);
         if (!string.IsNullOrWhiteSpace(projectMemoryContext))
         {
             transformed = projectMemoryContext
                 + "\n\nAKTUELLER BENUTZERAUFTRAG\n"
                 + transformed;
         }
-        if (!compactContext && codingSession.ChatMode == ChatMode.ClaudeScience)
+        if (includeClientScienceContext)
         {
             transformed = scienceSessionContext + transformed;
             transformed = BuildSciencePresentationPrompt(transformed, codingSession.Id);
@@ -3121,7 +3121,7 @@ public sealed partial class MissumAiAssistantService(
             or PromptTriggerAction.Audiobook
                 ? RunMode.General
                 : RunMode.Auto;
-        if (isScienceSession && sciencePresentation is not null) capabilities.Add("research.deliverables");
+        if (researchDeliverablesAvailable) capabilities.Add("research.deliverables");
         if (isScienceSession && researchSandbox is not null)
         {
             // Keep the stable tool catalog; prepare the runner only when a

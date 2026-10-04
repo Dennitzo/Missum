@@ -11,7 +11,7 @@ public sealed partial class AgentToolCatalog
         Client(ClientToolNames.ResearchRead, "Lies view=overview für den kompakten Forschungsstand; knownStateStamp spart unveränderte Inhalte. view=task liefert den vollständigen ursprünglichen Auftrag in Textseiten. objects/sources/experiments/checks laden ihren eigenen Bereich; ids liefern gezielte Details (sources auch Evidenz-IDs). Folge nextCursor nur innerhalb derselben Ansicht/ids; bei research.cursor_stale ohne Cursor neu beginnen. Ohne view bleiben frühere offset-Aufrufe kompatibel.", ToolRiskClass.ReadOnly, NormalizeResearchStateSchema(Parse("""
             {"type":"object","properties":{"projectId":{"type":"string","pattern":"^[A-Za-z0-9._-]{1,128}$"},"view":{"type":"string","enum":["overview","task","objects","sources","experiments","checks"]},"cursor":{"type":"string","minLength":1,"maxLength":2048},"knownStateStamp":{"type":"string","pattern":"^[a-fA-F0-9]{64}$"},"ids":{"type":"array","maxItems":32,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":256}},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["projectId"],"additionalProperties":false}
             """))),
-        Client(ClientToolNames.ResearchUpdate, "Speichere nur neue oder fachlich geänderte Forschungsobjekte dauerhaft. Stabile id, kind und expectedRevision aus research.read verwenden; neue Objekte erwarten Revision 0. Der Hauptagent schreibt einzelne Publikationsabschnitte, der Subagent eigene contributions und Hypothesen mit seiner Agent-ID als Präfix. data enthält den vollständigen aktuellen Inhalt nur dieses Objekts. Quellen, Experimente und Prüfnachweise über echte IDs referenzieren. Status verified erfordert einen tatsächlichen passenden gespeicherten Prüfbeleg; ein erfolgreicher Prozess allein belegt keine Aussage. Konflikte gezielt lesen und beheben, nicht die ganze Publikation erneut schreiben.", ToolRiskClass.LocalMutation, NormalizeResearchStateSchema(Parse("""
+        Client(ClientToolNames.ResearchUpdate, "Speichere nur neue oder fachlich geänderte Forschungsobjekte dauerhaft. Stabile id, kind und expectedRevision aus research.read verwenden; neue Objekte erwarten Revision 0. Bei kind section/contribution muss data.title UND data.contentMarkdown enthalten; description/method/limit ersetzen den wissenschaftlichen Markdowntext nicht. Bei hypothesis/claim/requirement muss data.statement enthalten. Der Hauptagent schreibt einzelne Publikationsabschnitte, der Subagent eigene contributions und Hypothesen mit seiner Agent-ID als Präfix. data enthält den vollständigen aktuellen Inhalt nur dieses Objekts. Quellen, Experimente und Prüfnachweise über echte IDs referenzieren. Status verified erfordert einen tatsächlichen passenden gespeicherten Prüfbeleg; ein erfolgreicher Prozess allein belegt keine Aussage. Konflikte gezielt lesen und beheben, nicht die ganze Publikation erneut schreiben.", ToolRiskClass.LocalMutation, NormalizeResearchStateSchema(Parse("""
             {"type":"object","properties":{"projectId":{"type":"string","pattern":"^[A-Za-z0-9._-]{1,128}$"},"title":{"type":"string","minLength":1,"maxLength":1000},"changes":{"type":"array","minItems":1,"maxItems":64,"items":{"type":"object","properties":{"id":{"type":"string","minLength":1,"maxLength":256},"kind":{"type":"string","enum":["hypothesis","claim","requirement","section","contribution"]},"expectedRevision":{"type":"integer","minimum":0},"data":{"type":"object","minProperties":1,"properties":{"title":{"type":"string","maxLength":1000},"contentMarkdown":{"type":"string","maxLength":64000},"statement":{"type":"string","maxLength":16000},"status":{"type":"string","enum":["planned","active","supported","provisionallySupported","verified","refuted","blocked","unresolved","superseded","withdrawn","completed","openLimit","draft"]},"assumptions":{"anyOf":[{"type":"string","maxLength":16000},{"type":"array","maxItems":64,"items":{"type":"string","maxLength":2000}}]},"prediction":{"type":"string","maxLength":16000},"nextCheck":{"type":"string","maxLength":4000},"reason":{"type":"string","maxLength":16000},"required":{"type":"boolean"},"order":{"type":"integer"},"sourceIds":{"type":"array","maxItems":128,"items":{"type":"string","minLength":1,"maxLength":256}},"claimIds":{"type":"array","maxItems":128,"items":{"type":"string","minLength":1,"maxLength":256}},"experimentIds":{"type":"array","maxItems":128,"items":{"type":"string","minLength":1,"maxLength":256}},"checkIds":{"type":"array","maxItems":128,"items":{"type":"string","minLength":1,"maxLength":256}}},"additionalProperties":false}},"required":["id","kind","expectedRevision","data"],"additionalProperties":false}}},"required":["projectId","changes"],"additionalProperties":false}
             """))),
     ];
@@ -39,6 +39,21 @@ public sealed partial class AgentToolCatalog
                 data[name] = JsonNode.Parse("""{"type":"string","maxLength":16000}""");
             data["units"] = JsonNode.Parse("""{"type":"array","maxItems":128,"items":{"type":"object","properties":{"symbol":{"type":"string","minLength":1,"maxLength":200},"meaning":{"type":"string","minLength":1,"maxLength":2000},"unit":{"type":"string","minLength":1,"maxLength":200}},"required":["symbol","meaning","unit"],"additionalProperties":false}}""");
             data["figureCaptions"] = JsonNode.Parse("""{"type":"array","maxItems":32,"items":{"type":"object","properties":{"experimentId":{"type":"string","minLength":1,"maxLength":200},"artifactPath":{"type":"string","minLength":1,"maxLength":2048},"caption":{"type":"string","minLength":1,"maxLength":4000}},"required":["experimentId","artifactPath","caption"],"additionalProperties":false}}""");
+            var changeSchema = changes["items"]!.AsObject();
+            // Native llama schemas parse anyOf before sibling properties and do
+            // not implement if/then. Keep the root object and give each nested
+            // alternative its complete shape; the kind sets are disjoint.
+            var manuscript = changeSchema.DeepClone().AsObject();
+            manuscript["properties"]!["kind"]!["enum"] = new JsonArray("section", "contribution");
+            manuscript["properties"]!["data"]!["required"] = new JsonArray("title", "contentMarkdown");
+            manuscript["properties"]!["data"]!["properties"]!["title"]!["minLength"] = 1;
+            manuscript["properties"]!["data"]!["properties"]!["contentMarkdown"]!["minLength"] = 1;
+            var assertion = changeSchema.DeepClone().AsObject();
+            assertion["properties"]!["kind"]!["enum"] = new JsonArray("hypothesis", "claim", "requirement");
+            assertion["properties"]!["data"]!["required"] = new JsonArray("statement");
+            assertion["properties"]!["data"]!["properties"]!["statement"]!["minLength"] = 1;
+            assertion["properties"]!["data"]!["properties"]!["contentMarkdown"]!["minLength"] = 1;
+            changes["items"] = new JsonObject { ["anyOf"] = new JsonArray(manuscript, assertion) };
         }
         return JsonSerializer.SerializeToElement(schema);
     }
@@ -102,8 +117,8 @@ public sealed partial class AgentToolCatalog
             if (!change.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Object)
                 throw new ArgumentException("data must be a scientific object.");
             var requiredContent = kind is "section" or "contribution" ? "contentMarkdown" : "statement";
-            _ = RequireString(data, requiredContent, 1, requiredContent == "contentMarkdown" ? 64_000 : 16_000);
-            if (kind is "section" or "contribution") _ = RequireString(data, "title", 1, 500);
+            RequireResearchContent(data, requiredContent, requiredContent == "contentMarkdown" ? 64_000 : 16_000, id, kind);
+            if (kind is "section" or "contribution") RequireResearchContent(data, "title", 500, id, kind);
             foreach (var field in data.EnumerateObject())
                 switch (field.Name)
                 {
@@ -135,6 +150,20 @@ public sealed partial class AgentToolCatalog
                 }
         }
         if (value.GetRawText().Length > 128_000) throw new ArgumentException("Split the scientific update into smaller independent object changes.");
+    }
+
+    private static void RequireResearchContent(JsonElement data, string field, int maximum, string id, string kind)
+    {
+        if (data.TryGetProperty(field, out var content) && content.ValueKind == JsonValueKind.String
+            && !string.IsNullOrWhiteSpace(content.GetString()) && content.GetString()!.Length <= maximum)
+            return;
+        var required = kind is "section" or "contribution" ? "data.title und data.contentMarkdown" : "data.statement";
+        var guidance = kind is "section" or "contribution"
+            ? "contentMarkdown ist der vollständige wissenschaftliche Text dieses Abschnitts/Entwurfs; description, method und limit ersetzen ihn nicht."
+            : "statement enthält die wissenschaftliche Aussage oder die erforderliche Aufgabe; description ersetzt sie nicht.";
+        throw new ArgumentException($"research.update: Objekt '{id}' (kind={kind}) benötigt {required} als nichtleere Strings. "
+            + $"data.{field} fehlt, ist leer oder ungültig (maximal {maximum} Zeichen). {guidance} "
+            + "Korrigiere das betroffene Objekt mit unveränderter id/kind/expectedRevision; keine Änderung wurde übernommen.");
     }
 
     private static void ValidateStateReferences(JsonElement values, string name, int maximum, int maximumCharacters = 200)

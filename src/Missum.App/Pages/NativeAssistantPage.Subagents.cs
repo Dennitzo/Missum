@@ -11,11 +11,19 @@ namespace Missum.App.Pages;
 public sealed partial class NativeAssistantPage
 {
     private readonly Dictionary<string, NativeSubagentState> _subagents = new(StringComparer.Ordinal);
+    private long _subagentObservationOrder;
     private readonly Dictionary<string, double> _conversationOffsets = new(StringComparer.Ordinal);
     private string? _activeSubagentId;
     private string? _parentComposerDraft;
     private string? _parentComposerPlaceholder;
     private string? _subagentOverlaySignature;
+    private Button? _subagentSummaryButton;
+    private StackPanel? _subagentSummaryIcons;
+    private TextBlock? _subagentSummaryLabel;
+    private TextBlock? _subagentSummaryFinished;
+    private readonly Dictionary<int, NativeSubagentAvatar> _subagentSummaryAvatars = [];
+    private SubagentPlanetIdentityStore? _subagentPlanetIdentities;
+    private SubagentPlanetIdentityStore PlanetIdentities => _subagentPlanetIdentities ??= new(App.Current.DataDirectory);
 
     // Coordinator events always update _messages, the parent transcript. A tab is
     // a projection, so a child delta cannot replace or navigate its parent's run.
@@ -72,7 +80,10 @@ public sealed partial class NativeAssistantPage
             _activeSubagentId = null;
             _parentComposerDraft = _parentComposerPlaceholder = null;
         }
-        foreach (var child in Items(snapshot, "subagents")) ObserveSubagentSnapshot(child);
+        var projectedChildren = Items(snapshot, "subagents").ToArray();
+        PlanetIdentities.EnsureAssigned(projectedChildren.Select(child => S(child, "agentId", S(child, "runId")))
+            .Where(id => id.Length > 0));
+        foreach (var child in projectedChildren) ObserveSubagentSnapshot(child);
         if (snapshot.TryGetProperty("subagents", out var children) && children.ValueKind == JsonValueKind.Array)
         {
             var knownIds = children.EnumerateArray().Select(child => S(child, "agentId", S(child, "runId"))).ToHashSet(StringComparer.Ordinal);
@@ -95,17 +106,26 @@ public sealed partial class NativeAssistantPage
         if (agentId.Length == 0) return;
         var owner = Guid.TryParse(S(snapshot, "sessionId"), out var session) ? session : _session;
         if (!_subagents.TryGetValue(agentId, out var child))
+        {
             _subagents[agentId] = child = CreateSubagentTab(agentId, owner);
+            child.ObservationOrder = ++_subagentObservationOrder;
+        }
         child.Snapshot = snapshot.Clone();
         child.SessionId = owner;
         child.Title = SubagentChatState.TaskTitle(S(snapshot, "title", "Subagent"));
         child.Status = S(snapshot, "status", "running");
-        child.IsRunning = S(snapshot, "isRunning") == "True"
-            || child.Status is "running" or "pending" or "queued" or "waiting";
+        child.IsRunning = child.Status is not ("completed" or "failed" or "denied" or "cancelled"
+            or "interrupted" or "disabled" or "unavailable")
+            && (S(snapshot, "isRunning") == "True"
+                || child.Status is "running" or "pending" or "queued" or "waiting" or "waitingForClient");
         if (double.TryParse(S(snapshot, "contextUsed"), out var used)) child.ContextUsed = used;
         if (double.TryParse(S(snapshot, "contextLimit"), out var limit)) child.ContextLimit = limit;
         child.Messages.Clear();
         foreach (var message in Items(snapshot, "messages")) child.Messages[S(message, "id")] = message.Clone();
+        // DTOs without a top-level creation time retain the assigned user
+        // message's timestamp. Token and completion updates never change recency.
+        var created = SubagentCreatedAt(snapshot);
+        if (created is not null) child.CreatedAt = created;
         ObserveThinkingProgress(snapshot);
         RefreshSubagentLifecycleRows(child);
         RefreshSubagentSources();
@@ -120,17 +140,18 @@ public sealed partial class NativeAssistantPage
 
     private NativeSubagentState CreateSubagentTab(string agentId, Guid owner)
     {
+        var planetIndex = PlanetIdentities.GetOrAssign(agentId);
         var label = new TextBlock { Text = "Subagent", FontSize = 13, MaxWidth = 184,
             TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center };
         var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 7, VerticalAlignment = VerticalAlignment.Center };
-        row.Children.Add(SubagentIcon(agentId, 13)); row.Children.Add(label);
+        row.Children.Add(SubagentIcon(agentId, 13, planetIndex)); row.Children.Add(label);
         var select = TabButton(); select.Content = row; select.Height = 30; select.Padding = new(10, 0, 5, 0);
         var close = TabButton(); close.Content = new FontIcon { Glyph = "\uE711", FontSize = 11 };
         close.Width = close.Height = 24; close.Margin = new(0, 0, 3, 0); close.VerticalAlignment = VerticalAlignment.Center;
         var grid = new Grid(); grid.ColumnDefinitions.Add(new() { Width = new(1, GridUnitType.Star) });
         grid.ColumnDefinitions.Add(new() { Width = GridLength.Auto }); grid.Children.Add(select);
         Grid.SetColumn(close, 1); grid.Children.Add(close);
-        var child = new NativeSubagentState(agentId, owner, new Border { Child = grid, MaxWidth = 285 }, select, close, label);
+        var child = new NativeSubagentState(agentId, owner, new Border { Child = grid, MaxWidth = 285 }, select, close, label, planetIndex);
         select.Click += async (_, _) => await ActivateSubagentTabAsync(child);
         close.Click += (_, _) =>
         {
@@ -141,16 +162,7 @@ public sealed partial class NativeAssistantPage
         return child;
     }
 
-    private static FontIcon SubagentIcon(string agentId, double size)
-    {
-        // Stable colors make concurrent agents recognizable without depending on
-        // randomized process hash codes or a model-specific palette.
-        uint hash = 2166136261;
-        foreach (var character in agentId) hash = (hash ^ character) * 16777619;
-        var colors = new[] { "research", "plan", "image", "speech", "success" };
-        return new FontIcon { Glyph = "\uE8D4", FontSize = size,
-            Foreground = NativeIconPalette.BrushFor(colors[(int)(hash % (uint)colors.Length)]), VerticalAlignment = VerticalAlignment.Center };
-    }
+    private static NativeSubagentAvatar SubagentIcon(string agentId, double size, int? planetIndex = null) => new(agentId, size, planetIndex);
 
     private NativeSubagentState? FindSubagentForStep(JsonElement step)
     {
@@ -192,6 +204,7 @@ public sealed partial class NativeAssistantPage
 
     private sealed class SubagentLifecycleView : Button
     {
+        private readonly Func<string, int> _planetIndexFor;
         internal event Func<string, Task>? SubagentRequested;
         internal string AgentId { get; private set; } = "";
         internal Task? NavigationTask { get; private set; }
@@ -200,14 +213,15 @@ public sealed partial class NativeAssistantPage
             TextWrapping = TextWrapping.NoWrap, VerticalAlignment = VerticalAlignment.Center };
         internal TextBlock StateLabel { get; } = new() { FontSize = 14, TextWrapping = TextWrapping.NoWrap,
             VerticalAlignment = VerticalAlignment.Center };
-        internal FontIcon Icon { get; } = new() { FontSize = 14, VerticalAlignment = VerticalAlignment.Center };
+        internal NativeSubagentAvatar Icon { get; } = SubagentIcon("", 14);
         private string _task = "";
         private bool _completion;
         private bool _appearanceChosen;
         private bool _legacyCompletion;
 
-        internal SubagentLifecycleView()
+        internal SubagentLifecycleView(Func<string, int> planetIndexFor)
         {
+            _planetIndexFor = planetIndexFor;
             var row = new Grid { ColumnSpacing = 6 };
             row.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
             row.ColumnDefinitions.Add(new() { Width = new(1, GridUnitType.Star) });
@@ -263,8 +277,7 @@ public sealed partial class NativeAssistantPage
         {
             if (TaskLabel.Text.Length == 0) TaskLabel.Text = SubagentChatState.TaskTitle(title);
             StateLabel.Text = _completion || _legacyCompletion ? "hat die Arbeit beendet" : "hat die Arbeit begonnen";
-            var icon = SubagentIcon(AgentId, 14);
-            Icon.Glyph = icon.Glyph; Icon.Foreground = icon.Foreground;
+            Icon.SetAgentId(AgentId, AgentId.Length == 0 ? null : _planetIndexFor(AgentId));
             IsEnabled = canOpen;
             var label = TaskLabel.Text + " " + StateLabel.Text;
             AutomationProperties.SetName(this, label);
@@ -301,39 +314,113 @@ public sealed partial class NativeAssistantPage
 
     private void RenderSubagentOverlay()
     {
-        var children = _subagents.Values.Where(child => child.SessionId == _session).ToArray();
-        var signature = _session + string.Join("|", children.Select(child => child.AgentId + child.Title + child.Status));
+        var children = SessionSubagents();
+        var signature = SubagentListSignature(children);
         if (_subagentOverlaySignature == signature) return;
         _subagentOverlaySignature = signature;
         SubagentsSection.Visibility = children.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
-        SubagentsPanel.Children.Clear();
-        foreach (var child in children)
+        if (children.Length == 0)
         {
-            var button = SidebarButton("\uE8D4", "Subagent");
-            button.Padding = new(0, 6, 0, 6); button.MinHeight = 32;
-            var row = (Grid)button.Content;
-            var icon = row.Children.OfType<FontIcon>().Single();
-            icon.Foreground = SubagentIcon(child.AgentId, 14).Foreground;
-            var label = row.Children.OfType<TextBlock>().Single();
-            label.Text = "Subagent · " + SubagentStatusLabel(child);
-            ToolTipService.SetToolTip(button, child.Title);
-            AutomationProperties.SetName(button, "Subagent: " + child.Title + " · " + SubagentStatusLabel(child));
-            button.Click += async (_, _) => await ActivateSubagentTabAsync(child);
-            SubagentsPanel.Children.Add(button);
+            SubagentsPanel.Children.Clear();
+            _subagentSummaryIcons?.Children.Clear(); _subagentSummaryAvatars.Clear();
         }
+        else
+        {
+            EnsureSubagentSummary();
+            var working = children.Where(child => child.IsRunning).ToArray();
+            var active = working.Length;
+            var inactive = children.Length - active;
+            var caption = active > 0 ? active + (active == 1 ? " arbeitet" : " arbeiten") : inactive + " fertig";
+            var finished = active > 0 && inactive > 0 ? inactive + " fertig" : "";
+            if (_subagentSummaryLabel!.Text != caption) _subagentSummaryLabel.Text = caption;
+            _subagentSummaryLabel.Foreground = active > 0 ? ThemeBrush("MissumTextBrush", 230)
+                : ThemeBrush("MissumMutedTextBrush", 160);
+            if (_subagentSummaryFinished!.Text != finished) _subagentSummaryFinished.Text = finished;
+            _subagentSummaryFinished.Visibility = finished.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+            var representatives = (active > 0 ? working : children).Take(4).ToArray();
+            for (var index = 0; index < representatives.Length; index++)
+            {
+                var child = representatives[index];
+                var variant = child.PlanetIndex;
+                if (!_subagentSummaryAvatars.TryGetValue(variant, out var avatar))
+                    _subagentSummaryAvatars[variant] = avatar = SubagentIcon(child.AgentId, 14, variant);
+                avatar.SetAgentId(child.AgentId, variant);
+                if (index >= _subagentSummaryIcons!.Children.Count || !ReferenceEquals(_subagentSummaryIcons.Children[index], avatar))
+                {
+                    _subagentSummaryIcons.Children.Remove(avatar);
+                    _subagentSummaryIcons.Children.Insert(index, avatar);
+                }
+            }
+            while (_subagentSummaryIcons!.Children.Count > representatives.Length)
+                _subagentSummaryIcons.Children.RemoveAt(_subagentSummaryIcons.Children.Count - 1);
+            var visiblePlanets = representatives.Select(child => child.PlanetIndex).ToHashSet();
+            foreach (var hidden in _subagentSummaryAvatars.Keys.Where(index => !visiblePlanets.Contains(index)).ToArray())
+                _subagentSummaryAvatars.Remove(hidden);
+            var label = caption + (finished.Length > 0 ? " · " + finished : "");
+            AutomationProperties.SetName(_subagentSummaryButton!, label);
+            var exceptions = children.Where(child => !child.IsRunning && child.Status != "completed")
+                .GroupBy(SubagentStatusLabel).Select(group => group.Count() + " " + group.Key.ToLowerInvariant());
+            ToolTipService.SetToolTip(_subagentSummaryButton!, label + "\nSubagentenübersicht öffnen"
+                + string.Concat(exceptions.Select(detail => "\n" + detail)));
+            if (SubagentsPanel.Children.Count != 1 || !ReferenceEquals(SubagentsPanel.Children[0], _subagentSummaryButton))
+            {
+                SubagentsPanel.Children.Clear(); SubagentsPanel.Children.Add(_subagentSummaryButton!);
+            }
+        }
+        if (_activeSubagentOverviewSession == _session) RenderSubagentOverviewContent();
+    }
+
+    private void EnsureSubagentSummary()
+    {
+        if (_subagentSummaryButton is not null) return;
+        _subagentSummaryIcons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4,
+            VerticalAlignment = VerticalAlignment.Center };
+        _subagentSummaryLabel = new TextBlock { FontSize = 14, VerticalAlignment = VerticalAlignment.Center,
+            TextTrimming = TextTrimming.CharacterEllipsis, TextWrapping = TextWrapping.NoWrap };
+        _subagentSummaryFinished = new TextBlock { FontSize = 14, VerticalAlignment = VerticalAlignment.Center,
+            Foreground = ThemeBrush("MissumMutedTextBrush", 145), Opacity = .75, HorizontalAlignment = HorizontalAlignment.Right };
+        var row = new Grid { ColumnSpacing = 6 };
+        row.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
+        row.ColumnDefinitions.Add(new() { Width = new(1, GridUnitType.Star) });
+        row.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
+        row.Children.Add(_subagentSummaryIcons);
+        Grid.SetColumn(_subagentSummaryLabel, 1); row.Children.Add(_subagentSummaryLabel);
+        Grid.SetColumn(_subagentSummaryFinished, 2); row.Children.Add(_subagentSummaryFinished);
+        _subagentSummaryButton = SidebarButton(null, "Subagentenübersicht öffnen");
+        _subagentSummaryButton.Content = row;
+        _subagentSummaryButton.Padding = new(0, 6, 0, 6); _subagentSummaryButton.MinHeight = _subagentSummaryButton.Height = 32;
+        _subagentSummaryButton.CornerRadius = new(4);
+        _subagentSummaryButton.Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        AutomationProperties.SetHelpText(_subagentSummaryButton, "Alle Subagenten dieser Sitzung öffnen");
+        _subagentSummaryButton.Click += (_, _) => OpenSubagentOverview();
+    }
+
+    private NativeSubagentState[] SessionSubagents() => _subagents.Values.Where(child => child.SessionId == _session)
+        .OrderByDescending(child => child.CreatedAt ?? DateTimeOffset.MinValue)
+        .ThenByDescending(child => child.ObservationOrder).ToArray();
+
+    private string SubagentListSignature(IEnumerable<NativeSubagentState> children) => _session + string.Join("|",
+        children.Select(child => child.AgentId + child.Title + child.Status + child.IsRunning + child.CreatedAt + child.ObservationOrder));
+
+    private static DateTimeOffset? SubagentCreatedAt(JsonElement snapshot)
+    {
+        if (DateTimeOffset.TryParse(S(snapshot, "createdAt", S(snapshot, "startedAt")), out var time)) return time;
+        var assigned = Items(snapshot, "messages").FirstOrDefault(message => S(message, "role") == "user");
+        return DateTimeOffset.TryParse(S(assigned, "createdAt"), out time) ? time : null;
     }
 
     private static string SubagentStatusLabel(NativeSubagentState child) => child.Status.ToLowerInvariant() switch
     {
-        "completed" => "Fertig", "failed" => "Fehlgeschlagen", "cancelled" => "Abgebrochen",
-        "pending" or "queued" or "waiting" => "Wartet", "disabled" or "unavailable" => "Nicht verfügbar", _ => "Arbeitet",
+        "completed" => "fertig", "failed" or "denied" => "Fehlgeschlagen", "cancelled" => "Abgebrochen",
+        "interrupted" => "Unterbrochen", "disabled" or "unavailable" => "Nicht verfügbar", _ => "arbeitet",
     };
 
     private void SaveConversationOffset() => _conversationOffsets[ConversationViewKey] = ConversationScroll.VerticalOffset;
 
     private async Task ActivateSubagentTabAsync(NativeSubagentState child)
     {
-        if (_disposed || child.SessionId != _session || _sessionTabNavigationBusy) return;
+        if (_disposed || child.SessionId != _session || _sessionTabNavigationBusy
+            || !_subagents.TryGetValue(child.AgentId, out var current) || !ReferenceEquals(current, child)) return;
         var owner = _session;
         if (_dictationSession == owner)
             await FinishDictationForNavigationAsync(owner, Composer.Text);
@@ -379,12 +466,15 @@ public sealed partial class NativeAssistantPage
         });
     }
 
-    private sealed class NativeSubagentState(string agentId, Guid sessionId, Border container, Button select, Button close, TextBlock label)
+    private sealed class NativeSubagentState(string agentId, Guid sessionId, Border container, Button select, Button close, TextBlock label, int planetIndex)
     {
         internal string AgentId { get; } = agentId;
+        internal int PlanetIndex { get; } = planetIndex;
         internal Guid SessionId { get; set; } = sessionId;
         internal string Title { get; set; } = "Subagent";
         internal string Status { get; set; } = "running";
+        internal DateTimeOffset? CreatedAt { get; set; }
+        internal long ObservationOrder { get; set; }
         internal bool IsRunning { get; set; } = true;
         internal bool TabOpen { get; set; } = true;
         internal double ContextUsed { get; set; }

@@ -18,8 +18,11 @@ public sealed partial class NativeAssistantPage
     {
         if (StatusText is null || ErrorBar is null) return;
         var hasActiveHeader = DisplayMessages.Values.Any(message => S(message, "role") == "assistant" && S(message, "status") is "streaming" or "pending");
+        var preparing = DisplayChatStatus.StartsWith("AI-Modell und Dienste werden vorbereitet", StringComparison.Ordinal)
+            || DisplayChatStatus.StartsWith("Modell wird geladen", StringComparison.Ordinal)
+            || DisplayChatStatus.StartsWith("Coding-Modell wird geladen", StringComparison.Ordinal);
         StatusText.Text = DisplayChatStatus;
-        StatusText.Visibility = string.IsNullOrWhiteSpace(DisplayChatStatus) || (DisplayRunning && hasActiveHeader) ? Visibility.Collapsed : Visibility.Visible;
+        StatusText.Visibility = string.IsNullOrWhiteSpace(DisplayChatStatus) || (DisplayRunning && hasActiveHeader && !preparing) ? Visibility.Collapsed : Visibility.Visible;
         _refreshingChatNotices = true;
         try
         {

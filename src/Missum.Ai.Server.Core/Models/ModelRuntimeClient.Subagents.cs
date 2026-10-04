@@ -40,12 +40,26 @@ public sealed partial class ModelRuntimeClient
     public Task<SubagentRuntimePreparation> PrepareSubagentAsync(
         string modelId, string? parentSessionCacheKey, string childSessionCacheKey,
         CancellationToken cancellationToken = default) =>
-        PrepareSubagentCoreAsync(modelId, parentSessionCacheKey, childSessionCacheKey, null, cancellationToken);
+        PrepareSubagentCoreAsync(modelId, parentSessionCacheKey, childSessionCacheKey, null, null, null, cancellationToken);
+
+    public Task<SubagentRuntimePreparation> PrepareSubagentAsync(
+        string modelId, string? parentSessionCacheKey, string childSessionCacheKey,
+        string? childSessionId, string? parentSessionId, CancellationToken cancellationToken = default) =>
+        PrepareSubagentCoreAsync(modelId, parentSessionCacheKey, childSessionCacheKey, null,
+            childSessionId, parentSessionId, cancellationToken);
 
     public Task<SubagentRuntimePreparation> PrepareSubagentAsync(
         string modelId, string? parentSessionCacheKey, string childSessionCacheKey,
         IReadOnlyList<LmChatMessage> messages, IReadOnlyList<LmToolDefinition> tools,
-        string modelRole, string? reasoningEffort, CancellationToken cancellationToken = default)
+        string modelRole, string? reasoningEffort, CancellationToken cancellationToken = default) =>
+        PrepareSubagentAsync(modelId, parentSessionCacheKey, childSessionCacheKey, messages, tools,
+            modelRole, reasoningEffort, null, null, cancellationToken);
+
+    public Task<SubagentRuntimePreparation> PrepareSubagentAsync(
+        string modelId, string? parentSessionCacheKey, string childSessionCacheKey,
+        IReadOnlyList<LmChatMessage> messages, IReadOnlyList<LmToolDefinition> tools,
+        string modelRole, string? reasoningEffort, string? childSessionId, string? parentSessionId,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(messages);
         ArgumentNullException.ThrowIfNull(tools);
@@ -63,12 +77,14 @@ public sealed partial class ModelRuntimeClient
             prefill["tools"] = PrepareTransportTools(modelId, tools);
             prefill["tool_choice"] = "auto";
         }
-        return PrepareSubagentCoreAsync(modelId, parentSessionCacheKey, childSessionCacheKey, prefill, cancellationToken);
+        return PrepareSubagentCoreAsync(modelId, parentSessionCacheKey, childSessionCacheKey, prefill,
+            childSessionId, parentSessionId, cancellationToken);
     }
 
     private async Task<SubagentRuntimePreparation> PrepareSubagentCoreAsync(
         string modelId, string? parentSessionCacheKey, string childSessionCacheKey,
-        IReadOnlyDictionary<string, object?>? prefill, CancellationToken cancellationToken)
+        IReadOnlyDictionary<string, object?>? prefill, string? childSessionId, string? parentSessionId,
+        CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(childSessionCacheKey);
         // Fork an idle immutable prefix while retaining both turn leases. The
@@ -84,7 +100,8 @@ public sealed partial class ModelRuntimeClient
                 var installed = ResolveInstalledModel(await GetRuntimeModelsAsync(timeout.Token).ConfigureAwait(false), modelId)
                     ?? throw new FileNotFoundException($"Das lokale Modell '{modelId}' ist nicht installiert.");
                 using var response = await SendJsonAsync(HttpMethod.Post, SubagentControlUri("prepare"),
-                    new { model = installed.Id, parentSessionCacheKey, childSessionCacheKey, prefill }, timeout.Token,
+                    new { model = installed.Id, parentSessionCacheKey, childSessionCacheKey, prefill,
+                        childSessionId, parentSessionId }, timeout.Token,
                     bufferContent: true).ConfigureAwait(false);
                 using var json = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(false),
                     cancellationToken: timeout.Token).ConfigureAwait(false);

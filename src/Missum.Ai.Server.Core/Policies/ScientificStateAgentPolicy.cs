@@ -15,6 +15,14 @@ internal static class ScientificStateAgentPolicy
         Lade bei einem Konflikt nur die betroffene id erneut. Bewahre auch gescheiterte, widerlegte oder offene Hypothesen
         mit Voraussetzungen, Vorhersage, Diagnose und nächster konkreter Prüfung. Ein erfolgreicher Prozess ist noch kein
         wissenschaftlicher Beweis; referenziere tatsächliche Quellen, Experimente und Prüfbelege über ihre gelieferten IDs.
+        Halte vor dimensionsabhängigen Herleitungen Geometrie, Radius-/Flächenkonventionen, Einheiten und Geltungsbereich
+        ausdrücklich fest. Prüfe die betroffene Beziehung passend zur Aussage symbolisch, durch Rücksubstitution oder
+        Dimensionsvergleich; dieselbe Beziehung muss in SI und natürlichen Einheiten nach Rückumrechnung übereinstimmen.
+        ProcessSucceeded bestätigt nur die Ausführung, nicht die fachliche Richtigkeit der Eingabe oder Schlussfolgerung.
+        Gleiche bekannte externe Formeln und relevante Literaturbehauptungen gezielt mit einer abrufbaren Originalquelle
+        ab; vorhandene passende Quellenbelege wiederverwenden. Ohne Beleg als ungeprüft kennzeichnen, nicht als bestätigt.
+        Löse erkennbare widersprüchliche Faktoren, Einheiten oder Ergebnisse vor dem fachlichen Abschluss auf; technische
+        PDF-Erstellung und research.deliverables.verify ersetzen diese Prüfung nicht. Keine pauschale Wahrheitsgarantie.
         Der Hauptagent besitzt die Publikationsabschnitte und führt Beiträge zusammen. Als Subagent verwende eigene IDs
         mit deiner Agent-ID und ':' als Präfix, schreibe contributions und deine eigenen Forschungsobjekte, keine section
         und keinen globalen Titel. Übernimm abgeschlossene Child-Ergebnisse direkt; prüfe deren Arbeit nicht erneut.

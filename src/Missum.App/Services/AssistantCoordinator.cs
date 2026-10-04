@@ -29,7 +29,8 @@ public sealed partial class AssistantCoordinator(
     IProjectMemoryStore? projectMemory = null,
     IAssistantRunScheduler? runScheduler = null,
     IScientificResearchRepository? scientificResearch = null,
-    IScientificResearchExportService? scientificResearchExports = null)
+    IScientificResearchExportService? scientificResearchExports = null,
+    NativeSessionCacheCleanupService? cacheCleanup = null)
 {
     private const string DefaultSessionTitle = "Neue Sitzung";
     private const string DefaultSystemPrompt = "Du bist ein allgemeiner lokaler AI-Assistent. Unterstütze die konkrete Aufgabe des Nutzers, etwa beim Programmieren, Schreiben, Lernen, Analysieren oder Planen. Passe Sprache, Detailtiefe und Vorgehen an die Frage an. Unterscheide belegte Informationen von Annahmen, benenne relevante Unsicherheiten und erfinde keine Fakten, Quellen oder Ergebnisse.";
@@ -107,6 +108,8 @@ public sealed partial class AssistantCoordinator(
     private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, Task> _scheduledRunObservers = new();
     private readonly IExtensionActionCatalog _extensionActions = extensionActions ?? ExtensionActionCatalog.CreateWithBuiltIns();
     private readonly IAssistantRunScheduler? _runScheduler = runScheduler;
+    private readonly NativeSessionCacheCleanupService? _cacheCleanup = cacheCleanup
+        ?? (runtimeProfile is null ? null : new(runtimeProfile));
 
     internal sealed record AssistantDisplayState(Guid MessageId, string? ModelSelection, bool IsCoding,
         bool IsRunning, string? Status = null, string? Detail = null, string? Model = null,
@@ -1215,7 +1218,7 @@ public sealed partial class AssistantCoordinator(
 
         await chats.DeleteSessionAsync(sessionId, cancellationToken).ConfigureAwait(false);
         _displayStates.TryRemove(sessionId, out _);
-        await CleanupDeletedCodingChangesAsync([sessionId]).ConfigureAwait(false);
+        await CleanupDeletedCodingChangesAsync([sessionId], [session]).ConfigureAwait(false);
         if (settings.Current.ActiveSessionId == sessionId
             || ActiveSessionIdFor(settings.Current, session.ChatMode) == sessionId)
         {
@@ -1299,7 +1302,7 @@ public sealed partial class AssistantCoordinator(
         var previousSessions = await chats.ListSessionsAsync(mode, cancellationToken: cancellationToken).ConfigureAwait(false);
         var deletedCount = await chats.DeleteSessionsAsync(mode, cancellationToken).ConfigureAwait(false);
         if (deletedCount > 0)
-            await CleanupDeletedCodingChangesAsync(previousSessions.Select(static session => session.Id)).ConfigureAwait(false);
+            await CleanupDeletedCodingChangesAsync(previousSessions.Select(static session => session.Id), previousSessions).ConfigureAwait(false);
 
         await settings.UpdateAsync(current => mode switch
         {
@@ -1331,12 +1334,25 @@ public sealed partial class AssistantCoordinator(
         await emit("session.changed", await BuildSnapshotAsync(cancellationToken), requestId);
     }
 
-    private async Task CleanupDeletedCodingChangesAsync(IEnumerable<Guid> candidateSessionIds)
+    private async Task CleanupDeletedCodingChangesAsync(IEnumerable<Guid> candidateSessionIds,
+        IEnumerable<ChatSession>? deletedSessions = null)
     {
         // Re-read after the committed deletion so only removed sessions lose
         // their workspace baselines and evidence bundles.
         var remaining = (await chats.ListSessionsAsync(cancellationToken: CancellationToken.None).ConfigureAwait(false))
             .Select(static session => session.Id).ToHashSet();
+        if (_cacheCleanup is not null && deletedSessions is not null)
+        {
+            try
+            {
+                await _cacheCleanup.DeleteSessionsAsync(deletedSessions.Where(session => !remaining.Contains(session.Id)),
+                    CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException)
+            {
+                System.Diagnostics.Trace.TraceWarning("Die Sitzung wurde gelöscht; die gezielte KV-Cache-Bereinigung konnte noch nicht abgeschlossen werden: {0}", exception.Message);
+            }
+        }
         foreach (var sessionId in candidateSessionIds.Where(id => !remaining.Contains(id)))
         {
             _displayStates.TryRemove(sessionId, out _);

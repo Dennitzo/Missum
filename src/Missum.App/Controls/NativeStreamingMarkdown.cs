@@ -161,7 +161,7 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
         if (!string.IsNullOrEmpty(specification.MathTokenPrefix))
         {
             section.MathText ??= new NativeMathParagraph();
-            section.MathText.FontSize = specification.HeadingLevel > 0 ? 24 - specification.HeadingLevel : BodyFontSize;
+            section.MathText.FontSize = SectionFontSize(specification.HeadingLevel);
             section.MathText.FontWeight = specification.HeadingLevel > 0
                 ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal;
             section.MathText.UpdateTokenizedText(specification.Text, specification.MathTokenPrefix);
@@ -170,7 +170,8 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
         }
         section.MathText = null;
         section.Element = section.Text;
-        section.Text.FontSize = specification.HeadingLevel > 0 ? 24 - specification.HeadingLevel : BodyFontSize;
+        section.Text.FontSize = SectionFontSize(specification.HeadingLevel);
+        section.Text.LineHeight = section.Text.FontSize * 26 / BodyFontSize;
         section.Text.FontWeight = specification.HeadingLevel > 0
             ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal;
         var pieces = ParseInlines(specification.Text);
@@ -217,7 +218,7 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
         var result = new List<SectionSpec>();
         var pending = new StringBuilder();
         var tokenPrefix = MathTokenPrefix(text);
-        foreach (var segment in NativeMathSyntax.Split(text))
+        foreach (var segment in NativeMathSyntax.SplitForRendering(text))
         {
             if (segment.IsMath && segment.Display)
             {
@@ -274,11 +275,11 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
                 lineIndex = nextLine - 1;
                 continue;
             }
-            var heading = HeadingPattern().Match(line);
-            var source = heading.Success ? heading.Groups[2].Value : BulletPattern().Replace(line, "•  ");
+            var isHeading = TryParseHeading(line, out var headingLevel, out var headingText);
+            var source = isHeading ? headingText : BulletPattern().Replace(line, "•  ");
             // Only the global parser may recognize formulas. Re-parsing the raw line here
             // would turn examples inside multiline code or unfinished display math into TeX.
-            result.Add(new SectionSpec(SectionKind.Paragraph, source, heading.Success ? heading.Groups[1].Length : 0, string.Empty,
+            result.Add(new SectionSpec(SectionKind.Paragraph, source, headingLevel, string.Empty,
                 source.Contains(tokenPrefix, StringComparison.Ordinal) ? tokenPrefix : string.Empty));
         }
         // An opening fence is sufficient: live code must be visible before the closing fence arrives.
@@ -367,7 +368,7 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
     {
         var prefix = MathTokenPrefix(text);
         var source = new StringBuilder();
-        foreach (var segment in NativeMathSyntax.Split(text))
+        foreach (var segment in NativeMathSyntax.SplitForRendering(text))
             source.Append(segment.IsMath ? EncodeMathToken(segment, prefix) : segment.Text);
         return (source.ToString(), prefix);
     }
@@ -379,8 +380,10 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
         return prefix;
     }
 
-    private static string EncodeMathToken(MathSegment segment, string prefix) => prefix + (segment.Display ? "D" : "I")
-        + Convert.ToBase64String(Encoding.UTF8.GetBytes(segment.Text)) + "\uE001";
+    private static string EncodeMathToken(MathSegment segment, string prefix) => segment.RenderLatex is { } renderLatex
+        ? prefix + "L" + Convert.ToBase64String(Encoding.UTF8.GetBytes(segment.Text)) + ":"
+            + Convert.ToBase64String(Encoding.UTF8.GetBytes(renderLatex)) + "\uE001"
+        : prefix + (segment.Display ? "D" : "I") + Convert.ToBase64String(Encoding.UTF8.GetBytes(segment.Text)) + "\uE001";
 
     internal static IReadOnlyList<MathInlineSpec> ParseMathInlines(string source, string tokenPrefix)
     {
@@ -401,7 +404,7 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
                 }
                 if (start > offset) result.Add(new(piece.Text[offset..start], false, false, piece.Kind, piece.Uri));
                 var payload = piece.Text[(start + tokenPrefix.Length)..end];
-                if (payload.Length < 2 || payload[0] is not ('I' or 'D'))
+                if (payload.Length < 2 || payload[0] is not ('I' or 'D' or 'L'))
                 {
                     result.Add(new(piece.Text[start..(end + 1)], false, false, piece.Kind, piece.Uri));
                     offset = end + 1;
@@ -409,8 +412,19 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
                 }
                 try
                 {
-                    var latex = Encoding.UTF8.GetString(Convert.FromBase64String(payload[1..]));
-                    result.Add(new(latex, true, payload[0] == 'D', piece.Kind, piece.Uri));
+                    if (payload[0] == 'L')
+                    {
+                        var separator = payload.IndexOf(':');
+                        if (separator < 2 || separator == payload.Length - 1) throw new FormatException("Incomplete legacy math token.");
+                        var original = Encoding.UTF8.GetString(Convert.FromBase64String(payload[1..separator]));
+                        var renderLatex = Encoding.UTF8.GetString(Convert.FromBase64String(payload[(separator + 1)..]));
+                        result.Add(new(original, true, false, piece.Kind, piece.Uri, renderLatex));
+                    }
+                    else
+                    {
+                        var latex = Encoding.UTF8.GetString(Convert.FromBase64String(payload[1..]));
+                        result.Add(new(latex, true, payload[0] == 'D', piece.Kind, piece.Uri));
+                    }
                 }
                 catch (FormatException)
                 {
@@ -442,8 +456,29 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
 
     private static SolidColorBrush Gray(byte value) => new(Color.FromArgb(255, value, value, value));
 
-    [GeneratedRegex(@"^(#{1,6})\s+(.+)$", RegexOptions.CultureInvariant)]
+    internal static double SectionFontSize(int headingLevel) => headingLevel switch
+    {
+        1 => BodyFontSize + 8, 2 => BodyFontSize + 6, 3 => BodyFontSize + 4,
+        4 => BodyFontSize + 2, 5 => BodyFontSize + 1, _ => BodyFontSize,
+    };
+
+    internal static bool TryParseHeading(string line, out int level, out string content)
+    {
+        var match = HeadingPattern().Match(line);
+        level = match.Success ? match.Groups["marker"].Length : 0;
+        content = match.Success ? HeadingClosingPattern().Replace(match.Groups["content"].Value, "").TrimEnd(' ', '\t') : line;
+        return match.Success;
+    }
+
+    // Model reasoning often indents its scientific draft by four spaces.
+    // Fenced/inline code is already protected; indentation alone does not turn
+    // text into a code block in this renderer. Recognize headings there too.
+    // Horizontal whitespace keeps each streamed line an independent boundary.
+    [GeneratedRegex(@"^[ \t]*(?<marker>#{1,6})(?:[ \t]+(?<content>.*)|)$", RegexOptions.CultureInvariant)]
     private static partial Regex HeadingPattern();
+
+    [GeneratedRegex(@"(?:^#+[ \t]*$|[ \t]+#+[ \t]*$)", RegexOptions.CultureInvariant)]
+    private static partial Regex HeadingClosingPattern();
 
     [GeneratedRegex(@"^\s*[-*]\s+", RegexOptions.CultureInvariant)]
     private static partial Regex BulletPattern();
@@ -456,7 +491,7 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
 
     internal enum SectionKind { Paragraph, Code, Math, Table }
     internal enum InlineKind { Plain, Bold, Code, Link }
-    internal readonly record struct MathInlineSpec(string Text, bool IsMath, bool Display, InlineKind Kind, Uri? Uri);
+    internal readonly record struct MathInlineSpec(string Text, bool IsMath, bool Display, InlineKind Kind, Uri? Uri, string? RenderLatex = null);
     internal readonly record struct SectionSpec(SectionKind Kind, string Text, int HeadingLevel, string Language, string MathTokenPrefix = "");
     internal readonly record struct TableSpec(IReadOnlyList<string> Headers, IReadOnlyList<TextAlignment> Alignments,
         IReadOnlyList<IReadOnlyList<string>> Rows, string Markdown);

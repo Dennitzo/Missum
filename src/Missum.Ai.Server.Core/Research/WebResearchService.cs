@@ -146,9 +146,10 @@ public sealed partial class WebResearchService : IDisposable
                     GetString(raw, "img_src") ?? GetString(raw, "thumbnail_src") ?? GetString(raw, "thumbnail")));
             }
         }
-        // Bing sometimes broadens multiword/site queries. Preserve it as an
-        // additional source, but prefer the more exact CSE/specialist hits.
-        results = results.OrderBy(result => result.Source == "bing" ? 1 : 0).Take(maximum).ToList();
+        // Engines can broaden a scientific query to a shared name (for example
+        // the Planck satellite). Prefer concrete query coverage before limiting
+        // results, retaining original titles, sources and weaker alternatives.
+        results = RankSearchResults(query, results, maximum);
 
         var failures = ReadEngineFailures(document.RootElement);
         foreach (var failure in failures)

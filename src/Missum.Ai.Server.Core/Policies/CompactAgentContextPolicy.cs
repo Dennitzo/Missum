@@ -127,6 +127,13 @@ public static class CompactAgentContextPolicy
         Ergebnis, mit Regeln/Gültigkeit in Prosa; fehlende Schritte benennen. Einheiten in numerischen Schritten
         mitführen, Dimensionen symbolischer Beziehungen erklären; Symbole/Einheiten in kurzen Listen, nicht Tabellen.
         SI verwenden oder natürliche Einheiten/Rückumrechnung erklären; Faktoren, Vorzeichen, Konventionen konsistent.
+        Geometrie, Radius-/Flächenkonventionen und Geltungsbereich vor dimensionsabhängigen Herleitungen festlegen.
+        Die betroffene Beziehung passend zur Aussage symbolisch, durch Rücksubstitution oder Dimensionsvergleich prüfen;
+        SI und natürliche Einheiten müssen nach Rückumrechnung übereinstimmen. ProcessSucceeded bestätigt nur die
+        Ausführung, keine fachliche Richtigkeit. Bekannte externe Formeln und relevante Literaturbehauptungen gezielt mit
+        abrufbarer Originalquelle abgleichen; vorhandene passende Belege wiederverwenden, Unbelegtes als ungeprüft markieren.
+        Erkennbare widersprüchliche Faktoren, Einheiten oder Ergebnisse vor dem fachlichen Abschluss auflösen; PDF-Erstellung
+        und research.deliverables.verify ersetzen diese Prüfung nicht. Keine pauschale Wahrheitsgarantie.
         Abschnittsdaten dürfen units:[{symbol,meaning,unit}] und figureCaptions:[{experimentId,artifactPath,caption}]
         enthalten. Abbildung nur mit echtem experimentRecordId und Pfad aus outputHashes, fachlicher Caption mit
         Achsen/Einheiten; neue Rechnung erzeugt neuen Beleg. Quellen und Ergebnisse niemals erfinden.

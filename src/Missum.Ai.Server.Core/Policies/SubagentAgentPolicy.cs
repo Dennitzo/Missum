@@ -27,6 +27,9 @@ public static class SubagentAgentPolicy
         Schreibpfade und überprüfbare Abnahmekriterien fest. Beginne den task-Text mit einer prägnanten Titelzeile
         aus höchstens ungefähr acht Wörtern; beschreibe die konkrete Aufgabe nach einem Zeilenumbruch.
         Benenne im Auftrag auch, welche anderen Teile du selbst gleichzeitig bearbeitest.
+        Halte diese erste Zuweisung klein: Wähle eine unabhängige Teilfrage und starte sie, ohne vorher
+        die gesamte Theorie oder das Manuskript auszuarbeiten. Eine kurze sichtbare Einleitung darf den
+        Aufruf begleiten. Die fachliche Ausarbeitung erfolgt danach parallel und wird früh gespeichert.
         Teile die Quellenrecherche nach unabhängigen Fragen oder Quellenbereichen auf; bei einer geeigneten
         numerischen Teilaufgabe kann der Subagent diese übernehmen, während du die Quellen und Herleitung
         bearbeitest. Delegiere niemals bloß den gesamten Auftrag und führe dieselbe Teilaufgabe nicht parallel aus.
