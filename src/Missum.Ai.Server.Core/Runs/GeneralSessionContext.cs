@@ -5,7 +5,7 @@ using System.Text.Json;
 namespace Missum.Ai.Server.Core.Runs;
 
 internal sealed record GeneralSessionContextSnapshot(AgentRunCheckpoint Checkpoint, RunRequest Request, string VisibleResponse,
-    bool WasInterrupted = false);
+    bool WasInterrupted = false, string? SourceRunId = null);
 
 internal static class GeneralSessionContext
 {
@@ -28,10 +28,7 @@ internal static class GeneralSessionContext
         // Stop during reasoning can leave no visible assistant message at all.
         // Do not invent one, and never recover hidden history over a user edit.
         var hasResponse = !string.IsNullOrWhiteSpace(previous.VisibleResponse);
-        if (current.Length != historical.Length + (hasResponse ? 2 : 1) || current[^1].Role != "user"
-            || (hasResponse && (current[^2].Role != "assistant" || current[^2].Content != previous.VisibleResponse))) return false;
-        for (var index = 0; index < historical.Length; index++)
-            if (historical[index].Role != current[index].Role || historical[index].Content != current[index].Content) return false;
+        if (!MatchesVisibleHistory(previous, historical, current, hasResponse)) return false;
 
         var saved = previous.Checkpoint.Messages;
         if (saved.Count == 0 || (!previous.WasInterrupted
@@ -58,6 +55,34 @@ internal static class GeneralSessionContext
                 continued.Add(new LmChatMessage("tool", "{\"status\":\"interrupted\",\"outcomeUnknown\":true,\"message\":\"Historischer Aufruf ohne gespeichertes Ergebnis; Zustand prüfen, nicht automatisch erneut ausführen.\"}", ToolCallId: id));
             pending.Clear();
         }
+    }
+
+    private static bool MatchesVisibleHistory(GeneralSessionContextSnapshot previous,
+        LmChatMessage[] historical, LmChatMessage[] current, bool hasResponse)
+    {
+        if (current.Length == historical.Length + (hasResponse ? 2 : 1)
+            && current[^1].Role == "user"
+            && (!hasResponse || current[^2].Role == "assistant" && current[^2].Content == previous.VisibleResponse))
+            return historical.Select((message, index) => message.Role == current[index].Role
+                && message.Content == current[index].Content).All(static same => same);
+
+        // Repeated "Fortsetzen" keeps one visible assistant anchor and one
+        // unchanged continuation instruction. Its published text grows inside
+        // that anchor; it does not add two visible conversation messages.
+        if (!previous.WasInterrupted || historical.Length < 2 || current.Length != historical.Length
+            || historical[^1].Role != "user" || current[^1].Role != "user"
+            || historical[^1].Content != current[^1].Content
+            || historical[^2].Role != "assistant" || current[^2].Role != "assistant") return false;
+        for (var index = 0; index < historical.Length - 2; index++)
+            if (historical[index].Role != current[index].Role || historical[index].Content != current[index].Content) return false;
+
+        var retained = historical[^2].Content ?? string.Empty;
+        if (!hasResponse) return current[^2].Content == retained;
+        // Both exact transport concatenation and the client's two-newline
+        // separator are known renderings. Never accept arbitrary prefix edits.
+        return current[^2].Content == retained + previous.VisibleResponse
+            || retained.Length > 0 && !retained.EndsWith("\n\n", StringComparison.Ordinal)
+                && current[^2].Content == retained + "\n\n" + previous.VisibleResponse;
     }
 
     private static bool SameScope(RunRequest previous, RunRequest current) =>

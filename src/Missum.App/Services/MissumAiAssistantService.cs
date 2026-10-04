@@ -1584,6 +1584,12 @@ public sealed partial class MissumAiAssistantService(
 
         async Task SaveSubagentAsync(SubagentChatState child)
         {
+            if (subagentStates.TryGetValue(child.AgentId, out var observed))
+            {
+                if (observed.RunId != child.RunId && (observed.PreviousRunIds ?? []).Contains(child.RunId, StringComparer.Ordinal)) return;
+                child = child with { ProjectionRevision = Math.Max(child.ProjectionRevision, observed.ProjectionRevision) + 1 };
+            }
+            else child = child with { ProjectionRevision = child.ProjectionRevision + 1 };
             subagentStates[child.AgentId] = child;
             var previous = assistant.ToolSteps?.FirstOrDefault(step => step.Id == child.ReceiptId);
             var now = NextToolStepUpdate(previous);
@@ -1601,6 +1607,7 @@ public sealed partial class MissumAiAssistantService(
         async Task RecordSubagentToolResultAsync(string agentId, ToolProposal proposal, ClientToolResult result, CodingCommandProgress? progress = null)
         {
             var child = subagentStates[agentId];
+            if (child.RunId != proposal.RunId) return;
             var now = DateTimeOffset.UtcNow;
             var old = child.AssistantMessage.ToolSteps?.FirstOrDefault(step => step.Id == proposal.ProposalId);
             var message = SubagentChatState.AddStep(child.AssistantMessage, new(proposal.ProposalId, proposal.Name,
@@ -1829,23 +1836,36 @@ public sealed partial class MissumAiAssistantService(
                     case RunEventTypes.SubagentCompleted:
                         var childInfo = item.Data.Deserialize<SubagentRunEvent>(JsonOptions)
                             ?? throw new InvalidDataException("Ungültiger Subagent-Status.");
+                        if (subagentStates.TryGetValue(childInfo.AgentId, out var knownChild)
+                            && knownChild.RunId != childInfo.RunId
+                            && (knownChild.PreviousRunIds ?? []).Contains(childInfo.RunId, StringComparer.Ordinal)) break;
                         if (childInfo.ParentRunId != localRun.ServerRunId) throw new InvalidDataException("Der Subagent gehört nicht zu diesem Lauf.");
                         if (!subagentStates.TryGetValue(childInfo.AgentId, out var lifecycleChild))
                             lifecycleChild = SubagentChatState.Create(childInfo, assistant.SessionId, item.CreatedAt);
-                        var childStatus = SubagentChatState.StateName(childInfo.State);
-                        lifecycleChild = lifecycleChild with { Status = childStatus, Model = childInfo.ModelId };
-                        if (!lifecycleChild.IsRunning)
-                            lifecycleChild = lifecycleChild with { AssistantMessage = SubagentChatState.Finish(lifecycleChild.AssistantMessage,
-                                childInfo.State == RunState.Completed ? MessageStatus.Completed : childInfo.State == RunState.Cancelled ? MessageStatus.Cancelled : MessageStatus.Failed, item.CreatedAt) };
-                        await SaveSubagentAsync(lifecycleChild).ConfigureAwait(false);
+                        var observedChild = lifecycleChild.ObserveLifecycle(childInfo, item.Id, item.CreatedAt,
+                            item.Type == RunEventTypes.SubagentStarted);
+                        if (!ReferenceEquals(observedChild, lifecycleChild)) await SaveSubagentAsync(observedChild).ConfigureAwait(false);
+                        break;
+                    case "subagent.continuationState":
+                        if (item.RunId != localRun.ServerRunId)
+                            throw new InvalidDataException("Der Subagenten-Fortsetzungsstand gehört nicht zu diesem Hauptlauf.");
+                        foreach (var priorChild in subagentStates.Values.ToArray())
+                        {
+                            var adoptedChild = priorChild.AdoptConsumer(item, localRun.ServerRunId!, assistant.SessionId);
+                            if (!ReferenceEquals(adoptedChild, priorChild)) await SaveSubagentAsync(adoptedChild).ConfigureAwait(false);
+                        }
                         break;
                     case "subagent.resultConsumed":
                         var deliveredAgent = StringProperty(item.Data, "agentId") ?? "";
+                        if (subagentStates.TryGetValue(deliveredAgent, out var retiredDelivery)
+                            && StringProperty(item.Data, "runId") is { } retiredDeliveryRun
+                            && retiredDelivery.RunId != retiredDeliveryRun
+                            && (retiredDelivery.PreviousRunIds ?? []).Contains(retiredDeliveryRun, StringComparer.Ordinal)) break;
                         if (item.RunId != localRun.ServerRunId
                             || StringProperty(item.Data, "parentRunId") is { Length: > 0 } consumedParent && consumedParent != localRun.ServerRunId
                             || !subagentStates.TryGetValue(deliveredAgent, out var deliveredChild)
                             || StringProperty(item.Data, "runId") != deliveredChild.RunId
-                            || deliveredChild.ParentRunId != localRun.ServerRunId || deliveredChild.SessionId != assistant.SessionId)
+                            || !deliveredChild.IsAuthorizedConsumer(localRun.ServerRunId!) || deliveredChild.SessionId != assistant.SessionId)
                             throw new InvalidDataException("Das Subagent-Ergebnis gehört nicht zum delegierten Lauf.");
                         var consumedChild = deliveredChild.MarkResultDelivered(item);
                         if (!ReferenceEquals(consumedChild, deliveredChild)) await SaveSubagentAsync(consumedChild).ConfigureAwait(false);
@@ -1859,6 +1879,10 @@ public sealed partial class MissumAiAssistantService(
                     case RunEventTypes.SubagentEvent:
                         var childEvent = item.Data.Deserialize<SubagentForwardedEvent>(JsonOptions)
                             ?? throw new InvalidDataException("Ungültiges Subagent-Ereignis.");
+                        if (subagentStates.TryGetValue(childEvent.AgentId, out var retiredChild)
+                            && retiredChild.RunId != childEvent.RunId
+                            && childEvent.Event.RunId == childEvent.RunId
+                            && (retiredChild.PreviousRunIds ?? []).Contains(childEvent.RunId, StringComparer.Ordinal)) break;
                         if (childEvent.ParentRunId != localRun.ServerRunId || childEvent.Event.RunId != childEvent.RunId
                             || !subagentStates.TryGetValue(childEvent.AgentId, out var childState) || childState.RunId != childEvent.RunId)
                             throw new InvalidDataException("Das Subagent-Ereignis gehört nicht zum delegierten Lauf.");
@@ -1868,7 +1892,8 @@ public sealed partial class MissumAiAssistantService(
                             await PersistSubagentResearchProgressAsync(localRun, item, childState, cancellationToken).ConfigureAwait(false);
                             if (isScienceRun && !usesScienceWorkingState) sciencePresentation?.Queue($"research-{localRun.SessionId:N}");
                         }
-                        await SaveSubagentAsync(childState.Apply(childItem)).ConfigureAwait(false);
+                        var appliedChild = childState.Apply(childItem);
+                        if (!ReferenceEquals(appliedChild, childState)) await SaveSubagentAsync(appliedChild).ConfigureAwait(false);
                         if (childItem.Type == RunEventTypes.ClientToolProposed)
                         {
                             var childProposal = childItem.Data.Deserialize<ToolProposal>(JsonOptions)
@@ -1884,6 +1909,7 @@ public sealed partial class MissumAiAssistantService(
                                         progress => { lastProgress = progress; return pump.PostAsync(async () =>
                                         {
                                             var current = subagentStates[childEvent.AgentId];
+                                            if (current.RunId != childProposal.RunId) return;
                                             var old = current.AssistantMessage.ToolSteps?.FirstOrDefault(step => step.Id == childProposal.ProposalId);
                                             var at = DateTimeOffset.UtcNow;
                                             await SaveSubagentAsync(current with { AssistantMessage = SubagentChatState.AddStep(current.AssistantMessage,
@@ -1907,6 +1933,7 @@ public sealed partial class MissumAiAssistantService(
                         {
                             var importedChild = await DownloadArtifactAsync(client, assistant.Id, childArtifact, childState.Model ?? "Subagent", childArtifact.StepId, cancellationToken).ConfigureAwait(false);
                             var currentChild = subagentStates[childEvent.AgentId];
+                            if (currentChild.RunId != childEvent.RunId) break;
                             await SaveSubagentAsync(currentChild with { Artifacts = (currentChild.Artifacts ?? []).Where(artifact => artifact.Id != importedChild.Id).Append(importedChild).ToArray() }).ConfigureAwait(false);
                         }
                         break;

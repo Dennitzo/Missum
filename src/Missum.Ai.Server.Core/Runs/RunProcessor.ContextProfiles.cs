@@ -87,7 +87,7 @@ public sealed partial class RunProcessor
     }
 
     internal static bool IsEarlyResearchContextRead(LmChatResult response, RunRequest request,
-        IReadOnlyList<AgentToolSpec> tools, AgentToolCatalog catalog)
+        IReadOnlyList<AgentToolSpec> tools, AgentToolCatalog catalog, IReadOnlyList<LmChatMessage>? messages = null)
     {
         if (response.ToolCalls.Count != 1 || response.ToolCalls[0] is not { Name: ClientToolNames.ResearchRead } read)
             return false;
@@ -95,9 +95,35 @@ public sealed partial class RunProcessor
         {
             catalog.Validate(catalog.Resolve(read.Name, tools), read.Arguments);
             return ScientificStateCompletionPolicy.Text(read.Arguments, "projectId") == ScientificStateCompletionPolicy.ProjectId(request)
-                && ScientificStateCompletionPolicy.Text(read.Arguments, "view") is "overview" or "objects" or "task";
+                && ScientificStateCompletionPolicy.Text(read.Arguments, "view") is "overview" or "objects" or "task"
+                && (messages is null || !HasCompletedResearchRead(messages, read));
         }
         catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or JsonException)
         { return false; }
+    }
+
+    private static bool HasCompletedResearchRead(IReadOnlyList<LmChatMessage> messages, LmToolCall read)
+    {
+        var pending = new Dictionary<string, (bool MatchingRead, bool Update)>(StringComparer.Ordinal);
+        var loaded = false;
+        foreach (var message in messages)
+        {
+            if (message.Role == "assistant")
+                foreach (var call in message.ToolCalls ?? [])
+                    if (call.Name is ClientToolNames.ResearchRead or ClientToolNames.ResearchUpdate)
+                        pending[call.Id] = (call.Name == ClientToolNames.ResearchRead && JsonElement.DeepEquals(call.Arguments, read.Arguments),
+                            call.Name == ClientToolNames.ResearchUpdate);
+            if (message.Role == "tool" && message.ToolCallId is { } id && pending.Remove(id, out var operation)
+                && ScientificStateCompletionPolicy.TryReceipt(message.Content, out var result, out var completed)
+                && completed
+                && ScientificStateCompletionPolicy.Text(result, "projectId") == ScientificStateCompletionPolicy.Text(read.Arguments, "projectId"))
+            {
+                if (operation.MatchingRead) loaded = true;
+                if (operation.Update && (ScientificStateCompletionPolicy.Boolean(result, "publicationChanged")
+                    || result.TryGetProperty("changedIds", out var changes) && changes.ValueKind == JsonValueKind.Array && changes.GetArrayLength() > 0))
+                    loaded = false; // Accepted state changes make an earlier read stale.
+            }
+        }
+        return loaded;
     }
 }

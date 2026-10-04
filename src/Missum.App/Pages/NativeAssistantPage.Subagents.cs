@@ -24,6 +24,8 @@ public sealed partial class NativeAssistantPage
     private readonly Dictionary<int, NativeSubagentAvatar> _subagentSummaryAvatars = [];
     private SubagentPlanetIdentityStore? _subagentPlanetIdentities;
     private SubagentPlanetIdentityStore PlanetIdentities => _subagentPlanetIdentities ??= new(App.Current.DataDirectory);
+    private SubagentTabStateStore? _subagentTabStates;
+    private SubagentTabStateStore SubagentTabStates => _subagentTabStates ??= new(App.Current.DataDirectory);
 
     // Coordinator events always update _messages, the parent transcript. A tab is
     // a projection, so a child delta cannot replace or navigate its parent's run.
@@ -84,6 +86,9 @@ public sealed partial class NativeAssistantPage
         PlanetIdentities.EnsureAssigned(projectedChildren.Select(child => S(child, "agentId", S(child, "runId")))
             .Where(id => id.Length > 0));
         foreach (var child in projectedChildren) ObserveSubagentSnapshot(child);
+        if (sessionChanged)
+            foreach (var historical in _subagents.Values.Where(child => child.SessionId == _session && !child.IsRunning))
+                historical.TabOpen = false;
         if (snapshot.TryGetProperty("subagents", out var children) && children.ValueKind == JsonValueKind.Array)
         {
             var knownIds = children.EnumerateArray().Select(child => S(child, "agentId", S(child, "runId"))).ToHashSet(StringComparer.Ordinal);
@@ -105,26 +110,49 @@ public sealed partial class NativeAssistantPage
         var agentId = S(snapshot, "agentId", S(snapshot, "runId"));
         if (agentId.Length == 0) return;
         var owner = Guid.TryParse(S(snapshot, "sessionId"), out var session) ? session : _session;
+        var status = S(snapshot, "status", S(snapshot, "isRunning") == "True" ? "running" : "unknown");
+        var isRunning = SubagentChatState.HasActiveRun(status, S(snapshot, "isRunning") == "True");
+        var runId = S(snapshot, "runId");
+        var created = SubagentCreatedAt(snapshot);
+        _ = long.TryParse(S(snapshot, "projectionRevision"), out var projectionRevision);
         if (!_subagents.TryGetValue(agentId, out var child))
         {
             _subagents[agentId] = child = CreateSubagentTab(agentId, owner);
             child.ObservationOrder = ++_subagentObservationOrder;
+            child.IsRunning = isRunning;
+            // The history is available through the overview; restoring a session
+            // must not open one tab for every terminal child in that history.
+            child.TabOpen = SubagentChatState.OpenTabOnFirstObservation(status, isRunning,
+                SubagentTabStates.WasManuallyClosed(owner, agentId));
         }
+        else
+        {
+            var previousRunId = S(child.Snapshot, "runId");
+            if (!SubagentChatState.AcceptSnapshot(previousRunId, child.CreatedAt, child.ProjectionRevision,
+                child.PreviousRunIds, runId, created, projectionRevision)) return;
+            if (previousRunId.Length > 0 && previousRunId != runId)
+            {
+                child.PreviousRunIds.Add(previousRunId);
+                child.ObservationOrder = ++_subagentObservationOrder;
+                child.ContextUsed = child.ContextLimit = 0;
+                if (isRunning && !SubagentTabStates.WasManuallyClosed(owner, agentId)) child.TabOpen = true;
+            }
+        }
+        foreach (var previousRun in Items(snapshot, "previousRunIds"))
+            if (previousRun.ValueKind == JsonValueKind.String && previousRun.GetString() is { Length: > 0 } previousRunId)
+                child.PreviousRunIds.Add(previousRunId);
+        child.ProjectionRevision = projectionRevision;
         child.Snapshot = snapshot.Clone();
         child.SessionId = owner;
         child.Title = SubagentChatState.TaskTitle(S(snapshot, "title", "Subagent"));
-        child.Status = S(snapshot, "status", "running");
-        child.IsRunning = child.Status is not ("completed" or "failed" or "denied" or "cancelled"
-            or "interrupted" or "disabled" or "unavailable")
-            && (S(snapshot, "isRunning") == "True"
-                || child.Status is "running" or "pending" or "queued" or "waiting" or "waitingForClient");
+        child.Status = status;
+        child.IsRunning = isRunning;
         if (double.TryParse(S(snapshot, "contextUsed"), out var used)) child.ContextUsed = used;
         if (double.TryParse(S(snapshot, "contextLimit"), out var limit)) child.ContextLimit = limit;
         child.Messages.Clear();
         foreach (var message in Items(snapshot, "messages")) child.Messages[S(message, "id")] = message.Clone();
         // DTOs without a top-level creation time retain the assigned user
         // message's timestamp. Token and completion updates never change recency.
-        var created = SubagentCreatedAt(snapshot);
         if (created is not null) child.CreatedAt = created;
         ObserveThinkingProgress(snapshot);
         RefreshSubagentLifecycleRows(child);
@@ -156,6 +184,7 @@ public sealed partial class NativeAssistantPage
         close.Click += (_, _) =>
         {
             child.TabOpen = false;
+            SubagentTabStates.Close(child.SessionId, child.AgentId);
             if (_activeSubagentId == child.AgentId) ShowParentConversation();
             RenderSessionTabs();
         };
@@ -176,7 +205,7 @@ public sealed partial class NativeAssistantPage
 
     private static bool IsAcceptedSubagentManagementStep(JsonElement step, IReadOnlyList<JsonElement> receipts)
     {
-        if (S(step, "tool") is not ("subagent.spawn" or "subagent.wait")
+        if (S(step, "tool") is not ("subagent.spawn" or "subagent.wait" or "subagent.resume")
             || S(step, "status") is "failed" or "denied" or "cancelled" or "interrupted") return false;
         var output = ToolStepView.ReadMetadata(S(step, "outputJson"));
         var input = ToolStepView.ReadMetadata(S(step, "inputJson"));
@@ -207,6 +236,7 @@ public sealed partial class NativeAssistantPage
         private readonly Func<string, int> _planetIndexFor;
         internal event Func<string, Task>? SubagentRequested;
         internal string AgentId { get; private set; } = "";
+        private string _runId = "";
         internal Task? NavigationTask { get; private set; }
         internal long InvocationCount { get; private set; }
         internal TextBlock TaskLabel { get; } = new() { FontSize = 14, TextTrimming = TextTrimming.CharacterEllipsis,
@@ -260,6 +290,7 @@ public sealed partial class NativeAssistantPage
                 _appearanceChosen = true;
             }
             AgentId = S(output, "agentId", S(input, "agentId", S(step, "agentId")));
+            _runId = S(output, "runId", S(input, "runId"));
             _task = S(input, "task", S(step, "detail", S(output, "title")));
             if (child is not null) { UpdateState(child); return; }
             UpdateLabels(S(output, "title", _task), canOpen: false);
@@ -268,7 +299,14 @@ public sealed partial class NativeAssistantPage
         internal void UpdateState(NativeSubagentState child)
         {
             AgentId = child.AgentId;
-            var assigned = child.Messages.Values.FirstOrDefault(message => S(message, "role") == "user");
+            if (_runId.Length > 0 && _runId != S(child.Snapshot, "runId"))
+            {
+                // Historical lifecycle cards keep their original task/attempt;
+                // their tab still exposes that attempt's retained transcript.
+                UpdateLabels(TaskLabel.Text.Length > 0 ? TaskLabel.Text : _task, canOpen: true);
+                return;
+            }
+            var assigned = child.Messages.Values.LastOrDefault(message => S(message, "role") == "user");
             _task = S(assigned, "content", _task);
             UpdateLabels(child.Title, canOpen: true);
         }
@@ -404,7 +442,7 @@ public sealed partial class NativeAssistantPage
 
     private static DateTimeOffset? SubagentCreatedAt(JsonElement snapshot)
     {
-        if (DateTimeOffset.TryParse(S(snapshot, "createdAt", S(snapshot, "startedAt")), out var time)) return time;
+        if (DateTimeOffset.TryParse(S(snapshot, "attemptStartedAt", S(snapshot, "createdAt", S(snapshot, "startedAt"))), out var time)) return time;
         var assigned = Items(snapshot, "messages").FirstOrDefault(message => S(message, "role") == "user");
         return DateTimeOffset.TryParse(S(assigned, "createdAt"), out time) ? time : null;
     }
@@ -429,7 +467,7 @@ public sealed partial class NativeAssistantPage
         if (ActiveSubagent is null)
         { _parentComposerDraft = Composer.Text; _parentComposerPlaceholder = Composer.PlaceholderText; _draftTimer.Stop(); }
         ShowChatView();
-        child.TabOpen = true; _activeSubagentId = child.AgentId;
+        child.TabOpen = true; SubagentTabStates.Open(child.SessionId, child.AgentId); _activeSubagentId = child.AgentId;
         _rendering = true; Composer.Text = ""; Composer.PlaceholderText = "Aufgabe vom Hauptagenten"; _rendering = false;
         RefreshConversationTab();
     }
@@ -475,8 +513,10 @@ public sealed partial class NativeAssistantPage
         internal string Status { get; set; } = "running";
         internal DateTimeOffset? CreatedAt { get; set; }
         internal long ObservationOrder { get; set; }
+        internal long ProjectionRevision { get; set; }
+        internal HashSet<string> PreviousRunIds { get; } = new(StringComparer.Ordinal);
         internal bool IsRunning { get; set; } = true;
-        internal bool TabOpen { get; set; } = true;
+        internal bool TabOpen { get; set; }
         internal double ContextUsed { get; set; }
         internal double ContextLimit { get; set; }
         internal JsonElement Snapshot { get; set; }

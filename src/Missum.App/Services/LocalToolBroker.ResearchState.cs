@@ -26,7 +26,12 @@ public sealed partial class LocalToolBroker
             if (proposal.Arguments.TryGetProperty("view", out _))
             {
                 var snapshot = await stateRepository.LoadWorkingReadSnapshotAsync(projectId, token).ConfigureAwait(false);
-                var projection = ResearchReadProjection.Create(snapshot, proposal.Arguments);
+                ResearchReadPathScope? paths = null;
+                if (researchSandbox is not null
+                    && await ResolveWorkspaceRootAsync(sessionId, session.CodingWorkspacePath, token).ConfigureAwait(false) is { } workspaceRoot)
+                    paths = ResearchReadPathScope.From(workspaceRoot,
+                        await researchSandbox.EnsureProjectAsync(projectId, token).ConfigureAwait(false));
+                var projection = ResearchReadProjection.Create(snapshot, proposal.Arguments, paths);
                 var success = StateBool(projection, "success");
                 return Result(proposal, success ? "completed" : "failed", projection,
                     success ? null : StateText(projection, "errorCode"), success ? null : StateText(projection, "message"));

@@ -13,11 +13,12 @@ internal static class ResearchReadProjection
     private static readonly string[] ReferenceFields =
         ["sourceIds", "claimIds", "experimentIds", "checkIds", "evidenceIds", "hypothesisIds", "requirementIds", "contributionIds"];
 
-    internal static string Stamp(ResearchWorkingReadSnapshot snapshot)
+    internal static string Stamp(ResearchWorkingReadSnapshot snapshot, ResearchReadPathScope? paths = null)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         Append(new { snapshot.Project.Id, snapshot.Project.SessionId, snapshot.Project.OriginalQuestion,
             snapshot.State.Revision, snapshot.State.PublicationRevision, snapshot.State.Title });
+        if (paths is not null) Append(paths);
         foreach (var item in snapshot.State.Items.OrderBy(item => item.Id, StringComparer.Ordinal)) Append(item);
         foreach (var item in snapshot.Sources.OrderBy(item => item.WorkId, StringComparer.Ordinal)) Append(item);
         foreach (var item in snapshot.Evidence.OrderBy(item => item.Id, StringComparer.Ordinal)) Append(item);
@@ -32,14 +33,14 @@ internal static class ResearchReadProjection
         }
     }
 
-    internal static JsonElement Create(ResearchWorkingReadSnapshot snapshot, JsonElement arguments)
+    internal static JsonElement Create(ResearchWorkingReadSnapshot snapshot, JsonElement arguments, ResearchReadPathScope? paths = null)
     {
         var view = Text(arguments, "view") ?? "overview";
         var ids = arguments.TryGetProperty("ids", out var requested)
             ? requested.EnumerateArray().Select(value => value.GetString()!).ToHashSet(StringComparer.Ordinal) : [];
         var limit = arguments.TryGetProperty("limit", out var count) ? count.GetInt32() : 16;
         var cursor = Text(arguments, "cursor");
-        var stamp = Stamp(snapshot);
+        var stamp = Stamp(snapshot, paths);
         var projectId = snapshot.Project.Id;
         var state = snapshot.State;
         var filterHash = Convert.ToHexStringLower(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(ids.Order(StringComparer.Ordinal), JsonOptions)));
@@ -130,6 +131,7 @@ internal static class ResearchReadProjection
         {
             success = true, projectId, protocol = "section-delta-v1", view, stateStamp = stamp, unchanged = false,
             state.Revision, state.PublicationRevision, state.Title,
+            paths = view == "overview" ? paths : null,
             items = selected, totalItems = all.Length, nextCursor = Next(offset + selected.Length, all.Length),
             task = view == "overview" ? new
             {
@@ -184,4 +186,14 @@ internal static class ResearchReadProjection
     }
 
     private sealed record ResearchCursor(int Version, string ProjectId, string View, string FilterHash, string StateStamp, int Offset);
+}
+
+internal sealed record ResearchReadPathScope(string WorkspaceRoot, string ProjectRoot, string WorkRoot, string CodingWorkPrefix)
+{
+    public string ResearchCodePaths { get; } = "research.code.write path sowie research.code.execute arguments[0] und workingDirectory sind relativ zu workRoot, ohne work/-Präfix; workingDirectory standardmäßig .";
+    public string CodingPaths { get; } = "coding.read/list/search verwenden workspaceRoot; für Forschungsdateien codingWorkPrefix + Dateiname verwenden.";
+
+    internal static ResearchReadPathScope From(string workspaceRoot, ResearchSandboxLayout layout) =>
+        new(Path.GetFullPath(workspaceRoot), layout.RootPath, layout.WorkPath,
+            Path.GetRelativePath(workspaceRoot, layout.WorkPath).Replace('\\', '/') + "/");
 }

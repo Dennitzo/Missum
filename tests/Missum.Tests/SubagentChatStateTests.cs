@@ -16,6 +16,96 @@ public sealed class SubagentChatStateTests
     private static readonly DateTimeOffset Start = new(2026, 10, 2, 12, 0, 0, TimeSpan.Zero);
     private static readonly JsonSerializerOptions ProtocolJson = MissumAiProtocol.CreateJsonOptions();
 
+    [Theory]
+    [InlineData("completed")]
+    [InlineData("Completed")]
+    [InlineData("failed")]
+    [InlineData("denied")]
+    [InlineData("cancelled")]
+    [InlineData("interrupted")]
+    [InlineData("disabled")]
+    [InlineData("unavailable")]
+    [InlineData("rejected")]
+    public void HistoricalTerminalSubagentsDoNotOpenTabsEvenWithAStaleRunningFlag(string status)
+    {
+        Assert.False(SubagentChatState.HasActiveRun(status, declaredRunning: true));
+        Assert.False(SubagentChatState.OpenTabOnFirstObservation(status, declaredRunning: true, manuallyClosed: false));
+    }
+
+    [Theory]
+    [InlineData("running")]
+    [InlineData("pending")]
+    [InlineData("queued")]
+    [InlineData("waiting")]
+    [InlineData("waitingForClient")]
+    public void OnlyActiveSubagentsAutomaticallyOpenUnlessTheirTabWasManuallyClosed(string status)
+    {
+        Assert.True(SubagentChatState.OpenTabOnFirstObservation(status, declaredRunning: false, manuallyClosed: false));
+        Assert.False(SubagentChatState.OpenTabOnFirstObservation(status, declaredRunning: true, manuallyClosed: true));
+    }
+
+    [Fact]
+    public void UnknownSubagentStatusesNeedExplicitRunEvidenceToAutomaticallyOpen()
+    {
+        Assert.False(SubagentChatState.OpenTabOnFirstObservation("unknown", declaredRunning: false, manuallyClosed: false));
+        Assert.True(SubagentChatState.OpenTabOnFirstObservation("unknown", declaredRunning: true, manuallyClosed: false));
+    }
+
+    [Fact]
+    public async Task ManualTabClosuresSurviveAReopenAndRemainScopedToTheirSessionAndProfile()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var session = Guid.NewGuid();
+        var store = new SubagentTabStateStore(environment.Directory);
+        Assert.False(store.WasManuallyClosed(session, "agent-1"));
+        store.Close(session, "agent-1");
+        Assert.True(store.WasManuallyClosed(session, "agent-1"));
+        Assert.False(store.WasManuallyClosed(Guid.NewGuid(), "agent-1"));
+        Assert.False(store.WasManuallyClosed(session, "agent-2"));
+        Assert.True(new SubagentTabStateStore(environment.Directory).WasManuallyClosed(session, "agent-1"));
+
+        // A different path has no in-memory cache; importing the saved file
+        // verifies the same disk restoration used after an application restart.
+        var reopenedDirectory = Path.Combine(environment.Directory, "reopened");
+        Directory.CreateDirectory(reopenedDirectory);
+        File.Copy(store.StoragePath, Path.Combine(reopenedDirectory, "SubagentTabs.json"));
+        var reopened = new SubagentTabStateStore(reopenedDirectory);
+        Assert.True(reopened.WasManuallyClosed(session, "agent-1"));
+        reopened.Open(session, "agent-1");
+        Assert.False(reopened.WasManuallyClosed(session, "agent-1"));
+        Assert.True(store.WasManuallyClosed(session, "agent-1"));
+        using var stored = JsonDocument.Parse(await File.ReadAllTextAsync(reopened.StoragePath));
+        Assert.Empty(stored.RootElement.GetProperty("closedTabs").EnumerateArray());
+    }
+
+    [Fact]
+    public async Task RepeatedManualTabClosureDoesNotWriteThePreferenceAgain()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var session = Guid.NewGuid();
+        var store = new SubagentTabStateStore(environment.Directory);
+        store.Close(session, "agent-1");
+        var marker = new DateTime(2020, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        File.SetLastWriteTimeUtc(store.StoragePath, marker);
+        store.Close(session, "agent-1");
+        Assert.Equal(marker, File.GetLastWriteTimeUtc(store.StoragePath));
+        Assert.Empty(Directory.GetFiles(environment.Directory, "SubagentTabs.json.*.tmp"));
+    }
+
+    [Fact]
+    public async Task MalformedStoredTabPreferencesDoNotPreventLoadingSubagentHistory()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        await File.WriteAllTextAsync(Path.Combine(environment.Directory, "SubagentTabs.json"), "{broken");
+        var session = Guid.NewGuid();
+        var store = new SubagentTabStateStore(environment.Directory);
+        Assert.False(store.WasManuallyClosed(session, "agent-1"));
+        store.Close(session, "agent-1");
+        Assert.True(store.WasManuallyClosed(session, "agent-1"));
+        using var stored = JsonDocument.Parse(await File.ReadAllTextAsync(store.StoragePath));
+        Assert.Equal(1, stored.RootElement.GetProperty("version").GetInt32());
+    }
+
     [Fact]
     public void AssignedTaskCreatesStableDistinctMessagesWithTheirParentSession()
     {
@@ -36,6 +126,108 @@ public sealed class SubagentChatStateTests
         Assert.Equal(child.AssistantMessage.Id, replay.AssistantMessage.Id);
         Assert.NotEqual(child.UserMessage.Id, child.AssistantMessage.Id);
         Assert.True(child.IsRunning);
+    }
+
+    [Theory]
+    [InlineData("cancelled", MessageStatus.Cancelled)]
+    [InlineData("interrupted", MessageStatus.Interrupted)]
+    public void ResumedAttemptKeepsItsHistoryButUsesANewStreamCursorAndLifecycleReceipts(string status, MessageStatus messageStatus)
+    {
+        var child = Child();
+        child = child.Apply(Event(child, 100, RunEventTypes.TextDelta, new TextDeltaEvent("Vorherige Herleitung.")));
+        child = child with
+        {
+            Status = status, AssistantMessage = child.AssistantMessage with { Status = messageStatus },
+            LifecycleEventId = 500, GeneratedTokens = 250, GenerationState = "generating", ContextUsed = 1200,
+            ResultDelivered = true,
+        };
+        var at = Start.AddMinutes(5);
+        var info = Info() with { RunId = "resumed-child-run", ParentRunId = "resumed-parent-run" };
+        var resumed = child.ObserveLifecycle(info, 1, at, started: true);
+
+        Assert.Equal(child.AgentId, resumed.AgentId);
+        Assert.Equal(info.RunId, resumed.RunId);
+        Assert.Equal(info.ParentRunId, resumed.ParentRunId);
+        Assert.Equal(child.Title, resumed.Title);
+        Assert.Equal(child.SessionId, resumed.SessionId);
+        Assert.Equal(0, resumed.LastEventId);
+        Assert.Equal(1, resumed.LifecycleEventId);
+        Assert.True(resumed.IsRunning);
+        Assert.False(resumed.ResultDelivered);
+        Assert.Null(resumed.GeneratedTokens);
+        Assert.Null(resumed.GenerationState);
+        Assert.Null(resumed.ContextUsed);
+        Assert.Empty(resumed.AssistantMessage.Content);
+        Assert.Equal(MessageStatus.Streaming, resumed.AssistantMessage.Status);
+        Assert.NotEqual(child.AssistantMessage.Id, resumed.AssistantMessage.Id);
+        Assert.NotEqual(child.ReceiptId, resumed.ReceiptId);
+        Assert.NotEqual(child.CompletionReceiptId, resumed.CompletionReceiptId);
+        Assert.Equal(new[] { child.RunId }, resumed.PreviousRunIds);
+        Assert.Equal(new[] { child.UserMessage, child.AssistantMessage }, resumed.PreviousMessages);
+
+        var streamed = resumed.Apply(new RunEvent(1, resumed.RunId, RunEventTypes.TextDelta, at.AddSeconds(1),
+            JsonSerializer.SerializeToElement(new TextDeltaEvent("Neue Prüfung."), ProtocolJson)));
+        Assert.Equal("Neue Prüfung.", streamed.AssistantMessage.Content);
+        Assert.Equal(1, streamed.LastEventId);
+        Assert.Same(streamed, streamed.Apply(Event(child, 1000, RunEventTypes.RunCancelled, new { })));
+    }
+
+    [Fact]
+    public void LateLifecycleEventsFromAPreviousAttemptCannotRollBackTheResumedAgent()
+    {
+        var child = Child() with { Status = "cancelled" };
+        var info = Info() with { RunId = "resumed-child-run", ParentRunId = "resumed-parent-run" };
+        var resumed = child.ObserveLifecycle(info, 1, Start.AddMinutes(1), started: true);
+        Assert.Same(resumed, resumed.ObserveLifecycle(Info() with { State = RunState.Cancelled }, 2000,
+            Start.AddMinutes(2), started: false));
+        Assert.Same(resumed, resumed.ObserveLifecycle(Info(), 2001, Start.AddMinutes(2), started: true));
+        Assert.Same(resumed, resumed.ObserveLifecycle(info with { State = RunState.Cancelled }, 1,
+            Start.AddMinutes(2), started: false));
+        Assert.Same(resumed, resumed.ObserveLifecycle(info with { ParentRunId = "foreign-parent", State = RunState.Cancelled },
+            2, Start.AddMinutes(2), started: false));
+
+        var completed = resumed.ObserveLifecycle(info with { State = RunState.Completed }, 2, Start.AddMinutes(2), started: false);
+        Assert.Equal(MessageStatus.Completed, completed.AssistantMessage.Status);
+        Assert.Equal("completed", completed.Status);
+        Assert.False(completed.IsRunning);
+    }
+
+    [Fact]
+    public void SnapshotGenerationAcceptsResumedRunsButRejectsOldRunsAndEarlierRevisions()
+    {
+        Assert.True(SubagentChatState.AcceptSnapshot("old-run", Start, 10, [], "new-run", Start.AddMinutes(1), 0));
+        Assert.False(SubagentChatState.AcceptSnapshot("new-run", Start.AddMinutes(1), 20, ["old-run"],
+            "old-run", Start.AddMinutes(2), 999));
+        Assert.False(SubagentChatState.AcceptSnapshot("new-run", Start.AddMinutes(1), 20, [], "old-run", Start, 999));
+        Assert.False(SubagentChatState.AcceptSnapshot("new-run", Start, 20, [], "new-run", Start, 19));
+        Assert.True(SubagentChatState.AcceptSnapshot("new-run", Start, 20, [], "new-run", Start, 20));
+        Assert.True(SubagentChatState.AcceptSnapshot("new-run", Start, 20, [], "new-run", Start, 21));
+        Assert.False(SubagentChatState.AcceptSnapshot("new-run", Start, 20, [], "", Start, 21));
+        Assert.True(SubagentChatState.AcceptSnapshot("", null, 0, [], "", null, 0));
+    }
+
+    [Fact]
+    public async Task AttemptHistoryRemainsLosslessInExternalStorageAndLegacyReceiptsKeepTheirIdentity()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var original = Child();
+        var content = new string('x', AssistantToolStep.MaximumStructuredJsonCharacters + 4096) + "\nVollständiges Ende.";
+        original = original with { Status = "cancelled", AssistantMessage = original.AssistantMessage with
+            { Content = content, Status = MessageStatus.Cancelled } };
+        var legacyId = "subagent:" + original.AgentId;
+        var legacy = Assert.Single(SubagentChatState.Read([original.AssistantMessage with
+            { ToolSteps = [Receipt(original, legacyId, JsonSerializer.Serialize(original, ProtocolJson))] }]));
+        Assert.Equal(legacyId, legacy.ReceiptId);
+        var resumed = legacy.ObserveLifecycle(Info() with { RunId = "new-run", ParentRunId = "new-parent" },
+            1, Start.AddMinutes(1), started: true);
+        Assert.NotEqual(legacyId, resumed.ReceiptId);
+        var json = await resumed.PersistAsync(environment.Directory);
+        var restored = Assert.Single(SubagentChatState.Read([resumed.AssistantMessage with
+            { ToolSteps = [Receipt(resumed, resumed.ReceiptId, json)] }], environment.Directory));
+        Assert.Equal(resumed.RunId, restored.RunId);
+        Assert.Equal(resumed.PreviousRunIds, restored.PreviousRunIds);
+        Assert.Equal(content, restored.PreviousMessages![1].Content);
+        Assert.Equal(original.AssistantMessage.Id, restored.PreviousMessages[1].Id);
     }
 
     [Theory]
@@ -145,6 +337,125 @@ public sealed class SubagentChatStateTests
         Assert.Same(child, child.MarkResultDelivered(receipt));
         Assert.False(child.ResultDelivered);
         Assert.Same(child, child.MarkResultDelivered(receipt with { RunId = "foreign-parent" }));
+    }
+
+    [Fact]
+    public void PreviousCompletedResultRequiresConfirmedGatewayAdoptionByTheCurrentMainRun()
+    {
+        var original = Child();
+        original = original.Apply(Event(original, 1, RunEventTypes.RunCompleted, new { }));
+        const string newParent = "continued-main-run";
+        var consumed = new RunEvent(20, newParent, "subagent.resultConsumed", Start.AddMinutes(1),
+            JsonSerializer.SerializeToElement(new { agentId = original.AgentId, runId = original.RunId, state = "completed" }, ProtocolJson));
+        Assert.Same(original, original.MarkResultDelivered(consumed));
+        Assert.False(original.IsAuthorizedConsumer(newParent));
+
+        var adoption = Adoption(original, newParent);
+        var adopted = original.AdoptConsumer(adoption, newParent, original.SessionId);
+        Assert.Equal(original.ParentRunId, adopted.ParentRunId);
+        Assert.True(adopted.IsAuthorizedConsumer(newParent));
+        Assert.Same(adopted, adopted.AdoptConsumer(adoption, newParent, original.SessionId));
+        var delivered = adopted.MarkResultDelivered(consumed);
+        Assert.True(delivered.ResultDelivered);
+        Assert.Equal(original.ParentRunId, delivered.ParentRunId);
+        Assert.NotNull(delivered.CompletionReceipt(50, consumed.CreatedAt));
+        Assert.Same(adopted, adopted.MarkResultDelivered(consumed with { RunId = "unapproved-main-run" }));
+    }
+
+    [Theory]
+    [InlineData("sourceParentRunId")]
+    [InlineData("runId")]
+    [InlineData("agentId")]
+    [InlineData("task")]
+    [InlineData("eventRunId")]
+    [InlineData("sessionId")]
+    public void UnmatchedContinuationStateCannotGrantConsumerPermissions(string changedField)
+    {
+        var child = Child();
+        const string consumer = "continued-parent";
+        var item = new RunEvent(10, changedField == "eventRunId" ? "foreign-parent" : consumer,
+            "subagent.continuationState", Start.AddMinutes(1), JsonSerializer.SerializeToElement(new
+            {
+                sourceParentRunId = changedField == "sourceParentRunId" ? "foreign-source" : child.ParentRunId,
+                adoptedFromParentRunId = "intermediate-parent",
+                children = new[] { new
+                {
+                    runId = changedField == "runId" ? "foreign-child" : child.RunId,
+                    agentId = changedField == "agentId" ? "foreign-agent" : child.AgentId,
+                    task = changedField == "task" ? "Changed assignment" : child.UserMessage.Content,
+                    state = "completed", isRunning = false,
+                } },
+            }, ProtocolJson));
+        Assert.Same(child, child.AdoptConsumer(item, consumer, changedField == "sessionId" ? Guid.NewGuid() : child.SessionId));
+        Assert.False(child.IsAuthorizedConsumer(consumer));
+    }
+
+    [Fact]
+    public async Task AdoptedConsumersPersistAcrossRestartAndAResumedAttemptGetsNoPreviousConsumerRights()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var child = Child();
+        child = child.Apply(Event(child, 1, RunEventTypes.RunCompleted, new { }));
+        const string firstConsumer = "continued-main";
+        var adopted = child.AdoptConsumer(Adoption(child, firstConsumer), firstConsumer, child.SessionId);
+        var stored = await adopted.PersistAsync(environment.Directory);
+        var restored = Assert.Single(SubagentChatState.Read([adopted.AssistantMessage with
+            { ToolSteps = [Receipt(adopted, adopted.ReceiptId, stored)] }], environment.Directory));
+        Assert.Equal(child.ParentRunId, restored.ParentRunId);
+        Assert.True(restored.IsAuthorizedConsumer(firstConsumer));
+
+        const string nextConsumer = "continued-main-after-restart";
+        var readopted = restored.AdoptConsumer(Adoption(restored, nextConsumer), nextConsumer, restored.SessionId);
+        Assert.True(readopted.IsAuthorizedConsumer(firstConsumer));
+        Assert.True(readopted.IsAuthorizedConsumer(nextConsumer));
+        var delivered = readopted.MarkResultDelivered(new RunEvent(20, nextConsumer, "subagent.resultConsumed", Start.AddMinutes(2),
+            JsonSerializer.SerializeToElement(new { agentId = child.AgentId, runId = child.RunId, state = "completed" }, ProtocolJson)));
+        Assert.True(delivered.ResultDelivered);
+
+        var resumed = readopted.ObserveLifecycle(Info() with { RunId = "new-child", ParentRunId = "new-owner" },
+            30, Start.AddMinutes(3), started: true);
+        Assert.True(resumed.IsAuthorizedConsumer("new-owner"));
+        Assert.False(resumed.IsAuthorizedConsumer(child.ParentRunId));
+        Assert.False(resumed.IsAuthorizedConsumer(firstConsumer));
+        Assert.False(resumed.IsAuthorizedConsumer(nextConsumer));
+        Assert.Empty(resumed.AuthorizedConsumerRunIds ?? []);
+    }
+
+    [Theory]
+    [InlineData("completed", MessageStatus.Completed)]
+    [InlineData("cancelled", MessageStatus.Cancelled)]
+    [InlineData("interrupted", MessageStatus.Interrupted)]
+    [InlineData("failed", MessageStatus.Failed)]
+    public void AuthoritativeAdoptionClosesALocallyRunningAgentAfterItsTerminalSseWasLost(string actual, MessageStatus messageStatus)
+    {
+        var child = Child();
+        child = child.Apply(Event(child, 1, RunEventTypes.TextDelta, new TextDeltaEvent("Empfangener fachlicher Text $x=2$.")));
+        child = child.Apply(Event(child, 2, RunEventTypes.ServerToolStarted,
+            new { tool = "coding.read", callId = "pending-read", arguments = new { path = "proof.md" } }));
+        child = child with { GenerationState = "tokenProgress", GeneratedTokens = 250, RunStatus = "Modell generiert" };
+        const string consumer = "continued-main";
+        var confirmation = new RunEvent(10, consumer, "subagent.continuationState", Start.AddMinutes(1),
+            JsonSerializer.SerializeToElement(new
+            {
+                sourceParentRunId = child.ParentRunId, adoptedFromParentRunId = child.ParentRunId,
+                children = new[] { new { runId = child.RunId, agentId = child.AgentId, task = child.UserMessage.Content,
+                    state = actual, isRunning = false } },
+            }, ProtocolJson));
+        var adopted = child.AdoptConsumer(confirmation, consumer, child.SessionId);
+        Assert.Equal(actual, adopted.Status);
+        Assert.False(adopted.IsRunning);
+        Assert.Equal(messageStatus, adopted.AssistantMessage.Status);
+        Assert.Equal(child.AssistantMessage.Content, adopted.AssistantMessage.Content);
+        Assert.Equal(actual, Assert.Single(adopted.AssistantMessage.ToolSteps!).Status);
+        Assert.Equal(actual, adopted.GenerationState);
+        Assert.Equal(child.GeneratedTokens, adopted.GeneratedTokens);
+        Assert.False(adopted.ResultDelivered);
+        Assert.Null(adopted.CompletionReceipt(20, confirmation.CreatedAt));
+        Assert.Same(adopted, adopted.AdoptConsumer(confirmation, consumer, child.SessionId));
+        var delivered = adopted.MarkResultDelivered(new RunEvent(11, consumer, "subagent.resultConsumed", Start.AddMinutes(2),
+            JsonSerializer.SerializeToElement(new { agentId = child.AgentId, runId = child.RunId, state = actual }, ProtocolJson)));
+        if (actual == "completed") Assert.True(delivered.ResultDelivered);
+        else Assert.Same(adopted, delivered);
     }
 
     [Fact]
@@ -445,6 +756,69 @@ public sealed class SubagentChatStateTests
         AssertChildSnapshot(conversation, child);
     }
 
+    [Fact]
+    public async Task ResumedAgentAndPreviousAttemptRemainReadableAfterDatabaseAndCoordinatorReopen()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var chats = environment.Get<IChatRepository>();
+        var session = await chats.CreateSessionAsync("Fortgesetzte Forschung", ChatMode.ClaudeScience);
+        var turn = await chats.AddTurnAsync(session.Id, "Führe die Herleitung vollständig aus.");
+        var original = SubagentChatState.Create(Info("Alternative Herleitung prüfen"), session.Id, Start);
+        original = original.Apply(Event(original, 20, RunEventTypes.TextDelta, new TextDeltaEvent("Bisheriger Ansatz $E=mc^2$.")));
+        original = original.Apply(Event(original, 21, RunEventTypes.ServerToolStarted,
+            new { tool = "coding.read", callId = "previous-read", arguments = new { path = "theory.md" } }));
+        original = original.Apply(Event(original, 22, RunEventTypes.RunCancelled, new { }));
+        var artifact = new ChatArtifact(Guid.NewGuid(), turn.AssistantMessage.Id, Guid.NewGuid(), "previous-plot",
+            "previous-plot.png", "image/png", new string('a', 64), 12, "local", Start);
+        original = original with { Artifacts = [artifact] };
+        await chats.SaveToolStepAsync(turn.AssistantMessage.Id,
+            Receipt(original, original.ReceiptId, await original.PersistAsync(environment.Directory)));
+
+        var at = Start.AddMinutes(1);
+        var resumed = original.ObserveLifecycle(Info("Alternative Herleitung prüfen") with
+            { RunId = "resumed-child", ParentRunId = "resumed-parent" }, 1, at, started: true);
+        resumed = resumed.Apply(new RunEvent(1, resumed.RunId, RunEventTypes.TextDelta, at.AddSeconds(1),
+            JsonSerializer.SerializeToElement(new TextDeltaEvent("Ergänzte Herleitung."), ProtocolJson)));
+        resumed = resumed.Apply(new RunEvent(2, resumed.RunId, RunEventTypes.RunCompleted, at.AddSeconds(2),
+            JsonSerializer.SerializeToElement(new { }, ProtocolJson))) with { ProjectionRevision = 40 };
+        await chats.SaveToolStepAsync(turn.AssistantMessage.Id,
+            Receipt(resumed, resumed.ReceiptId, await resumed.PersistAsync(environment.Directory)));
+        await environment.Get<ISettingsStore>().SaveAsync(new AppSettings
+            { SelectedChatMode = ChatMode.ClaudeScience, ActiveSessionId = session.Id, ActiveClaudeScienceSessionId = session.Id });
+
+        var services = new ServiceCollection(); services.AddLogging();
+        services.AddMissumInfrastructure(options => options.DataDirectory = environment.Directory);
+        await using var reopened = services.BuildServiceProvider(validateScopes: true);
+        await reopened.GetRequiredService<IMissumDatabase>().InitializeAsync();
+        var persisted = await reopened.GetRequiredService<IChatRepository>().ListMessagesAsync(session.Id);
+        var restored = Assert.Single(SubagentChatState.Read(persisted, environment.Directory));
+        Assert.Equal(resumed.RunId, restored.RunId);
+        Assert.Equal(2, restored.LastEventId);
+        Assert.Equal(original.AssistantMessage.Content, restored.PreviousMessages![1].Content);
+        Assert.Equal("cancelled", Assert.Single(restored.PreviousMessages[1].ToolSteps!).Status);
+        Assert.Equal(artifact.Id, Assert.Single(restored.PreviousMessageArtifacts![original.AssistantMessage.Id.ToString()]).Id);
+
+        using var settings = new SettingsCoordinator(reopened.GetRequiredService<ISettingsStore>());
+        await settings.InitializeAsync();
+        var activity = new RecentActivityService(settings, new ShellViewModel(), NullLogger<RecentActivityService>.Instance); activity.Restore();
+        var coordinator = new AssistantCoordinator(reopened.GetRequiredService<IChatRepository>(), reopened.GetRequiredService<IDocumentIngestor>(),
+            reopened.GetRequiredService<IContextAssembler>(), reopened.GetRequiredService<IPromptTriggerRepository>(),
+            reopened.GetRequiredService<IAssistantAttachmentRepository>(), reopened.GetRequiredService<IChatArtifactRepository>(),
+            reopened.GetRequiredService<IConversationSnapshotRepository>(), null, settings, activity);
+        var snapshot = JsonSerializer.SerializeToElement(await coordinator.BuildSnapshotAsync(), JsonSerializerOptions.Web);
+        var child = Assert.Single(snapshot.GetProperty("subagents").EnumerateArray());
+        Assert.Equal(resumed.RunId, child.GetProperty("runId").GetString());
+        Assert.Equal(40, child.GetProperty("projectionRevision").GetInt64());
+        Assert.Equal(at, child.GetProperty("attemptStartedAt").GetDateTimeOffset());
+        var projected = child.GetProperty("messages").EnumerateArray().ToArray();
+        Assert.Equal(4, projected.Length);
+        Assert.Equal(original.AssistantMessage.Content, projected[1].GetProperty("content").GetString());
+        Assert.Equal("cancelled", projected[1].GetProperty("status").GetString());
+        Assert.Equal(artifact.Id, Assert.Single(projected[1].GetProperty("artifacts").EnumerateArray()).GetProperty("id").GetGuid());
+        Assert.Equal("Ergänzte Herleitung.", projected[3].GetProperty("content").GetString());
+        Assert.Equal(resumed.AssistantMessage.Id, child.GetProperty("runMessageId").GetGuid());
+    }
+
     private static void AssertChildSnapshot(JsonElement snapshot, SubagentChatState expected)
     {
         var child = Assert.Single(snapshot.GetProperty("subagents").EnumerateArray());
@@ -462,6 +836,13 @@ public sealed class SubagentChatStateTests
     }
 
     private static SubagentRunEvent Info(string task = "Analysiere die Datei") => new("parent-run", "child-run", "child-agent", task, "local-model", RunState.Running);
+    private static RunEvent Adoption(SubagentChatState child, string consumer) => new(10, consumer, "subagent.continuationState",
+        Start.AddMinutes(1), JsonSerializer.SerializeToElement(new
+        {
+            sourceParentRunId = child.ParentRunId, adoptedFromParentRunId = child.ParentRunId,
+            children = new[] { new { runId = child.RunId, agentId = child.AgentId, task = child.UserMessage.Content,
+                state = child.Status, isRunning = child.IsRunning } },
+        }, ProtocolJson));
     private static SubagentChatState Child() => SubagentChatState.Create(Info(), Guid.NewGuid(), Start);
     private static RunEvent Event(SubagentChatState child, long id, string type, object data) => new(id, child.RunId, type, Start.AddSeconds(id), JsonSerializer.SerializeToElement(data, ProtocolJson));
     private static AssistantToolStep Receipt(SubagentChatState child, string id, string json) => new(id, "subagent", child.IsRunning ? "running" : child.Status, child.UserMessage.Content,

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Missum.App.Controls;
+using Missum.App.Services;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Automation.Peers;
@@ -215,6 +216,50 @@ public sealed partial class NativeAssistantPage
             childState.Status = originalChildStatus; childState.IsRunning = originalChildRunning;
             RenderSubagentOverlay(); VerifySubagentSummarySmoke("1 arbeitet");
             VerifyParentStillStreaming();
+            // Restore old terminal children while a new child is active: their
+            // transcripts remain available without flooding the native tab strip.
+            var historicalIds = new List<string>();
+            try
+            {
+                foreach (var historicalStatus in new[] { "completed", "failed", "cancelled" })
+                {
+                    var historicalId = "historical-tab-smoke:" + historicalStatus + ":" + session;
+                    historicalIds.Add(historicalId);
+                    var historical = child.Deserialize<Dictionary<string, JsonElement>>(JsonOptions)!;
+                    historical["agentId"] = JsonSerializer.SerializeToElement(historicalId);
+                    historical["status"] = JsonSerializer.SerializeToElement(historicalStatus);
+                    // Deliberately stale flag: the terminal status is authoritative.
+                    historical["isRunning"] = JsonSerializer.SerializeToElement(true);
+                    historical["messages"] = JsonSerializer.SerializeToElement(Array.Empty<object>());
+                    ApplyEvent("subagent.snapshot", JsonSerializer.SerializeToElement(historical));
+                    if (_subagents[historicalId].TabOpen || _subagents[historicalId].Container.Parent is not null)
+                        throw new InvalidOperationException("Restoring a historical terminal child opened an unwanted tab.");
+                }
+            }
+            finally
+            {
+                foreach (var historicalId in historicalIds)
+                    if (_subagents.Remove(historicalId, out var historicalState))
+                        SessionTabsPanel.Children.Remove(historicalState.Container);
+                RenderSubagentOverlay(); RenderSessionTabs();
+            }
+            if (new ButtonAutomationPeer(childState.Close).GetPattern(PatternInterface.Invoke) is not IInvokeProvider closeChild)
+                throw new InvalidOperationException("The live child tab lacks an accessible close button.");
+            closeChild.Invoke();
+            for (var attempt = 0; attempt < 20 && childState.TabOpen; attempt++) await Task.Delay(10);
+            if (childState.TabOpen || childState.Container.Parent is not null
+                || !SubagentTabStates.WasManuallyClosed(session, agentId))
+                throw new InvalidOperationException("Closing a running child tab did not preserve the user's choice.");
+            ApplyEvent("subagent.snapshot", child);
+            if (childState.TabOpen)
+                throw new InvalidOperationException("A background child update reopened its manually closed tab.");
+            _subagents.Remove(agentId);
+            _subagentTabStates = new SubagentTabStateStore(App.Current.DataDirectory);
+            ApplyEvent("subagent.snapshot", child);
+            childState = _subagents[agentId];
+            if (childState.TabOpen || childState.Container.Parent is not null)
+                throw new InvalidOperationException("Rehydrating a live child ignored its persisted closed-tab state.");
+            VerifyParentStillStreaming();
             Inspector.Visibility = Visibility.Visible; UpdateLayout();
             if (SubagentsHeading.TransformToVisual(Inspector).TransformPoint(new(0, 0)).Y
                 >= SourcesHeading.TransformToVisual(Inspector).TransformPoint(new(0, 0)).Y)
@@ -325,6 +370,12 @@ public sealed partial class NativeAssistantPage
                 throw new InvalidOperationException("The output entry could not reopen the closed child tab.");
             ShowParentConversation();
             VerifyParentStillStreaming();
+            SyncSubagents(JsonSerializer.SerializeToElement(new { subagents = new[] { childState.Snapshot } }), sessionChanged: true);
+            RenderSessionTabs();
+            if (childState.TabOpen || childState.Container.Parent is not null)
+                throw new InvalidOperationException("Returning to a warm session reopened its historical completed child tab.");
+            await InvokeLifecycleAsync(lifecycle, agentId);
+            ShowParentConversation(); VerifyParentStillStreaming();
             await VerifySubagentOverviewSmokeAsync(child, parentMessage);
             VerifyParentStillStreaming();
             if (live.ValueKind == JsonValueKind.Object)
@@ -410,6 +461,7 @@ public sealed partial class NativeAssistantPage
                     lifecycleCompletionWaitsForDelivery = true,
                     compactSubagentSummary = true, activeInactiveCountsCorrect = true, summaryControlsStable = true,
                     uniquePlanetIcons = true, planetIdentityConsistent = true,
+                    historicalTabsStayClosed = true, closedRunningTabSurvivesRehydration = true,
                     summaryClickOpensOverview = true, noSubagentAllLink = true,
                     latestSourceOnly = true, completeSubagentOverview = true,
                     completeSourcesOverview = true, overviewSessionIsolated = true, overviewClosableAndReopenable = true,

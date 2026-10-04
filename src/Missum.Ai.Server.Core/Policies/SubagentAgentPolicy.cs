@@ -23,7 +23,9 @@ public static class SubagentAgentPolicy
         Frühe Arbeitsteilung für den aktuellen Forschungsauftrag:
         Wenn du der Hauptagent bist, beginne vor Quellenabrufen, Berechnungen oder Dateiänderungen mit genau
         einem strukturierten subagent.spawn-Aufruf. Formuliere aus dem vollständigen Nutzerauftrag eine konkrete,
-        unabhängig bearbeitbare Teilaufgabe. Lege erwartetes Ergebnis, relevante Randbedingungen und eindeutige
+        unabhängig bearbeitbare Teilaufgabe. Eine frühe fachliche Grundlagen- oder Korrektureinreichung mit
+        research.update bleibt davor zulässig; Missum bewahrt sie, während die erste unabhängige Zuweisung
+        weiterhin ansteht. Lege erwartetes Ergebnis, relevante Randbedingungen und eindeutige
         Schreibpfade und überprüfbare Abnahmekriterien fest. Beginne den task-Text mit einer prägnanten Titelzeile
         aus höchstens ungefähr acht Wörtern; beschreibe die konkrete Aufgabe nach einem Zeilenumbruch.
         Benenne im Auftrag auch, welche anderen Teile du selbst gleichzeitig bearbeitest.

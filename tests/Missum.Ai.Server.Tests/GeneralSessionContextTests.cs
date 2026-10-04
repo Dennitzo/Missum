@@ -126,6 +126,45 @@ public sealed class GeneralSessionContextTests
     private static RunRequest Request() => new(MissumAiProtocol.Version, RunMode.General,
         [new("user", [new("text", "Merke dir den Projektnamen Eiche.")])], SessionId: "session-a");
 
+    [Theory]
+    [InlineData("", "Weiteres Ergebnis.")]
+    [InlineData("\n\n", "Weiteres Ergebnis.")]
+    [InlineData("", "")]
+    public void RepeatedInterruptedContinuationRetainsCanonicalToolAndReasoningHistory(string separator, string published)
+    {
+        var previousRequest = Request() with { DeepResearch = true, Messages =
+        [
+            Request().Messages[0], new("assistant", [new("text", "Bisheriger Abschnitt.")]),
+            new("user", [new("text", "Setze den ursprünglichen Auftrag fort.")]),
+        ] };
+        var native = ModelRuntimeClient.PrepareLanguageBoundMessages(RunProcessor.CreateInitialMessages(previousRequest, "general", []));
+        var read = new LmToolCall("canonical-research-read", "research.read", JsonSerializer.SerializeToElement(new { view = "overview" }));
+        var snapshot = new GeneralSessionContextSnapshot(new(
+            [.. native, new("assistant", null, ToolCalls: [read]), new("tool", "Gespeicherter fachlicher Stand", ToolCallId: read.Id),
+                new("assistant", published, ReasoningContent: "Unterbrochene Herleitung"),
+                new("user", "MISSUM_INTERRUPTED_MODEL_TURN: Noch nicht abgeschlossen.")],
+            1, 1, 100, 10, PreserveSessionPromptPrefix: true), previousRequest, published, WasInterrupted: true);
+        snapshot = JsonSerializer.Deserialize<GeneralSessionContextSnapshot>(JsonSerializer.Serialize(snapshot))!;
+        var next = previousRequest with { Messages =
+        [
+            previousRequest.Messages[0], new("assistant", [new("text", "Bisheriger Abschnitt." + separator + published)]),
+            previousRequest.Messages[^1],
+        ] };
+        Assert.True(GeneralSessionContext.TryContinue(snapshot, next, RunProcessor.CreateInitialMessages(next, "general", []), out var continued));
+        Assert.Equal(snapshot.Checkpoint.Messages, ModelRuntimeClient.PrepareLanguageBoundMessages(continued).Take(snapshot.Checkpoint.Messages.Count));
+        Assert.Equal(read.Id, Assert.Single(continued, message => message.Role == "tool").ToolCallId);
+        Assert.Equal("Unterbrochene Herleitung", continued.Single(message => message.ReasoningContent is not null).ReasoningContent);
+        Assert.Equal("Setze den ursprünglichen Auftrag fort.", continued[^1].Content);
+
+        var edited = next with { Messages = [next.Messages[0], new("assistant", [new("text", "Bearbeiteter Abschnitt." + published)]), next.Messages[^1]] };
+        Assert.False(GeneralSessionContext.TryContinue(snapshot, edited, RunProcessor.CreateInitialMessages(edited, "general", []), out _));
+        var changedTask = next with { Messages = [new("user", [new("text", "Anderer Auftrag.")]), .. next.Messages.Skip(1)] };
+        Assert.False(GeneralSessionContext.TryContinue(snapshot, changedTask, RunProcessor.CreateInitialMessages(changedTask, "general", []), out _));
+        var changedContinuation = next with { Messages = [.. next.Messages.Take(2), new("user", [new("text", "Ersetze den Auftrag.")])] };
+        Assert.False(GeneralSessionContext.TryContinue(snapshot, changedContinuation, RunProcessor.CreateInitialMessages(changedContinuation, "general", []), out _));
+        Assert.False(GeneralSessionContext.TryContinue(snapshot with { WasInterrupted = false }, next, RunProcessor.CreateInitialMessages(next, "general", []), out _));
+    }
+
     private static RunRequest FollowUp(RunRequest request) => request with
     {
         Messages = [.. request.Messages, new("assistant", [new("text", "Gespeichert.")]),

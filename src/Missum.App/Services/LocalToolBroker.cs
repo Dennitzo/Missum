@@ -252,8 +252,15 @@ public sealed partial class LocalToolBroker(
                 proposal.Arguments.GetProperty("content").GetString()!,
                 proposal.Arguments.TryGetProperty("expectedSha256", out var expected) ? expected.GetString() : null,
                 cancellationToken).ConfigureAwait(false);
+            var layout = await sandbox.EnsureProjectAsync(projectId, cancellationToken).ConfigureAwait(false);
+            var workspaceRoot = await ResolveWorkspaceRootAsync(session.Id, session.CodingWorkspacePath, cancellationToken).ConfigureAwait(false);
             return new { success = true, projectId, changeSetId = change.ChangeSetId, file = change.RelativePath,
-                change.BeforeSha256, change.AfterSha256, change.IsNewFile, root = "work/" };
+                change.BeforeSha256, change.AfterSha256, change.IsNewFile, root = "work/",
+                workRoot = layout.WorkPath, toolRelativePath = change.RelativePath,
+                workspaceRelativePath = workspaceRoot is null ? null
+                    : Path.GetRelativePath(workspaceRoot, Path.Combine(layout.WorkPath, change.RelativePath)).Replace('\\', '/'),
+                pathScope = "research-work-root", nextExecutePath = change.RelativePath,
+                note = "Für research.code.execute denselben toolRelativePath ohne work/-Präfix verwenden; coding.read nutzt workspaceRelativePath." };
         }
         if (proposal.Name == ClientToolNames.ResearchCodeRestore)
         {

@@ -272,20 +272,24 @@ public sealed partial class RunProcessor : BackgroundService
                 EarlySubagentDelegationPending: researchManagedByAgent && requestsEarlyDelegation && subagentAvailable,
                 CanonicalStateReadRequired: canonicalStateEnabled,
                 ContextProfileVersion: contextProfileVersion);
-            if (isCoding && await _repository.GetSessionContextAsync(runId, request, cancellationToken).ConfigureAwait(false) is { } previous)
+            string? subagentContinuationParent = null;
+            if (isCoding && await _repository.GetCodingSessionContextWithSourceAsync(runId, request, cancellationToken).ConfigureAwait(false) is { } codingPrevious)
             {
+                var previous = codingPrevious.Checkpoint;
                 checkpoint = checkpoint with
                 {
                     Messages = CodingSessionContext.Continue(previous, checkpoint.Messages),
                     WorkingState = CodingSessionContext.ContinueWorkingState(previous, ExtractOriginalTask(request)) ?? checkpoint.WorkingState,
                     PreserveSessionPromptPrefix = previous.PreserveSessionPromptPrefix,
                 };
+                if (codingPrevious.WasInterrupted) subagentContinuationParent = codingPrevious.SourceRunId;
                 _runtime.WriteLog("Information", "coding.session.context.restored", $"Run {runId}: {previous.Messages.Count} gespeicherte Kontextnachrichten derselben Sitzung übernommen.");
             }
             else if (!isCoding && await _repository.GetGeneralSessionContextAsync(runId, request, cancellationToken).ConfigureAwait(false) is { } generalPrevious
                 && GeneralSessionContext.TryContinue(generalPrevious, request, checkpoint.Messages, out var continued))
             {
                 checkpoint = checkpoint with { Messages = continued, PreserveSessionPromptPrefix = true };
+                if (generalPrevious.WasInterrupted) subagentContinuationParent = generalPrevious.SourceRunId;
             }
             if (request.ConversationProfile is not (ConversationProfile.Audiobook or ConversationProfile.ContextPreparation))
             {
@@ -293,7 +297,27 @@ public sealed partial class RunProcessor : BackgroundService
                 // retain an older system prefix; an active checkpoint must stay stable.
                 var initialNarration = checkpoint.Messages.ToList();
                 AgentNarrationPolicy.EnsureInstructions(initialNarration);
+                if (request.ClientCapabilities?.Contains("research.deliverables", StringComparer.OrdinalIgnoreCase) == true)
+                {
+                    if (!compactContext && canonicalStateEnabled) EnsureScientificStateInstructions(initialNarration);
+                    ScientificDerivationPolicy.EnsureAtNewRunBoundary(initialNarration);
+                }
                 checkpoint = checkpoint with { Messages = initialNarration };
+            }
+            if (request.Subagent is null && subagentContinuationParent is not null)
+            {
+                var continuationMessages = checkpoint.Messages.ToList();
+                await AppendSubagentContinuationStateAsync(runId, subagentContinuationParent, request,
+                    continuationMessages, cancellationToken).ConfigureAwait(false);
+                // The previous assignment already exists. Let the manager
+                // resume its saved work or consume its completed result instead
+                // of forcing a fresh early spawn over the adopted delegation.
+                checkpoint = checkpoint with
+                {
+                    Messages = continuationMessages,
+                    EarlySubagentDelegationPending = continuationMessages.Count == checkpoint.Messages.Count
+                        && checkpoint.EarlySubagentDelegationPending,
+                };
             }
             if (isCoding && request.DeepResearch && !researchManagedByAgent)
                 checkpoint = ScheduleExplicitDeepResearch(checkpoint, runId, ExtractOriginalTask(request), request.ResearchOptions);
@@ -625,6 +649,8 @@ public sealed partial class RunProcessor : BackgroundService
                         if (compactContext && call.Name == ClientToolNames.ResearchRead && clientResult.Status == "completed"
                             && ScientificStateCompletionPolicy.Text(clientResult.Result, "stateStamp") is { Length: > 0 } readStamp)
                             researchStateStamp = readStamp;
+                        if (canonicalStateEnabled && earlySubagentDelegationPending)
+                            EnsureEarlyResearchContextHint(messages, runId, request, call, SerializeClientToolResult(clientResult));
                         if (call.Name == ClientToolNames.CodingRenderHtml) htmlRenderUsed = true;
                         pendingProposalId = null;
                         pendingToolCallId = null;
@@ -1338,8 +1364,11 @@ public sealed partial class RunProcessor : BackgroundService
             if (earlySubagentDelegationPending)
             {
                 var preparingResearchContext = canonicalStateEnabled
-                    && IsEarlyResearchContextRead(response, request, availableTools, _toolCatalog);
-                if (!preparingResearchContext && !IsValidEarlyDelegationResponse(response, availableTools, _toolCatalog))
+                    && IsEarlyResearchContextRead(response, request, availableTools, _toolCatalog, messages);
+                var submittingResearchProgress = canonicalStateEnabled
+                    && IsEarlyResearchProgressUpdate(response, request, availableTools, _toolCatalog);
+                if (!preparingResearchContext && !submittingResearchProgress
+                    && !IsValidEarlyDelegationResponse(response, availableTools, _toolCatalog))
                 {
                     // No source/file/process action may precede the manager's
                     // initial assignment. Close rejected calls in chronological
@@ -1353,9 +1382,10 @@ public sealed partial class RunProcessor : BackgroundService
                     foreach (var rejected in response.ToolCalls)
                         messages.Add(new LmChatMessage("tool", "{\"status\":\"not_executed\",\"errorCode\":\"subagent.early_assignment_required\",\"message\":\"Zuerst die unabhängige Teilaufgabe mit subagent.spawn zuweisen; dieser Aufruf wurde nicht ausgeführt.\"}",
                             ToolCallId: rejected.Id));
-                    messages.Add(new LmChatMessage("system", "Der erste Schritt dieses Forschungsauftrags ist genau ein gültiger subagent.spawn-Aufruf. "
+                    messages.Add(new LmChatMessage("system", "Die frühe unabhängige Teilaufgabe ist noch nicht mit subagent.spawn zugewiesen. "
                         + "Formuliere Ziel, erwartetes Ergebnis, eindeutige Schreibpfade und die Abgrenzung zu deiner eigenen parallelen Arbeit. "
-                        + "Andere Werkzeugschritte beginnen erst nach der Zuweisung."));
+                        + "Notwendige neue Forschungsabrufe und gültige fachliche research.update-Einreichungen bleiben erlaubt; "
+                        + "umfangreiche weitere Werkzeugarbeit beginnt nach der Zuweisung."));
                     streamingTurnStartEventId = null;
                     await SaveCheckpointAsync().ConfigureAwait(false);
                     if (earlySubagentDelegationRetryCount > MaximumEarlyDelegationRetries)
@@ -1365,7 +1395,7 @@ public sealed partial class RunProcessor : BackgroundService
                 // The ensuing active-call checkpoint stores the exact model
                 // assignment and operation identity. Resume executes that call
                 // idempotently instead of asking for a second assignment.
-                if (!preparingResearchContext)
+                if (!preparingResearchContext && !submittingResearchProgress)
                 {
                     earlySubagentDelegationPending = false;
                     earlySubagentDelegationRetryCount = 0;
@@ -1790,9 +1820,11 @@ public sealed partial class RunProcessor : BackgroundService
                             + " Ich erhalte den Arbeitsstand und bearbeite den nächsten belegbaren Schritt.";
                     // Persist the repair before waiting or proposing a client tool.
                     // Recovery must retain this decision, including its backoff state.
-                    if (canonicalStateEnabled) ScientificStateCompletionPolicy.UpsertRecoveryPrompt(messages, assessment);
+                    var newCanonicalDiagnosis = false;
+                    if (canonicalStateEnabled) newCanonicalDiagnosis = ScientificStateCompletionPolicy.UpsertRecoveryPrompt(messages, assessment);
                     else ScientificRunCompletionPolicy.UpsertRecoveryPrompt(messages, assessment);
-                    if (assessment.RepeatedAttempts == 0 || assessment.RepeatedAttempts % 3 == 0)
+                    if (canonicalStateEnabled ? newCanonicalDiagnosis
+                        : assessment.RepeatedAttempts == 0 || assessment.RepeatedAttempts % 3 == 0)
                     {
                         await PublishVisibleDeltaAsync(new TextDeltaEvent("\n\n" + diagnosis + "\n\n"), cancellationToken).ConfigureAwait(false);
                     }

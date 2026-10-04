@@ -166,7 +166,11 @@ public sealed partial class RunRepository
             JOIN runs child ON child.run_id = $child
             WHERE checkpoint.run_id = $parent
               AND parent.state IN ('Queued', 'Running', 'WaitingForClient')
-              AND json_extract(child.request_json, '$.subagent.parentRunId') = $parent
+              AND (json_extract(child.request_json, '$.subagent.parentRunId') = $parent
+                OR EXISTS (SELECT 1 FROM run_events adopted, json_each(adopted.data_json, '$.children') listed
+                    WHERE adopted.run_id = $parent AND adopted.event_type = 'subagent.continuationState'
+                      AND json_extract(adopted.data_json, '$.sourceParentRunId') = json_extract(child.request_json, '$.subagent.parentRunId')
+                      AND json_extract(listed.value, '$.runId') = $child))
               AND child.state IN ('Completed', 'Failed', 'Cancelled', 'Interrupted');
             """;
         command.Parameters.AddWithValue("$parent", parentRunId);

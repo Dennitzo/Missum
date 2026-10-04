@@ -18,6 +18,105 @@ public sealed class SubagentOrchestrationTests
     private const string ModelId = "coding/Qwen-Fixture-Q4~123456";
 
     [Theory]
+    [InlineData("restored")]
+    [InlineData("miss")]
+    [InlineData("unavailable")]
+    public async Task StoppedDelegationResumesItsOwnHistoryOnceAndDeliversToTheNewParent(string cacheStatus)
+    {
+        using var context = new TestServerContext();
+        using var handler = new DualAgentHandler { PrepareCacheStatus = cacheStatus };
+        using var http = new HttpClient(handler);
+        using var runtime = new ModelRuntimeClient(http, context.WrappedOptions, NullLogger<ModelRuntimeClient>.Instance);
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddMissumAiServerServices(context.Options, includeHostedServices: false);
+        services.AddSingleton(context.Database);
+        services.AddSingleton(runtime);
+        using var provider = services.BuildServiceProvider();
+        var repository = provider.GetRequiredService<RunRepository>();
+        var processor = provider.GetRequiredService<RunProcessor>();
+        var request = Request() with { SessionId = "resume-parent-session", WorkspacePath = "C:/resume-workspace" };
+        var previousParent = await repository.CreateAsync(request, null);
+        const string task = "Read child.txt and report its marker.";
+        var childRequest = request with { SessionId = "same-child-session",
+            Subagent = new(previousParent.Snapshot.RunId, "same-agent", task, request.SessionId, ModelId + "@subagent") };
+        var unknownWrite = new LmToolCall("uncertain-write", ClientToolNames.CodingWrite,
+            JsonSerializer.SerializeToElement(new { path = "child.txt", content = "Uncertain mutation" }));
+        var oldCheckpoint = new AgentRunCheckpoint([new("system", "OWN_CHILD_SAVED_PREFIX"), new("user", task),
+            new("assistant", "SAVED_CHILD_PROGRESS"), new("assistant", ToolCalls: [unknownWrite])],
+            4, 3, 120, 60, ActiveToolCalls: [unknownWrite], PreserveSessionPromptPrefix: true, SelectedModelId: ModelId);
+        var previousChild = await repository.CreateSubagentAsync(childRequest, oldCheckpoint, "old-assignment");
+        await repository.CancelAsync(previousChild.RunId);
+        await repository.CancelAsync(previousParent.Snapshot.RunId);
+        var newParent = await repository.CreateAsync(request with { Messages = [new("user", [new("text", "Fortsetzen.")])] }, null);
+        var parentMessages = new List<LmChatMessage> { new("system", "CURRENT_PARENT_PREFIX"), new("user", "Fortsetzen.") };
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await processor.AppendSubagentContinuationStateAsync(newParent.Snapshot.RunId, previousParent.Snapshot.RunId,
+            request, parentMessages, timeout.Token);
+        Assert.Contains(parentMessages, message => message.Content?.Contains("\"state\":\"cancelled\"", StringComparison.Ordinal) == true);
+        await repository.SaveCheckpointAsync(newParent.Snapshot.RunId, new(parentMessages, 0, 0, 0, 0));
+        var args = JsonSerializer.SerializeToElement(new { task, resumeRunId = previousChild.RunId });
+        var selection = new ModelSelection(ModelId, "coding", 32768);
+        var started = await processor.ExecuteSubagentToolAsync(SubagentToolNames.Spawn, args,
+            newParent.Snapshot.RunId, "first-call", request, selection, parentMessages, timeout.Token);
+        Assert.True(started.Succeeded, started.ErrorMessage);
+        var resumedRunId = started.Result.GetProperty("runId").GetString()!;
+        Assert.NotEqual(previousChild.RunId, resumedRunId);
+        var replay = await processor.ExecuteSubagentToolAsync(SubagentToolNames.Spawn, args,
+            newParent.Snapshot.RunId, "second-call", request, selection, parentMessages, timeout.Token);
+        Assert.Equal(resumedRunId, replay.Result.GetProperty("runId").GetString());
+        Assert.Equal(1, handler.PrepareCalls);
+        using var preparation = JsonDocument.Parse(handler.LastPrepareBody!);
+        Assert.Equal(JsonValueKind.Null, preparation.RootElement.GetProperty("parentSessionCacheKey").ValueKind);
+        Assert.Equal("same-child-session", preparation.RootElement.GetProperty("childSessionId").GetString());
+        var preparedText = preparation.RootElement.GetProperty("prefill").GetProperty("messages").GetRawText();
+        Assert.Contains("OWN_CHILD_SAVED_PREFIX", preparedText);
+        Assert.Contains("SAVED_CHILD_PROGRESS", preparedText);
+        Assert.Contains("outcomeUnknown", preparedText);
+        Assert.DoesNotContain("CURRENT_PARENT_PREFIX", preparedText);
+        var resumedRequest = (await repository.GetRequestAsync(resumedRunId))!;
+        Assert.Equal("same-agent", resumedRequest.Subagent!.AgentId);
+        Assert.Equal("same-child-session", resumedRequest.SessionId);
+        Assert.Equal(newParent.Snapshot.RunId, resumedRequest.Subagent.ParentRunId);
+
+        var waiting = processor.ExecuteSubagentToolAsync(SubagentToolNames.Wait,
+            JsonSerializer.SerializeToElement(new { runId = resumedRunId }), newParent.Snapshot.RunId,
+            "wait-call", request, selection, parentMessages, timeout.Token);
+        long cursor = 0;
+        var executed = new HashSet<string>(StringComparer.Ordinal);
+        while (!waiting.IsCompleted)
+        {
+            foreach (var item in await repository.GetEventsAfterAsync(newParent.Snapshot.RunId, cursor, timeout.Token))
+            {
+                cursor = item.Id;
+                if (item.Type != RunEventTypes.SubagentEvent) continue;
+                var forwarded = item.Data.Deserialize<SubagentForwardedEvent>(MissumAiProtocol.CreateJsonOptions())!;
+                if (forwarded.Event.Type != RunEventTypes.ClientToolProposed) continue;
+                var proposal = forwarded.Event.Data.Deserialize<ToolProposal>(MissumAiProtocol.CreateJsonOptions())!;
+                if (!executed.Add(proposal.ProposalId)) continue;
+                Assert.Equal(ClientToolNames.CodingRead, proposal.Name); // No uncertain write is replayed.
+                Assert.Equal(resumedRunId, proposal.RunId);
+                await repository.SaveClientToolResultAsync(proposal.RunId, new(proposal.ProposalId, "completed",
+                    JsonSerializer.SerializeToElement(new { path = "child.txt", content = "CHILD_MARKER_731", sha256 = new string('a', 64) })), timeout.Token);
+            }
+            await Task.Delay(10, timeout.Token);
+        }
+        var result = await waiting;
+        Assert.True(result.Succeeded);
+        Assert.Contains("CHILD_MARKER_731", result.Result.GetProperty("result").GetString());
+        Assert.Single(executed);
+        Assert.Equal(RunState.Cancelled, (await repository.GetAsync(previousChild.RunId))!.State);
+        Assert.Equal(JsonSerializer.Serialize(oldCheckpoint.Messages),
+            JsonSerializer.Serialize((await repository.GetCheckpointAsync(previousChild.RunId))!.Messages));
+        var completedReplay = await processor.ExecuteSubagentToolAsync(SubagentToolNames.Spawn, args,
+            newParent.Snapshot.RunId, "third-call", request, selection, parentMessages, timeout.Token);
+        Assert.Equal("completed", completedReplay.Result.GetProperty("status").GetString());
+        Assert.Contains("CHILD_MARKER_731", completedReplay.Result.GetProperty("result").GetString());
+        Assert.Equal(1, handler.PrepareCalls);
+        Assert.Single(await repository.GetSubagentRunsAsync(newParent.Snapshot.RunId));
+    }
+
+    [Theory]
     [InlineData(RunMode.General)]
     [InlineData(RunMode.Coding)]
     public void GpuAdmissionControlsDelegationAndChildRetainsIdenticalFullToolSchemas(RunMode mode)
@@ -539,6 +638,8 @@ public sealed class SubagentOrchestrationTests
         public TaskCompletionSource ParentStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource ContinueParent { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public int PrepareCalls { get; private set; }
+        public string? LastPrepareBody { get; private set; }
+        public string PrepareCacheStatus { get; init; } = "forked";
         public int ChildTurns => Volatile.Read(ref _childTurns);
         public int ParentTurns => Volatile.Read(ref _parentTurns);
         public string[] ParentToolNames { get; private set; } = [];
@@ -570,10 +671,14 @@ public sealed class SubagentOrchestrationTests
             }
             if (path is "/agents/status" or "/agents/prepare")
             {
-                if (path == "/agents/prepare") PrepareCalls++;
+                if (path == "/agents/prepare")
+                {
+                    PrepareCalls++;
+                    LastPrepareBody = await request.Content!.ReadAsStringAsync(cancellationToken);
+                }
                 if (!_primaryLoaded) DeniedBeforeLoad = true;
                 return Json(new { allowed = !denySubagent && _primaryLoaded, reason = !_primaryLoaded ? "subagent.primary_not_loaded" : denySubagent ? "subagent.insufficient_vram" : null, modelId = ModelId,
-                    instanceId = ModelId + "@subagent", gpuIndex = 1, contextLength = 32768, cacheStatus = "forked", cachedTokens = 10 });
+                    instanceId = ModelId + "@subagent", gpuIndex = 1, contextLength = 32768, cacheStatus = PrepareCacheStatus, cachedTokens = 10 });
             }
             if (path is "/sessions/prepare" or "/sessions/save") return Json(new { success = true });
             if (path == "/v1/chat/completions/input_tokens") return Json(new { input_tokens = 100 });

@@ -504,6 +504,85 @@ public sealed class ScientificPublicationTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public async Task CanonicalSectionsPreserveEveryDerivationStepAndUnitLegendThroughPublicationSource()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var (repository, project) = await CreateProjectAsync(environment);
+        await repository.UpsertProjectAsync(project with { ProtocolVersion = 2 });
+        var states = Assert.IsAssignableFrom<IScientificResearchStateRepository>(repository);
+        var kinetic = string.Join('\n', UnitDerivationMarkdown.Replace("\r", "", StringComparison.Ordinal)
+            .Split('\n').Skip(1)).Trim() + "\n\nKINETICDERIVATIONEND";
+        const string potential = """
+            Im homogenen Schwerefeld ist die Masse konstant und die Fallbeschleunigung unabhängig von der Höhe. Wir wählen die Bezugshöhe $h=0$ mit $U(0)=0$; außerhalb dieser Näherung ist die folgende Formel nicht allgemein gültig. Die Zahlenwerte sind ein illustratives Rechenbeispiel.
+
+            Rechenschritt 1: Gegen die Gewichtskraft wird quasistatisch Arbeit verrichtet. Daher ist die Änderung der potentiellen Energie das Integral der konstanten Kraft $mg$ über die Höhe. Die Integrationsvariable $z$ besitzt die Einheit Meter.
+
+            $$\begin{aligned}
+            U(h)-U(0)&=\int_0^h mg\,\mathrm{d}z\\
+            &=mg[z]_0^h\\
+            &=mg(h-0)\\
+            U(h)&=mgh,\qquad [U]=\mathrm{kg}\,\mathrm{m}^2\,\mathrm{s}^{-2}=\mathrm{J}.
+            \end{aligned}$$
+
+            Rechenschritt 2: Wir setzen $m=2\,\mathrm{kg}$, $g=9{,}81\,\mathrm{m}\,\mathrm{s}^{-2}$ und $h=1{,}5\,\mathrm{m}$ ein. Zuerst werden die Faktoren einschließlich ihrer Einheiten eingesetzt, dann die Zahlen multipliziert und schließlich die zusammengesetzte SI-Einheit als Joule geschrieben.
+
+            $$\begin{aligned}
+            U&=(2\,\mathrm{kg})(9{,}81\,\mathrm{m}\,\mathrm{s}^{-2})(1{,}5\,\mathrm{m})\\
+            &=29{,}43\,\mathrm{kg}\,\mathrm{m}^2\,\mathrm{s}^{-2}\\
+            &=29{,}43\,\mathrm{J}.
+            \end{aligned}$$
+
+            Rechenschritt 3: Die Rückableitung $\mathrm{d}U/\mathrm{d}h=mg$ ergibt die eingesetzte Kraft in Newton. Das positive Vorzeichen bedeutet, dass beim Anheben Energie zugeführt wird. Diese Kontrolle gilt unter den genannten Annahmen und ist kein Nachweis für ein beliebiges Gravitationsfeld.
+
+            POTENTIALDERIVATIONEND
+            """;
+        var update = await states.ApplyWorkingUpdateAsync(project.Id, "complete-canonical-derivations", null,
+            "Mechanische Energie mit vollständigen Rechenwegen",
+            // Submit both sections in reverse order and use IDs that would also sort incorrectly.
+            [new("a-potential", "section", 0, JsonSerializer.SerializeToElement(new
+            {
+                title = "Potentielle Energie", contentMarkdown = potential, status = "draft", order = 20,
+                units = new[]
+                {
+                    new { symbol = "U", meaning = "potentielle Energie", unit = @"\mathrm{J}" },
+                    new { symbol = "h", meaning = "Höhe über der Bezugshöhe", unit = @"\mathrm{m}" },
+                    new { symbol = "g", meaning = "Fallbeschleunigung", unit = @"\mathrm{m}\,\mathrm{s}^{-2}" },
+                },
+            })), new("z-kinetic", "section", 0, JsonSerializer.SerializeToElement(new
+            {
+                title = "Kinetische Energie", contentMarkdown = kinetic, status = "draft", order = 10,
+                units = new[]
+                {
+                    new { symbol = "E", meaning = "kinetische Energie", unit = @"\mathrm{J}" },
+                    new { symbol = "v", meaning = "Geschwindigkeit", unit = @"\mathrm{m/s}" },
+                },
+            }))]);
+        Assert.True(update.Success);
+        Assert.Empty(update.Conflicts);
+
+        var persisted = await states.LoadWorkingStateAsync(project.Id);
+        Assert.Equal(kinetic, persisted.Items.Single(item => item.Id == "z-kinetic").Data.GetProperty("contentMarkdown").GetString());
+        Assert.Equal(potential, persisted.Items.Single(item => item.Id == "a-potential").Data.GetProperty("contentMarkdown").GetString());
+        var formatted = ScientificPublicationService.FormatCanonicalPublication(persisted, [], new([], [], [], []))
+            .Replace("\r", "", StringComparison.Ordinal);
+        Assert.Contains(kinetic, formatted);
+        Assert.Contains(potential.Replace("\r", "", StringComparison.Ordinal), formatted);
+        Assert.True(formatted.IndexOf("KINETICDERIVATIONEND", StringComparison.Ordinal)
+            < formatted.IndexOf("## Potentielle Energie", StringComparison.Ordinal));
+        Assert.Contains(@"- $v$ ist Geschwindigkeit in $\mathrm{m/s}$.", formatted);
+        Assert.Contains(@"- $g$ ist Fallbeschleunigung in $\mathrm{m}\,\mathrm{s}^{-2}$.", formatted);
+        Assert.DoesNotContain("| Symbol |", formatted);
+
+        // The fake renderer checks the exact source handed to PDF generation, without claiming mathematical correctness.
+        using var service = new ScientificPublicationService(repository, FakePdfAsync, Path.Combine(environment.Directory, "publications"));
+        var publication = await service.EnsureCurrentAsync(project.Id);
+        Assert.NotNull(publication);
+        Assert.True(publication.SectionDelta);
+        Assert.Equal(persisted.PublicationRevision, publication.Revision);
+        Assert.Equal(formatted, (await File.ReadAllTextAsync(publication.MarkdownPath)).Replace("\r", "", StringComparison.Ordinal));
+    }
+
+    [Fact]
     [Trait("Category", "Live")]
     public async Task RealScientificPublicationRendersMathematicsIntoReadablePdf()
     {

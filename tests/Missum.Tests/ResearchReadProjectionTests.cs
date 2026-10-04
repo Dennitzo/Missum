@@ -16,6 +16,31 @@ public sealed class ResearchReadProjectionTests
     private static readonly string[] EvidenceIds = ["evidence-1"];
 
     [Fact]
+    public void OverviewDistinguishesResearchWorkPathsFromWorkspacePathsAndTracksWorkspaceChanges()
+    {
+        var workspace = Path.Combine(Path.GetTempPath(), "science-workspace");
+        var root = Path.Combine(workspace, "Science", "research-test");
+        var layout = new ResearchSandboxLayout("research-test", root,
+            Path.Combine(root, "inputs"), Path.Combine(root, "work"), Path.Combine(root, "artifacts"),
+            Path.Combine(root, "notebooks"), Path.Combine(root, "manuscripts"), Path.Combine(root, "env"),
+            Path.Combine(root, "runs"), Path.Combine(root, "snapshots"), Now, "ready");
+        var paths = ResearchReadPathScope.From(workspace, layout);
+        var snapshot = Snapshot();
+        var overview = ResearchReadProjection.Create(snapshot, Args(new { view = "overview" }), paths);
+        var scope = overview.GetProperty("paths");
+        Assert.Equal(layout.WorkPath, scope.GetProperty("workRoot").GetString());
+        Assert.Equal("Science/research-test/work/", scope.GetProperty("codingWorkPrefix").GetString());
+        Assert.Contains("ohne work/-Präfix", scope.GetProperty("researchCodePaths").GetString(), StringComparison.Ordinal);
+        var objects = ResearchReadProjection.Create(snapshot, Args(new { view = "objects" }), paths);
+        Assert.Equal(overview.GetProperty("stateStamp").GetString(), objects.GetProperty("stateStamp").GetString());
+        Assert.Equal(JsonValueKind.Null, objects.GetProperty("paths").ValueKind);
+        var known = Args(new { view = "overview", knownStateStamp = overview.GetProperty("stateStamp").GetString() });
+        Assert.True(ResearchReadProjection.Create(snapshot, known, paths).GetProperty("unchanged").GetBoolean());
+        Assert.False(ResearchReadProjection.Create(snapshot, known, paths with { WorkRoot = Path.Combine(root, "new-work") })
+            .GetProperty("unchanged").GetBoolean());
+    }
+
+    [Fact]
     public void OverviewOmitsManuscriptAndReceiptsButLeavesAllDetailsAddressable()
     {
         var snapshot = Snapshot();

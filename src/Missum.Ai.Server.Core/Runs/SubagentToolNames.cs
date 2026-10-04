@@ -7,4 +7,5 @@ public static class SubagentToolNames
     public static IReadOnlyList<string> All { get; } = [Spawn, Wait];
     internal const string ResultConsumedEvent = "subagent.resultConsumed";
     internal const string ResultContextMarker = "MISSUM_SUBAGENT_RESULTS\n";
+    internal const string ContinuationStateEvent = "subagent.continuationState";
 }

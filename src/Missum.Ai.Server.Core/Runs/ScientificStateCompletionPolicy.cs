@@ -99,15 +99,19 @@ internal static class ScientificStateCompletionPolicy
             projectId, fingerprint, missing, 0);
     }
 
-    internal static void UpsertRecoveryPrompt(List<LmChatMessage> messages, ScientificCompletionAssessment assessment)
+    internal static bool UpsertRecoveryPrompt(List<LmChatMessage> messages, ScientificCompletionAssessment assessment)
     {
         var prefix = RecoveryMarker + "\n" + assessment.Fingerprint + "\n";
-        if (messages.Any(message => message.Role == "system" && message.Content?.StartsWith(prefix, StringComparison.Ordinal) == true)) return;
+        // Native templates keep chronological system guidance as a controlled user
+        // turn. Recognize that exact form on recovery without rewriting the prefix.
+        if (messages.Any(message => message.Role == "system" && message.Content?.StartsWith(prefix, StringComparison.Ordinal) == true
+            || message.Role == "user" && message.Content?.StartsWith("Missum-Laufanweisung:\n" + prefix, StringComparison.Ordinal) == true)) return false;
         messages.Add(new("system", prefix
             + "Der kanonische Forschungsauftrag ist noch offen. Nutze research.read gezielt für die betroffenen IDs; "
             + "ändere nur fehlende oder fachlich neue Objekte mit research.update. Bewahre verworfene Hypothesen, Gründe und echte Belege. "
             + "Schreibe kein vollständiges Chatmanuskript erneut und wiederhole keine bereits abgeschlossene delegierte Arbeit.\n"
             + string.Join("\n", assessment.Missing.Take(8).Select(static item => "- " + item))));
+        return true;
     }
 
     internal static bool Mutation(string name) => name is ClientToolNames.ResearchUpdate

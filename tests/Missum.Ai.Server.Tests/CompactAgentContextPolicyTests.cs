@@ -143,7 +143,11 @@ public sealed class CompactAgentContextPolicyTests
             "research.deliverables.verify", "danach frisch verifizieren", "Missum erzeugt/repariert PDF technisch" })
             Assert.Contains(requirement, policy, StringComparison.Ordinal);
         Assert.Equal(2, policy.Split(MathFormattingPolicy.Instructions, StringSplitOptions.None).Length);
-        Assert.True(policy.Length < 13000 + AgentNarrationPolicy.Instructions.Length, $"Science policy contains {policy.Length} characters.");
+        // Keep the previous shared-context budget; reserve a bounded, single
+        // Science-only publication contract rather than expanding common prompts.
+        Assert.True(ScientificDerivationPolicy.Instructions.Length < 3000);
+        Assert.True(policy.Length - ScientificDerivationPolicy.Instructions.Length < 13000 + AgentNarrationPolicy.Instructions.Length,
+            $"Science policy contains {policy.Length} characters.");
     }
 
     private static RunRequest Request(RunMode mode) => new(MissumAiProtocol.Version, mode,

@@ -133,7 +133,7 @@ public sealed partial class RunProcessor
         }
     }
 
-    private async Task<AgentToolExecutionResult> ExecuteSubagentToolAsync(string toolName, JsonElement arguments,
+    internal async Task<AgentToolExecutionResult> ExecuteSubagentToolAsync(string toolName, JsonElement arguments,
         string parentRunId, string operationId, RunRequest parentRequest, ModelSelection selection,
         List<LmChatMessage> parentMessages, CancellationToken cancellationToken)
     {
@@ -148,10 +148,16 @@ public sealed partial class RunProcessor
             {
                 var previousRequest = await _repository.GetRequestAsync(previous.RunId, cancellationToken).ConfigureAwait(false)
                     ?? throw new InvalidOperationException("Der Subagentenauftrag fehlt.");
-                await EnsureSubagentStartedAsync(previous, previousRequest, cancellationToken).ConfigureAwait(false);
-                _ = StartSubagentRunner(previous.RunId, previousRequest);
+                if (!IsTerminalSubagentState(previous.State))
+                {
+                    await EnsureSubagentStartedAsync(previous, previousRequest, cancellationToken).ConfigureAwait(false);
+                    _ = StartSubagentRunner(previous.RunId, previousRequest);
+                }
                 return SubagentSpawnReceipt(previous, previousRequest);
             }
+            if (arguments.TryGetProperty("resumeRunId", out _))
+                return await ResumeSubagentAsync(arguments, parentRunId, operationId, parentRequest,
+                    selection, parentMessages, cancellationToken).ConfigureAwait(false);
             var active = await _repository.GetSubagentRunsAsync(activeOnly: true, cancellationToken: cancellationToken).ConfigureAwait(false);
             if (active.Count > 0)
                 return SubagentFailure("subagent.gpu_busy", "GPU1 bearbeitet bereits einen Subagenten. Arbeite weiter und warte auf dessen Ergebnis.");
@@ -233,11 +239,19 @@ public sealed partial class RunProcessor
     private static AgentToolExecutionResult SubagentSpawnReceipt(RunSnapshot child, RunRequest request) =>
         new(JsonSerializer.SerializeToElement(new
         {
-            status = "started", runId = child.RunId, agentId = request.Subagent!.AgentId,
+            status = child.State is RunState.Queued or RunState.Running or RunState.WaitingForClient
+                ? "started" : child.State.ToString().ToLowerInvariant(),
+            isRunning = child.State is RunState.Queued or RunState.Running or RunState.WaitingForClient,
+            runId = child.RunId, agentId = request.Subagent!.AgentId,
             modelId = child.SelectedModel ?? request.PreferredGeneralModelId, gpuIndex = 1,
             task = request.Subagent.AssignedTask, sessionId = request.SessionId,
-            instruction = "Arbeite parallel an deiner eigenen Aufgabe. Hole dieses Ergebnis mit subagent.wait ab und verwende es direkt, ohne die abgeschlossene Teilaufgabe erneut auszuführen oder zu prüfen.",
-        }, MissumAiProtocol.CreateJsonOptions()), []);
+            instruction = child.State is RunState.Cancelled or RunState.Interrupted or RunState.Failed
+                ? "Dieser Subagent arbeitet nicht mehr. Setze die noch benötigte eigene Teilaufgabe gezielt mit subagent.spawn und resumeRunId fort; warte nicht auf den abgebrochenen Lauf."
+                : "Arbeite parallel an deiner eigenen Aufgabe. Hole dieses Ergebnis mit subagent.wait ab und verwende es direkt, ohne die abgeschlossene Teilaufgabe erneut auszuführen oder zu prüfen.",
+        }, MissumAiProtocol.CreateJsonOptions()), [],
+            Succeeded: child.State is not (RunState.Cancelled or RunState.Interrupted or RunState.Failed),
+            ErrorCode: child.State is RunState.Cancelled or RunState.Interrupted or RunState.Failed
+                ? child.ErrorCode ?? "subagent.interrupted" : null);
 
     private async Task EnsureSubagentStartedAsync(RunSnapshot child, RunRequest request, CancellationToken cancellationToken)
     {
@@ -350,10 +364,23 @@ public sealed partial class RunProcessor
     private async Task<AgentToolExecutionResult> WaitForSubagentAsync(string parentRunId, string childRunId, CancellationToken cancellationToken)
     {
         var request = await _repository.GetRequestAsync(childRunId, cancellationToken).ConfigureAwait(false);
-        if (request?.Subagent is not { } relation || relation.ParentRunId != parentRunId)
+        if (request?.Subagent is not { } relation)
             return SubagentFailure("subagent.invalid_owner", "Dieser Subagent gehört nicht zum aufrufenden Hauptagenten.");
-        var completion = StartSubagentRunner(childRunId, request);
-        await completion.WaitAsync(cancellationToken).ConfigureAwait(false);
+        if (relation.ParentRunId != parentRunId)
+        {
+            var prior = await _repository.GetAuthorizedSubagentContinuationAsync(parentRunId, childRunId, cancellationToken).ConfigureAwait(false);
+            if (prior is null) return SubagentFailure("subagent.invalid_owner", "Dieser Subagent gehört nicht zum aufrufenden Hauptagenten.");
+            if (prior.Value.Snapshot.State is RunState.Queued or RunState.Running or RunState.WaitingForClient)
+                return SubagentFailure("subagent.source_still_running", "Der vorherige Subagent ist noch aktiv. Starte keinen zweiten Versuch derselben Teilaufgabe; warte auf den tatsächlichen Endzustand.");
+            if (prior.Value.Snapshot.State != RunState.Completed)
+                return SubagentFailure("subagent.continuation_required", "Der frühere Subagent ist "
+                    + prior.Value.Snapshot.State + " und arbeitet nicht mehr. Nutze subagent.spawn mit unverändertem task und resumeRunId=" + childRunId + ".");
+        }
+        else
+        {
+            var completion = StartSubagentRunner(childRunId, request);
+            await completion.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
         var child = await _repository.GetAsync(childRunId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Der Subagentenlauf fehlt.");
         var text = CodingTextReconciler.Project(await _repository.GetVisibleTextEventsAsync(childRunId, cancellationToken: cancellationToken).ConfigureAwait(false));
@@ -368,7 +395,11 @@ public sealed partial class RunProcessor
             status = child.State == RunState.Completed ? "completed" : "failed",
             runId = childRunId, agentId = relation.AgentId, task = relation.AssignedTask,
             result = text, artifactIds, completionEvidence, errorCode = child.ErrorCode,
-            instruction = "Übernimm das abgeschlossene Ergebnis und die bereits ausgeführten Dateiänderungen direkt. Wiederhole oder überprüfe die zugewiesene abgeschlossene Teilaufgabe nicht. Verarbeite nur ausdrücklich offene Punkte weiter.",
+            state = child.State.ToString().ToLowerInvariant(),
+            isRunning = false,
+            instruction = child.State == RunState.Completed
+                ? "Übernimm das abgeschlossene Ergebnis und die bereits ausgeführten Dateiänderungen direkt. Wiederhole oder überprüfe die zugewiesene abgeschlossene Teilaufgabe nicht. Verarbeite nur ausdrücklich offene Punkte weiter."
+                : "Die Teilaufgabe ist abgebrochen und arbeitet nicht mehr. Bewahre belegte Teilergebnisse und setze nur offene Arbeit mit subagent.spawn/resumeRunId fort.",
         }, MissumAiProtocol.CreateJsonOptions()), [], Succeeded: child.State == RunState.Completed,
             ErrorCode: child.State == RunState.Completed ? null : child.ErrorCode ?? "subagent.failed");
     }

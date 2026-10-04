@@ -851,6 +851,10 @@ public sealed partial class RunRepository
 
     internal async Task<AgentRunCheckpoint?> GetSessionContextAsync(
         string currentRunId, RunRequest request, CancellationToken cancellationToken = default)
+        => (await GetCodingSessionContextWithSourceAsync(currentRunId, request, cancellationToken).ConfigureAwait(false))?.Checkpoint;
+
+    internal async Task<(AgentRunCheckpoint Checkpoint, string SourceRunId, bool WasInterrupted)?> GetCodingSessionContextWithSourceAsync(
+        string currentRunId, RunRequest request, CancellationToken cancellationToken = default)
     {
         if (request.Mode != RunMode.Coding || request.CodingOptions?.ContinueSessionContext != true
             || string.IsNullOrWhiteSpace(request.SessionId) || string.IsNullOrWhiteSpace(request.CodingOptions.WorkspacePath)) return null;
@@ -877,9 +881,10 @@ public sealed partial class RunRepository
             checkpoint = JsonSerializer.Deserialize<AgentRunCheckpoint>(reader.GetString(1), _checkpointJsonOptions);
             interrupted = reader.GetString(2) != "Completed";
         }
-        if (checkpoint is null || !interrupted) return checkpoint;
-        return RestoreInterruptedVisibleTail(checkpoint,
-            await GetContinuationEventsAsync(previousRun, 0, cancellationToken).ConfigureAwait(false));
+        if (checkpoint is null) return null;
+        return (interrupted ? RestoreInterruptedVisibleTail(checkpoint,
+            await GetContinuationEventsAsync(previousRun, 0, cancellationToken).ConfigureAwait(false)) : checkpoint,
+            previousRun, interrupted);
     }
 
     internal async Task<GeneralSessionContextSnapshot?> GetGeneralSessionContextAsync(
@@ -944,7 +949,7 @@ public sealed partial class RunRepository
         // The persisted request remains the immutable Create idempotency binding.
         // For session continuation compare the client's logical, steered history.
         return new(interrupted ? RestoreInterruptedVisibleTail(checkpoint, journal) : checkpoint,
-            previousRequest with { Messages = history }, visible[segmentStart..], interrupted);
+            previousRequest with { Messages = history }, visible[segmentStart..], interrupted, previousRun);
     }
 
     private static AgentRunCheckpoint RestoreInterruptedVisibleTail(AgentRunCheckpoint checkpoint, IReadOnlyList<RunEvent> journal)

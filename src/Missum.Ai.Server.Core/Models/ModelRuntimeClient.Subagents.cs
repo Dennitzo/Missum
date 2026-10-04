@@ -109,7 +109,12 @@ public sealed partial class ModelRuntimeClient
                 if (!availability.Allowed || availability.InstanceId is null || availability.GpuIndex != 1)
                     throw new InvalidOperationException(availability.Reason ?? "subagent.runtime_unavailable");
                 var cacheStatus = json.RootElement.TryGetProperty("cacheStatus", out var cache) ? cache.GetString() ?? "miss" : "miss";
-                if (prefill is not null && cacheStatus is not ("forked" or "restored" or "resident"))
+                // A resumed child has its own canonical message history and no
+                // source parent cache to fork. Missing/incompatible optional KV
+                // snapshots permit a cold first inference of that saved history.
+                // New delegations still require a verified parent-prefix transfer.
+                var coldOwnContext = parentSessionCacheKey is null && (cacheStatus is "miss" or "unavailable");
+                if (prefill is not null && !coldOwnContext && cacheStatus is not ("forked" or "restored" or "resident"))
                     throw new InvalidOperationException(json.RootElement.TryGetProperty("detail", out var detail)
                         ? detail.GetString() : "Der kanonische KV-Kontext konnte nicht übernommen werden.");
                 await GetRuntimeModelsAsync(timeout.Token).ConfigureAwait(false);

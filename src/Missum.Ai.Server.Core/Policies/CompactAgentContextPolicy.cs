@@ -87,7 +87,8 @@ public static class CompactAgentContextPolicy
     private const string Delegation = """
         Arbeitsteilung: Nur wenn subagentAvailable=true und du Hauptagent bist, nutze für unabhängige umfangreiche
         Teilaufgaben subagent.spawn. Bei DeepResearch beginne vor Quellenabrufen, Rechnungen oder Änderungen
-        mit genau einem frühen spawn, nachdem der vollständige Originalauftrag gelesen wurde. task beginnt
+        mit genau einem frühen spawn, nachdem der vollständige Originalauftrag gelesen wurde. Frühe fachliche
+        Grundlagen/Korrekturen mit research.update bleiben davor zulässig und werden bewahrt. task beginnt
         mit kurzer Titelzeile (etwa acht Wörter), dann Ziel, Randbedingungen, erwartetes Ergebnis, Abnahmekriterien,
         eindeutige Schreibpfade und deine eigene parallele Aufgabe. Delegiere keinen Gesamtauftrag und arbeite
         nicht dieselbe Teilaufgabe. Child erbt Modell, Kontext, Werkzeuge und Rechte. Bearbeite eigene Arbeit
@@ -103,7 +104,7 @@ public static class CompactAgentContextPolicy
         im Dialog vorhanden ist, lies view='task' mit originalQuestion und allen Folgeseiten vollständig,
         bevor du Anforderungen interpretierst/delegierst. Den vorhandenen vollständigen Erstprompt nicht neu laden.
         Auch Pflichtanforderungen vollständig paginieren, niemals aus gekürzter Übersicht Ziele streichen.
-        Nach erforderlicher früher Delegation zuerst Grundlagen: fachlicher Titel, Forschungsfrage, Definitionen,
+        Reiche Grundlagen früh ein, bei verfügbarer Delegation parallel: fachlicher Titel, Forschungsfrage, Definitionen,
         Voraussetzungen, Hypothesen und einfacher Ausgangsfall früh mit research.update speichern; gezielte
         Wissenslücken recherchieren, nicht erst komplette Literatur sammeln. Dasselbe Vorgehen ohne Subagent.
         Update: projectId, optional title, changes[{id,kind,expectedRevision,data}]. Neue Revision 0, sonst gelesene
@@ -123,10 +124,6 @@ public static class CompactAgentContextPolicy
         Kurzfassung und Gesamtdiskussion. contentMarkdown enthält keine Bedienhinweise, Fortschritts-/Netzdiagnosen,
         Dateiverwaltung, HTML/CSS/PDF-Code oder Manuskriptmarker. Betriebsinformationen knapp im Chat; Abschnitte
         dort nicht duplizieren. Missum speichert und setzt Layout, Formeln und PDF; keine eigenen PDF-Skripte.
-        Herleitungen zeigen Ausgangsgleichung, Voraussetzungen, fachliche Umformungen und Zwischenwerte bis
-        Ergebnis, mit Regeln/Gültigkeit in Prosa; fehlende Schritte benennen. Einheiten in numerischen Schritten
-        mitführen, Dimensionen symbolischer Beziehungen erklären; Symbole/Einheiten in kurzen Listen, nicht Tabellen.
-        SI verwenden oder natürliche Einheiten/Rückumrechnung erklären; Faktoren, Vorzeichen, Konventionen konsistent.
         Geometrie, Radius-/Flächenkonventionen und Geltungsbereich vor dimensionsabhängigen Herleitungen festlegen.
         Die betroffene Beziehung passend zur Aussage symbolisch, durch Rücksubstitution oder Dimensionsvergleich prüfen;
         SI und natürliche Einheiten müssen nach Rückumrechnung übereinstimmen. ProcessSucceeded bestätigt nur die
@@ -167,7 +164,8 @@ public static class CompactAgentContextPolicy
         if (request.Mode == RunMode.Coding) sections.Add(Coding);
         if (toolNames.Contains(SubagentToolNames.Spawn, StringComparer.Ordinal)) sections.Add(Delegation);
         if (toolNames.Contains(ClientToolNames.ResearchRead, StringComparer.Ordinal)
-            || toolNames.Contains(ClientToolNames.ResearchDeliverablesVerify, StringComparer.Ordinal)) sections.Add(Science);
+            || toolNames.Contains(ClientToolNames.ResearchDeliverablesVerify, StringComparer.Ordinal))
+            sections.Add(Science + "\n\n" + ScientificDerivationPolicy.Instructions);
         return string.Join("\n\n", sections);
     }
 

@@ -52,12 +52,33 @@ public sealed partial class NativeAssistantPage
             UpdateLayout();
             await SaveMathPreviewAsync(ConversationScroll, "native-continuation-preview.png");
 
+            var timelineMarker = _promptTimelineMarkers[currentUser.ToString()];
+            if (!timelineMarker.HitTarget.Focus(FocusState.Programmatic) || timelineMarker.IsHovered
+                || ToolTipService.GetToolTip(timelineMarker.HitTarget) is not ToolTip { IsOpen: false })
+                throw new InvalidOperationException("Automatic focus transfer must not open a prompt timeline preview.");
+            Composer.Focus(FocusState.Programmatic);
+            var keyboardFocused = timelineMarker.HitTarget.Focus(FocusState.Keyboard);
+            await Task.Delay(20);
+            if (!keyboardFocused || !timelineMarker.IsHovered
+                || ToolTipService.GetToolTip(timelineMarker.HitTarget) is not ToolTip { IsOpen: true })
+                throw new InvalidOperationException($"Deliberate keyboard navigation must still show the timeline preview. "
+                    + $"Focused={keyboardFocused}, state={timelineMarker.HitTarget.FocusState}, hover={timelineMarker.IsHovered}, "
+                    + $"preview={(ToolTipService.GetToolTip(timelineMarker.HitTarget) as ToolTip)?.IsOpen}.");
+            SetTimelineMarkerPointer(currentUser.ToString(), true);
+            if (!step.ContinueButton.Focus(FocusState.Pointer))
+                throw new InvalidOperationException("The native continuation button could not receive click focus.");
+            PrepareContinuationInteraction();
+
             _continuationRequestPending = true;
             _continuationMessageId = key;
             _continuationSessionId = session;
             _continuationServerStarted = false;
             RefreshContinuationSteps();
             SetRunning();
+            if (_promptTimelineMarkers.Values.Any(marker => marker.IsHovered
+                    || ToolTipService.GetToolTip(marker.HitTarget) is ToolTip { IsOpen: true })
+                || !ReferenceEquals(Microsoft.UI.Xaml.Input.FocusManager.GetFocusedElement(XamlRoot), Composer))
+                throw new InvalidOperationException("Continuing an answer selected the timeline or left its preview open.");
             if (step.ContinueButton.IsEnabled || _running || !IsContinuationPreparing || SendIcon.Glyph != "\uE71A"
                 || AutomationProperties.GetName(SendButton) != "Vorbereitung stoppen")
                 throw new InvalidOperationException("A repeated continuation click is enabled while preparing.");

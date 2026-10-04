@@ -55,6 +55,35 @@ public sealed class EarlySubagentResearchTests
         Assert.Empty(await fixture.Repository.GetSubagentRunsAsync(parent.Snapshot.RunId));
     }
 
+    [Fact]
+    public async Task ValidCanonicalSubmissionIsDispatchedEvenWhileEarlyAssignmentIsPending()
+    {
+        using var fixture = new Fixture(submitBeforeSpawn: true);
+        var request = Request() with { ClientCapabilities = ["workspace", "coding", "subagents", "research.deliverables"],
+            ResearchOptions = new(ProjectId: "research-canonical-context", ProtocolVersion: 2) };
+        var parent = await fixture.Repository.CreateAsync(request, null);
+        var tools = new AgentToolCatalog().GetAvailableTools(request, subagentAvailable: true);
+        await fixture.Repository.SaveCheckpointAsync(parent.Snapshot.RunId, new(
+            RunProcessor.CreateInitialMessages(request, "general", tools.Select(static tool => tool.Name).ToArray()),
+            1, 1, 100, 20, SelectedModelId: ModelId, UseStableSubagentToolCatalog: true,
+            ResearchManagedByAgent: true, EarlySubagentDelegationPending: true));
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        await Assert.ThrowsAsync<RunWaitingForClientException>(
+            () => fixture.Processor.ProcessAsync(parent.Snapshot.RunId, timeout.Token));
+        var events = await fixture.Repository.GetEventsAfterAsync(parent.Snapshot.RunId, 0);
+        var proposed = Assert.Single(events, item => item.Type == RunEventTypes.ClientToolProposed);
+        var submission = proposed.Data.Deserialize<ToolProposal>(MissumAiProtocol.CreateJsonOptions())!;
+        Assert.Equal(ClientToolNames.ResearchUpdate, submission.Name);
+        Assert.Equal("Neue fachliche Herleitung.", submission.Arguments.GetProperty("changes")[0]
+            .GetProperty("data").GetProperty("contentMarkdown").GetString());
+        var checkpoint = (await fixture.Repository.GetCheckpointAsync(parent.Snapshot.RunId))!;
+        Assert.True(checkpoint.EarlySubagentDelegationPending);
+        Assert.Equal(0, checkpoint.EarlySubagentDelegationRetryCount);
+        Assert.DoesNotContain(checkpoint.Messages, message => message.Content?.Contains("subagent.early_assignment_required",
+            StringComparison.Ordinal) == true);
+        Assert.Empty(await fixture.Repository.GetSubagentRunsAsync(parent.Snapshot.RunId));
+    }
+
     [Theory]
     [InlineData(RunMode.General)]
     [InlineData(RunMode.Coding)]
@@ -384,9 +413,11 @@ public sealed class EarlySubagentResearchTests
         internal RunProcessor Processor { get; }
 
         internal Fixture(bool initiallyUnloaded = false, bool rejectFirstAssignment = false,
-            bool pauseParent = false, bool denySubagent = false, bool completeWithoutChild = false, bool readTaskBeforeSpawn = false)
+            bool pauseParent = false, bool denySubagent = false, bool completeWithoutChild = false,
+            bool readTaskBeforeSpawn = false, bool submitBeforeSpawn = false)
         {
-            Handler = new(initiallyUnloaded, rejectFirstAssignment, pauseParent, denySubagent, completeWithoutChild, readTaskBeforeSpawn);
+            Handler = new(initiallyUnloaded, rejectFirstAssignment, pauseParent, denySubagent, completeWithoutChild,
+                readTaskBeforeSpawn, submitBeforeSpawn);
             var services = new ServiceCollection();
             services.AddLogging();
             services.AddMissumAiServerServices(_context.Options, includeHostedServices: false);
@@ -410,7 +441,7 @@ public sealed class EarlySubagentResearchTests
     }
 
     private sealed class ResearchHandler(bool initiallyUnloaded, bool rejectFirstAssignment, bool pauseParent,
-        bool denySubagent, bool completeWithoutChild, bool readTaskBeforeSpawn) : HttpMessageHandler
+        bool denySubagent, bool completeWithoutChild, bool readTaskBeforeSpawn, bool submitBeforeSpawn) : HttpMessageHandler
     {
         private static readonly string[] ParentTags = ["missum-context-train:131072", "missum-reasoning-mode:qwen3.8",
             "missum-reasoning-levels:none|low|medium|xhigh", "missum-reasoning-default:xhigh"];
@@ -492,6 +523,12 @@ public sealed class EarlySubagentResearchTests
             if (completeWithoutChild) return Text("Hallo. Der vorhandene Auftrag ist abgeschlossen.");
             if (readTaskBeforeSpawn && parentTurn == 1)
                 return Tool(ClientToolNames.ResearchRead, new { projectId = "research-canonical-context", view = "task" });
+            if (submitBeforeSpawn && parentTurn == 1)
+                return Tool(ClientToolNames.ResearchUpdate, new { projectId = "research-canonical-context", changes = new[]
+                {
+                    new { id = "foundations", kind = "section", expectedRevision = 0,
+                        data = new { title = "Grundlagen", contentMarkdown = "Neue fachliche Herleitung." } },
+                } });
             // Fail at the actual fixture contract problem instead of emitting
             // hundreds of identical spawn retries and reaching compaction.
             var preparationFailure = messages.Where(static item => item.GetProperty("role").GetString() == "tool")

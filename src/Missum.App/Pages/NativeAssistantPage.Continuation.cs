@@ -94,6 +94,7 @@ public sealed partial class NativeAssistantPage
             || !_messages.TryGetValue(messageId, out var message)
             || !IsNewestAssistantContinuation(messageId, message)
             || !Guid.TryParse(messageId, out var parsedMessageId)) return;
+        PrepareContinuationInteraction();
         var session = _session;
         _continuationRequestPending = true;
         _continuationMessageId = messageId;
@@ -123,6 +124,14 @@ public sealed partial class NativeAssistantPage
             RefreshContinuationSteps();
             SetRunning();
         }
+    }
+
+    private void PrepareContinuationInteraction()
+    {
+        DismissPromptTimelinePreviews();
+        // Move focus before disabling/removing the clicked button. Otherwise
+        // WinUI can select the first focusable control in the chat: its timeline.
+        Composer.Focus(FocusState.Programmatic);
     }
 
     internal sealed class ContinuationToolStepView : Grid

@@ -32,5 +32,5 @@ internal static class ScientificStateAgentPolicy
         sowie ausdrücklich erforderliche Auswertungen. Bearbeite nur die konkreten fehlenden Ziele und Diagnosen.
         Ein Ablauf mit drei weiteren Quellenaktionen ohne Erkenntnis oder Prüfziel benötigt eine fachliche Entscheidung,
         keine unveränderte Wiederholung. Werkzeuge und autonomes Weiterarbeiten bleiben dabei verfügbar.
-        """;
+        """ + "\n\n" + ScientificDerivationPolicy.Instructions;
 }

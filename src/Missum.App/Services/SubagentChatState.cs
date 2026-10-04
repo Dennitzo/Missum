@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -13,15 +15,40 @@ public sealed record SubagentChatState(
     long LastEventId = 0, string? Model = null, int? ContextUsed = null, int? ContextLimit = null,
     string? RunStatus = null, string? RunDetail = null, string? GenerationState = null,
     int? GeneratedTokens = null, DateTimeOffset? GenerationUpdatedAt = null,
-    IReadOnlyList<ChatArtifact>? Artifacts = null, bool? ResultDelivered = null)
+    IReadOnlyList<ChatArtifact>? Artifacts = null, bool? ResultDelivered = null,
+    IReadOnlyList<ChatMessage>? PreviousMessages = null, IReadOnlyList<string>? PreviousRunIds = null,
+    long LifecycleEventId = 0, long ProjectionRevision = 0, string? StoredReceiptId = null,
+    IReadOnlyDictionary<string, IReadOnlyList<ChatArtifact>>? PreviousMessageArtifacts = null,
+    IReadOnlyList<string>? AuthorizedConsumerRunIds = null)
 {
     internal const string ReceiptTool = "subagent";
     internal const string CompletionTool = "subagent.completed";
-    internal string ReceiptId => "subagent:" + AgentId;
-    internal string CompletionReceiptId => "subagent-completed:" + AgentId;
+    internal string ReceiptId => StoredReceiptId ?? "subagent:" + AgentId + ":" + RunId;
+    internal string CompletionReceiptId => "subagent-completed:" + AgentId + ":" + RunId;
     public bool IsRunning => Status is "queued" or "running" or "waitingForClient";
     public string LifecycleText => TaskTitle(Title) + " hat die Arbeit begonnen";
     internal static readonly JsonSerializerOptions JsonOptions = MissumAiProtocol.CreateJsonOptions();
+
+    internal static bool HasActiveRun(string? status, bool declaredRunning = false)
+    {
+        var normalized = status?.ToLowerInvariant();
+        return normalized is not ("completed" or "failed" or "denied" or "cancelled" or "interrupted"
+            or "disabled" or "unavailable" or "rejected")
+            && (declaredRunning || normalized is "running" or "pending" or "queued" or "waiting" or "waitingforclient");
+    }
+
+    internal static bool OpenTabOnFirstObservation(string? status, bool declaredRunning, bool manuallyClosed) =>
+        !manuallyClosed && HasActiveRun(status, declaredRunning);
+
+    internal static bool AcceptSnapshot(string currentRunId, DateTimeOffset? currentStartedAt, long currentRevision,
+        IEnumerable<string> previousRunIds, string incomingRunId, DateTimeOffset? incomingStartedAt, long incomingRevision)
+    {
+        if (currentRunId.Length == 0) return true;
+        if (incomingRunId.Length == 0) return false;
+        if (currentRunId == incomingRunId) return incomingRevision >= currentRevision;
+        return !previousRunIds.Contains(incomingRunId, StringComparer.Ordinal)
+            && (currentStartedAt is null || incomingStartedAt is { } started && started >= currentStartedAt);
+    }
 
     internal static SubagentChatState Create(SubagentRunEvent data, Guid session, DateTimeOffset at)
     {
@@ -30,6 +57,37 @@ public sealed record SubagentChatState(
             new(StableId(data.RunId + ":user"), session, ChatRole.User, data.Task, MessageStatus.Completed, at, at),
             new(StableId(data.RunId + ":assistant"), session, ChatRole.Assistant, "", MessageStatus.Streaming, at, at),
             Model: data.ModelId, RunStatus: "Aufgabe übernommen", ResultDelivered: false);
+    }
+
+    internal SubagentChatState ObserveLifecycle(SubagentRunEvent data, long eventId, DateTimeOffset at, bool started)
+    {
+        if (data.AgentId != AgentId) return this;
+        if (data.RunId != RunId)
+        {
+            // A resumed attempt is a new SSE stream. Its cursor and receipts must
+            // never inherit the cancelled attempt's identities or terminal state.
+            if (!started || at < AssistantMessage.CreatedAt || (PreviousRunIds ?? []).Contains(data.RunId, StringComparer.Ordinal))
+                return this;
+            var previousAssistant = IsRunning ? Finish(AssistantMessage, MessageStatus.Cancelled, at) : AssistantMessage;
+            var previousArtifacts = (PreviousMessageArtifacts ?? new Dictionary<string, IReadOnlyList<ChatArtifact>>())
+                .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+            if (Artifacts is { Count: > 0 }) previousArtifacts[AssistantMessage.Id.ToString()] = Artifacts;
+            return Create(data, SessionId, at) with
+            {
+                PreviousMessages = (PreviousMessages ?? []).Concat([UserMessage, previousAssistant]).ToArray(),
+                PreviousRunIds = (PreviousRunIds ?? []).Append(RunId).Distinct(StringComparer.Ordinal).ToArray(),
+                PreviousMessageArtifacts = previousArtifacts,
+                LifecycleEventId = eventId,
+                ProjectionRevision = ProjectionRevision,
+            };
+        }
+        if (data.ParentRunId != ParentRunId || eventId <= LifecycleEventId) return this;
+        var next = this with { Status = StateName(data.State), Model = data.ModelId, LifecycleEventId = eventId };
+        if (!next.IsRunning)
+            next = next with { AssistantMessage = Finish(next.AssistantMessage,
+                data.State == RunState.Completed ? MessageStatus.Completed
+                    : data.State == RunState.Cancelled ? MessageStatus.Cancelled : MessageStatus.Failed, at) };
+        return next;
     }
 
     internal static string TaskTitle(string? task)
@@ -60,10 +118,47 @@ public sealed record SubagentChatState(
         _ => "hat die Arbeit begonnen",
     };
 
+    internal bool IsAuthorizedConsumer(string parentRunId) => parentRunId == ParentRunId
+        || (AuthorizedConsumerRunIds ?? []).Contains(parentRunId, StringComparer.Ordinal);
+
+    internal SubagentChatState AdoptConsumer(RunEvent item, string parentRunId, Guid sessionId)
+    {
+        if (item.Type != "subagent.continuationState" || item.RunId != parentRunId || SessionId != sessionId
+            || item.Data.ValueKind != JsonValueKind.Object || Text(item.Data, "sourceParentRunId") != ParentRunId
+            || !item.Data.TryGetProperty("children", out var children) || children.ValueKind != JsonValueKind.Array) return this;
+        var confirmed = children.EnumerateArray().FirstOrDefault(child => child.ValueKind == JsonValueKind.Object
+            && Text(child, "runId") == RunId && Text(child, "agentId") == AgentId
+            && Text(child, "task") == UserMessage.Content);
+        if (confirmed.ValueKind != JsonValueKind.Object) return this;
+        var next = IsAuthorizedConsumer(parentRunId) ? this
+            : this with { AuthorizedConsumerRunIds = (AuthorizedConsumerRunIds ?? []).Append(parentRunId).ToArray() };
+        var actual = Text(confirmed, "state")?.ToLowerInvariant();
+        if (actual is not ("completed" or "cancelled" or "interrupted" or "failed")) return next;
+        var (messageStatus, runStatus) = actual switch
+        {
+            "completed" => (MessageStatus.Completed, "Abgeschlossen"),
+            "cancelled" => (MessageStatus.Cancelled, "Gestoppt"),
+            "interrupted" => (MessageStatus.Interrupted, "Unterbrochen"),
+            _ => (MessageStatus.Failed, "Fehlgeschlagen"),
+        };
+        if (next.Status == actual && next.AssistantMessage.Status == messageStatus && next.RunStatus == runStatus && next.RunDetail is null
+            && (next.GenerationState is null || next.GenerationState == actual)
+            && !(next.AssistantMessage.ToolSteps ?? []).Any(step => step.Status == "running")) return next;
+        // This ownership-checked gateway event reports the actual terminal state
+        // even if shutdown prevented delivery of the old completion SSE. Keep
+        // every received character; delivery is still confirmed separately.
+        return next with
+        {
+            Status = actual, RunStatus = runStatus, RunDetail = null,
+            GenerationState = actual, GenerationUpdatedAt = item.CreatedAt,
+            AssistantMessage = Finish(next.AssistantMessage, messageStatus, item.CreatedAt),
+        };
+    }
+
     internal SubagentChatState MarkResultDelivered(RunEvent item)
     {
-        if (ResultDelivered is true || item.Type != "subagent.resultConsumed" || item.RunId != ParentRunId || item.Data.ValueKind != JsonValueKind.Object
-            || Text(item.Data, "parentRunId") is { Length: > 0 } parent && parent != ParentRunId || Text(item.Data, "agentId") != AgentId
+        if (ResultDelivered is true || item.Type != "subagent.resultConsumed" || !IsAuthorizedConsumer(item.RunId) || item.Data.ValueKind != JsonValueKind.Object
+            || Text(item.Data, "parentRunId") is { Length: > 0 } parent && parent != item.RunId || Text(item.Data, "agentId") != AgentId
             || Text(item.Data, "runId") != RunId || Text(item.Data, "state") != "completed"
             || Status != "completed" || AssistantMessage.Status != MessageStatus.Completed) return this;
         return this with { ResultDelivered = true };
@@ -79,7 +174,8 @@ public sealed record SubagentChatState(
     internal static IReadOnlyList<SubagentChatState> Read(IEnumerable<ChatMessage> messages, string? dataDirectory = null) => messages
         .SelectMany(message => message.ToolSteps ?? [])
         .Where(step => step.Tool == ReceiptTool && step.OutputJson is not null)
-        .Select(step => DeserializeStored(step.OutputJson!, dataDirectory)).OfType<SubagentChatState>()
+        .Select(step => DeserializeStored(step.OutputJson!, dataDirectory) is { } state
+            ? state with { StoredReceiptId = step.Id } : null).OfType<SubagentChatState>()
         .GroupBy(state => state.AgentId, StringComparer.Ordinal).Select(group => group.Last()).ToArray();
 
     internal async Task<string> PersistAsync(string dataDirectory)
@@ -225,4 +321,96 @@ public sealed record SubagentChatState(
     internal static string StateName(RunState state) => JsonNamingPolicy.CamelCase.ConvertName(state.ToString());
     private static string? Text(JsonElement data, string property) => data.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
     private static Guid StableId(string value) => new(SHA256.HashData(Encoding.UTF8.GetBytes(value)).AsSpan(0, 16));
+}
+
+/// <summary>Retains explicit tab closures without reopening historical transcripts.</summary>
+internal sealed class SubagentTabStateStore
+{
+    private static readonly ConcurrentDictionary<string, SharedState> States = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private readonly SharedState _state;
+    internal string StoragePath { get; }
+
+    internal SubagentTabStateStore(string dataDirectory)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(dataDirectory);
+        StoragePath = Path.GetFullPath(Path.Combine(dataDirectory, "SubagentTabs.json"));
+        _state = States.GetOrAdd(StoragePath, static _ => new SharedState());
+        lock (_state.Gate)
+        {
+            if (_state.Loaded) return;
+            foreach (var key in ReadClosedTabs(StoragePath)) _state.ClosedTabs.Add(key);
+            _state.Loaded = true;
+        }
+    }
+
+    internal bool WasManuallyClosed(Guid sessionId, string agentId)
+    {
+        lock (_state.Gate) return _state.ClosedTabs.Contains(Key(sessionId, agentId));
+    }
+
+    internal void Close(Guid sessionId, string agentId) => SetClosed(sessionId, agentId, closed: true);
+    internal void Open(Guid sessionId, string agentId) => SetClosed(sessionId, agentId, closed: false);
+
+    private static string Key(Guid sessionId, string agentId) => sessionId.ToString("N") + ":" + agentId;
+
+    private void SetClosed(Guid sessionId, string agentId, bool closed)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(agentId);
+        lock (_state.Gate)
+        {
+            var key = Key(sessionId, agentId);
+            if (!(closed ? _state.ClosedTabs.Add(key) : _state.ClosedTabs.Remove(key))) return;
+            // Per-profile windows share this state. Background snapshots only
+            // read memory; filesystem writes happen on an explicit open/close.
+            var snapshot = new Snapshot(1, _state.ClosedTabs.Order(StringComparer.Ordinal).ToArray());
+            var temporary = StoragePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(StoragePath)!);
+                using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None,
+                           4096, FileOptions.WriteThrough))
+                {
+                    JsonSerializer.Serialize(stream, snapshot, JsonOptions);
+                    stream.Flush(flushToDisk: true);
+                }
+                File.Move(temporary, StoragePath, overwrite: true);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            { Trace.TraceWarning("Cannot save subagent tab closures at {0}: {1}", StoragePath, exception.Message); }
+            finally
+            {
+                try { File.Delete(temporary); }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                { Trace.TraceWarning("Cannot remove temporary subagent tab closure file {0}: {1}", temporary, exception.Message); }
+            }
+        }
+    }
+
+    private static string[] ReadClosedTabs(string path)
+    {
+        try
+        {
+            if (!File.Exists(path) || new FileInfo(path).Length > 4 * 1024 * 1024) return [];
+            using var stream = File.OpenRead(path);
+            var snapshot = JsonSerializer.Deserialize<Snapshot>(stream, JsonOptions);
+            return snapshot is { Version: 1, ClosedTabs: not null }
+                ? snapshot.ClosedTabs.Where(key => key is { Length: > 33 } && key[32] == ':'
+                    && Guid.TryParseExact(key[..32], "N", out _) && !string.IsNullOrWhiteSpace(key[33..])).ToArray()
+                : [];
+        }
+        catch (Exception exception) when (exception is JsonException or IOException or UnauthorizedAccessException)
+        {
+            Trace.TraceWarning("Cannot read subagent tab closures at {0}: {1}", path, exception.Message);
+            return [];
+        }
+    }
+
+    private sealed record Snapshot(int Version, string[] ClosedTabs);
+    private sealed class SharedState
+    {
+        internal object Gate { get; } = new();
+        internal HashSet<string> ClosedTabs { get; } = new(StringComparer.Ordinal);
+        internal bool Loaded { get; set; }
+    }
 }

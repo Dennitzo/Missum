@@ -27,6 +27,7 @@ public sealed partial class NativeAssistantPage
         PromptTimeline.Visibility = prompts.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
         if (prompts.Length == 0)
         {
+            DismissPromptTimelinePreviews();
             PromptTimeline.Children.Clear();
             _promptTimelineMarkers.Clear();
             _activePromptTimelineId = null;
@@ -36,6 +37,8 @@ public sealed partial class NativeAssistantPage
         foreach (var stale in _promptTimelineMarkers.Keys
                      .Where(id => prompts.All(prompt => S(prompt, "id") != id)).ToArray())
         {
+            if (ToolTipService.GetToolTip(_promptTimelineMarkers[stale].HitTarget) is ToolTip preview)
+                preview.IsOpen = false;
             PromptTimeline.Children.Remove(_promptTimelineMarkers[stale].HitTarget);
             _promptTimelineMarkers.Remove(stale);
         }
@@ -80,10 +83,10 @@ public sealed partial class NativeAssistantPage
                 hitTarget.Resources["ButtonBackgroundPressed"] = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
                 var capturedId = id;
                 hitTarget.Click += (_, _) => ScrollToPrompt(capturedId);
-                hitTarget.PointerEntered += (_, _) => SetTimelineMarkerHover(capturedId, true);
-                hitTarget.PointerExited += (_, _) => SetTimelineMarkerHover(capturedId, false);
-                hitTarget.GotFocus += (_, _) => SetTimelineMarkerHover(capturedId, true);
-                hitTarget.LostFocus += (_, _) => SetTimelineMarkerHover(capturedId, false);
+                hitTarget.PointerEntered += (_, _) => SetTimelineMarkerPointer(capturedId, true);
+                hitTarget.PointerExited += (_, _) => SetTimelineMarkerPointer(capturedId, false);
+                hitTarget.RegisterPropertyChangedCallback(UIElement.FocusStateProperty,
+                    (_, _) => SetTimelineMarkerFocus(capturedId, hitTarget.FocusState == FocusState.Keyboard));
                 Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(hitTarget,
                     $"Zu Prompt {index + 1} springen: {NativePromptTimelineState.PreviewText(S(prompt, "content"), 80)}");
                 marker = new PromptTimelineMarker(hitTarget, line, scale);
@@ -189,9 +192,35 @@ public sealed partial class NativeAssistantPage
         }
     }
 
-    private void SetTimelineMarkerHover(string id, bool hovered)
+    private void SetTimelineMarkerPointer(string id, bool entered)
     {
         if (!_promptTimelineMarkers.TryGetValue(id, out var marker)) return;
+        marker.IsPointerOver = entered;
+        UpdateTimelineMarkerPreview(id, marker);
+    }
+
+    private void SetTimelineMarkerFocus(string id, bool keyboardFocused)
+    {
+        if (!_promptTimelineMarkers.TryGetValue(id, out var marker)) return;
+        // WinUI relocates focus when a continuation button becomes disabled or
+        // disappears. That automatic focus transfer is not timeline navigation.
+        marker.IsKeyboardFocused = keyboardFocused;
+        UpdateTimelineMarkerPreview(id, marker);
+    }
+
+    private void DismissPromptTimelinePreviews()
+    {
+        foreach (var (id, marker) in _promptTimelineMarkers)
+        {
+            marker.IsPointerOver = false;
+            marker.IsKeyboardFocused = false;
+            UpdateTimelineMarkerPreview(id, marker);
+        }
+    }
+
+    private void UpdateTimelineMarkerPreview(string id, PromptTimelineMarker marker)
+    {
+        var hovered = marker.IsPointerOver || marker.IsKeyboardFocused;
         marker.IsHovered = hovered;
         if (ToolTipService.GetToolTip(marker.HitTarget) is ToolTip preview) preview.IsOpen = hovered;
         if (hovered)
@@ -229,6 +258,8 @@ public sealed partial class NativeAssistantPage
         public ScaleTransform Scale { get; } = scale;
         public double TargetOffset { get; set; }
         public double TargetScale { get; set; } = scale.ScaleX;
+        public bool IsPointerOver { get; set; }
+        public bool IsKeyboardFocused { get; set; }
         public bool IsHovered { get; set; }
     }
 }
