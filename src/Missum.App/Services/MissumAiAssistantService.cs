@@ -50,7 +50,10 @@ public sealed record MissumAiAssistantUpdate(
     int? GeneratedTokens = null,
     DateTimeOffset? GenerationUpdatedAt = null,
     SubagentChatState? Subagent = null,
-    string? ContextSource = null);
+    string? ContextSource = null,
+    int? ProcessedPromptTokens = null,
+    int? TotalPromptTokens = null,
+    double? PromptProgress = null);
 
 public sealed record MissumAiSpeechUpdate(
     bool IsActive,
@@ -2011,6 +2014,7 @@ public sealed partial class MissumAiAssistantService(
                                 Status: generation.State switch
                                 {
                                     "codingLoading" => "Coding-Modell wird geladen",
+                                    "promptProcessing" => "Kontext wird verarbeitet",
                                     "codingWaiting" => "Modell generiert",
                                     "codingCompacting" => "Projektkontext wird verdichtet",
                                     "providerRetryWaiting" => "Lokales Modell vorübergehend nicht erreichbar",
@@ -2030,7 +2034,10 @@ public sealed partial class MissumAiAssistantService(
                                 ContextSource: modelTokenProgress.HasMeasuredContext ? "measured" : "estimated",
                                 GenerationState: generation.State,
                                 GeneratedTokens: modelTokenProgress.GeneratedTokens,
-                                GenerationUpdatedAt: item.CreatedAt)).ConfigureAwait(false);
+                                GenerationUpdatedAt: item.CreatedAt,
+                                ProcessedPromptTokens: generation.ProcessedPromptTokens,
+                                TotalPromptTokens: generation.PromptTokens,
+                                PromptProgress: generation.PromptProgress)).ConfigureAwait(false);
                         }
                         break;
                     case "research.state.tokens":

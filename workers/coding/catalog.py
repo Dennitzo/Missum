@@ -155,10 +155,69 @@ def matching_projector(path, root):
     return None
 
 
+def _jinja_thinking_controls(template):
+    """Read boolean inputs from executable Jinja conditions, not prose.
+
+    Skip comments/raw sections and consume quoted values before their closing
+    delimiter. An example like ``{{ '{% if thinking %}' }}`` is not a toggle;
+    neither are attributes of message data.
+    """
+    controls = set()
+    position = 0
+    opening = re.compile(r"\{([%#{])")
+    quoted = re.compile(r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"", re.DOTALL)
+    while match := opening.search(template, position):
+        kind = match.group(1)
+        end_token = {"%": "%}", "#": "#}", "{": "}}"}[kind]
+        start = match.end()
+        if kind == "#":
+            end = template.find(end_token, start)
+        else:
+            cursor = start
+            end = -1
+            while cursor < len(template):
+                if template[cursor] in "'\"":
+                    literal = quoted.match(template, cursor)
+                    if literal is None:
+                        break  # Malformed template: do not infer capabilities.
+                    cursor = literal.end()
+                elif template.startswith(end_token, cursor):
+                    end = cursor
+                    break
+                else:
+                    cursor += 1
+        if end < 0:
+            break
+        position = end + len(end_token)
+        if kind != "%":
+            continue
+        code = template[start:end].strip().strip("-+").strip()
+        if code == "raw":
+            raw_end = re.search(r"\{%[-+]?\s*endraw\s*[-+]?%\}", template[position:])
+            if raw_end is None:
+                break
+            position += raw_end.end()
+            continue
+        condition = re.match(r"(?:if|elif)\s+(.+)", code, re.DOTALL)
+        if condition is None:
+            continue
+        expression = quoted.sub(" ", condition.group(1))
+        tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]*|[^\s]", expression)
+        for index, token in enumerate(tokens):
+            if token not in ("thinking", "enable_thinking"):
+                continue
+            previous = tokens[index - 1] if index else None
+            following = tokens[index + 1] if index + 1 < len(tokens) else None
+            if previous != "." and following not in (".", "("):
+                controls.add(token)
+    return controls
+
+
 def reasoning_profile(metadata):
     """Only select effort values supported by this model's actual template."""
     template = metadata.get("tokenizer.chat_template", "")
     architecture = metadata.get("general.architecture", "")
+    thinking_controls = _jinja_thinking_controls(template)
     levels = []
     for match in re.finditer(r"(?:resolved_)?reasoning_(?:effort|strength)\s+(?:not\s+)?in\s*[\[(]([^\])]{1,512})[\])]", template):
         levels.extend(re.findall(r"['\"]([a-z][a-z0-9_-]{0,31})['\"]", match.group(1)))
@@ -166,12 +225,14 @@ def reasoning_profile(metadata):
     if not levels and (architecture == "gpt-oss" or "gpt-oss" in metadata.get("general.name", "").lower()) and "reasoning_effort" in template:
         levels = ["low", "medium", "high"]
     if levels:
-        if "enable_thinking" in template and "none" not in levels:
+        if "enable_thinking" in thinking_controls and "none" not in levels:
             levels.insert(0, "none")
         highest = next((level for level in ("max", "ultra", "xhigh", "high", "medium", "low", "minimal") if level in levels), None)
         return {"enabled": True, "effort": highest, "budget": -1, "levels": levels, "mode": "llama-native"}
-    if "enable_thinking" in template:
+    if "enable_thinking" in thinking_controls:
         return {"enabled": True, "effort": None, "budget": -1, "levels": ["none", "on"], "mode": "llama-toggle"}
+    if "thinking" in thinking_controls:
+        return {"enabled": True, "effort": None, "budget": -1, "levels": ["none", "on"], "mode": "llama-thinking-toggle"}
     if "<think>" in template or "<|channel>analysis" in template:
         return {"enabled": None, "effort": None, "budget": -1, "levels": ["on"], "mode": "llama-fixed"}
     return {"enabled": None, "effort": None, "budget": -1, "levels": [], "mode": "automatic"}

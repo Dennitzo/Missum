@@ -69,6 +69,41 @@ public sealed partial class NativeAssistantPage
                 || row.Label.Text != $"Denke nach · {1025:N0} Token")
                 throw new InvalidOperationException("Thinking must remain a compact, collapsed disclosure without a cursor host below it.");
 
+            // Prompt evaluation must honestly precede thinking without creating
+            // another control, invented reasoning, or generated-token counts.
+            ApplyEvent("status.changed", JsonSerializer.SerializeToElement(new
+            {
+                sessionId = owner, messageId, runStatus = "Kontext wird verarbeitet", generationState = "promptProcessing",
+                processedPromptTokens = 70539, totalPromptTokens = 80000, promptProgress = .88,
+                generatedTokens = 0, generationUpdatedAt = DateTimeOffset.UtcNow,
+            }));
+            RefreshThinkingIndicators();
+            if (!ReferenceEquals(row, _thinkingIndicators[messageId]) || row.Visibility != Visibility.Visible
+                || !row.IsProcessing || !row.Label.Text.StartsWith("Kontext wird verarbeitet", StringComparison.Ordinal)
+                || !row.Label.Text.Contains($"{70539:N0} Eingangstoken", StringComparison.Ordinal))
+                throw new InvalidOperationException("Prompt processing was mislabeled as generated reasoning.");
+            row.SetExpanded(true); await Task.Delay(30);
+            if (row.ReasoningView.Visibility != Visibility.Collapsed
+                || !row.ExplanationText.Contains("Generierung beginnt", StringComparison.Ordinal))
+                throw new InvalidOperationException("Prefill needs an explanatory message instead of invented reasoning.");
+            var processingLabel = row.Label.Text;
+            _messagesDirty = false;
+            ApplyEvent("status.changed", JsonSerializer.SerializeToElement(new
+            {
+                sessionId = owner, messageId, generationState = "promptProcessing",
+                processedPromptTokens = 72000, totalPromptTokens = 80000,
+                generatedTokens = 0, generationUpdatedAt = DateTimeOffset.UtcNow,
+            }));
+            RefreshThinkingIndicators();
+            if (_messagesDirty || !ReferenceEquals(row, _thinkingIndicators[messageId]) || row.Label.Text != processingLabel)
+                throw new InvalidOperationException("Prompt-processing updates rebuilt controls or bypassed throttling.");
+            RefreshThinkingIndicators(refreshTokens: true);
+            if (!row.Label.Text.Contains($"{72000:N0} Eingangstoken", StringComparison.Ordinal)
+                || !row.Label.Text.Contains(.9.ToString("P0", System.Globalization.CultureInfo.CurrentCulture), StringComparison.Ordinal))
+                throw new InvalidOperationException("Measured prompt progress did not reach the native row.");
+            await SaveMathPreviewAsync(LayoutRoot, "native-thinking-processing-preview.png");
+            row.SetExpanded(false);
+
             // Exercise the real native button, then stream reasoning through the
             // same chat.delta path while retaining its open control and receipt.
             var reasoningMessage = _messages[messageId].Deserialize<Dictionary<string, JsonElement>>()!;

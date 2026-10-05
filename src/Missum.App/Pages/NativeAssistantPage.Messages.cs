@@ -100,7 +100,9 @@ public sealed partial class NativeAssistantPage
             desired.Add(element);
         }
         var messageSteps = Items(message, "toolSteps");
-        var latestReasoning = messageSteps.LastOrDefault(step => S(step, "tool") == "assistant.reasoning" && S(step, "agentId").Length == 0);
+        var reasoningOwner = ActiveSubagent?.AgentId ?? "";
+        var latestReasoning = messageSteps.LastOrDefault(step => S(step, "tool") == "assistant.reasoning"
+            && NativeThinkingIndicatorState.IsOwnedStep(S(step, "agentId"), reasoningOwner));
         FrameworkElement? latestReasoningView = null;
         var subagentReceipts = messageSteps.Where(step => S(step, "tool") == "subagent").ToArray();
         foreach (var step in messageSteps)
@@ -128,7 +130,7 @@ public sealed partial class NativeAssistantPage
                 desired.Add(lifecycle);
                 continue;
             }
-            if (S(step, "status") is "running" or "pending" && S(step, "agentId").Length == 0
+            if (S(step, "status") is "running" or "pending" && NativeThinkingIndicatorState.IsOwnedStep(S(step, "agentId"), reasoningOwner)
                 && tool is not ("assistant.reasoning" or "assistant.progress" or "assistant.narration" or "assistant.steering"))
                 hasBlockingTool = true;
             var detail = S(step, "detail", S(step, "explanation"));
@@ -174,9 +176,14 @@ public sealed partial class NativeAssistantPage
             if (!_thinkingStates.TryGetValue(messageId, out var reasoningState))
                 _thinkingStates[messageId] = reasoningState = new NativeThinkingIndicatorState();
             reasoningState.ObserveReasoning(messageId, S(latestReasoning, "id"), S(latestReasoning, "detail"), reasoningUpdatedAt);
+            if (!string.IsNullOrWhiteSpace(S(latestReasoning, "detail")))
+                _modelPhases[messageId] = (_modelPhases.GetValueOrDefault(messageId) ?? new NativeModelPhasePresentation())
+                    .ObserveReasoning(reasoningUpdatedAt);
         }
-        if (assistant && _thinkingStates.TryGetValue(messageId, out var thinkingState))
-            thinkingState.ObserveContent(messageId, visibleAnswer.ToString(), DateTimeOffset.UtcNow);
+        if (assistant && _thinkingStates.TryGetValue(messageId, out var thinkingState)
+            && thinkingState.ObserveContent(messageId, visibleAnswer.ToString(), DateTimeOffset.UtcNow))
+            _modelPhases[messageId] = (_modelPhases.GetValueOrDefault(messageId) ?? new NativeModelPhasePresentation())
+                .ObserveContent(DateTimeOffset.UtcNow);
         if (S(message, "error") is { Length: > 0 } error && error != content) Text("error", error);
         var artifacts = Items(message, "artifacts");
         if (artifacts.Length > 0)
@@ -208,7 +215,7 @@ public sealed partial class NativeAssistantPage
             _thinkingIndicators[messageId] = indicator;
             desired.Add(indicator);
         }
-        else { _thinkingIndicators.Remove(messageId); _thinkingStates.Remove(messageId); }
+        else { _thinkingIndicators.Remove(messageId); _thinkingStates.Remove(messageId); _modelPhases.Remove(messageId); }
         if (MessageActionsFor(messageId, message) is { } messageActions) desired.Add(messageActions);
         foreach (var old in panel.Children.OfType<FrameworkElement>().Where(child => !desired.Contains(child)).ToArray()) panel.Children.Remove(old);
         for (var i = 0; i < desired.Count; i++)

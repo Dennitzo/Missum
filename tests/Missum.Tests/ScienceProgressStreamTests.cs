@@ -45,6 +45,12 @@ public sealed class ScienceProgressStreamTests
         await service.ResumePendingAsync(update => { updates.Enqueue(update); return Task.CompletedTask; }, timeout.Token);
 
         Assert.DoesNotContain(updates, update => update.Kind == MissumAiAssistantUpdateKind.Failed);
+        var processing = Assert.Single(updates, update => update.GenerationState == "promptProcessing");
+        Assert.Equal("Kontext wird verarbeitet", processing.Status);
+        Assert.Equal(70539, processing.ProcessedPromptTokens);
+        Assert.Equal(80000, processing.TotalPromptTokens);
+        Assert.Equal(.88, processing.PromptProgress);
+        Assert.Equal(0, processing.GeneratedTokens);
         Assert.Equal("completed", (await runs.GetAsync(run.Id))!.State);
         var completed = Assert.Single(updates, update => update.Kind == MissumAiAssistantUpdateKind.Completed);
         Assert.Equal(Report, completed.Message.Content);
@@ -90,6 +96,8 @@ public sealed class ScienceProgressStreamTests
                     (RunEventTypes.ResearchEvidenceExtracted, new { projectId, completed = 2 }),
                     (RunEventTypes.ResearchVerificationUpdated, new { projectId, completed = 2 }),
                     (RunEventTypes.ResearchReportCompleted, new { projectId, completed = 2 }),
+                    (RunEventTypes.ModelGeneration, new ModelGenerationEvent("promptProcessing",
+                        PromptProgress: .88, PromptTokens: 80000, ProcessedPromptTokens: 70539)),
                     (RunEventTypes.ReasoningDelta, new ReasoningDeltaEvent("Ich prüfe zuerst die Einheiten.", 1, ReplaceFrom: 0)),
                     (RunEventTypes.ReasoningDelta, new ReasoningDeltaEvent(" Danach die Herleitung.", 1)),
                     (RunEventTypes.ReasoningDelta, new ReasoningDeltaEvent("", 1, State: "completed")),

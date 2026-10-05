@@ -19,7 +19,8 @@ public sealed record SubagentChatState(
     IReadOnlyList<ChatMessage>? PreviousMessages = null, IReadOnlyList<string>? PreviousRunIds = null,
     long LifecycleEventId = 0, long ProjectionRevision = 0, string? StoredReceiptId = null,
     IReadOnlyDictionary<string, IReadOnlyList<ChatArtifact>>? PreviousMessageArtifacts = null,
-    IReadOnlyList<string>? AuthorizedConsumerRunIds = null)
+    IReadOnlyList<string>? AuthorizedConsumerRunIds = null,
+    int? ProcessedPromptTokens = null, int? TotalPromptTokens = null, double? PromptProgress = null)
 {
     internal const string ReceiptTool = "subagent";
     internal const string CompletionTool = "subagent.completed";
@@ -262,7 +263,12 @@ public sealed record SubagentChatState(
             case RunEventTypes.ModelGeneration:
                 var generation = item.Data.Deserialize<ModelGenerationEvent>(JsonOptions);
                 next = next with { GeneratedTokens = generation?.GeneratedTokens ?? GeneratedTokens, GenerationState = generation?.State,
-                    GenerationUpdatedAt = item.CreatedAt, RunStatus = "Modell generiert", ContextUsed = generation?.CurrentTokens ?? ContextUsed };
+                    GenerationUpdatedAt = item.CreatedAt, RunStatus = generation?.State == "promptProcessing" ? "Kontext wird verarbeitet" : "Modell generiert",
+                    ContextUsed = generation?.CurrentTokens ?? ContextUsed,
+                    ProcessedPromptTokens = generation?.ProcessedPromptTokens ?? (generation?.State == GenerationState ? ProcessedPromptTokens : null),
+                    TotalPromptTokens = generation?.PromptTokens ?? (generation?.State == GenerationState ? TotalPromptTokens : null),
+                    PromptProgress = generation?.PromptProgress ?? (generation?.State == GenerationState
+                        && generation?.ProcessedPromptTokens is not >= 0 && generation?.PromptTokens is not >= 0 ? PromptProgress : null) };
                 break;
             case RunEventTypes.ClientToolProposed:
                 if (item.Data.Deserialize<ToolProposal>(JsonOptions) is { } proposal)

@@ -489,6 +489,31 @@ public sealed class SubagentChatStateTests
     }
 
     [Fact]
+    public void ChildProcessingKeepsMeasuredInputCountersSeparateFromGeneratedTokensAndClearsOnNewRound()
+    {
+        var child = Child();
+        child = child.Apply(Event(child, 1, RunEventTypes.ModelGeneration,
+            new ModelGenerationEvent("promptProcessing", PromptProgress: .4, PromptTokens: 100, ProcessedPromptTokens: 40)));
+        Assert.Equal("Kontext wird verarbeitet", child.RunStatus);
+        Assert.Equal(40, child.ProcessedPromptTokens);
+        Assert.Equal(100, child.TotalPromptTokens);
+        Assert.Equal(.4, child.PromptProgress);
+        Assert.Null(child.GeneratedTokens);
+        child = child.Apply(Event(child, 2, RunEventTypes.ModelGeneration,
+            new ModelGenerationEvent("promptProcessing", ProcessedPromptTokens: 60)));
+        Assert.Equal(60, child.ProcessedPromptTokens);
+        Assert.Equal(100, child.TotalPromptTokens);
+        Assert.Null(child.PromptProgress);
+        child = child.Apply(Event(child, 3, RunEventTypes.ModelGeneration,
+            new ModelGenerationEvent("promptProcessing", ProcessedPromptTokens: 70, PromptProgress: .68)));
+        Assert.Equal(.68, child.PromptProgress);
+        child = child.Apply(Event(child, 4, RunEventTypes.ModelGeneration, new ModelGenerationEvent("generationStarted")));
+        Assert.Null(child.ProcessedPromptTokens);
+        Assert.Null(child.TotalPromptTokens);
+        Assert.Null(child.PromptProgress);
+    }
+
+    [Fact]
     public void ReasoningRemainsItsOwnDetailedReceiptAndUsesIdempotentRoundCorrections()
     {
         var child = Child();

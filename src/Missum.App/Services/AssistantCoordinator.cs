@@ -115,7 +115,8 @@ public sealed partial class AssistantCoordinator(
         bool IsRunning, string? Status = null, string? Detail = null, string? Model = null,
         int? ContextUsed = null, int? ContextLimit = null, int? LoadedFiles = null, bool ContextWasCompacted = false,
         string? GenerationState = null, int? GeneratedTokens = null, DateTimeOffset? GenerationUpdatedAt = null,
-        string? ContextSource = null);
+        string? ContextSource = null, int? ProcessedPromptTokens = null, int? TotalPromptTokens = null,
+        double? PromptProgress = null);
 
     private async Task ObserveDisplayStateAsync(MissumAiAssistantUpdate update)
     {
@@ -151,6 +152,13 @@ public sealed partial class AssistantCoordinator(
                 GenerationState = preserveGeneration ? current.GenerationState : update.GenerationState,
                 GeneratedTokens = preserveGeneration ? current.GeneratedTokens : update.GeneratedTokens,
                 GenerationUpdatedAt = preserveGeneration ? current.GenerationUpdatedAt : update.GenerationUpdatedAt,
+                ProcessedPromptTokens = preserveGeneration ? current.ProcessedPromptTokens
+                    : update.ProcessedPromptTokens ?? (update.GenerationState == current.GenerationState ? current.ProcessedPromptTokens : null),
+                TotalPromptTokens = preserveGeneration ? current.TotalPromptTokens
+                    : update.TotalPromptTokens ?? (update.GenerationState == current.GenerationState ? current.TotalPromptTokens : null),
+                PromptProgress = preserveGeneration ? current.PromptProgress
+                    : update.PromptProgress ?? (update.GenerationState == current.GenerationState
+                        && update.ProcessedPromptTokens is not >= 0 && update.TotalPromptTokens is not >= 0 ? current.PromptProgress : null),
             };
         }
     }
@@ -436,6 +444,9 @@ public sealed partial class AssistantCoordinator(
             generationState = isSessionRunning ? display?.GenerationState : null,
             generatedTokens = isSessionRunning ? display?.GeneratedTokens : null,
             generationUpdatedAt = isSessionRunning ? display?.GenerationUpdatedAt : null,
+            processedPromptTokens = isSessionRunning ? display?.ProcessedPromptTokens : null,
+            totalPromptTokens = isSessionRunning ? display?.TotalPromptTokens : null,
+            promptProgress = isSessionRunning ? display?.PromptProgress : null,
             loadedFiles = display?.LoadedFiles,
             model = display?.Model ?? (isCodingSession ? selectedModel ?? "Lokaler AI-Server" : "Lokaler AI-Server"),
             provider = settings.Current.AiProvider.ToString(),
@@ -1912,6 +1923,9 @@ public sealed partial class AssistantCoordinator(
                     generationState = generationDisplay?.GenerationState,
                     generatedTokens = generationDisplay?.GeneratedTokens,
                     generationUpdatedAt = generationDisplay?.GenerationUpdatedAt,
+                    processedPromptTokens = generationDisplay?.ProcessedPromptTokens,
+                    totalPromptTokens = generationDisplay?.TotalPromptTokens,
+                    promptProgress = generationDisplay?.PromptProgress,
                     model = update.Model,
                     loadedFiles = update.LoadedFiles,
                     attachments = pendingAttachments.Select(ToAttachmentDto),
@@ -1937,6 +1951,9 @@ public sealed partial class AssistantCoordinator(
                     generationState = generationDisplay?.GenerationState,
                     generatedTokens = generationDisplay?.GeneratedTokens,
                     generationUpdatedAt = generationDisplay?.GenerationUpdatedAt,
+                    processedPromptTokens = generationDisplay?.ProcessedPromptTokens,
+                    totalPromptTokens = generationDisplay?.TotalPromptTokens,
+                    promptProgress = generationDisplay?.PromptProgress,
                     model = update.Model,
                     contextUsed = update.ContextUsed,
                     contextSource = update.ContextSource,

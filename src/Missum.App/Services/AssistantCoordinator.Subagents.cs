@@ -10,6 +10,7 @@ public sealed partial class AssistantCoordinator
             .Concat([ToMessageDto(state.UserMessage), ToMessageDto(state.AssistantMessage, state.Artifacts)]).ToArray(),
         state.IsRunning, state.Model, state.ContextUsed, state.ContextLimit,
         state.RunStatus, state.RunDetail, state.GenerationState, state.GeneratedTokens, state.GenerationUpdatedAt,
+        state.ProcessedPromptTokens, state.TotalPromptTokens, state.PromptProgress,
         state.ResultDelivered, state.LifecycleText,
         state.ProjectionRevision,
         state.PreviousRunIds,

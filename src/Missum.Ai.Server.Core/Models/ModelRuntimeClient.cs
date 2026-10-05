@@ -1977,9 +1977,10 @@ public sealed partial class ModelRuntimeClient : IDisposable
             return;
         }
 
-        if (profile.Family == "llama-toggle")
+        if (profile.Family is "llama-toggle" or "llama-thinking-toggle")
         {
-            body["chat_template_kwargs"] = new Dictionary<string, object?> { ["enable_thinking"] = effort != "none" };
+            var argument = profile.Family == "llama-thinking-toggle" ? "thinking" : "enable_thinking";
+            body["chat_template_kwargs"] = new Dictionary<string, object?> { [argument] = effort != "none" };
             if (effort == "none") body["reasoning_effort"] = "none";
             return;
         }

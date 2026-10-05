@@ -237,6 +237,64 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(catalog.reasoning_profile({"tokenizer.chat_template": "{% if enable_thinking %}"})["levels"], ["none", "on"])
         self.assertEqual(catalog.reasoning_profile({"tokenizer.chat_template": "{{ messages }}"})["levels"], [])
 
+    def test_standalone_thinking_template_exports_its_native_boolean_toggle(self):
+        expected = {"enabled": True, "effort": None, "budget": -1,
+                    "levels": ["none", "on"], "mode": "llama-thinking-toggle"}
+        for template in (
+            "{% if thinking %}enabled{% else %}disabled{% endif %}",
+            "{%- if not thinking is defined -%}{% set thinking = false %}{% endif %}",
+            "{% if other %}first{% elif thinking | default(false) %}second{% endif %}",
+            "{% if (thinking) and tools %}enabled{% endif %}",
+            "{# enable_thinking is only an example #}{% if thinking %}enabled{% endif %}",
+        ):
+            with self.subTest(template=template):
+                self.assertEqual(expected, catalog.reasoning_profile({"tokenizer.chat_template": template}))
+
+    def test_thinking_alias_keeps_the_existing_enable_thinking_transport(self):
+        template = ("{% if not thinking is defined %}{% if enable_thinking is defined %}"
+                    "{% set thinking = enable_thinking %}{% else %}{% set thinking = false %}"
+                    "{% endif %}{% endif %}{% if thinking %}enabled{% endif %}")
+        self.assertEqual("llama-toggle", catalog.reasoning_profile({"tokenizer.chat_template": template})["mode"])
+
+    def test_thinking_control_names_in_comments_literals_raw_or_data_do_not_advertise_a_toggle(self):
+        for template in (
+            "{# {% if thinking %}{% if enable_thinking %} #}{{ messages }}",
+            "{{ '{% if thinking %}' }}{{ messages }}",
+            '{{ "{% if enable_thinking %}" }}{{ messages }}',
+            "{% set example = '{% if thinking %}' %}{{ example }}",
+            "{% if text == 'thinking' or text == 'enable_thinking' %}data{% endif %}",
+            "{% raw %}{% if thinking %}{% if enable_thinking %}{% endraw %}{{ messages }}",
+            "{%- raw -%}{% if thinking %}{%- endraw -%}{{ messages }}",
+            "{% if message.thinking or message.enable_thinking %}data{% endif %}",
+            "{% if message . thinking or message . enable_thinking %}data{% endif %}",
+            "{% if message['thinking'] or message['enable_thinking'] %}data{% endif %}",
+            "{% if thinking_state or is_thinking or enable_thinking_mode %}data{% endif %}",
+            "{% if thinking() %}function{% endif %}",
+        ):
+            with self.subTest(template=template):
+                profile = catalog.reasoning_profile({"tokenizer.chat_template": template})
+                self.assertEqual("automatic", profile["mode"])
+                self.assertEqual([], profile["levels"])
+                self.assertIsNone(profile["enabled"])
+
+    def test_quoted_jinja_delimiters_do_not_hide_a_later_real_thinking_control(self):
+        template = "{{ '{% if enable_thinking %} }}' }}{% if thinking %}enabled{% endif %}"
+        self.assertEqual("llama-thinking-toggle", catalog.reasoning_profile({"tokenizer.chat_template": template})["mode"])
+
+    def test_standalone_thinking_preset_defaults_to_on_without_an_invented_effort(self):
+        gguf(self.root / "future-thinking.gguf",
+             template="{% if thinking %}enabled{% else %}disabled{% endif %}")
+        target = self.root / "models.ini"
+        models = catalog.write_presets(self.root, target)
+        self.assertEqual("llama-thinking-toggle", models[0]["reasoning"]["mode"])
+        text = target.read_text()
+        self.assertIn("missum-reasoning-mode:llama-thinking-toggle", text)
+        self.assertIn("missum-reasoning-levels:none|on", text)
+        self.assertIn("missum-reasoning-default:on", text)
+        self.assertIn("reasoning = on", text)
+        self.assertIn("reasoning-budget = -1", text)
+        self.assertNotIn("reasoning-effort =", text)
+
     def test_gpt_oss_high_and_instruct_without_reasoning_are_distinct(self):
         gguf(self.root / "gpt.gguf", architecture="gpt-oss", context=131072, template="{{ reasoning_effort|default('medium') }}")
         gguf(self.root / "QwenVL-Instruct.gguf", architecture="qwen3vlmoe", context=262144, template="{{ messages }}")

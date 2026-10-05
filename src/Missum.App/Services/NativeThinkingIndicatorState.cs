@@ -3,6 +3,9 @@ namespace Missum.App.Services;
 /// <summary>Tracks silent token generation without coupling it to a visual tree.</summary>
 internal sealed class NativeThinkingIndicatorState
 {
+    internal static bool IsOwnedStep(string? stepAgentId, string? conversationAgentId) =>
+        string.IsNullOrEmpty(stepAgentId) || string.Equals(stepAgentId, conversationAgentId, StringComparison.Ordinal);
+
     private static readonly TimeSpan ProgressFreshness = TimeSpan.FromSeconds(8);
     private static readonly TimeSpan ContentQuietPeriod = TimeSpan.FromMilliseconds(750);
     private DateTimeOffset? _latestProgressAt;
@@ -90,22 +93,23 @@ internal sealed class NativeThinkingIndicatorState
         if (generationState is "generationStarted" or "generationRetry") _generatedTokens = 0;
     }
 
-    public void ObserveContent(string messageId, string content, DateTimeOffset now)
+    public bool ObserveContent(string messageId, string content, DateTimeOffset now)
     {
         // Separators streamed ahead of the next sentence are not visible output.
         content = content.TrimEnd();
         if (!string.Equals(MessageId, messageId, StringComparison.Ordinal)
-            || string.Equals(_content, content, StringComparison.Ordinal)) return;
+            || string.Equals(_content, content, StringComparison.Ordinal)) return false;
         var firstContent = _content is null;
         _content = content;
-        if (content.Length == 0) return;
+        if (content.Length == 0) return false;
         _lastContentAt = now;
         // Historical text in the first snapshot is a baseline, not new output.
-        if (firstContent && !_shown) return;
+        if (firstContent && !_shown) return false;
         _shown = false;
         _generating = false;
         _lastTokenProgressAt = null;
         _contentProgressAt = _latestProgressAt > now ? _latestProgressAt : now;
+        return true;
     }
 
     public bool ShouldShow(string messageId, bool active, bool blocked, bool visible, DateTimeOffset now)

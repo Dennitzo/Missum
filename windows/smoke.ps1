@@ -174,7 +174,7 @@ try {
         throw 'Native chat did not render incremental answer text without a decorative cursor before completion.'
     }
     Copy-Item -LiteralPath $chatStreamingPath -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.chat-streaming-validation.json')) -Force
-    foreach ($chatPreviewName in @('native-table-math-preview', 'native-table-narrow-preview', 'native-thinking-expanded-preview')) {
+    foreach ($chatPreviewName in @('native-table-math-preview', 'native-table-narrow-preview', 'native-thinking-expanded-preview', 'native-thinking-processing-preview')) {
         $chatPreview = Join-Path $smokeData ($chatPreviewName + '.png')
         if (-not (Test-Path -LiteralPath $chatPreview -PathType Leaf) -or (Get-Item -LiteralPath $chatPreview).Length -lt 100) {
             throw "Missing native chat rendering preview: $chatPreviewName"

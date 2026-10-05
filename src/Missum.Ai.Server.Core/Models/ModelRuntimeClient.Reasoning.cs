@@ -94,6 +94,8 @@ public sealed partial class ModelRuntimeClient
         }
         if (!data.TryGetProperty("chat_template", out var value) || value.ValueKind != JsonValueKind.String) return null;
         var template = value.GetString() ?? "";
+        var enableThinkingToggle = TemplateUsesBooleanControl(template, "enable_thinking");
+        var thinkingToggle = TemplateUsesBooleanControl(template, "thinking");
         var levelsFromTemplate = new List<string>();
         foreach (Match match in Regex.Matches(template,
             @"(?:resolved_)?reasoning_(?:effort|strength)\s+(?:not\s+)?in\s*[\[(]([^\])]{1,512})[\])]",
@@ -103,14 +105,87 @@ public sealed partial class ModelRuntimeClient
                 if (!levelsFromTemplate.Contains(literal.Groups[1].Value)) levelsFromTemplate.Add(literal.Groups[1].Value);
         if (levelsFromTemplate.Count > 0)
         {
-            if (template.Contains("enable_thinking", StringComparison.Ordinal) && !levelsFromTemplate.Contains("none")) levelsFromTemplate.Insert(0, "none");
+            if (enableThinkingToggle && !levelsFromTemplate.Contains("none")) levelsFromTemplate.Insert(0, "none");
             var highest = HighestReasoningLevels.FirstOrDefault(levelsFromTemplate.Contains);
             return new("llama-native", levelsFromTemplate, highest);
         }
-        if (template.Contains("enable_thinking", StringComparison.Ordinal)) return new("llama-toggle", ["none", "on"], "on");
+        if (enableThinkingToggle) return new("llama-toggle", ["none", "on"], "on");
+        // Some native templates consume thinking directly and have no alias to
+        // llama.cpp's enable_thinking argument. Discovery and transport must
+        // agree on that input; model names are not capability evidence.
+        if (thinkingToggle) return new("llama-thinking-toggle", ["none", "on"], "on");
         // A template consuming an unconstrained effort string does not prove which
         // values the model was trained for. Retain catalog evidence or native defaults.
         return null;
+    }
+
+    internal static bool TemplateUsesBooleanControl(string template, string variable)
+    {
+        // Inspect executable Jinja conditionals only. A word in documentation,
+        // a quoted dictionary key, a comment or a raw code example is not a
+        // configurable template input.
+        var raw = false;
+        for (var cursor = 0; cursor < template.Length;)
+        {
+            if (raw)
+            {
+                var endRaw = Regex.Match(template[cursor..], @"\{%[-+]?\s*endraw\s*[-+]?%\}",
+                    RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+                if (!endRaw.Success) break;
+                cursor += endRaw.Index + endRaw.Length;
+                raw = false;
+                continue;
+            }
+            var start = template.IndexOf('{', cursor);
+            if (start < 0 || start + 1 >= template.Length) break;
+            var kind = template[start + 1];
+            if (kind is not ('%' or '{' or '#')) { cursor = start + 1; continue; }
+            var terminator = kind == '%' ? "%}" : kind == '{' ? "}}" : "#}";
+            var end = FindJinjaBlockEnd(template, start + 2, terminator, kind == '#');
+            if (end < 0) break;
+            cursor = end + 2;
+            if (kind == '#') continue;
+            var expression = template[(start + 2)..end].Trim().Trim('-', '+').Trim();
+            if (kind == '%' && expression == "endraw") { raw = false; continue; }
+            if (raw) continue;
+            if (kind == '%' && expression == "raw") { raw = true; continue; }
+            if (kind != '%') continue;
+            expression = Regex.Replace(expression, "'(?:\\\\.|[^'\\\\])*'|\"(?:\\\\.|[^\"\\\\])*\"", " ",
+                RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+            if (!Regex.IsMatch(expression, @"^(?:if|elif)\b", RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1))) continue;
+            foreach (Match input in Regex.Matches(expression, @"\b" + Regex.Escape(variable) + @"\b",
+                RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1)))
+            {
+                // Keep attribute punctuation until after matching. Removing
+                // .value first would turn thinking.value into a false input.
+                var previous = input.Index - 1;
+                while (previous >= 0 && char.IsWhiteSpace(expression[previous])) previous--;
+                var next = input.Index + input.Length;
+                while (next < expression.Length && char.IsWhiteSpace(expression[next])) next++;
+                if (previous >= 0 && expression[previous] == '.') continue;
+                if (next < expression.Length && expression[next] is '.' or '(') continue;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static int FindJinjaBlockEnd(string template, int start, string terminator, bool comment)
+    {
+        var quote = '\0';
+        for (var index = start; index + 1 < template.Length; index++)
+        {
+            var value = template[index];
+            if (!comment && quote != '\0')
+            {
+                if (value == '\\') { index++; continue; }
+                if (value == quote) quote = '\0';
+                continue;
+            }
+            if (!comment && value is '\'' or '"') { quote = value; continue; }
+            if (value == terminator[0] && template[index + 1] == terminator[1]) return index;
+        }
+        return -1;
     }
 
     private static bool IsEffortIdentifier(string value) => value.Length is > 0 and <= 32
