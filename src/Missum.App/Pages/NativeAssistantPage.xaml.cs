@@ -22,6 +22,8 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly AssistantCoordinator _coordinator;
+    private readonly AssistantHost _assistantHost;
+    private readonly IDisposable _hostSubscription;
     private readonly SettingsCoordinator _settings;
     private readonly CancellationTokenSource _lifetime = new();
     private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _draftTimer;
@@ -67,6 +69,8 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         Composer.AddHandler(UIElement.PreviewKeyDownEvent, new Microsoft.UI.Xaml.Input.KeyEventHandler(OnComposerKeyDown), true);
         NavigationCacheMode = NavigationCacheMode.Required;
         _coordinator = App.Current.GetService<AssistantCoordinator>();
+        _assistantHost = App.Current.GetService<AssistantHost>();
+        _hostSubscription = _assistantHost.Subscribe("desktop", (type, payload, id) => EmitAsync(type, payload, id));
         _settings = App.Current.GetService<SettingsCoordinator>();
         Inspector.Visibility = _settings.Current.AssistantOutputsVisible ? Visibility.Visible : Visibility.Collapsed;
         _microphone = App.Current.GetService<MicrophoneTranscriptionService>();
@@ -142,10 +146,10 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                 if (!_navigationState.IsCurrent(generation)) return false;
                 draft = await FinishDictationForNavigationAsync(draftSession, draft);
                 if (draftSession != Guid.Empty && draft is not null)
-                    await _coordinator.SaveDraftAsync(draftSession, draft);
+                    await _assistantHost.SaveDraftAsync("desktop", draftSession, draft);
                 if (!_navigationState.IsCurrent(generation)) return false;
             }
-            await _coordinator.HandleAsync(new(1, type, requestId, arguments),
+            await _assistantHost.HandleAsync("desktop", new(2, type, requestId, arguments),
                 (eventType, data, id) => EmitAsync(eventType, data, id, generation, onError, requestSession), _lifetime.Token);
             if (navigation && !_navigationState.IsCurrent(generation)) return false;
             return !_failedRequests.Remove(requestId);
@@ -222,6 +226,20 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         }
         if (type == "host.error") { ShowError(S(data, "message")); return; }
         if (type == "queue.changed") { UpdateSidebarActivity(data); return; }
+        if (type == "session.grouped")
+        {
+            // A peer's project/session edit updates the shared sidebar, while
+            // the current conversation and its unsaved composer remain local.
+            if (_snapshot.ValueKind != JsonValueKind.Object || S(data, "chatMode", _mode) != _mode) return;
+            var merged = _snapshot.Deserialize<Dictionary<string, JsonElement>>(JsonOptions)!;
+            foreach (var field in new[] { "sessions", "sessionGroups" })
+                if (data.TryGetProperty(field, out var value) && value.ValueKind == JsonValueKind.Array)
+                    merged[field] = value.Clone();
+            _snapshot = JsonSerializer.SerializeToElement(merged);
+            RenderSidebar();
+            SyncSessionTabs();
+            return;
+        }
         if (type == "speech.status") { ApplyMessageSpeechStatus(data); return; }
         if (type == "speech.progress") { ApplyMessageSpeechProgress(data); return; }
         if (type == "coding.changes") RefreshChangesReview(data);
@@ -467,7 +485,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     public async Task FlushDraftAsync()
     {
         _draftTimer.Stop();
-        if (_session != Guid.Empty && !_rendering) await _coordinator.SaveDraftAsync(_session, ActiveSubagent is null ? Composer.Text : _parentComposerDraft ?? "");
+        if (_session != Guid.Empty && !_rendering) await _assistantHost.SaveDraftAsync("desktop", _session, ActiveSubagent is null ? Composer.Text : _parentComposerDraft ?? "");
     }
     public async Task RefreshForExternalActivationAsync()
     {
@@ -788,6 +806,10 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         {
             var options = await App.Current.GetService<MissumAiAssistantService>().GetReasoningOptionsAsync(modelId, role, _lifetime.Token);
             if (_disposed || _reasoningModel != role + ":" + modelId) return;
+            // A peer can save a shared choice while this status request is in
+            // flight. Never repaint an older selection over that notification.
+            var savedEffort = MissumAiAssistantService.StoredReasoning(_settings.Current, modelId, role);
+            if (savedEffort is not null && options.Levels.Contains(savedEffort)) options = options with { Selected = savedEffort };
             if (!_running) UpdateContext(JsonSerializer.SerializeToElement(new { contextLimit = Missum.Ai.Contracts.ModelContextProfiles.ResolveMaximum(modelId, role) }));
             _reasoning = options;
             RefreshComposerModelDisplay();
@@ -992,6 +1014,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         _researchRefreshTimer?.Stop();
         _ = CancelNativeMediaCaptureAsync();
         _conversationSelection?.Clear();
+        _hostSubscription.Dispose();
         _disposed = true; _draftTimer.Stop(); _renderTimer.Stop(); _microphone.TurnChanged -= OnTranscript; _lifetime.Cancel(); _lifetime.Dispose();
     }
 }

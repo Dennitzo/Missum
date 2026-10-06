@@ -78,9 +78,9 @@ test("Deep Research adds a real request flag without replacing General or Coding
     assert.equal(state.selectedToolAction, null);
     assert.equal(menuItem.getAttribute("aria-checked"), "true");
     assert.equal(menuItem.classList.contains("active"), true);
-    assert.equal(elements.activeTools.querySelectorAll(".active-tool-chip").length, 1);
+    assert.equal(elements.activeTools.querySelectorAll(".active-tool-chip").length, 0, "restored legacy research state does not create a non-native chip");
     context.updateContextStripVisibility();
-    assert.equal(elements.contextStrip.hidden, false, "General research is visible even without another tool or attachment");
+    assert.equal(elements.contextStrip.hidden, true, "General research stays in the footer chip row without leaving an empty row above the prompt");
     elements.prompt.value = "Recherchiere das Thema mit mehreren Quellen.";
     await context.submitPrompt();
     assert.equal(posts.at(-1).type, "chat.send");
@@ -90,7 +90,7 @@ test("Deep Research adds a real request flag without replacing General or Coding
     assert.equal(posts.at(-1).payload.chatMode, mode);
     assert.equal(posts.at(-1).payload.sessionId, "session-a");
     state.pendingChatSend = null;
-    await elements.activeTools.querySelector(".active-tool-chip__remove").dispatch("click");
+    context.selectDeepResearch(false);
     assert.equal(posts.at(-1).type, "action.invoke");
     assert.equal(posts.at(-1).payload.enabled, false);
     context.selectDeepResearch(false, false);
@@ -103,10 +103,11 @@ test("Deep Research adds a real request flag without replacing General or Coding
   }
 });
 
-test("the Deep Research chip requests persisted state while the old research overlay stays removed", async () => {
+test("legacy research state remains readable without the old profile and Stand chip", () => {
   const { context, elements, posts } = harness();
   context.selectDeepResearch(true, false);
-  await elements.activeTools.querySelector(".active-tool-chip__details").dispatch("click");
+  assert.equal(elements.activeTools.children.length, 0);
+  context.openScientificResearch();
   assert.equal(posts.at(-1).type, "research.list");
   assert.equal(posts.at(-1).payload.sessionId, "session-a");
   const html = fs.readFileSync(path.join(webRoot, "index.html"), "utf8");
@@ -149,13 +150,12 @@ test("completed media selection clears research while Coding remains a chat mode
   assert.equal(state.deepResearch, true);
 });
 
-test("research profile is selectable, session-scoped, persisted, and sent with the existing action", async () => {
+test("legacy research profile remains session-scoped, persisted, and sent with the existing action", async () => {
   const first = harness();
   first.context.selectDeepResearch(true, false);
-  const select = first.elements.activeTools.querySelector("select");
-  assert.ok(select);
-  select.value = "mathematicalInvestigation";
-  await select.dispatch("change");
+  assert.equal(first.elements.activeTools.querySelector("select"), null);
+  first.state.deepResearchProfile = "mathematicalInvestigation";
+  first.context.persistDeepResearch();
   assert.equal(first.state.deepResearchProfile, "mathematicalInvestigation");
   first.elements.prompt.value = "Untersuche die Gleichung und prüfe Gegenbeispiele.";
   await first.context.submitPrompt();
@@ -201,4 +201,39 @@ test("the data-driven action catalog keeps Deep Research independent from chat m
   assert.doesNotMatch(source, /const defaultActionDescriptors/);
   assert.match(source, /availableActionDescriptors\(\)\.find\(item => item\.actionId === actionId\)/);
   assert.match(html, /id="tools-menu-content" class="action-menu__content"/);
+});
+
+test("a browser-started prompt waits for its shared reasoning acknowledgement and sends once", async () => {
+  const { context, state, elements, posts } = harness();
+  let saved;
+  context.missumReasoningSelection = { commitForSubmission: () => new Promise(resolve => { saved = resolve; }) };
+  elements.prompt.value = "Beweise die Behauptung.";
+  const sending = context.submitPrompt();
+  assert.equal(state.reasoningSubmissionPending, true);
+  await context.submitPrompt();
+  assert.equal(posts.some(item => item.type === "chat.send"), false);
+  saved(); await sending;
+  assert.equal(state.reasoningSubmissionPending, false);
+  assert.equal(posts.filter(item => item.type === "chat.send").length, 1);
+});
+
+test("failed reasoning saves or navigation while saving retain the local prompt without starting a job", async () => {
+  for (const changed of ["error", "session", "draft", "run"]) {
+    const { context, state, elements, posts } = harness();
+    let saved, failed;
+    context.missumReasoningSelection = { commitForSubmission: () => new Promise((resolve, reject) => { saved = resolve; failed = reject; }) };
+    elements.prompt.value = "Mein neuer Auftrag";
+    const sending = context.submitPrompt();
+    if (changed === "error") failed(new Error("Reasoning konnte nicht gespeichert werden."));
+    else {
+      if (changed === "session") state.activeSessionId = "session-b";
+      if (changed === "draft") elements.prompt.value = "Bearbeiteter Entwurf";
+      if (changed === "run") state.isRunning = true;
+      saved();
+    }
+    await sending;
+    assert.equal(state.reasoningSubmissionPending, false);
+    assert.equal(posts.some(item => item.type === "chat.send"), false);
+    assert.equal(elements.prompt.value, changed === "draft" ? "Bearbeiteter Entwurf" : "Mein neuer Auftrag");
+  }
 });

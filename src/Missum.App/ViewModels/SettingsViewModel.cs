@@ -14,8 +14,26 @@ public sealed partial class SettingsViewModel(
     IPromptTriggerRepository triggerRepository,
     IBackupService backups,
     ShellViewModel shell,
-    ModelCapabilityRegistry modelCapabilities) : ObservableObject
+    ModelCapabilityRegistry modelCapabilities,
+    AssistantSettingsService? sharedSettingsService = null) : ObservableObject
 {
+    private readonly AssistantSettingsService _sharedSettings = sharedSettingsService
+        ?? new(settings, missumAi, triggerRepository, backups);
+    private long _preferencesRevision;
+    private AppSettings _preferencesBaseline = new();
+
+    /// <summary>External settings refreshes may replace the editor only when it has no local draft.</summary>
+    public bool HasUnsavedChanges =>
+        MissumAiServerUrl != _preferencesBaseline.MissumAiServerUrl
+        || IsAutomaticSpeechEnabled != _preferencesBaseline.IsAutomaticSpeechEnabled
+        || LiveCaptionLanguage != _preferencesBaseline.LiveCaptionLanguage
+        || CodingToolStepsExpanded != _preferencesBaseline.CodingToolStepsExpanded
+        || Theme != _preferencesBaseline.Theme
+        || AccentColor != _preferencesBaseline.AccentColor
+        || BackgroundColor != _preferencesBaseline.BackgroundColor
+        || Language != _preferencesBaseline.Language
+        || _deletedTriggers.Count != 0
+        || PromptTriggers.Any(item => item.IsDirty);
     private static readonly HashSet<string> TriggerSortableColumns =
     [
         "Phrase",
@@ -110,6 +128,8 @@ public sealed partial class SettingsViewModel(
     public void Initialize()
     {
         var current = settings.Current;
+        _preferencesRevision = current.PreferencesRevision;
+        _preferencesBaseline = current;
         IsAutomaticSpeechEnabled = current.IsAutomaticSpeechEnabled;
         MissumAiServerUrl = current.MissumAiServerUrl;
         LiveCaptionLanguage = current.LiveCaptionLanguage;
@@ -142,12 +162,13 @@ public sealed partial class SettingsViewModel(
 
     public async Task<MissumAiConnectionStatus?> SaveAsync(CancellationToken cancellationToken = default)
     {
-        await SavePreferencesAsync(cancellationToken);
-        await SaveTriggersAsync(cancellationToken);
+        // Preflight preferences and every trigger together, so a stale trigger
+        // editor cannot save unrelated preferences before reporting its conflict.
+        await SaveTriggersAsync(includePreferences: true, cancellationToken);
         App.Current.ApplyTheme(Theme);
         App.Current.ApplyAccentColor(AccentColor);
         App.Current.ApplyBackgroundColor(BackgroundColor);
-        var status = await missumAi.TestAsync(cancellationToken);
+        var status = await _sharedSettings.TestConnectionAsync(MissumAiServerUrl, cancellationToken);
         ConnectionStatus = status.Message;
         IsServerReady = status.IsReady;
         shell.ApplyAiConnectionState(status.IsReachable, status.IsReady);
@@ -158,29 +179,24 @@ public sealed partial class SettingsViewModel(
     // probes so it can also be validated without launching the WinUI app.
     internal async Task SavePreferencesAsync(CancellationToken cancellationToken = default)
     {
-        if (!Uri.TryCreate(MissumAiServerUrl.Trim(), UriKind.Absolute, out var missumAiUri)
-            || missumAiUri.Scheme is not ("http" or "https"))
-        {
-            throw new InvalidOperationException("Missum benötigt eine gültige HTTP- oder HTTPS-Adresse zum Docker-Gateway.");
-        }
+        await _sharedSettings.UpdatePreferencesAsync(CreatePreferencesPatch(), _preferencesRevision, cancellationToken);
+        _preferencesRevision = settings.Current.PreferencesRevision;
+        _preferencesBaseline = settings.Current;
+        MissumAiServerUrl = settings.Current.MissumAiServerUrl;
+        SelectedModel = settings.Current.SelectedModel;
+    }
 
-
-        await settings.UpdateAsync(current => current with
+    private AssistantSettingsPatch CreatePreferencesPatch() => new()
         {
             IsAutomaticSpeechEnabled = IsAutomaticSpeechEnabled,
-            MissumAiServerUrl = missumAiUri.ToString().TrimEnd('/'),
+            MissumAiServerUrl = MissumAiServerUrl,
             LiveCaptionLanguage = string.IsNullOrWhiteSpace(LiveCaptionLanguage) ? "auto" : LiveCaptionLanguage.Trim(),
-            SelectedModel = current.SelectedModel,
-            SelectedCodingModel = current.SelectedModel,
             CodingToolStepsExpanded = CodingToolStepsExpanded,
-            ReasoningEffort = "auto",
             Theme = Theme,
             AccentColor = AccentColor,
             BackgroundColor = BackgroundColor,
             Language = Language,
-        }, cancellationToken);
-        SelectedModel = settings.Current.SelectedModel;
-    }
+        };
 
     public async Task<MissumAiConnectionStatus?> RefreshModelsAsync(CancellationToken cancellationToken = default)
     {
@@ -393,34 +409,35 @@ public sealed partial class SettingsViewModel(
     public void RefreshPromptTriggerView() =>
         OnPropertyChanged(nameof(VisiblePromptTriggers));
 
-    private async Task SaveTriggersAsync(CancellationToken cancellationToken)
+    private async Task SaveTriggersAsync(bool includePreferences, CancellationToken cancellationToken)
     {
-        foreach (var deleted in _deletedTriggers)
+        var dirty = PromptTriggers.Where(item => item.IsDirty).ToArray();
+        var edits = dirty.Select(item => item.ToModel()).ToArray();
+        var deleted = _deletedTriggers.Select(item => new AssistantDeletedTrigger(item.Id, item.Revision)).ToArray();
+        var saved = includePreferences
+            ? await _sharedSettings.ApplyAsync(CreatePreferencesPatch(), _preferencesRevision, edits, deleted, cancellationToken)
+            : await _sharedSettings.ApplyTriggersAsync(edits, deleted, cancellationToken);
+        if (includePreferences)
         {
-            await triggerRepository.DeleteAsync(deleted.Id, deleted.Revision, cancellationToken);
+            _preferencesRevision = settings.Current.PreferencesRevision;
+            _preferencesBaseline = settings.Current;
+            MissumAiServerUrl = settings.Current.MissumAiServerUrl;
+            SelectedModel = settings.Current.SelectedModel;
         }
         _deletedTriggers.Clear();
-        foreach (var item in PromptTriggers)
+        foreach (var item in dirty)
         {
-            if (!item.IsDirty)
-            {
-                continue;
-            }
-            var saved = item.IsNew
-                ? await triggerRepository.CreateAsync(item.ToModel(), cancellationToken)
-                : await triggerRepository.UpdateAsync(item.ToModel(), item.Revision, cancellationToken);
-            item.ApplySaved(saved);
+            item.ApplySaved(saved.Single(trigger => trigger.Id == item.Id));
         }
         RefreshPromptTriggerView();
     }
 
     public Task<BackupResult> CreateBackupAsync(string destinationPath, CancellationToken cancellationToken = default) =>
-        backups.CreateAsync(destinationPath, cancellationToken);
+        _sharedSettings.CreateBackupAsync(destinationPath, cancellationToken);
 
     public async Task RestoreBackupAsync(string backupPath, CancellationToken cancellationToken = default)
     {
-        await backups.ValidateAsync(backupPath, cancellationToken);
-        await backups.RestoreAsync(backupPath, cancellationToken);
+        await _sharedSettings.RestoreBackupAsync(backupPath, cancellationToken);
     }
 
     partial void OnTriggerSearchTextChanged(string value)

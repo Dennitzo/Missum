@@ -19,7 +19,7 @@ test('native coding changes snapshots pass through the versioned inbound bridge'
   assert.equal(delivered.length, 1);
   assert.equal(delivered[0].type, 'missum:host-message');
   assert.equal(delivered[0].detail.payload, payload);
-  receive({data:{version:2,type:'coding.changes',payload}});
+  receive({data:{version:3,type:'coding.changes',payload}});
   receive({data:{version:1,type:'coding.changes',payload:'invalid'}});
   assert.equal(delivered.length, 1, 'wrong protocol versions and non-object snapshots are ignored');
 });

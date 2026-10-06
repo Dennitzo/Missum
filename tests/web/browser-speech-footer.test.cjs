@@ -1,0 +1,159 @@
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const vm = require("node:vm");
+const { TestNode } = require("./test-dom.cjs");
+const root = path.resolve(__dirname, "../../src/Missum.App/Assets/Web");
+const app = fs.readFileSync(path.join(root, "app.js"), "utf8").replace(/\r\n/g, "\n");
+const icons = ["messageCopyIcon", "messageDoneIcon", "messageSpeechIcon", "messageSpeechStopIcon", "messageSpeechPauseIcon", "messageSpeechResumeIcon"];
+
+function extract(name) {
+  const start = app.indexOf(`  function ${name}(`);
+  const ending = app.slice(start).match(/\n {2}\}(?:\n|$)/);
+  assert.ok(start >= 0 && ending, `production helper ${name} exists`);
+  return app.slice(start, start + ending.index + ending[0].length);
+}
+
+function harness() {
+  let document; const allowedIcons = new Set(), posts = [], calls = { messages: 0, context: 0, status: 0, highlights: 0 };
+  class Node extends TestNode {
+    set innerHTML(value) { assert.ok(allowedIcons.has(String(value)), "only production's static icon SVG may use innerHTML"); this.markup = String(value); this.textContent = ""; }
+    get innerHTML() { return this.markup || ""; }
+    focus() { document.activeElement = this; }
+  }
+  const body = new Node("body");
+  document = { body, activeElement: null, createElement: tag => new Node(tag), createTextNode: value => new Node("#text", value),
+    querySelectorAll: selector => body.querySelectorAll(selector), querySelector: selector => body.querySelector(selector) };
+  const elements = Object.fromEntries(["activeTools", "documents", "contextStrip", "codingChanges", "prompt", "messageList", "messageScroll"].map(name => [name, new Node("div")]));
+  for (const item of Object.values(elements)) body.append(item);
+  elements.codingChanges.hidden = true; elements.prompt.value = "Privater unveränderter Entwurf";
+  const state = { activeSessionId: "session-a", messages: [], speechStatus: { active: false }, speechProgress: {}, microphone: {},
+    documents: [], attachments: [], pendingDocumentImports: [], chatMode: "general", messageRunStatus: new Map(), selectedToolAction: null,
+    selectedExtensionActionId: null, isRunning: false, isAiBusy: false, activeActionIds: new Set() };
+  const context = vm.createContext({ document, state, elements, URL, setTimeout() {},
+    post: (type, payload) => { posts.push({ type, payload }); return `request-${posts.length}`; },
+    renderMessages: () => calls.messages++, renderContext: () => calls.context++, renderStatus: () => calls.status++,
+    renderMicrophone() {}, clearSpeechHighlight: () => calls.highlights++, applySpeechHighlight: () => calls.highlights++,
+    clearCompletedOneShotToolAction() {}, syncVoiceCaptureSuspension() {}, showToast() {},
+    renderCodingWorkspace() {}, renderDeepResearch() {}, renderScienceWorkbench() {},
+    isAudioCaptureActive: () => false, isScreenClipActive: () => false, ensureEditableContext: () => true,
+    createToolIcon: () => new Node("svg"), availableActionDescriptors: () => state.actionDescriptors || [],
+    toolVisuals: { textToSpeech: ["Vorlesen", "speech"], webSearch: ["Websuche", "web"] }, actionIcons: { speech: "speech", extension: "extension" } });
+  for (const name of icons) {
+    const declaration = app.match(new RegExp(`^  const ${name} = ([^\\n]+);$`, "m"));
+    assert.ok(declaration, `static icon ${name} exists`);
+    vm.runInContext(`globalThis.${name} = ${declaration[1]};`, context); allowedIcons.add(context[name]);
+  }
+  for (const name of ["createMessageIconAction", "createMessageFooterLink", "flashMessageAction", "isMessageSpeechActive",
+    "updateMessageSpeechFooter", "createMessageFooter", "updateContextStripVisibility", "renderSpeechStatus", "updateSpeechProgress", "handleHostMessage"])
+    vm.runInContext(extract(name), context, { filename: `app.js:${name}` });
+  const renderContext = extract("renderContext");
+  const make = (extra = {}) => {
+    const message = { id: "answer-a", sessionId: "session-a", role: "assistant", status: "completed", content: "Eine verständliche Antwort.", ...extra };
+    state.messages.push(message);
+    const article = new Node("article"); article.dataset.messageId = message.id; article.className = `message ${message.role}`;
+    const footer = context.createMessageFooter(message, article); article.append(footer); elements.messageList.append(article);
+    return { message, article, footer, read: () => footer.querySelector(".message-action--speech"),
+      pause: () => footer.querySelector(".message-action--speech-pause"), status: () => footer.querySelector(".message-speech-status") };
+  };
+  const dispatch = (type, payload) => context.handleHostMessage({ detail: { type, payload } });
+  const progress = (extra = {}) => ({ playbackId: "playback-1", eventSequence: 1, sessionId: "session-a", sourceMessageId: "answer-a", sourceKind: "message", sourceUnits: [], sourceUnitIds: [], state: "buffering", ...extra });
+  const activate = extra => { state.speechStatus = { active: true, status: "Vorlesen", detail: "F5" }; state.microphone = { isSpeaking: true, canPauseSpeech: true, isSpeechPaused: false, status: "Vorlesen" }; dispatch("speech.progress", progress(extra)); };
+  return { context, document, elements, state, posts, calls, make, dispatch, progress, activate,
+    renderChips() { vm.runInContext(renderContext, context); context.renderContext(); } };
+}
+
+test("speech composer DOM and bindings are removed and native message actions retain their 28px footprint", () => {
+  const html = fs.readFileSync(path.join(root, "index.html"), "utf8"), css = fs.readFileSync(path.join(root, "browser-panels.css"), "utf8");
+  assert.doesNotMatch(html, /composer-speech-/); assert.doesNotMatch(app, /composer-speech-|elements\.composerSpeech/);
+  assert.match(css, /\.message-action\s*\{[^}]*width:\s*28px;[^}]*height:\s*28px;/);
+  assert.match(css, /\.message-action--speech-pause\[hidden\]/);
+});
+
+test("read-aloud selection and active playback never produce a composer chip or an empty upper strip", () => {
+  const h = harness(); h.state.speechStatus.active = true;
+  for (const scenario of [
+    { selectedToolAction: "textToSpeech", selectedExtensionActionId: null, actionDescriptors: [] },
+    { selectedToolAction: null, selectedExtensionActionId: "builtin.speech/read-aloud", actionDescriptors: [{ actionId: "builtin.speech/read-aloud", displayName: "Vorlesen", iconKey: "speech" }] },
+    { selectedToolAction: "textToSpeech", selectedExtensionActionId: "custom.read-aloud", actionDescriptors: [{ actionId: "custom.read-aloud", displayName: "Vorlesen", toolAction: "textToSpeech", iconKey: "speech" }] }
+  ]) {
+    Object.assign(h.state, scenario); h.renderChips();
+    assert.equal(h.elements.activeTools.children.length, 0); assert.equal(h.elements.contextStrip.hidden, true);
+  }
+});
+
+test("explicit source session and message IDs select only the owning footer even when source units are not yet available", () => {
+  const h = harness(), source = h.make(), other = h.make({ id: "other-answer" }), foreign = h.make({ sessionId: "session-b" });
+  h.activate();
+  assert.equal(source.read().getAttribute("aria-label"), "Vorlesen beenden"); assert.equal(source.pause().hidden, false);
+  assert.equal(other.read().getAttribute("aria-label"), "Nachricht vorlesen"); assert.equal(other.pause().hidden, true);
+  assert.equal(foreign.read().getAttribute("aria-label"), "Nachricht vorlesen"); assert.equal(foreign.pause().hidden, true);
+  assert.equal(h.context.isMessageSpeechActive("answer-a", "session-a"), true);
+  assert.equal(h.context.isMessageSpeechActive("answer-a", "session-b"), false);
+});
+
+test("global speaking state and text similarity cannot activate an unrelated or ownerless footer", () => {
+  const h = harness(), source = h.make(); h.state.speechStatus.active = true; h.state.microphone.isSpeaking = true;
+  for (const speechProgress of [{}, { sessionId: "session-a" }, { sourceMessageId: "answer-a" }, { sessionId: "other", sourceMessageId: "answer-a", state: "playing" }]) {
+    h.state.speechProgress = speechProgress; h.context.renderSpeechStatus();
+    assert.equal(source.read().getAttribute("aria-label"), "Nachricht vorlesen"); assert.equal(source.pause().hidden, true);
+  }
+});
+
+test("footer read, pause, resume and stop dispatch their source-specific or playback commands without an AI run", async () => {
+  const h = harness(), source = h.make();
+  await source.read().dispatch("click"); assert.deepEqual(JSON.parse(JSON.stringify(h.posts.at(-1))), { type: "microphone.speak", payload: { sessionId: "session-a", messageId: "answer-a", text: source.message.content } });
+  h.activate(); await source.pause().dispatch("click"); assert.equal(h.posts.at(-1).type, "microphone.toggleSpeechPause");
+  h.dispatch("microphone.changed", { isSpeaking: true, canPauseSpeech: true, isSpeechPaused: true, status: "Pausiert" });
+  assert.equal(source.pause().getAttribute("aria-label"), "Vorlesen fortsetzen"); assert.equal(source.pause().getAttribute("aria-pressed"), "true");
+  assert.equal(source.status().textContent, "Vorlesen pausiert");
+  await source.pause().dispatch("click"); assert.equal(h.posts.at(-1).type, "microphone.toggleSpeechPause");
+  await source.read().dispatch("click"); assert.equal(h.posts.at(-1).type, "microphone.stopSpeech");
+  assert.equal(h.posts.some(command => /^(chat\.|session\.|settings\.)/.test(command.type)), false);
+});
+
+test("speech progress and repeated microphone updates preserve focused controls and never recreate the conversation", () => {
+  const h = harness(), source = h.make(); h.activate(); const pause = source.pause(), read = source.read(), status = source.status(); pause.focus();
+  for (let sequence = 2; sequence <= 6; sequence++) {
+    h.dispatch("speech.progress", h.progress({ eventSequence: sequence, state: "playing", sourceUnitIds: [`unit-${sequence}`] }));
+    h.dispatch("microphone.changed", { isSpeaking: true, canPauseSpeech: true, isSpeechPaused: sequence % 2 === 0, status: "Vorlesen" });
+    assert.equal(source.pause(), pause); assert.equal(source.read(), read); assert.equal(source.status(), status);
+    assert.equal(h.document.activeElement, pause); assert.equal(pause.isConnected, true);
+  }
+  assert.equal(h.calls.messages, 0); assert.equal(h.calls.context, 0); assert.equal(h.elements.prompt.value, "Privater unveränderter Entwurf");
+});
+
+test("controls exist before automatic speech begins and update at the native hidden streaming footer without chat rerender", () => {
+  const h = harness(), source = h.make({ status: "streaming", content: "Die Antwort wächst." });
+  assert.equal(source.footer.hidden, true); assert.ok(source.read()); assert.ok(source.pause()); assert.ok(source.status());
+  assert.equal(source.read().disabled, true); assert.equal(source.pause().hidden, true);
+  h.activate(); assert.equal(source.footer.hidden, true, "native streaming visibility is preserved");
+  assert.equal(source.read().getAttribute("aria-label"), "Vorlesen beenden"); assert.equal(source.read().disabled, false);
+  assert.equal(source.pause().hidden, false); assert.equal(h.calls.messages, 0);
+});
+
+test("terminal progress wins over a lagging active status and stale playback events cannot re-enable its controls", () => {
+  const h = harness(), source = h.make(); h.activate();
+  h.dispatch("speech.progress", h.progress({ eventSequence: 4, state: "completed" }));
+  assert.equal(source.read().getAttribute("aria-label"), "Nachricht vorlesen"); assert.equal(source.pause().hidden, true);
+  h.dispatch("speech.progress", h.progress({ eventSequence: 3, state: "playing" }));
+  assert.equal(source.pause().hidden, true);
+  h.dispatch("speech.progress", h.progress({ playbackId: "old-playback", eventSequence: 50, state: "playing" }));
+  assert.equal(source.pause().hidden, true);
+  h.dispatch("speech.status", { active: false, status: "Abgebrochen" });
+  assert.equal(source.status().hidden, true); assert.equal(h.state.speechProgress.sourceMessageId, null);
+});
+
+test("navigation and a recreated footer use playback truth instead of an optimistic paused state", () => {
+  const h = harness(), source = h.make(); h.activate();
+  h.state.activeSessionId = "session-b"; source.article.remove(); const foreign = h.make({ id: "other", sessionId: "session-b" });
+  h.context.renderSpeechStatus(); assert.equal(foreign.pause().hidden, true);
+  const returned = h.make({ id: "answer-a", sessionId: "session-a" });
+  assert.equal(returned.pause().hidden, false); assert.equal(returned.pause().getAttribute("aria-label"), "Vorlesen pausieren");
+  h.state.microphone.isSpeechPaused = true; h.state.speechProgress.state = "paused"; h.context.renderSpeechStatus();
+  assert.equal(returned.pause().getAttribute("aria-label"), "Vorlesen fortsetzen");
+  h.dispatch("speech.status", { active: false, status: "Abgebrochen" });
+  h.state.microphone.isSpeechPaused = true; const reloaded = h.make({ id: "answer-a", sessionId: "session-a" });
+  assert.equal(reloaded.pause().hidden, true); assert.equal(reloaded.read().getAttribute("aria-label"), "Nachricht vorlesen");
+});

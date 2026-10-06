@@ -31,11 +31,13 @@
     activeRunMessageId: null,
     runQueue: { active: null, pending: [], queueDepth: 0, isIdle: true },
     pendingChatSend: null,
+    pendingResume: null,
     pendingPlanImplementation: null,
     contextSource: "estimated",
     contextProfile: null,
     contextMeasurementMessageId: null,
     model: null,
+    selectedModelId: null,
     contextUsed: 0,
     contextLimit: 8192,
     contextWasTruncated: false,
@@ -116,6 +118,10 @@
   };
 
   const byId = id => document.getElementById(id);
+  const messageRenderTiming = globalThis.missumRenderTiming?.create({
+    getScope: () => `${state.activeSessionId || ""}:${state.activeRunId || ""}`,
+    render: meta => renderMessages(meta.reason === "force" ? "force" : meta.follow, true),
+  });
   const persistentToolActions = new Set(["audiobook", "planMode"]);
   const persistentExtensionActionIds = new Set(["builtin.audiobook/create", "builtin.coding/plan-mode"]);
   const toolVisuals = Object.freeze({
@@ -238,6 +244,11 @@
 
   function applyRunQueue(value) {
     state.runQueue = normalizeRunQueue(value);
+    const admitted = [state.runQueue.active, ...state.runQueue.pending].filter(Boolean);
+    if (state.pendingChatSend && admitted.some(run => run.requestId === state.pendingChatSend.requestId && run.sessionId === String(state.pendingChatSend.sessionId))) {
+      state.pendingChatSend = null; state.pendingCaptureRequest = null; state.waitingForCapture = false;
+    }
+    if (state.pendingResume && admitted.some(run => run.requestId === state.pendingResume)) state.pendingResume = null;
     const active = state.runQueue.active;
     state.isAiBusy = !state.runQueue.isIdle || Boolean(state.isRunning);
     if (active) {
@@ -290,11 +301,6 @@
     prompt: byId("prompt"),
     chatPane: document.querySelector(".chat-pane"),
     composerRegion: document.querySelector(".composer-region"),
-    composerSpeechStatus: byId("composer-speech-status"),
-    composerSpeechDetail: byId("composer-speech-detail"),
-    composerSpeechPause: byId("composer-speech-pause"),
-    composerSpeechPauseIcon: byId("composer-speech-pause-icon"),
-    composerSpeechStop: byId("composer-speech-stop"),
     send: byId("send"),
     toolsButton: byId("tools-button"),
     toolsMenu: byId("tools-menu"),
@@ -369,7 +375,9 @@
     prompt.style.maxHeight = `${maximum}px`;
     prompt.style.overflowY = "hidden";
     prompt.style.height = "0px";
-    const contentHeight = prompt.scrollHeight;
+    // An empty textarea can retain its intrinsic/placeholder scroll height
+    // after a session/view switch; the native empty composer uses its minimum.
+    const contentHeight = prompt.value.length === 0 ? minimum : prompt.scrollHeight;
     prompt.style.height = `${Math.min(maximum, Math.max(minimum, contentHeight))}px`;
     prompt.style.overflowY = contentHeight > maximum ? "auto" : "hidden";
     prompt.scrollTop = contentHeight > maximum ? previousScroll : 0;
@@ -485,10 +493,10 @@
     elements.modeSwitcherInitial.textContent = label[0];
     elements.modeSwitcherButton.title = `${label}-Ansicht wechseln`;
     elements.appShell.dataset.chatMode = state.chatMode;
-    elements.newSession.title = state.chatMode === "claudescience" ? "Neues Forschungsvorhaben starten" : "Projektordner auswählen";
-    elements.newSession.setAttribute("aria-label", state.chatMode === "claudescience" ? "Neues Forschungsvorhaben starten" : "Neues Projekt: Workspace auswählen");
+    elements.newSession.title = "Projektordner auswählen";
+    elements.newSession.setAttribute("aria-label", "Neues Projekt: Workspace auswählen");
     const projectsHeading = document.querySelector(".sidebar-projects-heading .sidebar-title");
-    if (projectsHeading) projectsHeading.textContent = state.chatMode === "claudescience" ? "Forschung" : "Projekte";
+    if (projectsHeading) projectsHeading.textContent = "Projekte";
     for (const option of elements.modeSwitcherMenu.querySelectorAll("[data-chat-mode]")) {
       const selected = normalizeChatMode(option.dataset.chatMode) === state.chatMode;
       option.setAttribute("aria-checked", String(selected));
@@ -645,11 +653,10 @@
       post("session.open", { sessionId: session.id });
       document.body.classList.remove("sessions-open");
     });
-    open.addEventListener("contextmenu", event => {
-      event.preventDefault();
-      const nextTitle = globalThis.prompt("Sitzung umbenennen", session.title || "Neue Sitzung");
-      if (nextTitle?.trim()) post("session.rename", { sessionId: session.id, title: nextTitle.trim() });
-    });
+    open.addEventListener("contextmenu", event => showSidebarMenu(event, [
+      ["Umbenennen", () => { const title = globalThis.prompt("Sitzung umbenennen", session.title || "Neue Sitzung"); if (title?.trim()) post("session.rename", { sessionId: session.id, title: title.trim() }); }],
+      ["Löschen", () => { if (globalThis.confirm(`„${session.title || "Neue Sitzung"}“ endgültig löschen?`)) post("session.delete", { sessionId: session.id }); }]
+    ]));
 
     const remove = document.createElement("button");
     remove.type = "button";
@@ -702,19 +709,24 @@
     folder.append(folderPath);
     head.append(chevron, folder, nameLabel, count);
     head.addEventListener("click", () => onToggle(!collapsed));
+    const projectMenu = event => showSidebarMenu(event, [
+      ["Projektpfad auf dem PC kopieren", () => post("message.copy", { text: workspacePath || "" })],
+      ["Projekt löschen", () => deleteWorkspaceProject({ id, name })]
+    ]);
+    head.addEventListener("contextmenu", projectMenu);
 
     if (addable && onNewSession) {
       const add = document.createElement("button");
       add.type = "button";
       add.className = "session-group__add";
-      add.disabled = state.isAiBusy || state.isRunning || Boolean(state.pendingChatSend);
+      add.disabled = Boolean(state.pendingChatSend);
       add.setAttribute("aria-label", `Neue Sitzung im Projekt ${name}`);
       add.title = `Neue Sitzung im Projekt ${name} starten`;
       const compose = document.createElementNS("http://www.w3.org/2000/svg", "svg");
       compose.setAttribute("viewBox", "0 0 24 24");
       compose.setAttribute("aria-hidden", "true");
       compose.classList.add("session-group__compose");
-      for (const shape of ["M12 5v14M5 12h14"]) {
+      for (const shape of ["M4 20h4L20 8l-4-4L4 16v4M14 6l4 4"]) {
         const path = document.createElementNS(compose.namespaceURI, "path");
         path.setAttribute("d", shape);
         compose.append(path);
@@ -726,7 +738,8 @@
       });
       const headRow = document.createElement("div");
       headRow.className = "session-group__headrow";
-      headRow.append(head, add);
+      const more = document.createElement("button"); more.type = "button"; more.className = "session-group__menu"; more.textContent = "⋯"; more.setAttribute("aria-label", `Projektmenü ${name}`); more.addEventListener("click", projectMenu);
+      headRow.append(head, more, add);
       section.append(headRow);
     } else {
       section.append(head);
@@ -736,17 +749,56 @@
       const body = document.createElement("div");
       body.className = "session-group__body";
       for (const session of sessions) body.append(createSessionItem(session));
+      if (!sessions.length) {
+        const empty = document.createElement("div"); empty.className = "session-group__empty";
+        empty.textContent = "Keine Chats"; body.append(empty);
+      }
       section.append(body);
     }
     return section;
   }
 
-  function createWorkspaceProject() {
-    if (state.isRunning || state.isAiBusy || state.pendingChatSend) return;
+  function showSidebarMenu(event, actions) {
+    event.preventDefault(); event.stopPropagation(); document.querySelector(".sidebar-context-menu")?.remove();
+    const menu = document.createElement("div"); menu.className = "browser-read-menu sidebar-context-menu"; menu.setAttribute("role", "menu");
+    for (const [label, action] of actions) { const item = document.createElement("button"); item.type = "button"; item.textContent = label; item.setAttribute("role", "menuitem"); item.addEventListener("click", () => { menu.remove(); action(); }); menu.append(item); }
+    menu.style.left = `${Math.min(event.clientX || event.target.getBoundingClientRect().right, window.innerWidth - 250)}px`;
+    menu.style.top = `${Math.min(event.clientY || event.target.getBoundingClientRect().bottom, window.innerHeight - 100)}px`; document.body.append(menu); menu.querySelector("button")?.focus();
+    const close = next => { if (next.type === "keydown" && next.key !== "Escape") return; if (next.type === "click" && menu.contains(next.target)) return; menu.remove(); document.removeEventListener("click", close); document.removeEventListener("keydown", close); };
+    document.addEventListener("click", close); document.addEventListener("keydown", close);
+  }
+
+  function acknowledgedCommand(type, payload) {
+    return new Promise((resolve, reject) => {
+      let requestId, timer;
+      const cleanup = () => { clearTimeout(timer); globalThis.removeEventListener("missum:host-message", receive); globalThis.removeEventListener("missum:bridge-disconnected", disconnected); };
+      const disconnected = () => { cleanup(); reject(new Error("Verbindung unterbrochen. Das Projekt wurde nicht vollständig gelöscht.")); };
+      const receive = event => { const message = event.detail; if (message.requestId !== requestId) return; if (message.type === "host.error") { cleanup(); reject(new Error(message.payload?.message || "Aktion fehlgeschlagen.")); } else if (["state.snapshot", "session.changed", "action.completed"].includes(message.type)) { cleanup(); resolve(message); } };
+      globalThis.addEventListener("missum:host-message", receive); globalThis.addEventListener("missum:bridge-disconnected", disconnected); timer = setTimeout(() => { cleanup(); reject(new Error("Die Serverbestätigung fehlt. Lade den aktuellen Projektstand vor einem weiteren Löschversuch.")); }, 30000); requestId = post(type, payload);
+    });
+  }
+
+  async function deleteWorkspaceProject(group) {
+    const sessions = (state.sessions || []).filter(session => session.sessionGroupId === group.id);
+    if (!globalThis.confirm(`Projekt „${group.name}“ mit ${sessions.length} Sitzung(en) löschen? Der Projektordner und seine Dateien bleiben erhalten.`)) return;
+    try { for (const session of sessions) await acknowledgedCommand("session.delete", { sessionId: session.id }); await acknowledgedCommand("session.groupDeleteEmpty", { groupId: group.id }); } catch (error) { showToast(error.message, true); }
+  }
+
+  async function createWorkspaceProject() {
+    if (state.pendingChatSend || state.workspaceCreationPending) return;
     flushDraft();
     if (globalThis.missumBridge?.isLanBrowser) {
-      openWorkspacePicker();
       document.body.classList.remove("sessions-open");
+      if (!globalThis.missumWorkspace) { openWorkspacePicker(); return; }
+      const frozenMode = state.chatMode;
+      state.workspaceCreationPending = true;
+      try {
+        const recentPaths = (state.sessionGroups || []).filter(group => group.workspacePath)
+          .map(group => ({ path: group.workspacePath, name: group.name }));
+        const selectedPath = await globalThis.missumWorkspace.open({ initialPath: state.workspacePath || recentPaths[0]?.path || null, recentPaths });
+        if (selectedPath) post("session.projectCreate", { workspacePath: selectedPath, chatMode: frozenMode });
+      } catch (error) { showToast(error.message || "Der Projektordner konnte nicht ausgewählt werden.", true); }
+      finally { state.workspaceCreationPending = false; }
       return;
     }
     post("session.workspaceCreate", { chatMode: state.chatMode });
@@ -772,42 +824,19 @@
   }
 
   function renderSessions() {
-    const bySessionActivity = (a, b) => {
-      const left = Date.parse(a.updatedAt || a.createdAt || "");
-      const right = Date.parse(b.updatedAt || b.createdAt || "");
-      if (Number.isFinite(left) && Number.isFinite(right) && left !== right) return right - left;
-      const leftRaw = String(a.updatedAt || a.createdAt || "");
-      const rightRaw = String(b.updatedAt || b.createdAt || "");
-      return leftRaw < rightRaw ? 1 : leftRaw > rightRaw ? -1 : 0;
-    };
     const query = elements.sessionSearch.value.trim().toLocaleLowerCase();
     const matchesQuery = item => !query || String(item.title || "").toLocaleLowerCase().includes(query);
-    const visibleSessions = state.sessions.filter(sessionMatchesMode);
-    const snapshotContainsOtherModes = state.sessions.some(session => !sessionMatchesMode(session));
     elements.sessionList.replaceChildren();
-
-    const groups = (Array.isArray(state.sessionGroups) ? state.sessionGroups : [])
-      .filter(group => visibleSessions.some(session => sessionBelongsToGroup(session, group))
-        || !snapshotContainsOtherModes)
-      .slice().sort((left, right) => {
-      const latestActivity = group => {
-        const memberDates = visibleSessions
-          .filter(session => sessionBelongsToGroup(session, group))
-          .map(session => Date.parse(session.updatedAt || session.createdAt || ""))
-          .filter(Number.isFinite);
-        const created = Date.parse(group.createdAt || "");
-        return Math.max(Number.isFinite(created) ? created : 0, ...memberDates, 0);
-      };
-      return latestActivity(right) - latestActivity(left);
-    });
-    const assignedIds = new Set();
-
+    // Like the native sidebar, use the host's shared group list in every mode.
+    // Filtering this again by chat mode hides existing and empty projects.
+    const groups = Array.isArray(state.sessionGroups) ? state.sessionGroups : [];
+    const byId = new Map(state.sessions.map(session => [String(session.id), session]));
     for (const group of groups) {
-      const members = visibleSessions.filter(session => sessionBelongsToGroup(session, group));
-      for (const session of members) assignedIds.add(String(session.id));
+      const members = Array.isArray(group.sessionIds)
+        ? group.sessionIds.map(id => byId.get(String(id))).filter(Boolean)
+        : state.sessions.filter(session => sessionBelongsToGroup(session, group));
       const matchesProject = query && String(group.name || "").toLocaleLowerCase().includes(query);
-      const groupSessions = members.filter(session => matchesProject || matchesQuery(session))
-        .sort(bySessionActivity);
+      const groupSessions = members.filter(session => matchesProject || matchesQuery(session));
       const collapsed = query ? false : Boolean(group.isCollapsed);
       if (!groupSessions.length && query && !matchesProject) continue;
       elements.sessionList.append(createProjectRow({
@@ -832,34 +861,23 @@
           state.selectedExtensionActionId = null;
           state.persistentExtensionActionId = null;
           renderContext();
-          post("session.projectCreate", { workspacePath: group.workspacePath, chatMode: state.chatMode });
+          post("session.projectCreate", { workspacePath: group.workspacePath, chatMode: normalizeChatMode(group.chatMode) || state.chatMode });
           document.body.classList.remove("sessions-open");
         }
       }));
     }
 
-    const ungroupedSessions = visibleSessions.filter(session => !assignedIds.has(String(session.id)) && matchesQuery(session))
-      .sort(bySessionActivity);
-    if (ungroupedSessions.length) {
-      const collapsed = query ? false : readUngroupedCollapsed();
-      elements.sessionList.append(createProjectRow({
-        id: "ungrouped",
-        name: "Allgemeine Sitzungen",
-        workspacePath: null,
-        // Legacy projectless sessions remain readable, but new sessions are
-        // created only from a concrete project row with a fixed workspace.
-        addable: false,
-        collapsed,
-        sessions: ungroupedSessions,
-        onToggle: nextCollapsed => {
-          persistUngroupedCollapsed(nextCollapsed);
-          renderSessions();
-        }
-      }));
-    }
+    const addProject = document.createElement("button");
+    addProject.type = "button"; addProject.className = "sidebar-add-project";
+    addProject.textContent = "Projekt hinzufügen"; addProject.disabled = Boolean(state.pendingChatSend);
+    addProject.addEventListener("click", createWorkspaceProject); if (!groups.length) elements.sessionList.append(addProject);
   }
 
-  function renderMessages(scrollToEnd) {
+  function renderMessages(scrollToEnd, fromTiming = false) {
+    if (!fromTiming && typeof messageRenderTiming !== "undefined" && messageRenderTiming) {
+      messageRenderTiming.request({ follow: scrollToEnd, immediate: scrollToEnd === "force", reason: scrollToEnd === "force" ? "force" : null });
+      return;
+    }
     renderCodingChanges();
     if ((state.chatMode === "coding" || (!state.chatMode && ["coding"].includes(state.selectedToolAction))) || state.messages.some(message => message.toolSteps?.length
       || state.codingActivity.get(String(message.id))?.some(step => step.kind === "tool"))) {
@@ -1185,7 +1203,7 @@
     if (String(progress.sessionId || "") !== String(state.activeSessionId || "")) return;
     if (!Array.isArray(progress.activeSourceUnitIds) || progress.activeSourceUnitIds.length === 0) return;
     const article = activeSpeechArticle(progress.sourceMessageId);
-    const content = article?.querySelector(":scope > .message-body > .message-content");
+    const content = article?.querySelector(":scope > .message-body > .message-content, :scope > .message-body > .coding-timeline");
     if (!content) return;
 
     // One playback segment maps to one visible sentence. Keeping this as one
@@ -1255,6 +1273,7 @@
         state: playbackState
       };
       clearSpeechHighlight();
+      renderSpeechStatus();
       return;
     }
 
@@ -1276,11 +1295,16 @@
       state: playbackState || current.state || null
     };
     applySpeechHighlight();
+    renderSpeechStatus();
   }
 
   const messageCopyIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
   const messagePdfIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4"/><path d="m7 9 5-5 5 5"/><path d="M20 16v3a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-3"/></svg>';
+  const messageSpeechIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4zM15 8a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14"/></svg>';
   const messageDoneIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>';
+  const messageSpeechStopIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>';
+  const messageSpeechPauseIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14M16 5v14"/></svg>';
+  const messageSpeechResumeIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5l11 7-11 7z"/></svg>';
 
   function flashMessageAction(button, originalIcon, label) {
     button.classList.add("copied");
@@ -1330,13 +1354,58 @@
     elements.messageScroll.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
   }
 
+  function isMessageSpeechActive(messageId, sessionId) {
+    const progress = state.speechProgress || {};
+    return Boolean((state.speechStatus?.active || state.microphone?.isSpeaking)
+      && progress.sourceMessageId && progress.sessionId
+      && !["completed", "cancelled", "stopped"].includes(String(progress.state || "").toLowerCase())
+      && String(progress.sourceMessageId) === String(messageId)
+      && String(progress.sessionId) === String(sessionId));
+  }
+
+  function updateMessageSpeechFooter(footer) {
+    const active = isMessageSpeechActive(footer.dataset.speechMessageId, footer.dataset.speechSessionId);
+    const read = footer.querySelector(".message-action--speech");
+    const pause = footer.querySelector(".message-action--speech-pause");
+    const status = footer.querySelector(".message-speech-status");
+    if (!read || !pause || !status) return;
+    const paused = typeof state.microphone?.isSpeechPaused === "boolean"
+      ? state.microphone.isSpeechPaused : state.speechProgress?.state === "paused";
+    const readLabel = active ? "Vorlesen beenden" : "Nachricht vorlesen";
+    read.title = readLabel; read.setAttribute("aria-label", readLabel);
+    read.classList.toggle("message-action--speech-stop", active);
+    if (read.dataset.speechIcon !== String(active)) {
+      read.innerHTML = active ? messageSpeechStopIcon : messageSpeechIcon;
+      read.dataset.speechIcon = String(active);
+    }
+    read.disabled = !active && footer.dataset.canRead !== "true";
+    pause.hidden = !active; pause.disabled = !active || !state.microphone?.canPauseSpeech;
+    const pauseLabel = paused ? "Vorlesen fortsetzen" : "Vorlesen pausieren";
+    pause.title = pauseLabel; pause.setAttribute("aria-label", pauseLabel);
+    pause.setAttribute("aria-pressed", String(active && paused));
+    pause.classList.toggle("message-action--speech-resume", active && paused);
+    if (pause.dataset.speechIcon !== String(paused)) {
+      pause.innerHTML = paused ? messageSpeechResumeIcon : messageSpeechPauseIcon;
+      pause.dataset.speechIcon = String(paused);
+    }
+    const label = active ? paused ? "Vorlesen pausiert"
+      : (state.microphone?.isSpeaking && state.microphone?.status !== "Inaktiv" && state.microphone?.status)
+        || state.speechStatus?.status || "Vorlesen" : "";
+    if (status.textContent !== label) status.textContent = label;
+    status.hidden = !active;
+    status.title = active ? state.speechStatus?.detail || label : "";
+  }
+
   function createMessageFooter(message, article) {
+    const sessionId = message.sessionId || state.activeSessionId;
     const showAssistantActions = String(message.role).toLowerCase() === "assistant";
     const footer = document.createElement("div");
     footer.className = "message-footer";
+    footer.dataset.speechMessageId = String(message.id);
+    footer.dataset.speechSessionId = String(sessionId);
+    footer.dataset.streaming = String(showAssistantActions && ["pending", "streaming"].includes(String(message.status).toLowerCase()));
     const messageText = message.content || "";
-    const canReadAloud = showAssistantActions
-      && ["completed", "cancelled", "interrupted", "failed"]
+    const canReadAloud = ["completed", "cancelled", "interrupted", "failed"]
         .includes(String(message.status || "").toLowerCase())
       && messageText.trim().length > 0;
 
@@ -1344,24 +1413,46 @@
       post("message.copy", { text: messageText });
       flashMessageAction(button, messageCopyIcon, "Nachricht kopieren");
     }));
-    footer.append(createMessageIconAction("Nachricht als PDF exportieren", messagePdfIcon, button => {
-      post("message.exportPdf", { messageId: String(message.id) });
-      flashMessageAction(button, messagePdfIcon, "Nachricht als PDF exportieren");
-    }));
-
-    if (canReadAloud) {
-      footer.append(createMessageFooterLink("Vorlesen", () => {
+    footer.dataset.canRead = String(canReadAloud);
+    if (showAssistantActions || canReadAloud || isMessageSpeechActive(message.id, sessionId)) {
+      const read = createMessageIconAction("Nachricht vorlesen", messageSpeechIcon, () => {
+        if (isMessageSpeechActive(message.id, sessionId)) { post("microphone.stopSpeech", {}); return; }
         post("microphone.speak", {
-          sessionId: state.activeSessionId,
+          sessionId,
           messageId: String(message.id),
           text: messageText
         });
-      }));
+      });
+      read.classList.add("message-action--speech"); footer.append(read);
+      const pause = createMessageIconAction("Vorlesen pausieren", messageSpeechPauseIcon, () => {
+        if (isMessageSpeechActive(message.id, sessionId) && state.microphone?.canPauseSpeech)
+          post("microphone.toggleSpeechPause", {});
+      });
+      pause.classList.add("message-action--speech-pause"); pause.hidden = true; footer.append(pause);
+      const status = document.createElement("span"); status.className = "message-speech-status";
+      status.setAttribute("role", "status"); status.setAttribute("aria-live", "polite"); status.hidden = true;
+      footer.append(status);
+      updateMessageSpeechFooter(footer);
     }
-    if (showAssistantActions) {
-      footer.append(createMessageFooterLink("Zum Anfang springen", () => scrollMessageToTop(article)));
+    const conversation = (state.messages || []).filter(item => ["user", "assistant"].includes(item.role));
+    const terminalStatus = String(message.status || "").toLowerCase();
+    const hasResumableContent = (message.toolSteps || []).some(step => !["assistant.continuation", "assistant.progress"].includes(step.tool))
+      || messageText.trim() && messageText.trim() !== String(message.error || "").trim()
+        && !/^(?:\*\*Fehler|Der AI-Lauf ist fehlgeschlagen|Der Missum-AI-Auftrag konnte nicht abgeschlossen werden\.)/.test(messageText.trim());
+    if (showAssistantActions && conversation.at(-1)?.id === message.id
+      && conversation.slice(0, -1).some(item => item.role === "user" && String(item.content || "").trim())
+      && (["cancelled", "interrupted"].includes(terminalStatus) || terminalStatus === "failed" && hasResumableContent)) {
+      const resume = createMessageFooterLink("Fortsetzen", () => {
+        if (resume.disabled) return;
+        elements.prompt.focus();
+        state.pendingResume = post("chat.resume", { sessionId: state.activeSessionId, messageId: message.id });
+        resume.disabled = true; resume.textContent = "Wird vorbereitet …";
+      });
+      resume.classList.add("continuation-step");
+      resume.disabled = Boolean(state.isAiBusy || state.isRunning || state.pendingChatSend || state.pendingResume);
+      footer.append(resume);
     }
-
+    if (showAssistantActions && ["pending", "streaming"].includes(String(message.status).toLowerCase())) footer.hidden = true;
     return footer;
   }
 
@@ -1470,7 +1561,8 @@
     if (role === "assistant") {
       const avatar = document.createElement("div");
       avatar.className = "avatar";
-      avatar.textContent = "AI";
+      avatar.setAttribute("aria-hidden", "true");
+      avatar.append(createToolIcon("M8 8h8a3 3 0 0 1 3 3v5a3 3 0 0 1-3 3H8a3 3 0 0 1-3-3v-5a3 3 0 0 1 3-3ZM12 5v3M10 12h.01M14 12h.01M9 16h6M8 5h8"));
       article.append(avatar);
     }
 
@@ -1480,12 +1572,12 @@
       const meta = document.createElement("div");
       meta.className = "message-meta";
       const messageTime = timeLabel(message.createdAt || message.updatedAt);
-        const assistantLabel = state.chatMode === "claudescience" ? "Claude Science"
-          : state.chatMode === "coding" || (!state.chatMode && ["coding"].includes(state.selectedToolAction)) ? "Codex" : "AI";
-      const displayLabel = message.isLiveCaption ? "Live-Untertitel" : assistantLabel;
+      const elapsedSeconds = Math.floor((globalThis.missumAppearance?.activeMilliseconds(message) || 0) / 1000);
+      const duration = `${Math.floor(elapsedSeconds / 60)} Min. ${elapsedSeconds % 60} Sek.`;
       const identity = document.createElement("span");
       identity.className = "message-meta__identity";
-      identity.textContent = messageTime ? `${displayLabel} - ${messageTime}` : displayLabel;
+      identity.textContent = ["pending", "streaming"].includes(String(message.status).toLowerCase())
+        ? `In Bearbeitung seit ${duration}` : messageTime ? `${messageTime} · ${duration} lang gearbeitet` : "";
       meta.append(identity);
       const liveStatus = state.messageRunStatus.get(String(message.id));
       const appendActivity = (label, detail, spinning = false, failed = false) => {
@@ -1710,6 +1802,14 @@
     const name = String(value || "");
     return ({
       "assistant.reasoning": "Denkprozess",
+      "research.read": "Forschungsstand lesen",
+      "research.update": "Forschungsstand ergänzen",
+      "research.code.write": "Python-Datei vorbereiten",
+      "research.code.execute": "Python-Analyse ausführen",
+      "research.code.test": "Berechnung prüfen",
+      "research.code.benchmark": "Berechnung vergleichen",
+      "research.deliverables.verify": "Forschungsergebnisse prüfen",
+      "math.formalProof": "Lean-Beweis prüfen",
       "document.agent": "Historischer Dokumentauftrag",
       "document.create": "Dokument erstellen oder bearbeiten",
       "document.read": "Dokument lesen",
@@ -1736,10 +1836,38 @@
       "coding.searchHistory": "Chatverlauf durchsuchen",
       "coding.searchKnowledge": "Dokumentwissen durchsuchen",
       "coding.renderHtml": "HTML-Vorschau erstellen",
-      "web.search": "Im Web suchen",
+      "web.search": "Websuche",
       "web.fetch": "Quelle lesen",
       "web.deepResearch": "Quellen recherchieren"
     })[name] || name.replace(/^(?:coding|web)\./, "").replace(/([a-z])([A-Z])/g, "$1 $2") || "Werkzeug";
+  }
+
+  function codingToolSummary(step) {
+    if (step?.tool === "research.read") return "Hypothesen, offene Prüfungen und Publikationsstand";
+    if (!["research.update", "research.code.execute"].includes(step?.tool)) return null;
+    let input;
+    try { input = typeof step.inputJson === "string" ? JSON.parse(step.inputJson) : step.inputJson; }
+    catch { return null; }
+    if (step.tool === "research.code.execute") {
+      if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+      const target = `${input.executable ?? ""} ${Array.isArray(input.arguments) ? input.arguments.map(value => value ?? "").join(" ") : ""}`;
+      if (!target.trim()) return null;
+      let output;
+      try { output = typeof step.outputJson === "string" ? JSON.parse(step.outputJson) : step.outputJson; }
+      catch { output = null; }
+      const facts = [target];
+      for (const [key, label] of [["entries", "Einträge"], ["matches", "Treffer"], ["results", "Treffer"], ["sources", "Quellen"]])
+        if (Array.isArray(output?.[key])) facts.push(`${output[key].length.toLocaleString("de-DE")} ${label}`);
+      if (output?.exitCode != null) facts.push(`Exitcode ${output.exitCode}`);
+      const error = output?.error ?? output?.errorCode;
+      if (error != null && String(error).length) facts.push(String(error));
+      if (output?.truncated === true) facts.push("Ausgabe gekürzt");
+      return facts.join(" · ");
+    }
+    if (!input || !Array.isArray(input.changes)) return null;
+    const titles = input.changes.map(change => String(change?.data?.title ?? change?.id ?? "")).filter(title => title.length > 0);
+    const summary = titles.length === 1 ? titles[0] : `${titles.length} Forschungsobjekte`;
+    return summary.length > 100 ? `${summary.slice(0, 97)}…` : summary;
   }
 
   function codingStepState(value) {
@@ -1813,7 +1941,11 @@
       renderMarkdown: text => globalThis.missumMarkdown.render(text),
       enhanceCodeBlocks: enhanceCodingCodeBlocks,
       sanitizeText: sanitizeVisibleMessageContent,
-      liveStatus: live ? { status: live.status, detail: cleanStatusMetadata(live.detail) } : null,
+      toolSummary: codingToolSummary,
+      createSubagentReceipt: step => globalThis.missumPanels?.createSubagentReceipt(step) || null,
+      liveStatus: live ? { ...live, detail: cleanStatusMetadata(live.detail) } : null,
+      // The thinking timer already runs at the native 80ms cadence.
+      onThinkingChanged: () => { if (state.activeSessionId === sessionId) renderMessages(false, true); },
       onPreview: (messageId, stepId) => { if (state.activeSessionId === sessionId) openCodingPreview(messageId, stepId); },
       createArtifacts: typeof createArtifactList === "function" ? createArtifactList : null
     });
@@ -1929,17 +2061,16 @@
     elements.appShell.classList.toggle("coding-mode", coding);
     elements.appShell.classList.toggle("science-mode", state.chatMode === "claudescience");
     elements.prompt.placeholder = state.chatMode === "claudescience"
-      ? "Forschungsfrage, Analyse oder Manuskriptauftrag eingeben …"
-      : coding ? "Änderung beschreiben oder Frage zum Projekt stellen …" : "Nachricht eingeben …";
+      ? "Stelle eine Forschungsfrage" : coding ? "Leg einfach los" : "Frag etwas";
     renderScienceWorkbench();
     renderCodingChanges();
   }
 
   function renderScienceWorkbench() {
-    const visible = state.chatMode === "claudescience";
-    elements.scienceWorkbench.hidden = !visible;
-    elements.conversationPane.classList.toggle("science-conversation", visible);
-    elements.appShell.classList.toggle("science-chat-hidden", visible && !state.scienceChatVisible);
+    const visible = false;
+    elements.scienceWorkbench.hidden = true;
+    elements.conversationPane.classList.remove("science-conversation");
+    elements.appShell.classList.remove("science-chat-hidden");
     if (!visible) return;
     const science = state.scientificResearch || {};
     const projects = Array.isArray(science.projects) ? science.projects : [];
@@ -2220,6 +2351,11 @@
 
   async function beginMediaCapture(action, skipVoiceFeedback = false) {
     if (hasMediaAnalysisContext(action)) return;
+    if (globalThis.missumBridge?.isLanBrowser && !globalThis.missumBridge.capabilities?.screen) {
+      showToast("Aufnahme ist über HTTP nicht verfügbar. Hänge eine Datei oder einen Screenshot an.");
+      globalThis.missumBridge.pickFiles(state.activeSessionId);
+      return;
+    }
     const feedback = mediaCaptureFeedback(action);
     if (!skipVoiceFeedback && feedback && isVoiceControlActive()) {
       state.voiceCaptureFeedbackAction = action;
@@ -2256,32 +2392,22 @@
     renderDeepResearch();
     renderScienceWorkbench();
 
-    if (state.workspacePath) {
-      const workspace = String(state.workspacePath);
-      const trimmed = workspace.replace(/[\\/]+$/, "");
-      const label = trimmed.split(/[\\/]/).filter(Boolean).at(-1) || trimmed || workspace;
-      const chip = document.createElement("div");
-      chip.className = "active-tool-chip workspace-context-chip";
-      chip.title = `Workspace: ${workspace}`;
-      chip.setAttribute("aria-label", `Workspace ${label}`);
-      const text = document.createElement("span");
-      text.textContent = label;
-      chip.append(createToolIcon("M3 7V5h6l2 2h10v13H3Z"), text);
-      elements.activeTools.append(chip);
-    }
-
     const selectedDescriptor = state.selectedExtensionActionId
       ? availableActionDescriptors().find(item => item.actionId === state.selectedExtensionActionId)
       : null;
     const displaysToolChip = selectedDescriptor
       && !["builtin.coding/run", "builtin.general/run"].includes(selectedDescriptor.actionId);
-    if (displaysToolChip || state.selectedToolAction && !["coding", "general"].includes(state.selectedToolAction) && toolVisuals[state.selectedToolAction]) {
+    const isReadAloud = selectedDescriptor?.actionId === "builtin.speech/read-aloud"
+      || state.selectedExtensionActionId === "builtin.speech/read-aloud"
+      || selectedDescriptor?.toolAction === "textToSpeech" || state.selectedToolAction === "textToSpeech";
+    if (!isReadAloud && (displaysToolChip || state.selectedToolAction && !["coding", "general"].includes(state.selectedToolAction) && toolVisuals[state.selectedToolAction])) {
       const fallbackVisual = toolVisuals[state.selectedToolAction] || ["Erweiterungsaktion", actionIcons.extension];
-      const label = selectedDescriptor?.displayName || fallbackVisual[0];
+      const label = selectedDescriptor?.actionId === "builtin.coding/plan-mode" ? "Planen" : selectedDescriptor?.displayName || fallbackVisual[0];
       const iconPath = actionIcons[selectedDescriptor?.iconKey] || fallbackVisual[1];
       const chip = document.createElement("button");
       chip.type = "button";
       chip.className = "active-tool-chip";
+      chip.dataset.icon = selectedDescriptor?.iconKey || state.selectedToolAction || "extension";
       chip.title = `${label} abwählen`;
       chip.setAttribute("aria-label", `${label} abwählen`);
       const text = document.createElement("span");
@@ -2296,11 +2422,12 @@
       elements.activeTools.append(chip);
     }
 
-    if (state.liveCaption?.isActive) {
+    if (state.liveCaption?.isActive && (!state.liveCaption.sessionId || state.liveCaption.sessionId === state.activeSessionId)) {
       const [label, iconPath] = toolVisuals["liveCaption.start"];
       const chip = document.createElement("button");
       chip.type = "button";
       chip.className = "active-tool-chip";
+      chip.dataset.icon = "captions";
       chip.title = `${label} beenden`;
       chip.setAttribute("aria-label", `${label} beenden`);
       const text = document.createElement("span");
@@ -2313,82 +2440,18 @@
       elements.activeTools.append(chip);
     }
 
-    const browserVoiceActive = Boolean(
-      globalThis.missumVoiceCapture?.isActive
-      || globalThis.missumVoiceCapture?.isStarting
-      || state.voiceStarting);
-    if (browserVoiceActive) {
-      const chip = document.createElement("div");
-      chip.className = "active-tool-chip voice-context-chip";
-      const label = document.createElement("span");
-      label.textContent = state.voiceStarting
-        ? "Mikrofon wird geöffnet …"
-        : "Ich höre zu · „Senden“ zum Absenden";
-      chip.append(createToolIcon("M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zM5 11a7 7 0 0 0 14 0M12 18v3M9 21h6"), label);
-      elements.activeTools.append(chip);
-    }
-
+    // Native exposes recording state at its microphone/capture controls.
+    // The composer footer contains selections and the current chat's captions.
     if (isAudioCaptureActive()) {
       const audio = state.audioCapture || {};
       const elapsed = Math.max(0, Number(audio.elapsedSeconds) || 0);
       const maximum = Math.max(1, Number(audio.maximumSeconds) || 600);
-      const chip = document.createElement("button");
-      chip.type = "button";
-      chip.className = "active-tool-chip screen-clip-chip";
-      chip.disabled = Boolean(audio.isBusy);
-      chip.title = audio.isBusy ? "Audio wird vorbereitet" : "Audioaufnahme abschließen";
-      chip.setAttribute("aria-label", chip.title);
-      const label = document.createElement("span");
-      label.textContent = audio.isBusy
-        ? "Systemaudio wird vorbereitet"
-        : `Systemaudio aufnehmen · ${formatClipTime(elapsed)} / ${formatClipTime(maximum)}`;
-      const indicator = document.createElement("span");
-      indicator.className = "screen-clip-chip__indicator";
-      indicator.setAttribute("aria-hidden", "true");
-      chip.append(createToolIcon(toolVisuals.audioAnalysis[1]), label, indicator);
-      chip.addEventListener("click", () => post("audioCapture.stop", {}));
-      elements.activeTools.append(chip);
       if (audio.isRecording && elapsed >= maximum && !state.audioCaptureStopRequested) {
         state.audioCaptureStopRequested = true;
         post("audioCapture.stop", {});
       }
     } else if (!state.audioCapture?.isBusy) {
       state.audioCaptureStopRequested = false;
-    }
-
-    if (isScreenClipActive()) {
-      const clip = state.screenClip || {};
-      const elapsed = Math.max(0, Number(clip.elapsedSeconds) || 0);
-      const maximum = Math.max(1, Number(clip.maximumSeconds) || 30);
-      const chip = document.createElement("div");
-      chip.className = "active-tool-chip screen-clip-chip";
-      chip.title = clip.isBusy ? "Video wird vorbereitet" : "Aufnahme übernehmen";
-      const label = document.createElement("span");
-      label.textContent = clip.isBusy
-        ? "Video wird vorbereitet"
-        : `Video aufnehmen · ${formatClipTime(elapsed)} / ${formatClipTime(maximum)}`;
-      const indicator = document.createElement("span");
-      indicator.className = "screen-clip-chip__indicator";
-      indicator.setAttribute("aria-hidden", "true");
-      chip.append(createToolIcon(toolVisuals["screenClip.toggle"][1]), label, indicator);
-      if (!clip.isBusy) {
-        const accept = document.createElement("button");
-        accept.type = "button";
-        accept.className = "screen-clip-chip__action";
-        accept.title = "Aufnahme übernehmen";
-        accept.setAttribute("aria-label", accept.title);
-        accept.textContent = "✓";
-        accept.addEventListener("click", () => post("screenClip.stop", { sessionId: state.activeSessionId }));
-        const cancel = document.createElement("button");
-        cancel.type = "button";
-        cancel.className = "screen-clip-chip__action screen-clip-chip__action--cancel";
-        cancel.title = "Aufnahme verwerfen";
-        cancel.setAttribute("aria-label", cancel.title);
-        cancel.textContent = "×";
-        cancel.addEventListener("click", () => post("screenClip.cancel", {}));
-        chip.append(accept, cancel);
-      }
-      elements.activeTools.append(chip);
     }
 
     const createFileChip = file => {
@@ -2509,26 +2572,16 @@
   function updateContextStripVisibility() {
     elements.contextStrip.hidden = state.documents.length === 0
       && state.attachments.length === 0
-      && !state.selectedExtensionActionId
-      && (!state.selectedToolAction || state.selectedToolAction === "coding")
-      && !state.deepResearch
-      && !isAudioCaptureActive()
-      && !isScreenClipActive()
-      && !globalThis.missumVoiceCapture?.isActive
-      && !globalThis.missumVoiceCapture?.isStarting
-      && !state.voiceStarting
-      && (elements.codingChanges?.hidden ?? true)
-      && !state.speechStatus?.active
-      && !state.liveCaption?.isActive;
+      && !(state.pendingDocumentImports?.length)
+      && (elements.codingChanges?.hidden ?? true);
   }
 
   function renderComposerAction() {
-    // Speech playback is an independent activity. The composer stop button only
-    // cancels the current AI run; playback has its own chip
-    // controls so sending/aborting a prompt cannot interrupt it.
+    // Native priority: cancel the visible AI run/queue first. With an empty
+    // draft and no AI activity, stop standalone speech that has no source footer.
     const canSteer = globalThis.missumRunSteering?.canSteer(state) ?? false;
     const canRetrySteer = Boolean(globalThis.missumRunSteering?.pendingRetry(state, elements.prompt.value));
-    const preparing = Boolean(state.pendingChatSend);
+    const preparing = Boolean(state.pendingChatSend || state.reasoningSubmissionPending);
     const hasText = Boolean(elements.prompt.value.trim());
     const scheduledRun = scheduledRunForSession(state.activeSessionId);
     const isQueued = scheduledRun?.queueState === "queued";
@@ -2537,12 +2590,15 @@
     const foreignRunActive = Boolean(state.runQueue?.active
       && String(state.runQueue.active.sessionId) !== String(state.activeSessionId || ""));
     const canStop = canSteer && !hasText && !preparing;
+    const canStopSpeech = !hasText && !preparing && !canSteer && !scheduledRun
+      && Boolean(state.speechStatus?.active || state.microphone?.isSpeaking);
     elements.send.hidden = false;
-    elements.send.classList.toggle("send-button--stop", canStop || canCancelScheduled);
-    elements.send.disabled = preparing || (!hasText && !canStop && !canCancelScheduled)
+    elements.send.classList.toggle("send-button--stop", canStop || canCancelScheduled || canStopSpeech);
+    elements.send.disabled = preparing || (!hasText && !canStop && !canCancelScheduled && !canStopSpeech)
       || Boolean(hasText && (isQueued || isStarting) && !canRetrySteer);
     elements.send.title = preparing ? "Der Auftrag wird vorbereitet. Deine weitere Eingabe bleibt erhalten."
       : canStop ? "Antwort stoppen"
+      : canStopSpeech ? "Vorlesen beenden"
       : canCancelScheduled ? isQueued ? `Auftrag von Platz ${scheduledRun.position} aus der Warteschlange entfernen` : "Startenden Auftrag abbrechen"
       : isQueued ? `Diese Sitzung wartet auf Platz ${scheduledRun.position}. Ein zweiter Auftrag wird nicht eingereiht.`
       : isStarting ? "Der Auftrag dieser Sitzung wird gestartet."
@@ -2551,23 +2607,25 @@
       elements.send.title = "Nachricht zur Warteschlange hinzufügen";
     }
     elements.send.setAttribute("aria-label", preparing ? "Wird vorbereitet" : canStop ? "Antwort stoppen"
+      : canStopSpeech ? "Vorlesen beenden"
       : canCancelScheduled ? "Aus Warteschlange entfernen"
       : canSteer || canRetrySteer ? "Umlenken"
       : foreignRunActive ? "Einreihen" : "Senden");
     elements.prompt.placeholder = isQueued ? `Warteschlange · Platz ${scheduledRun.position}`
       : isStarting ? "Auftrag wird gestartet …"
       : foreignRunActive ? "Nachricht eingeben und einreihen …"
-      : "Nachricht eingeben …";
+      : state.chatMode === "claudescience" ? "Stelle eine Forschungsfrage"
+      : state.chatMode === "coding" ? "Leg einfach los" : "Frag etwas";
   }
 
   function renderStatus() {
     renderCodingWorkspace();
     renderComposerAction();
-    const preparing = Boolean(state.pendingChatSend);
+    const preparing = Boolean(state.pendingChatSend || state.reasoningSubmissionPending);
     elements.prompt.disabled = false;
-    elements.newSession.disabled = state.isRunning || state.isAiBusy || preparing;
+    elements.newSession.disabled = Boolean(state.pendingChatSend) || preparing;
     for (const button of elements.sessionList?.querySelectorAll(".session-group__add") || []) {
-      button.disabled = state.isRunning || state.isAiBusy || preparing;
+      button.disabled = preparing;
     }
     const hasVisibleSessions = state.sessions.some(session => !session.chatMode
       || String(session.chatMode).toLocaleLowerCase() === String(state.chatMode || "general").toLocaleLowerCase());
@@ -2593,36 +2651,8 @@
   }
 
   function renderSpeechStatus() {
-    const speech = state.speechStatus || {};
-    const canPause = Boolean(speech.active && state.microphone?.canPauseSpeech);
-    const isPaused = Boolean(canPause && state.microphone?.isSpeechPaused);
-    elements.composerSpeechStatus.hidden = !speech.active;
-    elements.composerSpeechStatus.classList.toggle("paused", isPaused);
-    if (!speech.active) {
-      elements.composerSpeechDetail.textContent = "";
-      elements.composerSpeechPause.disabled = true;
-      elements.composerSpeechStop.disabled = true;
-      updateContextStripVisibility();
-      return;
-    }
-    const liveStatus = isPaused
-      ? "Pausiert"
-      : canPause
-        ? "Sprachausgabe wird wiedergegeben"
-        : speech.status;
-    const speechModel = String(speech.model || "").trim();
-    const speechModelLabel = speechModel ? `Sprachausgabe: ${speechModel}` : null;
-    elements.composerSpeechDetail.textContent = uniqueStatusParts(
-      liveStatus,
-      cleanStatusMetadata(speech.detail),
-      speechModelLabel).join(" · ");
-    const controlLabel = isPaused ? "Fortsetzen" : "Pausieren";
-    elements.composerSpeechPause.disabled = !canPause;
-    elements.composerSpeechPause.title = controlLabel;
-    elements.composerSpeechPause.setAttribute("aria-label", controlLabel);
-    elements.composerSpeechPause.setAttribute("aria-pressed", String(isPaused));
-    elements.composerSpeechPauseIcon.setAttribute("d", isPaused ? "M8 5l11 7-11 7z" : "M8 5v14M16 5v14");
-    elements.composerSpeechStop.disabled = false;
+    for (const footer of document.querySelectorAll(".message-footer[data-speech-message-id]"))
+      updateMessageSpeechFooter(footer);
     updateContextStripVisibility();
   }
 
@@ -2652,6 +2682,12 @@
   }
 
   function renderMicrophone() {
+    if (globalThis.missumBridge?.isLanBrowser && !globalThis.missumBridge.capabilities?.microphone) {
+      elements.microphone.disabled = true;
+      elements.microphone.title = "Mikrofonaufnahme ist über HTTP nicht verfügbar. Dateien und Screenshots über + anhängen.";
+      elements.microphone.setAttribute("aria-label", elements.microphone.title);
+      return;
+    }
     const browserActive = Boolean(globalThis.missumVoiceCapture?.isActive || globalThis.missumVoiceCapture?.isStarting);
     const active = Boolean(browserActive || state.voiceStarting);
     elements.microphone.classList.toggle("recording", active);
@@ -2767,6 +2803,7 @@
   function setToolsMenuOpen(open) {
     elements.toolsMenu.hidden = !open;
     elements.toolsButton.setAttribute("aria-expanded", String(open));
+    globalThis.missumToolsMenu?.setOpen(elements.toolsMenu, open);
     if (open) {
       updateActionMenuState();
       elements.toolsMenu.querySelector(".service-option:not(:disabled)")?.focus();
@@ -2826,6 +2863,9 @@
 
   function resolvedActionDisabledReason(descriptor) {
     if (!descriptor) return null;
+    if (globalThis.missumBridge?.isLanBrowser && /live.?caption|captions/i.test(`${descriptor.actionId} ${descriptor.captureAction}`)) {
+      return "Live-Untertitel benötigen eine lokale Aufnahme. Über HTTP kannst du Audio- oder Videodateien anhängen.";
+    }
     if (descriptor.actionId !== "builtin.documents/export-chat-pdf") {
       return descriptor.disabledReason || null;
     }
@@ -2838,6 +2878,7 @@
   }
 
   function updateActionMenuState() {
+    if (globalThis.missumToolsMenu?.update(elements.toolsMenu)) return;
     for (const button of elements.toolsMenuContent.querySelectorAll(".service-option")) {
       const descriptor = button._actionDescriptor;
       if (!descriptor) continue;
@@ -2871,6 +2912,13 @@
   }
 
   function renderActionMenu() {
+    if (globalThis.missumToolsMenu?.render({ menu: elements.toolsMenu, content: elements.toolsMenuContent,
+      trigger: elements.toolsButton, composer: document.querySelector(".composer"),
+      descriptors: availableActionDescriptors(), mode: state.chatMode, sessionId: state.activeSessionId,
+      invoke: invokeActionDescriptor, isActive: isActionDescriptorActive, disabledReason: resolvedActionDisabledReason,
+      openFiles: () => post("document.pick", { sessionId: state.activeSessionId }),
+      openWorkspace: createWorkspaceProject, openPublication: () => globalThis.missumPanels?.setView("publication"),
+      isLan: globalThis.missumBridge?.isLanBrowser })) return;
     elements.toolsMenuContent.replaceChildren();
     const groups = new Map();
     for (const descriptor of availableActionDescriptors()) {
@@ -2938,7 +2986,7 @@
 
   async function postChatRequest(payload) {
     if (state.pendingChatSend) return null;
-    const requestId = globalThis.crypto.randomUUID();
+    const requestId = globalThis.missumBridge?.newRequestId?.() || globalThis.crypto?.randomUUID?.() || `request-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const pending = { sessionId: payload.sessionId, prompt: payload.prompt, requestId };
     state.pendingChatSend = pending;
     state.pendingCaptureRequest = payload;
@@ -2965,11 +3013,13 @@
     else if (globalThis.missumRunSteering?.canSteer(state) || scheduledRunForSession(state.activeSessionId)) {
       post("chat.cancel", { sessionId: state.activeSessionId });
     }
+    else if (state.speechStatus?.active || state.microphone?.isSpeaking) post("microphone.stopSpeech", {});
   }
 
   async function submitPrompt() {
     const prompt = elements.prompt.value.trim();
     if (!prompt) return;
+    if (state.reasoningSubmissionPending) return;
     if (state.pendingChatSend) {
       showToast("Der Auftrag wird vorbereitet. Deine neue Eingabe bleibt erhalten und kann danach umlenken.");
       return;
@@ -2989,6 +3039,27 @@
         ? `Diese Sitzung wartet bereits auf Platz ${scheduledRun.position}.`
         : "Der Auftrag dieser Sitzung wird gerade gestartet.", true);
       return;
+    }
+    if (globalThis.missumReasoningSelection?.commitForSubmission) {
+      const submissionSession = state.activeSessionId;
+      let savedSelection;
+      state.reasoningSubmissionPending = true;
+      renderStatus();
+      try {
+        savedSelection = await globalThis.missumReasoningSelection.commitForSubmission();
+      } catch (error) {
+        showToast(error?.message || "Reasoning konnte nicht gespeichert werden. Deine Eingabe bleibt erhalten.", true);
+        return;
+      } finally {
+        state.reasoningSubmissionPending = false;
+        renderStatus();
+      }
+      // Navigation or an edited draft while saving requires an explicit new
+      // submission; never send an older prompt into another client session.
+      if (state.activeSessionId !== submissionSession || elements.prompt.value.trim() !== prompt) return;
+      if (savedSelection?.modelId && state.selectedModelId && savedSelection.modelId !== state.selectedModelId) return;
+      if (savedSelection?.role && savedSelection.role !== (state.chatMode === "coding" ? "coding" : "general")) return;
+      if (state.pendingChatSend || state.isRunning || scheduledRunForSession(submissionSession)) return;
     }
     state.voiceTurn = null;
     renderContext();
@@ -3249,43 +3320,8 @@
       option.classList.toggle("active", Boolean(state.deepResearch));
       option.setAttribute("aria-checked", state.deepResearch ? "true" : "false");
     }
-    if (!state.deepResearch || state.chatMode === "claudescience") return;
-    const chip = document.createElement("div");
-    chip.className = "active-tool-chip";
-    chip.dataset.toolToggle = "deepResearch";
-    const profile = document.createElement("select");
-    profile.className = "active-tool-chip__profile";
-    profile.setAttribute("aria-label", "Deep-Research-Profil");
-    for (const [value, label] of [["auto", "Deep Research · Automatisch"], ["web", "Webrecherche"],
-      ["scientificEvidence", "Wissenschaftliche Evidenz"], ["systematicReview", "Systematischer Review"],
-      ["scopingReview", "Scoping Review"], ["literatureUpdate", "Literatur aktualisieren"],
-      ["replicationAudit", "Replikationsprüfung"], ["openProblem", "Offenes Forschungsproblem"],
-      ["mathematicalInvestigation", "Mathematische Untersuchung"]]) {
-      const option = document.createElement("option");
-      option.value = value;
-      option.textContent = label;
-      option.selected = value === state.deepResearchProfile;
-      profile.append(option);
-    }
-    profile.addEventListener("change", () => {
-      state.deepResearchProfile = profile.value;
-      persistDeepResearch();
-    });
-    const status = document.createElement("button");
-    status.type = "button";
-    status.className = "active-tool-chip__details";
-    status.textContent = "Stand";
-    status.title = "Gespeicherten Forschungsstand öffnen";
-    status.addEventListener("click", () => openScientificResearch());
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "active-tool-chip__remove";
-    remove.textContent = "×";
-    remove.title = "Deep Research abwählen";
-    remove.setAttribute("aria-label", remove.title);
-    remove.addEventListener("click", () => selectDeepResearch(false));
-    chip.append(createToolIcon(toolVisuals.webSearch[1]), profile, status, remove);
-    elements.activeTools.append(chip);
+    // The native menu exposes research through Claude Science. Persisted
+    // legacy profiles remain readable but do not add a separate composer UI.
   }
 
   function openScientificResearch() {
@@ -3470,6 +3506,7 @@
     state.activeRunId = payload.activeRunId || null;
     state.loadedFiles = payload.loadedFiles ?? null;
     state.model = payload.model || null;
+    state.selectedModelId = payload.reasoningModelId || payload.selectedModel || payload.model || null;
     state.workspacePath = payload.workspacePath || payload.codingWorkspacePath || null;
     // Compatibility alias for the Coding timeline while the shared workspace
     // terminology is adopted throughout the client.
@@ -3500,7 +3537,11 @@
     state.activeRunMessageId = runningMessage?.id || null;
     globalThis.missumRunSteering?.observeRun(state);
     if (runningMessage) state.messageRunStatus.set(String(runningMessage.id), {
-      status: state.runStatus || "Denkt nach", detail: state.runDetail, model: state.model
+      status: state.runStatus || "Denkt nach", detail: state.runDetail, model: state.model,
+      runId: payload.activeRunId || payload.runId || state.activeRunId,
+      generationState: payload.generationState, generatedTokens: payload.generatedTokens,
+      generationUpdatedAt: payload.generationUpdatedAt, processedPromptTokens: payload.processedPromptTokens,
+      totalPromptTokens: payload.totalPromptTokens, promptProgress: payload.promptProgress, contextUsed: payload.contextUsed,
     });
     pruneTerminalMessageRunStatuses();
     state.liveCaption = payload.liveCaption || state.liveCaption;
@@ -3668,9 +3709,16 @@
 
   function handleHostMessage(event) {
     const { type, payload, requestId } = event.detail;
+    if (state.pendingResume && requestId === state.pendingResume && ["chat.started", "host.error", "chat.failed", "chat.completed", "chat.cancelled"].includes(type)) {
+      state.pendingResume = null;
+      if (type === "host.error") renderMessages(false);
+    }
     switch (type) {
       case "state.snapshot":
         applySnapshot(payload);
+        break;
+      case "settings.changed":
+        if (typeof payload.values?.codingToolStepsExpanded === "boolean") state.codingToolStepsExpanded = payload.values.codingToolStepsExpanded;
         break;
       case "conversation.snapshot":
         applyConversationSnapshot(payload);
@@ -3751,7 +3799,10 @@
         state.runDetail = payload.runDetail || null;
         if (payload.message?.id) state.messageRunStatus.set(String(payload.message.id), {
           status: payload.runStatus || "Denkt nach",
-          detail: payload.runDetail || null,
+          detail: payload.runDetail || null, runId: payload.runId || state.activeRunId,
+          generationState: payload.generationState, generatedTokens: payload.generatedTokens,
+          generationUpdatedAt: payload.generationUpdatedAt, processedPromptTokens: payload.processedPromptTokens,
+          totalPromptTokens: payload.totalPromptTokens, promptProgress: payload.promptProgress, contextUsed: payload.contextUsed,
           model: payload.model || state.model || null
         });
         persistMeasuredContext();
@@ -3937,6 +3988,17 @@
         break;
       case "action.completed":
         {
+          if (payload?.duplicate && event.detail.version === 2 && payload.originalRequestId === requestId
+            && (!globalThis.missumBridge?.isLanBrowser || event.detail.clientId === globalThis.missumBridge.clientId)) {
+            if (state.pendingChatSend?.requestId === requestId) {
+              const pending = state.pendingChatSend; state.pendingChatSend = null; state.pendingCaptureRequest = null;
+              if (payload.receiptStatus === "failed" && String(state.activeSessionId) === String(pending.sessionId) && !elements.prompt.value.trim()) {
+                setPromptValue(pending.prompt); scheduleDraftSave(); showToast("Der vorherige Auftrag konnte nicht gestartet werden. Deine Eingabe bleibt erhalten.", true);
+              }
+            }
+            if (state.pendingResume === requestId) { state.pendingResume = null; renderMessages(false); }
+            renderStatus(); break;
+          }
           const descriptor = availableActionDescriptors().find(item => item.actionId === payload?.actionId);
           const extensionActionId = normalizeExtensionActionId(payload?.extensionActionId || payload?.actionId)
             || extensionActionIdForToolAction(payload?.toolAction);
@@ -4015,12 +4077,17 @@
           if (statusMessageId) state.messageRunStatus.set(statusMessageId, {
             status: payload.runStatus || "Denkt nach",
             detail: payload.runDetail || null,
-            model: payload.model || state.model || null
+            model: payload.model || state.model || null,
+            runId: payload.runId || state.activeRunId,
+            generationState: payload.generationState, generatedTokens: payload.generatedTokens,
+            generationUpdatedAt: payload.generationUpdatedAt, processedPromptTokens: payload.processedPromptTokens,
+            totalPromptTokens: payload.totalPromptTokens, promptProgress: payload.promptProgress, contextUsed: payload.contextUsed,
           });
         } else if (statusMessageId) {
           state.messageRunStatus.delete(statusMessageId);
         }
-        renderContext();
+        // Native status telemetry dirties the message view at most once per
+        // 80-ms tick; it does not recreate the composer/tool chip controls.
         renderMessages(false);
         renderStatus();
         break;
@@ -4177,13 +4244,16 @@
         if (payload?.error) showToast(payload.error, true);
         break;
       case "theme.changed":
+        if (globalThis.missumSettings?.isPreviewing()) break;
         document.documentElement.dataset.theme = payload.highContrast ? "high-contrast" : payload.theme || "system";
         if (payload.highContrast) {
           document.documentElement.style.removeProperty("--accent");
+          document.documentElement.style.removeProperty("--accent-contrast");
           document.documentElement.style.removeProperty("--background-accent");
         } else {
           if (payload.accent) {
             document.documentElement.style.setProperty("--accent", payload.accent);
+            globalThis.missumAppearance?.setAccent(payload.accent);
           }
           if (payload.backgroundAccent) {
             document.documentElement.style.setProperty("--background-accent", payload.backgroundAccent);
@@ -4280,6 +4350,12 @@
     setSessionsCollapsed(collapsed, true);
     post("ui.sessionPane", { isOpen: !collapsed });
   });
+  byId("toggle-session-search")?.addEventListener("click", () => {
+    const field = byId("session-search-field"), toggle = byId("toggle-session-search");
+    field.hidden = !field.hidden; toggle.setAttribute("aria-expanded", String(!field.hidden));
+    if (!field.hidden) elements.sessionSearch.focus();
+    else { elements.sessionSearch.value = ""; renderSessions(); }
+  });
   elements.newSession.addEventListener("click", createWorkspaceProject);
   elements.clearSessions.addEventListener("click", () => {
     const hasVisibleSessions = state.sessions.some(session => !session.chatMode
@@ -4340,13 +4416,8 @@
     }
   });
   elements.send.addEventListener("click", handleComposerAction);
-  elements.composerSpeechPause.addEventListener("click", () => {
-    if (!elements.composerSpeechPause.disabled) post("microphone.toggleSpeechPause", {});
-  });
-  elements.composerSpeechStop.addEventListener("click", () => {
-    if (!elements.composerSpeechStop.disabled) post("microphone.stopSpeech", {});
-  });
   elements.microphone.addEventListener("click", async () => {
+    if (globalThis.missumBridge?.isLanBrowser && !globalThis.missumBridge.capabilities?.microphone) return;
     if (state.voiceStarting) return;
     const active = Boolean(globalThis.missumVoiceCapture?.isActive || globalThis.missumVoiceCapture?.isStarting);
     if (active) {
@@ -4582,5 +4653,14 @@
   }
   document.fonts?.ready.then(schedulePromptResize);
   schedulePromptResize();
+  globalThis.missumApp = Object.freeze({
+    getState: () => state,
+    isMessageSpeechActive,
+    notify: showToast,
+    flushDraft,
+    refresh: () => requestConversationRefresh(),
+    openSession: sessionId => { flushDraft(); post("session.open", { sessionId }); },
+    toggleSidebar: () => elements.toggleSessions.click()
+  });
   post("app.ready", {});
 })();

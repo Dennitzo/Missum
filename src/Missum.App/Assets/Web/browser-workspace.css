@@ -1,0 +1,69 @@
+.server-workspace-dialog {
+  width: min(920px, calc(100vw - 32px));
+  max-width: calc(100vw - 32px);
+  max-height: calc(100dvh - 40px);
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-solid);
+  color: var(--text);
+  box-shadow: var(--shadow);
+  font-family: "Segoe UI", Selawik, system-ui, sans-serif;
+}
+.server-workspace-dialog::backdrop { background: rgb(0 0 0 / 48%); }
+.server-workspace-header { display: flex; align-items: start; justify-content: space-between; gap: 16px; padding: 18px 20px 14px; border-bottom: 1px solid var(--border); }
+.server-workspace-header h2 { margin: 0; font-size: 18px; font-weight: 600; }
+.server-workspace-header p { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
+.server-workspace-close { width: 30px; height: 30px; padding: 0; border: 0; border-radius: 5px; background: transparent; color: var(--muted); font-size: 23px; line-height: 30px; }
+.server-workspace-close:hover { color: var(--text); background: var(--surface-hover); }
+.server-workspace-body { display: grid; grid-template-columns: 210px minmax(0, 1fr); min-height: 350px; }
+.server-workspace-sidebar { min-width: 0; max-height: min(490px, calc(100dvh - 240px)); padding: 12px 8px; overflow-y: auto; border-right: 1px solid var(--border); }
+.server-workspace-side-title { margin: 16px 8px 5px; color: var(--muted); font-size: 11px; font-weight: 600; }
+.server-workspace-place { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; min-height: 32px; padding: 6px 8px; border: 0; border-radius: 5px; background: transparent; color: var(--text); font-size: 12px; text-align: left; }
+.server-workspace-place-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.server-workspace-place:hover, .server-workspace-place.active { background: var(--surface-hover); }
+.server-workspace-place svg, .server-workspace-folder svg { width: 17px; height: 17px; flex: none; color: #f19d38; }
+.server-workspace-main { display: flex; flex-direction: column; min-width: 0; padding: 12px; gap: 8px; }
+.server-workspace-navigation { display: flex; align-items: center; gap: 7px; min-height: 30px; }
+.server-workspace-breadcrumbs { display: flex; align-items: center; min-width: 0; gap: 2px; overflow-x: auto; white-space: nowrap; }
+.server-workspace-crumb { flex: none; max-width: 180px; padding: 5px 6px; overflow: hidden; text-overflow: ellipsis; border: 0; border-radius: 4px; background: transparent; color: var(--text); font-size: 12px; }
+.server-workspace-crumb:hover { background: var(--surface-hover); }
+.server-workspace-crumb-divider { color: var(--muted); font-size: 15px; }
+.server-workspace-pathbar { display: flex; gap: 8px; min-width: 0; }
+.server-workspace-path, .server-workspace-search { min-width: 0; height: 34px; padding: 6px 9px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--text); font-size: 13px; }
+.server-workspace-path { flex: 1; }
+.server-workspace-search { width: 100%; }
+.server-workspace-list { flex: 1; height: 260px; min-height: 100px; max-height: min(300px, calc(100dvh - 350px)); padding: 4px; border: 1px solid var(--border); border-radius: 5px; overflow-y: auto; background: var(--bg); }
+.server-workspace-list[aria-busy="true"] { opacity: .65; }
+.server-workspace-folder { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 31px; padding: 5px 7px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--text); font-size: 13px; text-align: left; }
+.server-workspace-folder:hover { background: var(--surface-hover); }
+.server-workspace-folder.selected { border-color: color-mix(in srgb, var(--accent) 50%, transparent); background: color-mix(in srgb, var(--accent) 15%, var(--bg)); }
+.server-workspace-folder-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.server-workspace-empty { margin: 10px; color: var(--muted); font-size: 13px; }
+.server-workspace-status { min-height: 18px; margin: 2px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.server-workspace-status--error { color: var(--danger, #da5052); }
+.server-workspace-footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 16px; border-top: 1px solid var(--border); }
+.server-workspace-summary { min-width: 0; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.server-workspace-actions { display: flex; flex: none; gap: 8px; }
+.server-workspace-button { flex: none; min-height: 32px; padding: 5px 11px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-raised); color: var(--text); font-size: 12px; }
+.server-workspace-button:hover:not(:disabled) { background: var(--surface-hover); }
+.server-workspace-primary { max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-color: var(--accent); background: var(--accent); color: var(--accent-ink, #141414); }
+.server-workspace-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 90%, white); }
+.server-workspace-dialog button:disabled, .server-workspace-dialog input:disabled { opacity: .5; cursor: default; }
+.server-workspace-dialog button:focus-visible, .server-workspace-dialog input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.server-workspace-dialog [hidden] { display: none; }
+@media (max-width: 600px) {
+  .server-workspace-body { grid-template-columns: 125px minmax(0, 1fr); }
+  .server-workspace-header { padding: 12px; }
+  .server-workspace-header h2 { font-size: 15px; }
+  .server-workspace-main { padding: 8px; }
+  .server-workspace-sidebar { padding: 8px 4px; }
+  .server-workspace-place { font-size: 11px; }
+  .server-workspace-footer { align-items: stretch; flex-direction: column; gap: 8px; padding: 10px; }
+  .server-workspace-actions { justify-content: end; }
+}
+@media (forced-colors: active) {
+  .server-workspace-dialog { background: Canvas; color: CanvasText; border-color: CanvasText; }
+  .server-workspace-dialog svg { color: CanvasText; }
+  .server-workspace-folder.selected { outline: 1px solid Highlight; }
+}

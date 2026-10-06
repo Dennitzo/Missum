@@ -1,4 +1,4 @@
-﻿using Missum.App.Services;
+using Missum.App.Services;
 using Missum.Core.Extensions;
 using Missum.Core.Models;
 using Microsoft.UI.Xaml;

@@ -18,7 +18,7 @@ function harness(storage = new Map()) {
     contextSource: "estimated", contextProfile: null, activeSessionId: null, codingActivity: new Map(), chatMode: "general",
     selectedExtensionActionId: null, persistentExtensionActionId: null,
     runQueue: { active: null, pending: [], queueDepth: 0, isIdle: true } };
-  const elements = Object.fromEntries(["sessionList", "sessionSearch", "overlay", "prompt", "send",
+  const elements = Object.fromEntries(["sessionList", "recentSessions", "sessionSearch", "overlay", "prompt", "send",
     "newSession", "clearSessions", "context", "contextLabel", "chatHeading"].map(name => [name, new Node("div")]));
   elements.sessionSearch.value = "";
   elements.prompt.value = "";
@@ -57,7 +57,7 @@ function harness(storage = new Map()) {
     "sortCommittedMessages", "requestConversationRefresh", "applyConversationSnapshot", "acceptCommittedRevision", "applyCommittedMessage",
     "upsertLiveMessage", "applyLiveDelta", "handleHostMessage", "isTerminalMessageStatus", "pruneTerminalMessageRunStatuses", "conversationMessagesDiffer",
     "renderComposerAction", "renderStatus"]) {
-    const start = source.indexOf(`  function ${name}(`);
+    const start = source.indexOf(`${name === "createWorkspaceProject" ? "  async function" : "  function"} ${name}(`);
     const ending = source.slice(start).match(/\r?\n {2}\}(?:\r?\n|$)/);
     assert.ok(start >= 0 && ending, name);
     vm.runInContext(source.slice(start, start + ending.index + ending[0].length), context);
@@ -85,7 +85,8 @@ test("workspace headers keep every session visible and project compose emits its
     { id: "project-b", name: "Other", workspacePath: "D:\\Projects\\Other" },
     { id: "empty", name: "Leeres Projekt", workspacePath: "C:\\Projects\\Empty" }
   ] }));
-  assert.equal(elements.sessionList.querySelectorAll(".session-item").length, 4);
+  assert.equal(elements.sessionList.querySelectorAll(".session-item").length, 2);
+  assert.equal(elements.recentSessions.querySelectorAll(".session-item").length, 0, "the mode flyout contains only the three modes, like the native app");
   assert.equal(elements.sessionList.querySelectorAll(".session-group__add").length, 3,
     "an empty project group remains available for project-scoped session creation");
   state.selectedToolAction = "planMode";
@@ -159,7 +160,10 @@ test("global project plus requests the native folder picker before creating anyt
   assert.equal(state.sessions.length, 0, "no optimistic project or session is created before picker acceptance");
   state.isAiBusy = true;
   context.createWorkspaceProject();
-  assert.equal(posts.length, 1, "a busy UI cannot start another folder selection");
+  assert.equal(posts.length, 2, "another client's job does not block choosing a project");
+  state.pendingChatSend = { requestId: "pending" };
+  context.createWorkspaceProject();
+  assert.equal(posts.length, 2, "an unacknowledged local submission still blocks duplicate admission");
 });
 
 test("project-local compose preserves each workspace and ignores removed legacy pin metadata", async () => {
@@ -188,7 +192,7 @@ test("project-local compose preserves each workspace and ignores removed legacy 
     assert.equal(icon.tagName, "SVG");
     assert.equal(icon.getAttribute("aria-hidden"), "true");
     assert.equal(icon.querySelectorAll("path").length, 1);
-    assert.equal(icon.querySelector("path").getAttribute("d"), "M12 5v14M5 12h14");
+    assert.equal(icon.querySelector("path").getAttribute("d"), "M4 20h4L20 8l-4-4L4 16v4M14 6l4 4");
     assert.equal(group.querySelector(".session-item__date"), null);
     for (const row of rows) {
       const main = row.querySelector(".session-item__main");
@@ -203,7 +207,7 @@ test("project-local compose preserves each workspace and ignores removed legacy 
   }
 });
 
-test("projects are ordered by their most recently changed session", () => {
+test("project order matches the authoritative native sidebar snapshot", () => {
   const { context, elements } = harness();
   context.applySnapshot(snapshot({ sessions: [
     { id: "old", title: "Alt", sessionGroupId: "old-project", updatedAt: "2026-09-20T10:00:00Z" },
@@ -213,11 +217,42 @@ test("projects are ordered by their most recently changed session", () => {
     { id: "new-project", name: "Neues Projekt", createdAt: "2026-09-19T09:00:00Z", workspacePath: "C:\\New" }
   ] }));
   const groups = elements.sessionList.querySelectorAll(".session-group");
-  assert.equal(groups[0].querySelector(".session-group__name").textContent, "Neues Projekt");
-  assert.equal(groups[1].querySelector(".session-group__name").textContent, "Altes Projekt");
+  assert.equal(groups[0].querySelector(".session-group__name").textContent, "Altes Projekt");
+  assert.equal(groups[1].querySelector(".session-group__name").textContent, "Neues Projekt");
 });
 
-test("snapshot chatMode filters project and ungrouped sessions before rendering", () => {
+test("LAN project selection freezes its mode, posts once and handles cancellation without creating a session", async () => {
+  const h = harness(); let resolveSelection; const requests = [];
+  h.context.missumBridge = { isLanBrowser: true };
+  h.context.missumWorkspace = { open(options) { requests.push(options); return new Promise(resolve => { resolveSelection = resolve; }); } };
+  h.state.chatMode = "claudescience"; h.state.workspacePath = "C:\\Recent";
+  const selecting = h.context.createWorkspaceProject();
+  await h.context.createWorkspaceProject();
+  assert.equal(requests.length, 1); assert.equal(h.posts.length, 0);
+  assert.equal(requests[0].initialPath, "C:\\Recent");
+  h.state.chatMode = "coding"; resolveSelection("C:\\Chosen"); await selecting;
+  assert.equal(h.posts.length, 1); assert.equal(h.posts[0].type, "session.projectCreate");
+  assert.equal(h.posts[0].payload.chatMode, "claudescience"); assert.equal(h.posts[0].payload.workspacePath, "C:\\Chosen");
+  assert.equal(h.state.workspaceCreationPending, false);
+  const cancel = h.context.createWorkspaceProject(); resolveSelection(null); await cancel;
+  assert.equal(h.posts.length, 1); assert.equal(h.state.workspaceCreationPending, false);
+});
+
+test("Science respects group member order and starts a project chat in that group's mode", async () => {
+  const { context, elements, posts } = harness();
+  context.applySnapshot(snapshot({ chatMode: "claudescience", messages: [], sessions: [
+    { id: "first", title: "Erste", chatMode: "general", sessionGroupId: "project", updatedAt: "2026-10-05T12:00:00Z" },
+    { id: "second", title: "Zweite", chatMode: "coding", sessionGroupId: "project", updatedAt: "2026-10-05T10:00:00Z" },
+    { id: "foreign", title: "Nicht zugeordnet", sessionGroupId: "project" }
+  ], sessionGroups: [{ id: "project", name: "Projekt", chatMode: "coding", workspacePath: "C:\\Projekt", sessionIds: ["second", "missing", "first"] }] }));
+  const rows = elements.sessionList.querySelectorAll(".session-item");
+  assert.deepEqual(rows.map(row => row.querySelector(".session-item__title").textContent), ["Zweite", "Erste"]);
+  await elements.sessionList.querySelector(".session-group__add").dispatch("click");
+  assert.equal(posts.at(-1).payload.chatMode, "coding");
+  assert.equal(posts.at(-1).payload.workspacePath, "C:\\Projekt");
+});
+
+test("all modes retain the authoritative native project list including empty projects", () => {
   const { context, state, elements } = harness();
   const sessions = [
     { id: "general-project", title: "General Projekt", chatMode: "General", sessionGroupId: "general-workspace" },
@@ -242,8 +277,10 @@ test("snapshot chatMode filters project and ungrouped sessions before rendering"
   assert.equal(elements.sessionList.querySelectorAll(".session-item").length, 2);
   assert.match(elements.sessionList.textContent, /Coding Workspace/);
   assert.match(elements.sessionList.textContent, /Coding Projekt/);
-  assert.match(elements.sessionList.textContent, /Coding Frei/);
-  assert.doesNotMatch(elements.sessionList.textContent, /General Workspace|General Projekt|General Frei|Leeres Workspace/);
+  assert.match(elements.sessionList.textContent, /General Workspace/);
+  assert.match(elements.sessionList.textContent, /General Projekt/);
+  assert.match(elements.sessionList.textContent, /Leeres Workspace.*Keine Chats/s);
+  assert.doesNotMatch(elements.sessionList.textContent, /General Frei|Coding Frei/);
 
   context.applySnapshot(snapshot({
     chatMode: "general",
@@ -256,8 +293,13 @@ test("snapshot chatMode filters project and ungrouped sessions before rendering"
   assert.match(elements.sessionList.textContent, /General Workspace/,
     "General keeps its own workspace-backed project group");
   assert.match(elements.sessionList.textContent, /General Projekt/);
-  assert.match(elements.sessionList.textContent, /General Frei/);
-  assert.doesNotMatch(elements.sessionList.textContent, /Coding Workspace|Coding Projekt|Coding Frei|Leeres Workspace/);
+  assert.match(elements.sessionList.textContent, /Coding Workspace/);
+  assert.match(elements.sessionList.textContent, /Leeres Workspace/);
+  assert.doesNotMatch(elements.sessionList.textContent, /Coding Frei|General Frei/);
+
+  context.applySnapshot(snapshot({ chatMode: "claudescience", messages: [], sessions, sessionGroups }));
+  assert.equal(elements.sessionList.querySelectorAll(".session-group").length, 3, "Science cannot hide all existing projects through an extra mode filter");
+  assert.equal(elements.sessionList.querySelectorAll(".session-item").length, 2);
 });
 
 test("a stale grouping snapshot from another chat mode cannot replace the active sidebar", () => {
@@ -291,10 +333,11 @@ test("profile queue state stays visible across session snapshots and position ch
     activeSessionId: "session-c",
     messages: [],
     sessions: [
-      { id: "session-a", title: "Aktiver Auftrag" },
-      { id: "session-b", title: "Wartender Auftrag" },
-      { id: "session-c", title: "Offene Sitzung" }
+      { id: "session-a", title: "Aktiver Auftrag", sessionGroupId: "queue-project" },
+      { id: "session-b", title: "Wartender Auftrag", sessionGroupId: "queue-project" },
+      { id: "session-c", title: "Offene Sitzung", sessionGroupId: "queue-project" }
     ],
+    sessionGroups: [{ id: "queue-project", name: "Aufträge", workspacePath: "C:\\Queue" }],
     isAiBusy: true,
     runQueue: { active, pending: [waiting], queueDepth: 1, isIdle: false }
   }));
@@ -553,7 +596,7 @@ test("a background completion refreshes its sidebar title and reenables project 
   context.applySnapshot(snapshot({ isAiBusy: true,
     sessions: [{ id: "session-a", title: "Neue Sitzung", sessionGroupId: "project" }],
     sessionGroups: [{ id: "project", name: "Projekt", workspacePath: "C:\\Project" }] }));
-  assert.equal(elements.sessionList.querySelector(".session-group__add").disabled, true);
+  assert.equal(elements.sessionList.querySelector(".session-group__add").disabled, false, "a background job permits project navigation and composing another queued job");
   emit("chat.completed", { message: { id: "answer-b", sessionId: "session-b" },
     session: { id: "session-b", title: "Fertige Hintergrundaufgabe", sessionGroupId: "project" } });
   assert.equal(state.activeSessionId, "session-a");

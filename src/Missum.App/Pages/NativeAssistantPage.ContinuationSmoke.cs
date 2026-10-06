@@ -53,9 +53,18 @@ public sealed partial class NativeAssistantPage
             await SaveMathPreviewAsync(ConversationScroll, "native-continuation-preview.png");
 
             var timelineMarker = _promptTimelineMarkers[currentUser.ToString()];
-            if (!timelineMarker.HitTarget.Focus(FocusState.Programmatic) || timelineMarker.IsHovered
+            // Establish a different focus owner before testing programmatic
+            // transfer. WinUI can preserve the state of an already focused target.
+            Composer.Focus(FocusState.Programmatic);
+            DismissPromptTimelinePreviews();
+            UpdateLayout();
+            var programmaticFocused = timelineMarker.HitTarget.Focus(FocusState.Programmatic);
+            if (!programmaticFocused || timelineMarker.IsHovered
                 || ToolTipService.GetToolTip(timelineMarker.HitTarget) is not ToolTip { IsOpen: false })
-                throw new InvalidOperationException("Automatic focus transfer must not open a prompt timeline preview.");
+                throw new InvalidOperationException("Automatic focus transfer must not open a prompt timeline preview. "
+                    + $"Focused={programmaticFocused}, state={timelineMarker.HitTarget.FocusState}, loaded={timelineMarker.HitTarget.IsLoaded}, "
+                    + $"hover={timelineMarker.IsHovered}, pointer={timelineMarker.IsPointerOver}, keyboard={timelineMarker.IsKeyboardFocused}, "
+                    + $"preview={(ToolTipService.GetToolTip(timelineMarker.HitTarget) as ToolTip)?.IsOpen}.");
             Composer.Focus(FocusState.Programmatic);
             var keyboardFocused = timelineMarker.HitTarget.Focus(FocusState.Keyboard);
             await Task.Delay(20);

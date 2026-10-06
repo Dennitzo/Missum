@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using Missum.App.Services;
 using Missum.Ai.Contracts;
 using Missum.Core.Contracts;
@@ -69,7 +69,7 @@ public sealed partial class NativeAssistantPage
     {
         var responses = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
         var snapshotGeneration = _navigationState.Generation;
-        await _coordinator.HandleAsync(new(1, type, Guid.NewGuid().ToString("N"), JsonSerializer.SerializeToElement(payload, JsonOptions)),
+        await _assistantHost.HandleAsync("desktop", new(2, type, Guid.NewGuid().ToString("N"), JsonSerializer.SerializeToElement(payload, JsonOptions)),
             async (eventType, data, requestId) =>
             {
                 var json = JsonSerializer.SerializeToElement(data, JsonOptions);

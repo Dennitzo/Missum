@@ -1,4 +1,4 @@
-﻿using Missum.App.Controls;
+using Missum.App.Controls;
 using Missum.App.Services;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;

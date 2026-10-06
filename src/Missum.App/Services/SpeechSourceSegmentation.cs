@@ -625,7 +625,7 @@ internal static partial class SpeechSourceSegmentation
     [GeneratedRegex(@"`([^`]+)`", RegexOptions.CultureInvariant)]
     private static partial Regex InlineCodeRegex();
 
-    [GeneratedRegex(@"(?:^|\s)(?:#{1,6}|[-*\u2022]|\d+[.)]|>)\s+|[*_~]", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"^[ \t]*(?:#{1,6}|[-*\u2022]|\d+[.)]|>)[ \t]+|[*_~]", RegexOptions.Multiline | RegexOptions.CultureInvariant)]
     private static partial Regex MarkdownMarkersRegex();
 
     [GeneratedRegex(@"\s+", RegexOptions.CultureInvariant)]

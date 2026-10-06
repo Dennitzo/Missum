@@ -283,6 +283,8 @@ public sealed record AppSettings
     public const int MaximumRecentActivityTextLength = 180;
 
     public int Version { get; init; } = CurrentVersion;
+    // Independent of navigation/window state; used by desktop and LAN preference editors.
+    public long PreferencesRevision { get; init; }
     public bool IsAutomaticSpeechEnabled { get; init; }
     public AiProviderKind AiProvider { get; init; } = AiProviderKind.MissumAiServer;
     public string MissumAiServerUrl { get; init; } = "http://127.0.0.1:8080";

@@ -32,7 +32,15 @@ public sealed partial class AssistantCoordinator(
     IScientificResearchExportService? scientificResearchExports = null,
     NativeSessionCacheCleanupService? cacheCleanup = null)
 {
+    private AppSettings CurrentSettings => AssistantClientExecutionScope.Resolve(settings.Current);
+    private Task UpdateViewSettingsAsync(Func<AppSettings, AppSettings> update, CancellationToken cancellationToken = default) =>
+        AssistantClientExecutionScope.UpdateAsync(settings, update, cancellationToken);
+    internal Func<string, WebBridgeEnvelope, Func<string, object, string?, Task>, CancellationToken, Task<bool>>? BrowserSpeechHandler { get; set; }
+    internal Action<string, MissumAiAssistantUpdate, Func<string, object, string?, Task>>? BrowserAutomaticSpeech { get; set; }
+
     private const string DefaultSessionTitle = "Neue Sitzung";
+    private static readonly JsonSerializerOptions BrowserSpeechJsonOptions = new(JsonSerializerDefaults.Web);
+    private sealed record QueuedChatInput(ChatSession Session, PromptTriggerMatch? Match);
     private const string DefaultSystemPrompt = "Du bist ein allgemeiner lokaler AI-Assistent. Unterstütze die konkrete Aufgabe des Nutzers, etwa beim Programmieren, Schreiben, Lernen, Analysieren oder Planen. Passe Sprache, Detailtiefe und Vorgehen an die Frage an. Unterscheide belegte Informationen von Annahmen, benenne relevante Unsicherheiten und erfinde keine Fakten, Quellen oder Ergebnisse.";
     private static readonly HashSet<string> GenericSessionTitles = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -125,7 +133,7 @@ public sealed partial class AssistantCoordinator(
         var isCoding = _displayStates.TryGetValue(update.Message.SessionId, out var previous)
             && previous.MessageId == update.Message.Id ? previous.IsCoding
                 : IsCodingAgentSession((await chats.GetSessionAsync(update.Message.SessionId, CancellationToken.None).ConfigureAwait(false))?.ChatMode);
-        var selection = isCoding ? settings.Current.SelectedModel : settings.Current.SelectedModel;
+        var selection = CurrentSettings.SelectedModel;
         _displayStates.AddOrUpdate(update.Message.SessionId,
             _ => Merge(new(update.Message.Id, selection, isCoding, true)),
             (_, current) => Merge(current.MessageId == update.Message.Id ? current : new(update.Message.Id, selection, isCoding, true)));
@@ -163,10 +171,12 @@ public sealed partial class AssistantCoordinator(
         }
     }
 
-    public Task SaveDraftAsync(Guid sessionId, string draft, CancellationToken cancellationToken = default)
+    public async Task SaveDraftAsync(Guid sessionId, string draft, CancellationToken cancellationToken = default)
     {
         ArgumentOutOfRangeException.ThrowIfGreaterThan(draft.Length, 100_000);
-        return chats.SaveDraftAsync(sessionId, draft, cancellationToken);
+        await AssistantClientExecutionScope.SaveDraftAsync(sessionId, draft, settings.Current, cancellationToken).ConfigureAwait(false);
+        if (!AssistantClientExecutionScope.IsBrowser && !AssistantClientExecutionScope.IsFrozen)
+            await chats.SaveDraftAsync(sessionId, draft, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task SetCodingWorkspacePathAsync(Guid sessionId, string path, CancellationToken cancellationToken = default)
@@ -339,7 +349,7 @@ public sealed partial class AssistantCoordinator(
                 _ = await RepairScienceTitleAsync(scienceSession, cancellationToken).ConfigureAwait(false);
         var conversation = await conversationSnapshots.GetAsync(activeSession.Id, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Die aktive Chat-Sitzung wurde nicht gefunden.");
-        var session = conversation.Session;
+        var session = conversation.Session with { Draft = AssistantClientExecutionScope.Draft(conversation.Session.Id, conversation.Session.Draft, settings.Current) };
         var selectedChatMode = session.ChatMode;
         var sessions = await chats.ListSessionsAsync(selectedChatMode, cancellationToken: cancellationToken).ConfigureAwait(false);
         var messages = conversation.Messages;
@@ -352,7 +362,7 @@ public sealed partial class AssistantCoordinator(
         // A snapshot is local UI state. Never make sidebar/session interaction wait for
         // the native model runtime, which may be offline or loading a model.
         var isCodingSession = IsCodingAgentSession(session.ChatMode);
-        var selectedModel = isCodingSession ? settings.Current.SelectedModel : settings.Current.SelectedModel;
+        var selectedModel = isCodingSession ? CurrentSettings.SelectedModel : CurrentSettings.SelectedModel;
         var contextLimit = ModelContextProfiles.ResolveMaximum(selectedModel, isCodingSession ? "coding" : "general");
         ContextBuildResult context;
         if (isCodingSession)
@@ -384,7 +394,8 @@ public sealed partial class AssistantCoordinator(
                 contextLimit));
         }
         _displayStates.TryGetValue(session.Id, out var display);
-        if (display is not null && (display.IsCoding != isCodingSession || display.ModelSelection != selectedModel)) display = null;
+        if (display is not null && (display.IsCoding != isCodingSession || display.ModelSelection != selectedModel
+            && !(missumAi?.IsRunning == true && missumAi.ActiveSessionId == session.Id))) display = null;
         var displayMessage = display is null ? null : messages.FirstOrDefault(message => message.Id == display.MessageId);
         var isSessionRunning =
             missumAi?.IsRunning == true && missumAi.ActiveSessionId == session.Id
@@ -406,7 +417,7 @@ public sealed partial class AssistantCoordinator(
             messages = messages.Select(message => ToMessageDto(
                 message,
                 artifactItems.TryGetValue(message.Id, out var messageArtifacts) ? messageArtifacts : null)),
-            subagents = SubagentChatState.Read(messages, settings.DataDirectory).Select(ToSubagentDto).ToArray(),
+            subagents = ToSubagentDtos(SubagentChatState.Read(messages, settings.DataDirectory)),
             conversationRevision = session.ConversationRevision,
             documents = documentItems.Select(ToDocumentDto),
             attachments = attachmentItems.Select(ToAttachmentDto),
@@ -449,7 +460,7 @@ public sealed partial class AssistantCoordinator(
             promptProgress = isSessionRunning ? display?.PromptProgress : null,
             loadedFiles = display?.LoadedFiles,
             model = display?.Model ?? (isCodingSession ? selectedModel ?? "Lokaler AI-Server" : "Lokaler AI-Server"),
-            provider = settings.Current.AiProvider.ToString(),
+            provider = CurrentSettings.AiProvider.ToString(),
             contextUsed = display?.ContextUsed ?? context.EstimatedTokens,
             contextLimit = display?.ContextLimit ?? contextLimit,
             contextWasTruncated = display?.ContextUsed is not null ? display.ContextWasCompacted : context.WasTruncated,
@@ -466,9 +477,9 @@ public sealed partial class AssistantCoordinator(
             codingWorkspaceRequired = isCodingSession
                 && (string.IsNullOrWhiteSpace(session.CodingWorkspacePath)
                     || !Directory.Exists(session.CodingWorkspacePath)),
-            codingToolStepsExpanded = settings.Current.CodingToolStepsExpanded,
+            codingToolStepsExpanded = CurrentSettings.CodingToolStepsExpanded,
             changesSummary = missumAi is null ? null : await missumAi.GetChangesSummaryAsync(session.Id, messages, cancellationToken).ConfigureAwait(false),
-            isSessionPaneOpen = settings.Current.IsAssistantSessionPaneOpen,
+            isSessionPaneOpen = CurrentSettings.IsAssistantSessionPaneOpen,
         };
     }
 
@@ -538,6 +549,8 @@ public sealed partial class AssistantCoordinator(
         }).ToArray();
     }
 
+    internal Task<object> BuildConversationForHostAsync(Guid sessionId, CancellationToken cancellationToken) => BuildConversationSnapshotAsync(sessionId, cancellationToken);
+
     private async Task<object> BuildConversationSnapshotAsync(
         Guid sessionId,
         CancellationToken cancellationToken = default)
@@ -547,10 +560,10 @@ public sealed partial class AssistantCoordinator(
         return new
         {
             activeSessionId = sessionId,
-            subagents = SubagentChatState.Read(conversation.Messages, settings.DataDirectory).Select(ToSubagentDto).ToArray(),
+            subagents = ToSubagentDtos(SubagentChatState.Read(conversation.Messages, settings.DataDirectory)),
             chatMode = ChatModeName(conversation.Session.ChatMode),
             conversationRevision = conversation.Session.ConversationRevision,
-            codingToolStepsExpanded = settings.Current.CodingToolStepsExpanded,
+            codingToolStepsExpanded = CurrentSettings.CodingToolStepsExpanded,
             changesSummary = missumAi is null ? null : await missumAi.GetChangesSummaryAsync(sessionId, conversation.Messages, cancellationToken).ConfigureAwait(false),
             messages = conversation.Messages.Select(message => ToMessageDto(
                 message,
@@ -603,7 +616,7 @@ public sealed partial class AssistantCoordinator(
                     await missumAi.StopPersistedRunsAtStartupAsync(cancellationToken).ConfigureAwait(false);
                 }
                 await emit("state.snapshot", await BuildSnapshotAsync(cancellationToken), envelope.RequestId);
-                if (settings.Current.AiProvider == AiProviderKind.MissumAiServer
+                if (CurrentSettings.AiProvider == AiProviderKind.MissumAiServer
                     && missumAi is not null)
                 {
                     lock (_resumeLock)
@@ -641,7 +654,7 @@ public sealed partial class AssistantCoordinator(
                     ParseChatMode(
                         GetOptionalString(envelope.Payload, "chatMode", 16)
                         ?? GetOptionalString(envelope.Payload, "mode", 16)
-                        ?? ChatModeName(settings.Current.SelectedChatMode)),
+                        ?? ChatModeName(CurrentSettings.SelectedChatMode)),
                     emit,
                     envelope.RequestId,
                     cancellationToken).ConfigureAwait(false);
@@ -678,13 +691,13 @@ public sealed partial class AssistantCoordinator(
                 var requestedMode = GetOptionalString(envelope.Payload, "chatMode", 16)
                     ?? GetOptionalString(envelope.Payload, "mode", 16);
                 var mode = requestedMode is null
-                    ? settings.Current.SelectedChatMode
+                    ? CurrentSettings.SelectedChatMode
                     : ParseChatMode(requestedMode);
                 await ClearSessionsAsync(mode, emit, envelope.RequestId, cancellationToken);
                 break;
             }
             case "session.draft":
-                await chats.SaveDraftAsync(
+                await SaveDraftAsync(
                     GetRequiredGuid(envelope.Payload, "sessionId"),
                     GetOptionalString(envelope.Payload, "draft", 100_000) ?? string.Empty,
                     cancellationToken);
@@ -706,6 +719,22 @@ public sealed partial class AssistantCoordinator(
             case "action.invoke":
                 await InvokeActionAsync(envelope, emit, cancellationToken).ConfigureAwait(false);
                 break;
+            case "models.list":
+                if (missumAi is null) throw new InvalidOperationException("AI-Verbindung ist nicht verfügbar.");
+                await emit("models.snapshot", await missumAi.GetBrowserModelsAsync(cancellationToken).ConfigureAwait(false), envelope.RequestId).ConfigureAwait(false);
+                break;
+            case "models.select":
+            {
+                if (missumAi is null) throw new InvalidOperationException("AI-Verbindung ist nicht verfügbar.");
+                var modelId = GetRequiredString(envelope.Payload, "modelId", 512);
+                var catalog = await missumAi.GetBrowserModelsAsync(cancellationToken).ConfigureAwait(false);
+                if (!catalog.Models.Any(model => model.Id == modelId && model.Downloaded && model.Role is "general" or "coding"))
+                    throw new ArgumentException("Das ausgewählte Modell ist nicht installiert.");
+                await UpdateViewSettingsAsync(current => current with { SelectedModel = modelId, SelectedCodingModel = modelId }, cancellationToken).ConfigureAwait(false);
+                await emit("state.snapshot", await BuildSnapshotAsync(cancellationToken).ConfigureAwait(false), envelope.RequestId).ConfigureAwait(false);
+                await emit("models.snapshot", catalog, envelope.RequestId).ConfigureAwait(false);
+                break;
+            }
             case "reasoning.get":
             case "reasoning.set":
             {
@@ -713,25 +742,20 @@ public sealed partial class AssistantCoordinator(
                 var role = GetOptionalString(envelope.Payload, "role", 16) ?? "general";
                 if (role is not ("coding" or "general")) throw new ArgumentException("Unbekannte Modellrolle.");
                 var modelId = GetOptionalString(envelope.Payload, "modelId", 512) ?? "";
-                var selectedId = role == "coding" ? settings.Current.SelectedModel : settings.Current.SelectedModel;
+                var selectedId = role == "coding" ? CurrentSettings.SelectedModel : CurrentSettings.SelectedModel;
                 if (modelId != selectedId) throw new InvalidOperationException("Die Modellauswahl hat sich geändert. Öffne Reasoning erneut.");
                 var options = await missumAi.GetReasoningOptionsAsync(modelId, role, cancellationToken).ConfigureAwait(false);
                 if (envelope.Type == "reasoning.set")
                 {
-                    if (modelId != (role == "coding" ? settings.Current.SelectedModel : settings.Current.SelectedModel))
+                    if (modelId != (role == "coding" ? CurrentSettings.SelectedModel : CurrentSettings.SelectedModel))
                         throw new InvalidOperationException("Das ausgewählte Modell hat sich während der Prüfung geändert.");
                     var effort = GetRequiredString(envelope.Payload, "effort", 32).Trim().ToLowerInvariant();
                     if (!options.Available || !options.Levels.Contains(effort))
                         throw new ArgumentException("Diese Reasoning-Stufe wird vom ausgewählten Modell nicht unterstützt.");
-                    await settings.UpdateAsync(current =>
-                    {
-                        var choices = new Dictionary<string, string>(current.ReasoningEffortsByModel, StringComparer.OrdinalIgnoreCase);
-                        var key = MissumAiAssistantService.ReasoningKey(modelId, role);
-                        choices[key] = effort;
-                        return current with { ReasoningEffortsByModel = choices };
-                    }, cancellationToken).ConfigureAwait(false);
+                    await missumAi.PersistSharedReasoningAsync(modelId, role, effort, cancellationToken).ConfigureAwait(false);
                     options = options with { Selected = effort };
-                    await missumAi.RequestLiveModelSelectionAsync(cancellationToken).ConfigureAwait(false);
+                    // Reasoning is shared for future submissions. Accepted runs
+                    // retain the preferences frozen when they entered the queue.
                 }
                 await emit("reasoning.snapshot", options, envelope.RequestId);
                 break;
@@ -813,7 +837,7 @@ public sealed partial class AssistantCoordinator(
                 await ExportScientificResearchAsync(envelope, emit, cancellationToken).ConfigureAwait(false);
                 break;
             case "ui.sessionPane":
-                await settings.UpdateAsync(current => current with
+                await UpdateViewSettingsAsync(current => current with
                 {
                     IsAssistantSessionPaneOpen = GetRequiredBoolean(envelope.Payload, "isOpen"),
                 }, CancellationToken.None).ConfigureAwait(false);
@@ -873,8 +897,8 @@ public sealed partial class AssistantCoordinator(
     private void EnsureContextCanChange(Guid? targetSessionId = null)
     {
         var selectedSessionId = targetSessionId
-            ?? ActiveSessionIdFor(settings.Current, settings.Current.SelectedChatMode)
-            ?? settings.Current.ActiveSessionId;
+            ?? ActiveSessionIdFor(CurrentSettings, CurrentSettings.SelectedChatMode)
+            ?? CurrentSettings.ActiveSessionId;
         var queue = _runScheduler?.Snapshot;
         var sessionIsBusy = selectedSessionId.HasValue && (
             missumAi?.ActiveSessionId == selectedSessionId.Value
@@ -890,21 +914,21 @@ public sealed partial class AssistantCoordinator(
     {
         // One-time settings migration: older builds persisted only one active ID.
         // Resolve its durable mode before choosing the surface to restore.
-        if (settings.Current.ActiveGeneralSessionId is null
-            && settings.Current.ActiveCodingSessionId is null
-            && settings.Current.ActiveSessionId is { } legacyId
+        if (CurrentSettings.ActiveGeneralSessionId is null
+            && CurrentSettings.ActiveCodingSessionId is null
+            && CurrentSettings.ActiveSessionId is { } legacyId
             && await chats.GetSessionAsync(legacyId, cancellationToken).ConfigureAwait(false) is { } legacy)
         {
             await ActivateSessionAsync(legacy, cancellationToken).ConfigureAwait(false);
         }
 
-        var mode = settings.Current.SelectedChatMode;
-        var activeId = ActiveSessionIdFor(settings.Current, mode);
+        var mode = CurrentSettings.SelectedChatMode;
+        var activeId = ActiveSessionIdFor(CurrentSettings, mode);
         if (activeId is { } selectedId
             && await chats.GetSessionAsync(selectedId, cancellationToken).ConfigureAwait(false) is { } active
             && active.ChatMode == mode)
         {
-            if (settings.Current.ActiveSessionId != active.Id)
+            if (CurrentSettings.ActiveSessionId != active.Id)
             {
                 await ActivateSessionAsync(active, cancellationToken).ConfigureAwait(false);
             }
@@ -920,7 +944,7 @@ public sealed partial class AssistantCoordinator(
     }
 
     private Task ActivateSessionAsync(ChatSession session, CancellationToken cancellationToken) =>
-        settings.UpdateAsync(current => session.ChatMode switch
+        UpdateViewSettingsAsync(current => session.ChatMode switch
         {
             ChatMode.General => current with
             {
@@ -957,7 +981,7 @@ public sealed partial class AssistantCoordinator(
         string requestId,
         CancellationToken cancellationToken)
     {
-        await settings.UpdateAsync(current => current with
+        await UpdateViewSettingsAsync(current => current with
         {
             SelectedChatMode = mode,
             ActiveSessionId = ActiveSessionIdFor(current, mode),
@@ -974,7 +998,7 @@ public sealed partial class AssistantCoordinator(
     {
         var session = await chats.CreateSessionAsync(
             DefaultSessionTitle,
-            requestedMode ?? settings.Current.SelectedChatMode,
+            requestedMode ?? CurrentSettings.SelectedChatMode,
             cancellationToken).ConfigureAwait(false);
         await ActivateSessionAsync(session, cancellationToken).ConfigureAwait(false);
         await recentActivity.RecordAsync(
@@ -990,7 +1014,7 @@ public sealed partial class AssistantCoordinator(
         CancellationToken cancellationToken) =>
         await CreateWorkspaceSessionAsync(
             workspacePath,
-            settings.Current.SelectedChatMode,
+            CurrentSettings.SelectedChatMode,
             emit,
             requestId,
             cancellationToken).ConfigureAwait(false);
@@ -1230,10 +1254,10 @@ public sealed partial class AssistantCoordinator(
         await chats.DeleteSessionAsync(sessionId, cancellationToken).ConfigureAwait(false);
         _displayStates.TryRemove(sessionId, out _);
         await CleanupDeletedCodingChangesAsync([sessionId], [session]).ConfigureAwait(false);
-        if (settings.Current.ActiveSessionId == sessionId
-            || ActiveSessionIdFor(settings.Current, session.ChatMode) == sessionId)
+        if (CurrentSettings.ActiveSessionId == sessionId
+            || ActiveSessionIdFor(CurrentSettings, session.ChatMode) == sessionId)
         {
-            await settings.UpdateAsync(current => session.ChatMode switch
+            await UpdateViewSettingsAsync(current => session.ChatMode switch
             {
                 ChatMode.General => current with
                 {
@@ -1315,7 +1339,7 @@ public sealed partial class AssistantCoordinator(
         if (deletedCount > 0)
             await CleanupDeletedCodingChangesAsync(previousSessions.Select(static session => session.Id), previousSessions).ConfigureAwait(false);
 
-        await settings.UpdateAsync(current => mode switch
+        await UpdateViewSettingsAsync(current => mode switch
         {
             ChatMode.General => current with
             {
@@ -1387,13 +1411,14 @@ public sealed partial class AssistantCoordinator(
     {
         if (_runScheduler is null)
         {
-            await SendMissumAiChatAsync(envelope, emit, cancellationToken).ConfigureAwait(false);
+            await SendMissumAiChatAsync(envelope, emit, null, cancellationToken).ConfigureAwait(false);
             return;
         }
 
+        var runScope = AssistantClientExecutionScope.Capture(settings.Current);
         var sessionId = GetOptionalGuid(envelope.Payload, "sessionId")
             ?? (await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false)).Id;
-        _ = GetRequiredString(envelope.Payload, "prompt", 100_000);
+        var prompt = GetRequiredString(envelope.Payload, "prompt", 100_000);
         var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Die AI-Sitzung wurde nicht gefunden.");
         if (session.ChatMode == ChatMode.Coding
@@ -1403,12 +1428,26 @@ public sealed partial class AssistantCoordinator(
             throw new InvalidOperationException("Wähle für diese Coding-Sitzung zuerst ein vorhandenes Projekt oder einen Workspace aus.");
         }
 
+        // Resolve tools when the user submits, not when a waiting run eventually
+        // receives the model. A captured null is intentional and stays null.
+        var match = IsCancelCommand(prompt) ? null
+            : await ResolveRequestedMatchAsync(session, prompt, envelope.Payload, cancellationToken).ConfigureAwait(false);
+        var persistentActionId = PersistentExtensionActionIdFor(match?.Trigger.Action);
+        if (persistentActionId is not null && session.PersistentExtensionActionId != persistentActionId)
+        {
+            await chats.SetPersistentExtensionActionIdAsync(sessionId, persistentActionId, cancellationToken).ConfigureAwait(false);
+            session = session with { PersistentExtensionActionId = persistentActionId };
+            await emit("session.changed", await BuildSnapshotAsync(cancellationToken).ConfigureAwait(false), envelope.RequestId).ConfigureAwait(false);
+        }
+        var queuedInput = new QueuedChatInput(session, match);
+        await SaveDraftAsync(sessionId, string.Empty, cancellationToken).ConfigureAwait(false);
         var accepted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var ticket = _runScheduler.Enqueue<object?>(
             sessionId,
             envelope.RequestId,
             async scheduledCancellationToken =>
             {
+                using var executionScope = runScope();
                 await accepted.Task.WaitAsync(scheduledCancellationToken).ConfigureAwait(false);
                 await WaitForDetachedRunAsync(scheduledCancellationToken).ConfigureAwait(false);
                 await TryEmitAsync(
@@ -1416,7 +1455,7 @@ public sealed partial class AssistantCoordinator(
                     "queue.changed",
                     new { runQueue = ToRunQueueDto(_runScheduler.Snapshot) },
                     envelope.RequestId).ConfigureAwait(false);
-                await SendMissumAiChatAsync(envelope, emit, scheduledCancellationToken).ConfigureAwait(false);
+                await SendMissumAiChatAsync(envelope, emit, queuedInput, scheduledCancellationToken).ConfigureAwait(false);
                 return null;
             },
             CancellationToken.None);
@@ -1508,12 +1547,15 @@ public sealed partial class AssistantCoordinator(
     private async Task SendMissumAiChatAsync(
         WebBridgeEnvelope envelope,
         Func<string, object, string?, Task> emit,
+        QueuedChatInput? queuedInput,
         CancellationToken cancellationToken)
     {
         var prompt = GetRequiredString(envelope.Payload, "prompt", 100_000);
         if (IsCancelCommand(prompt))
         {
-            if (microphone is not null)
+            if (AssistantClientExecutionScope.IsBrowser && BrowserSpeechHandler is not null)
+                await BrowserSpeechHandler(AssistantClientExecutionScope.ClientId, envelope with { Type = "microphone.stopSpeech" }, emit, cancellationToken).ConfigureAwait(false);
+            else if (microphone is not null)
             {
                 await microphone.StopSpeechAsync(cancellationToken).ConfigureAwait(false);
             }
@@ -1531,10 +1573,17 @@ public sealed partial class AssistantCoordinator(
             }, envelope.RequestId).ConfigureAwait(false);
             return;
         }
-        var sessionId = GetOptionalGuid(envelope.Payload, "sessionId")
+        var sessionId = queuedInput?.Session.Id ?? GetOptionalGuid(envelope.Payload, "sessionId")
             ?? (await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false)).Id;
         var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Die AI-Sitzung wurde nicht gefunden.");
+        if (queuedInput is not null)
+            session = session with
+            {
+                ChatMode = queuedInput.Session.ChatMode,
+                CodingWorkspacePath = queuedInput.Session.CodingWorkspacePath,
+                PersistentExtensionActionId = queuedInput.Session.PersistentExtensionActionId,
+            };
         if (session.ChatMode == ChatMode.Coding
             && (string.IsNullOrWhiteSpace(session.CodingWorkspacePath)
                 || !Directory.Exists(session.CodingWorkspacePath)))
@@ -1564,31 +1613,20 @@ public sealed partial class AssistantCoordinator(
             await chats.RenameSessionAsync(sessionId, derivedTitle, cancellationToken).ConfigureAwait(false);
             session = session with { Title = derivedTitle };
         }
-        await chats.SaveDraftAsync(sessionId, string.Empty, cancellationToken).ConfigureAwait(false);
-        var explicitExtensionActionId = GetExplicitExtensionActionId(envelope.Payload);
-        var match = await ResolvePromptMatchAsync(
-            session,
-            prompt,
-            explicitExtensionActionId,
-            cancellationToken).ConfigureAwait(false);
-        if (envelope.Payload.TryGetProperty("deepResearch", out var deepResearch) && deepResearch.ValueKind == JsonValueKind.True)
-        {
-            if (match is not null && match.Trigger.Action is not (PromptTriggerAction.Coding or PromptTriggerAction.WebSearch))
-                throw new ArgumentException("Deep Research ist mit General oder Coding nutzbar. Wähle andere einmalige Tools zuerst ab.");
-            var researchProfile = GetOptionalString(envelope.Payload, "deepResearchProfile", 64)?.Trim() ?? "auto";
-            if (!DeepResearchProfiles.IsValid(researchProfile))
-                throw new ArgumentException("Das ausgewählte Deep-Research-Profil ist unbekannt.");
-            match = (match ?? CreateToolMatch("webSearch", prompt)) with
-            {
-                DeepResearch = true,
-                DeepResearchProfile = researchProfile,
-            };
-        }
+        await SaveDraftAsync(sessionId, string.Empty, cancellationToken).ConfigureAwait(false);
+        var match = queuedInput is not null ? queuedInput.Match
+            : await ResolveRequestedMatchAsync(session, prompt, envelope.Payload, cancellationToken).ConfigureAwait(false);
 
         await ActivateSessionAsync(session, cancellationToken).ConfigureAwait(false);
         var speechMessageId = GetOptionalGuid(envelope.Payload, "speechMessageId");
         if (match?.Trigger.Action == PromptTriggerAction.TextToSpeech)
         {
+            if (AssistantClientExecutionScope.IsBrowser && BrowserSpeechHandler is not null)
+            {
+                var payload = JsonSerializer.SerializeToElement(new { sessionId, messageId = speechMessageId, text = match.RemainingPrompt }, BrowserSpeechJsonOptions);
+                await BrowserSpeechHandler(AssistantClientExecutionScope.ClientId, envelope with { Type = "microphone.speak", Payload = payload }, emit, cancellationToken).ConfigureAwait(false);
+                return;
+            }
             var serverAssistant = missumAi
                 ?? throw new InvalidOperationException("Der Missum-AI-Clientdienst ist nicht verfügbar.");
             await serverAssistant.SpeakAsync(
@@ -1622,7 +1660,7 @@ public sealed partial class AssistantCoordinator(
             throw new InvalidOperationException(
                 "In dieser Sitzung ist noch keine Hörbuchgeschichte vorhanden. Starte zuerst mit „Hörbuch erstellen“.");
         }
-        if (requestedPersistentActionId is { } persistentActionId
+        if (queuedInput is null && requestedPersistentActionId is { } persistentActionId
             && !string.Equals(session.PersistentExtensionActionId, persistentActionId, StringComparison.Ordinal))
         {
             await chats.SetPersistentExtensionActionIdAsync(
@@ -1643,12 +1681,31 @@ public sealed partial class AssistantCoordinator(
                 prompt,
                 match,
                 update => EmitMissumAiUpdateAsync(update, emit, envelope.RequestId),
-                cancellationToken).ConfigureAwait(false);
+                submittedSession: queuedInput?.Session,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
         }
         catch (MissumAiStreamDetachedException)
         {
             // Navigating away only detaches the local SSE reader. The run is resumed from SQLite later.
         }
+    }
+
+    private async Task<PromptTriggerMatch?> ResolveRequestedMatchAsync(ChatSession session, string prompt,
+        JsonElement payload, CancellationToken cancellationToken)
+    {
+        var match = await ResolvePromptMatchAsync(session, prompt, GetExplicitExtensionActionId(payload), cancellationToken).ConfigureAwait(false);
+        if (AssistantClientExecutionScope.IsBrowser && match?.Trigger.Action is PromptTriggerAction.VoiceInput
+            or PromptTriggerAction.LiveCaptions or PromptTriggerAction.LiveTranslation)
+            throw new InvalidOperationException("Mikrofon und Live-Aufnahme sind über HTTP nicht verfügbar. Lade eine Audio- oder Videodatei vom Mac hoch.");
+        if (payload.TryGetProperty("deepResearch", out var research) && research.ValueKind == JsonValueKind.True)
+        {
+            if (match is not null && match.Trigger.Action is not (PromptTriggerAction.Coding or PromptTriggerAction.WebSearch))
+                throw new ArgumentException("Deep Research ist mit General oder Coding nutzbar. Wähle andere einmalige Tools zuerst ab.");
+            var profile = GetOptionalString(payload, "deepResearchProfile", 64)?.Trim() ?? "auto";
+            if (!DeepResearchProfiles.IsValid(profile)) throw new ArgumentException("Das ausgewählte Deep-Research-Profil ist unbekannt.");
+            match = (match ?? CreateToolMatch("webSearch", prompt)) with { DeepResearch = true, DeepResearchProfile = profile };
+        }
+        return match;
     }
 
     private async Task ResumePendingInBackgroundAsync(Func<string, object, string?, Task> emit,
@@ -1670,7 +1727,7 @@ public sealed partial class AssistantCoordinator(
 
     internal async Task<object> BuildSessionSidebarSnapshotAsync(bool groupingCompleted, CancellationToken cancellationToken = default)
     {
-        var mode = settings.Current.SelectedChatMode;
+        var mode = CurrentSettings.SelectedChatMode;
         var sessions = await chats.ListSessionsAsync(mode, cancellationToken: cancellationToken).ConfigureAwait(false);
         var groups = await chats.ListSessionGroupsAsync(mode, cancellationToken).ConfigureAwait(false);
         // Grouping never owns the active conversation. The user may switch sessions,
@@ -1864,7 +1921,9 @@ public sealed partial class AssistantCoordinator(
                 await emit("coding.changes", summary, requestId).ConfigureAwait(false);
             return;
         }
-        if (settings.Current.IsAutomaticSpeechEnabled)
+        if (CurrentSettings.IsAutomaticSpeechEnabled && AssistantClientExecutionScope.IsBrowser)
+            BrowserAutomaticSpeech?.Invoke(AssistantClientExecutionScope.ClientId, update, emit);
+        else if (CurrentSettings.IsAutomaticSpeechEnabled)
         {
             missumAi?.ObserveAutomaticSpeech(update,
                 speech => emit("speech.status", new

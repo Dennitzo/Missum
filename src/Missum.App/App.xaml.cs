@@ -75,6 +75,8 @@ public partial class App : Application
     private int _activationReady;
     private int _shutdownStarted;
     private Uri? _lifecycleGateway;
+    private AssistantResolvedAppearance? _resolvedAppearance;
+    private UISettings? _appearanceSystemSettings;
 
     public App()
     {
@@ -102,6 +104,11 @@ public partial class App : Application
                 services.AddExtensionHostSupervisor();
                 services.AddAssistantRunScheduling();
                 services.AddSingleton<SettingsCoordinator>();
+                services.AddSingleton<AssistantSettingsService>();
+                services.AddSingleton<AssistantClientStateStore>();
+                services.AddSingleton<AssistantHost>();
+                services.AddSingleton<BrowserSpeechService>();
+                services.AddSingleton<NativeChatPdfExportService>();
                 services.AddSingleton<Missum.Core.Research.IResearchSandboxService, ResearchSandboxService>();
                 services.AddSingleton<AssistantSessionActivationService>();
                 services.AddSingleton<NativeModelRuntimeService>();
@@ -207,6 +214,7 @@ public partial class App : Application
             SetBrushColors(AccentTextBrushKeys, ContrastForeground(color));
         }
 
+        CacheResolvedAppearance();
         ThemeChanged?.Invoke(this, EventArgs.Empty);
     }
 
@@ -224,6 +232,7 @@ public partial class App : Application
             ApplyBackgroundSurfaceColors(color);
         }
 
+        CacheResolvedAppearance();
         ThemeChanged?.Invoke(this, EventArgs.Empty);
     }
 
@@ -277,6 +286,11 @@ public partial class App : Application
             _window.Closed += OnWindowClosed;
             _window.BeforeCloseAsync = PrepareShutdownAsync;
             _window.Activate();
+            var sharedSettings = GetService<AssistantSettingsService>();
+            sharedSettings.ResolvedAppearanceProvider = () => Volatile.Read(ref _resolvedAppearance);
+            sharedSettings.ResolvedThemeProvider = () => Volatile.Read(ref _resolvedAppearance)?.Theme ?? "dark";
+            settings.Changed += OnSharedSettingsChanged;
+            await GetService<AssistantHost>().StartAsync();
             Volatile.Write(ref _activationReady, 1);
             while (_pendingActivationTargets.TryDequeue(out var targetSessionId))
             {
@@ -289,6 +303,17 @@ public partial class App : Application
             System.Diagnostics.Debug.WriteLine($"Missum startup failed: {exception}");
             throw;
         }
+    }
+
+    private void OnSharedSettingsChanged(object? sender, SettingsChangedEventArgs args)
+    {
+        if (!args.PreferencesChanged) return;
+        _window?.DispatcherQueue.TryEnqueue(() =>
+        {
+            ApplyTheme(args.Current.Theme);
+            ApplyAccentColor(args.Current.AccentColor);
+            ApplyBackgroundColor(args.Current.BackgroundColor);
+        });
     }
 
     private void StartAiAvailabilityMonitoring()
@@ -566,6 +591,11 @@ public partial class App : Application
         }
 
         _accessibilitySettings = null;
+        if (_appearanceSystemSettings is not null)
+        {
+            _appearanceSystemSettings.ColorValuesChanged -= OnSystemAppearanceChanged;
+            _appearanceSystemSettings = null;
+        }
         if (_themeRoot is not null)
         {
             _themeRoot.ActualThemeChanged -= OnActualThemeChanged;
@@ -585,6 +615,8 @@ public partial class App : Application
         {
             ApplyPaletteColors();
         }
+        else if (GetService<SettingsCoordinator>().Current.Theme == AppTheme.System)
+            CacheResolvedAppearance(systemAppearanceChanged: true);
     }
 
     private void SubscribeHighContrastChanges()
@@ -594,6 +626,8 @@ public partial class App : Application
             _accessibilitySettings = new AccessibilitySettings();
             _accessibilitySettings.HighContrastChanged += OnHighContrastChanged;
             _highContrastEventsSubscribed = true;
+            _appearanceSystemSettings = new UISettings();
+            _appearanceSystemSettings.ColorValuesChanged += OnSystemAppearanceChanged;
         }
         catch (Exception exception) when (exception is not OutOfMemoryException)
         {
@@ -613,11 +647,20 @@ public partial class App : Application
         var dispatcher = _window?.DispatcherQueue;
         if (dispatcher is not null && !dispatcher.HasThreadAccess)
         {
-            _ = dispatcher.TryEnqueue(ApplyPaletteColors);
+            _ = dispatcher.TryEnqueue(() => { ApplyPaletteColors(); CacheResolvedAppearance(systemAppearanceChanged: true); });
             return;
         }
 
         ApplyPaletteColors();
+        CacheResolvedAppearance(systemAppearanceChanged: true);
+    }
+
+    private void OnSystemAppearanceChanged(UISettings sender, object args)
+    {
+        var dispatcher = _window?.DispatcherQueue;
+        if (dispatcher is not null && !dispatcher.HasThreadAccess)
+            _ = dispatcher.TryEnqueue(() => CacheResolvedAppearance(systemAppearanceChanged: true));
+        else if (dispatcher is not null) CacheResolvedAppearance(systemAppearanceChanged: true);
     }
 
     private async Task PrepareShutdownAsync()
@@ -774,7 +817,136 @@ public partial class App : Application
             ApplyBackgroundSurfaceColors(background);
         }
 
+        CacheResolvedAppearance();
         ThemeChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void CacheResolvedAppearance(bool systemAppearanceChanged = false)
+    {
+        // Called only alongside native palette application on the UI thread.
+        // LAN requests receive this immutable cache and never touch WinUI objects.
+        var highContrast = IsHighContrastEnabled();
+        var saved = GetService<SettingsCoordinator>().Current;
+        if (!MatchesSavedAppearance(saved, _appliedTheme, AccentColor, BackgroundColor))
+        {
+            // Native SettingsPage.Apply* previews are local until preferences save.
+            // System accessibility/theme changes still resolve the saved palette.
+            if (!systemAppearanceChanged) return;
+            var systemLight = RequestedTheme == ApplicationTheme.Light;
+            if (saved.Theme == AppTheme.System && !highContrast)
+            {
+                try
+                {
+                    var systemBackground = new UISettings().GetColorValue(UIColorType.Background);
+                    systemLight = systemBackground.R + systemBackground.G + systemBackground.B > 384;
+                }
+                catch (Exception exception) when (exception is not OutOfMemoryException) { System.Diagnostics.Debug.WriteLine(exception); }
+            }
+            PublishResolvedAppearance(CreateSavedAppearance(saved, systemLight, highContrast ? ResolveHighContrastPalette() : null));
+            return;
+        }
+        var light = _appliedTheme == AppTheme.Light
+            || (_appliedTheme == AppTheme.System && _themeRoot?.ActualTheme == ElementTheme.Light);
+        string ReadBrush(string key, Windows.UI.Color fallback)
+        {
+            if (Resources.TryGetValue(key, out var value) && value is SolidColorBrush brush)
+                return CssColor(brush.Color, brush.Opacity);
+            return CssColor(fallback, 1);
+        }
+        var foreground = light ? Windows.UI.Color.FromArgb(228, 0, 0, 0) : Microsoft.UI.Colors.White;
+        if (highContrast) foreground = ResolveHighContrastPalette().Foreground;
+        var colors = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["window"] = ReadBrush("MissumWindowBrush", Microsoft.UI.Colors.Black),
+            ["layer"] = ReadBrush("MissumLayerBrush", Microsoft.UI.Colors.Black),
+            ["layerStrong"] = ReadBrush("MissumLayerStrongBrush", Microsoft.UI.Colors.Black),
+            ["input"] = ReadBrush("MissumInputBrush", Microsoft.UI.Colors.Black),
+            ["hover"] = ReadBrush("MissumHoverBrush", Microsoft.UI.Colors.Black),
+            ["pressed"] = ReadBrush("MissumPressedBrush", Microsoft.UI.Colors.Black),
+            ["stroke"] = ReadBrush("MissumStrokeBrush", foreground),
+            ["mutedText"] = ReadBrush("MissumMutedTextBrush", foreground),
+            ["text"] = CssColor(foreground, 1),
+            ["accent"] = ReadBrush("MissumAccentBrush", foreground),
+            ["accentForeground"] = ReadBrush("MissumAccentTextBrush", Microsoft.UI.Colors.Black),
+            ["accentSubtle"] = ReadBrush("MissumAccentSubtleBrush", foreground),
+        };
+        if ((_window?.Content as FrameworkElement)?.FindName("ContentFrame") is Microsoft.UI.Xaml.Controls.Frame frame
+            && frame.Content is Microsoft.UI.Xaml.Controls.Control page && page.ActualTheme == (light ? ElementTheme.Light : ElementTheme.Dark)
+            && page.Foreground is SolidColorBrush text)
+            colors["text"] = CssColor(text.Color, text.Opacity);
+        // The native title bar layers AccentSubtle over the window surface.
+        colors["titlebar"] = ComposeCssColors(colors["accentSubtle"], colors["window"]);
+        foreach (var name in new[] { "Web", "Research", "Image", "Audio", "Speech", "Pdf", "Document", "Plan", "Code", "Folder", "Navigation", "Link", "Add", "Danger", "Settings", "Subagent" })
+            colors["icon" + name] = ReadBrush("MissumIcon" + name + "Brush", Controls.NativeIconPalette.ColorFor(name));
+        var snapshot = new AssistantResolvedAppearance(highContrast ? "high-contrast" : light ? "light" : "dark",
+            highContrast, new System.Collections.ObjectModel.ReadOnlyDictionary<string, string>(colors));
+        PublishResolvedAppearance(snapshot);
+    }
+
+    internal static bool MatchesSavedAppearance(AppSettings saved, AppTheme appliedTheme, string accent, string background) =>
+        saved.Theme == appliedTheme && string.Equals(saved.AccentColor, accent, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(saved.BackgroundColor, background, StringComparison.OrdinalIgnoreCase);
+
+    internal static AssistantResolvedAppearance CreateSavedAppearance(AppSettings saved, bool systemLight, HighContrastPalette? highContrast)
+    {
+        var light = saved.Theme == AppTheme.Light || (saved.Theme == AppTheme.System && systemLight);
+        _ = TryParsePaletteColor(saved.AccentColor, out var accent);
+        _ = TryParsePaletteColor(saved.BackgroundColor, out var background);
+        var foreground = light ? Windows.UI.Color.FromArgb(228, 0, 0, 0) : Microsoft.UI.Colors.White;
+        string Mixed(uint baseRgb, double weight, byte alpha = 255) => CssColor(MixBackground(baseRgb, background, weight, alpha), 1);
+        var colors = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["window"] = Mixed(light ? 0xF3F0F5u : 0x202020u, light ? .07 : .08),
+            ["layer"] = Mixed(light ? 0xFFFFFFu : 0x202020u, light ? .04 : .12, light ? (byte)248 : (byte)230),
+            ["layerStrong"] = Mixed(light ? 0xFAF8FCu : 0x2B2B2Bu, light ? .08 : .18, light ? (byte)255 : (byte)242),
+            ["input"] = Mixed(light ? 0xFFFFFFu : 0x333333u, light ? .09 : .20),
+            ["hover"] = Mixed(light ? 0xF5F1F7u : 0x303030u, light ? .13 : .23),
+            ["pressed"] = Mixed(light ? 0xEEE9F1u : 0x383838u, light ? .18 : .28),
+            ["stroke"] = Mixed(light ? 0x302A38u : 0xFFFFFFu, light ? .22 : .28, light ? (byte)82 : (byte)66),
+            ["mutedText"] = light ? "#51465D" : "#999999",
+            ["text"] = CssColor(foreground, 1),
+            ["accent"] = CssColor(accent, 1), ["accentForeground"] = CssColor(ContrastForeground(accent), 1),
+            ["accentSubtle"] = CssColor(accent, .14),
+        };
+        if (highContrast is { } contrast)
+        {
+            foreach (var key in new[] { "window", "layer", "layerStrong", "input", "hover", "pressed" }) colors[key] = CssColor(contrast.Background, 1);
+            foreach (var key in new[] { "stroke", "mutedText", "text" }) colors[key] = CssColor(contrast.Foreground, 1);
+            colors["accent"] = CssColor(contrast.Accent, 1); colors["accentForeground"] = CssColor(contrast.AccentForeground, 1);
+            colors["accentSubtle"] = CssColor(contrast.Accent, .14);
+        }
+        colors["titlebar"] = ComposeCssColors(colors["accentSubtle"], colors["window"]);
+        foreach (var name in new[] { "Web", "Research", "Image", "Audio", "Speech", "Pdf", "Document", "Plan", "Code", "Folder", "Navigation", "Link", "Add", "Danger", "Settings", "Subagent" })
+            colors["icon" + name] = CssColor(Controls.NativeIconPalette.ColorFor(name), 1);
+        return new(highContrast is not null ? "high-contrast" : light ? "light" : "dark", highContrast is not null,
+            new System.Collections.ObjectModel.ReadOnlyDictionary<string, string>(colors));
+    }
+
+    private void PublishResolvedAppearance(AssistantResolvedAppearance snapshot)
+    {
+        Volatile.Write(ref _resolvedAppearance, snapshot);
+        if (Volatile.Read(ref _activationReady) != 0) _ = RefreshBrowserAppearanceAsync();
+    }
+
+    private async Task RefreshBrowserAppearanceAsync()
+    {
+        try { await GetService<AssistantHost>().RefreshAppearanceAsync(); }
+        catch (Exception exception) when (exception is not OutOfMemoryException) { System.Diagnostics.Debug.WriteLine(exception); }
+    }
+
+    private static string CssColor(Windows.UI.Color color, double opacity)
+    {
+        var alpha = (byte)Math.Clamp(Math.Round(color.A * opacity), 0, 255);
+        return alpha == 255 ? $"#{color.R:X2}{color.G:X2}{color.B:X2}" : $"#{color.R:X2}{color.G:X2}{color.B:X2}{alpha:X2}";
+    }
+
+    private static string ComposeCssColors(string foreground, string background)
+    {
+        var source = uint.Parse(foreground.AsSpan(1, 6), NumberStyles.HexNumber, CultureInfo.InvariantCulture);
+        var target = uint.Parse(background.AsSpan(1, 6), NumberStyles.HexNumber, CultureInfo.InvariantCulture);
+        var alpha = foreground.Length == 9 ? byte.Parse(foreground.AsSpan(7, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture) / 255d : 1;
+        byte Channel(int shift) => (byte)Math.Round(((source >> shift) & 255) * alpha + ((target >> shift) & 255) * (1 - alpha));
+        return $"#{Channel(16):X2}{Channel(8):X2}{Channel(0):X2}";
     }
 
     private async Task RunShutdownStepAsync(string stage, Func<CancellationToken, Task> action, TimeSpan timeout)

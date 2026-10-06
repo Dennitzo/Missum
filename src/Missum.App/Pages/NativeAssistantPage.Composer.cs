@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using System.Text.Json;
 using Missum.App.Controls;
 using Missum.Core.Extensions;

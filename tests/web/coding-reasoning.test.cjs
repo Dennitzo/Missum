@@ -33,6 +33,14 @@ const message = (extra = {}) => ({ id: "message-a", sessionId: "session-a", role
 const reasoning = (extra = {}) => ({ id: "reasoning-a-1", tool: "assistant.reasoning", detail: "Ich prüfe die relevante Stelle.",
   status: "running", inputJson: '{"round":1,"phase":"main"}', contentOffset: 0, ...extra });
 
+function openReasoning(root) {
+  const disclosure = root.querySelector(".coding-reasoning__disclosure");
+  assert.ok(disclosure, "the reasoning disclosure is mounted");
+  disclosure.setAttribute("open", "");
+  for (const listener of disclosure.listeners.get("toggle") || []) listener({ target: disclosure });
+  return disclosure;
+}
+
 function statusHarness() {
   const result = harness();
   const { context, document, render } = result;
@@ -67,6 +75,7 @@ test("reasoning status packets grow the live card without replacing or rerenderi
     toolStep: reasoning({ detail, outputJson: '{"lastEventId":1}' }) });
   const card = timeline().querySelector(".coding-reasoning");
   assert.ok(card);
+  openReasoning(card);
   for (let cursor = 2; cursor <= 5; cursor++) {
     post({ runStatus: "Denkt nach", runDetail: "assistant.reasoning",
       toolStep: reasoning({ detail: `${detail}\n\n${"Weitere Belege. ".repeat(cursor)}`,
@@ -107,7 +116,7 @@ test("model and tool status updates remain functional between display-only reaso
   assert.ok(timeline().querySelector(".coding-step"));
   assert.ok(timeline().querySelector(".coding-reasoning"));
   assert.equal(calls.messages, 3);
-  assert.equal(calls.context, 2);
+  assert.equal(calls.context, 0, "status packets retain the mounted native composer chips");
   assert.equal(calls.status, 2);
 });
 
@@ -116,11 +125,13 @@ test("steering closes the previous reasoning round without stopping the next rou
   const first = reasoning({ outputJson: '{"lastEventId":1,"state":"running"}' });
   post({ toolStep: first });
   const card = timeline().querySelector(".coding-reasoning");
-  assert.ok(card.querySelector(".message-status-spinner"));
+  assert.equal(card.querySelector(".coding-reasoning__status").textContent, "…");
+  assert.equal(card.querySelector(".message-status-spinner"), null);
   const stopped = { ...first, status: "interrupted", outputJson: '{"lastEventId":2,"state":"steered"}' };
   post({ toolStep: stopped });
   assert.equal(timeline().querySelector(".coding-reasoning"), card);
-  assert.equal(card.querySelector(".coding-reasoning__status").textContent, "Umgeleitet");
+  assert.ok(card.classList.contains("coding-reasoning--steered"));
+  assert.equal(card.querySelector(".coding-reasoning__status").textContent, "");
   assert.equal(card.querySelector(".message-status-spinner"), null);
   const next = reasoning({ id: "reasoning-a-2", detail: "Ich bearbeite den neuen Auftrag.", inputJson: '{"round":2}',
     outputJson: '{"lastEventId":3,"state":"running"}' });
@@ -128,14 +139,18 @@ test("steering closes the previous reasoning round without stopping the next rou
   post({ toolStep: first });
   const cards = timeline().querySelectorAll(".coding-reasoning");
   assert.equal(cards.length, 2);
-  assert.equal(cards[0].querySelector(".coding-reasoning__status").textContent, "Umgeleitet");
+  assert.ok(cards[0].classList.contains("coding-reasoning--steered"));
+  assert.equal(cards[0].querySelector(".coding-reasoning__status").textContent, "");
   assert.equal(cards[0].querySelector(".message-status-spinner"), null);
-  assert.ok(cards[1].querySelector(".message-status-spinner"));
+  assert.ok(cards[1].classList.contains("coding-reasoning--running"));
+  assert.equal(cards[1].querySelector(".coding-reasoning__status").textContent, "…");
+  assert.equal(cards[1].querySelector(".message-status-spinner"), null);
   assert.equal(context.state.messageRunStatus.get("message-a"), status);
   assert.equal(context.state.isRunning, true);
   const restored = render(message(), JSON.parse(JSON.stringify([stopped, next])));
-  assert.equal(restored.querySelectorAll(".coding-reasoning")[0].querySelector(".coding-reasoning__status").textContent, "Umgeleitet");
-  assert.equal(restored.querySelectorAll(".message-status-spinner").length, 1);
+  assert.ok(restored.querySelectorAll(".coding-reasoning")[0].classList.contains("coding-reasoning--steered"));
+  assert.equal(restored.querySelectorAll(".coding-reasoning")[1].querySelector(".coding-reasoning__status").textContent, "…");
+  assert.equal(restored.querySelectorAll(".message-status-spinner").length, 0);
 });
 
 test("reasoning packets from another session or after completion cannot resurrect a live card", () => {
@@ -151,7 +166,7 @@ test("reasoning packets from another session or after completion cannot resurrec
   }
 });
 
-test("reasoning is a separate default-open card with accent identity, round, live status and safe Markdown", () => {
+test("reasoning defaults to a compact collapsed disclosure and renders safe Markdown when opened", () => {
   const { render, posts } = harness();
   const source = "**Gezieltes Vorgehen**\n\n1. `math.py` lesen.\n2. Einen Fehler beheben.\n\n```python\nreturn a + 2\n```";
   const timeline = render(message(), [reasoning({ detail: source })]);
@@ -159,10 +174,14 @@ test("reasoning is a separate default-open card with accent identity, round, liv
   assert.ok(card);
   assert.equal(card.getAttribute("data-speech-exclude"), "true");
   assert.equal(card.getAttribute("aria-label"), "Denkprozess · Runde 1");
-  assert.equal(card.querySelector("details").hasAttribute("open"), true);
+  assert.equal(card.querySelector("details").hasAttribute("open"), false);
+  assert.equal(card.querySelector(".coding-reasoning__body"), null, "closed text is created lazily");
+  assert.equal(card.querySelector(".coding-reasoning__round"), null);
+  assert.equal(card.querySelector(".coding-reasoning__phase"), null);
   assert.equal(card.querySelector("summary").querySelector("button"), null);
-  assert.equal(card.querySelector(".coding-reasoning__status").textContent, "Denkt nach");
-  assert.ok(card.querySelector(".message-status-spinner"));
+  assert.equal(card.querySelector(".coding-reasoning__status").textContent, "…");
+  assert.equal(card.querySelector(".message-status-spinner"), null);
+  openReasoning(card);
   assert.equal(card.querySelector(".coding-reasoning__body strong").textContent, "Gezieltes Vorgehen");
   assert.equal(card.querySelectorAll("li").length, 2);
   assert.equal(card.querySelector(".hljs-keyword").textContent, "return");
@@ -181,6 +200,7 @@ test("live reasoning colors embedded Python commands before fence completion and
   const timeline = render(message(), [initial]);
   document.body.append(timeline);
   const card = timeline.querySelector(".coding-reasoning");
+  openReasoning(card);
   let code = card.querySelector("pre code");
   assert.equal(code.textContent, command);
   assert.ok(code.querySelectorAll(".hljs-keyword").some(node => node.textContent === "import"));
@@ -210,7 +230,8 @@ test("reasoning and narration retain their stream boundaries without consuming e
   const timeline = render(message({ content: before + after }), tools);
   assert.deepEqual(timeline.children.map(item => item.dataset.stepId || item.textContent.trim()),
     ["reasoning-a-1", before.trim(), "read", "reasoning-a-2", "edit", after]);
-  assert.deepEqual(timeline.querySelectorAll(".coding-step__number").map(item => item.textContent), ["01", "02"]);
+  assert.deepEqual(timeline.querySelectorAll(".coding-step").map(item => item.getAttribute("aria-label")), ["Schritt 1: coding.read", "Schritt 2: coding.edit"]);
+  assert.equal(timeline.querySelector(".coding-step__number"), null, "native compact headers have no visible execution-number badge");
   assert.equal(timeline.querySelectorAll(".coding-narration").length, 2);
 });
 
@@ -220,6 +241,7 @@ test("live reasoning appends to existing selected text and retains completed par
   const current = render(message(), [first]);
   document.body.append(current);
   const card = current.querySelector(".coding-reasoning");
+  openReasoning(card);
   const paragraphs = current.querySelectorAll(".coding-reasoning__body p");
   const selectedText = paragraphs[1].firstChild;
   context.missumCodingTimeline.reconcile(current, render(message(), [{ ...first, detail: first.detail + " nun die Änderung." }], { previousTimeline: current }));
@@ -237,6 +259,8 @@ test("manual collapse survives new tokens and terminal status while reopening sh
   const current = render(message(), [first]);
   document.body.append(current);
   const disclosure = current.querySelector("details"), summary = disclosure.firstChild;
+  openReasoning(current);
+  assert.ok(disclosure.querySelector(".coding-reasoning__body"));
   disclosure.removeAttribute("open");
   await disclosure.dispatch("toggle");
   assert.equal(disclosure.querySelector(".coding-step__content"), null);
@@ -244,10 +268,11 @@ test("manual collapse survives new tokens and terminal status while reopening sh
   context.missumCodingTimeline.reconcile(current, render(message(), [{ ...first, detail }], { previousTimeline: current }));
   assert.equal(disclosure.hasAttribute("open"), false);
   assert.equal(disclosure.firstChild, summary);
-  assert.ok(disclosure.querySelector(".coding-reasoning__preview").textContent.includes("Neue Erkenntnis"));
+  assert.equal(disclosure.querySelector(".coding-reasoning__preview"), null);
+  assert.equal(disclosure.querySelector(".coding-reasoning__body"), null);
   context.missumCodingTimeline.reconcile(current, render(message({ status: "completed" }), [{ ...first, detail, status: "completed" }]));
   assert.equal(disclosure.hasAttribute("open"), false, "reader state survives even cache-free reconciliation");
-  assert.equal(disclosure.querySelector(".coding-reasoning__status").textContent, "Abgeschlossen");
+  assert.equal(disclosure.querySelector(".coding-reasoning__status").textContent, "", "completed native headers have no status badge");
   assert.equal(disclosure.querySelector(".message-status-spinner"), null);
   disclosure.setAttribute("open", "");
   await disclosure.dispatch("toggle");
@@ -262,12 +287,14 @@ test("interrupted and failed reasoning keep received text without stale spinner 
     const timeline = render(message({ status }), [reasoning()]);
     assert.ok(timeline.querySelector(".coding-reasoning--interrupted"));
     assert.equal(timeline.querySelector(".message-status-spinner"), null);
+    openReasoning(timeline);
     assert.ok(timeline.querySelector(".coding-reasoning__body").textContent.includes(reasoning().detail));
   }
   for (const status of ["failed", "cancelled", "completed"]) {
     const timeline = render(message({ status: "completed" }), [reasoning({ status })]);
     assert.ok(timeline.querySelector(`.coding-reasoning--${status}`));
     assert.equal(timeline.querySelector(".message-status-spinner"), null);
+    if (status === "completed") assert.equal(timeline.querySelector(".coding-reasoning__status").textContent, "");
   }
 });
 
@@ -276,6 +303,7 @@ test("hostile reasoning is inert and complete long output retains all paragraphs
   const source = '<script>missumBridge.post("session.clear", {})</script>\n\n<img src=x onerror=alert(1)>\n\n[unsafe](javascript:alert(1))';
   const paragraphs = Array.from({ length: 200 }, (_, index) => `Befund ${index}: ${"Beleg ".repeat(30)}`);
   const timeline = render(message(), [reasoning({ detail: [source, ...paragraphs, "Letzter Beleg 日本語"].join("\n\n") })]);
+  openReasoning(timeline);
   assert.equal(timeline.querySelector("script"), null);
   assert.equal(timeline.querySelector("img"), null);
   assert.equal(timeline.querySelector("iframe"), null);
@@ -289,6 +317,7 @@ test("reasoning is excluded from all read-aloud block kinds while answer narrati
   const { render, context } = harness();
   const detail = "# Denküberschrift\n\nNicht vorlesen.\n\n1. Interner Punkt\n\n```python\nreturn 1\n```";
   const timeline = render(message({ content: "Die Antwort wird vorgelesen.", status: "completed" }), [reasoning({ detail, status: "completed" })]);
+  openReasoning(timeline);
   const body = timeline.querySelector(".coding-reasoning__body");
   for (const kind of ["heading", "paragraph", "listItem", "tableRow", "quote", "math", "code"]) {
     assert.equal(context.speechBlockCandidates(body, kind).length, 0, `direct ${kind} selection excludes reasoning`);
@@ -361,12 +390,15 @@ test("missing or invalid reasoning clocks never reopen terminal receipts and ord
   assert.equal(context.mergeCodingToolSteps(message({ toolSteps: [saved] }))[0].status, "completed");
 });
 
-test("compaction gets a distinct badge and changing phase invalidates cached reasoning card", () => {
+test("compaction changes the compact title and accessible phase without adding a round or phase badge", () => {
   const { render, context } = harness();
   const first = reasoning({ inputJson: '{"round":3,"phase":"main"}' });
   const current = render(message(), [first]);
   assert.equal(current.querySelector(".coding-reasoning__phase"), null);
+  assert.equal(current.querySelector(".coding-reasoning__name").textContent, "Denkprozess");
   context.missumCodingTimeline.reconcile(current, render(message(), [{ ...first, inputJson: '{"round":3,"phase":"compaction"}' }], { previousTimeline: current }));
-  assert.equal(current.querySelector(".coding-reasoning__phase").textContent, "Kontextverdichtung");
+  assert.equal(current.querySelector(".coding-reasoning__phase"), null);
+  assert.equal(current.querySelector(".coding-reasoning__round"), null);
+  assert.equal(current.querySelector(".coding-reasoning__name").textContent, "Kontextverdichtung");
   assert.equal(current.querySelector(".coding-reasoning").getAttribute("aria-label"), "Denkprozess · Runde 3 · Kontextverdichtung");
 });

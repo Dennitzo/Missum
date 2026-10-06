@@ -159,7 +159,7 @@ public sealed partial class MissumAiAssistantService
                 started = true;
                 await update(new(MissumAiAssistantUpdateKind.Started, assistant, Session: session,
                     Status: "Lauf wird fortgesetzt", Detail: "Neuer Serverversuch mit ursprünglichem Auftrag und gespeichertem Stand.",
-                    ToolStep: receipt, Model: settings.Current.SelectedModel, LocalRunId: localRun.Id)).ConfigureAwait(false);
+                    ToolStep: receipt, Model: CurrentSettings.SelectedModel, LocalRunId: localRun.Id)).ConfigureAwait(false);
                 await StartFileChangesAsync(localRun, assistant, resume: true, update, token).ConfigureAwait(false);
                 await FlushLiveModelSelectionAsync(token).ConfigureAwait(false);
                 var completed = await StreamRunWithReconnectAsync(localRun, assistant, update, token, client).ConfigureAwait(false);

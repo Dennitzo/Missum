@@ -28,6 +28,7 @@ function harness() {
     createTextNode: text => new TestNode("#text", text),
     createDocumentFragment: () => new TestNode("#fragment")
   };
+  document.querySelectorAll = selector => document.body.querySelectorAll(selector);
   const host = new TestNode("div");
   document.body.append(host);
   const posts = [];
@@ -190,90 +191,53 @@ test("chat start clears the previous run and resume can immediately restore its 
   assert.equal(state.changesSummary.revision, 1001);
 });
 
-test("speech uses only the visible Vorlesen label while retaining accessible live details and Pause/Stop state", () => {
+test("speech never mounts an upper composer chip and playback state does not reveal an empty context strip", () => {
   const { context, state, elements } = harness();
-  for (const name of ["composerSpeechStatus", "composerSpeechDetail", "composerSpeechPause", "composerSpeechPauseIcon", "composerSpeechStop"])
-    elements[name] = new TestNode("span");
   state.selectedToolAction = null;
-  state.microphone = { canPauseSpeech: false, isSpeechPaused: false };
-  state.speechStatus = { active: true, status: "Antwort wird fortlaufend vorgelesen", detail: "Warte auf weiteren Antworttext.", model: "local-voice" };
-  context.renderSpeechStatus();
-  assert.equal(elements.composerSpeechStatus.hidden, false);
-  assert.equal(elements.composerSpeechPause.disabled, true);
-  assert.equal(elements.composerSpeechStop.disabled, false);
-  assert.ok(elements.composerSpeechDetail.textContent.includes("Warte auf weiteren Antworttext."));
-  assert.ok(elements.composerSpeechDetail.textContent.includes("local-voice"));
-  assert.equal(elements.contextStrip.hidden, false);
-  state.microphone = { canPauseSpeech: true, isSpeechPaused: true };
-  context.renderSpeechStatus();
-  assert.equal(elements.composerSpeechPause.getAttribute("aria-label"), "Fortsetzen");
-  assert.equal(elements.composerSpeechPause.getAttribute("aria-pressed"), "true");
-  assert.equal(elements.composerSpeechStatus.classList.contains("paused"), true);
+  for (const paused of [false, true]) {
+    state.microphone = { canPauseSpeech: true, isSpeechPaused: paused, isSpeaking: true };
+    state.speechStatus = { active: true, status: paused ? "Pausiert" : "Vorlesen", detail: "F5" };
+    context.renderSpeechStatus();
+    assert.equal(elements.contextStrip.hidden, true);
+  }
   state.speechStatus = { active: false };
   context.renderSpeechStatus();
-  assert.equal(elements.composerSpeechStatus.hidden, true);
-  assert.equal(elements.composerSpeechDetail.textContent, "");
-  assert.equal(elements.composerSpeechStop.disabled, true);
   assert.equal(elements.contextStrip.hidden, true);
-
   const html = fs.readFileSync(path.join(webRoot, "index.html"), "utf8");
-  const speechMarkup = html.slice(html.indexOf('<div id="composer-speech-status"'), html.indexOf('<div class="composer">'));
-  assert.match(speechMarkup, /<span class="composer-speech-status__label">Vorlesen<\/span>/);
-  assert.match(speechMarkup, /<span aria-hidden="true">×<\/span>/);
-  assert.doesNotMatch(speechMarkup, /<strong>|<rect/);
-  assert.ok(speechMarkup.indexOf('id="composer-speech-stop"') < speechMarkup.indexOf('id="composer-speech-detail"'));
-  assert.match(speechMarkup, /role="status" aria-live="polite"/);
-  assert.match(speechMarkup, /composer-speech-status__indicator/);
   const css = fs.readFileSync(path.join(webRoot, "styles.css"), "utf8");
-  const hiddenDetail = css.match(/\.composer-speech-status #composer-speech-detail\s*\{([^}]+)\}/)?.[1];
-  assert.match(hiddenDetail, /position:\s*absolute/);
-  assert.match(hiddenDetail, /clip-path:\s*inset\(50%\)/);
-  assert.doesNotMatch(hiddenDetail, /display:\s*none|visibility:\s*hidden/, "status details remain in the accessibility tree");
+  assert.doesNotMatch(html, /composer-speech-/);
+  assert.doesNotMatch(css, /composer-speech-/);
 });
 
-test("an active streaming speech session can pause in preparation and text gaps without microphone capture or pause resets", () => {
+test("streaming preparation and text gaps retain server pause state independently of AI activity", () => {
   for (const microphoneFirst of [false, true]) {
     const { context, state, elements } = harness();
-    for (const name of ["composerSpeechStatus", "composerSpeechDetail", "composerSpeechPause", "composerSpeechPauseIcon", "composerSpeechStop"])
-      elements[name] = new TestNode("span");
     state.isRunning = true;
     state.speechStatus = { active: false };
     state.microphone = { isRecording: false, isSpeaking: false, canPauseSpeech: false, isSpeechPaused: false };
     const emit = (type, payload) => context.handleHostMessage({ detail: { type, payload } });
-    // The host owns the whole queue's pause capability, including intervals
-    // with no audio player. IsSpeaking does not mean microphone capture.
     const queuedSpeech = { isRecording: false, isBusy: false, isSpeaking: true,
       canPauseSpeech: true, isSpeechPaused: false, status: "Sprachausgabe wird vorbereitet" };
-    const waiting = { active: true, status: "Antwort wird fortlaufend vorgelesen", detail: "Warte auf weiteren Antworttext." };
+    const waiting = { active: true, status: "Vorlesen", detail: "Warte auf weiteren Antworttext." };
     const initial = [["speech.status", waiting], ["microphone.changed", queuedSpeech]];
     if (microphoneFirst) initial.reverse();
     for (const [type, payload] of initial) emit(type, payload);
-    assert.equal(elements.composerSpeechPause.disabled, false, "the queue can pause before its first audio segment");
-    assert.equal(elements.composerSpeechStop.disabled, false);
+    assert.equal(state.microphone.canPauseSpeech, true);
     assert.equal(state.microphone.isRecording, false);
-
     emit("microphone.changed", { ...queuedSpeech, isSpeechPaused: true, status: "Pausiert" });
-    assert.equal(elements.composerSpeechPause.getAttribute("aria-label"), "Fortsetzen");
-    assert.equal(elements.composerSpeechPause.getAttribute("aria-pressed"), "true");
     for (const detail of ["Nächster Sprachabschnitt wird vorbereitet.", "Warte auf weiteren Antworttext."]) {
       emit("speech.status", { ...waiting, detail });
-      assert.equal(elements.composerSpeechPause.disabled, false);
-      assert.equal(elements.composerSpeechPause.getAttribute("aria-label"), "Fortsetzen");
-      assert.equal(elements.composerSpeechStatus.classList.contains("paused"), true,
-        "generation and queue status updates cannot reset the host's paused state");
+      assert.equal(state.microphone.canPauseSpeech, true);
+      assert.equal(state.microphone.isSpeechPaused, true, "text updates preserve the authoritative paused state");
     }
     emit("microphone.changed", { ...queuedSpeech, status: "Wiedergabe" });
-    assert.equal(elements.composerSpeechPause.getAttribute("aria-label"), "Pausieren");
-    assert.equal(elements.composerSpeechPause.getAttribute("aria-pressed"), "false");
+    assert.equal(state.microphone.isSpeechPaused, false);
     emit("speech.status", waiting);
-    assert.equal(elements.composerSpeechPause.disabled, false, "the gap after a segment remains pausible");
-    emit("microphone.changed", { ...queuedSpeech, isSpeechPaused: true });
-    assert.equal(elements.composerSpeechPause.getAttribute("aria-label"), "Fortsetzen");
+    assert.equal(state.microphone.canPauseSpeech, true);
     emit("speech.status", { active: false });
-    assert.equal(elements.composerSpeechStatus.hidden, true);
-    assert.equal(elements.composerSpeechPause.disabled, true);
-    assert.equal(elements.composerSpeechStop.disabled, true);
-    assert.equal(state.isRunning, true, "stopping speech does not stop the independent Coding run");
+    assert.equal(state.speechStatus.active, false);
+    assert.equal(elements.contextStrip.hidden, true);
+    assert.equal(state.isRunning, true, "speech termination does not stop the independent AI run");
   }
 });
 
@@ -287,14 +251,15 @@ test("the changes overview has one responsive outer scroller and all required ca
   assert.match(css, /focus-visible/);
   const html = fs.readFileSync(path.join(webRoot, "index.html"), "utf8");
   for (const asset of ["styles.css", "coding-changes.css", "coding-timeline.css", "bridge.js", "coding-timeline.js", "coding-changes.js", "app.js"]) {
-    const revision = asset === "app.js" ? "20260927-science-workbench-1"
+    const revision = asset === "app.js" ? "20261006-lan-2"
       : asset === "styles.css" ? "20260927-science-workbench-1"
       : asset === "coding-timeline.js" ? "20260920-artifacts-1"
-      : asset === "bridge.js" ? "20260927-science-workbench-1" : "20260913-3";
+      : asset === "bridge.js" ? "20261005-lan-1" : "20260913-3";
     assert.ok(html.includes(`${asset}?v=${revision}`), `${asset} must use the deployed cache revision`);
   }
   assert.ok(html.indexOf('src="coding-timeline.js') < html.indexOf('src="coding-changes.js'));
   assert.ok(html.indexOf('src="coding-changes.js') < html.indexOf('src="app.js'));
-  assert.ok(html.indexOf('id="active-tool-chips"') < html.indexOf('id="coding-changes"'));
+  assert.ok(html.indexOf('id="coding-changes"') < html.indexOf('class="composer-toolbar"'));
+  assert.ok(html.indexOf('id="active-tool-chips"') > html.indexOf('class="composer-toolbar"'), "selected tools belong in the native composer footer");
   assert.ok(html.indexOf('id="coding-changes"') < html.indexOf('id="prompt"'));
 });

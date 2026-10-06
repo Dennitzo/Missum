@@ -46,13 +46,23 @@ public sealed partial class MissumAiAssistantService
         using var client = await connection.CreateClientAsync(cancellationToken).ConfigureAwait(false);
         var snapshot = await client.GetModelStatusAsync(cancellationToken).ConfigureAwait(false);
         foreach (var model in snapshot.Models) ModelContextProfiles.RegisterMaximum(model.Id, model.ContextTokens);
-        return ResolveComposerReasoning(settings.Current, modelId, role, snapshot);
+        return ResolveComposerReasoning(CurrentSettings, modelId, role, snapshot);
     }
+
+    internal Task PersistSharedReasoningAsync(string modelId, string role, string effort, CancellationToken cancellationToken) =>
+        settings.UpdateAsync(current =>
+        {
+            var choices = new Dictionary<string, string>(current.ReasoningEffortsByModel, StringComparer.OrdinalIgnoreCase)
+            {
+                [ReasoningKey(modelId, role)] = effort,
+            };
+            return current with { ReasoningEffortsByModel = choices };
+        }, cancellationToken);
 
     internal async Task<string?> ResolveRequestedReasoningAsync(MissumAiClient client, string modelId, string role, CancellationToken cancellationToken)
     {
         var status = await client.GetModelStatusAsync(cancellationToken).ConfigureAwait(false);
         if (!status.ProviderReachable) throw new InvalidOperationException(status.ErrorMessage ?? "Reasoning-Kompatibilität des Modells ist nicht erreichbar.");
-        return ResolveComposerReasoning(settings.Current, modelId, role, status).Selected;
+        return ResolveComposerReasoning(CurrentSettings, modelId, role, status).Selected;
     }
 }

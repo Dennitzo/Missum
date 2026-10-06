@@ -1,6 +1,7 @@
 using Missum.Core.Coding;
 using Missum.Core.Models;
 using System.Diagnostics;
+using System.Collections.Concurrent;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 
@@ -50,7 +51,11 @@ public sealed partial class MissumAiAssistantService
         var summary = await CodingChangesMonitor.ReadLatestAsync(
             CodingChangesMonitor.StorageDirectory(settings.DataDirectory, sessionId, message.Id),
             cancellationToken).ConfigureAwait(false);
-        return summary is not null && summary.ComparisonKind == "git-v1" && summary.SessionId == sessionId && summary.MessageId == message.Id ? summary : null;
+        if (summary is null || summary.ComparisonKind != "git-v1" || summary.SessionId != sessionId || summary.MessageId != message.Id) return null;
+        if (_activeFileChanges?.Owns(sessionId, message.Id) != true)
+            summary = await CodingChangesMonitor.RecoverIndexLockAsync(
+                CodingChangesMonitor.StorageDirectory(settings.DataDirectory, sessionId, message.Id), summary, cancellationToken).ConfigureAwait(false);
+        return summary.ComparisonKind == "git-v1" && summary.SessionId == sessionId && summary.MessageId == message.Id ? summary : null;
     }
 }
 
@@ -59,6 +64,8 @@ internal sealed class CodingChangesMonitor : IAsyncDisposable
 {
     private const string LatestFileName = "latest.json";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> PublicationGates = new(
+        OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
     private readonly CodingGitChangeTracker? _tracker;
     private readonly Exception? _initializationError;
     private readonly string _directory;
@@ -93,6 +100,43 @@ internal sealed class CodingChangesMonitor : IAsyncDisposable
 
     internal static string StorageDirectory(string dataDirectory, Guid sessionId, Guid messageId) =>
         Path.Combine(dataDirectory, "Cache", "CodingChanges", sessionId.ToString("N"), messageId.ToString("N"));
+
+    internal bool Owns(Guid sessionId, Guid messageId) => _sessionId == sessionId && _messageId == messageId && Volatile.Read(ref _disposed) == 0;
+
+    internal static async Task<CodingChangesSummary> RecoverIndexLockAsync(string directory, CodingChangesSummary expected,
+        CancellationToken cancellationToken = default)
+    {
+        if (!IsIndexLockFailure(expected)) return expected;
+        var gate = PublicationGates.GetOrAdd(Path.GetFullPath(directory), static _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var current = await ReadLatestAsync(directory, cancellationToken).ConfigureAwait(false);
+            if (current is null || current.SessionId != expected.SessionId || current.MessageId != expected.MessageId
+                || current.RunId != expected.RunId || current.Revision != expected.Revision) return current ?? expected;
+            if (!IsIndexLockFailure(current)) return current;
+            if (!File.Exists(Path.Combine(directory, "git-baseline.json"))) return current;
+            // LoadExisting requires the original manifest and validates its Git
+            // tree. This repair never captures a replacement baseline or deletes
+            // the repository's old index.lock; captures use a private index.
+            using var tracker = new CodingGitChangeTracker(current.WorkspacePath, directory);
+            var snapshot = await tracker.LoadExistingAsync(cancellationToken).ConfigureAwait(false);
+            var repaired = current with
+            {
+                Files = snapshot.Files, IsPartial = snapshot.IsPartial, Notice = snapshot.Notice,
+                UpdatedAt = snapshot.UpdatedAt,
+                Revision = Math.Max(current.Revision + 1, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()),
+            };
+            await WriteLatestAsync(directory, repaired, cancellationToken).ConfigureAwait(false);
+            return repaired;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception exception) when (IsStorageError(exception)) { return expected; }
+        finally { gate.Release(); }
+
+        static bool IsIndexLockFailure(CodingChangesSummary summary) => summary.ComparisonKind == "git-v1" && summary.IsPartial
+            && summary.Notice?.Contains("index.lock", StringComparison.OrdinalIgnoreCase) == true;
+    }
 
     internal static Task DeleteSessionStorageAsync(string dataDirectory, Guid sessionId) => Task.Run(() =>
     {
@@ -207,31 +251,11 @@ internal sealed class CodingChangesMonitor : IAsyncDisposable
 
     private async Task StoreAndPublishAsync(CodingChangesSummary summary, CancellationToken cancellationToken)
     {
-        var temporary = Path.Combine(_directory, $".latest-{Guid.NewGuid():N}.tmp");
+        var gate = PublicationGates.GetOrAdd(Path.GetFullPath(_directory), static _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            Directory.CreateDirectory(_directory);
-            await File.WriteAllTextAsync(temporary, JsonSerializer.Serialize(summary, JsonOptions), cancellationToken).ConfigureAwait(false);
-            var replacement = Stopwatch.StartNew();
-            while (true)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                try
-                {
-                    File.Move(temporary, Path.Combine(_directory, LatestFileName), overwrite: true);
-                    break;
-                }
-                catch (Exception exception) when (OperatingSystem.IsWindows()
-                    && (exception is IOException or UnauthorizedAccessException)
-                    && (exception.HResult & 0xffff) is 5 or 32 or 33
-                    && replacement.Elapsed < TimeSpan.FromSeconds(5))
-                {
-                    // Brief readers/indexers may hold the old receipt without
-                    // delete sharing. Keep it intact until this atomic move succeeds.
-                    _replacementBlocked?.Invoke();
-                    await Task.Delay(100, cancellationToken).ConfigureAwait(false);
-                }
-            }
+            await WriteLatestAsync(_directory, summary, cancellationToken, _replacementBlocked).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception exception) when (exception is not OutOfMemoryException)
@@ -239,15 +263,41 @@ internal sealed class CodingChangesMonitor : IAsyncDisposable
             _diagnostic(exception);
             summary = summary with { IsPartial = true, Notice = "Die Änderungsübersicht konnte nicht dauerhaft gespeichert werden: " + exception.Message };
         }
+        finally { gate.Release(); }
+        _latest = summary;
+        try { await _publish(summary).ConfigureAwait(false); }
+        catch (Exception exception) when (exception is not OutOfMemoryException) { _diagnostic(exception); }
+    }
+
+    private static async Task WriteLatestAsync(string directory, CodingChangesSummary summary, CancellationToken cancellationToken,
+        Action? replacementBlocked = null)
+    {
+        var temporary = Path.Combine(directory, $".latest-{Guid.NewGuid():N}.tmp");
+        try
+        {
+            Directory.CreateDirectory(directory);
+            await File.WriteAllTextAsync(temporary, JsonSerializer.Serialize(summary, JsonOptions), cancellationToken).ConfigureAwait(false);
+            var replacement = Stopwatch.StartNew();
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                try { File.Move(temporary, Path.Combine(directory, LatestFileName), overwrite: true); return; }
+                catch (Exception exception) when (OperatingSystem.IsWindows()
+                    && (exception is IOException or UnauthorizedAccessException)
+                    && (exception.HResult & 0xffff) is 5 or 32 or 33
+                    && replacement.Elapsed < TimeSpan.FromSeconds(5))
+                {
+                    replacementBlocked?.Invoke();
+                    await Task.Delay(100, cancellationToken).ConfigureAwait(false);
+                }
+            }
+        }
         finally
         {
             try { if (File.Exists(temporary)) File.Delete(temporary); }
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
         }
-        _latest = summary;
-        try { await _publish(summary).ConfigureAwait(false); }
-        catch (Exception exception) when (exception is not OutOfMemoryException) { _diagnostic(exception); }
     }
 
     internal static async Task<CodingChangesSummary?> ReadLatestAsync(string directory, CancellationToken cancellationToken = default)

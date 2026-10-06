@@ -1,0 +1,83 @@
+/* Native MainWindow's 44px application title/menu bar. Window controls belong to Chrome. */
+.browser-menubar {
+  position: relative;
+  z-index: 110;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 44px;
+  padding: 0 16px;
+  background: var(--titlebar, color-mix(in srgb, var(--accent) 14%, var(--bg)));
+  color: var(--text);
+  font-family: "Segoe UI Variable Text", "Segoe UI", Selawik, system-ui, sans-serif;
+  font-size: 14px;
+}
+.browser-menubar__brand { flex: none; font-weight: 600; }
+.browser-menubar__menus { display: flex; align-items: center; gap: 0; min-width: 0; }
+.browser-menubar__group { position: relative; }
+.browser-menubar__trigger {
+  display: block;
+  height: 32px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 32px;
+}
+.browser-menubar__trigger:hover,
+.browser-menubar__trigger[aria-expanded=true] { background: var(--surface-hover); }
+.browser-menubar__popup {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 120;
+  min-width: 224px;
+  max-width: calc(100vw - 32px);
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-solid);
+  box-shadow: var(--shadow);
+}
+.browser-menubar__item {
+  display: block;
+  width: 100%;
+  min-height: 32px;
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  text-align: left;
+  white-space: nowrap;
+  font-size: 14px;
+  line-height: 20px;
+}
+.browser-menubar__item:hover,
+.browser-menubar__item:focus-visible { background: var(--surface-hover); }
+.browser-menubar__separator { height: 1px; margin: 4px 8px; background: var(--border); }
+.browser-about {
+  width: min(420px, calc(100vw - 32px));
+  margin: auto;
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-solid);
+  color: var(--text);
+  box-shadow: var(--shadow);
+  font-family: inherit;
+}
+.browser-about::backdrop { background: rgba(0, 0, 0, .4); }
+.browser-about h2 { margin: 0 0 14px; font-size: 20px; font-weight: 600; }
+.browser-about p { margin: 0; font-size: 14px; line-height: 1.5; }
+.browser-about__footer { display: flex; justify-content: flex-end; margin-top: 24px; }
+.browser-about__close { min-width: 100px; padding: 7px 14px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-raised); font-size: 14px; }
+html[data-theme=high-contrast] .browser-menubar { background: Canvas; color: CanvasText; border-bottom: 1px solid CanvasText; }
+@media (forced-colors: active) { .browser-menubar { background: Canvas; color: CanvasText; border-bottom: 1px solid CanvasText; } }
+@media (max-width: 440px) {
+  .browser-menubar { padding: 0 10px; gap: 4px; }
+  .browser-menubar__trigger { padding: 0 8px; }
+  .browser-menubar__group:last-child .browser-menubar__popup { left: auto; right: 0; }
+}

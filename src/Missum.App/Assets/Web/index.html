@@ -9,6 +9,12 @@
   <link rel="stylesheet" href="styles.css?v=20260927-science-workbench-1">
   <link rel="stylesheet" href="coding-timeline.css?v=20260913-3">
   <link rel="stylesheet" href="coding-changes.css?v=20260913-3">
+  <link rel="stylesheet" href="browser-panels.css?v=20261006-1">
+  <link rel="stylesheet" href="browser-prompt-timeline.css?v=20261006-1">
+  <link rel="stylesheet" href="browser-tools-menu.css?v=20261005-1">
+  <link rel="stylesheet" href="browser-workspace.css?v=20261005-1">
+  <link rel="stylesheet" href="settings.css?v=20261005-1">
+  <link rel="stylesheet" href="browser-menubar.css?v=20261005-1">
 </head>
 <body>
   <div id="app-shell" class="app-shell">
@@ -18,36 +24,38 @@
           <button id="mode-switcher-button" class="mode-switcher__button" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="mode-switcher-menu">
             <span id="mode-switcher-initial" class="mode-switcher__initial" aria-hidden="true">G</span>
             <span id="mode-switcher-label">ChatGPT</span>
-            <svg class="mode-switcher__chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 10 4 4 4-4"/></svg>
+            <svg class="mode-switcher__chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m10 7 5 5-5 5"/></svg>
           </button>
           <div id="mode-switcher-menu" class="mode-switcher__menu" role="menu" aria-label="Chatansicht auswählen" hidden>
             <button class="mode-option" type="button" role="menuitemradio" aria-checked="true" data-chat-mode="general">
-              <span class="mode-option__copy"><strong>ChatGPT</strong><span>Fragen, lernen und erkunden</span></span>
-              <span class="mode-option__check" aria-hidden="true">✓</span>
+              <span class="mode-option__copy"><strong>ChatGPT</strong><span>Erstellen, lernen und erkunden</span></span>
+              <svg class="mode-option__check" viewBox="0 0 16 16" aria-hidden="true"><path d="m3 8 3 3 7-7"/></svg>
             </button>
             <button class="mode-option" type="button" role="menuitemradio" aria-checked="false" data-chat-mode="coding">
               <span class="mode-option__copy"><strong>Codex</strong><span>Erstellen, debuggen und ausliefern</span></span>
-              <span class="mode-option__check" aria-hidden="true">✓</span>
+              <svg class="mode-option__check" viewBox="0 0 16 16" aria-hidden="true"><path d="m3 8 3 3 7-7"/></svg>
             </button>
             <button class="mode-option" type="button" role="menuitemradio" aria-checked="false" data-chat-mode="claudescience">
-              <span class="mode-option__copy"><strong>Claude Science</strong><span>Forschen, analysieren und publizieren</span></span>
-              <span class="mode-option__check" aria-hidden="true">✓</span>
+              <span class="mode-option__copy"><strong>Claude Science</strong><span>Deep Research, Analysen und Nachweise</span></span>
+              <svg class="mode-option__check" viewBox="0 0 16 16" aria-hidden="true"><path d="m3 8 3 3 7-7"/></svg>
             </button>
           </div>
         </div>
+        <button id="open-settings" type="button" aria-label="Missum Einstellungen öffnen" hidden>Einstellungen</button>
         <span class="sidebar-toolbar-spacer"></span>
-        <button id="toggle-sessions" class="sidebar-icon-button" type="button" title="Sitzungsleiste ein- oder ausklappen" aria-label="Sitzungsleiste ein- oder ausklappen" aria-expanded="true">
+        <button id="toggle-sessions" class="sidebar-icon-button" type="button" title="Sitzungsleiste ein- oder ausklappen" aria-label="Sitzungsleiste ein- oder ausklappen" aria-expanded="true" hidden>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
         </button>
-        <button id="clear-sessions" class="sidebar-icon-button" type="button" title="Alle Sitzungen in dieser Ansicht löschen" aria-label="Alle Sitzungen in dieser Ansicht löschen">
+        <button id="clear-sessions" class="sidebar-icon-button" type="button" title="Alle Sitzungen in dieser Ansicht löschen" aria-label="Alle Sitzungen in dieser Ansicht löschen" hidden>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5"/></svg>
         </button>
+        <button id="toggle-session-search" class="sidebar-icon-button" type="button" title="Projekte und Sitzungen suchen" aria-label="Projekte und Sitzungen suchen" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 4 4"/></svg></button>
         <button id="collapse-sessions" class="sidebar-icon-button mobile-only" type="button" aria-label="Sitzungen schließen">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
         </button>
       </div>
 
-      <label class="search-field" title="Sitzung suchen">
+      <label id="session-search-field" class="search-field" title="Sitzung suchen" hidden>
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m16.2 16.2 4 4"/></svg>
         <input id="session-search" type="search" autocomplete="off" placeholder="Projekt oder Sitzung suchen">
       </label>
@@ -58,6 +66,9 @@
         </button>
       </div>
       <div id="session-list" class="session-list" role="list"></div>
+      <footer class="sidebar-footer" hidden>
+        <span id="browser-host-label" class="browser-host-label">Werkzeuge laufen auf diesem PC</span>
+      </footer>
     </aside>
 
     <button id="open-sessions" class="mobile-sidebar-trigger mobile-only" type="button" aria-label="Sitzungen öffnen">
@@ -65,6 +76,14 @@
     </button>
 
     <main class="chat-pane">
+      <nav class="assistant-tabbar" aria-label="Sitzungsansichten">
+        <button id="tabbar-sidebar-toggle" class="icon-button" type="button" aria-label="Seitenleiste umschalten"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+        <div id="session-tabs" class="session-tabs" role="tablist"></div>
+        <button id="inspector-toggle" class="icon-button" type="button" aria-label="Ausgaben einblenden" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3 10 14M11 5H4v15h15v-7"/></svg></button>
+      </nav>
+      <section id="browser-view-panel" class="browser-view-panel" hidden aria-label="Sitzungsansicht"></section>
+      <section id="settings-page" class="settings-page" hidden aria-label="Missum Einstellungen"></section>
+      <nav id="prompt-navigation" class="prompt-navigation" aria-label="Chronologische Prompt-Navigation" hidden></nav>
       <section id="science-workbench" class="science-workbench" aria-label="Claude Science Forschungsoberfläche" hidden>
         <header class="science-toolbar">
           <div class="science-toolbar__identity">
@@ -107,25 +126,12 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v16m-6-6 6 6 6-6"/></svg>
         </button>
         <div id="context-strip" class="context-strip" hidden>
-          <div id="active-tool-chips" class="active-tool-chips"></div>
           <div id="coding-changes" class="coding-changes" hidden></div>
           <div id="document-chips" class="document-chips"></div>
-          <div id="composer-speech-status" class="composer-speech-status" role="status" aria-live="polite" hidden>
-            <span class="composer-speech-status__indicator">
-              <button id="composer-speech-pause" class="composer-speech-status__pause" type="button" title="Pausieren" aria-label="Pausieren" disabled>
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path id="composer-speech-pause-icon" d="M8 5v14M16 5v14"/></svg>
-              </button>
-            </span>
-            <span class="composer-speech-status__label">Vorlesen</span>
-            <button id="composer-speech-stop" class="composer-speech-status__stop active-tool-chip__remove" type="button" title="Vorlesen beenden" aria-label="Vorlesen beenden" disabled>
-              <span aria-hidden="true">×</span>
-            </button>
-            <span id="composer-speech-detail"></span>
-          </div>
         </div>
 
         <div class="composer">
-          <textarea id="prompt" rows="1" maxlength="100000" placeholder="Nachricht eingeben …" aria-label="Nachricht"></textarea>
+          <textarea id="prompt" rows="1" maxlength="100000" placeholder="Frag etwas" aria-label="Nachricht"></textarea>
           <div class="composer-toolbar">
             <div class="toolbar-group composer-tools">
               <div class="tools-menu-anchor">
@@ -137,24 +143,20 @@
                   <div id="tools-menu-content" class="action-menu__content"></div>
                 </div>
               </div>
-
-              <div class="tools-menu-anchor reasoning-menu-anchor">
-                <button id="reasoning-button" class="tool-button icon-only" type="button" title="Reasoning" aria-label="Reasoning auswählen" aria-haspopup="menu" aria-expanded="false" aria-controls="reasoning-menu">
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18h6M10 21h4M8 14a6 6 0 1 1 8 0c-1 1-1 2-1 3H9c0-1 0-2-1-3Z"/></svg>
-                </button>
-                <div id="reasoning-menu" class="tools-menu reasoning-menu" role="menu" aria-label="Reasoning auswählen" hidden>
-                  <div class="tools-menu__title">Denkleistung</div>
-                  <p id="reasoning-detail" class="reasoning-menu__detail" role="status">Modellinformationen werden geladen.</p>
-                  <div id="reasoning-options"></div>
-                </div>
-              </div>
-              <div id="context-meter" class="context-meter" title="Kontext: 0 von 0 Tokens" role="img" aria-label="Kontext zu 0 Prozent belegt">
-                <span class="context-ring" aria-hidden="true"></span>
-                <span id="context-label">0%</span>
-              </div>
+              <div id="active-tool-chips" class="active-tool-chips" aria-label="Ausgewählte Werkzeuge"></div>
             </div>
 
             <div class="toolbar-group composer-submit">
+              <div id="context-meter" class="context-meter" title="Kontext: 0 von 0 Tokens" role="img" aria-label="Kontext zu 0 Prozent belegt"><span class="context-ring" aria-hidden="true"></span><span id="context-label">0%</span></div>
+              <div class="tools-menu-anchor reasoning-menu-anchor">
+                <button id="reasoning-button" class="model-reasoning-button" type="button" title="Reasoning" aria-label="Modell und Reasoning auswählen" aria-haspopup="dialog" aria-expanded="false" aria-controls="reasoning-menu"><span id="selected-model-label">Modell auswählen</span><span id="selected-reasoning-label"></span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m10 7 5 5-5 5"/></svg></button>
+                <div id="reasoning-menu" class="tools-menu reasoning-menu" role="dialog" aria-label="Modell und Reasoning" hidden>
+                  <div id="reasoning-title" class="reasoning-title">Reasoning</div>
+                  <button id="open-model-dialog" class="reasoning-model-link" type="button">Modell auswählen ›</button>
+                  <p id="reasoning-detail" class="reasoning-menu__detail" role="status">Modellinformationen werden geladen.</p>
+                  <div class="reasoning-slider"><input id="reasoning-range" type="range" min="0" max="0" step="1" aria-label="Denkaufwand"><div id="reasoning-options"></div></div>
+                </div>
+              </div>
               <button id="microphone" class="microphone-button" type="button" title="Sprachsteuerung starten" aria-label="Sprachsteuerung starten">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0M12 17v4M9 21h6"/></svg>
                 <span class="microphone-frequency" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
@@ -168,6 +170,7 @@
         </div>
       </section>
       </section>
+      <aside id="output-inspector" class="output-inspector" hidden aria-label="Ausgaben und Quellen"></aside>
     </main>
   </div>
 
@@ -197,8 +200,12 @@
   </div>
 
   <div id="toast-region" class="toast-region" aria-live="polite"></div>
+  <div id="local-model-overlay" class="modal-backdrop" hidden><section class="local-model-dialog" role="dialog" aria-modal="true" aria-labelledby="local-model-title"><h2 id="local-model-title">Lokales Modell</h2><label for="model-picker">Modell</label><select id="model-picker" class="model-picker" aria-label="Modell auswählen"><option value="">Modell auswählen</option></select><label for="local-model-effort">Denkaufwand</label><select id="local-model-effort" aria-label="Denkaufwand für das Modell"></select><p id="local-model-detail" class="browser-muted"></p><footer><button id="cancel-local-model" class="secondary" type="button">Abbrechen</button><button id="apply-local-model" class="primary" type="button">Übernehmen</button></footer></section></div>
+  <button id="browser-audio-resume" class="browser-audio-resume primary" type="button" hidden>F5-Wiedergabe starten</button>
   <script src="vendor/katex/0.16.10/katex.min.js?v=20260814-3"></script>
-  <script src="bridge.js?v=20260927-science-workbench-1"></script>
+  <script src="bridge.js?v=20261005-lan-1"></script>
+  <script src="browser-appearance.js?v=20261005-1"></script>
+  <script src="browser-speech.js?v=20261005-1"></script>
   <script src="reasoning-menu.js?v=20260927-science-tools-1"></script>
   <script src="voice.js?v=20260822-2"></script>
   <script src="vendor/highlightjs/11.11.1/highlight.min.js"></script>
@@ -206,9 +213,16 @@
   <script src="code-highlighting.js?v=20260913-3"></script>
   <script src="markdown.js?v=20260913-3"></script>
   <script src="coding-timeline.js?v=20260920-artifacts-1"></script>
-  <script src="run-steering.js?v=20260919-agents-1"></script>
+  <script src="run-steering.js?v=20261005-lan-1"></script>
   <script src="coding-changes.js?v=20260913-3"></script>
   <script src="chat-scroll.js?v=20260913-3"></script>
-  <script src="app.js?v=20260927-science-workbench-1"></script>
+  <script src="browser-tools-menu.js?v=20261005-1"></script>
+  <script src="browser-workspace.js?v=20261005-1"></script>
+  <script src="browser-render-timing.js?v=20261006-1"></script>
+  <script src="app.js?v=20261006-lan-2"></script>
+  <script src="settings.js?v=20261005-1"></script>
+  <script src="browser-prompt-timeline.js?v=20261006-1"></script>
+  <script src="browser-panels.js?v=20261006-1"></script>
+  <script src="browser-menubar.js?v=20261005-1"></script>
 </body>
 </html>

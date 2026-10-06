@@ -9,10 +9,11 @@ public sealed partial class MissumAiAssistantService
 
     public async Task RequestLiveModelSelectionAsync(CancellationToken cancellationToken = default)
     {
-        if (ActiveSessionId is not { } session || string.IsNullOrWhiteSpace(settings.Current.SelectedModel))
+        if (_activeRunClientId != AssistantClientExecutionScope.ClientId) return;
+        if (ActiveSessionId is not { } session || string.IsNullOrWhiteSpace(CurrentSettings.SelectedModel))
         { _pendingModelSelection = null; return; }
         var role = UsesCodingAgent(_activeRunAction) ? "coding" : "general";
-        _pendingModelSelection = new(session.ToString("D"), settings.Current.SelectedModel, StoredReasoning(settings.Current, settings.Current.SelectedModel, role));
+        _pendingModelSelection = new(session.ToString("D"), CurrentSettings.SelectedModel, StoredReasoning(CurrentSettings, CurrentSettings.SelectedModel, role));
         await FlushLiveModelSelectionAsync(cancellationToken).ConfigureAwait(false);
     }
 

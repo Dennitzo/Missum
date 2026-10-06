@@ -1,30 +1,99 @@
 (function () {
   "use strict";
 
-  const version = 1;
-  const clientId = (() => {
+  const version = 2;
+  function storedIdentity(storageName, key) {
     try {
-      const saved = globalThis.sessionStorage?.getItem("assistant.lan.client-id");
+      const storage = globalThis[storageName];
+      const saved = storage?.getItem(key);
       if (saved) return saved;
       const created = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-      globalThis.sessionStorage?.setItem("assistant.lan.client-id", created);
+      storage?.setItem(key, created);
       return created;
     } catch {
       return globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     }
-  })();
+  }
+  const deviceId = storedIdentity("localStorage", "assistant.lan.device-id");
+  let tabId = storedIdentity("sessionStorage", "assistant.lan.tab-id");
+  let clientId = `${deviceId}.${tabId}`;
+  let identityReady = false;
+  let identityChannel = null;
+  let identityInstance = null;
+  let lanTransportGeneration = 0;
   let lanSocket = null;
   let lanEvents = null;
   let lanHttpReady = false;
   let lanTransportWasReady = false;
   let lanHttpSendChain = Promise.resolve();
-  let browserSpeech = null;
-  let browserSpeechPaused = false;
-  let browserSpeechGeneration = 0;
+  let hostEpoch = null;
+  let lastRevision = 0;
   const pendingLanMessages = [];
+  const unacknowledgedChatCommands = new Map();
+  function currentClientEnvelope(serialized) {
+    const envelope = JSON.parse(serialized); envelope.clientId = clientId; envelope.tabId = tabId; return JSON.stringify(envelope);
+  }
+  function abandonSentChat(message) {
+    for (const [requestId, command] of unacknowledgedChatCommands) {
+      if (!command.sent) continue;
+      unacknowledgedChatCommands.delete(requestId);
+      receive({ data: { version, type: "host.error", requestId, payload: { message } } });
+    }
+  }
+  function renewTabIdentity() {
+    tabId = newRequestId(); clientId = `${deviceId}.${tabId}`;
+    try { globalThis.sessionStorage?.setItem("assistant.lan.tab-id", tabId); } catch { /* Page identity remains unique without storage. */ }
+    if (!identityReady) return;
+    // A delayed collision must not replay an already submitted job as a second client.
+    abandonSentChat("Dieser Tab wurde von einem zweiten Tab getrennt. Prüfe den Chat vor einem erneuten Auftrag; eine unbestätigte Eingabe bleibt erhalten.");
+    lanTransportGeneration += 1;
+    lanSocket?.close(); lanEvents?.close(); lanSocket = null; lanEvents = null; lanHttpReady = false;
+    globalThis.dispatchEvent(new CustomEvent("missum:bridge-disconnected"));
+    connectLanBridge();
+  }
+  function claimTabIdentity() {
+    if (typeof BroadcastChannel !== "function") return false;
+    try { identityChannel = new BroadcastChannel(`missum-assistant-tabs:v2:${deviceId}`); } catch { return false; }
+    identityInstance = newRequestId();
+    identityChannel.addEventListener("message", event => {
+      const claim = event.data;
+      if (!claim || claim.tabId !== tabId || claim.instanceId === identityInstance) return;
+      if (claim.type === "probe" && (identityReady || identityInstance.localeCompare(claim.instanceId) < 0)) {
+        identityChannel.postMessage({ type: "occupied", tabId, instanceId: identityInstance, targetInstanceId: claim.instanceId });
+      } else if (claim.type === "occupied" && claim.targetInstanceId === identityInstance) renewTabIdentity();
+    });
+    globalThis.addEventListener?.("pagehide", () => identityChannel?.close());
+    identityChannel.postMessage({ type: "probe", tabId, instanceId: identityInstance });
+    return true;
+  }
+  function markChatRetry() {
+    for (const command of unacknowledgedChatCommands.values()) if (command.sent) command.retryNeeded = true;
+  }
+  function acknowledgeChat(envelope) {
+    if (["chat.queued", "chat.started", "chat.completed", "chat.cancelled", "chat.failed", "host.error"].includes(envelope.type)) {
+      unacknowledgedChatCommands.delete(envelope.requestId);
+    } else if (envelope.type === "action.completed" && envelope.version === 2 && envelope.payload?.duplicate
+      && envelope.payload.originalRequestId === envelope.requestId) unacknowledgedChatCommands.delete(envelope.requestId);
+    else if (["state.snapshot", "queue.changed"].includes(envelope.type)) {
+      const queue = envelope.payload.runQueue || (envelope.type === "queue.changed" ? envelope.payload : null);
+      for (const run of [queue?.active, ...(queue?.pending || [])]) if (run?.requestId) unacknowledgedChatCommands.delete(run.requestId);
+    }
+  }
+  function retryChatAfterSnapshot() {
+    for (const command of unacknowledgedChatCommands.values()) {
+      if (!command.retryNeeded) continue;
+      if (lanSocket?.readyState === 1) lanSocket.send(command.serialized);
+      else if (lanHttpReady) sendHttp(command.serialized);
+      else return;
+      command.retryNeeded = false;
+    }
+  }
   const allowedOutbound = new Set([
-    "app.ready", "conversation.refresh", "chat.send", "chat.steer", "chat.cancel", "session.create", "session.open",
-    "mode.switch", "action.invoke",
+    "app.ready", "conversation.refresh", "chat.send", "chat.steer", "chat.cancel", "chat.resume", "session.create", "session.open",
+    "models.list", "models.select", "science.presentation.get", "settings.get", "settings.update", "settings.connectionTest",
+    "promptTriggers.list", "promptTriggers.apply",
+    "backup.create", "backup.restore", "backup.restoreCommit", "backup.restoreCancel", "speech.playbackProgress", "session.groupDeleteEmpty",
+    "mode.switch", "action.invoke", "workspace.browse",
     "reasoning.get", "reasoning.set",
     "session.rename", "session.delete", "session.clear", "session.draft", "session.groupCollapse", "session.projectCreate", "session.workspaceCreate", "document.pick", "document.paste", "document.upload",
     "document.remove",
@@ -39,7 +108,11 @@
   ]);
   const allowedInbound = new Set([
     "state.snapshot", "conversation.snapshot", "conversation.messageCommitted", "action.completed",
-    "reasoning.snapshot",
+    "models.snapshot", "settings.snapshot", "settings.changed", "settings.conflict", "settings.error", "settings.connectionResult",
+    "promptTriggers.snapshot", "promptTriggers.changed",
+    "backup.ready", "backup.restoreReady", "backup.restoreDeferred", "backup.restored", "speech.audio", "speech.reset", "speech.complete", "speech.pause",
+    "subagent.snapshot", "subagents.snapshot", "science.presentation", "download.ready", "host.capabilities", "backup.cancelled",
+    "reasoning.snapshot", "workspace.list",
     "chat.queued", "queue.changed", "chat.started", "chat.delta", "chat.completed", "chat.steer.accepted",
     "chat.cancelled", "chat.failed", "coding.changes", "session.changed", "session.grouped",
     "memory.snapshot", "memory.changed", "research.snapshot", "research.exported", "document.changed", "document.import.started", "document.import.progress", "document.import.completed", "status.changed", "speech.status", "speech.progress", "theme.changed",
@@ -51,7 +124,12 @@
     if (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function") {
       return globalThis.crypto.randomUUID();
     }
-    return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const bytes = new Uint8Array(16);
+    if (globalThis.crypto?.getRandomValues) globalThis.crypto.getRandomValues(bytes);
+    else for (let index = 0; index < bytes.length; index += 1) bytes[index] = Math.floor(Math.random() * 256);
+    bytes[6] = (bytes[6] & 15) | 64; bytes[8] = (bytes[8] & 63) | 128;
+    const hex = Array.from(bytes, value => value.toString(16).padStart(2, "0")).join("");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
   }
 
   function isLanBrowser() {
@@ -172,73 +250,6 @@
     receive({ data: { version, type, requestId: requestId || newRequestId(), payload } });
   }
 
-  function browserSpeechState(active, requestId, error = null) {
-    emitLocal("speech.status", {
-      active,
-      status: active ? (browserSpeechPaused ? "Pausiert" : "Sprachausgabe wird wiedergegeben") : (error ? "Fehlgeschlagen" : "Abgeschlossen"),
-      detail: "Wiedergabe auf diesem Browser-PC",
-      model: "Browser-Sprachausgabe",
-      error
-    }, requestId);
-    emitLocal("microphone.changed", {
-      isRecording: false,
-      isBusy: active,
-      isSpeaking: active,
-      canPauseSpeech: active,
-      isSpeechPaused: active && browserSpeechPaused,
-      status: active ? (browserSpeechPaused ? "Pausiert" : "Spricht") : "Inaktiv",
-      provider: "browser",
-      error
-    }, requestId);
-  }
-
-  function finishBrowserSpeech(requestId, generation, error = null) {
-    if (generation !== browserSpeechGeneration) return;
-    browserSpeech = null;
-    browserSpeechPaused = false;
-    browserSpeechState(false, requestId, error);
-  }
-
-  function speakInBrowser(text, requestId) {
-    if (!globalThis.speechSynthesis || typeof globalThis.SpeechSynthesisUtterance !== "function") {
-      emitLocal("host.error", { message: "Dieser Browser unterstützt keine lokale Sprachausgabe." }, requestId);
-      return;
-    }
-    browserSpeechGeneration += 1;
-    const generation = browserSpeechGeneration;
-    globalThis.speechSynthesis.cancel();
-    const spokenText = String(text || "")
-      .replace(/```[\s\S]*?```/g, " Codeblock. ")
-      .replace(/[`*_>#\[\]()~-]+/g, " ")
-      .replace(/\s+/g, " ").trim();
-    if (!spokenText) return;
-    const utterance = new globalThis.SpeechSynthesisUtterance(spokenText);
-    utterance.lang = document.documentElement.lang || "de-DE";
-    utterance.onstart = () => browserSpeechState(true, requestId);
-    utterance.onend = () => finishBrowserSpeech(requestId, generation);
-    utterance.onerror = event => finishBrowserSpeech(
-      requestId, generation, event?.error === "canceled" ? null : "Die Browser-Sprachausgabe ist fehlgeschlagen.");
-    browserSpeech = utterance;
-    browserSpeechPaused = false;
-    globalThis.speechSynthesis.speak(utterance);
-  }
-
-  function stopBrowserSpeech(requestId) {
-    browserSpeechGeneration += 1;
-    globalThis.speechSynthesis?.cancel();
-    browserSpeech = null;
-    browserSpeechPaused = false;
-    browserSpeechState(false, requestId);
-  }
-
-  function toggleBrowserSpeech(requestId) {
-    if (!browserSpeech || !globalThis.speechSynthesis) return;
-    if (browserSpeechPaused) globalThis.speechSynthesis.resume();
-    else globalThis.speechSynthesis.pause();
-    browserSpeechPaused = !browserSpeechPaused;
-    browserSpeechState(true, requestId);
-  }
-
   async function printInBrowser(messageId) {
     if (!globalThis.missumPrepareBookPdf?.(messageId || null)) return;
     let finished = false;
@@ -258,6 +269,15 @@
   function handleBrowserAction(envelope) {
     if (!isLanBrowser()) return false;
     const payload = envelope.payload || {};
+    if (["screen.capture", "screenClip.start", "audioCapture.start"].includes(envelope.type)) {
+      globalThis.missumApp?.notify("Aufnahme ist über HTTP nicht verfügbar. Wähle eine Datei oder einen Screenshot.");
+      pickBrowserFiles(payload.sessionId || globalThis.missumApp?.getState()?.activeSessionId, envelope.requestId);
+      return true;
+    }
+    if (["microphone.start", "microphone.audio", "liveCaption.start"].includes(envelope.type) && !globalThis.isSecureContext) {
+      emitLocal("host.error", { message: "Mikrofonaufnahme und Live-Untertitel sind über die HTTP-LAN-Adresse nicht verfügbar. Hänge eine Audio- oder Videodatei an." }, envelope.requestId);
+      return true;
+    }
     if (envelope.type === "document.pick"
       || (envelope.type === "action.invoke" && payload.actionId === "builtin.workspace/attach-files-and-folders")) {
       pickBrowserFiles(payload.sessionId, envelope.requestId);
@@ -267,22 +287,14 @@
       copyInBrowser(payload.text);
       return true;
     }
-    if (envelope.type === "microphone.speak") {
-      speakInBrowser(payload.text, envelope.requestId);
-      return true;
-    }
     if (envelope.type === "microphone.stopSpeech") {
-      stopBrowserSpeech(envelope.requestId);
-      return true;
+      globalThis.missumBrowserSpeech?.stop();
+      return false;
     }
     if (envelope.type === "microphone.toggleSpeechPause") {
-      toggleBrowserSpeech(envelope.requestId);
-      return true;
-    }
-    if (envelope.type === "message.exportPdf"
-      || (envelope.type === "action.invoke" && payload.actionId === "builtin.documents/export-chat-pdf")) {
-      void printInBrowser(envelope.type === "message.exportPdf" ? payload.messageId : null);
-      return true;
+      const paused = globalThis.missumBrowserSpeech?.togglePause();
+      if (typeof paused === "boolean") envelope.payload.paused = paused;
+      return false;
     }
     if ((envelope.type === "artifact.open" || envelope.type === "artifact.save") && payload.artifactId) {
       const suffix = envelope.type === "artifact.save" ? "?download=1" : "";
@@ -314,13 +326,17 @@
       throw new Error(`Nicht erlaubter Bridge-Typ: ${type}`);
     }
     const envelope = { version, type, requestId: requestId || newRequestId(), payload: payload || {} };
-    if (isLanBrowser()) envelope.clientId = clientId;
+    if (isLanBrowser()) { envelope.clientId = clientId; envelope.tabId = tabId; }
     if (handleBrowserAction(envelope)) return envelope.requestId;
     if (globalThis.chrome?.webview) {
       globalThis.chrome.webview.postMessage(envelope);
     } else if (location.protocol.startsWith("http")) {
       const serialized = JSON.stringify(envelope);
-      if (lanSocket?.readyState === 1) lanSocket.send(serialized);
+      if (type === "chat.send" || type === "chat.resume") unacknowledgedChatCommands.set(envelope.requestId, { serialized, sent: Boolean(lanSocket?.readyState === 1 || lanHttpReady), retryNeeded: false });
+      if (lanSocket?.readyState === 1) {
+        try { lanSocket.send(serialized); }
+        catch (error) { unacknowledgedChatCommands.delete(envelope.requestId); throw error; }
+      }
       else if (lanHttpReady) sendHttp(serialized);
       else pendingLanMessages.push(serialized);
     } else {
@@ -330,7 +346,7 @@
   }
 
   function configureContract(contract) {
-    if (!contract || Number(contract.version) !== version) return false;
+    if (!contract || ![1, version].includes(Number(contract.version))) return false;
     const outbound = Array.isArray(contract.clientActions) ? contract.clientActions : [];
     const inbound = Array.isArray(contract.hostEvents) ? contract.hostEvents : [];
     if (!outbound.includes("app.ready") || !inbound.includes("state.snapshot") || !inbound.includes("host.error")) return false;
@@ -343,11 +359,26 @@
 
   function receive(event) {
     const envelope = event.data;
-    if (!envelope || envelope.version !== version || typeof envelope.type !== "string"
+    if (!envelope || ![1, version].includes(envelope.version) || typeof envelope.type !== "string"
       || !allowedInbound.has(envelope.type) || typeof envelope.payload !== "object") {
       return;
     }
+    if (envelope.clientId && envelope.clientId !== clientId && isLanBrowser()) return;
+    if (envelope.hostEpoch && envelope.hostEpoch !== hostEpoch) {
+      if (hostEpoch) {
+        abandonSentChat("Missum wurde neu gestartet. Prüfe den Chat vor einem erneuten Auftrag; deine noch unbestätigte Eingabe bleibt erhalten.");
+      }
+      hostEpoch = envelope.hostEpoch;
+      lastRevision = 0;
+    }
+    const revision = Number(envelope.revision);
+    if (Number.isFinite(revision) && revision > 0) {
+      if (revision <= lastRevision) return;
+      lastRevision = revision;
+    }
+    acknowledgeChat(envelope);
     globalThis.dispatchEvent(new CustomEvent("missum:host-message", { detail: envelope }));
+    if (envelope.type === "state.snapshot") retryChatAfterSnapshot();
   }
 
   if (globalThis.chrome?.webview) {
@@ -355,7 +386,12 @@
   }
 
   function flushPending(send) {
-    while (pendingLanMessages.length > 0) send(pendingLanMessages.shift());
+    while (pendingLanMessages.length > 0) {
+      const serialized = currentClientEnvelope(pendingLanMessages.shift());
+      const command = unacknowledgedChatCommands.get(JSON.parse(serialized).requestId);
+      if (command) { command.sent = true; command.serialized = serialized; }
+      send(serialized);
+    }
     globalThis.dispatchEvent(new CustomEvent("missum:bridge-ready"));
   }
 
@@ -382,18 +418,21 @@
   }
 
   function readyEnvelope() {
-    return JSON.stringify({ version, type: "app.ready", requestId: newRequestId(), payload: {}, clientId });
+    return JSON.stringify({ version, type: "app.ready", requestId: newRequestId(), payload: {}, clientId, tabId });
   }
 
   function connectHttpBridge() {
     if (lanEvents || typeof EventSource !== "function" || typeof fetch !== "function") return;
+    const generation = lanTransportGeneration;
     const eventUrl = new URL("events", location.href);
     eventUrl.searchParams.set("clientId", clientId);
     lanEvents = new EventSource(eventUrl);
     lanEvents.addEventListener("message", event => {
+      if (generation !== lanTransportGeneration) return;
       try { receive({ data: JSON.parse(event.data) }); } catch { /* Reject malformed host data. */ }
     });
     lanEvents.addEventListener("open", () => {
+      if (generation !== lanTransportGeneration) return;
       const pendingHasReady = pendingLanMessages.some(serialized => {
         try { return JSON.parse(serialized)?.type === "app.ready"; } catch { return false; }
       });
@@ -403,11 +442,16 @@
       flushPending(sendHttp);
     });
     lanEvents.addEventListener("error", () => {
+      if (generation !== lanTransportGeneration) return;
       lanHttpReady = false;
+      markChatRetry();
+      globalThis.dispatchEvent(new CustomEvent("missum:bridge-disconnected"));
     });
   }
 
+  function connectLanBridge() {
   if (isLanBrowser()) {
+    const generation = lanTransportGeneration;
     if (typeof WebSocket === "function") {
       const socketProtocol = location.protocol === "https:" ? "wss:" : "ws:";
       try {
@@ -420,28 +464,44 @@
       }
       if (!lanSocket) return;
       lanSocket.addEventListener("message", event => {
+        if (generation !== lanTransportGeneration) return;
         try { receive({ data: JSON.parse(event.data) }); } catch { /* Reject malformed host data. */ }
       });
       lanSocket.addEventListener("open", () => {
+        if (generation !== lanTransportGeneration) return;
         lanTransportWasReady = true;
         flushPending(serialized => lanSocket.send(serialized));
       });
       lanSocket.addEventListener("close", () => {
+        if (generation !== lanTransportGeneration) return;
         lanSocket = null;
+        markChatRetry();
+        globalThis.dispatchEvent(new CustomEvent("missum:bridge-disconnected"));
         connectHttpBridge();
       });
     } else {
       connectHttpBridge();
     }
   }
+  }
 
   globalThis.missumBridge = Object.freeze({
     post,
+    newRequestId,
     version,
-    clientId,
+    get clientId() { return clientId; },
+    deviceId,
+    get tabId() { return tabId; },
+    capabilities: Object.freeze({ microphone: !isLanBrowser() || Boolean(globalThis.isSecureContext && globalThis.navigator?.mediaDevices?.getUserMedia), screen: !isLanBrowser() || Boolean(globalThis.isSecureContext && globalThis.navigator?.mediaDevices?.getDisplayMedia) }),
     isLanBrowser: isLanBrowser(),
     uploadFiles,
+    fileToBase64,
+    pickFiles: pickBrowserFiles,
     resourceUrl: browserResourceUrl,
     configureContract
   });
+  if (isLanBrowser()) {
+    if (claimTabIdentity()) setTimeout(() => { identityReady = true; connectLanBridge(); }, 150);
+    else { identityReady = true; connectLanBridge(); }
+  }
 })();

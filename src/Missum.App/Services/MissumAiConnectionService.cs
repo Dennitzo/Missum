@@ -55,7 +55,7 @@ public sealed partial class MissumAiConnectionService(
         CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
-        var addressText = baseAddressOverride?.AbsoluteUri ?? settings.Current.MissumAiServerUrl;
+        var addressText = baseAddressOverride?.AbsoluteUri ?? AssistantClientExecutionScope.Resolve(settings.Current).MissumAiServerUrl;
         if (!Uri.TryCreate(addressText.TrimEnd('/') + "/", UriKind.Absolute, out var baseAddress)
             || baseAddress.Scheme is not ("http" or "https"))
         {

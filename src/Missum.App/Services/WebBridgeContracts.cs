@@ -7,7 +7,8 @@ public sealed record WebBridgeEnvelope(
     string Type,
     string RequestId,
     JsonElement Payload,
-    string? ClientId = null);
+    string? ClientId = null,
+    string? TabId = null);
 
 public sealed class WebBridgeMessageEventArgs(WebBridgeEnvelope envelope) : EventArgs
 {

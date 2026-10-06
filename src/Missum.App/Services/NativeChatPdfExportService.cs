@@ -13,11 +13,20 @@ public sealed class NativeChatPdfExportService(
     IChatArtifactRepository artifacts,
     DocumentPdfExporter renderer)
 {
+    public Task<ChatPdfExportReceipt> ExportAsync(Guid sessionId, string destinationPath,
+        CancellationToken cancellationToken = default) => ExportAsync(sessionId, destinationPath, null, cancellationToken);
+
     public async Task<ChatPdfExportReceipt> ExportAsync(Guid sessionId, string destinationPath,
-        CancellationToken cancellationToken = default)
+        Guid? messageId, CancellationToken cancellationToken = default)
     {
         var snapshot = await conversations.GetAsync(sessionId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Die zu exportierende Sitzung wurde nicht gefunden.");
+        if (messageId is { } selectedId)
+        {
+            var selected = snapshot.Messages.FirstOrDefault(message => message.Id == selectedId)
+                ?? throw new InvalidOperationException("Die zu exportierende Nachricht wurde nicht gefunden.");
+            snapshot = snapshot with { Messages = [selected] };
+        }
         if (snapshot.Messages.Count == 0) throw new InvalidOperationException("Der Chat enthält noch keine Nachrichten.");
         var destination = Path.GetFullPath(destinationPath);
         if (!string.Equals(Path.GetExtension(destination), ".pdf", StringComparison.OrdinalIgnoreCase))

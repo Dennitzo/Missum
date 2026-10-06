@@ -1,0 +1,126 @@
+/* NativeAssistantPage.ShowComposerTools: composer-wide, single-line rows. */
+#tools-menu.native-tools-menu {
+  --native-tools-surface: var(--surface-solid, #2c2c2c);
+  --native-tools-border: var(--border, #3d3d3d);
+  --native-tools-title: var(--muted, #9b9b9b);
+  --native-tools-label: var(--text, #dcdcdc);
+  --native-tools-detail: var(--muted, #919191);
+  position: fixed;
+  top: auto;
+  right: auto;
+  min-width: 0;
+  max-width: calc(100vw - 16px);
+  max-height: var(--native-tools-max-height, 320px);
+  padding: 4px 5px;
+  border: 1px solid var(--native-tools-border);
+  border-radius: 24px;
+  background: var(--native-tools-surface);
+  box-shadow: 0 12px 30px rgb(0 0 0 / 18%);
+  backdrop-filter: none;
+  overflow: hidden;
+  z-index: 80;
+}
+html[data-theme="dark"] #tools-menu.native-tools-menu {
+  --native-tools-surface: #2c2c2c;
+  --native-tools-border: #3d3d3d;
+  --native-tools-title: #9b9b9b;
+  --native-tools-label: #dcdcdc;
+  --native-tools-detail: #919191;
+}
+#tools-menu.native-tools-menu[hidden] { display: none; }
+#tools-menu.native-tools-menu .tools-menu__title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 25px;
+  margin: 0;
+  padding: 2px 8px 3px;
+  color: var(--native-tools-title);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 20px;
+}
+#tools-menu.native-tools-menu .native-tools-content {
+  display: block;
+  max-height: calc(var(--native-tools-max-height, 320px) - 35px);
+  padding: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-gutter: stable;
+}
+#tools-menu.native-tools-menu .native-tools-row {
+  display: grid;
+  grid-template-columns: 16px max-content minmax(0, 1fr) 16px;
+  align-items: center;
+  column-gap: 8px;
+  width: 100%;
+  min-height: 28px;
+  height: 28px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 15px;
+  background: transparent;
+  color: var(--native-tools-label);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 20px;
+  text-align: left;
+}
+#tools-menu.native-tools-menu .native-tools-row:hover:not(:disabled),
+#tools-menu.native-tools-menu .native-tools-row:focus-visible {
+  background: var(--surface-hover, rgb(255 255 255 / 7%));
+}
+#tools-menu.native-tools-menu .native-tools-row:focus-visible {
+  outline: 1px solid var(--accent, #5b9cf6);
+  outline-offset: -1px;
+}
+#tools-menu.native-tools-menu .native-tools-row.active {
+  background: var(--surface-hover, rgb(255 255 255 / 7%));
+  color: var(--native-tools-label);
+}
+#tools-menu.native-tools-menu .native-tools-row:disabled { opacity: .48; cursor: default; }
+#tools-menu.native-tools-menu .native-tools-label {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-weight: 400;
+}
+#tools-menu.native-tools-menu .native-tools-description {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--native-tools-detail);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 20px;
+}
+#tools-menu.native-tools-menu .native-tools-icon { width: 16px; height: 16px; flex: none; }
+#tools-menu.native-tools-menu .native-tools-status { color: var(--native-tools-title); font-size: 13px !important; font-weight: 400; }
+#tools-menu.native-tools-menu .native-tools-status[hidden] { display: none; }
+#tools-menu.native-tools-menu .native-tools-back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  margin: 0 0 0 -5px;
+  padding: 4px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--native-tools-title);
+}
+#tools-menu.native-tools-menu .native-tools-back:hover { background: var(--surface-hover, rgb(255 255 255 / 7%)); }
+@media (max-width: 600px) {
+  #tools-menu.native-tools-menu .native-tools-row { grid-template-columns: 16px minmax(0, 1fr) 16px; }
+  #tools-menu.native-tools-menu .native-tools-description { display: none; }
+  #tools-menu.native-tools-menu .native-tools-row:disabled .native-tools-label::after { content: " · HTTP"; font-size: 11px; }
+}
+@media (forced-colors: active) {
+  #tools-menu.native-tools-menu { background: Canvas; border-color: CanvasText; }
+  #tools-menu.native-tools-menu .native-tools-row { color: CanvasText; }
+  #tools-menu.native-tools-menu .native-tools-icon { color: CanvasText !important; }
+  #tools-menu.native-tools-menu .native-tools-description,
+  #tools-menu.native-tools-menu .tools-menu__title { color: CanvasText; }
+}

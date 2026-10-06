@@ -1,7 +1,9 @@
 (() => {
   "use strict";
   const pending = new Map();
-  const storageKey = sessionId => `assistant.run-steering.v1:${sessionId}`;
+  const storageKey = sessionId => globalThis.missumBridge?.isLanBrowser
+    ? `assistant.run-steering.v2:${globalThis.missumBridge.clientId}:${sessionId}`
+    : `assistant.run-steering.v1:${sessionId}`;
   const legacyStorageKey = sessionId => `go.assistant.steer.v1:${sessionId}`;
 
   function readStoredValue(sessionId) {
@@ -10,6 +12,7 @@
     const canonicalKey = storageKey(sessionId);
     const legacyKey = legacyStorageKey(sessionId);
     const canonical = storage.getItem(canonicalKey);
+    if (globalThis.missumBridge?.isLanBrowser) return canonical;
     if (canonical !== null) {
       storage.removeItem(legacyKey);
       return canonical;
@@ -55,7 +58,7 @@
     const runId = state.activeRunId || null;
     const request = previous?.prompt === prompt && belongsToRun(previous, state)
       ? { ...previous, ...(runId ? { expectedRunId: runId } : {}) }
-      : { sessionId, prompt, inputId: globalThis.crypto.randomUUID(), originMessageId: state.activeRunMessageId || null,
+      : { sessionId, prompt, inputId: globalThis.missumBridge?.newRequestId?.() || globalThis.crypto?.randomUUID?.() || "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, value => { const random = Math.floor(Math.random() * 16); return (value === "x" ? random : (random & 3) | 8).toString(16); }), originMessageId: state.activeRunMessageId || null,
           ...(runId ? { expectedRunId: runId } : {}) };
     pending.set(sessionId, request);
     try { globalThis.localStorage?.setItem(storageKey(sessionId), JSON.stringify(request)); } catch { /* Retry still works in this page. */ }
@@ -93,7 +96,7 @@
     pending.delete(sessionId);
     try {
       globalThis.localStorage?.removeItem(storageKey(sessionId));
-      globalThis.localStorage?.removeItem(legacyStorageKey(sessionId));
+      if (!globalThis.missumBridge?.isLanBrowser) globalThis.localStorage?.removeItem(legacyStorageKey(sessionId));
     } catch { /* Optional storage. */ }
     const sameSession = sessionId === String(state.activeSessionId || "");
     return { accepted: true, clearDraft: sameSession && String(composerText || "").trim() === request.prompt, sameSession };

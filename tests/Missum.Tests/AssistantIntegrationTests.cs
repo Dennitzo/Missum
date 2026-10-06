@@ -99,7 +99,7 @@ public sealed class AssistantIntegrationTests
         Assert.DoesNotContain("\"session.tool\"", bridge, StringComparison.Ordinal);
 
         var html = File.ReadAllText(Path.Combine(webRoot, "index.html"));
-        Assert.Contains("bridge.js?v=20260927-science-workbench-1", html, StringComparison.Ordinal);
+        Assert.Matches("bridge\\.js\\?v=[^\"\\s]+", html);
 
         var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
         Assert.Contains("post(\"action.invoke\"", app, StringComparison.Ordinal);
@@ -175,8 +175,8 @@ public sealed class AssistantIntegrationTests
         var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
         Assert.Contains("session.projectCreate", app, StringComparison.Ordinal);
         Assert.Contains("Neue Sitzung im Projekt", app, StringComparison.Ordinal);
-        Assert.Contains("name: \"Allgemeine Sitzungen\"", app, StringComparison.Ordinal);
-        Assert.Contains("addable: false", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("Allgemeine Sitzungen", app, StringComparison.Ordinal);
+        Assert.Contains("Array.isArray(state.sessionGroups)", app, StringComparison.Ordinal);
         Assert.DoesNotContain("post(\"session.create\"", app, StringComparison.Ordinal);
     }
 
@@ -253,7 +253,7 @@ public sealed class AssistantIntegrationTests
     }
 
     [Fact]
-    public void WebAssetsExposeTheSameMicrophoneContractAndPlaceItAboveSend()
+    public void WebAssetsExposeTheSameMicrophoneContractBesideSendWithoutAStatusChip()
     {
         var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
         var bridge = File.ReadAllText(Path.Combine(webRoot, "bridge.js"));
@@ -300,9 +300,12 @@ public sealed class AssistantIntegrationTests
         Assert.Contains("microphone-frequency", html, StringComparison.Ordinal);
         Assert.DoesNotContain("voice-feedback", html, StringComparison.Ordinal);
         var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
-        Assert.Contains("voice-context-chip", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("voice-context-chip", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("voice-context-chip", html, StringComparison.Ordinal);
         Assert.DoesNotContain("voice-listening-preview", app, StringComparison.Ordinal);
-        Assert.Contains("Ich höre zu", app, StringComparison.Ordinal);
+        Assert.Contains("elements.microphone.classList.toggle(\"recording\", active)", app, StringComparison.Ordinal);
+        Assert.Contains("active ? \"Sprachsteuerung beenden\" : \"Sprachsteuerung starten\"", app, StringComparison.Ordinal);
+        Assert.Contains("elements.microphone.setAttribute(\"aria-label\", label)", app, StringComparison.Ordinal);
         Assert.DoesNotContain("id=\"live-caption\"", html, StringComparison.Ordinal);
         Assert.Contains("isLiveCaption: true", app, StringComparison.Ordinal);
         Assert.Contains("state.liveCaption?.isActive", app, StringComparison.Ordinal);
@@ -324,19 +327,29 @@ public sealed class AssistantIntegrationTests
     }
 
     [Fact]
-    public void ScreenClipEventsRenderOnlyInTheComposerContext()
+    public void ScreenClipEventsUpdateCaptureControlsWithoutAComposerStatusChip()
     {
         var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
+        var html = File.ReadAllText(Path.Combine(webRoot, "index.html"));
         var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
         var styles = File.ReadAllText(Path.Combine(webRoot, "styles.css"));
+        var bridge = File.ReadAllText(Path.Combine(webRoot, "bridge.js"));
 
         Assert.DoesNotContain("createScreenClipProgressMessage", app, StringComparison.Ordinal);
         Assert.DoesNotContain("data-screen-clip-progress", app, StringComparison.Ordinal);
-        Assert.Contains("Video aufnehmen · ${formatClipTime(elapsed)}", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("screen-clip-chip", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("screen-clip-chip", html, StringComparison.Ordinal);
+        Assert.Contains("case \"screenClip.changed\":", app, StringComparison.Ordinal);
+        Assert.Contains("state.screenClip = payload || state.screenClip", app, StringComparison.Ordinal);
+        Assert.Contains("elements.screenClip.classList.toggle(\"recording\", Boolean(clip.isRecording))", app, StringComparison.Ordinal);
+        Assert.Contains("Video aufnehmen · ${formatClipTime(seconds)}", app, StringComparison.Ordinal);
+        Assert.Contains("clip.isRecording && seconds >= maximum && !state.captureStopRequested", app, StringComparison.Ordinal);
         Assert.Contains("post(\"screenClip.stop\"", app, StringComparison.Ordinal);
-        Assert.Contains("post(\"screenClip.cancel\"", app, StringComparison.Ordinal);
+        Assert.Contains("\"screenClip.cancel\"", bridge, StringComparison.Ordinal);
+        Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("screenClip.start"));
+        Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("screenClip.stop"));
+        Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("screenClip.cancel"));
         Assert.DoesNotContain(".screen-clip-progress", styles, StringComparison.Ordinal);
-        Assert.Contains(".screen-clip-chip", styles, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -503,7 +516,14 @@ public sealed class AssistantIntegrationTests
         Assert.DoesNotContain(".session-delete:disabled", styles, StringComparison.Ordinal);
         Assert.Contains(".session-item:hover .session-delete", styles, StringComparison.Ordinal);
         Assert.Contains("post(\"audioCapture.start\", { sessionId: state.activeSessionId })", app, StringComparison.Ordinal);
-        Assert.Contains("Systemaudio aufnehmen", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("audio-capture-chip", app, StringComparison.Ordinal);
+        Assert.DoesNotContain("audio-capture-chip", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("screen-clip-chip", app, StringComparison.Ordinal);
+        Assert.Contains("case \"audioCapture.changed\":", app, StringComparison.Ordinal);
+        Assert.Contains("state.audioCapture = payload || state.audioCapture", app, StringComparison.Ordinal);
+        Assert.Contains("audio.isRecording && elapsed >= maximum && !state.audioCaptureStopRequested", app, StringComparison.Ordinal);
+        Assert.Contains("post(\"audioCapture.stop\", {})", app, StringComparison.Ordinal);
+        Assert.Contains("finishActiveMediaCaptureFromVoice(text)", app, StringComparison.Ordinal);
         Assert.DoesNotContain("missumAnalysisAudioCapture", voice, StringComparison.Ordinal);
         Assert.DoesNotContain("audioCapture.audio", bridge, StringComparison.Ordinal);
         Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("audioCapture.start"));
@@ -1388,47 +1408,65 @@ public sealed class AssistantIntegrationTests
     }
 
     [Fact]
-    public void SpeechUsesComposerStatusWithoutRetryOrChatRendering()
+    public void SpeechUsesItsSourceMessageFooterWithoutComposerChipsRetryOrChatRendering()
     {
         var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
         var html = File.ReadAllText(Path.Combine(webRoot, "index.html"));
         var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
         var bridge = File.ReadAllText(Path.Combine(webRoot, "bridge.js"));
 
-        Assert.Contains("id=\"composer-speech-status\"", html, StringComparison.Ordinal);
-        Assert.Contains("id=\"composer-speech-pause\"", html, StringComparison.Ordinal);
-        Assert.Contains("id=\"composer-speech-stop\"", html, StringComparison.Ordinal);
-        Assert.Contains("title=\"Vorlesen beenden\"", html, StringComparison.Ordinal);
-        Assert.DoesNotContain("composer-speech-previous", html, StringComparison.Ordinal);
-        Assert.DoesNotContain("composer-speech-skip", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("composer-speech", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("composer-speech", app, StringComparison.Ordinal);
         Assert.DoesNotContain("Vorheriger Absatz", html, StringComparison.Ordinal);
         Assert.DoesNotContain("Absatz überspringen", html, StringComparison.Ordinal);
-        Assert.DoesNotContain("composer-speech-pause-label", html, StringComparison.Ordinal);
-        Assert.True(
-            html.IndexOf("id=\"composer-speech-status\"", StringComparison.Ordinal)
-            < html.IndexOf("<div class=\"composer\">", StringComparison.Ordinal));
+        Assert.Contains("function isMessageSpeechActive(messageId, sessionId)", app, StringComparison.Ordinal);
+        Assert.Contains("String(progress.sourceMessageId) === String(messageId)", app, StringComparison.Ordinal);
+        Assert.Contains("String(progress.sessionId) === String(sessionId)", app, StringComparison.Ordinal);
+        Assert.Contains("footer.dataset.speechMessageId = String(message.id)", app, StringComparison.Ordinal);
+        Assert.Contains("footer.dataset.speechSessionId = String(sessionId)", app, StringComparison.Ordinal);
+        Assert.Contains("active ? \"Vorlesen beenden\" : \"Nachricht vorlesen\"", app, StringComparison.Ordinal);
+        Assert.Contains("paused ? \"Vorlesen fortsetzen\" : \"Vorlesen pausieren\"", app, StringComparison.Ordinal);
+        Assert.Contains("pause.setAttribute(\"aria-pressed\", String(active && paused))", app, StringComparison.Ordinal);
+        Assert.Contains("pause.hidden = !active", app, StringComparison.Ordinal);
+        Assert.Contains("status.hidden = !active", app, StringComparison.Ordinal);
+        Assert.Contains("status.setAttribute(\"role\", \"status\")", app, StringComparison.Ordinal);
+        Assert.Contains("status.setAttribute(\"aria-live\", \"polite\")", app, StringComparison.Ordinal);
         Assert.Contains("case \"speech.status\":", app, StringComparison.Ordinal);
         Assert.Contains("renderSpeechStatus();", app, StringComparison.Ordinal);
         Assert.Contains("post(\"microphone.toggleSpeechPause\"", app, StringComparison.Ordinal);
-        Assert.Contains("elements.composerSpeechStop.addEventListener", app, StringComparison.Ordinal);
+        Assert.Contains("if (isMessageSpeechActive(message.id, sessionId))", app, StringComparison.Ordinal);
         Assert.Contains("post(\"microphone.stopSpeech\", {});", app, StringComparison.Ordinal);
+        var speechRenderStart = app.IndexOf("function renderSpeechStatus()", StringComparison.Ordinal);
+        var captionRenderStart = app.IndexOf("function renderLiveCaption()", speechRenderStart, StringComparison.Ordinal);
+        Assert.True(speechRenderStart >= 0 && captionRenderStart > speechRenderStart);
+        var speechRenderer = app[speechRenderStart..captionRenderStart];
+        Assert.Contains(".message-footer[data-speech-message-id]", speechRenderer, StringComparison.Ordinal);
+        Assert.Contains("updateMessageSpeechFooter(footer)", speechRenderer, StringComparison.Ordinal);
+        Assert.DoesNotContain("replaceChildren", speechRenderer, StringComparison.Ordinal);
+        Assert.DoesNotContain("renderMessages(", speechRenderer, StringComparison.Ordinal);
         var promptStop = app.IndexOf("async function handleComposerAction()", StringComparison.Ordinal);
         var promptSubmit = app.IndexOf("async function submitPrompt()", promptStop, StringComparison.Ordinal);
         Assert.True(promptStop >= 0 && promptSubmit > promptStop);
-        Assert.DoesNotContain(
-            "microphone.stopSpeech",
-            app[promptStop..promptSubmit],
-            StringComparison.Ordinal);
+        var composerActions = app[promptStop..promptSubmit];
+        Assert.Contains("if (elements.prompt.value.trim()) await submitPrompt();", composerActions, StringComparison.Ordinal);
+        Assert.Contains("else if (state.speechStatus?.active || state.microphone?.isSpeaking) post(\"microphone.stopSpeech\", {});", composerActions, StringComparison.Ordinal);
+        Assert.True(composerActions.IndexOf("chat.cancel", StringComparison.Ordinal)
+            < composerActions.IndexOf("microphone.stopSpeech", StringComparison.Ordinal), "AI cancellation retains priority over standalone speech.");
         Assert.DoesNotContain("\"chat.removed\"", app, StringComparison.Ordinal);
         Assert.DoesNotContain("microphone.previousSpeechParagraph", app, StringComparison.Ordinal);
         Assert.DoesNotContain("microphone.skipSpeechParagraph", app, StringComparison.Ordinal);
-        Assert.Contains("isPaused ? \"Fortsetzen\" : \"Pausieren\"", app, StringComparison.Ordinal);
         Assert.Contains("messageId: String(message.id)", app, StringComparison.Ordinal);
         Assert.Contains("sessionId: state.activeSessionId", app, StringComparison.Ordinal);
         Assert.Contains("\"speech.status\"", bridge, StringComparison.Ordinal);
         Assert.DoesNotContain("Erneut senden", app, StringComparison.Ordinal);
         Assert.DoesNotContain("retryMessage", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("createMessageFooterLink(\"Fortsetzen\"", app, StringComparison.Ordinal);
+        var speechStatusStart = app.IndexOf("case \"speech.status\":", StringComparison.Ordinal);
+        var speechProgressStart = app.IndexOf("case \"speech.progress\":", speechStatusStart, StringComparison.Ordinal);
+        Assert.True(speechStatusStart >= 0 && speechProgressStart > speechStatusStart);
+        var speechStatusHandler = app[speechStatusStart..speechProgressStart];
+        Assert.DoesNotContain("createMessageFooterLink", speechStatusHandler, StringComparison.Ordinal);
+        Assert.DoesNotContain("post(\"chat.resume\"", speechStatusHandler, StringComparison.Ordinal);
+        Assert.DoesNotContain("renderMessages(", speechStatusHandler, StringComparison.Ordinal);
         Assert.DoesNotContain("function continueMessage()", app, StringComparison.Ordinal);
     }
 

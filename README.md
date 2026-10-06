@@ -34,6 +34,42 @@ Run the client regression suite separately with `./windows/test.ps1`. The full
 `./windows/build.ps1` pipeline also invokes the context/server checks and portable
 publish. Run these sequentially so outputs are not locked by concurrent builds.
 
+## Browser access in the home network
+
+Start Missum on the Windows PC and open `http://<PC-IP>:8080/assistant/`
+in Chrome on the Mac. The Windows settings page lists the LAN addresses.
+Access requires no certificates, login, pairing or additional Mac software.
+The host stays available while the window is minimized and ends when Missum exits.
+
+Chats, projects, tools, settings and files belong to the PC. Each browser tab
+keeps its own navigation, model selection and drafts. Submitted jobs retain
+their model and tool settings, and connected clients receive shared live answers.
+Reasoning levels are shared PC preferences per model. Browser submissions wait
+for the saved selection to be acknowledged, and the native model footer updates
+for that model; queued and running jobs keep their accepted parameters.
+The browser follows the native Missum sidebar, message timeline, action footer
+and composer. The floating **Ausgaben** panel opens from the top right and shows
+the PC workspace, file changes, subagents, sources and generated files; sources
+can open in their own tab, and generated files support browser preview/download.
+Views such as sources hide the panel automatically and restore it on returning
+to a chat if it was open.
+Selected tools appear beside **+** in the composer footer. Project creation opens
+a server folder picker with drives, breadcrumbs, folder filtering and recent
+workspaces; it validates the chosen PC folder before creating the project.
+Browser settings support connection tests, prompt triggers and backup downloads
+and uploads. Restore waits for active work, creates a safety backup and restarts
+Missum; the browser reconnects automatically. Backups also include client views
+and drafts, while older backups remain importable.
+
+Browser read-aloud uses WAV sections from the existing Supertonic-3 F5 service
+on the PC and plays them on the requesting client. Pause, resume, stop and text
+highlighting follow browser playback. A play button handles blocked autoplay.
+Read-aloud controls belong to their source message footer and never add a tool
+or status chip to the composer.
+Microphone, voice control and screen recording are unavailable at ordinary HTTP
+LAN addresses; use file or screenshot uploads. Windows speech functions remain
+available in the native application.
+
 ## Data and models
 
 Missum stores its own chats and settings in %LOCALAPPDATA%\Missum.

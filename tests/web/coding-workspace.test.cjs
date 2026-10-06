@@ -52,14 +52,15 @@ function harness({ speech = false, codingToolStepsExpanded = false } = {}) {
       }
       return list;
     },
-    messageCopyIcon: "copy", messagePdfIcon: "pdf", messageDoneIcon: "done",
+    messageCopyIcon: "copy", messagePdfIcon: "pdf", messageDoneIcon: "done", messageSpeechIcon: "speech",
+    messageSpeechStopIcon: "speech-stop", messageSpeechPauseIcon: "speech-pause", messageSpeechResumeIcon: "speech-resume",
     persistMeasuredContext: () => {}, renderContext: () => {}, renderStatus: () => {},
     renderScienceWorkbench: () => {}
   });
-  for (const name of ["visibleModelLabel", "codingToolLabel", "codingStepState", "normalizeCodingStep", "recordCodingActivity", "compareReasoningStepUpdates",
+  for (const name of ["visibleModelLabel", "codingToolLabel", "codingToolSummary", "codingStepState", "normalizeCodingStep", "recordCodingActivity", "compareReasoningStepUpdates",
     "createCodingActivity", "mergeCodingToolSteps", "codingPreviewHtml", "openCodingPreview", "closeCodingPreview", "enhanceCodingCodeBlocks", "renderCodingWorkspace", "renderCodingChanges", "applyCodingChanges", "cleanStatusMetadata",
     "uniqueStatusParts", "isTerminalMessageStatus", "statusLabel", "runStatusText", "sanitizeVisibleMessageContent", "createMessage",
-    "createMessageFooter", "createMessageIconAction", "createMessageFooterLink", "flashMessageAction", "scrollMessageToTop", "renderMessages", "renderCodingMessages",
+    "createMessageFooter", "isMessageSpeechActive", "updateMessageSpeechFooter", "createMessageIconAction", "createMessageFooterLink", "flashMessageAction", "scrollMessageToTop", "renderMessages", "renderCodingMessages",
     "conversationMessagesDiffer", "sortCommittedMessages", "pruneTerminalMessageRunStatuses", "requestConversationRefresh", "acceptCommittedRevision",
     "applyCommittedMessage", "applyConversationSnapshot", "belongsToActiveSession", "upsertLiveMessage", "applyLiveDelta", "handleHostMessage",
     "preparePdfMedia", "preparePdfMessage"]) {
@@ -142,9 +143,8 @@ test("identical failure fallback appears once after live completion and reload w
       await article.querySelectorAll("button").find(button => button.getAttribute("aria-label") === "Nachricht kopieren").dispatch("click");
       assert.equal(posts.at(-1).type, "message.copy");
       assert.equal(posts.at(-1).payload.text, error);
-      await article.querySelectorAll("button").find(button => button.getAttribute("aria-label") === "Nachricht als PDF exportieren").dispatch("click");
-      assert.equal(posts.at(-1).type, "message.exportPdf");
-      assert.equal(posts.at(-1).payload.messageId, failed.id);
+      assert.equal(article.querySelectorAll(".message-footer button").some(button => button.getAttribute("aria-label") === "Nachricht als PDF exportieren"), false,
+        "PDF export is available from the message context menu; the compact footer keeps copy and speech");
       const pdf = context.preparePdfMessage(article);
       assert.equal(pdf.textContent.split(error).length - 1, 1);
       if (hasTools) assert.equal(pdf.querySelector(".coding-step__disclosure").hasAttribute("open"), true);
@@ -292,7 +292,7 @@ test("assistant headers use the Coding presentation in General and show accurate
   state.messageRunStatus.set("answer-1", { status: "Denkt nach", detail: "Antwort wird vorbereitet" });
   const answer = context.createMessage(message({ status: "streaming" }));
   const answerMeta = answer.querySelector(".message-meta");
-  assert.equal(answerMeta.querySelector(".message-meta__identity").textContent, "AI - 12:34");
+  assert.equal(answerMeta.querySelector(".message-meta__identity").textContent, "In Bearbeitung seit 0 Min. 0 Sek.");
   assert.equal(answerMeta.querySelector(".message-status").textContent, "Denkt nach");
   assert.equal(answerMeta.querySelector(".message-meta__detail").textContent, "Antwort wird vorbereitet");
   assert.ok(answerMeta.querySelector(".message-status-spinner"));
@@ -302,7 +302,7 @@ test("assistant headers use the Coding presentation in General and show accurate
     liveCaptionStatus: "Sprache wird erkannt", liveCaptionProvider: "whisper-large-v3-live + ECAPA"
   }));
   const captionMeta = caption.querySelector(".message-meta");
-  assert.equal(captionMeta.querySelector(".message-meta__identity").textContent, "Live-Untertitel - 12:34");
+  assert.equal(captionMeta.querySelector(".message-meta__identity").textContent, "In Bearbeitung seit 0 Min. 0 Sek.");
   assert.equal(captionMeta.querySelector(".message-status").textContent, "Sprache wird erkannt");
   assert.equal(captionMeta.querySelector(".message-meta__detail").textContent, "whisper-large-v3-live + ECAPA");
   assert.ok(captionMeta.querySelector(".message-status-spinner"));
@@ -443,7 +443,7 @@ test("Coding and General share one header and no duplicate composer status", () 
   state.selectedToolAction = null;
   context.renderCodingWorkspace();
   assert.equal(elements.appShell.className.includes("coding-mode"), false);
-  assert.equal(elements.prompt.placeholder, "Nachricht eingeben …");
+  assert.equal(elements.prompt.placeholder, "Frag etwas");
 });
 
 test("running Coding status remains in the assistant message only", () => {
@@ -620,7 +620,8 @@ test("persisted tools restore after restart and merge without regressing a compl
   let panel = context.createCodingActivity(message({ toolSteps: [tool] }));
   assert.equal(panel.querySelectorAll(".coding-step").length, 1);
   assert.ok(panel.textContent.includes("Datei lesen"));
-  assert.ok(panel.textContent.includes("Abgeschlossen"));
+  assert.ok(panel.querySelector(".coding-step--completed"));
+  assert.equal(panel.querySelector(".coding-step__status").textContent, "", "completed compact headers have no redundant status badge");
   context.recordCodingActivity({ messageId: "answer-1", toolStep: tool });
   let steps = context.mergeCodingToolSteps(message({ toolSteps: [{ ...tool, status: "running" }] }));
   assert.equal(steps.length, 1);
@@ -716,12 +717,33 @@ test("message footer actions still execute in Coding and General", () => {
     const article = context.createMessage(answer);
     assert.equal(article.querySelectorAll(".code-block").length, 1);
     const footer = article.querySelector(".message-footer");
-    assert.equal(footer.childNodes.length, 4);
-    for (const button of footer.childNodes) button.listeners.click({ preventDefault() {}, stopPropagation() {} });
-    assert.deepEqual(posts.map(post => post.type), ["message.copy", "message.exportPdf", "microphone.speak"]);
+    const visibleActions = footer.children.filter(button => !button.hidden);
+    assert.equal(visibleActions.length, 2);
+    assert.deepEqual(visibleActions.map(button => button.getAttribute("aria-label")), ["Nachricht kopieren", "Nachricht vorlesen"]);
+    for (const button of visibleActions) button.listeners.click({ preventDefault() {}, stopPropagation() {} });
+    assert.deepEqual(posts.map(post => post.type), ["message.copy", "microphone.speak"]);
     assert.equal(posts[0].payload.text, answer.content);
     assert.equal(posts[1].payload.messageId, answer.id);
-    assert.equal(posts[2].payload.sessionId, "session-a");
-    assert.equal(elements.messageScroll.scrollTop, 42);
+    assert.equal(posts[1].payload.sessionId, "session-a");
+    assert.equal(elements.messageScroll.scrollTop, 50);
   }
+});
+
+test("the latest interrupted answer resumes its existing message without changing the composer draft", () => {
+  const { context, state, posts, elements } = harness();
+  const answer = message({ content: "Bisheriges Ergebnis", status: "interrupted" });
+  state.messages = [{ id: "user", role: "user", content: "Löse das Problem" }, answer];
+  elements.prompt.value = "Mein noch nicht gesendeter Entwurf";
+  elements.prompt.focus = () => {};
+  const footer = context.createMessageFooter(answer, new Node("article"));
+  const resume = footer.children.find(button => button.textContent === "Fortsetzen");
+  assert.ok(resume);
+  resume.listeners.click({ preventDefault() {}, stopPropagation() {} });
+  assert.equal(posts[0].type, "chat.resume");
+  assert.equal(posts[0].payload.messageId, answer.id);
+  assert.equal(posts[0].payload.sessionId, "session-a");
+  assert.equal(elements.prompt.value, "Mein noch nicht gesendeter Entwurf");
+  assert.equal(resume.disabled, true);
+  state.messages.push({ id: "later-user", role: "user", content: "Neue Anfrage" });
+  assert.equal(context.createMessageFooter(answer, new Node("article")).children.some(button => button.textContent === "Fortsetzen"), false);
 });

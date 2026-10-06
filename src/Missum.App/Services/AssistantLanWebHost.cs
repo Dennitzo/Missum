@@ -56,9 +56,13 @@ internal sealed class AssistantLanWebHost : IAsyncDisposable
 
     public Func<Guid, CancellationToken, Task<LanArtifactResource?>>? ArtifactResolver { get; set; }
 
+    public Func<string, string, CancellationToken, Task<LanArtifactResource?>>? ResourceResolver { get; set; }
+
     public Func<Guid, string, CancellationToken, Task<string?>>? CodingPreviewResolver { get; set; }
 
     public string AccessFilePath { get; }
+
+    public IReadOnlyList<string> AccessUrls { get; private set; } = [];
 
     public async Task StartAsync(string webRoot, string? previewRoot = null, CancellationToken cancellationToken = default)
     {
@@ -99,6 +103,11 @@ internal sealed class AssistantLanWebHost : IAsyncDisposable
             executableSha256 = _executableSha256,
         }));
         app.MapGet("/artifacts/{artifactId:guid}", (Delegate)HandleArtifactAsync);
+        foreach (var kind in new[] { "gateway-artifacts", "settings-resources", "science-resources" })
+        {
+            var resourceKind = kind;
+            app.MapGet("/" + kind + "/{resourceId}", (string resourceId, HttpContext context) => HandleResourceAsync(resourceKind, resourceId, context));
+        }
         app.MapGet("/coding-preview/{messageId:guid}/{stepId}", (Delegate)HandleCodingPreviewAsync);
         if (!string.IsNullOrWhiteSpace(previewRoot))
         {
@@ -112,10 +121,12 @@ internal sealed class AssistantLanWebHost : IAsyncDisposable
             });
         }
         app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = new PhysicalFileProvider(webRoot) });
+        var contentTypes = new FileExtensionContentTypeProvider();
+        contentTypes.Mappings[".ttf"] = "font/ttf";
         app.UseStaticFiles(new StaticFileOptions
         {
             FileProvider = new PhysicalFileProvider(webRoot),
-            ContentTypeProvider = new FileExtensionContentTypeProvider(),
+            ContentTypeProvider = contentTypes,
             ServeUnknownFileTypes = false,
         });
         _application = app;
@@ -310,6 +321,17 @@ internal sealed class AssistantLanWebHost : IAsyncDisposable
         return Results.Text(html, "text/html", Encoding.UTF8);
     }
 
+    private async Task<IResult> HandleResourceAsync(string kind, string id, HttpContext context)
+    {
+        var resource = ResourceResolver is null ? null : await ResourceResolver(kind, id, context.RequestAborted).ConfigureAwait(false);
+        if (resource is null) return Results.NotFound();
+        var download = kind == "settings-resources" || context.Request.Query["download"] == "1";
+        var inline = IsSafeInlineContentType(resource.ContentType);
+        context.Response.Headers["Content-Security-Policy"] = "default-src 'none'; sandbox; base-uri 'none'; form-action 'none'";
+        return Results.Stream(resource.Content, inline ? resource.ContentType : "application/octet-stream",
+            download || !inline ? resource.FileName : null, enableRangeProcessing: true);
+    }
+
     private async Task HandleBridgeAsync(HttpContext context)
     {
         if (!context.WebSockets.IsWebSocketRequest)
@@ -402,10 +424,11 @@ internal sealed class AssistantLanWebHost : IAsyncDisposable
             .Distinct()
             .Select(address => address.ToString())
             .ToArray();
+        AccessUrls = addresses.Select(address => $"http://{address}:{_gatewayPort}/assistant/").ToArray();
         var payload = JsonSerializer.Serialize(new
         {
             port = _port,
-            urls = addresses.Select(address => $"http://{address}:{_gatewayPort}/assistant/").ToArray(),
+            urls = AccessUrls,
             directUrls = addresses.Select(address => $"http://{address}:{_port}/").ToArray(),
             localUrl = $"http://127.0.0.1:{_gatewayPort}/assistant/",
             directLocalUrl = $"http://127.0.0.1:{_port}/",

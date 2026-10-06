@@ -54,8 +54,9 @@ test("each tool defaults to its own native collapsed disclosure with a short fac
   assert.equal(disclosure.hasAttribute("open"), false);
   assert.equal(disclosure.firstChild.nodeName, "SUMMARY", "native summary provides Enter/Space and expanded-state accessibility");
   assert.equal(disclosure.firstChild.querySelector("button"), null, "disclosure activation must not contain competing copy/preview buttons");
-  assert.equal(disclosure.querySelector(".coding-step__summary").textContent, "src/math.py · 45 Zeilen");
-  assert.equal(disclosure.querySelector(".coding-step__status").textContent, "Abgeschlossen");
+  assert.equal(disclosure.querySelector(".coding-step__name").textContent, "Datei lesen · src/math.py · 45 Zeilen");
+  assert.equal(disclosure.querySelector(".coding-step__summary"), null, "label and factual summary share one compact native header");
+  assert.equal(disclosure.querySelector(".coding-step__status").textContent, "");
   assert.equal(disclosure.querySelector(".coding-step__content"), null, "closed details must not build hidden receipt DOM");
   disclosure.setAttribute("open", "");
   await disclosure.dispatch("toggle");
@@ -175,6 +176,7 @@ test("one thousand manually collapsed receipts create only headers and build the
   assert.equal(buttons, 0, "closed receipts do not allocate copy-payload handlers");
 
   const last = current.querySelector('[data-step-id="receipt-999"] details');
+  const toggleListenerCount = last.listeners.get("toggle").length;
   const focusedSummary = last.firstChild;
   const latestPatch = patch.replace("+new 日本語", "+latest Grüße € 日本語");
   const updated = tools.map((tool, index) => index === 999 ? { ...tool,
@@ -200,7 +202,7 @@ test("one thousand manually collapsed receipts create only headers and build the
   await last.dispatch("toggle");
   await last.dispatch("toggle");
   assert.equal(current.querySelectorAll(".coding-step__content").length, 1, "queued toggle events cannot duplicate the receipt");
-  assert.equal(last.listeners.get("toggle").length, 1, "reconciliation retains exactly one toggle listener");
+  assert.equal(last.listeners.get("toggle").length, toggleListenerCount, "reconciliation and repeated toggling do not register duplicate handlers");
 });
 
 test("reopening a live command shows final cancellation diagnostics and refreshed copy handlers", async () => {
@@ -254,24 +256,25 @@ test("collapsed live headers update without replacing the focused summary or hid
   document.body.append(current);
   const disclosure = current.querySelector("details");
   const focusedSummary = current.querySelector("summary");
-  assert.equal(current.querySelector(".coding-step__summary").textContent, "python checks.py · stdout: Test 1 läuft");
+  assert.equal(current.querySelector(".coding-step__name").textContent, "Befehl ausführen · python checks.py · stdout: Test 1 läuft");
   const fullOutput = `Test 1 läuft\n${"x".repeat(600)}\n<script>literal stdout</script>`;
   context.missumCodingTimeline.reconcile(current, render(message, [{ ...command,
     outputJson: JSON.stringify({ stdout: fullOutput, stderr: "", partial: true }) }], { previousTimeline: current }));
   assert.equal(current.querySelector("summary"), focusedSummary);
   assert.equal(disclosure.hasAttribute("open"), false);
-  assert.equal(current.querySelector(".coding-step__summary").textContent, "python checks.py · stdout: <script>literal stdout</script>");
+  assert.equal(current.querySelector(".coding-step__name").textContent, "Befehl ausführen · python checks.py · stdout: <script>literal stdout</script>");
   assert.equal(current.querySelector("script"), null);
   assert.equal(current.querySelector(".coding-step__content"), null);
 
   const error = "Check failed: " + "e".repeat(400);
   context.missumCodingTimeline.reconcile(current, render(answer({ status: "failed" }), [{ ...command, status: "failed",
     outputJson: JSON.stringify({ stdout: fullOutput, stderr: error, exitCode: 1 }) }], { previousTimeline: current }));
-  const header = current.querySelector(".coding-step__summary").textContent;
+  const header = current.querySelector(".coding-step__name").textContent;
   assert.ok(header.includes("Exitcode 1 · stdout: <script>literal stdout</script>"));
   assert.ok(header.includes("stderr: Check failed:"));
   assert.ok(header.endsWith("…"));
-  assert.ok(header.length <= 263, "only the compact summary is bounded");
+  assert.ok(header.startsWith("Befehl ausführen · "));
+  assert.ok(header.slice("Befehl ausführen · ".length).length <= 263, "only the compact factual summary is bounded");
   disclosure.setAttribute("open", "");
   await disclosure.dispatch("toggle");
   assert.ok(current.querySelector(".coding-step__content").textContent.includes(fullOutput));
@@ -287,12 +290,12 @@ test("a previous stderr warning cannot hide new stdout progress in the collapsed
     outputJson: JSON.stringify({ stdout: "Test 1 läuft", stderr: "Warnung: optionale Erweiterung fehlt" }) });
   const current = render(message, [command]);
   document.body.append(current);
-  const summary = current.querySelector(".coding-step__summary");
-  assert.equal(summary.textContent, "python checks.py · stdout: Test 1 läuft · stderr: Warnung: optionale Erweiterung fehlt");
+  const summary = current.querySelector(".coding-step__name");
+  assert.equal(summary.textContent, "Befehl ausführen · python checks.py · stdout: Test 1 läuft · stderr: Warnung: optionale Erweiterung fehlt");
   const updated = { ...command, outputJson: JSON.stringify({ stdout: "Test 1 läuft\nTest 2 bestanden", stderr: "Warnung: optionale Erweiterung fehlt" }) };
   context.missumCodingTimeline.reconcile(current, render(message, [updated], { previousTimeline: current }));
-  assert.equal(current.querySelector(".coding-step__summary"), summary);
-  assert.equal(summary.textContent, "python checks.py · stdout: Test 2 bestanden · stderr: Warnung: optionale Erweiterung fehlt");
+  assert.equal(current.querySelector(".coding-step__name"), summary);
+  assert.equal(summary.textContent, "Befehl ausführen · python checks.py · stdout: Test 2 bestanden · stderr: Warnung: optionale Erweiterung fehlt");
   assert.equal(current.querySelector("details").hasAttribute("open"), false);
 
   const stdout = "Ergebnis: " + "s".repeat(500), stderr = "Warnung: " + "w".repeat(500);
@@ -301,7 +304,7 @@ test("a previous stderr warning cannot hide new stdout progress in the collapsed
   assert.ok(summary.textContent.includes("Exitcode 0"));
   assert.ok(summary.textContent.includes("stdout: Ergebnis:"));
   assert.ok(summary.textContent.includes("stderr: Warnung:"));
-  assert.ok(summary.textContent.length <= 263);
+  assert.ok(summary.textContent.slice("Befehl ausführen · ".length).length <= 263);
   assert.equal((summary.textContent.match(/…/g) || []).length, 2, "both streams receive their own bounded space");
   const disclosure = current.querySelector("details");
   disclosure.setAttribute("open", "");
@@ -310,21 +313,53 @@ test("a previous stderr warning cannot hide new stdout progress in the collapsed
   assert.ok(current.querySelector(".coding-step__content").textContent.includes(stderr));
 });
 
-test("tool summaries report received counts and applied changes without claiming unconfirmed writes", () => {
+test("compact tool headers report received counts without claiming an unconfirmed saved mutation", () => {
   const { render } = harness();
-  const summary = value => render(answer({ status: "streaming" }), [step(value)]).querySelector(".coding-step__summary")?.textContent || "";
-  assert.equal(summary({ tool: "coding.search", inputJson: '{"query":"multiply"}', outputJson: '{"matches":[{},{}]}' }), "multiply · 2 Treffer");
-  assert.equal(summary({ tool: "coding.list", inputJson: '{"path":"src"}', outputJson: '{"entries":[{}],"truncated":true}' }), "src · 1 Eintrag · Ausgabe gekürzt");
-  assert.equal(summary({ tool: "coding.edit", inputJson: '{"path":"math.py"}', status: "running", outputJson: '{"addedLines":2,"removedLines":1,"applied":false}' }), "math.py · +2 / −1");
-  assert.equal(summary({ tool: "coding.edit", inputJson: '{"path":"math.py"}', outputJson: '{"addedLines":2,"removedLines":1,"applied":true}' }), "math.py · +2 / −1 · Gespeichert");
-  assert.equal(summary({ tool: "coding.write", inputJson: '{"path":"math.py"}' }), "math.py");
+  const header = value => render(answer({ status: "streaming" }), [step(value)]).querySelector("summary");
+  assert.equal(header({ tool: "coding.search", label: "Code durchsuchen", inputJson: '{"query":"multiply"}', outputJson: '{"matches":[{},{}]}' }).querySelector(".coding-step__name").textContent, "Code durchsuchen · multiply · 2 Treffer");
+  assert.equal(header({ tool: "coding.list", label: "Projekt erkunden", inputJson: '{"path":"src"}', outputJson: '{"entries":[{}],"truncated":true}' }).querySelector(".coding-step__name").textContent, "Projekt erkunden · src · 1 Eintrag · Ausgabe gekürzt");
+  const pending = header({ tool: "coding.edit", label: "Datei bearbeiten", inputJson: '{"path":"src/math.py"}', status: "running", outputJson: '{"addedLines":2,"removedLines":1,"applied":false}' });
+  assert.equal(pending.querySelector(".coding-step__name").textContent, "math.py");
+  assert.equal(pending.querySelector(".coding-step__counts").textContent, "+2−1");
+  assert.equal(pending.querySelector(".coding-step__status").textContent, "…");
+  assert.equal(pending.textContent.includes("Gespeichert"), false);
+  const completed = header({ tool: "coding.edit", label: "Datei bearbeiten", inputJson: '{"path":"src/math.py"}', outputJson: '{"addedLines":2,"removedLines":1,"applied":true}' });
+  assert.equal(completed.querySelector(".coding-step__name").textContent, "math.py");
+  assert.equal(completed.querySelector(".coding-step__counts").textContent, "+2−1");
+  assert.equal(completed.querySelector(".coding-step__status").textContent, "");
+  assert.equal(header({ tool: "coding.write", inputJson: '{"path":"src/math.py"}' }).querySelector(".coding-step__name").textContent, "math.py");
+});
+
+test("mutation headers switch between basename counts and German operation with target while preserving reader state", async () => {
+  const { context, render, document } = harness();
+  const mutation = step({ tool: "coding.edit", label: "Datei bearbeiten", inputJson: '{"path":"src/math.py"}',
+    outputJson: '{"path":"src/math.py","addedLines":2,"removedLines":1,"applied":true}' });
+  const current = render(answer(), [mutation]); document.body.append(current);
+  const disclosure = current.querySelector("details"), header = disclosure.firstChild;
+  assert.equal(header.querySelector(".coding-step__name").textContent, "math.py");
+  assert.equal(header.querySelector(".review-added").textContent, "+2");
+  assert.equal(header.querySelector(".review-removed").textContent, "−1");
+  disclosure.setAttribute("open", ""); await disclosure.dispatch("toggle");
+  assert.equal(header.querySelector(".coding-step__name").textContent, "Datei bearbeiten · src/math.py · +2 / −1 · Gespeichert");
+  assert.ok(disclosure.querySelector(".coding-step__content"));
+  context.missumCodingTimeline.reconcile(current, render(answer(), [{ ...mutation,
+    outputJson: '{"path":"src/math.py","addedLines":3,"removedLines":2,"applied":true}' }], { previousTimeline: current }));
+  assert.equal(current.querySelector("details"), disclosure);
+  assert.equal(disclosure.firstChild, header);
+  assert.equal(disclosure.hasAttribute("open"), true);
+  assert.equal(header.querySelector(".coding-step__name").textContent, "Datei bearbeiten · src/math.py · +3 / −2 · Gespeichert");
+  disclosure.removeAttribute("open"); await disclosure.dispatch("toggle");
+  assert.equal(header.querySelector(".coding-step__name").textContent, "math.py");
+  assert.equal(header.querySelector(".review-added").textContent, "+3");
+  assert.equal(header.querySelector(".review-removed").textContent, "−2");
+  assert.equal(disclosure.querySelector(".coding-step__content"), null);
 });
 
 test("expanded disclosure content keeps full-height output and patch rules", () => {
   const css = fs.readFileSync(path.join(webRoot, "coding-timeline.css"), "utf8");
   for (const selector of [".coding-timeline .coding-step__content", ".coding-timeline .coding-step__detail", ".coding-output__text"]) {
     const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const rule = new RegExp(`${escaped} \\{([^}]+)\\}`).exec(css)?.[1];
+    const rule = new RegExp(`^${escaped} \\{([^}]+)\\}`, "m").exec(css)?.[1];
     assert.ok(rule, `rule exists: ${selector}`);
     assert.match(rule, /max-height:\s*none/);
     assert.match(rule, /overflow:\s*visible/);

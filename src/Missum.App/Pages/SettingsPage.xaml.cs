@@ -15,6 +15,7 @@ public sealed partial class SettingsPage : Page
 {
     private readonly ILogger<SettingsPage> _logger;
     private bool _synchronizing;
+    private bool _sharedSettingsSubscribed;
 
     public SettingsPage()
     {
@@ -68,9 +69,39 @@ public sealed partial class SettingsPage : Page
             await ViewModel.InitializeAsync();
             SynchronizeControls();
             UpdatePromptTriggerSortIndicators();
+            var host = App.Current.GetService<AssistantHost>();
+            LanAddressText.Text = string.Join("\n", host.AccessUrls.Count > 0 ? host.AccessUrls : [host.LocalUrl]);
+            if (!_sharedSettingsSubscribed)
+            {
+                App.Current.GetService<AssistantSettingsService>().Changed += OnSharedSettingsChanged;
+                _sharedSettingsSubscribed = true;
+            }
             await ViewModel.RefreshModelsAsync();
         });
     }
+
+    private void OnUnloaded(object sender, RoutedEventArgs e)
+    {
+        if (!_sharedSettingsSubscribed) return;
+        App.Current.GetService<AssistantSettingsService>().Changed -= OnSharedSettingsChanged;
+        _sharedSettingsSubscribed = false;
+    }
+
+    private void OnSharedSettingsChanged(object? sender, EventArgs args) => DispatcherQueue.TryEnqueue(async () =>
+    {
+        if (!_sharedSettingsSubscribed) return;
+        if (ViewModel.HasUnsavedChanges)
+        {
+            ShowStatus("Einstellungen wurden auf einem anderen Gerät geändert. Dein Entwurf bleibt erhalten; beim Speichern wird ein Konflikt gemeldet.", InfoBarSeverity.Informational);
+            return;
+        }
+        await RunActionAsync(async () =>
+        {
+            await ViewModel.InitializeAsync();
+            SynchronizeControls();
+            UpdatePromptTriggerSortIndicators();
+        });
+    });
 
     private void SynchronizeControls()
     {
@@ -329,7 +360,8 @@ public sealed partial class SettingsPage : Page
                 return;
             }
 
-            await ViewModel.RestoreBackupAsync(file.Path);
+            ShowStatus("Wiederherstellung wartet gegebenenfalls auf den Abschluss aktiver Aufträge.", InfoBarSeverity.Informational);
+            await App.Current.GetService<AssistantHost>().RestoreBackupFileAsync(file.Path);
             ShowStatus("Backup wiederhergestellt. Missum wird neu gestartet.", InfoBarSeverity.Success);
             _ = AppInstance.Restart("--restored-backup");
         });

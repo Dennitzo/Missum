@@ -44,6 +44,7 @@ public sealed partial class NativeAssistantPage
                 throw new InvalidOperationException("User messages lack working copy/read footer actions.");
             visits++;
         }
+        VerifySharedSidebarSmoke();
         // A multiline Windows prompt must converge to one durable message when its
         // normalized repository content arrives through the native event path.
         var multilinePrompt = "Forschungsfrage\r\n\r\nPrüfe die Feldgleichungen.\rNächster Absatz.";
@@ -165,6 +166,41 @@ public sealed partial class NativeAssistantPage
         ApplyEvent("state.snapshot", original);
         RenderMessagesNow();
         return visits;
+    }
+
+    private void VerifySharedSidebarSmoke()
+    {
+        var owner = _session;
+        var beforeMessages = _messages.Keys.Order().ToArray();
+        var previousDraft = Composer.Text;
+        _rendering = true;
+        Composer.Text = "Dieser Entwurf bleibt auf dem PC.";
+        _rendering = false;
+        var group = Guid.NewGuid();
+        ApplyEvent("session.grouped", JsonSerializer.SerializeToElement(new
+        {
+            chatMode = _mode,
+            sessions = new[] { new { id = owner, title = "Gemeinsam bearbeiteter Chat", chatMode = _mode } },
+            sessionGroups = new[] { new { id = group, name = "Browserprojekt", workspacePath = "", isCollapsed = false,
+                chatMode = _mode, sessionIds = new[] { owner } } },
+            activeSessionId = Guid.NewGuid(), draft = "Dieser fremde Entwurf darf nicht übernommen werden.",
+        }));
+        ProjectsPanel.Measure(new Windows.Foundation.Size(288, double.PositiveInfinity));
+        ProjectsPanel.UpdateLayout();
+        var sidebarLabels = Descendants(ProjectsPanel).OfType<TextBlock>().Select(text => text.Text).ToArray();
+        if (_session != owner || Composer.Text != "Dieser Entwurf bleibt auf dem PC."
+            || !beforeMessages.SequenceEqual(_messages.Keys.Order())
+            || !sidebarLabels.Contains("Browserprojekt") || !sidebarLabels.Contains("Gemeinsam bearbeiteter Chat"))
+            throw new InvalidOperationException("A shared sidebar update must render the browser project without replacing the native conversation or draft. "
+                + JsonSerializer.Serialize(new { ownerPreserved = _session == owner, draft = Composer.Text,
+                    messagesPreserved = beforeMessages.SequenceEqual(_messages.Keys.Order()), sidebarLabels }));
+        ApplyEvent("session.grouped", JsonSerializer.SerializeToElement(new { chatMode = "coding",
+            sessions = Array.Empty<object>(), sessionGroups = Array.Empty<object>() }));
+        if (!Descendants(ProjectsPanel).OfType<TextBlock>().Any(text => text.Text == "Browserprojekt"))
+            throw new InvalidOperationException("Sidebar metadata from another chat mode replaced the native sidebar.");
+        _rendering = true;
+        Composer.Text = previousDraft;
+        _rendering = false;
     }
 
     private async Task VerifySourcesSmokeAsync(JsonElement original)

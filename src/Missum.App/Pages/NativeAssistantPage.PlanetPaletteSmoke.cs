@@ -75,7 +75,8 @@ public sealed partial class NativeAssistantPage
             await File.WriteAllTextAsync(Path.Combine(App.Current.DataDirectory, "native-planet-palette-validation.json"),
                 JsonSerializer.Serialize(new { renderer = "WinUI3", passed = true, paletteVersion = NativePlanetPalette.PaletteVersion,
                     paletteCount = NativePlanetPalette.PaletteCount, renderedSamples = sampleCount, distinctSmallIcons = hashes.Count,
-                    smallIconDip = 14, nativeVectors = true }));
+                    smallIconDip = 14, nativeVectors = true,
+                    signatures = Enumerable.Range(0, sampleCount).Select(NativePlanetPalette.VisualSignatureFor).ToArray() }));
         }
         finally { MessagesPanel.Children.Remove(preview); BodyGrid.Visibility = originalBody; UpdateLayout(); }
     }

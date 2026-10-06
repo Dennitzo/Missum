@@ -18,6 +18,8 @@ public sealed class MissumAiClient : IDisposable
     private readonly TimeSpan _streamIdleTimeout;
     private bool _disposed;
 
+    public Uri? BaseAddress => _httpClient.BaseAddress;
+
     public MissumAiClient(HttpClient httpClient, string? clientId = null, bool ownsHttpClient = false, TimeSpan? streamIdleTimeout = null)
     {
         _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));

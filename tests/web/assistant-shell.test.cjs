@@ -25,8 +25,11 @@ test("the chat uses its full height without a redundant header", () => {
   assert.doesNotMatch(css, /session-item\.pinned|pin-chip|pdf-chip|header-actions/);
 });
 
-test("reasoning is an icon-only composer control and text inputs suppress nested browser outlines", () => {
-  assert.match(html, /id="reasoning-button" class="tool-button icon-only"/);
+test("the native model and reasoning pill opens its slider and separate model dialog", () => {
+  assert.match(html, /id="reasoning-button" class="model-reasoning-button"/);
+  assert.match(html, /id="selected-model-label"/);
+  assert.match(html, /id="reasoning-range" type="range"/);
+  assert.match(html, /id="local-model-overlay"[^>]*hidden/);
   assert.doesNotMatch(html, /id="reasoning-label"/);
   assert.match(css, /\.composer textarea:focus-visible,[\s\S]*outline: 0 !important/);
   assert.match(css, /\.search-field input:focus-visible/);
@@ -42,10 +45,52 @@ test("Planmodus stays selected while planning keeps its decision flow", () => {
 });
 
 test("sidebar exposes General and Coding as views rather than composer tools", () => {
-  assert.match(html, /data-chat-mode="general"[\s\S]*Fragen, lernen und erkunden/);
+  assert.match(html, /data-chat-mode="general"[\s\S]*Erstellen, lernen und erkunden/);
   assert.match(html, /data-chat-mode="coding"[\s\S]*Erstellen, debuggen und ausliefern/);
   assert.match(appSource, /post\("mode\.switch", \{ chatMode \}\)/);
   assert.doesNotMatch(appSource, /const defaultActionDescriptors|displayName:\s*"(?:General|Coding)"/);
+});
+
+test("selected tool chips live beside the native footer plus without narrowing the text input", () => {
+  const chips = html.indexOf('id="active-tool-chips"');
+  const toolbar = html.indexOf('class="composer-toolbar"');
+  const tools = html.indexOf('class="toolbar-group composer-tools"');
+  const right = html.indexOf('class="toolbar-group composer-submit"');
+  assert.ok(chips > tools && tools > toolbar && chips < right);
+  const abovePrompt = html.slice(html.indexOf('id="context-strip"'), html.indexOf('id="prompt"'));
+  assert.doesNotMatch(abovePrompt, /active-tool-chips/);
+  const browserCss = fs.readFileSync(path.join(webRoot, "browser-panels.css"), "utf8");
+  assert.match(browserCss, /#active-tool-chips\s*\{[^}]*overflow-x:\s*auto/);
+  assert.match(browserCss, /\.composer-tools\s*\{[^}]*flex:\s*1 1 46px;[^}]*min-width:\s*46px;[^}]*flex-wrap:\s*nowrap/);
+  assert.match(browserCss, /\.app-shell\.sessions-collapsed\s*\{\s*grid-template-columns:\s*minmax\(0, 1fr\);/,
+    "a hidden sidebar must leave the chat in a real full-width track");
+});
+
+test("project chats keep only selected tools and captions in the native composer footer", async () => {
+  const workspacePath = "C:\\Projekte\\Ordner ÄÖ 漢字", workspaceRenders = [], invocations = [], posts = [];
+  const descriptor = { actionId: "builtin.web/search", displayName: "Websuche", iconKey: "web" };
+  const state = { workspacePath, selectedExtensionActionId: descriptor.actionId, selectedToolAction: "webSearch",
+    documents: [], attachments: [], pendingDocumentImports: [], liveCaption: { isActive: true } };
+  const activeTools = new TestNode("div");
+  const context = vm.createContext({ state, elements: { activeTools, documents: new TestNode("div") },
+    document: { createElement: tag => new TestNode(tag) },
+    renderCodingWorkspace: () => workspaceRenders.push(state.workspacePath), renderDeepResearch() {}, renderScienceWorkbench() {},
+    availableActionDescriptors: () => [descriptor], actionIcons: { web: "web" },
+    toolVisuals: { webSearch: ["Websuche", "web"], "liveCaption.start": ["Live-Untertitel", "caption"] },
+    createToolIcon: () => new TestNode("svg"), isAudioCaptureActive: () => false, isScreenClipActive: () => false,
+    updateContextStripVisibility() {}, invokeActionDescriptor: item => invocations.push(item.actionId),
+    post: (type, payload) => posts.push({ type, payload }) });
+  vm.runInContext(functionSource("renderContext"), context);
+  context.renderContext();
+  assert.equal(activeTools.querySelector(".workspace-context-chip"), null);
+  assert.deepEqual(activeTools.children.map(chip => chip.getAttribute("aria-label")), ["Websuche abwählen", "Live-Untertitel beenden"]);
+  await activeTools.children[0].dispatch("click"); await activeTools.children[1].dispatch("click");
+  assert.deepEqual(invocations, [descriptor.actionId]); assert.equal(posts[0].type, "liveCaption.stop");
+  state.selectedExtensionActionId = null; state.selectedToolAction = null; state.liveCaption.isActive = false;
+  context.renderContext();
+  assert.equal(activeTools.children.length, 0, "the project alone never consumes footer space");
+  assert.deepEqual(workspaceRenders, [workspacePath, workspacePath]);
+  assert.equal(state.workspacePath, workspacePath, "workspace selection remains available to sidebar, tools and outputs");
 });
 
 test("the grouped action menu is populated only by the current snapshot descriptors", () => {
@@ -104,7 +149,7 @@ test("the grouped action menu is populated only by the current snapshot descript
     "new built-ins are rendered from descriptors without a WebView allow-list");
   assert.doesNotMatch(html, /workflow|memory-overlay|memory-auto-capture|pin-memory-entry/i);
   assert.doesNotMatch(appSource, /workflow|builtin\.memory\/open-library/i);
-  assert.match(appSource, /post\("message\.exportPdf", \{ messageId:/, "per-message PDF export remains available");
+  assert.match(fs.readFileSync(path.join(webRoot, "browser-panels.js"), "utf8"), /post\("message\.exportPdf", \{ sessionId: state\(\)\.activeSessionId, messageId:/, "per-message PDF export remains available in the native context menu");
 });
 
 test("whole-chat PDF and media rows dispatch canonical extension actions", () => {
@@ -204,54 +249,25 @@ test("product-neutral storage keys migrate legacy values on first read", () => {
   assert.doesNotMatch(bridgeSource, /"session\.tool"/);
 });
 
-test("the LAN browser owns its workspace dialog and local speech playback", () => {
+test("the LAN browser owns uploads and forwards F5 requests to its server", () => {
   assert.match(html, /id="workspace-overlay"[\s\S]*id="workspace-path"/);
   assert.match(html, /Workspace auf dem Host öffnen/);
   assert.match(appSource, /if \(globalThis\.missumBridge\?\.isLanBrowser\) \{[\s\S]*openWorkspacePicker\(\)/);
   assert.match(appSource, /post\("session\.projectCreate", \{ workspacePath, chatMode: state\.chatMode \}\)/);
-  assert.doesNotMatch(appSource, /workflow|builtin\.memory\/open-library/i);
-
-  const events = [];
-  let spoken = null;
-  let paused = false;
-  let cancelled = 0;
+  assert.doesNotMatch(bridgeSource, /speechSynthesis|SpeechSynthesisUtterance/);
+  const sent = [];
   class Socket {
-    constructor() { this.readyState = 0; }
+    constructor() { this.readyState = 1; }
     addEventListener() {}
+    send(value) { sent.push(JSON.parse(value)); }
   }
-  class Utterance {
-    constructor(text) { this.text = text; }
-  }
-  const storage = new Map();
-  const context = vm.createContext({
-    URL,
-    WebSocket: Socket,
+  const context = vm.createContext({ URL, WebSocket: Socket,
     location: { protocol: "http:", href: "http://host/assistant/", host: "host", pathname: "/assistant/" },
-    crypto: { randomUUID: () => "client-a" },
-    sessionStorage: {
-      getItem: key => storage.get(key) || null,
-      setItem: (key, value) => storage.set(key, value)
-    },
-    SpeechSynthesisUtterance: Utterance,
-    speechSynthesis: {
-      cancel: () => { cancelled += 1; },
-      speak: utterance => { spoken = utterance; utterance.onstart(); },
-      pause: () => { paused = true; },
-      resume: () => { paused = false; }
-    },
-    document: { documentElement: { lang: "de-DE" } },
-    CustomEvent: class { constructor(type, options) { this.type = type; this.detail = options.detail; } },
-    dispatchEvent: event => events.push(event),
-    setTimeout,
-    clearTimeout
-  });
+    crypto: { randomUUID: () => "client-a" }, CustomEvent: class {}, dispatchEvent() {} });
   vm.runInContext(bridgeSource, context);
-  context.missumBridge.post("microphone.speak", { text: "Hallo **Browser**" }, "speech-a");
-  assert.equal(spoken.text, "Hallo Browser");
-  assert.ok(events.some(event => event.detail?.type === "speech.status" && event.detail.payload.active));
-  context.missumBridge.post("microphone.toggleSpeechPause", {}, "speech-b");
-  assert.equal(paused, true);
-  context.missumBridge.post("microphone.stopSpeech", {}, "speech-c");
-  assert.ok(cancelled >= 2);
-  assert.ok(events.some(event => event.detail?.type === "speech.status" && !event.detail.payload.active));
+  context.missumBridge.post("microphone.speak", { sessionId: "s", messageId: "m", text: "Hallo **Browser**" }, "speech-a");
+  assert.equal(sent[0].type, "microphone.speak");
+  assert.equal(sent[0].payload.text, "Hallo **Browser**");
+  assert.equal(sent[0].version, 2);
+  assert.equal(sent[0].tabId, "client-a");
 });

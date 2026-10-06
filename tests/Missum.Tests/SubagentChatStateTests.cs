@@ -750,6 +750,9 @@ public sealed class SubagentChatStateTests
         child = child.Apply(Event(child, 2, RunEventTypes.ServerToolStarted, new { tool = "web.search", callId = "persisted-search", arguments = new { query = "OpenAI Agents SDK" } }));
         child = child.Apply(Event(child, 3, RunEventTypes.ServerToolCompleted, new { tool = "web.search", callId = "persisted-search", success = true, result = new { results = new[] { new { title = "Agents SDK", url = "https://openai.github.io/openai-agents-python/" } } } }));
         child = child.Apply(Event(child, 4, RunEventTypes.RunCompleted, new { }));
+        var nativePlanets = new SubagentPlanetIdentityStore(environment.Directory);
+        nativePlanets.EnsureAssigned(["already-visible-native-agent", "another-native-agent"]);
+        var nativePlanetIndex = nativePlanets.GetOrAssign(child.AgentId);
         await chats.SaveToolStepAsync(turn.AssistantMessage.Id, Receipt(child, child.ReceiptId, JsonSerializer.Serialize(child, ProtocolJson)));
         await environment.Get<ISettingsStore>().SaveAsync(new AppSettings { SelectedChatMode = ChatMode.Coding, ActiveSessionId = session.Id, ActiveCodingSessionId = session.Id });
 
@@ -779,6 +782,16 @@ public sealed class SubagentChatStateTests
             JsonSerializer.SerializeToElement(new { sessionId = session.Id })), (type, payload, _) =>
             { Assert.Equal("conversation.snapshot", type); conversation = JsonSerializer.SerializeToElement(payload, JsonSerializerOptions.Web); return Task.CompletedTask; });
         AssertChildSnapshot(conversation, child);
+        Assert.Equal(nativePlanetIndex, Assert.Single(snapshot.GetProperty("subagents").EnumerateArray()).GetProperty("planetIndex").GetInt32());
+        Assert.Equal(nativePlanetIndex, Assert.Single(conversation.GetProperty("subagents").EnumerateArray()).GetProperty("planetIndex").GetInt32());
+        JsonElement liveChild = default;
+        await coordinator.EmitMissumAiUpdateAsync(new(MissumAiAssistantUpdateKind.SubagentChanged,
+            turn.AssistantMessage, Subagent: child), (type, payload, _) =>
+            {
+                if (type == "subagent.snapshot") liveChild = JsonSerializer.SerializeToElement(payload, JsonSerializerOptions.Web);
+                return Task.CompletedTask;
+            }, "same-native-planet");
+        Assert.Equal(nativePlanetIndex, liveChild.GetProperty("planetIndex").GetInt32());
     }
 
     [Fact]

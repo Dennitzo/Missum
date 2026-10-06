@@ -9,16 +9,13 @@ const css = fs.readFileSync(path.join(webRoot, "styles.css"), "utf8");
 const app = fs.readFileSync(path.join(webRoot, "app.js"), "utf8");
 const bridge = fs.readFileSync(path.join(webRoot, "bridge.js"), "utf8");
 
-test("Claude Science owns a full workbench and a separately collapsible conversation panel", () => {
-  assert.match(html, /id="science-workbench"/);
+test("Claude Science uses the native shared chat with publication and simulation views", () => {
   assert.match(html, /id="conversation-pane"/);
-  assert.match(html, /id="science-chat-toggle"/);
-  assert.doesNotMatch(html, /id="research-overlay"|Forschungsstand öffnen/);
-  for (const view of ["overview", "research", "data", "analysis", "figures", "manuscript", "review", "provenance"])
-    assert.match(html, new RegExp(`data-science-view="${view}"`));
-  assert.match(css, /\.app-shell\.science-mode \.chat-pane\s*\{[^}]*grid-template-columns:/);
-  assert.match(css, /\.science-workbench__content\s*\{[^}]*overflow:\s*auto/);
-  assert.match(css, /@media \(max-width: 820px\)/);
+  const panels = fs.readFileSync(path.join(webRoot, "browser-panels.js"), "utf8");
+  assert.match(panels, /add\("Publikation", "publication", icon\("publication"\)\)/);
+  assert.match(panels, /add\("Simulation", "simulation", icon\("simulation"\)\)/);
+  assert.doesNotMatch(panels, /add\("Forschung", "research"\)/);
+  assert.match(panels, /byId\("science-workbench"\)\.hidden = true/);
 });
 
 test("science views render persisted evidence rather than static placeholder copy", () => {

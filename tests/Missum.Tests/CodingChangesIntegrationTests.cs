@@ -10,6 +10,61 @@ namespace Missum.Tests;
 
 public sealed class CodingChangesIntegrationTests
 {
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    [Fact]
+    public async Task CachedIndexLockFailureRecoversFromTheOriginalBaselineWithoutRemovingTheLockOrChangingRunIdentity()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var workspace = Directory.CreateDirectory(Path.Combine(environment.Directory, "project")).FullName;
+        var source = Path.Combine(workspace, "source.txt");
+        await File.WriteAllTextAsync(source, "original\n");
+        var session = Guid.NewGuid(); var message = Guid.NewGuid(); var run = Guid.NewGuid();
+        var storage = CodingChangesMonitor.StorageDirectory(environment.Directory, session, message);
+        using (var tracker = new Missum.Core.Coding.CodingGitChangeTracker(workspace, storage)) await tracker.InitializeAsync();
+        var baseline = await File.ReadAllBytesAsync(Path.Combine(storage, "git-baseline.json"));
+        var stale = Path.Combine(storage, "git-comparison", "index.lock");
+        await File.WriteAllTextAsync(stale, "retain prior lock evidence");
+        await File.WriteAllTextAsync(source, "after failed old capture\n");
+        var failed = new CodingChangesSummary(session, message, run, workspace, 100, DateTimeOffset.UtcNow,
+            [], true, "fatal: git-comparison/index.lock: File exists", "git-v1");
+        await File.WriteAllTextAsync(Path.Combine(storage, "latest.json"), JsonSerializer.Serialize(failed, JsonOptions));
+        var repaired = await CodingChangesMonitor.RecoverIndexLockAsync(storage, failed);
+        Assert.False(repaired.IsPartial, repaired.Notice); Assert.Null(repaired.Notice);
+        Assert.Equal(session, repaired.SessionId); Assert.Equal(message, repaired.MessageId); Assert.Equal(run, repaired.RunId);
+        Assert.True(repaired.Revision > failed.Revision);
+        var change = Assert.Single(repaired.Files);
+        Assert.Contains("-original", change.Diff, StringComparison.Ordinal);
+        Assert.Contains("+after failed old capture", change.Diff, StringComparison.Ordinal);
+        Assert.Equal(baseline, await File.ReadAllBytesAsync(Path.Combine(storage, "git-baseline.json")));
+        Assert.Equal("retain prior lock evidence", await File.ReadAllTextAsync(stale));
+        Assert.Equal(repaired.Revision, (await CodingChangesMonitor.ReadLatestAsync(storage))!.Revision);
+        Assert.Empty(Directory.EnumerateFiles(storage, ".git-index-*"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task HistoryRepairNeverInventsAMissingOrInvalidBaselineOrClearsItsPartialWarning(bool invalidManifest)
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var workspace = Directory.CreateDirectory(Path.Combine(environment.Directory, "project")).FullName;
+        var storage = Directory.CreateDirectory(Path.Combine(environment.Directory, "missing-baseline")).FullName;
+        var failed = new CodingChangesSummary(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), workspace, 100, DateTimeOffset.UtcNow,
+            [], true, "fatal: index.lock: File exists", "git-v1");
+        var saved = JsonSerializer.Serialize(failed, JsonOptions);
+        await File.WriteAllTextAsync(Path.Combine(storage, "latest.json"), saved);
+        var manifest = Path.Combine(storage, "git-baseline.json");
+        var invalid = JsonSerializer.Serialize(new { Workspace = workspace, Tree = new string('0', 40) });
+        if (invalidManifest) await File.WriteAllTextAsync(manifest, invalid);
+        var result = await CodingChangesMonitor.RecoverIndexLockAsync(storage, failed);
+        Assert.True(result.IsPartial); Assert.Equal(failed.Notice, result.Notice); Assert.Equal(failed.Revision, result.Revision);
+        if (invalidManifest) Assert.Equal(invalid, await File.ReadAllTextAsync(manifest));
+        else Assert.False(File.Exists(manifest));
+        Assert.False(File.Exists(Path.Combine(storage, "git-capture-started")));
+        Assert.False(Directory.Exists(Path.Combine(workspace, ".git")), "a refused repair must not initialize the user's workspace");
+        Assert.Equal(saved, await File.ReadAllTextAsync(Path.Combine(storage, "latest.json")));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

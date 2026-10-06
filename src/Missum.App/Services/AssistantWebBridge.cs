@@ -15,14 +15,17 @@ public sealed class AssistantWebBridge : IDisposable
         LogLevel.Warning,
         new EventId(9410, "AssistantLanHostUnavailable"),
         "Die LAN-Browseroberfläche konnte nicht gestartet werden; die Desktop-WebView bleibt verfügbar.");
-    public const int ProtocolVersion = 1;
+    public const int ProtocolVersion = 2;
     public const string VirtualHost = "assistant.local";
     private const int MaximumIncomingMessageLength = 100_663_296;
     private const int MaximumOutgoingMessageLength = 16_777_216;
     private static readonly HashSet<string> AllowedIncomingTypes = new(StringComparer.Ordinal)
     {
+        "settings.get", "settings.update", "settings.connectionTest", "promptTriggers.list", "promptTriggers.apply",
+        "backup.create", "backup.restore", "backup.restoreCommit", "backup.restoreCancel", "models.list", "models.select",
+        "chat.resume", "session.groupDeleteEmpty", "speech.playbackProgress", "science.presentation.get", "coding.pickWorkspace",
         "app.ready", "conversation.refresh", "chat.send", "chat.steer", "chat.cancel", "session.create", "session.open",
-        "reasoning.get", "reasoning.set",
+        "reasoning.get", "reasoning.set", "workspace.browse",
         "session.rename", "session.delete", "session.clear", "session.draft", "session.groupCollapse", "session.projectCreate", "session.workspaceCreate", "mode.switch", "action.invoke", "document.pick", "document.paste", "document.upload",
         "document.remove", "attachment.remove", "message.exportPdf", "message.copy",
         "memory.list", "memory.create", "memory.update", "memory.pin", "memory.confirm", "memory.delete", "memory.autoCapture",
@@ -34,25 +37,31 @@ public sealed class AssistantWebBridge : IDisposable
     };
     private static readonly HashSet<string> AllowedOutgoingTypes = new(StringComparer.Ordinal)
     {
+        "settings.snapshot", "settings.changed", "settings.conflict", "settings.connectionResult", "promptTriggers.snapshot", "promptTriggers.changed",
+        "backup.ready", "backup.restoreReady", "backup.restoreDeferred", "backup.restored", "backup.cancelled", "models.snapshot", "host.capabilities", "download.ready", "settings.error",
+        "speech.reset", "speech.audio", "speech.complete", "speech.pause", "subagent.snapshot", "science.presentation",
         "state.snapshot", "chat.queued", "queue.changed", "chat.started", "chat.delta", "chat.completed",
         "chat.cancelled", "chat.failed", "session.changed", "session.grouped",
         "document.changed", "document.import.started", "document.import.progress", "document.import.completed", "status.changed", "speech.status", "speech.progress", "theme.changed",
         "draft.saved", "caption.changed", "screenClip.changed", "audioCapture.changed", "capture.required", "capture.cancelled",
         "microphone.changed", "microphone.transcript", "artifact.previewReady", "host.error",
         "conversation.snapshot", "conversation.messageCommitted", "coding.changes",
-        "reasoning.snapshot",
+        "reasoning.snapshot", "workspace.list",
         "chat.steer.accepted",
         "action.completed", "memory.snapshot", "memory.changed", "research.snapshot", "research.exported",
     };
     private static readonly HashSet<string> ClientScopedOutgoingTypes = new(StringComparer.Ordinal)
     {
+        "settings.snapshot", "settings.conflict", "settings.connectionResult", "promptTriggers.snapshot", "backup.ready", "backup.restoreReady",
+        "backup.restored", "backup.restoreDeferred", "backup.cancelled", "models.snapshot", "host.capabilities", "download.ready", "settings.error",
+        "speech.reset", "speech.audio", "speech.complete", "speech.pause", "science.presentation",
         "state.snapshot", "conversation.snapshot",
         "session.changed", "session.grouped",
         "document.changed", "document.import.started", "document.import.progress", "document.import.completed",
         "draft.saved", "speech.status", "speech.progress", "caption.changed", "screenClip.changed",
         "audioCapture.changed", "capture.required", "capture.cancelled", "microphone.changed",
         "microphone.transcript", "artifact.previewReady", "host.error",
-        "reasoning.snapshot", "chat.steer.accepted", "action.completed", "memory.snapshot", "research.snapshot", "research.exported",
+        "reasoning.snapshot", "workspace.list", "chat.steer.accepted", "action.completed", "memory.snapshot", "research.snapshot", "research.exported",
     };
     private static readonly HashSet<string> ReadableBlockKinds = new(StringComparer.Ordinal)
     {
@@ -376,7 +385,7 @@ public sealed class AssistantWebBridge : IDisposable
         {
             envelope = JsonSerializer.Deserialize<WebBridgeEnvelope>(json, SerializerOptions);
             return envelope is not null
-                && envelope.Version == ProtocolVersion
+                && envelope.Version is 1 or ProtocolVersion
                 && IsIncomingTypeAllowed(envelope.Type)
                 && !string.IsNullOrWhiteSpace(envelope.RequestId)
                 && envelope.RequestId.Length <= 128
