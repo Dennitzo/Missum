@@ -29,6 +29,7 @@ internal static class ScientificDeliverablesVerifier
             : !File.Exists(publication.MarkdownPath) ? "Die Markdownquelle der Publikation fehlt."
             : "Die PDF-Datei fehlt oder besitzt keinen gültigen PDF-Dateikopf.");
         var files = new List<object>();
+        var interactiveFiles = new List<object>();
         var verifiedFigureExperiments = new HashSet<string>(StringComparer.Ordinal);
         var rejected = new HashSet<string>(StringComparer.Ordinal);
         var simulation = snapshot?.Simulation;
@@ -37,6 +38,13 @@ internal static class ScientificDeliverablesVerifier
             foreach (var image in simulation.Artifacts)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                if (image.Kind == "interactive")
+                {
+                    if (await VerifyInteractiveArtifactAsync(projectId, image, cancellationToken).ConfigureAwait(false) is { } artifact)
+                        interactiveFiles.Add(artifact);
+                    else rejected.Add("Die interaktive Simulation fehlt, ist verändert oder besitzt keinen gültigen projektgebundenen HTML-/JavaScript-Quellbeleg.");
+                    continue;
+                }
                 // A publication evidence chart, a missing file or a changed PNG is not a successful research execution.
                 if (!image.IsResearchData || !image.Provenance.StartsWith("Forschungsexperiment · ", StringComparison.Ordinal))
                 { rejected.Add("Die Abbildung ist keinem erfolgreichen Python-Experiment zugeordnet."); continue; }
@@ -68,13 +76,24 @@ internal static class ScientificDeliverablesVerifier
                     scriptSha256 = await HashAsync(image.ScriptPath, cancellationToken).ConfigureAwait(false) });
             }
         }
-        var simulationReady = files.Count > 0;
-        var simulationRequired = state is null || state.Items.Any(item => item.Kind == "requirement"
-            && Required(item.Data) && Text(item.Data, "status") is not ("withdrawn" or "openLimit") && IsFigureRequirement(item.Data));
+        var executed = files.Count > 0;
+        var interactiveReady = interactiveFiles.Count > 0;
+        var activeRequirements = state?.Items.Where(item => item.Kind == "requirement"
+            && Required(item.Data) && Text(item.Data, "status") is not ("withdrawn" or "openLimit")).ToArray() ?? [];
+        // Legacy receipts retain the Python/figure gate. Canonical requirements can
+        // explicitly ask for an interactive source artifact instead of a process proof.
+        var executionRequired = state is null || activeRequirements.Any(item => IsFigureRequirement(item.Data)
+            && (!IsInteractiveRequirement(item.Data) || RequiresScientificExecution(item.Data)));
+        var interactiveRequired = activeRequirements.Any(item => IsInteractiveRequirement(item.Data));
+        var simulationRequired = executionRequired || interactiveRequired;
+        var simulationReady = (!executionRequired || executed) && (!interactiveRequired || interactiveReady)
+            && (executed || interactiveReady || !simulationRequired);
         var simulationError = snapshot?.SimulationError ?? (simulationReady ? null : rejected.Count > 0
-            ? string.Join(" ", rejected.Take(3)) : "Noch keine darstellbare Abbildung aus einem erfolgreichen Python-Experiment vorhanden.");
+            ? string.Join(" ", rejected.Take(3)) : interactiveRequired && !interactiveReady
+                ? "Noch keine gültige projektgebundene HTML-/JavaScript-Simulation vorhanden."
+                : "Noch keine darstellbare Abbildung aus einem erfolgreichen Python-Experiment vorhanden.");
         var missing = state is null ? new List<string>()
-            : await ResearchMissingAsync(state, receipts, publication, verifiedFigureExperiments, cancellationToken).ConfigureAwait(false);
+            : await ResearchMissingAsync(state, receipts, publication, verifiedFigureExperiments, interactiveReady, cancellationToken).ConfigureAwait(false);
         if (!publicationReady) missing.Add(publicationError ?? "Die Publikation entspricht noch nicht dem aktuellen fachlichen Stand.");
         if (simulationRequired && !simulationReady) missing.Add(simulationError ?? "Die erforderliche Darstellung fehlt.");
         var ready = publicationReady && (!simulationRequired || simulationReady) && missing.Count == 0;
@@ -88,14 +107,15 @@ internal static class ScientificDeliverablesVerifier
                 publicationRevision = state.PublicationRevision, ready, missing },
             publication = new { ready = publicationReady, pdfPath = publicationReady ? publication!.PdfPath : null,
                 sourceSha256 = sourceHash, revision = publication?.Revision ?? 0, error = publicationError },
-            simulation = new { required = simulationRequired, ready = simulationReady, executed = simulationReady, artifacts = files,
+            simulation = new { required = simulationRequired, ready = simulationReady, executed, executionRequired,
+                interactiveRequired, interactiveReady, artifacts = files, interactiveArtifacts = interactiveFiles,
                 error = simulationRequired ? simulationError : null },
             retryable = true,
         });
     }
 
     private static async Task<List<string>> ResearchMissingAsync(ResearchWorkingState state, ResearchResultSnapshot? receipts,
-        ScientificPublicationArtifact? publication, HashSet<string> verifiedFigureExperiments, CancellationToken token)
+        ScientificPublicationArtifact? publication, HashSet<string> verifiedFigureExperiments, bool interactiveReady, CancellationToken token)
     {
         var missing = new List<string>();
         var requirements = state.Items.Where(item => item.Kind == "requirement" && Required(item.Data)
@@ -113,6 +133,12 @@ internal static class ScientificDeliverablesVerifier
             {
                 missing.Add($"Arbeitsergebnis {requirement.Id}: noch offen; nächsten fachlichen Schritt oder begründete Nachweisgrenze dokumentieren.");
                 continue;
+            }
+            if (IsInteractiveRequirement(requirement.Data))
+            {
+                if (!interactiveReady)
+                    missing.Add($"Arbeitsergebnis {requirement.Id}: der aktuelle projektgebundene HTML-/JavaScript-Quellbeleg für die interaktive Simulation fehlt.");
+                if (!RequiresScientificExecution(requirement.Data)) continue;
             }
             var formal = HasMethod(requirement.Data, "lean", "formal", "formalproof");
             var symbolic = HasMethod(requirement.Data, "symbolic", "symbolisch", "symbolische", "sympy", "smt");
@@ -215,6 +241,40 @@ internal static class ScientificDeliverablesVerifier
 
     private static bool IsFigureRequirement(JsonElement data) =>
         HasMethod(data, "simulation", "plot", "figure", "graph", "graphviz", "abbildung", "visualization", "visualisierung");
+
+    private static bool IsInteractiveRequirement(JsonElement data)
+    {
+        var text = string.Join(" ", Text(data, "method"), Text(data, "title"), Text(data, "statement"));
+        return System.Text.RegularExpressions.Regex.IsMatch(text,
+            @"\b(?:interactive|interaktiv\p{L}*|animation\p{L}*|animated|animiert\p{L}*|realtime|real[- ]time|echtzeit\p{L}*)\b",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant,
+            TimeSpan.FromSeconds(1));
+    }
+
+    private static bool RequiresScientificExecution(JsonElement data) => HasMethod(data,
+        "python", "numeric", "numerical", "numerisch", "numerische", "numerik", "lean", "formal", "formalproof",
+        "symbolic", "symbolisch", "symbolische", "sympy", "smt");
+
+    private static async Task<object?> VerifyInteractiveArtifactAsync(string projectId, ScientificSimulationArtifact artifact, CancellationToken token)
+    {
+        if (artifact.IsResearchData || artifact.Execution is not null || artifact.ContentType != "text/html"
+            || string.IsNullOrWhiteSpace(artifact.ProjectRoot) || !ScientificSimulationHtml.IsHtmlPath(artifact.ImagePath)
+            || Path.GetFileName(Path.TrimEndingDirectorySeparator(artifact.ProjectRoot)) != projectId) return null;
+        try
+        {
+            var relative = Path.GetRelativePath(artifact.ProjectRoot, artifact.ImagePath).Replace('\\', '/');
+            if (!(relative.StartsWith("work/", StringComparison.Ordinal) || relative.StartsWith("artifacts/", StringComparison.Ordinal))
+                || relative.Split('/').Any(part => part.Equals("publication", StringComparison.OrdinalIgnoreCase))) return null;
+            var path = ScientificSimulationService.SafePath(artifact.ProjectRoot, relative);
+            if (!File.Exists(path) || new FileInfo(path).Length is <= 0 or > ScientificSimulationHtml.MaximumBytes) return null;
+            var source = await File.ReadAllBytesAsync(path, token).ConfigureAwait(false);
+            var hash = Convert.ToHexStringLower(SHA256.HashData(source));
+            if (hash != artifact.Sha256 || !ScientificSimulationHtml.IsInteractiveDocument(System.Text.Encoding.UTF8.GetString(source))) return null;
+            return new { kind = "interactive", projectId, path, artifactPath = relative, sha256 = hash,
+                sourceArtifact = true, executed = false, contentType = "text/html" };
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException) { return null; }
+    }
 
     private static bool HasMethod(JsonElement data, params string[] choices)
     {

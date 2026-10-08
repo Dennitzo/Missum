@@ -5,6 +5,23 @@ namespace Missum.Tests;
 public sealed class NativeLooseMathTests
 {
     [Theory]
+    [InlineData("dA/dt = A(μ - c A²) + ξ(t)", "dA/dt = A (μ-c A^{2})+ξ (t)")]
+    [InlineData("τ_K ∝ exp(ΔU/D_eff)", @"τ_{K} \propto \exp (ΔU/D_{eff})")]
+    [InlineData("ΔU = μ²/(4c)", "ΔU = μ^{2}/(4 c)")]
+    [InlineData("A·m²", @"A\cdot m^{2}")]
+    public void CurrentGeomagneticEquationsRenderAsOneCompleteLosslessFormula(string source, string latex)
+    {
+        var segments = NativeMathSyntax.SplitForRendering(source);
+        var formula = Assert.Single(segments, segment => segment.IsMath);
+        Assert.Equal(source, formula.Text);
+        Assert.Equal(source, string.Concat(segments.Select(segment => segment.Text)));
+        Assert.Equal(latex, formula.RenderLatex);
+        var image = NativeMathRenderer.Render(formula.RenderLatex!, display: false);
+        Assert.True(image.Error is null, image.Error);
+        Assert.NotEmpty(image.Png);
+    }
+
+    [Theory]
     [InlineData("T_ECT = T_HH/ln 2")]
     [InlineData("P_ECT = A·T_ECT⁴ = A·(T_HH/ln 2)⁴ = P_std/(ln 2)⁴")]
     [InlineData("dM/dt = -P/c²")]
@@ -71,6 +88,9 @@ public sealed class NativeLooseMathTests
     [InlineData("tool_name=T_ECT")]
     [InlineData("path=x_i")]
     [InlineData("cache_key=T_ECT")]
+    [InlineData("ΔU.py")]
+    [InlineData("samples/ΔU")]
+    [InlineData("ΔUnknown=1")]
     public void CodeFilesPathsUrlsAndSimpleAssignmentsStayLiteral(string source)
     {
         var segments = NativeMathSyntax.SplitForRendering(source);
@@ -95,6 +115,7 @@ public sealed class NativeLooseMathTests
     [InlineData("Ein Zwischenschritt: P_ECT = A·T_ECT^{")]
     [InlineData("$5^2")]
     [InlineData("$5x²")]
+    [InlineData("τ_K ∝ exp(ΔU/")]
     public void IncompleteStreamingOperatorsStayLosslessAndNeverBecomeBrokenFormulas(string source)
     {
         var segments = NativeMathSyntax.SplitForRendering(source);

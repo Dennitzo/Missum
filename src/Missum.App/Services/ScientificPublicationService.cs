@@ -87,6 +87,7 @@ public sealed partial class ScientificPublicationService : IDisposable, IScienti
         ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
         ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        ResearchWorkingState? renderingState = null;
         try
         {
             var snapshot = await ReadSnapshotAsync(projectId, cancellationToken).ConfigureAwait(false);
@@ -114,6 +115,7 @@ public sealed partial class ScientificPublicationService : IDisposable, IScienti
                     return cached;
                 }
             }
+            renderingState = snapshot.WorkingState;
             var markdown = snapshot.WorkingState is { } canonical
                 ? FormatCanonicalPublication(canonical, snapshot.Works, snapshot.Results)
                 : FormatPublication(snapshot.Project, snapshot.Results, snapshot.Works, snapshot.Evidence, snapshot.Report, snapshot.Manuscript);
@@ -154,7 +156,8 @@ public sealed partial class ScientificPublicationService : IDisposable, IScienti
                 try { rendered = await _render(pendingSource, cancellationToken).ConfigureAwait(false); }
                 catch (Exception exception) when (snapshot.WorkingState is not null && IsContentRenderError(exception))
                 {
-                    throw new ScientificPublicationContentException(SectionRepairDiagnostic(snapshot.WorkingState, exception.Message), exception);
+                    throw new ScientificPublicationContentException(SectionRepairDiagnostic(snapshot.WorkingState, exception.Message), exception,
+                        snapshot.WorkingState, SectionRepairTargets(snapshot.WorkingState, exception.Message));
                 }
                 if (rendered is null || !await IsValidPdfAsync(rendered, cancellationToken).ConfigureAwait(false))
                     throw new InvalidDataException("Die wissenschaftliche Publikation konnte nicht als gültiges PDF erzeugt werden.");
@@ -185,6 +188,20 @@ public sealed partial class ScientificPublicationService : IDisposable, IScienti
                     && Path.GetFileName(staging).StartsWith(".pending-", StringComparison.Ordinal)
                     && Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
             }
+        }
+        catch (ScientificPublicationContentException exception) when (renderingState is not null && exception.PublicationRevision is null)
+        {
+            // Pre-render validators and future renderer paths get the same exact source snapshot
+            // as the PDF parser. Existing structured metadata is retained unchanged.
+            throw new ScientificPublicationContentException(exception.Message, exception, renderingState,
+                exception.Sections.Count > 0 ? exception.Sections : SectionRepairTargets(renderingState, exception.Message));
+        }
+        catch (Exception exception) when (renderingState is not null
+                                        && exception is not (ScientificPublicationContentException or OutOfMemoryException or OperationCanceledException)
+                                        && IsContentRenderError(exception))
+        {
+            throw new ScientificPublicationContentException(SectionRepairDiagnostic(renderingState, exception.Message), exception,
+                renderingState, SectionRepairTargets(renderingState, exception.Message));
         }
         finally { _gate.Release(); }
     }

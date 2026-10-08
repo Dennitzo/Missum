@@ -58,13 +58,18 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     public NativeAssistantPage()
     {
         InitializeComponent();
-        _conversationSelection = new NativeConversationSelection(ConversationContent, MessagesPanel, ConversationScroll) { ReadFromMenuFactory = CreateReadFromMenu };
+        NativeNotice.Attach(ErrorBar);
+        _conversationSelection = new NativeConversationSelection(ConversationContent, MessagesPanel, ConversationScroll)
+        {
+            ReadFromMenuFactory = CreateReadFromMenu,
+            UiProjectionCallback = (phase, projection) => RunUiCallback(phase, projection),
+        };
         ResetChangesSummary();
-        ComposerChipsScroll.SizeChanged += (_, _) =>
+        ComposerChipsScroll.SizeChanged += (_, _) => RunUiCallback("ComposerChips.SizeChanged", () =>
         {
             var width = Math.Clamp(ComposerChipsScroll.ActualWidth, 28, 220);
             SelectedToolChip.MaxWidth = CaptionChip.MaxWidth = width;
-        };
+        });
         ConfigureSidebarHoverActions(ProjectsHeader, AddProjectButton);
         Composer.AddHandler(UIElement.PreviewKeyDownEvent, new Microsoft.UI.Xaml.Input.KeyEventHandler(OnComposerKeyDown), true);
         NavigationCacheMode = NavigationCacheMode.Required;
@@ -81,9 +86,9 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         _draftTimer.Tick += async (_, _) => { try { await FlushDraftAsync(); } catch (Exception ex) { ShowError(ex.Message); } };
         _renderTimer = DispatcherQueue.CreateTimer();
         _renderTimer.Interval = TimeSpan.FromMilliseconds(80);
-        _renderTimer.Tick += (_, _) => { UpdateVoiceVisual(); UpdateRunDurations(); if (_messagesDirty) { _messagesDirty = false; RenderMessagesNow(); } RefreshThinkingIndicators(); };
+        _renderTimer.Tick += (_, _) => OnNativeRenderTimerTick();
         _renderTimer.Start();
-        SizeChanged += (_, _) => UpdateResponsiveLayout();
+        SizeChanged += (_, _) => RunUiCallback("Page.SizeChanged", UpdateResponsiveLayout);
     }
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
@@ -114,11 +119,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     private static SolidColorBrush Brush(byte gray) => new(Color.FromArgb(255, gray, gray, gray));
 
     private static SolidColorBrush ThemeBrush(string key, byte fallback)
-    {
-        if (Application.Current.Resources.TryGetValue(key, out var value) && value is SolidColorBrush brush)
-            return brush;
-        return Brush(fallback);
-    }
+        => NativeThemeBrushes.Resource(key, fallback);
 
     private async Task<bool> CommandAsync(string type, object payload, Action<string>? onError = null)
     {
@@ -204,6 +205,8 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                     else if (_navigationState.IsCurrent(generation)) ShowError(S(json, "message"));
                     return;
                 }
+                _lastUiEventType = type;
+                _lastUiEventRevision = S(json, "revision", S(json, "conversationRevision"));
                 ApplyEvent(type, json);
             }
             catch (Exception ex) { if (onError is not null) onError(ex.Message); else ShowError(ex.Message); }
@@ -540,27 +543,41 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     private bool _syncingScroll;
     private void OnConversationSizeChanged(object sender, SizeChangedEventArgs e)
     {
-        if (BodyGrid.Visibility != Visibility.Visible || e.NewSize.Width <= 0) return;
-        var width = Math.Max(0, e.NewSize.Width - ConversationScroll.Padding.Left - ConversationScroll.Padding.Right);
-        if (double.IsNaN(ConversationContent.Width) || Math.Abs(ConversationContent.Width - width) > .5) ConversationContent.Width = width;
-        SyncOuterScroll();
+        RunUiCallback("Conversation.SizeChanged", () =>
+        {
+            if (_conversationLayoutSyncing || BodyGrid.Visibility != Visibility.Visible || e.NewSize.Width <= 0) return;
+            _conversationLayoutSyncing = true;
+            try
+            {
+                var width = Math.Max(0, e.NewSize.Width - ConversationScroll.Padding.Left - ConversationScroll.Padding.Right);
+                if (double.IsNaN(ConversationContent.Width) || Math.Abs(ConversationContent.Width - width) > .5) ConversationContent.Width = width;
+                SyncOuterScroll();
+            }
+            finally { _conversationLayoutSyncing = false; }
+        });
     }
     private void OnConversationViewChanged(object sender, ScrollViewerViewChangedEventArgs e)
     {
-        SyncOuterScroll();
-        UpdatePromptTimelineSelection();
+        RunUiCallback("Conversation.ViewChanged", () =>
+        {
+            SyncOuterScroll();
+            UpdatePromptTimelineSelection();
+        });
     }
     private void SyncOuterScroll()
     {
-        if (OuterChatScrollBar is null) return;
+        if (_disposed || _syncingScroll || OuterChatScrollBar is null) return;
         _syncingScroll = true;
-        OuterChatScrollBar.Maximum = ConversationScroll.ScrollableHeight;
-        OuterChatScrollBar.ViewportSize = ConversationScroll.ViewportHeight;
-        OuterChatScrollBar.LargeChange = ConversationScroll.ViewportHeight;
-        OuterChatScrollBar.Value = ConversationScroll.VerticalOffset;
-        OuterChatScrollBar.Visibility = ConversationScroll.ScrollableHeight > 0 ? Visibility.Visible : Visibility.Collapsed;
-        ScrollToBottomButton.Visibility = ConversationScroll.ScrollableHeight - ConversationScroll.VerticalOffset > 90 ? Visibility.Visible : Visibility.Collapsed;
-        _syncingScroll = false;
+        try
+        {
+            OuterChatScrollBar.Maximum = ConversationScroll.ScrollableHeight;
+            OuterChatScrollBar.ViewportSize = ConversationScroll.ViewportHeight;
+            OuterChatScrollBar.LargeChange = ConversationScroll.ViewportHeight;
+            OuterChatScrollBar.Value = ConversationScroll.VerticalOffset;
+            OuterChatScrollBar.Visibility = ConversationScroll.ScrollableHeight > 0 ? Visibility.Visible : Visibility.Collapsed;
+            ScrollToBottomButton.Visibility = ConversationScroll.ScrollableHeight - ConversationScroll.VerticalOffset > 90 ? Visibility.Visible : Visibility.Collapsed;
+        }
+        finally { _syncingScroll = false; }
     }
     private void OnOuterScrollChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
     { if (!_syncingScroll) ConversationScroll.ChangeView(null, e.NewValue, null, true); }
@@ -588,7 +605,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         scroll.ChangeView(null, offset, null, true);
         e.Handled = true;
     }
-    private void OnBodySizeChanged(object sender, SizeChangedEventArgs e) => UpdateResponsiveLayout();
+    private void OnBodySizeChanged(object sender, SizeChangedEventArgs e) => RunUiCallback("Body.SizeChanged", UpdateResponsiveLayout);
     private void UpdateResponsiveLayout()
     {
         if (Inspector is null || BodyGrid is null || AssistantFrame is null || InspectorToggle is null) return;
@@ -829,17 +846,17 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         var options = _reasoning;
         var flyout = new Flyout { Placement = Microsoft.UI.Xaml.Controls.Primitives.FlyoutPlacementMode.Top, AreOpenCloseAnimationsEnabled = true };
         var presenter = new Style(typeof(FlyoutPresenter));
-        presenter.Setters.Add(new Setter(Control.BackgroundProperty, Brush(43)));
+        presenter.Setters.Add(new Setter(Control.BackgroundProperty, ThemeBrush("MissumLayerStrongBrush", 43)));
         presenter.Setters.Add(new Setter(Control.CornerRadiusProperty, new CornerRadius(18)));
         presenter.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(12, 8, 12, 6)));
-        presenter.Setters.Add(new Setter(Control.BorderBrushProperty, Brush(62)));
+        presenter.Setters.Add(new Setter(Control.BorderBrushProperty, ThemeBrush("MissumStrokeBrush", 62)));
         flyout.FlyoutPresenterStyle = presenter;
         var panel = new StackPanel { Width = 232, Spacing = 0 };
         var heading = new Grid();
-        var caption = new TextBlock { Text = options?.Available == true ? "Reasoning: " + EffortLabel(options.Selected) : "Reasoning: nicht verfügbar", HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, FontSize = 15, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Foreground = ThemeBrush("MissumAccentBrush", 0x8B) };
+        var caption = new TextBlock { Text = options?.Available == true ? "Reasoning: " + EffortLabel(options.Selected) : "Reasoning: nicht verfügbar", HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, FontSize = 15, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Foreground = ThemeBrush("MissumAccentReadableBrush", 0x8B) };
         heading.Children.Add(caption);
         panel.Children.Add(heading);
-        var chooseModel = new Button { Content = ModelLabel.Text + " ›", BorderThickness = new(0), Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), HorizontalAlignment = HorizontalAlignment.Center, FontSize = 13, Foreground = Brush(185), Padding = new(6, 0, 6, 4), MaxWidth = 228 };
+        var chooseModel = new Button { Content = ModelLabel.Text + " ›", BorderThickness = new(0), Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), HorizontalAlignment = HorizontalAlignment.Center, FontSize = 13, Foreground = ThemeBrush("MissumMutedTextBrush", 185), Padding = new(6, 0, 6, 4), MaxWidth = 228 };
         chooseModel.Click += (_, _) => { flyout.Hide(); OnSelectModel(sender, e); };
         panel.Children.Add(chooseModel);
         if (options?.Available == true)
@@ -867,7 +884,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             // Use the same thumb-centre geometry for the fill and discrete stops.
             // The native Slider remains responsible for keyboard, pointer and accessibility input.
             var sliderContainer = new Grid();
-            var track = new Border { Height = 24, CornerRadius = new(12), Background = Brush(69), VerticalAlignment = VerticalAlignment.Center, Margin = new(0, 2, 0, 0), IsHitTestVisible = false };
+            var track = new Border { Height = 24, CornerRadius = new(12), Background = ThemeBrush("MissumHoverBrush", 69), VerticalAlignment = VerticalAlignment.Center, Margin = new(0, 2, 0, 0), IsHitTestVisible = false };
             var color = (accent as SolidColorBrush)?.Color ?? Microsoft.UI.Colors.MediumPurple;
             var light = Windows.UI.Color.FromArgb(255, (byte)((color.R + 255) / 2), (byte)((color.G + 255) / 2), (byte)((color.B + 255) / 2));
             var gradient = new LinearGradientBrush { StartPoint = new(0, .5), EndPoint = new(1, .5) };
@@ -908,7 +925,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             panel.Children.Add(sliderContainer);
             flyout.Closed += async (_, _) => { if (selected != options.Selected && selected is not null) await CommandAsync("reasoning.set", new { modelId = options.ModelId, role = options.Role, effort = selected }); };
         }
-        else { panel.Children.Add(new TextBlock { Text = options?.Detail ?? "Modell auswählen", FontSize = 13, TextWrapping = TextWrapping.Wrap, Foreground = Brush(150) }); }
+        else { panel.Children.Add(new TextBlock { Text = options?.Detail ?? "Modell auswählen", FontSize = 13, TextWrapping = TextWrapping.Wrap, Foreground = ThemeBrush("MissumMutedTextBrush", 150) }); }
         flyout.Content = panel; NativeDropdownChevron.Bind(flyout, ModelButton); flyout.ShowAt(ModelButton);
     }
     private async void OnSelectModel(object sender, RoutedEventArgs e)
@@ -985,12 +1002,12 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     {
         if (_disposed) return;
         var owner = _session;
-        DispatcherQueue.TryEnqueue(() =>
+        DispatcherQueue.TryEnqueue(() => RunUiCallback("ShowError", () =>
         {
             if (_disposed) return;
             if (_activeResearchSessionId == owner) ShowResearchError(owner, message);
             else { _chatErrors[owner] = message; RefreshChatNotices(); }
-        });
+        }));
     }
     public void FocusComposer() => Composer.Focus(FocusState.Programmatic);
     public async Task CloseSessionToolsAsync()
@@ -1003,6 +1020,16 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             if (captions.IsRunning) await captions.StopAsync(CancellationToken.None);
         }
         catch (Exception exception) when (exception is not OutOfMemoryException) { }
+    }
+    public async Task DisposeAsync()
+    {
+        var simulations = _interactiveSimulationViews.Values.ToArray();
+        var publications = _publicationViews.Values.ToArray();
+        Dispose();
+        // Keep the window/dispatcher alive until pending WebView2 operations
+        // have settled and every retained browser has closed on its UI thread.
+        await Task.WhenAll(simulations.Select(view => view.DisposeAsync())
+            .Concat(publications.Select(view => view.DisposeAsync().AsTask())));
     }
     public void Dispose()
     {

@@ -1,11 +1,88 @@
 using System.Security.Cryptography;
+using System.Text.Json;
 using Missum.Ai.Contracts;
 using Missum.App.Services;
+using Missum.Core.Research;
 
 namespace Missum.Tests;
 
 public sealed class ScientificDeliverablesVerifierTests
 {
+    [Theory]
+    [InlineData("animation", "Interaktive Simulation", true)]
+    [InlineData("simulation", "Echtzeit-Simulation", true)]
+    [InlineData("simulation", "Numerischer Prüfplot", false)]
+    [InlineData("python numeric simulation", "Echtzeit-Simulation", false)]
+    [InlineData("formalproof simulation", "Interaktive Simulation", false)]
+    public async Task InteractiveSourceSatisfiesOnlyExplicitTechnicalDeliveryAndNeverScientificExecution(
+        string method, string title, bool expectedReady)
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var (publication, _) = await WriteDeliverablesAsync(environment.Directory);
+        var artifact = await WriteInteractiveArtifactAsync(environment.Directory);
+        var state = InteractiveState(method, title);
+        var snapshot = new ScientificPresentationSnapshot(1, publication with { SectionDelta = true },
+            new("research-test", 1, "ready", "", [artifact], DateTimeOffset.UtcNow), null, null);
+
+        var result = await ScientificDeliverablesVerifier.VerifyAsync("research-test", snapshot, state, null);
+
+        Assert.Equal(expectedReady, result.GetProperty("success").GetBoolean());
+        Assert.False(result.GetProperty("simulation").GetProperty("executed").GetBoolean());
+        Assert.True(result.GetProperty("simulation").GetProperty("interactiveReady").GetBoolean());
+        var verified = Assert.Single(result.GetProperty("simulation").GetProperty("interactiveArtifacts").EnumerateArray());
+        Assert.Equal(artifact.Sha256, verified.GetProperty("sha256").GetString());
+        Assert.True(verified.GetProperty("sourceArtifact").GetBoolean());
+        Assert.False(verified.GetProperty("executed").GetBoolean());
+        Assert.Empty(result.GetProperty("simulation").GetProperty("artifacts").EnumerateArray());
+    }
+
+    [Theory]
+    [InlineData("changed")]
+    [InlineData("scope")]
+    [InlineData("structure")]
+    public async Task InteractiveDeliveryRejectsChangedForeignOrNoninteractiveSource(string failure)
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var (publication, _) = await WriteDeliverablesAsync(environment.Directory);
+        var artifact = await WriteInteractiveArtifactAsync(environment.Directory);
+        if (failure == "changed") await File.AppendAllTextAsync(artifact.ImagePath, "<!-- changed -->");
+        if (failure == "scope") artifact = artifact with { ProjectRoot = environment.Directory };
+        if (failure == "structure")
+        {
+            await File.WriteAllTextAsync(artifact.ImagePath, "<!doctype html><html><script>let t=1</script><p>Keine Simulation</p></html>");
+            artifact = artifact with { Sha256 = Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(artifact.ImagePath))) };
+        }
+        var snapshot = new ScientificPresentationSnapshot(1, publication with { SectionDelta = true },
+            new("research-test", 1, "ready", "", [artifact], DateTimeOffset.UtcNow), null, null);
+        var result = await ScientificDeliverablesVerifier.VerifyAsync("research-test", snapshot,
+            InteractiveState("animation", "Echtzeit-Simulation"), null);
+        Assert.False(result.GetProperty("success").GetBoolean());
+        Assert.False(result.GetProperty("simulation").GetProperty("interactiveReady").GetBoolean());
+        Assert.Empty(result.GetProperty("simulation").GetProperty("interactiveArtifacts").EnumerateArray());
+    }
+
+    private static ResearchWorkingState InteractiveState(string method, string title)
+    {
+        var now = DateTimeOffset.UtcNow;
+        return new("research-test", 1, 1, "Erdmagnetfeld",
+            [new("grundlagen", "section", 1, null, JsonSerializer.SerializeToElement(new
+                { title = "Modellannahmen", contentMarkdown = "Explizit hypothetisches Modell." }), now),
+             new("simulation", "requirement", 1, null, JsonSerializer.SerializeToElement(new
+                { title, method, required = true, status = "completed" }), now)], now);
+    }
+
+    private static async Task<ScientificSimulationArtifact> WriteInteractiveArtifactAsync(string directory)
+    {
+        var root = Path.Combine(directory, "research-test");
+        var work = Path.Combine(root, "work");
+        Directory.CreateDirectory(work);
+        var path = Path.Combine(work, "animation.html");
+        await File.WriteAllTextAsync(path, "<!doctype html><html><canvas></canvas><script>let t=0;requestAnimationFrame(()=>t++);</script></html>");
+        return new("html", "Echtzeit", path, path, null, "Interaktive Simulation · Projektdatei", false,
+            Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(path))),
+            Kind: "interactive", ContentType: "text/html", ProjectRoot: root);
+    }
+
     [Fact]
     public async Task MissingFilesAndEvidenceOverviewDoNotCompleteResearch()
     {

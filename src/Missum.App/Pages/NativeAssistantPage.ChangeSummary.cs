@@ -1,10 +1,10 @@
 using System.Globalization;
 using System.Text.Json;
+using Missum.App.Controls;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using Windows.UI;
 
 namespace Missum.App.Pages;
 
@@ -91,7 +91,7 @@ public sealed partial class NativeAssistantPage
                   Stroke="{ThemeResource MissumIconCodeBrush}" StrokeThickness="1.2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
                   Data="M3,1 L11,1 Q13,1 13,3 L13,11 Q13,13 11,13 L3,13 Q1,13 1,11 L1,3 Q1,1 3,1 Z M5,5 L9,5 M7,3 L7,7 M5,10 L9,10"/>
             """));
-        var title = Label("Änderungen", Brush(235));
+        var title = Label("Änderungen", NativeThemeBrushes.Text);
         Grid.SetColumn(title, 1); layout.Children.Add(title);
         Grid.SetColumn(row, 2); layout.Children.Add(row);
         var description = label;
@@ -99,18 +99,18 @@ public sealed partial class NativeAssistantPage
         {
             var additions = $"+{added:N0}";
             var removals = $"−{removed:N0}";
-            row.Children.Add(Label(additions, new SolidColorBrush(Color.FromArgb(255, 0x31, 0xC7, 0x7D))));
-            row.Children.Add(Label(removals, new SolidColorBrush(Color.FromArgb(255, 0xFF, 0x62, 0x5A))));
+            row.Children.Add(Label(additions, NativeThemeBrushes.Resource("MissumSuccessBrush", Microsoft.UI.Colors.SeaGreen)));
+            row.Children.Add(Label(removals, NativeThemeBrushes.Resource("MissumDangerBrush", Microsoft.UI.Colors.Firebrick)));
             description += $", {added:N0} Zeilen hinzugefügt, {removed:N0} Zeilen entfernt";
         }
         else if (textFiles > 0)
         {
-            row.Children.Add(Label("Zeilenzahlen nicht verfügbar", Brush(145)));
+            row.Children.Add(Label("Zeilenzahlen nicht verfügbar", NativeThemeBrushes.MutedText));
             description += ", Zeilenzahlen nicht verfügbar";
         }
         if (partial && files.Length > 0)
         {
-            row.Children.Add(Label("teilweise", Brush(150)));
+            row.Children.Add(Label("teilweise", NativeThemeBrushes.MutedText));
             description += ", teilweise erfasst";
         }
 

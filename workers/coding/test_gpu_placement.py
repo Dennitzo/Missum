@@ -278,11 +278,12 @@ class MeasuredModelProfileTests(unittest.TestCase):
         self.assertEqual((policy["split"], policy["context"], policy["fit"], policy["gpuLayers"]),
                          ("tensor", 1048576, "off", "999"))
         block = manager.preset.read_text().split("[" + self.model["id"] + "]", 1)[1].split("\n[")[0]
-        for parameter in ("mmproj-device = CUDA1", "batch-size = 1024", "ubatch-size = 256", "ctx-size = 1048576",
+        for parameter in ("mmproj-device = CUDA1", "batch-size = 256", "ubatch-size = 256", "ctx-size = 1048576",
                           "device = CUDA0,CUDA1", "tensor-split = 1,1"):
             self.assertIn(parameter, block)
         fingerprint = manager.session_fingerprint(self.model["id"])
-        self.assertEqual(fingerprint["runtimePolicy"]["batchSize"], 1024)
+        self.assertEqual(fingerprint["runtimePolicy"]["batchSize"], 256)
+        self.assertEqual(fingerprint["runtimePolicy"]["ubatchSize"], 256)
         self.assertEqual(fingerprint["runtimePolicy"]["allReduce"], "none")
         self.assertEqual(fingerprint["runtimePolicy"]["devices"], "CUDA0,CUDA1")
         self.assertEqual(fingerprint["runtimePolicy"]["tensorSplit"], "1,1")
@@ -440,7 +441,7 @@ class MeasuredModelProfileTests(unittest.TestCase):
                          ("layer", 1048576, "off", "999"))
         self.assertNotIn("allReduce", policy)
         fingerprint = manager.session_fingerprint(self.model["id"])
-        self.assertEqual(fingerprint["runtimePolicy"]["batchSize"], 512)
+        self.assertEqual(fingerprint["runtimePolicy"]["batchSize"], 128)
         self.assertEqual(fingerprint["runtimePolicy"]["ubatchSize"], 128)
         self.assertEqual(fingerprint["runtimePolicy"]["mmprojDevice"], "CUDA1")
         self.assertEqual(fingerprint["runtimePolicy"]["devices"], "CUDA0,CUDA1")
@@ -457,7 +458,7 @@ class MeasuredModelProfileTests(unittest.TestCase):
                 catalog, "gpu_profile_inventory", return_value=self.gpus):
             manager.load(self.model["id"])
         self.assertEqual(attempts[0]["profileId"], self.profile["id"])
-        self.assertEqual(attempts[0]["batchSize"], 512)
+        self.assertEqual(attempts[0]["batchSize"], 128)
         self.assertEqual(manager.router_allreduce, None)
 
     def test_layer_profile_settings_freeze_until_next_load_and_change_cache_identity(self):
@@ -476,7 +477,7 @@ class MeasuredModelProfileTests(unittest.TestCase):
                 catalog, "gpu_profile_inventory", return_value=self.gpus):
             manager.load(self.model["id"])
         self.assertNotEqual(fingerprint, manager.session_fingerprint(self.model["id"]))
-        self.assertEqual(attempts[1]["batchSize"], 1024)
+        self.assertEqual(attempts[1]["batchSize"], 256)
         self.assertEqual(attempts[1]["mmprojDevice"], "CUDA0")
 
     def test_layer_profile_inherits_only_to_same_weight_aliases_and_stale_profile_keeps_legacy_identity(self):
@@ -540,6 +541,61 @@ class MeasuredModelProfileTests(unittest.TestCase):
         block = manager.preset.read_text().split("[" + self.model["id"] + "]", 1)[1].split("\n[")[0]
         self.assertNotIn("device =", block)
         self.assertNotIn("tensor-split =", block)
+
+    def test_installed_layer_profile_lowers_vision_batch_without_growing_microbatch_or_changing_profile(self):
+        profile = dict(self.layer_profile(), batchSize=1024, ubatchSize=256)
+        self.write_profile(profile)
+        original = (self.root / "model-load-policy.json").read_bytes()
+        manager, _, attempts = self.manager()
+        self.load(manager)
+        policy, = attempts
+        self.assertEqual((policy["batchSize"], policy["ubatchSize"]), (256, 256))
+        self.assertEqual((policy["context"], policy["contextMaximum"], policy["contextPolicy"]),
+                         (1048576, 1048576, "model-maximum"))
+        self.assertEqual((policy["cacheK"], policy["cacheV"], policy["split"], policy["mmprojDevice"]),
+                         ("q8_0", "q8_0", "layer", "CUDA1"))
+        self.assertEqual((policy["devices"], policy["tensorSplit"]), ("CUDA0,CUDA1", "1,1"))
+        fingerprint = manager.session_fingerprint(self.model["id"])
+        self.assertEqual(fingerprint["visionBatch"], dict(batchSize=256, ubatchSize=256))
+        self.assertEqual(fingerprint["runtimePolicy"]["batchSize"], 256)
+        self.assertEqual(fingerprint["runtimePolicy"]["ubatchSize"], 256)
+        self.assertEqual(original, (self.root / "model-load-policy.json").read_bytes())
+
+    def test_every_same_weight_vision_alias_and_subagent_uses_safe_measured_batch(self):
+        models = catalog.discover_models(self.root)
+        models += [dict(model, id=model["id"] + "@subagent", baseModel=model["id"], instance="subagent")
+                   for model in models[:]]
+        resolved = {model["id"]: catalog.measured_model_policy(model, self.profile, "2048") for model in models}
+        catalog.write_presets(self.root, self.root / "models.ini", managed_gpu=True,
+                              resolved_policies=resolved, agent_instances=True)
+        text = (self.root / "models.ini").read_text()
+        for model in models:
+            with self.subTest(alias=model["id"]):
+                block = text.split("[" + model["id"] + "]", 1)[1].split("\n[")[0]
+                self.assertIn("batch-size = 256\nubatch-size = 256", block)
+                self.assertIn("mmproj-device = CUDA1", block)
+                self.assertIn("ctx-size = 1048576", block)
+
+    def test_same_effective_vision_batch_has_same_cache_identity_after_actual_reload(self):
+        profile = dict(self.layer_profile(), batchSize=1024, ubatchSize=256)
+        self.write_profile(profile)
+        manager, state, _ = self.manager()
+        self.load(manager)
+        fingerprint = manager.session_fingerprint(self.model["id"])
+        self.write_profile(dict(profile, batchSize=512))
+        state["loaded"] = False
+        with patch.object(catalog, "gpu_inventory", return_value=[]), patch.object(
+                catalog, "gpu_profile_inventory", return_value=self.gpus):
+            manager.load(self.model["id"])
+        self.assertEqual(fingerprint, manager.session_fingerprint(self.model["id"]))
+
+    def test_text_only_measured_profile_retains_its_logical_batch_and_original_fields(self):
+        text_model = dict(self.model)
+        text_model.pop("projector")
+        policy = catalog.measured_model_policy(text_model, self.profile, "2048")
+        self.assertEqual((policy["batchSize"], policy["ubatchSize"]), (1024, 256))
+        self.assertEqual((policy["context"], policy["split"], policy["mmprojDevice"]),
+                         (1048576, "tensor", "CUDA1"))
 
 
 if __name__ == "__main__":

@@ -7,7 +7,11 @@
   if (!panel || !tabs || !globalThis.missumApp) return;
   let view = globalThis.location?.hash === "#settings" ? "settings" : "chat";
   let ownerSession = null;
+  const inspectorDevice = globalThis.missumBridge?.deviceId || String(globalThis.missumBridge?.clientId || "browser").replace(/\.[^.]+$/, "");
+  const inspectorPreferenceKey = `assistant.outputs-visible:v1:${inspectorDevice}`;
   let inspectorOpen = false;
+  try { inspectorOpen = globalThis.localStorage?.getItem(inspectorPreferenceKey) === "1"; }
+  catch { /* Keep the default when private browser storage is unavailable. */ }
   let childId = null;
   let presentation = null;
   const presentations = new Map();
@@ -322,6 +326,8 @@
   function toggleInspector() {
     if (view !== "chat" && view !== "subagent") return;
     inspectorOpen = !inspectorOpen;
+    try { globalThis.localStorage?.setItem(inspectorPreferenceKey, inspectorOpen ? "1" : "0"); }
+    catch { /* The current tab remains usable without persistent browser storage. */ }
     if (inspectorOpen) inspectorSignature = "";
     renderInspector();
   }
@@ -339,8 +345,19 @@
   }
   function renderScience() {
     const current = state(); const data = presentation || {}; const publication = data.publication; const simulation = data.simulation;
-    const title = view === "publication" ? "Wissenschaftliche Publikation" : "Simulation";
-    const card = section(title, view === "publication" ? "Fortlaufend aktualisiertes PDF · Formeln, Ergebnisse und Quellen" : "Reproduzierbare Python-Analysen mit Daten und Quellcode");
+    if (view === "publication") {
+      const publicationView = node("section", "browser-publication-view");
+      if (data.publicationError) publicationView.append(node("p", "browser-panel-error publication-error", data.publicationError));
+      const pdf = url(publication?.pdfUrl || publication?.url, true);
+      if (pdf) {
+        const frame = node("iframe", "publication-frame"); frame.title = "Wissenschaftliche Publikation als PDF";
+        frame.src = pdf.split("#", 1)[0] + "#view=FitH";
+        publicationView.append(frame);
+      } else publicationView.append(node("p", "browser-empty-state publication-empty-state", current.scientificResearch.selectedProjectId ? "Die wissenschaftliche Publikation wird erstellt. Der Arbeitsablauf bleibt im Chat sichtbar." : "Stelle im Chat eine Forschungsfrage."));
+      panel.append(publicationView);
+      return;
+    }
+    const card = section("Simulation", "Reproduzierbare Python-Analysen mit Daten und Quellcode");
     card.classList.add("science-presentation-card");
     const toolbar = node("div", "browser-panel-toolbar"); toolbar.append(button("Aktualisieren", () => { post("research.list", { sessionId: current.activeSessionId }); if (current.scientificResearch.selectedProjectId) post("research.open", { sessionId: current.activeSessionId, projectId: current.scientificResearch.selectedProjectId }); })); card.append(toolbar);
     if ((current.scientificResearch.projects || []).length > 1) {
@@ -349,30 +366,32 @@
       picker.value = current.scientificResearch.selectedProjectId || "";
       picker.addEventListener("change", () => post("research.open", { sessionId: current.activeSessionId, projectId: picker.value })); toolbar.append(picker);
     }
-    const error = view === "publication" ? data.publicationError : data.simulationError || (simulation?.status === "failed" ? simulation.detail : null);
+    const error = data.simulationError || (simulation?.status === "failed" ? simulation.detail : null);
     if (error) card.append(node("p", "browser-panel-error", error));
-    if (view === "publication") {
-      const pdf = url(publication?.pdfUrl || publication?.url, true);
-      if (pdf) {
-        toolbar.append(link("PDF öffnen", pdf));
-        const markdown = publication.markdownUrl || publication.sourceUrl; if (markdown) toolbar.append(link("Quelle", markdown));
-        const frame = node("iframe", "publication-frame"); frame.title = "Wissenschaftliche Publikation als PDF"; frame.src = pdf; card.append(frame);
-      } else card.append(node("p", "browser-empty-state", current.scientificResearch.selectedProjectId ? "Die wissenschaftliche Publikation wird erstellt. Der Arbeitsablauf bleibt im Chat sichtbar." : "Stelle im Chat eine Forschungsfrage."));
-    } else {
+    if (view === "simulation") {
       if (simulation?.detail) card.append(node("p", "browser-muted", simulation.detail));
       const artifacts = simulation?.artifacts || [];
       for (const artifact of artifacts) {
         const item = section(artifact.title || artifact.fileName || artifact.kind || "Ergebnis");
         const resource = url(artifact.url || artifact.previewUrl, true);
-        if (resource && /html|interactive/i.test(`${artifact.kind} ${artifact.contentType} ${artifact.fileName}`)) {
+        const interactive = /html|interactive/i.test(`${artifact.kind} ${artifact.contentType} ${artifact.fileName}`);
+        if (resource && interactive) {
           const frame = node("iframe", "simulation-frame"); frame.title = artifact.title || "Interaktive Simulation"; frame.src = resource; frame.setAttribute("sandbox", "allow-scripts"); item.append(frame);
         } else if (resource) {
           // ScientificSimulationArtifact always represents a real ImagePath.
           // Its HTTP resource ID has no file suffix and scripts are optional.
           const image = node("img", "simulation-image"); image.src = resource; image.alt = artifact.title || artifact.fileName || "Simulationsergebnis"; item.append(image);
         }
-        if (resource) item.append(link("Öffnen / herunterladen", resource));
-        if (artifact.sourceUrl || artifact.scriptUrl) item.append(link("Quellcode", artifact.sourceUrl || artifact.scriptUrl)); if (artifact.dataUrl) item.append(link("Daten", artifact.dataUrl));
+        if (resource && !interactive) item.append(link("Öffnen / herunterladen", resource));
+        if (interactive && resource) {
+          const source = node("details", "simulation-source"); source.append(node("summary", "", "HTML-/JavaScript-Code"));
+          const text = node("pre", "", "Quellcode wird geladen …"); source.append(text); let loaded = false;
+          source.addEventListener("toggle", async () => {
+            if (!source.open || loaded) return;
+            try { const response = await fetch(resource, { credentials: "same-origin" }); if (!response.ok) throw new Error(`HTTP ${response.status}`); const code = await response.text(); text.textContent = code.slice(0, 100000) + (code.length > 100000 ? "\nVorschau auf 100.000 Zeichen begrenzt." : ""); loaded = true; }
+            catch (error) { text.textContent = `Quellcode konnte nicht geladen werden: ${error.message}`; }
+          }); item.append(source);
+        } else if (artifact.sourceUrl || artifact.scriptUrl) item.append(link("Quellcode", artifact.sourceUrl || artifact.scriptUrl)); if (artifact.dataUrl) item.append(link("Daten", artifact.dataUrl));
         if (artifact.provenance) { const detail = node("details", "simulation-provenance"); detail.append(node("summary", "", "Provenienz"), node("pre", "", typeof artifact.provenance === "string" ? artifact.provenance : JSON.stringify(artifact.provenance, null, 2))); item.append(detail); }
         card.append(item);
       }

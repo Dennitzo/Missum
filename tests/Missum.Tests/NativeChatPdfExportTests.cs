@@ -42,6 +42,49 @@ public sealed class NativeChatPdfExportTests(ITestOutputHelper output)
 
     [Fact]
     [Trait("Category", "Live")]
+    public async Task GeomagneticMatrixPublicationRendersWithoutRewritingItsTeXSource()
+    {
+        if (Environment.GetEnvironmentVariable("MISSUM_NATIVE_PDF_EXPORT_LIVE") != "1") return;
+        await using var environment = await TestEnvironment.CreateAsync();
+        var source = Path.Combine(environment.Directory, "GeomagneticMatrix.md");
+        const string markdown = """
+            # GEOMAGNETICMATRIXCHECK
+
+            ## Reduziertes Modell
+
+            ### 3.3 Reduzierte α-Ω-Gleichungen
+
+            $$\frac{d}{dt}\begin{pmatrix}B_p\\B_\phi\end{pmatrix} = \begin{pmatrix}-\eta_p & \alpha\\\omega_\Omega & -\eta_\phi\end{pmatrix}\begin{pmatrix}B_p\\B_\phi\end{pmatrix} \tag{3.9}$$
+            """;
+        await File.WriteAllTextAsync(source, markdown);
+        using var renderer = new DocumentPdfExporter(NullLogger<DocumentPdfExporter>.Instance);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+
+        var target = await renderer.EnsureCurrentAsync(source, sourceChanged: true,
+            scientificPublication: true, cancellationToken: deadline.Token);
+
+        Assert.NotNull(target);
+        using var pdf = PdfDocument.Open(target);
+        var content = string.Join('\n', pdf.GetPages().Select(page => page.Text));
+        Assert.Contains("GEOMAGNETICMATRIXCHECK", content, StringComparison.Ordinal);
+        Assert.Contains("(3.9)", content, StringComparison.Ordinal);
+        Assert.DoesNotContain("\\begin", content, StringComparison.Ordinal);
+        Assert.Equal(markdown, await File.ReadAllTextAsync(source, deadline.Token));
+
+        var published = await File.ReadAllBytesAsync(target, deadline.Token);
+        await File.WriteAllTextAsync(source, markdown + "\n\n$$\\MissumUnknownCommand{1}$$", deadline.Token);
+        var invalid = await Assert.ThrowsAsync<InvalidOperationException>(() => renderer.EnsureCurrentAsync(
+            source, sourceChanged: true, scientificPublication: true, cancellationToken: deadline.Token));
+        Assert.Contains("3.3 Reduzierte α-Ω-Gleichungen", invalid.Message, StringComparison.Ordinal);
+        Assert.Contains("mathematische Ausdrücke", invalid.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain('\uFFFD', invalid.Message);
+        Assert.Contains("Undefined control sequence", invalid.Message, StringComparison.Ordinal);
+        Assert.Equal(published, await File.ReadAllBytesAsync(target, deadline.Token));
+        output.WriteLine($"Geomagnetic matrix PDF: {pdf.NumberOfPages} page(s), {published.Length} bytes; invalid math preserves the prior PDF and reports the real parser error.");
+    }
+
+    [Fact]
+    [Trait("Category", "Live")]
     public async Task DocumentExportPublishesLongPathsAtomicallyAndReportsTheActualFailure()
     {
         if (Environment.GetEnvironmentVariable("MISSUM_NATIVE_PDF_EXPORT_LIVE") != "1") return;

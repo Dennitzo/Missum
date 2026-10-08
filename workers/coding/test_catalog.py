@@ -188,6 +188,45 @@ class CatalogTests(unittest.TestCase):
         gguf(snapshot / "mmproj-two.gguf", architecture="clip")
         self.assertEqual(len(catalog.discover_models(self.root)), 1)
 
+    def test_projector_aliases_have_bounded_default_batches_without_changing_text_only_or_embedding(self):
+        gguf(self.root / "vision" / "Gemma.gguf", architecture="gemma3")
+        gguf(self.root / "vision" / "mmproj-F16.gguf", architecture="clip")
+        gguf(self.root / "text" / "Qwen.gguf")
+        gguf(self.root / "embedding" / "embedding.gguf", architecture="bert", context=8192)
+        target = self.root / "models.ini"
+        models = catalog.write_presets(self.root, target, agent_instances=True)
+        text = target.read_text()
+        for model in models:
+            with self.subTest(alias=model["id"]):
+                block = text.split("[" + model["id"] + "]", 1)[1].split("\n[")[0]
+                if model.get("projector"):
+                    self.assertIn("batch-size = 512\nubatch-size = 512", block)
+                elif model["role"] == "embedding":
+                    self.assertIn("batch-size = 8192\nubatch-size = 8192", block)
+                else:
+                    self.assertNotIn("batch-size =", block)
+
+    def test_resolved_projector_batch_is_bounded_without_mutating_supplied_policy(self):
+        gguf(self.root / "vision" / "DeepSeek.gguf", architecture="deepseek4")
+        gguf(self.root / "vision" / "mmproj-F16.gguf", architecture="clip")
+        model = catalog.discover_models(self.root)[0]
+        policy = dict(catalog.model_runtime_policy(model), batchSize=1024, ubatchSize=256)
+        target = self.root / "models.ini"
+        catalog.write_presets(self.root, target, resolved_policies={model["id"]: policy})
+        block = target.read_text().split("[" + model["id"] + "]", 1)[1].split("\n[")[0]
+        self.assertIn("batch-size = 256\nubatch-size = 256", block)
+        self.assertEqual((policy["batchSize"], policy["ubatchSize"]), (1024, 256))
+
+    def test_vision_batch_defaults_and_partial_profiles_never_grow_the_physical_batch(self):
+        model = dict(role="general", projector=Path("mmproj.gguf"))
+        for supplied, expected in (({}, 512), (dict(batchSize=128), 128), (dict(ubatchSize=256), 256),
+                                   (dict(batchSize=1024, ubatchSize=256), 256),
+                                   (dict(batchSize=1024, ubatchSize=1024), 1024)):
+            with self.subTest(supplied=supplied):
+                policy = catalog.vision_batch_policy(model, supplied)
+                self.assertEqual(policy, dict(batchSize=expected, ubatchSize=expected))
+                self.assertLessEqual(policy["ubatchSize"], supplied.get("ubatchSize", 512))
+
     def test_training_maximum_is_published_without_disabling_runtime_memory_fitting(self):
         snapshot = self.root / "models--maker--qwen" / "snapshots" / ("1" * 40)
         gguf(snapshot / "Qwen.gguf", context=262144)

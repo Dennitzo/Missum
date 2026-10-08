@@ -216,6 +216,25 @@ class SubagentRuntimeTests(unittest.TestCase):
             self.assertIn("mmproj-device = " + self.manager.placements[instance], block)
             self.assertTrue(any("mmproj-F16.gguf" in path for path, _, _ in self.manager.session_fingerprint(instance)["files"]))
 
+    def test_vision_replica_inherits_primary_safe_batch_and_fingerprint_without_growing_gpu_buffers(self):
+        gguf(self.root / "mmproj-F16.gguf", architecture="clip")
+        model = next(model for model in catalog.discover_models(self.root) if model["id"] == self.base)
+        self.manager.policies[self.base] = dict(catalog.model_runtime_policy(model, "CUDA0"),
+                                               batchSize=256, ubatchSize=256)
+        self.manager.placements[self.base] = "CUDA0"
+        with patch.object(catalog, "gpu_inventory", return_value=self.devices):
+            result = self.manager.load(self.base)
+        self.assertTrue(result["subagent"]["loaded"])
+        self.assertEqual([self.child], self.loads)
+        for instance in (self.base, self.child):
+            policy = self.manager.policies[instance]
+            self.assertEqual((policy["batchSize"], policy["ubatchSize"]), (256, 256))
+            fingerprint = self.manager.session_fingerprint(instance)
+            self.assertEqual(fingerprint["visionBatch"], dict(batchSize=256, ubatchSize=256))
+            block = self.manager.preset.read_text().split("[" + instance + "]", 1)[1].split("\n[")[0]
+            self.assertIn("batch-size = 256\nubatch-size = 256", block)
+        self.assertEqual(self.manager.placements, {self.base: "CUDA0", self.child: "CUDA1"})
+
     def test_actual_multi_gpu_placement_disables_delegation_for_any_model(self):
         self.primary["status"]["args"] = ["--device", "CUDA0,CUDA1", "--split-mode", "layer"]
         with patch.object(catalog, "gpu_inventory", return_value=self.devices):

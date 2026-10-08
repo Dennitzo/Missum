@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Runtime.CompilerServices;
 using Missum.App.Controls;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
@@ -11,6 +12,7 @@ public sealed partial class NativeAssistantPage
 {
     private readonly List<SessionTabState> _sessionTabs = [];
     private bool _sessionTabNavigationBusy;
+    private static readonly ConditionalWeakTable<FrameworkElement, TabAppearanceState> TabAppearanceStates = new();
 
     // Tabs describe views inside the current session. New session views can be
     // added per mode without turning other chats into tabs.
@@ -88,7 +90,7 @@ public sealed partial class NativeAssistantPage
 
     private void RenderSessionTabs()
     {
-        SessionTabsPanel.Spacing = 6;
+        if (SessionTabsPanel.Spacing != 6) SessionTabsPanel.Spacing = 6;
         var layout = SessionViewLayouts.TryGetValue(_mode, out var configured)
             ? configured
             : SessionViewLayouts["general"];
@@ -118,17 +120,13 @@ public sealed partial class NativeAssistantPage
             var tab = _sessionTabs.FirstOrDefault(item => item.Id == _session);
             if (tab is null) continue;
             var active = ActiveSubagent is null && tab.Id == _session && _activeReviewRunId is null && _activeResearchSessionId is null && _activeSourcesSession is null && _activeSubagentOverviewSession is null;
-            tab.Label.Text = tab.Title;
+            SetTabText(tab.Label, tab.Title);
             ApplyTabAppearance(tab.Container, tab.Select, active);
-            tab.Select.IsEnabled = !_sessionTabNavigationBusy;
-            ToolTipService.SetToolTip(tab.Select, tab.Title);
-            AutomationProperties.SetName(tab.Select, $"Chat-Tab: {tab.Title}");
-            AutomationProperties.SetHelpText(tab.Select, active ? "Aktiver Chat" : "Chat öffnen");
-            if (position >= SessionTabsPanel.Children.Count || !ReferenceEquals(SessionTabsPanel.Children[position], tab.Container))
-            {
-                SessionTabsPanel.Children.Remove(tab.Container);
-                SessionTabsPanel.Children.Insert(position, tab.Container);
-            }
+            SetTabEnabled(tab.Select, !_sessionTabNavigationBusy);
+            SetTabToolTip(tab.Select, tab.Title);
+            SetTabName(tab.Select, $"Chat-Tab: {tab.Title}");
+            SetTabHelp(tab.Select, active ? "Aktiver Chat" : "Chat öffnen");
+            PositionTab(tab.Container, position);
             position++;
         }
         RenderReviewTabs(RenderSubagentOverviewTab(RenderSourcesTab(RenderSubagentTabs(position))));
@@ -155,28 +153,70 @@ public sealed partial class NativeAssistantPage
         }
     }
 
-    private static void ApplyTabAppearance(Control control, bool active)
+    private static void ApplyTabAppearance(Button control, bool active)
     {
-        control.Height = 32;
-        control.CornerRadius = new CornerRadius(8);
-        control.BorderThickness = new Thickness(1);
-        control.Background = active ? ThemeBrush("MissumAccentSubtleBrush", 42) : Brush(29);
-        control.BorderBrush = active ? ThemeBrush("MissumAccentBrush", 72) : new SolidColorBrush(Microsoft.UI.Colors.Transparent);
-        control.Foreground = Brush(active ? (byte)242 : (byte)170);
-        control.FontFamily = new FontFamily("Segoe UI Variable Text");
-        control.FontSize = 13;
+        var state = TabAppearanceStates.GetValue(control, static _ => new TabAppearanceState());
+        if (state.Initialized && state.Active == active) return;
+        if (!state.Initialized)
+        {
+            control.Height = 32;
+            control.CornerRadius = new CornerRadius(8);
+            control.BorderThickness = new Thickness(1);
+            control.FontFamily = new FontFamily("Segoe UI Variable Text");
+            control.FontSize = 13;
+        }
+        control.Background = active ? ThemeBrush("MissumAccentSubtleBrush", 42) : ThemeBrush("MissumLayerStrongBrush", 29);
+        control.BorderBrush = active ? ThemeBrush("MissumAccentBrush", 72) : state.TransparentBorder;
+        control.Foreground = ThemeBrush(active ? "MissumTextBrush" : "MissumMutedTextBrush", active ? (byte)242 : (byte)170);
+        state.Initialized = true;
+        state.Active = active;
     }
 
     private static void ApplyTabAppearance(Border container, Button select, bool active)
     {
-        container.Height = 32;
-        container.CornerRadius = new CornerRadius(8);
-        container.BorderThickness = new Thickness(1);
-        container.Background = active ? ThemeBrush("MissumAccentSubtleBrush", 42) : Brush(29);
-        container.BorderBrush = active ? ThemeBrush("MissumAccentBrush", 72) : new SolidColorBrush(Microsoft.UI.Colors.Transparent);
-        select.Foreground = Brush(active ? (byte)242 : (byte)170);
-        select.FontFamily = new FontFamily("Segoe UI Variable Text");
-        select.FontSize = 13;
+        var state = TabAppearanceStates.GetValue(container, static _ => new TabAppearanceState());
+        if (state.Initialized && state.Active == active) return;
+        if (!state.Initialized)
+        {
+            container.Height = 32;
+            container.CornerRadius = new CornerRadius(8);
+            container.BorderThickness = new Thickness(1);
+            select.FontFamily = new FontFamily("Segoe UI Variable Text");
+            select.FontSize = 13;
+        }
+        container.Background = active ? ThemeBrush("MissumAccentSubtleBrush", 42) : ThemeBrush("MissumLayerStrongBrush", 29);
+        container.BorderBrush = active ? ThemeBrush("MissumAccentBrush", 72) : state.TransparentBorder;
+        select.Foreground = ThemeBrush(active ? "MissumTextBrush" : "MissumMutedTextBrush", active ? (byte)242 : (byte)170);
+        state.Initialized = true;
+        state.Active = active;
+    }
+
+    // Retain controls at an unchanged position. Detaching an already visible
+    // tab discards WinUI's hover/focus state on every background projection.
+    private void PositionTab(FrameworkElement tab, int index)
+    {
+        var position = Math.Clamp(index, 0, SessionTabsPanel.Children.Count);
+        if (position < SessionTabsPanel.Children.Count && ReferenceEquals(SessionTabsPanel.Children[position], tab)) return;
+        SessionTabsPanel.Children.Remove(tab);
+        SessionTabsPanel.Children.Insert(Math.Min(position, SessionTabsPanel.Children.Count), tab);
+    }
+
+    private static void SetTabText(TextBlock label, string value) { if (label.Text != value) label.Text = value; }
+    private static void SetTabEnabled(Button control, bool enabled) { if (control.IsEnabled != enabled) control.IsEnabled = enabled; }
+    private static void SetTabToolTip(Button target, string value) { if (ToolTipService.GetToolTip(target) as string != value) ToolTipService.SetToolTip(target, value); }
+    private static void SetTabName(Button target, string value) { if (AutomationProperties.GetName(target) != value) AutomationProperties.SetName(target, value); }
+    private static void SetTabHelp(Button target, string value) { if (AutomationProperties.GetHelpText(target) != value) AutomationProperties.SetHelpText(target, value); }
+    private static void SetTabCloseForeground(Button close)
+    {
+        var brush = ThemeBrush("MissumMutedTextBrush", 155);
+        if (!ReferenceEquals(close.Foreground, brush)) close.Foreground = brush;
+    }
+
+    private sealed class TabAppearanceState
+    {
+        public bool Initialized { get; set; }
+        public bool Active { get; set; }
+        public SolidColorBrush TransparentBorder { get; } = new(Microsoft.UI.Colors.Transparent);
     }
 
     private static Button TabButton()
@@ -190,8 +230,8 @@ public sealed partial class NativeAssistantPage
             Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
             CornerRadius = new CornerRadius(6),
         };
-        button.Resources["ButtonBackgroundPointerOver"] = Brush(53);
-        button.Resources["ButtonBackgroundPressed"] = Brush(62);
+        button.Resources["ButtonBackgroundPointerOver"] = ThemeBrush("MissumHoverBrush", 53);
+        button.Resources["ButtonBackgroundPressed"] = ThemeBrush("MissumPressedBrush", 62);
         return button;
     }
 

@@ -390,8 +390,12 @@ test("Science publication broadcasts keep the selected project and restore cache
   const { context, current, ids, emit } = panelsContext();
   emit("science.presentation", { projectId: "project-a", revision: 3, publication: { pdfUrl: "science/a.pdf" } });
   context.missumPanels.setView("publication");
-  const pdf = () => ids.get("browser-view-panel").querySelector("iframe")?.src;
+  const pdf = () => {
+    const src = ids.get("browser-view-panel").querySelector("iframe")?.src;
+    return src ? new URL(src).pathname : undefined;
+  };
   assert.match(pdf(), /science\/a\.pdf$/);
+  assert.equal(new URL(ids.get("browser-view-panel").querySelector("iframe").src).hash, "#view=FitH");
   emit("science.presentation", { projectId: "project-b", revision: 4, publication: { pdfUrl: "science/b.pdf" } });
   assert.match(pdf(), /science\/a\.pdf$/, "another Windows project must not replace this Mac PDF");
   current.scientificResearch.selectedProjectId = "project-b"; emit("research.snapshot", {});

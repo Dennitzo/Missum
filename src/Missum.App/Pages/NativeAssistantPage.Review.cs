@@ -197,18 +197,16 @@ public sealed partial class NativeAssistantPage
         {
             var tab = visibleTabs[index];
             var active = _activeReviewRunId == tab.RunId && _session == tab.SessionId;
-            tab.Label.Text = tab.Title;
+            SetTabText(tab.Label, tab.Title);
             ApplyTabAppearance(tab.Container, tab.Select, active);
-            tab.Close.Foreground = Brush(155);
-            tab.Select.IsEnabled = tab.Close.IsEnabled = !_sessionTabNavigationBusy;
-            ToolTipService.SetToolTip(tab.Select, tab.Title + (S(tab.Summary, "emptyOverview") == "True" ? "" : "\nLauf " + tab.RunId.ToString("N")[..8]));
-            AutomationProperties.SetName(tab.Select, "Änderungs-Tab: " + tab.Title);
-            AutomationProperties.SetName(tab.Close, "Änderungs-Tab schließen: " + tab.Title);
-            AutomationProperties.SetHelpText(tab.Select, active ? "Aktive Änderungsübersicht" : "Dateiänderungen dieses Laufs öffnen");
-            var position = firstIndex + index;
-            if (position < SessionTabsPanel.Children.Count && ReferenceEquals(SessionTabsPanel.Children[position], tab.Container)) continue;
-            SessionTabsPanel.Children.Remove(tab.Container);
-            SessionTabsPanel.Children.Insert(position, tab.Container);
+            SetTabCloseForeground(tab.Close);
+            SetTabEnabled(tab.Select, !_sessionTabNavigationBusy);
+            SetTabEnabled(tab.Close, !_sessionTabNavigationBusy);
+            SetTabToolTip(tab.Select, tab.Title + (S(tab.Summary, "emptyOverview") == "True" ? "" : "\nLauf " + tab.RunId.ToString("N")[..8]));
+            SetTabName(tab.Select, "Änderungs-Tab: " + tab.Title);
+            SetTabName(tab.Close, "Änderungs-Tab schließen: " + tab.Title);
+            SetTabHelp(tab.Select, active ? "Aktive Änderungsübersicht" : "Dateiänderungen dieses Laufs öffnen");
+            PositionTab(tab.Container, firstIndex + index);
         }
         return visibleTabs.Length;
     }
@@ -224,22 +222,26 @@ public sealed partial class NativeAssistantPage
         ReviewChangesPanel.Children.Add(new TextBlock
         {
             Text = S(tab.Summary, "emptyOverview") == "True" ? "Noch keine Änderungen in dieser Sitzung." : (workspace.Length > 0 ? workspace + "\n" : "") + "Lauf " + tab.RunId.ToString("N")[..8],
-            FontSize = 13, Foreground = Brush(150), TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true,
+            FontSize = 13, Foreground = ThemeBrush("MissumMutedTextBrush", 150), TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true,
         });
         var partial = S(tab.Summary, "isPartial") == "True";
         var notice = S(tab.Summary, "notice");
         if (partial || notice.Length > 0)
-            ReviewChangesPanel.Children.Add(new InfoBar
+        {
+            var noticeBar = new InfoBar
             {
                 IsOpen = true, IsClosable = false, Severity = partial ? InfoBarSeverity.Warning : InfoBarSeverity.Informational,
                 Title = partial ? "Änderungen nur teilweise erfasst" : "Hinweis",
                 Message = notice.Length > 0 ? notice : "Die vorhandene Quittung enthält möglicherweise nicht alle Dateiänderungen dieses Laufs.",
-            });
+            };
+            NativeNotice.Attach(noticeBar);
+            ReviewChangesPanel.Children.Add(noticeBar);
+        }
 
         var files = Items(tab.Summary, "files");
         if (files.Length == 0)
             ReviewChangesPanel.Children.Add(new TextBlock { Text = partial ? "Noch keine Datei-Diffs verfügbar." : "Keine erfassten Dateiänderungen vorhanden.",
-                Foreground = Brush(170), TextWrapping = TextWrapping.Wrap });
+                Foreground = ThemeBrush("MissumMutedTextBrush", 170), TextWrapping = TextWrapping.Wrap });
         foreach (var file in files)
         {
             var panel = new StackPanel { Spacing = 0 };
@@ -253,8 +255,8 @@ public sealed partial class NativeAssistantPage
             if (binary) counts.Text = "Binärdatei";
             else if (TryReviewLineCount(file, "addedLines", out var added) && TryReviewLineCount(file, "removedLines", out var removed))
             {
-                counts.Inlines.Add(new Run { Text = $"+{added:N0}", Foreground = new SolidColorBrush(Color.FromArgb(255, 49, 199, 125)) });
-                counts.Inlines.Add(new Run { Text = $"  −{removed:N0}", Foreground = new SolidColorBrush(Color.FromArgb(255, 255, 98, 90)) });
+                counts.Inlines.Add(new Run { Text = $"+{added:N0}", Foreground = ThemeBrush("MissumSuccessBrush", 160) });
+                counts.Inlines.Add(new Run { Text = $"  −{removed:N0}", Foreground = ThemeBrush("MissumDangerBrush", 160) });
             }
             else counts.Text = "Zeilenzahlen nicht verfügbar";
             Grid.SetColumn(counts, 1); header.Children.Add(counts); panel.Children.Add(header);
@@ -266,7 +268,7 @@ public sealed partial class NativeAssistantPage
                 panel.Children.Add(diff);
             }
             if (S(file, "diffTruncated") == "True") panel.Children.Add(ReviewNotice("Dieser Diff ist gekürzt. Die Quittung enthält nicht alle geänderten Zeilen."));
-            ReviewChangesPanel.Children.Add(new Border { Child = panel, Background = Brush(30), BorderBrush = Brush(52),
+            ReviewChangesPanel.Children.Add(new Border { Child = panel, Background = ThemeBrush("MissumLayerBrush", 30), BorderBrush = ThemeBrush("MissumStrokeBrush", 52),
                 BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(12) });
         }
         ReviewChangesPanel.UpdateLayout();
@@ -278,7 +280,7 @@ public sealed partial class NativeAssistantPage
 
     private static TextBlock ReviewNotice(string text) => new()
     {
-        Text = text, FontSize = 13, Foreground = Brush(170), TextWrapping = TextWrapping.Wrap,
+        Text = text, FontSize = 13, Foreground = ThemeBrush("MissumMutedTextBrush", 170), TextWrapping = TextWrapping.Wrap,
         Margin = new Thickness(14, 6, 14, 12),
     };
 

@@ -27,6 +27,7 @@ public sealed class NativeFormulaView : Button
         FontSize = fontSize;
         FontFamily = new FontFamily("Segoe UI Variable Text");
         FontWeight = Microsoft.UI.Text.FontWeights.Normal;
+        Foreground = linkUri is null ? NativeThemeBrushes.Text : NativeThemeBrushes.ReadableAccent;
         BorderThickness = new Thickness(0);
         Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
         HorizontalAlignment = HorizontalAlignment.Left;

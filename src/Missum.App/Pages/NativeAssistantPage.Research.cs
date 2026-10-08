@@ -17,6 +17,7 @@ public sealed partial class NativeAssistantPage
     private Guid? _activeResearchSessionId;
     private Button? _researchTabButton;
     private DispatcherTimer? _researchRefreshTimer;
+    private long _researchTabSelectionVersion;
 
     private string ModelRole => _mode == "coding" ? "coding" : "general";
 
@@ -49,7 +50,7 @@ public sealed partial class NativeAssistantPage
         var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(6) };
         timer.Tick += (_, _) =>
         {
-            RenderResearchView();
+            RunUiCallback("researchRefreshTimer.Tick", RenderResearchView);
             if (!_disposed && _mode == "claudescience" && (_running || _activeResearchSessionId == _session))
                 _ = RefreshNativeResearchAsync(_session);
         };
@@ -83,7 +84,8 @@ public sealed partial class NativeAssistantPage
         finally
         {
             _researchLoading.Remove(sessionId);
-            if (!_disposed && _activeResearchSessionId == sessionId) RenderResearchView();
+            if (!_disposed && _activeResearchSessionId == sessionId)
+                RunUiCallback("Research.RefreshCompleted", RenderResearchView);
             // A user may select another project while the old read is in flight.
             // Its response is ignored by RequestedProjectId; load the new choice next.
             if (!_disposed && requestedProject is not null && ResearchState(sessionId).RequestedProjectId is { } nextProject
@@ -134,7 +136,7 @@ public sealed partial class NativeAssistantPage
                 state.Revision = 0;
             }
         }
-        if (_activeResearchSessionId == sessionId) RenderResearchView();
+        if (_activeResearchSessionId == sessionId) RunUiCallback("Research.Snapshot", RenderResearchView);
         if (_session == sessionId) RenderSources(_snapshot);
         return true;
     }
@@ -157,15 +159,19 @@ public sealed partial class NativeAssistantPage
         _activeResearchSessionId = _session;
         _simulationView = simulation;
         ResearchHost.Visibility = Visibility.Visible;
-        RenderResearchView();
+        RunUiCallback("Research.Open", RenderResearchView);
+        UpdateInteractiveSimulationActivity();
         RenderSessionTabs();
         _ = RefreshNativeResearchAsync(_session);
     }
 
     private void HideResearchView()
     {
+        _researchTabSelectionVersion++;
         _activeResearchSessionId = null;
         ResearchHost.Visibility = Visibility.Collapsed;
+        foreach (var viewer in _interactiveSimulationViews.Values) viewer.SetActive(false);
+        foreach (var viewer in _publicationViews.Values) viewer.SetActive(false);
     }
 
     private void RenderResearchTab(int index)
@@ -185,28 +191,39 @@ public sealed partial class NativeAssistantPage
             _researchTabButton.Height = 32;
             _researchTabButton.Padding = new Thickness(10, 0, 10, 0);
             _researchTabButton.BorderThickness = new Thickness(1);
-            _researchTabButton.Click += (_, _) => OpenResearchView();
+            _researchTabButton.Click += (_, _) => QueueResearchTabSelection(simulation: false);
             AutomationProperties.SetName(_researchTabButton, "Publikation dieser Sitzung öffnen");
             ToolTipService.SetToolTip(_researchTabButton, "Wissenschaftliche Publikation · PDF mit mathematischen Formeln");
         }
         var active = _activeResearchSessionId == _session && _activeReviewRunId is null && !_simulationView;
         ApplyTabAppearance(_researchTabButton, active);
-        _researchTabButton.IsEnabled = !_sessionTabNavigationBusy;
-        AutomationProperties.SetHelpText(_researchTabButton, active ? "Aktive Publikation" : "Publikation der geöffneten Sitzung");
-        if (index < SessionTabsPanel.Children.Count && ReferenceEquals(SessionTabsPanel.Children[index], _researchTabButton)) return;
-        SessionTabsPanel.Children.Remove(_researchTabButton);
-        SessionTabsPanel.Children.Insert(Math.Min(index, SessionTabsPanel.Children.Count), _researchTabButton);
+        SetTabEnabled(_researchTabButton, !_sessionTabNavigationBusy);
+        SetTabHelp(_researchTabButton, active ? "Aktive Publikation" : "Publikation der geöffneten Sitzung");
+        PositionTab(_researchTabButton, index);
     }
 
     private void ShowResearchError(Guid sessionId, string error)
     {
         if (_disposed) return;
         ResearchState(sessionId).Error = error;
-        if (_activeResearchSessionId == sessionId) RenderResearchView();
+        if (_activeResearchSessionId == sessionId) RunUiCallback("Research.Error", RenderResearchView);
     }
 
-    private void UpdateResearchRuntimeChrome() => RenderResearchView();
-    private void UpdateResearchChrome(NativeResearchSession state) => RenderResearchView();
+    private void QueueResearchTabSelection(bool simulation)
+    {
+        var owner = _session;
+        var version = ++_researchTabSelectionVersion;
+        // WebView2/XAML changes must occur after the pointer's routed event has
+        // unwound. A later navigation invalidates a queued, outdated selection.
+        DispatcherQueue.TryEnqueue(() => RunUiCallback("Research.TabSelection", () =>
+        {
+            if (version != _researchTabSelectionVersion || owner != _session || _mode != "claudescience") return;
+            OpenResearchView(simulation);
+        }));
+    }
+
+    private void UpdateResearchRuntimeChrome() => RunUiCallback("Research.RuntimeChrome", RenderResearchView);
+    private void UpdateResearchChrome(NativeResearchSession state) => RunUiCallback("Research.Chrome", RenderResearchView);
     private static JsonElement ResearchObject(JsonElement element, string name) =>
         element.ValueKind == JsonValueKind.Object && element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Object ? value : default;
     private static long ResearchRevision(JsonElement element) =>

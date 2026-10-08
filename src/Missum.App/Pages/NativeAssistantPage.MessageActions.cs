@@ -351,7 +351,7 @@ public sealed partial class NativeAssistantPage
         {
             Width = 28, Height = 28, MinWidth = 0, MinHeight = 0,
             Padding = new Thickness(0), BorderThickness = new Thickness(0), CornerRadius = new CornerRadius(6),
-            Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), Foreground = Brush(154),
+            Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), Foreground = ThemeBrush("MissumMutedTextBrush", 154),
             Content = new FontIcon { Glyph = glyph, FontSize = 15, Foreground = NativeIconPalette.BrushFor(glyph == "\uE8C8" ? "link" : "speech") },
         };
         ToolTipService.SetToolTip(button, label);
@@ -372,7 +372,7 @@ public sealed partial class NativeAssistantPage
         public Button Copy { get; } = MessageActionButton("\uE8C8", "Nachricht kopieren");
         public Button Read { get; } = MessageActionButton("\uE767", "Nachricht vorlesen");
         public Button Pause { get; } = MessageActionButton("\uE769", "Vorlesen pausieren");
-        public TextBlock Status { get; } = new() { FontSize = 13, Foreground = Brush(145), MaxWidth = 310, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(5, 0, 0, 0) };
+        public TextBlock Status { get; } = new() { FontSize = 13, Foreground = ThemeBrush("MissumMutedTextBrush", 145), MaxWidth = 310, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(5, 0, 0, 0) };
         public MenuFlyout Menu { get; } = new();
         public MenuFlyoutItem CopyMenu { get; } = new() { Text = "Nachricht kopieren", Icon = new FontIcon { Glyph = "\uE8C8", Foreground = NativeIconPalette.BrushFor("link") } };
         public MenuFlyoutItem ReadMenu { get; } = new() { Text = "Nachricht vorlesen", Icon = new FontIcon { Glyph = "\uE767", Foreground = NativeIconPalette.BrushFor("speech") } };

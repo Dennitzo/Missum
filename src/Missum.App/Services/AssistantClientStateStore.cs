@@ -176,12 +176,23 @@ internal static class AssistantClientExecutionScope
     internal static bool IsBrowser => ClientId != "desktop";
     internal static bool IsFrozen => Current.Value?.Frozen is not null;
     internal static AppSettings Resolve(AppSettings global) => Current.Value is { } context
-        ? context.Frozen ?? context.Store.Resolve(context.ClientId, global) : global;
+        ? context.Frozen ?? context.Store?.Resolve(context.ClientId, global) ?? global : global;
 
     internal static IDisposable Enter(AssistantClientStateStore store, string clientId)
     {
         var previous = Current.Value;
         Current.Value = new(store, clientId, null);
+        return new Restore(previous);
+    }
+
+    internal static IDisposable EnterFrozen(AppSettings submitted)
+    {
+        ArgumentNullException.ThrowIfNull(submitted);
+        var previous = Current.Value;
+        Current.Value = new(previous?.Store, previous?.ClientId ?? "desktop", submitted with
+        {
+            ReasoningEffortsByModel = new(submitted.ReasoningEffortsByModel, StringComparer.OrdinalIgnoreCase),
+        });
         return new Restore(previous);
     }
 
@@ -201,18 +212,18 @@ internal static class AssistantClientExecutionScope
     {
         if (Current.Value is not { } context) return settings.UpdateAsync(update, token);
         if (context.Frozen is not null) { context.Frozen = update(context.Frozen); return Task.CompletedTask; }
-        return context.Store.UpdateAsync(context.ClientId, settings, update, token);
+        return context.Store!.UpdateAsync(context.ClientId, settings, update, token);
     }
 
     internal static string Draft(Guid id, string legacy, AppSettings defaults) => Current.Value is { } context
-        ? context.Store.Draft(context.ClientId, id, legacy, defaults) : legacy;
+        ? context.Store?.Draft(context.ClientId, id, legacy, defaults) ?? legacy : legacy;
 
     internal static Task SaveDraftAsync(Guid id, string draft, AppSettings defaults, CancellationToken token) => Current.Value is { Frozen: null } context
-        ? context.Store.SaveDraftAsync(context.ClientId, id, draft, defaults, token) : Task.CompletedTask;
+        ? context.Store!.SaveDraftAsync(context.ClientId, id, draft, defaults, token) : Task.CompletedTask;
 
-    private sealed class Context(AssistantClientStateStore store, string clientId, AppSettings? frozen)
+    private sealed class Context(AssistantClientStateStore? store, string clientId, AppSettings? frozen)
     {
-        internal AssistantClientStateStore Store { get; } = store;
+        internal AssistantClientStateStore? Store { get; } = store;
         internal string ClientId { get; } = clientId;
         internal AppSettings? Frozen { get; set; } = frozen;
     }

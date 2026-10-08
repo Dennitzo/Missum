@@ -8,7 +8,7 @@ namespace Missum.App.Services;
 
 public sealed record ScientificSimulationArtifact(string Id, string Title, string ImagePath,
     string? ScriptPath, string? DataPath, string Provenance, bool IsResearchData, string Sha256,
-    ScientificExecutionEvidence? Execution = null);
+    ScientificExecutionEvidence? Execution = null, string Kind = "image", string ContentType = "image/png", string? ProjectRoot = null);
 
 public sealed record ScientificExecutionEvidence(string ProjectRoot, string ExperimentRecordId, string RunId,
     string ExecutedScriptPath, string ScriptSha256, string SnapshotId, IReadOnlyDictionary<string, string> InputHashes,
@@ -58,10 +58,17 @@ public sealed partial class ScientificSimulationService(
             // Refresh only discovers real Python output. It never derives a chart
             // from a publication, counts evidence, writes a script or starts Python.
             artifacts = await DiscoverExperimentImagesAsync(project, layout, result.Experiments, notBefore: null, cancellationToken).ConfigureAwait(false);
+            // HTML/Canvas simulations are executable project documents, not Python figures.
+            // Restore them from this project's private work/artifacts tree without executing Python
+            // or claiming that their JavaScript is a measured experiment.
+            var interactive = new List<ScientificSimulationArtifact>();
+            await DiscoverInteractiveSimulationsAsync(layout, interactive, cancellationToken).ConfigureAwait(false);
+            artifacts = interactive.Concat(artifacts).ToList();
             var restored = new List<ScientificSimulationArtifact>();
             await RestoreLastVisualizationAsync(project, layout, restored, cancellationToken).ConfigureAwait(false);
             artifacts = artifacts.Concat(restored).DistinctBy(item => item.ImagePath, StringComparer.OrdinalIgnoreCase)
-                .OrderByDescending(item => File.GetLastWriteTimeUtc(item.ImagePath)).Take(MaximumImages).ToList();
+                .OrderByDescending(item => item.Kind == "interactive")
+                .ThenByDescending(item => File.GetLastWriteTimeUtc(item.ImagePath)).Take(MaximumImages).ToList();
             var snapshot = Snapshot(project, artifacts, artifacts.Count > 0 ? "ready" : "empty", "");
             if (artifacts.Count > 0)
             {
@@ -133,6 +140,67 @@ public sealed partial class ScientificSimulationService(
                 ? Snapshot(project, images, status, detail) : Superseded(projectId);
         }
         finally { _gate.Release(); }
+    }
+
+    /// <summary>Validates a workspace.open request for the integrated Simulation tab.</summary>
+    public async Task<ScientificSimulationArtifact> ResolveInteractiveSimulationAsync(string projectId, string path,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateId(projectId);
+        var project = await repository.GetProjectAsync(projectId, cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("Das Forschungsprojekt wurde nicht gefunden.");
+        var layout = await sandbox.EnsureProjectAsync(project.Id, cancellationToken).ConfigureAwait(false);
+        var relative = Path.IsPathRooted(path) ? Path.GetRelativePath(layout.RootPath, path) : path;
+        var candidate = SafePath(layout.RootPath, relative);
+        var artifacts = new List<ScientificSimulationArtifact>();
+        await AddInteractiveSimulationAsync(candidate, layout, artifacts, cancellationToken).ConfigureAwait(false);
+        return artifacts.SingleOrDefault() ?? throw new InvalidDataException(
+            "Die Projektdatei ist keine eigenständige HTML-Simulation im work- oder artifacts-Verzeichnis. Interaktive Simulationen erscheinen ausschließlich im Simulation-Tab.");
+    }
+
+    private static async Task DiscoverInteractiveSimulationsAsync(ResearchSandboxLayout layout,
+        List<ScientificSimulationArtifact> artifacts, CancellationToken token)
+    {
+        var pending = new Stack<string>();
+        pending.Push(layout.WorkPath); pending.Push(layout.ArtifactsPath);
+        var scanned = 0;
+        while (pending.TryPop(out var directory) && scanned < MaximumScanEntries && artifacts.Count < MaximumImages)
+        {
+            if (!Directory.Exists(directory)) continue;
+            foreach (var entry in Directory.EnumerateFileSystemEntries(directory))
+            {
+                token.ThrowIfCancellationRequested();
+                if (++scanned > MaximumScanEntries || artifacts.Count >= MaximumImages) break;
+                var attributes = File.GetAttributes(entry);
+                if ((attributes & FileAttributes.ReparsePoint) != 0) continue;
+                _ = SafePath(layout.RootPath, Path.GetRelativePath(layout.RootPath, entry));
+                if ((attributes & FileAttributes.Directory) != 0)
+                {
+                    if (Path.GetFileName(entry) is not (".state" or ".venv" or "__pycache__" or "publication")) pending.Push(entry);
+                }
+                else if (ScientificSimulationHtml.IsHtmlPath(entry))
+                    await AddInteractiveSimulationAsync(entry, layout, artifacts, token).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private static async Task AddInteractiveSimulationAsync(string path, ResearchSandboxLayout layout,
+        List<ScientificSimulationArtifact> artifacts, CancellationToken token)
+    {
+        if (artifacts.Count >= MaximumImages || !ScientificSimulationHtml.IsHtmlPath(path)
+            || artifacts.Any(item => item.ImagePath.Equals(path, StringComparison.OrdinalIgnoreCase))) return;
+        var relative = Path.GetRelativePath(layout.RootPath, path).Replace('\\', '/');
+        if (!(relative.StartsWith("work/", StringComparison.Ordinal) || relative.StartsWith("artifacts/", StringComparison.Ordinal))
+            || relative.Split('/').Any(part => part.Equals("publication", StringComparison.OrdinalIgnoreCase))) return;
+        path = SafePath(layout.RootPath, relative);
+        if (!File.Exists(path) || new FileInfo(path).Length is <= 0 or > ScientificSimulationHtml.MaximumBytes) return;
+        var bytes = await File.ReadAllBytesAsync(path, token).ConfigureAwait(false);
+        var source = Encoding.UTF8.GetString(bytes);
+        if (!ScientificSimulationHtml.IsInteractiveDocument(source)) return;
+        var hash = Hash(bytes);
+        artifacts.Add(new(hash[..24], ScientificSimulationHtml.Title(source, Path.GetFileNameWithoutExtension(path)), path,
+            path, null, "Interaktive Simulation · Projektdatei · " + relative + " · Modellannahmen im Quellcode prüfen.", false,
+            hash, Kind: "interactive", ContentType: "text/html", ProjectRoot: layout.RootPath));
     }
 
     private async Task WriteExperimentAsync(ScientificResearchProject project, string title, string relative, string sourceHash,
@@ -358,7 +426,8 @@ public sealed partial class ScientificSimulationService(
                     || System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(header.AsSpan(20, 4)) > 16000)) return;
         stream.Position = 0;
         var hash = Convert.ToHexStringLower(await SHA256.HashDataAsync(stream, token).ConfigureAwait(false));
-        images.Add(new(hash[..24], title, path, scriptPath, dataPath, provenance, researchData, hash));
+        images.Add(new(hash[..24], title, path, scriptPath, dataPath, provenance, researchData, hash,
+            ContentType: png ? "image/png" : "image/jpeg"));
     }
 
     private static async Task RestoreLastVisualizationAsync(ScientificResearchProject project, ResearchSandboxLayout layout,

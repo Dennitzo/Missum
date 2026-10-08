@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
     [string]$SourcePath,
@@ -14,6 +14,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+# The native process reads redirected diagnostics as UTF-8. Windows PowerShell
+# otherwise uses the console code page and corrupts German text and TeX symbols.
+$OutputEncoding = [Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = $OutputEncoding
 
 function Resolve-EdgeExecutable {
     $configured = [Environment]::GetEnvironmentVariable('MISSUM_EDGE_PATH')
@@ -396,13 +400,14 @@ $html = @"
       }
       document.body.dataset.missumPdfReady = 'true';
       document.body.dataset.missumKatexInvalid = String(documentContent.querySelectorAll('.math-selectable.invalid').length);
-      const headings = Array.from(documentContent.querySelectorAll('h2'));
+      const headings = Array.from(documentContent.querySelectorAll('h2, h3, h4, h5, h6'));
       document.body.dataset.missumKatexErrors = encodeURIComponent(JSON.stringify(
         Array.from(documentContent.querySelectorAll('.math-selectable.invalid')).slice(0, 8).map(formula => {
           const preceding = headings.filter(heading => Boolean(heading.compareDocumentPosition(formula) & Node.DOCUMENT_POSITION_FOLLOWING));
           const heading = preceding.length ? preceding[preceding.length - 1] : null;
           return { section: heading ? heading.textContent.trim().slice(0, 500) : '',
-            source: (formula.querySelector('.math-source-text')?.textContent || '').slice(0, 500) };
+            source: (formula.querySelector('.math-source-text')?.textContent || '').slice(0, 500),
+            reason: (formula.dataset.mathError || '').slice(0, 500) };
         })));
       document.body.dataset.missumKatexRendered = String(documentContent.querySelectorAll('.math-render[data-math-typeset="true"] .katex').length);
       document.body.dataset.missumFigureInvalid = String(Array.from(documentContent.querySelectorAll('.publication-figure img')).filter(image => !image.complete || image.naturalWidth === 0).length);
@@ -451,7 +456,9 @@ try {
             try {
                 $formulaErrors = [Uri]::UnescapeDataString($Matches[1]) | ConvertFrom-Json
                 $formulaDetails = (@($formulaErrors) | ForEach-Object {
-                    'Abschnitt "' + $_.section + '", Ausdruck: ' + $_.source
+                    $detail = 'Abschnitt "' + $_.section + '", Ausdruck: ' + $_.source
+                    if ($_.reason) { $detail += ', Ursache: ' + $_.reason }
+                    $detail
                 }) -join '; '
             } catch { $formulaDetails = '' }
         }

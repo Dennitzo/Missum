@@ -24,11 +24,14 @@ public sealed partial class MissumAiAssistantService
             // Compatibility only when this request cannot advertise research.deliverables.
             // Canonical requests obtain this state through the gateway's initial read.
             var state = await stateRepository.LoadWorkingStateAsync(project.Id, cancellationToken).ConfigureAwait(false);
+            var presentation = sciencePresentation is null ? (JsonElement?)null
+                : await sciencePresentation.ObserveFeedbackAsync(state, refresh: false, TimeSpan.Zero, cancellationToken).ConfigureAwait(false);
             var summary = JsonSerializer.Serialize(new
             {
                 originalQuestion = BoundScienceContext(project.OriginalQuestion, 16_000),
                 research = new { protocol = "section-delta-v1", projectId = project.Id,
                     state.Revision, state.PublicationRevision, state.Title, itemCount = state.Items.Count },
+                presentation,
                 workingItems = state.Items.OrderByDescending(item => item.Kind == "requirement")
                     .ThenByDescending(item => item.UpdatedAt).Take(32)
                     .Select(item => LocalToolBroker.ResearchItemReceipt(item, full: false)),

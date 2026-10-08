@@ -26,7 +26,8 @@ public sealed partial class LocalToolBroker(
     Missum.Core.Research.IResearchSandboxService? researchSandbox = null,
     ScientificPresentationCoordinator? sciencePresentation = null,
     Missum.Core.Research.IScientificResearchRepository? scientificResearch = null,
-    ScientificPublicationService? scientificPublications = null)
+    ScientificPublicationService? scientificPublications = null,
+    ScientificSimulationService? scientificSimulations = null)
 {
     private const int MaximumResultCharacters = 4 * 1024 * 1024;
     private static readonly JsonSerializerOptions JsonOptions = MissumAiProtocol.CreateJsonOptions();
@@ -99,6 +100,32 @@ public sealed partial class LocalToolBroker(
             }
             if (WorkspaceTools.IsLocal(proposal.Name))
             {
+                if (proposal.Name == WorkspaceTools.Open && chats is not null
+                    && await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false) is { ChatMode: ChatMode.ClaudeScience })
+                {
+                    var projectId = "research-" + sessionId.ToString("N");
+                    var requested = proposal.Arguments.GetProperty("path").GetString()!;
+                    if (ScientificSimulationHtml.IsHtmlPath(requested))
+                    {
+                        if (scientificSimulations is null || sciencePresentation is null)
+                            throw new InvalidOperationException("Die integrierte Simulation-Ansicht ist nicht verfügbar.");
+                        var path = WorkspaceFilePath.Resolve(codingWorkspacePath ?? "", requested);
+                        var artifact = await scientificSimulations.ResolveInteractiveSimulationAsync(projectId, path, cancellationToken).ConfigureAwait(false);
+                        sciencePresentation.Queue(projectId);
+                        return Result(proposal, "completed", new
+                        {
+                            opened = false, available = true, displayed = false, registered = true,
+                            integrated = true, view = "simulation", projectId, path = requested,
+                            artifact.Id, artifact.Title, artifact.Sha256,
+                            instruction = "Das Artefakt ist im Simulation-Tab dieser Sitzung registriert, wurde aber nicht angezeigt; die aktuelle Nutzeransicht bleibt erhalten. "
+                                + "Missum öffnet dafür kein eigenes Fenster. Ein Screenshot des Missum-Chatfensters belegt keine sichtbaren Eigenschaften der Simulation. "
+                                + "Bestätige keine Sichtbefunde, wenn die Aufnahme den Chat statt der Simulation zeigt. "
+                                + "Nutze vorhandene PNG-Plots mit image.input operation=file und ihrem tatsächlichen path, anschließend media.analyze; "
+                                + "solche Plots belegen nur ihren eigenen Bildinhalt, keine ungeprüfte HTML-Animation. "
+                                + "Der HTML-/JavaScript-Quellcode ist im Simulation-Tab einsehbar; die Registrierung ist kein gemessener Python-Ausführungsbeleg.",
+                        });
+                    }
+                }
                 var workspaceResult = await new WorkspaceToolService(connection).ExecuteAsync(
                     proposal,
                     codingWorkspacePath,

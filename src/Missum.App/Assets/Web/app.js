@@ -638,7 +638,17 @@
     title.className = "session-item__title";
     title.textContent = session.title || "Neue Sitzung";
     main.append(title);
-    if (queueLabel) {
+    if (scheduledRun?.queueState === "active") {
+      const activity = document.createElement("span");
+      activity.className = "session-item__activity";
+      activity.setAttribute("role", "status");
+      activity.setAttribute("aria-label", "Auftrag läuft");
+      const spinner = document.createElement("span");
+      spinner.className = "session-item__spinner";
+      spinner.setAttribute("aria-hidden", "true");
+      activity.append(spinner);
+      main.append(activity);
+    } else if (queueLabel) {
       const status = document.createElement("span");
       status.className = `message-status${scheduledRun.queueState === "active" ? " streaming" : ""}`;
       status.textContent = queueLabel;

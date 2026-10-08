@@ -28,7 +28,7 @@ public sealed class NativeComposerToolChip : Button
         VerticalAlignment = VerticalAlignment.Center;
         ApplyBackground();
         ActualThemeChanged += (_, _) => ApplyBackground();
-        Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 190, 190, 190));
+        Foreground = NativeThemeBrushes.MutedText;
         var slot = new Grid { Width = 16, Height = 16 };
         slot.Children.Add(_icon); slot.Children.Add(_close);
         var row = new Grid { ColumnSpacing = 5 };

@@ -127,7 +127,7 @@ try {
     )
     $nativeReady = Join-Path $smokeData 'native-ui-ready.json'
     $nativeState = $null
-    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    $deadline = [DateTime]::UtcNow.AddSeconds(60)
     while ([DateTime]::UtcNow -lt $deadline -and -not $process.HasExited) {
         if (Test-Path -LiteralPath $nativeReady -PathType Leaf) {
             # The writer may still be flushing its first JSON document.
@@ -137,7 +137,21 @@ try {
         }
         Start-Sleep -Milliseconds 250
     }
-    if ($process.HasExited) { throw "Missum exited early: $($process.ExitCode)" }
+    if ($process.HasExited) {
+        $startupFailurePath = Join-Path $smokeData 'native-ui-failure.json'
+        if (Test-Path -LiteralPath $startupFailurePath -PathType Leaf) {
+            Copy-Item -LiteralPath $startupFailurePath -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-ui-failure.json')) -Force
+            foreach ($diagnosticName in @('native-simulation-errors.jsonl', 'simulation-view.jsonl', 'native-publication-errors.jsonl', 'publication-view.jsonl', 'native-ui-render-errors.jsonl', 'crash.log')) {
+                $diagnosticPath = Join-Path (Join-Path $smokeData 'Diagnostics') $diagnosticName
+                if (Test-Path -LiteralPath $diagnosticPath -PathType Leaf) {
+                    Copy-Item -LiteralPath $diagnosticPath -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.' + $diagnosticName)) -Force
+                }
+            }
+            $startupFailure = Get-Content -LiteralPath $startupFailurePath -Raw | ConvertFrom-Json
+            throw ("Native WinUI smoke failed: {0}" -f $startupFailure.error)
+        }
+        throw "Missum exited early: $($process.ExitCode)"
+    }
     if (-not (Test-Path -LiteralPath $nativeReady)) {
         $nativeFailure = Join-Path $smokeData 'native-ui-failure.json'
         if (Test-Path -LiteralPath $nativeFailure -PathType Leaf) {
@@ -159,7 +173,11 @@ try {
             throw "Native chat did not initialize its isolated local state: $runtimeFile"
         }
     }
-    if (Test-Path -LiteralPath (Join-Path $smokeData 'WebView2')) { throw 'Desktop unexpectedly created a WebView2 profile.' }
+    $webViewProfileRoot = Join-Path $smokeData 'WebView2'
+    if (Test-Path -LiteralPath $webViewProfileRoot) {
+        $unexpectedWebProfiles = @(Get-ChildItem -LiteralPath $webViewProfileRoot | Where-Object { -not $_.PSIsContainer -or $_.Name -notin @('Simulations', 'Publications') })
+        if ($unexpectedWebProfiles.Count -gt 0) { throw 'Desktop unexpectedly created a WebView2 profile outside the interactive Simulation view.' }
+    }
     $mathPreview = Join-Path $smokeData 'native-math-preview.png'
     if (-not (Test-Path -LiteralPath $mathPreview -PathType Leaf) -or (Get-Item -LiteralPath $mathPreview).Length -lt 100) {
         throw 'Native math smoke did not produce a rendered formula preview.'
@@ -304,7 +322,88 @@ try {
     Copy-Item -LiteralPath $planetValidationPath -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-planet-palette-validation.json')) -Force
     Copy-Item -LiteralPath $planetPreviewPath -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-planet-palette-preview.png')) -Force
     Write-Host 'Native planet palette: 128 distinct rendered planets at 14 DIP verified.'
-    foreach ($sciencePreview in @('native-outputs-preview', 'native-publication-preview', 'native-publication-last-page-preview', 'native-simulation-empty-preview', 'native-python-receipt-preview', 'native-changes-preview', 'native-tool-icons-preview', 'native-colored-chrome-preview', 'native-continuation-preview', 'native-continuation-preparing-preview', 'native-continuation-loading-preview', 'native-thinking-preview')) {
+    $tabRetentionPath = Join-Path $smokeData 'native-tab-retention-validation.json'
+    $callbackGuardPath = Join-Path $smokeData 'native-ui-callback-validation.json'
+    foreach ($projectionEvidencePath in @($tabRetentionPath, $callbackGuardPath)) {
+        if (-not (Test-Path -LiteralPath $projectionEvidencePath -PathType Leaf) -or
+            (Get-Item -LiteralPath $projectionEvidencePath).LastWriteTimeUtc -lt $startedAt.AddSeconds(-1)) {
+            throw 'Native UI projection smoke did not produce fresh validation evidence.'
+        }
+    }
+    $tabRetention = Get-Content -LiteralPath $tabRetentionPath -Raw | ConvertFrom-Json
+    if ($tabRetention.tokenUpdates -ne 100) {
+        throw 'Native tab retention smoke did not exercise 100 background projections.'
+    }
+    foreach ($tabCheck in @('passed', 'retainedControls', 'retainedOrder', 'hoverPreserved', 'focusPreserved', 'noVisualDetach', 'appearancePropertiesStable', 'mutablePaletteResourcesRetained', 'explicitNavigationUpdatesAppearance', 'titleChangesStillVisible')) {
+        if ($tabRetention.PSObject.Properties.Name -notcontains $tabCheck -or $tabRetention.$tabCheck -ne $true) {
+            throw "Native tab retention smoke failed: $tabCheck"
+        }
+    }
+    $callbackGuard = Get-Content -LiteralPath $callbackGuardPath -Raw | ConvertFrom-Json
+    if ($callbackGuard.processId -ne $process.Id -or $callbackGuard.timerMilliseconds -ne 80 -or
+        $callbackGuard.injected -ne 'COM_E_FAIL' -or $callbackGuard.caughtFailures -ne 1) {
+        throw 'Native UI callback smoke did not exercise the real process and dispatcher timer.'
+    }
+    foreach ($callbackCheck in @('nextProjectionSucceeded', 'ownerUnchanged', 'messagesUnchanged', 'runUnchanged')) {
+        if ($callbackGuard.PSObject.Properties.Name -notcontains $callbackCheck -or $callbackGuard.$callbackCheck -ne $true) {
+            throw "Native UI callback smoke failed: $callbackCheck"
+        }
+    }
+    Copy-Item -LiteralPath $tabRetentionPath -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-tab-retention-validation.json')) -Force
+    Copy-Item -LiteralPath $callbackGuardPath -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-ui-callback-validation.json')) -Force
+    Write-Host 'Native tab hover/focus retention and dispatcher-timer error recovery verified.'
+    $noticePath = Join-Path $smokeData 'native-notice-selection-validation.json'
+    if (-not (Test-Path -LiteralPath $noticePath -PathType Leaf) -or
+        (Get-Item -LiteralPath $noticePath).LastWriteTimeUtc -lt $startedAt.AddSeconds(-1)) {
+        throw 'Native error-text selection smoke did not produce fresh evidence.'
+    }
+    $noticeValidation = Get-Content -LiteralPath $noticePath -Raw | ConvertFrom-Json
+    foreach ($noticeCheck in @('passed', 'textSelectionEnabled', 'fullTextSelected', 'exactCopyText', 'latexAndLineBreaksPreserved', 'runtimeUpdatesRetainTemplate', 'noDuplicateMessage', 'existingActionPreserved', 'existingContextMenuPreserved', 'attachmentIdempotent')) {
+        if ($noticeValidation.PSObject.Properties.Name -notcontains $noticeCheck -or $noticeValidation.$noticeCheck -ne $true) {
+            throw "Native error-text selection smoke failed: $noticeCheck"
+        }
+    }
+    Copy-Item -LiteralPath $noticePath -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-notice-selection-validation.json')) -Force
+    Write-Host 'Native selectable errors and exact LaTeX/Unicode copy text verified.'
+    $simulationLifecyclePath = Join-Path $smokeData 'native-simulation-lifecycle-validation.json'
+    if (-not (Test-Path -LiteralPath $simulationLifecyclePath -PathType Leaf) -or
+        (Get-Item -LiteralPath $simulationLifecyclePath).LastWriteTimeUtc -lt $startedAt.AddSeconds(-1)) {
+        throw 'Native simulation lifecycle smoke did not produce fresh evidence.'
+    }
+    $simulationLifecycle = Get-Content -LiteralPath $simulationLifecyclePath -Raw | ConvertFrom-Json
+    if ($simulationLifecycle.passed -ne $true -or $simulationLifecycle.processId -ne $process.Id -or
+        $simulationLifecycle.tabCycles -lt 40 -or $simulationLifecycle.suspendResumeCycles -lt 4 -or $simulationLifecycle.navigationCount -ne 2 -or
+        $simulationLifecycle.browserFaults -ne 0 -or $simulationLifecycle.uiFaults -ne 0) {
+        throw 'Native interactive simulation failed the real-process tab lifecycle checks.'
+    }
+    foreach ($simulationCheck in @('stableRoot', 'stableBrowserParent', 'realCanvasAnimation', 'animationResumed')) {
+        if ($simulationLifecycle.PSObject.Properties.Name -notcontains $simulationCheck -or $simulationLifecycle.$simulationCheck -ne $true) {
+            throw "Native interactive simulation lifecycle failed: $simulationCheck"
+        }
+    }
+    Copy-Item -LiteralPath $simulationLifecyclePath -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-simulation-lifecycle-validation.json')) -Force
+    Write-Host 'Native interactive simulation: 40 tab cycles and snapshot updates verified.'
+    if (-not [string]::IsNullOrWhiteSpace($env:MISSUM_SCIENCE_PDF_SMOKE_PATH)) {
+        $publicationLayoutPath = Join-Path $smokeData 'native-publication-layout-validation.json'
+        if (-not (Test-Path -LiteralPath $publicationLayoutPath -PathType Leaf) -or
+            (Get-Item -LiteralPath $publicationLayoutPath).LastWriteTimeUtc -lt $startedAt.AddSeconds(-1)) {
+            throw 'Native publication layout smoke did not produce fresh evidence.'
+        }
+        $publicationLayout = Get-Content -LiteralPath $publicationLayoutPath -Raw | ConvertFrom-Json
+        if ($publicationLayout.processId -ne $process.Id -or $publicationLayout.viewportWidth -le 0 -or
+            [Math]::Abs($publicationLayout.viewerWidth - $publicationLayout.viewportWidth) -gt 1 -or
+            $simulationLifecycle.publicationFixtureLoaded -ne $true) {
+            throw 'The native PDF does not fit the complete available viewport.'
+        }
+        foreach ($publicationCheck in @('passed', 'fullWidth', 'headingsHidden', 'externalPdfButtonsRemoved', 'browserViewer')) {
+            if ($publicationLayout.PSObject.Properties.Name -notcontains $publicationCheck -or $publicationLayout.$publicationCheck -ne $true) {
+                throw "Native publication layout failed: $publicationCheck"
+            }
+        }
+        Copy-Item -LiteralPath $publicationLayoutPath -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-publication-layout-validation.json')) -Force
+        Write-Host 'Native publication: full viewport width without headings or PDF buttons verified.'
+    }
+    foreach ($sciencePreview in @('native-outputs-preview', 'native-publication-preview', 'native-publication-last-page-preview', 'native-simulation-empty-preview', 'native-simulation-lifecycle-preview', 'native-python-receipt-preview', 'native-changes-preview', 'native-tool-icons-preview', 'native-colored-chrome-preview', 'native-continuation-preview', 'native-continuation-preparing-preview', 'native-continuation-loading-preview', 'native-thinking-preview')) {
         $scienceImage = Join-Path $smokeData ($sciencePreview + '.png')
         if (Test-Path -LiteralPath $scienceImage -PathType Leaf) {
             $scienceEvidence = Assert-MissumArtifactPath -Path ($PublishDirectory + '.' + $sciencePreview + '.png')

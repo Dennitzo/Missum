@@ -15,6 +15,10 @@ public sealed partial class MissumAiAssistantService
     public async Task<ChatMessage> ResumeMessageAsync(Guid sessionId, Guid assistantMessageId,
         Func<MissumAiAssistantUpdate, Task> update, CancellationToken cancellationToken = default)
     {
+        // A manual continuation is a new submission. Preserve the invoking
+        // client's model and reasoning before the first asynchronous lookup.
+        // Automatic reconnect and uncertain create recovery retain their run.
+        using var submittedPreferences = AssistantClientExecutionScope.EnterFrozen(CurrentSettings);
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         if (!await _gate.WaitAsync(0, cancellationToken).ConfigureAwait(false))
             throw new InvalidOperationException("Es läuft bereits ein AI-Auftrag; dieser Lauf wurde nicht nochmals gestartet.");
@@ -39,7 +43,8 @@ public sealed partial class MissumAiAssistantService
                 _activeCodingWorkspace = persisted is null ? session.CodingWorkspacePath : ResolvePersistedCodingWorkspace(persisted);
             await update(new(MissumAiAssistantUpdateKind.Status, assistant, Session: session,
                 Status: "AI-Modell und Dienste werden vorbereitet",
-                Detail: "Fortsetzung wird vorbereitet; die Verbindung zum Gateway wird hergestellt.")).ConfigureAwait(false);
+                Detail: "Fortsetzung wird vorbereitet; die Verbindung zum Gateway wird hergestellt.",
+                Model: CurrentSettings.SelectedModel)).ConfigureAwait(false);
             using var client = await CreateClientForActionAsync(_activeRunAction, token).ConfigureAwait(false);
             await connection.WaitForGatewayAsync(client, token).ConfigureAwait(false);
 
@@ -61,6 +66,8 @@ public sealed partial class MissumAiAssistantService
                 }
                 if (IsActiveContinuationRun(snapshot.State) || snapshot.State == RunState.Completed)
                 {
+                    if (IsActiveContinuationRun(snapshot.State))
+                        await ApplyManualContinuationSelectionAsync(client, snapshot, sessionId, token).ConfigureAwait(false);
                     _activeServerRunId = snapshot.RunId;
                     var reattached = persisted! with { State = snapshot.State.ToString(), SelectedModel = snapshot.SelectedModel };
                     await chats.UpdateMessageAsync(assistant.Id, assistant.Content, MessageStatus.Streaming,
@@ -72,10 +79,26 @@ public sealed partial class MissumAiAssistantService
                         Status: "Lauf wird fortgesetzt", Detail: "Der vorhandene Serverlauf wird ab dem gespeicherten Ereignis wieder angezeigt.",
                         Model: snapshot.SelectedModel, LocalRunId: reattached.Id)).ConfigureAwait(false);
                     await StartFileChangesAsync(reattached, assistant, resume: true, update, token).ConfigureAwait(false);
+                    await FlushLiveModelSelectionAsync(token).ConfigureAwait(false);
                     return await StreamRunWithReconnectAsync(reattached, assistant, update, token, client).ConfigureAwait(false);
                 }
             }
 
+            // A lost create acknowledgement is recovery of the accepted request,
+            // not a fresh submission using today's composer selection. Read its
+            // durable payload before preparing context for any different model.
+            var reusePendingKey = persisted is { ServerRunId: null, State: "queued" };
+            var pendingReceipt = reusePendingKey ? (assistant.ToolSteps ?? [])
+                .LastOrDefault(step => step.Id == "continuation:" + persisted!.IdempotencyKey) : null;
+            RunRequest? recoveredRequest = null;
+            if (pendingReceipt?.InputJson is { } frozenRequest)
+            {
+                ValidateContinuationReceiptOwner(pendingReceipt, persisted!, assistant, requireServer: false);
+                recoveredRequest = JsonSerializer.Deserialize<RunRequest>(frozenRequest, JsonOptions)
+                    ?? throw new InvalidDataException("Der vorbereitete Fortsetzungsauftrag ist ungültig.");
+                if (recoveredRequest.SessionId != sessionId.ToString("D"))
+                    throw new InvalidDataException("Der vorbereitete Fortsetzungsauftrag gehört zu einer anderen Sitzung.");
+            }
             var attachmentsForRun = await attachments.ListAsync(sessionId, token).ConfigureAwait(false);
             var uploaded = await UploadAttachmentsAsync(client, attachmentsForRun, update, assistant, token).ConfigureAwait(false);
             var retainUploads = false;
@@ -90,7 +113,7 @@ public sealed partial class MissumAiAssistantService
                     OriginalPrompt = continuationInstruction,
                     RemainingPrompt = continuationInstruction,
                 };
-                var request = await BuildRunRequestAsync(client, sessionId, continuationInstruction, requestTrigger,
+                var request = recoveredRequest ?? await BuildRunRequestAsync(client, sessionId, continuationInstruction, requestTrigger,
                     attachmentsForRun, history, uploaded, assistant, update, token).ConfigureAwait(false);
                 if (session.ChatMode == ChatMode.ClaudeScience)
                 {
@@ -107,22 +130,12 @@ public sealed partial class MissumAiAssistantService
 
                 // Recover an uncertain create by its durable idempotency key. Never
                 // silently issue a second operation after a lost acceptance response.
-                var reusePendingKey = persisted is { ServerRunId: null, State: "queued" };
                 var key = reusePendingKey ? persisted!.IdempotencyKey : $"missum-continuation-{assistant.Id:N}-{assistant.Revision}";
                 var attempt = new MissumAiRunRecord(Guid.NewGuid(), sessionId, assistant.Id, _activeRunAction,
                     key, null, 0, "queued", null, null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow,
                     WorkspacePath: workspace, ExtensionActionId: persisted?.ExtensionActionId);
                 var localRun = await runs.BeginContinuationAttemptAsync(attempt, token).ConfigureAwait(false);
                 var receiptId = "continuation:" + key;
-                var previousPreparation = (assistant.ToolSteps ?? []).LastOrDefault(step => step.Id == receiptId);
-                if (reusePendingKey && previousPreparation?.InputJson is { } frozenRequest)
-                {
-                    ValidateContinuationReceiptOwner(previousPreparation, localRun, assistant, requireServer: false);
-                    request = JsonSerializer.Deserialize<RunRequest>(frozenRequest, JsonOptions)
-                        ?? throw new InvalidDataException("Der vorbereitete Fortsetzungsauftrag ist ungültig.");
-                    if (request.SessionId != sessionId.ToString("D"))
-                        throw new InvalidDataException("Der vorbereitete Fortsetzungsauftrag gehört zu einer anderen Sitzung.");
-                }
                 var retainedContent = string.IsNullOrWhiteSpace(assistant.Content) ? string.Empty : assistant.Content;
                 var prefix = retainedContent.Length == 0 || retainedContent.EndsWith("\n\n", StringComparison.Ordinal)
                     ? retainedContent : retainedContent + "\n\n";
@@ -138,8 +151,10 @@ public sealed partial class MissumAiAssistantService
                 // The frozen request and preserved prefix are durable before creation.
                 // An acceptance lost during shutdown can be recovered with the same key.
                 var accepted = await client.CreateRunAsync(request, key, token).ConfigureAwait(false);
-                await runs.UpdateAsync(localRun.Id, accepted.RunId, 0, "running", cancellationToken: token).ConfigureAwait(false);
-                localRun = localRun with { ServerRunId = accepted.RunId, State = "running", UpdatedAt = DateTimeOffset.UtcNow };
+                var submittedModel = request.Mode == RunMode.Coding ? request.PreferredCodingModelId : request.PreferredGeneralModelId;
+                await runs.UpdateAsync(localRun.Id, accepted.RunId, 0, "running", submittedModel, cancellationToken: token).ConfigureAwait(false);
+                localRun = localRun with { ServerRunId = accepted.RunId, State = "running", SelectedModel = submittedModel,
+                    UpdatedAt = DateTimeOffset.UtcNow };
                 _activeServerRunId = accepted.RunId;
                 if (!string.IsNullOrWhiteSpace(workspace)) _codingWorkspaces[accepted.RunId] = workspace;
                 foreach (var open in (assistant.ToolSteps ?? []).Where(step => step.Status == "running"))
@@ -159,7 +174,7 @@ public sealed partial class MissumAiAssistantService
                 started = true;
                 await update(new(MissumAiAssistantUpdateKind.Started, assistant, Session: session,
                     Status: "Lauf wird fortgesetzt", Detail: "Neuer Serverversuch mit ursprünglichem Auftrag und gespeichertem Stand.",
-                    ToolStep: receipt, Model: CurrentSettings.SelectedModel, LocalRunId: localRun.Id)).ConfigureAwait(false);
+                    ToolStep: receipt, Model: submittedModel, LocalRunId: localRun.Id)).ConfigureAwait(false);
                 await StartFileChangesAsync(localRun, assistant, resume: true, update, token).ConfigureAwait(false);
                 await FlushLiveModelSelectionAsync(token).ConfigureAwait(false);
                 var completed = await StreamRunWithReconnectAsync(localRun, assistant, update, token, client).ConfigureAwait(false);
@@ -252,6 +267,23 @@ public sealed partial class MissumAiAssistantService
     }
 
     private static bool IsActiveContinuationRun(RunState state) => state is RunState.Queued or RunState.Running or RunState.WaitingForClient;
+
+    private async Task ApplyManualContinuationSelectionAsync(MissumAiClient client, RunSnapshot snapshot,
+        Guid sessionId, CancellationToken token)
+    {
+        var selectedModel = CurrentSettings.SelectedModel?.Trim();
+        if (string.IsNullOrWhiteSpace(selectedModel))
+            throw new InvalidOperationException("Wähle zuerst ein lokales AI-Modell für die Fortsetzung.");
+        var role = UsesCodingAgent(_activeRunAction) ? "coding" : "general";
+        var reasoning = await ResolveRequestedReasoningAsync(client, selectedModel, role, token).ConfigureAwait(false);
+        // The gateway applies this durable selection before the next inference.
+        // Existing tool receipts remain owned by the reattached run; no second
+        // attempt is created and an in-flight tool is never interrupted. Always
+        // submit the resolved choice: the snapshot does not expose reasoning,
+        // and removing a stored preference must also restore the model default.
+        await client.SelectRunModelAsync(snapshot.RunId,
+            new(sessionId.ToString("D"), selectedModel, reasoning), token).ConfigureAwait(false);
+    }
 
     private static async Task<RunSnapshot?> ReadContinuationServerSnapshotAsync(MissumAiClient client, MissumAiRunRecord? run, CancellationToken token)
     {

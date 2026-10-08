@@ -39,15 +39,15 @@ public sealed class NativeToolResultView : StackPanel
                     if (item.ValueKind == JsonValueKind.Object) results.Children.Add(new NativeToolResultView(item, path, false, false));
                     else results.Children.Add(new TextBlock { Text = item.ToString(), TextWrapping = TextWrapping.Wrap, FontSize = 13 });
                 }
-                cards.Add(new StackPanel { Spacing = 10, Children = { new TextBlock { Text = Label(key), FontSize = 13, Foreground = ResourceBrush("MissumAccentBrush", Microsoft.UI.Colors.MediumPurple) }, results } });
+                cards.Add(new StackPanel { Spacing = 10, Children = { new TextBlock { Text = Label(key), FontSize = 13, Foreground = NativeThemeBrushes.ReadableAccent }, results } });
                 continue;
             }
             var fact = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Margin = new(0, 0, 18, 6) };
-            fact.Children.Add(new TextBlock { Text = Label(key), FontSize = 12, Foreground = ResourceBrush("MissumAccentBrush", Microsoft.UI.Colors.MediumPurple), VerticalAlignment = VerticalAlignment.Top });
+            fact.Children.Add(new TextBlock { Text = Label(key), FontSize = 12, Foreground = NativeThemeBrushes.ReadableAccent, VerticalAlignment = VerticalAlignment.Top });
             var text = value.ValueKind is JsonValueKind.Object or JsonValueKind.Array
                 ? JsonSerializer.Serialize(value, PrettyJson)
                 : value.ValueKind == JsonValueKind.True ? "Ja" : value.ValueKind == JsonValueKind.False ? "Nein" : value.ToString();
-            var content = new TextBlock { Text = text, FontFamily = new("Segoe UI Variable Text"), FontSize = 13, Foreground = ResourceBrush("TextFillColorPrimaryBrush", Microsoft.UI.Colors.WhiteSmoke), IsTextSelectionEnabled = true, TextWrapping = TextWrapping.Wrap, MaxWidth = 520 };
+            var content = new TextBlock { Text = text, FontFamily = new("Segoe UI Variable Text"), FontSize = 13, Foreground = NativeThemeBrushes.Text, IsTextSelectionEnabled = true, TextWrapping = TextWrapping.Wrap, MaxWidth = 520 };
             if (value.ValueKind is JsonValueKind.Object or JsonValueKind.Array) new NativeCodeHighlighter(content).UpdateText(text, "json");
             fact.Children.Add(content); facts.Children.Add(fact);
         }
@@ -86,7 +86,7 @@ public sealed class NativeToolResultView : StackPanel
         if (language == "diff") body = new NativeDiffView(source);
         else
         {
-            var text = new TextBlock { FontFamily = new(language == "text" ? "Segoe UI Variable Text" : "Cascadia Mono"), FontSize = language == "text" ? 14 : 13, LineHeight = 23, IsTextSelectionEnabled = true, TextWrapping = language == "text" ? TextWrapping.Wrap : TextWrapping.NoWrap, Margin = new(12) };
+            var text = new TextBlock { FontFamily = new(language == "text" ? "Segoe UI Variable Text" : "Cascadia Mono"), Foreground = NativeThemeBrushes.Text, FontSize = language == "text" ? 14 : 13, LineHeight = 23, IsTextSelectionEnabled = true, TextWrapping = language == "text" ? TextWrapping.Wrap : TextWrapping.NoWrap, Margin = new(12) };
             if (language == "text") text.Text = source;
             else new NativeCodeHighlighter(text).UpdateText(source, language);
             body = new ScrollViewer { Content = text, MaxHeight = 520, HorizontalScrollBarVisibility = language == "text" ? ScrollBarVisibility.Disabled : ScrollBarVisibility.Auto, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollMode = language == "text" ? ScrollMode.Disabled : ScrollMode.Enabled };
@@ -99,7 +99,7 @@ public sealed class NativeToolResultView : StackPanel
         var header = new Grid { Padding = new(14, 8, 10, 8), ColumnSpacing = 8, Background = ResourceBrush("MissumAccentSubtleBrush", Windows.UI.Color.FromArgb(24, 150, 110, 220)) };
         header.ColumnDefinitions.Add(new() { Width = new(1, GridUnitType.Star) });
         header.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
-        header.Children.Add(new TextBlock { Text = title, FontSize = 12, TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center, Foreground = ResourceBrush("MissumAccentBrush", Microsoft.UI.Colors.MediumPurple), FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
+        header.Children.Add(new TextBlock { Text = title, FontSize = 12, TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center, Foreground = NativeThemeBrushes.ReadableAccent, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
         if (copy is not null) { Grid.SetColumn(copy, 1); header.Children.Add(copy); }
         var content = new StackPanel();
         content.Children.Add(new Border { Child = header, BorderThickness = new(0, 0, 0, 1), BorderBrush = ResourceBrush("MissumStrokeBrush", Microsoft.UI.Colors.DimGray) });

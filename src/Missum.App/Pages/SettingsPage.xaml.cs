@@ -1,4 +1,5 @@
 using Missum.App.ViewModels;
+using Missum.App.Controls;
 using Missum.App.Services;
 using Missum.Core.Models;
 using Microsoft.Extensions.Logging;
@@ -20,6 +21,7 @@ public sealed partial class SettingsPage : Page
     public SettingsPage()
     {
         InitializeComponent();
+        NativeNotice.Attach(StatusBar);
         ViewModel = App.Current.GetService<SettingsViewModel>();
         _logger = App.Current.GetService<ILogger<SettingsPage>>();
     }

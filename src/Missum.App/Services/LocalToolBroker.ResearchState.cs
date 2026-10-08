@@ -32,6 +32,10 @@ public sealed partial class LocalToolBroker
                     paths = ResearchReadPathScope.From(workspaceRoot,
                         await researchSandbox.EnsureProjectAsync(projectId, token).ConfigureAwait(false));
                 var projection = ResearchReadProjection.Create(snapshot, proposal.Arguments, paths);
+                if (sciencePresentation is not null)
+                    projection = ScientificPresentationFeedbackProjection.Append(projection,
+                        await sciencePresentation.ObserveFeedbackAsync(snapshot.State, refresh: false,
+                            TimeSpan.FromSeconds(2), token).ConfigureAwait(false));
                 var success = StateBool(projection, "success");
                 return Result(proposal, success ? "completed" : "failed", projection,
                     success ? null : StateText(projection, "errorCode"), success ? null : StateText(projection, "message"));
@@ -49,9 +53,13 @@ public sealed partial class LocalToolBroker
                 .ThenBy(item => item.Kind, StringComparer.Ordinal).ThenBy(item => item.Id, StringComparer.Ordinal).ToArray();
             var selected = ids.Count > 0 ? ordered.Where(item => ids.Contains(item.Id)).ToArray()
                 : ordered.Skip(offset).Take(limit).ToArray();
+            var presentation = sciencePresentation is null ? (JsonElement?)null
+                : await sciencePresentation.ObserveFeedbackAsync(state, refresh: false,
+                    TimeSpan.FromSeconds(2), token).ConfigureAwait(false);
             return Result(proposal, "completed", new
             {
                 success = true, projectId, protocol = "section-delta-v1", state.Revision, state.PublicationRevision, state.Title,
+                presentation,
                 items = selected.Select(item => ResearchItemReceipt(item, ids.Count > 0)),
                 totalItems = ordered.Length,
                 nextOffset = ids.Count == 0 && offset + selected.Length < ordered.Length ? (int?)(offset + selected.Length) : null,
@@ -90,27 +98,44 @@ public sealed partial class LocalToolBroker
         var receipt = await stateRepository.ApplyWorkingUpdateAsync(projectId,
             proposal.RunId + ":" + proposal.ProposalId, actorAgentId,
             StateText(proposal.Arguments, "title"), changes, token).ConfigureAwait(false);
-        var publicationChanged = receipt.State.PublicationRevision != before.PublicationRevision;
-        if (receipt.Success && (publicationChanged || receipt.Replayed && receipt.State.PublicationRevision > 0))
-            sciencePresentation?.Queue(projectId);
-        return ResearchUpdateReceipt(proposal.ProposalId, receipt, publicationChanged);
+        var publicationChanged = !receipt.Replayed && receipt.State.PublicationRevision != before.PublicationRevision;
+        JsonElement? feedback = null;
+        if (receipt.Success && sciencePresentation is not null)
+        {
+            var feedbackState = receipt.Replayed
+                ? await stateRepository.LoadWorkingStateAsync(projectId, token).ConfigureAwait(false) : receipt.State;
+            feedback = await sciencePresentation.ObserveFeedbackAsync(feedbackState,
+                refresh: publicationChanged || receipt.Replayed && feedbackState.PublicationRevision > 0,
+                TimeSpan.FromSeconds(8), token).ConfigureAwait(false);
+        }
+        return ResearchUpdateReceipt(proposal.ProposalId, receipt, publicationChanged, feedback);
     }
 
     internal static ClientToolResult ResearchUpdateReceipt(string proposalId, ResearchWorkingUpdateResult receipt,
-        bool publicationChanged)
+        bool publicationChanged, JsonElement? presentation = null)
     {
         var conflictIds = receipt.Conflicts.Select(conflict => conflict.Id).ToHashSet(StringComparer.Ordinal);
+        var presentationStatus = presentation is { } feedback ? StateText(feedback, "status") : null;
+        var message = !receipt.Success
+            ? "Keine Änderungen übernommen. Korrigiere ausschließlich die gemeldeten Einträge und ihre Revisionen."
+            : presentationStatus == "failed"
+                ? "Forschungsstand gespeichert; PDF oder Simulation konnte nicht dargestellt werden. Beachte die konkrete Diagnose und Abschnittsrevisionen in presentation. Korrigiere nur gemeldete Inhaltsfehler, nicht unveränderte Abschnitte."
+            : presentationStatus == "pending"
+                ? "Forschungsstand gespeichert; PDF/Darstellung ist noch ausstehend. Speicherung ist kein PDF-Erfolgsbeleg. Vor Abschluss mit research.deliverables.verify prüfen; kein unverändertes research.update wiederholen."
+            : presentationStatus == "empty"
+                ? "Forschungsstand gespeichert; noch kein ausgearbeiteter Publikationsabschnitt vorhanden."
+            : receipt.ChangedIds.Count == 0 ? "Forschungsstand unverändert."
+                : "Forschungsstand gespeichert; geänderte Publikationsabschnitte werden von Missum gesetzt.";
         return new(proposalId, receipt.Success ? "completed" : "failed", JsonSerializer.SerializeToElement(new
         {
             success = receipt.Success, projectId = receipt.State.ProjectId, protocol = "section-delta-v1", receipt.State.Revision,
             receipt.State.PublicationRevision, receipt.State.Title, receipt.ChangedIds, receipt.Conflicts, receipt.Replayed,
-            publicationChanged,
+            stored = receipt.Success, publicationChanged, presentation,
             items = receipt.State.Items.Where(item => receipt.ChangedIds.Contains(item.Id) || conflictIds.Contains(item.Id))
                 .Select(item => ResearchItemReceipt(item, conflictIds.Contains(item.Id))),
-            message = receipt.Success ? receipt.ChangedIds.Count == 0 ? "Forschungsstand unverändert."
-                : "Forschungsstand gespeichert; geänderte Publikationsabschnitte werden von Missum gesetzt."
-                : "Keine Änderungen übernommen. Korrigiere ausschließlich die gemeldeten Einträge und ihre Revisionen.",
-        }, JsonOptions), receipt.Success ? null : "research.update_conflict", receipt.Success ? null : "Forschungsänderung nicht übernommen.");
+            message,
+        }, JsonOptions), receipt.Success ? null : "research.update_conflict",
+            receipt.Success ? presentationStatus is "failed" or "pending" ? message : null : "Forschungsänderung nicht übernommen.");
     }
 
     internal static object ResearchItemReceipt(ResearchWorkingItem item, bool full) => new

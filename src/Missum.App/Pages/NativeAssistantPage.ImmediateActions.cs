@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Missum.App.Services;
+using Missum.App.Controls;
 using Missum.Ai.Contracts;
 using Missum.Core.Contracts;
 using Missum.Core.Extensions;
@@ -81,12 +82,17 @@ public sealed partial class NativeAssistantPage
         return responses;
     }
 
-    private static InfoBar ImmediateErrorBar() => new()
+    private static InfoBar ImmediateErrorBar()
     {
-        Severity = InfoBarSeverity.Error,
-        IsClosable = true,
-        IsOpen = false,
-    };
+        var bar = new InfoBar
+        {
+            Severity = InfoBarSeverity.Error,
+            IsClosable = true,
+            IsOpen = false,
+        };
+        NativeNotice.Attach(bar);
+        return bar;
+    }
 
     private static TextBlock ImmediateText(string text) => new()
     {

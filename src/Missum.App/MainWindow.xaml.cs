@@ -393,7 +393,7 @@ public sealed partial class MainWindow : Window
 
             try
             {
-                DisposeNativeAssistantPage();
+                await DisposeNativeAssistantPageAsync();
             }
             catch (Exception exception)
             {
@@ -465,6 +465,13 @@ public sealed partial class MainWindow : Window
         App.Current.ThemeChanged -= OnAppThemeChanged;
         _appWindow.Changed -= OnAppWindowChanged;
         _appWindow.Closing -= OnAppWindowClosing;
+    }
+
+    private async Task DisposeNativeAssistantPageAsync()
+    {
+        var assistantPage = _assistantPage;
+        _assistantPage = null;
+        if (assistantPage is not null) await assistantPage.DisposeAsync();
     }
 
     private void DisposeNativeAssistantPage()

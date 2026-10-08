@@ -2725,8 +2725,14 @@ public sealed partial class MissumAiAssistantService(
         var receipt = await repository.ReadWorkingOperationAsync(projectId,
             execution.ServerRunId + ":" + execution.ProposalId, actorAgentId, cancellationToken).ConfigureAwait(false);
         if (receipt is null) return null;
-        if (receipt.Success && receipt.State.PublicationRevision > 0) sciencePresentation?.Queue(projectId);
-        return LocalToolBroker.ResearchUpdateReceipt(execution.ProposalId, receipt, publicationChanged: false);
+        JsonElement? presentation = null;
+        if (receipt.Success && sciencePresentation is not null)
+        {
+            var current = await repository.LoadWorkingStateAsync(projectId, cancellationToken).ConfigureAwait(false);
+            presentation = await sciencePresentation.ObserveFeedbackAsync(current,
+                refresh: current.PublicationRevision > 0, TimeSpan.FromSeconds(8), cancellationToken).ConfigureAwait(false);
+        }
+        return LocalToolBroker.ResearchUpdateReceipt(execution.ProposalId, receipt, publicationChanged: false, presentation);
     }
 
     private static ClientToolResult UnknownClientToolOutcome(string proposalId) => new(proposalId, "failed",
@@ -3195,7 +3201,7 @@ public sealed partial class MissumAiAssistantService(
                 .ToArray(),
             Limits: CreateGeneralChatRunLimits(sessionContext.ContextLength, action, capabilities),
             SessionId: sessionId.ToString("D"),
-            AllowedServerTools: GetAllowedServerTools(action, originalPrompt),
+            AllowedServerTools: GetAllowedServerTools(action, originalPrompt, codingSession.ChatMode),
             PreferredGeneralModelId: selectedModel,
             DocumentContext: documentContext?.Descriptor,
             SessionContext: sessionContext.Descriptor,
@@ -3837,8 +3843,15 @@ public sealed partial class MissumAiAssistantService(
 
     internal static IReadOnlyList<string> GetAllowedServerTools(
         PromptTriggerAction? action,
-        string? prompt = null) => action switch
+        string? prompt = null,
+        ChatMode chatMode = ChatMode.General) => action switch
     {
+        // Science uses the web-search action for its research workflow, including
+        // figures and workspace images. A new request must advertise visual
+        // analysis as well as retrieval; ordinary web search stays restricted.
+        // Existing accepted requests are restored from their frozen payload.
+        PromptTriggerAction.WebSearch when chatMode == ChatMode.ClaudeScience =>
+            ["web.search", "web.fetch", "media.inspect", "media.analyze"],
         PromptTriggerAction.WebSearch => ["web.search", "web.fetch"],
         PromptTriggerAction.Coding => ["web.search", "web.fetch", "web.deepResearch", "media.inspect", "media.analyze", "image.generate", "speech.synthesize", "math.evaluate", "context.embed", "context.retrieve"],
         PromptTriggerAction.PlanMode => ["web.search", "web.fetch", "web.deepResearch", "media.inspect", "media.analyze", "math.evaluate", "context.retrieve"],

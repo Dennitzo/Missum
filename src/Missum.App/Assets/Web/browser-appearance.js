@@ -17,13 +17,14 @@
     window: ["--bg"], layer: ["--surface", "--sidebar"], layerStrong: ["--layer-strong", "--surface-raised", "--user-bubble"],
     input: ["--composer"], hover: ["--surface-hover"], pressed: ["--surface-pressed"], stroke: ["--border"],
     mutedText: ["--muted"], text: ["--text"], accent: ["--accent"], accentForeground: ["--accent-contrast", "--accent-ink"],
-    accentSubtle: ["--accent-subtle"], titlebar: ["--titlebar"]
+    accentSubtle: ["--accent-subtle"], titlebar: ["--titlebar"], accentReadable: ["--accent-readable"]
   };
   const icons = { Web: "#4c94f2", Research: "#a07cf6", Image: "#e768ab", Audio: "#46bc85", Speech: "#33b8cf",
     Pdf: "#da5052", Document: "#378fea", Plan: "#f19d38", Code: "#9774e1", Folder: "#f19d38", Navigation: "#5b9cf6",
     Link: "#5b9cf6", Add: "#46bc85", Danger: "#da5052", Settings: "#9774e1", Subagent: "#a07cf6" };
   for (const name of Object.keys(icons)) colorKeys[`icon${name}`] = [`--icon-${name.toLowerCase()}`];
-  const properties = [...new Set([...Object.values(colorKeys).flat(), "--background-accent", "--surface-solid", "--stroke-color"])];
+  const properties = [...new Set([...Object.values(colorKeys).flat(), "--background-accent", "--surface-solid", "--stroke-color",
+    "--link-readable", "--success-readable", "--danger-readable", "--warning-readable"])];
   const validColor = color => /^#[\da-f]{6}(?:[\da-f]{2})?$/i.test(color || "");
   const rgb = color => [1, 3, 5].map(index => parseInt(color.slice(index, index + 2), 16));
   const hex = values => `#${values.map(value => value.toString(16).padStart(2, "0")).join("")}`;
@@ -42,6 +43,45 @@
     const alpha = foreground.length === 9 ? parseInt(foreground.slice(7), 16) / 255 : 1;
     const source = rgb(foreground), target = rgb(background);
     return hex(source.map((value, index) => roundNative(value * alpha + target[index] * (1 - alpha))));
+  }
+  function relativeLuminance(color) {
+    const linear = rgb(color).map(value => { const channel = value / 255; return channel <= .04045 ? channel / 12.92 : ((channel + .055) / 1.055) ** 2.4; });
+    return linear[0] * .2126 + linear[1] * .7152 + linear[2] * .0722;
+  }
+  function readableColor(color, backgrounds, minimum = 4.5) {
+    const luminances = backgrounds.map(relativeLuminance);
+    const ratio = (first, second) => (Math.max(first, second) + .05) / (Math.min(first, second) + .05);
+    const accepts = candidate => luminances.every(background => ratio(relativeLuminance(candidate), background) >= minimum);
+    if (accepts(color)) return color;
+    const destination = Math.min(...luminances.map(background => ratio(0, background))) >= Math.min(...luminances.map(background => ratio(1, background))) ? "#000000" : "#ffffff";
+    let low = 0, high = 1;
+    for (let attempt = 0; attempt < 24; attempt++) {
+      const middle = (low + high) / 2;
+      if (accepts(mix(color, destination, middle))) high = middle; else low = middle;
+    }
+    return mix(color, destination, high);
+  }
+  function applyReadableColors(palette) {
+    const colors = palette.colors;
+    const background = colors.window, surfaces = [background, colors.layer.slice(0,7), colors.layerStrong.slice(0,7), colors.input, colors.hover, colors.pressed];
+    if (!validColor(colors.accentReadable)) colors.accentReadable = palette.theme === "light" ? readableColor(colors.accent, surfaces) : colors.accent;
+    const root = document.documentElement;
+    root.style.setProperty("--accent-readable", colors.accentReadable, palette.highContrast ? "important" : "");
+    for (const [name, color] of Object.entries({ link: colors.iconLink, success: "#087a52", danger: "#c62843", warning: "#c77c16" }))
+      root.style.setProperty(`--${name}-readable`, palette.theme === "light" ? readableColor(color, surfaces) : color);
+  }
+  function correctLightText(palette) {
+    if (palette.theme !== "light") return;
+    const colors = palette.colors, background = colors.window;
+    const surfaces = [background, composite(colors.layer, background), composite(colors.layerStrong, background), colors.input,
+      composite(colors.accentSubtle, background)];
+    for (const name of ["text", "mutedText"]) {
+      const readable = surfaces.every(surface => {
+        const ink = relativeLuminance(composite(colors[name], surface)), paper = relativeLuminance(surface);
+        return (Math.max(ink, paper) + .05) / (Math.min(ink, paper) + .05) >= 4.5;
+      });
+      if (!readable) colors[name] = readableColor(colors[name], surfaces);
+    }
   }
   function fallbackPalette(values = {}, resolvedTheme = "dark") {
     const theme = String(values.theme || "dark").toLowerCase() === "system" ? String(resolvedTheme || "dark").toLowerCase() : String(values.theme || "dark").toLowerCase();
@@ -70,6 +110,7 @@
     return { theme, highContrast: theme === "high-contrast", colors, background };
   }
   function writePalette(palette) {
+    correctLightText(palette);
     const root = document.documentElement;
     root.dataset.theme = palette.theme;
     root.style.colorScheme = palette.highContrast ? "light dark" : palette.theme;
@@ -80,6 +121,7 @@
     root.style.setProperty("--surface-solid", palette.colors.layer.slice(0, 7), palette.highContrast ? "important" : "");
     root.style.setProperty("--stroke-color", palette.colors.stroke.slice(0, 7), palette.highContrast ? "important" : "");
     root.style.setProperty("--background-accent", palette.background, palette.highContrast ? "important" : "");
+    applyReadableColors(palette);
   }
   function apply(snapshot = {}) {
     const actual = snapshot.resolvedAppearance;

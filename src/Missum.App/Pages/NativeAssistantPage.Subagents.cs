@@ -265,8 +265,8 @@ public sealed partial class NativeAssistantPage
             MinWidth = 0; MinHeight = Height = 30;
             Padding = new(6, 4, 6, 4); BorderThickness = new(0); CornerRadius = new(6);
             Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
-            Resources["ButtonBackgroundPointerOver"] = Brush(53);
-            Resources["ButtonBackgroundPressed"] = Brush(62);
+            Resources["ButtonBackgroundPointerOver"] = ThemeBrush("MissumHoverBrush", 53);
+            Resources["ButtonBackgroundPressed"] = ThemeBrush("MissumPressedBrush", 62);
             TaskLabel.Foreground = StateLabel.Foreground = ThemeBrush("MissumMutedTextBrush", 160);
             Click += async (_, _) =>
             {
@@ -331,20 +331,17 @@ public sealed partial class NativeAssistantPage
             if (child.SessionId != _session || !child.TabOpen)
             { SessionTabsPanel.Children.Remove(child.Container); continue; }
             var active = _activeSubagentId == child.AgentId && BodyGrid.Visibility == Visibility.Visible;
-            child.Label.Text = "Subagent · " + child.Title;
+            SetTabText(child.Label, "Subagent · " + child.Title);
             ApplyTabAppearance(child.Container, child.Select, active);
-            child.Close.Foreground = Brush(155);
-            child.Select.IsEnabled = child.Close.IsEnabled = !_sessionTabNavigationBusy;
-            AutomationProperties.SetName(child.Select, "Subagent-Tab: " + child.Title);
-            AutomationProperties.SetHelpText(child.Select, active ? "Aktiver Subagent" : "Aufgabe und Werkzeugschritte öffnen");
-            AutomationProperties.SetName(child.Close, "Subagent-Tab schließen: " + child.Title);
-            ToolTipService.SetToolTip(child.Select, child.Title + "\n" + SubagentStatusLabel(child));
-            ToolTipService.SetToolTip(child.Close, "Subagent-Tab schließen");
-            if (index >= SessionTabsPanel.Children.Count || !ReferenceEquals(SessionTabsPanel.Children[index], child.Container))
-            {
-                SessionTabsPanel.Children.Remove(child.Container);
-                SessionTabsPanel.Children.Insert(Math.Min(index, SessionTabsPanel.Children.Count), child.Container);
-            }
+            SetTabCloseForeground(child.Close);
+            SetTabEnabled(child.Select, !_sessionTabNavigationBusy);
+            SetTabEnabled(child.Close, !_sessionTabNavigationBusy);
+            SetTabName(child.Select, "Subagent-Tab: " + child.Title);
+            SetTabHelp(child.Select, active ? "Aktiver Subagent" : "Aufgabe und Werkzeugschritte öffnen");
+            SetTabName(child.Close, "Subagent-Tab schließen: " + child.Title);
+            SetTabToolTip(child.Select, child.Title + "\n" + SubagentStatusLabel(child));
+            SetTabToolTip(child.Close, "Subagent-Tab schließen");
+            PositionTab(child.Container, index);
             index++;
         }
         return index;
@@ -497,11 +494,11 @@ public sealed partial class NativeAssistantPage
         var key = ConversationViewKey;
         var offset = _conversationOffsets.GetValueOrDefault(key);
         ConversationScroll.ChangeView(null, offset, null, disableAnimation: true);
-        DispatcherQueue.TryEnqueue(() =>
+        DispatcherQueue.TryEnqueue(() => RunUiCallback("Subagent.RestoreScroll", () =>
         {
             if (!_disposed && key == ConversationViewKey)
             { ConversationScroll.ChangeView(null, offset, null, disableAnimation: true); SyncOuterScroll(); }
-        });
+        }));
     }
 
     private sealed class NativeSubagentState(string agentId, Guid sessionId, Border container, Button select, Button close, TextBlock label, int planetIndex)

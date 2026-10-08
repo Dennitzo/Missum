@@ -23,18 +23,18 @@ public sealed class NativeCodeHighlighter
     {
         ArgumentNullException.ThrowIfNull(target);
         _target = target;
-        _plainForeground = target.Foreground as SolidColorBrush ?? Brush(0xDC, 0xDC, 0xDC);
+        _plainForeground = target.Foreground as SolidColorBrush ?? NativeThemeBrushes.Text;
         // Brushes belong to the UI thread; one palette also keeps large diffs inexpensive.
         _colors = _threadColors ??= new()
         {
-            [TokenKind.Keyword] = Brush(0xC5, 0x86, 0xC0),
-            [TokenKind.Type] = Brush(0x4E, 0xC9, 0xB0),
-            [TokenKind.String] = Brush(0xCE, 0x91, 0x78),
-            [TokenKind.Number] = Brush(0xB5, 0xCE, 0xA8),
-            [TokenKind.Comment] = Brush(0x6A, 0x99, 0x55),
-            [TokenKind.Function] = Brush(0xDC, 0xDC, 0xAA),
-            [TokenKind.Property] = Brush(0x9C, 0xDC, 0xFE),
-            [TokenKind.Tag] = Brush(0x56, 0x9C, 0xD6),
+            [TokenKind.Keyword] = NativeThemeBrushes.Resource("MissumCodeKeywordBrush", Color.FromArgb(255, 0xC5, 0x86, 0xC0)),
+            [TokenKind.Type] = NativeThemeBrushes.Resource("MissumCodeTypeBrush", Color.FromArgb(255, 0x4E, 0xC9, 0xB0)),
+            [TokenKind.String] = NativeThemeBrushes.Resource("MissumCodeStringBrush", Color.FromArgb(255, 0xCE, 0x91, 0x78)),
+            [TokenKind.Number] = NativeThemeBrushes.Resource("MissumCodeNumberBrush", Color.FromArgb(255, 0xB5, 0xCE, 0xA8)),
+            [TokenKind.Comment] = NativeThemeBrushes.Resource("MissumCodeCommentBrush", Color.FromArgb(255, 0x6A, 0x99, 0x55)),
+            [TokenKind.Function] = NativeThemeBrushes.Resource("MissumCodeFunctionBrush", Color.FromArgb(255, 0xDC, 0xDC, 0xAA)),
+            [TokenKind.Property] = NativeThemeBrushes.Resource("MissumCodePropertyBrush", Color.FromArgb(255, 0x9C, 0xDC, 0xFE)),
+            [TokenKind.Tag] = NativeThemeBrushes.Resource("MissumCodeTagBrush", Color.FromArgb(255, 0x56, 0x9C, 0xD6)),
         };
         // A Text value and an Inline collection should never compete on the same TextBlock.
         _target.Text = "";
@@ -347,7 +347,6 @@ public sealed class NativeCodeHighlighter
         source.AsSpan(start, limit - start).StartsWith(value, StringComparison.Ordinal);
     private static bool IdentifierStart(char value) => char.IsLetter(value) || value == '_';
     private static bool IdentifierPart(char value) => char.IsLetterOrDigit(value) || value == '_';
-    private static SolidColorBrush Brush(byte red, byte green, byte blue) => new(Color.FromArgb(255, red, green, blue));
     private static HashSet<string> Words(string source, bool ignoreCase = false) =>
         new(source.Split(' ', StringSplitOptions.RemoveEmptyEntries), ignoreCase ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
 

@@ -72,7 +72,7 @@ internal static class ScientificStateCompletionPolicy
             && simulation.TryGetProperty("required", out var required)
             && required.ValueKind is JsonValueKind.True or JsonValueKind.False;
         var simulationReady = declaredSimulation && (!Boolean(simulation, "required")
-            || Boolean(simulation, "ready") && Boolean(simulation, "executed"));
+            || Boolean(simulation, "ready") && ValidSimulationReceipt(simulation, projectId));
         var ready = current && !verificationFailed && verification is { } verified && Boolean(verified, "success")
             && Text(research, "protocol") == Protocol && Boolean(research, "ready")
             && validPublication && simulationReady;
@@ -88,7 +88,7 @@ internal static class ScientificStateCompletionPolicy
                             missing.Add(diagnosis[..Math.Min(diagnosis.Length, 2000)]);
                 if (Text(research, "protocol") != Protocol) missing.Add("Der Client hat keinen gültigen section-delta-v1-Prüfbeleg zurückgegeben.");
                 if (!validPublication) missing.Add("Die aktuelle Publikationsrevision enthält noch keinen bestätigten gerenderten PDF-Beleg. Bearbeite nur die fehlenden kanonischen Abschnitte.");
-                if (!simulationReady) missing.Add("Eine ausdrücklich erforderliche Auswertung ist noch nicht durch tatsächliche aktuelle Ausführungs- und Artefaktbelege bestätigt.");
+                if (!simulationReady) missing.Add("Eine ausdrücklich erforderliche Auswertung oder interaktive Simulation besitzt noch keine gültigen aktuellen, zum jeweiligen Ergebnistyp passenden Belege.");
                 if (missing.Count == 0) missing.Add("Bearbeite die offenen Anforderungen und Prüfdiagnosen im kanonischen Forschungszustand; ein Prozesslauf oder Modellstatus allein belegt keine wissenschaftliche Aussage.");
             }
         }
@@ -118,6 +118,38 @@ internal static class ScientificStateCompletionPolicy
         or ClientToolNames.ResearchCodeWrite or ClientToolNames.ResearchCodeRestore or ClientToolNames.ResearchCodeExecute
         or ClientToolNames.ResearchCodeTest or ClientToolNames.ResearchCodeBenchmark
         or ClientToolNames.MathSymbolic or ClientToolNames.MathNumeric or ClientToolNames.MathSmt or ClientToolNames.MathFormalProof;
+
+    private static bool ValidSimulationReceipt(JsonElement simulation, string projectId)
+    {
+        // Older clients supply only the executed-figure receipt. The additive
+        // source-artifact branch applies solely to explicit interactive delivery.
+        if (!DeclaredBoolean(simulation, "executionRequired") || !DeclaredBoolean(simulation, "interactiveRequired"))
+            return Boolean(simulation, "executed");
+        var executionRequired = Boolean(simulation, "executionRequired");
+        var interactiveRequired = Boolean(simulation, "interactiveRequired");
+        if (!executionRequired && !interactiveRequired || executionRequired && !Boolean(simulation, "executed")) return false;
+        if (!interactiveRequired) return true;
+        if (!Boolean(simulation, "interactiveReady") || !simulation.TryGetProperty("interactiveArtifacts", out var artifacts)
+            || artifacts.ValueKind != JsonValueKind.Array || artifacts.GetArrayLength() is < 1 or > 48) return false;
+        return artifacts.EnumerateArray().Any(artifact => Text(artifact, "kind") == "interactive"
+            && Text(artifact, "projectId") == projectId && Boolean(artifact, "sourceArtifact")
+            && DeclaredBoolean(artifact, "executed") && !Boolean(artifact, "executed")
+            && Text(artifact, "contentType") == "text/html" && ValidInteractivePath(Text(artifact, "artifactPath"))
+            && Text(artifact, "sha256") is { Length: 64 } hash && hash.All(Uri.IsHexDigit));
+    }
+
+    private static bool DeclaredBoolean(JsonElement value, string name) => value.ValueKind == JsonValueKind.Object
+        && value.TryGetProperty(name, out var property) && property.ValueKind is JsonValueKind.True or JsonValueKind.False;
+
+    private static bool ValidInteractivePath(string path)
+    {
+        if (path.Length is < 1 or > 1024 || path.Contains('\\') || path.Contains(':') || path.Any(char.IsControl)) return false;
+        var parts = path.Split('/');
+        return parts.Length > 1 && (parts[0] is "work" or "artifacts")
+            && parts.All(part => part.Length > 0 && part is not ("." or ".."))
+            && !parts.Any(part => part.Equals("publication", StringComparison.OrdinalIgnoreCase))
+            && (path.EndsWith(".html", StringComparison.OrdinalIgnoreCase) || path.EndsWith(".htm", StringComparison.OrdinalIgnoreCase));
+    }
 
     internal static bool TryReceipt(string? content, out JsonElement result, out bool completed)
     {

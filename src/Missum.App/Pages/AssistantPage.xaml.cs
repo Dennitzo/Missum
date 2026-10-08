@@ -1,4 +1,5 @@
 using Missum.App.Services;
+using Missum.App.Controls;
 using Missum.App.ViewModels;
 using Missum.Ai.Contracts;
 using Missum.Core.Chat;
@@ -85,6 +86,7 @@ public sealed partial class AssistantPage : Page, IDisposable
     public AssistantPage()
     {
         InitializeComponent();
+        NativeNotice.Attach(ErrorBar);
         NavigationCacheMode = NavigationCacheMode.Required;
         _coordinator = App.Current.GetService<AssistantCoordinator>();
         _runtimeProfile = App.Current.GetService<AssistantRuntimeProfile>();

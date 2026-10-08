@@ -19,11 +19,11 @@ public sealed partial class NativeAssistantPage
     {
         var flyout = new Flyout { Placement = FlyoutPlacementMode.BottomEdgeAlignedLeft };
         var style = new Style(typeof(FlyoutPresenter));
-        style.Setters.Add(new Setter(Control.BackgroundProperty, Brush(43)));
+        style.Setters.Add(new Setter(Control.BackgroundProperty, ThemeBrush("MissumLayerStrongBrush", 43)));
         style.Setters.Add(new Setter(Control.CornerRadiusProperty, new CornerRadius(18)));
         style.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(4)));
         style.Setters.Add(new Setter(Control.BorderThicknessProperty, new Thickness(1)));
-        style.Setters.Add(new Setter(Control.BorderBrushProperty, Brush(49)));
+        style.Setters.Add(new Setter(Control.BorderBrushProperty, ThemeBrush("MissumStrokeBrush", 49)));
         flyout.FlyoutPresenterStyle = style;
         var panel = new StackPanel { Width = 232, Spacing = 2 };
         foreach (var (mode, title, description) in new[] { ("general", "ChatGPT", "Erstellen, lernen und erkunden"), ("coding", "Codex", "Erstellen, debuggen und ausliefern"), ("claudescience", "Claude Science", "Deep Research, Analysen und Nachweise") })
@@ -31,7 +31,7 @@ public sealed partial class NativeAssistantPage
             var row = new Grid();
             var text = new StackPanel { Spacing = 2 };
             text.Children.Add(new TextBlock { Text = title, FontSize = 15, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
-            text.Children.Add(new TextBlock { Text = description, FontSize = 13, Foreground = Brush(160) });
+            text.Children.Add(new TextBlock { Text = description, FontSize = 13, Foreground = ThemeBrush("MissumMutedTextBrush", 160) });
             row.Children.Add(text);
             if (_mode == mode) row.Children.Add(new FontIcon { Glyph = "\uE73E", FontSize = 14, Foreground = NativeIconPalette.BrushFor("success"), HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Top, Margin = new(0, 5, 0, 0) });
             var button = new Button { Content = row, Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new(0), HorizontalContentAlignment = HorizontalAlignment.Stretch, HorizontalAlignment = HorizontalAlignment.Stretch, Padding = new(8, 8, 8, 8), CornerRadius = new(12) };
@@ -93,8 +93,8 @@ public sealed partial class NativeAssistantPage
         var width = Math.Max(280, ComposerSurface.ActualWidth);
         var menu = new Flyout { Placement = FlyoutPlacementMode.TopEdgeAlignedLeft, AreOpenCloseAnimationsEnabled = true };
         var style = new Style(typeof(FlyoutPresenter));
-        style.Setters.Add(new Setter(Control.BackgroundProperty, Brush(44)));
-        style.Setters.Add(new Setter(Control.BorderBrushProperty, Brush(61)));
+        style.Setters.Add(new Setter(Control.BackgroundProperty, ThemeBrush("MissumLayerStrongBrush", 44)));
+        style.Setters.Add(new Setter(Control.BorderBrushProperty, ThemeBrush("MissumStrokeBrush", 61)));
         style.Setters.Add(new Setter(Control.BorderThicknessProperty, new Thickness(1)));
         style.Setters.Add(new Setter(Control.CornerRadiusProperty, new CornerRadius(20)));
         style.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(4, 5, 4, 5)));
@@ -103,7 +103,7 @@ public sealed partial class NativeAssistantPage
         style.Setters.Add(new Setter(FrameworkElement.WidthProperty, width));
         menu.FlyoutPresenterStyle = style;
         var rows = new StackPanel { Spacing = 0, Width = width - 10 };
-        void Heading(string text) => rows.Children.Add(new TextBlock { Text = text, FontSize = 13, Foreground = Brush(155), Margin = new(8, 6, 8, 5) });
+        void Heading(string text) => rows.Children.Add(new TextBlock { Text = text, FontSize = 13, Foreground = ThemeBrush("MissumMutedTextBrush", 155), Margin = new(8, 6, 8, 5) });
         void Row(string glyph, string name, string description, Action action, bool enabled = true, Color? color = null)
         {
             var content = new Grid { ColumnSpacing = 8 };
@@ -111,9 +111,9 @@ public sealed partial class NativeAssistantPage
             content.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
             content.ColumnDefinitions.Add(new() { Width = new(1, GridUnitType.Star) });
             content.Children.Add(new FontIcon { Glyph = glyph, FontSize = 15, Foreground = color is { } c ? new SolidColorBrush(c) : NativeIconPalette.BrushFor("tool"), VerticalAlignment = VerticalAlignment.Center });
-            var label = new TextBlock { Text = name, FontSize = 14, Foreground = Brush(220), VerticalAlignment = VerticalAlignment.Center };
+            var label = new TextBlock { Text = name, FontSize = 14, Foreground = ThemeBrush("MissumTextBrush", 220), VerticalAlignment = VerticalAlignment.Center };
             Grid.SetColumn(label, 1); content.Children.Add(label);
-            var detail = new TextBlock { Text = description, FontSize = 14, Foreground = Brush(145), VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
+            var detail = new TextBlock { Text = description, FontSize = 14, Foreground = ThemeBrush("MissumMutedTextBrush", 145), VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
             Grid.SetColumn(detail, 2); content.Children.Add(detail);
             var button = new Button { Content = content, HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch,
                 Padding = new(8, 5, 8, 5), MinHeight = 28, CornerRadius = new(15), IsEnabled = enabled, BorderThickness = new(0), Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent) };

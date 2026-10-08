@@ -99,6 +99,9 @@ public sealed class ScienceRestartContextTests
         Assert.Equal(before.HistoryJson, after.HistoryJson);
         Assert.Equal(session.Id.ToString("D"), after.Request.SessionId);
         Assert.True(after.Request.DeepResearch);
+        Assert.Contains("visual-tools", after.Request.ClientCapabilities!);
+        Assert.Contains("media.inspect", after.Request.AllowedServerTools!);
+        Assert.Contains("media.analyze", after.Request.AllowedServerTools!);
         Assert.Equal(projectId, after.Request.ResearchOptions?.ProjectId);
         Assert.Equal(workspace, after.Request.WorkspacePath);
         Assert.Equal(Model, after.Request.PreferredGeneralModelId);

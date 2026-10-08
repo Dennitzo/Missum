@@ -137,8 +137,8 @@ public sealed partial class NativeAssistantPage
         row.Children.OfType<FontIcon>().Single().Foreground = Missum.App.Controls.NativeIconPalette.BrushFor("web");
         var oldTitle = row.Children.OfType<TextBlock>().Single();
         var labels = new StackPanel { Spacing = 2, VerticalAlignment = VerticalAlignment.Center };
-        labels.Children.Add(new TextBlock { Text = title, FontSize = 14, Foreground = Brush(230), TextTrimming = TextTrimming.CharacterEllipsis });
-        labels.Children.Add(new TextBlock { Text = url, FontSize = 12, Foreground = ThemeBrush("MissumMutedTextBrush", 145), Opacity = .75, TextTrimming = TextTrimming.CharacterEllipsis });
+        labels.Children.Add(new TextBlock { Text = title, FontSize = 14, Foreground = ThemeBrush("MissumTextBrush", 230), TextTrimming = TextTrimming.CharacterEllipsis });
+        labels.Children.Add(new TextBlock { Text = url, FontSize = 12, Foreground = ThemeBrush("MissumMutedTextBrush", 145), TextTrimming = TextTrimming.CharacterEllipsis });
         Grid.SetColumn(labels, Grid.GetColumn(oldTitle)); row.Children.Remove(oldTitle); row.Children.Add(labels);
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(button, title + " · " + url);
         ToolTipService.SetToolTip(button, title + "\n" + url);
@@ -260,8 +260,7 @@ public sealed partial class NativeAssistantPage
             _sourcesTabContainer = new Border { Child = row };
         }
         ApplyTabAppearance(_sourcesTabContainer, _sourcesTabButton!, _activeSourcesSession == _session);
-        SessionTabsPanel.Children.Remove(_sourcesTabContainer);
-        SessionTabsPanel.Children.Insert(Math.Min(index, SessionTabsPanel.Children.Count), _sourcesTabContainer);
+        PositionTab(_sourcesTabContainer, index);
         return index + 1;
     }
 }

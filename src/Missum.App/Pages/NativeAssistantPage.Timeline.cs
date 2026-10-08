@@ -16,7 +16,7 @@ public sealed partial class NativeAssistantPage
     private readonly Dictionary<string, PromptTimelineMarker> _promptTimelineMarkers = new(StringComparer.Ordinal);
     private string? _activePromptTimelineId;
 
-    private void OnPromptTimelineSizeChanged(object sender, SizeChangedEventArgs e) => RenderPromptTimeline();
+    private void OnPromptTimelineSizeChanged(object sender, SizeChangedEventArgs e) => RunUiCallback("PromptTimeline.SizeChanged", RenderPromptTimeline);
 
     private void RenderPromptTimeline()
     {

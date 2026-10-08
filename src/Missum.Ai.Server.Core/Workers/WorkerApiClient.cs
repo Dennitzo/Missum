@@ -1,6 +1,7 @@
 using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Configuration;
 using Microsoft.Extensions.Options;
+using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text;
@@ -255,10 +256,7 @@ public sealed class WorkerApiClient
         using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {
-            throw new HttpRequestException(
-                $"Worker {workerName} returned HTTP {(int)response.StatusCode}.",
-                inner: null,
-                response.StatusCode);
+            throw await CreateWorkerFailureAsync(workerName, path, response, cancellationToken).ConfigureAwait(false);
         }
 
         return await response.Content.ReadFromJsonAsync<T>(_jsonOptions, cancellationToken).ConfigureAwait(false)
@@ -281,15 +279,79 @@ public sealed class WorkerApiClient
         using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {
-            throw new HttpRequestException(
-                $"Worker {workerName} returned HTTP {(int)response.StatusCode}.",
-                inner: null,
-                response.StatusCode);
+            throw await CreateWorkerFailureAsync(workerName, path, response, cancellationToken).ConfigureAwait(false);
         }
 
         return await response.Content.ReadFromJsonAsync<T>(_jsonOptions, cancellationToken).ConfigureAwait(false)
             ?? throw new JsonException($"Worker {workerName} returned an empty response.");
     }
+
+    private static async Task<WorkerRequestException> CreateWorkerFailureAsync(
+        string workerName, string path, HttpResponseMessage response, CancellationToken cancellationToken)
+    {
+        // Worker errors are small protocol objects. Never retain an arbitrary HTML
+        // response, uploaded media, or an unbounded provider response in the run journal.
+        string? errorCode = null;
+        string? detail = null;
+        try
+        {
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+            var bytes = new byte[4097];
+            var count = 0;
+            while (count < bytes.Length)
+            {
+                var read = await stream.ReadAsync(bytes.AsMemory(count), cancellationToken).ConfigureAwait(false);
+                if (read == 0) break;
+                count += read;
+            }
+            if (count <= 4096)
+            {
+                using var document = JsonDocument.Parse(bytes.AsMemory(0, count));
+                var value = document.RootElement;
+                if (value.ValueKind == JsonValueKind.Object && value.TryGetProperty("detail", out var nested))
+                    value = nested;
+                if (value.ValueKind == JsonValueKind.Object)
+                {
+                    if (value.TryGetProperty("errorCode", out var code) && code.ValueKind == JsonValueKind.String)
+                    {
+                        var candidate = code.GetString();
+                        if (candidate is { Length: > 0 and <= 128 }
+                            && candidate.All(static character => char.IsAsciiLetterOrDigit(character) || character is '.' or '_' or '-'))
+                            errorCode = candidate;
+                    }
+                    if (value.TryGetProperty("message", out var message) && message.ValueKind == JsonValueKind.String)
+                        detail = message.GetString();
+                }
+                else if (value.ValueKind == JsonValueKind.String) detail = value.GetString();
+            }
+        }
+        catch (Exception exception) when (exception is JsonException or IOException)
+        {
+            // A malformed error body must not hide the worker's HTTP status.
+        }
+        return new WorkerRequestException(workerName, path, response.StatusCode, errorCode, detail);
+    }
+}
+
+public sealed class WorkerRequestException : HttpRequestException
+{
+    public WorkerRequestException(string workerName, string operation, HttpStatusCode statusCode,
+        string? errorCode, string? detail)
+        : base($"Worker {workerName} returned HTTP {(int)statusCode}"
+            + (errorCode is null ? "." : $" ({errorCode})."), null, statusCode)
+    {
+        WorkerName = workerName;
+        Operation = operation;
+        ErrorCode = errorCode;
+        // Detail is sanitized again when exposed to the AI; this bound also
+        // protects callers outside media.analyze.
+        Detail = detail is null ? null : detail[..Math.Min(detail.Length, 1024)];
+    }
+
+    public string WorkerName { get; }
+    public string Operation { get; }
+    public string? ErrorCode { get; }
+    public string? Detail { get; }
 }
 
 public sealed record WorkerArtifact(

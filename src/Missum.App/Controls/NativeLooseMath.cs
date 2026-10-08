@@ -89,7 +89,7 @@ internal static class NativeLooseMath
     private static bool IsScientificSymbol(ReadOnlySpan<char> text)
     {
         if (text.Length == 1 && char.IsLetter(text[0])) return true;
-        if (text.Length == 2 && text[0] == 'd' && char.IsLetter(text[1])) return true;
+        if (text.Length == 2 && text[0] is 'd' or 'Δ' && char.IsLetter(text[1])) return true;
         if (text.Length < 3 || !char.IsLetter(text[0]) || text[1] != '_') return false;
         var label = text[2..];
         if (label.Length == 1 || label.SequenceEqual("std") || label.SequenceEqual("eff")
@@ -183,7 +183,9 @@ internal static class NativeLooseMath
                     result.Append(character == '/' ? "/" : @"\cdot ").Append(right);
                 }
                 else if (previousEnd == _position && (char.IsLetter(character) || character == '(')
-                    && (char.IsDigit(text[previousEnd - 1]) || text[previousEnd - 1] == ')'))
+                    && (char.IsDigit(text[previousEnd - 1]) || text[previousEnd - 1] == ')'
+                        || character == '(' && IsScientificSymbol(left))
+                    || _position > previousEnd && IsScientificSymbol(left) && IsScriptedSymbolAhead())
                 {
                     var right = ReadPower();
                     if (right is null) break;
@@ -192,6 +194,14 @@ internal static class NativeLooseMath
                 else break;
             }
             return result.ToString();
+        }
+
+        private bool IsScriptedSymbolAhead()
+        {
+            if (_position >= _limit || !char.IsLetter(text[_position])) return false;
+            var marker = _position + 1;
+            if (text[_position] is 'd' or 'Δ' && marker < _limit && char.IsLetter(text[marker])) marker++;
+            return marker < _limit && (text[marker] is '_' or '^' || Superscript(text[marker]) is not null);
         }
 
         private string? ReadPower()
@@ -295,6 +305,7 @@ internal static class NativeLooseMath
                 if (argument is null) { Incomplete = true; return null; }
                 return "\\" + symbol + " " + argument;
             }
+            if (symbol.Length == 2 && symbol[0] == 'Δ') { HasEvidence = true; return symbol; }
             if (symbol.Length == 1 || symbol.Length == 2 && symbol[0] == 'd' || symbol is "mc") return symbol;
             _position = symbolStart;
             return null;

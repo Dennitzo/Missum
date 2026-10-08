@@ -54,8 +54,9 @@ public static class CompactAgentContextPolicy
         Dokumentkontext fehlende Belege mit documents.search/readPages nachladen; vor Abschluss mindestens
         einen echten Dokumentbeleg oder ausgewiesenes wiederverwendetes Dossier nutzen. full bedeutet vollständig.
         Sichtprüfung: image.input, danach media.analyze mit konkreter Frage; nach visuellen Änderungen erneut.
-        Behaupte Sichtbefunde nur aus Bildern. Upload-IDs nur aus der neuesten Nutzernachricht verwenden;
-        historische IDs sind ungültig. Ohne aktuellen Anhang vorhandene Befunde nutzen.
+        Behaupte Sichtbefunde nur aus Bildern. Upload-IDs aus aktuellen Nutzeranhängen oder erfolgreichen
+        image.input-Ergebnissen dieses Laufs verwenden; historische Dateien mit image.input neu laden.
+        Ohne Bild vorhandene Befunde nutzen, keine neue Sichtprüfung behaupten.
         """;
 
     private const string Coding = """

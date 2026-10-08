@@ -119,12 +119,10 @@ public sealed partial class ScientificPublicationService
     internal static string FormatCanonicalPublication(ResearchWorkingState state,
         IReadOnlyList<ResearchLiteratureEntry> works, ResearchResultSnapshot results)
     {
-        var sections = state.Items.Where(item => item.Kind == "section" && item.OwnerAgentId is null
-            && Text(item.Data, "status") != "withdrawn" && !string.IsNullOrWhiteSpace(Text(item.Data, "contentMarkdown")))
-            .OrderBy(item => Number(item.Data, "order")).ThenBy(item => item.Id, StringComparer.Ordinal).ToArray();
+        var sections = OrderedPublicationSections(state);
         if (sections.Length == 0) throw new InvalidOperationException("Noch kein fachlicher Publikationsabschnitt vorhanden.");
         if (string.IsNullOrWhiteSpace(state.Title)) throw new ScientificPublicationContentException(
-            "Der fachliche Publikationstitel fehlt. Ergänze nur den Titel mit research.update.");
+            "Der fachliche Publikationstitel fehlt. Ergänze nur den Titel mit research.update.", state: state, sections: []);
         var text = new StringBuilder().Append("# ").AppendLine(OneLine(state.Title)).AppendLine()
             .Append("**Missum · Claude Science**  \n").Append(IsCanonicalDraft(state) ? "Arbeitsfassung" : "Forschungsstand").Append(" · Revision ")
             .AppendLine(state.PublicationRevision.ToString(CultureInfo.InvariantCulture)).AppendLine();
@@ -133,6 +131,7 @@ public sealed partial class ScientificPublicationService
         var sourceNumbers = works.Where(work => citedBySection.Values.Any(ids => ids.Contains(work.WorkId)))
             .OrderBy(work => work.WorkId, StringComparer.Ordinal).Select((work, index) => (work.WorkId, Number: index + 1))
             .ToDictionary(item => item.WorkId, item => item.Number, StringComparer.Ordinal);
+        var usedFigures = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var section in sections)
         {
             var title = Text(section.Data, "title");
@@ -160,7 +159,8 @@ public sealed partial class ScientificPublicationService
             }
             var body = Text(section.Data, "contentMarkdown").Trim();
             if (!section.Id.StartsWith("legacy-section-", StringComparison.Ordinal) && Regex.IsMatch(body, @"!\[[^\r\n]*\]\(", RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1)))
-                throw new ScientificPublicationContentException($"Abschnitt {section.Id}: ordne Abbildungen über figureCaptions mit experimentId und artifactPath zu; contentMarkdown enthält nur fachlichen Text und Formeln.");
+                throw new ScientificPublicationContentException($"Abschnitt {section.Id}: ordne Abbildungen über figureCaptions mit experimentId und artifactPath zu; contentMarkdown enthält nur fachlichen Text und Formeln.",
+                    state: state, sections: [new(section.Id, section.Revision)]);
             text.AppendLine(body).AppendLine();
             if (section.Data.TryGetProperty("units", out var units) && units.ValueKind == JsonValueKind.Array && units.GetArrayLength() > 0)
             {
@@ -178,11 +178,15 @@ public sealed partial class ScientificPublicationService
                     var experiment = results.Experiments.FirstOrDefault(item => item.Id == experimentId
                         && Ids(section.Data, "experimentIds").Contains(item.Id));
                     if (experiment is null || !MeasuredImageHashes(experiment).ContainsKey(path))
-                        throw new ScientificPublicationContentException($"Abschnitt {section.Id}: Abbildung {path} besitzt keinen zugeordneten erfolgreichen Ausführungsbeleg. Korrigiere nur figureCaptions/experimentIds.");
+                        throw new ScientificPublicationContentException($"Abschnitt {section.Id}: Abbildung {path} besitzt keinen zugeordneten erfolgreichen Ausführungsbeleg. Korrigiere nur figureCaptions/experimentIds.",
+                            state: state, sections: [new(section.Id, section.Revision)]);
                     text.Append("![").Append(EscapeLabel(Text(figure, "caption"))).Append("](")
                         .Append(path.Replace(" ", "%20", StringComparison.Ordinal)).AppendLine(")").AppendLine();
+                    usedFigures.Add(path);
                 }
             }
+            AppendMeasuredPlots(text, results.Experiments.Where(experiment => Ids(section.Data, "experimentIds").Contains(experiment.Id)),
+                usedFigures, includeHeading: false);
             var sectionSources = citedBySection[section.Id].Where(sourceNumbers.ContainsKey).OrderBy(id => sourceNumbers[id]).ToArray();
             referenced.UnionWith(sectionSources);
             if (sectionSources.Length > 0)
@@ -190,6 +194,7 @@ public sealed partial class ScientificPublicationService
                     .Append(string.Join(", ", sectionSources.Select(id => "[" + sourceNumbers[id].ToString(CultureInfo.InvariantCulture) + "]")))
                     .AppendLine(".*").AppendLine();
         }
+        AppendMeasuredPlots(text, results.Experiments, usedFigures, includeHeading: true);
         var sources = works.Where(work => referenced.Contains(work.WorkId)).OrderBy(work => work.WorkId, StringComparer.Ordinal).ToArray();
         if (sources.Length > 0)
         {
@@ -240,7 +245,8 @@ public sealed partial class ScientificPublicationService
         {
             sources = snapshot.Works.Where(work => sourceIds.Contains(work.WorkId)).OrderBy(work => work.WorkId)
                 .Select(work => new { work.WorkId, work.Title, work.CanonicalUrl }),
-            experiments = snapshot.Results.Experiments.Where(experiment => experimentIds.Contains(experiment.Id)).OrderBy(experiment => experiment.Id)
+            experiments = snapshot.Results.Experiments.Where(experiment => experimentIds.Contains(experiment.Id)
+                || MeasuredImageHashes(experiment).Count > 0).OrderBy(experiment => experiment.Id)
                 .Select(experiment => new { experiment.Id, experiment.StdoutEvidence, experiment.VerificationStatus }),
         }));
     }
@@ -282,6 +288,7 @@ public sealed partial class ScientificPublicationService
         if (sections.All(section => section.Id.StartsWith("legacy-section-", StringComparison.Ordinal))) return;
         var allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var required = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var experiment in snapshot.Results.Experiments) allowed.UnionWith(MeasuredImageHashes(experiment).Values);
         foreach (var section in sections)
         {
             var referenced = snapshot.Results.Experiments.Where(experiment => Ids(section.Data, "experimentIds").Contains(experiment.Id)).ToArray();
@@ -296,7 +303,9 @@ public sealed partial class ScientificPublicationService
         if (!sections.Any(section => section.Id.StartsWith("legacy-section-", StringComparison.Ordinal))
                 && images.Images.Any(image => !allowed.Contains(image.Sha256))
             || required.Any(hash => !images.Images.Any(image => image.Sha256.Equals(hash, StringComparison.OrdinalIgnoreCase))))
-            throw new ScientificPublicationContentException("Die Abbildungen stimmen nicht mit den gespeicherten Ausführungsbelegen überein. Prüfe figureCaptions/experimentIds des betroffenen Abschnitts und erzeuge fehlende oder veränderte Ergebnisse erneut; die vorherige PDF bleibt erhalten.");
+            throw new ScientificPublicationContentException("Die Abbildungen stimmen nicht mit den gespeicherten Ausführungsbelegen überein. Prüfe figureCaptions/experimentIds des betroffenen Abschnitts und erzeuge fehlende oder veränderte Ergebnisse erneut; die vorherige PDF bleibt erhalten.",
+                state: snapshot.WorkingState, sections: sections.Where(section => section.Data.TryGetProperty("figureCaptions", out _))
+                    .Select(section => new ScientificPresentationSectionFailure(section.Id, section.Revision)).ToArray());
     }
 
     internal async Task<ScientificPublicationArtifact?> RestoreLastPublicationAsync(string projectId, CancellationToken token)
@@ -379,19 +388,46 @@ public sealed partial class ScientificPublicationService
 
     private static bool IsContentRenderError(Exception exception) => exception.Message.Contains("KaTeX", StringComparison.OrdinalIgnoreCase)
         || exception.Message.Contains("mathematische Ausdrücke", StringComparison.OrdinalIgnoreCase)
-        || exception.Message.Contains("nicht lesbare Abbildungen", StringComparison.OrdinalIgnoreCase);
+        || exception.Message.Contains("nicht lesbare Abbildungen", StringComparison.OrdinalIgnoreCase)
+        || exception.Message.Contains("Publikationstitel", StringComparison.OrdinalIgnoreCase)
+        || exception.Message.Contains("Überschrift", StringComparison.OrdinalIgnoreCase);
 
-    private static string SectionRepairDiagnostic(ResearchWorkingState state, string error)
+    internal static string SectionRepairDiagnostic(ResearchWorkingState state, string error)
     {
-        var sections = state.Items.Where(item => item.Kind == "section" && Text(item.Data, "status") != "withdrawn").ToArray();
-        var located = sections.Where(item => Text(item.Data, "title") is { Length: > 0 } title
-            && error.Contains(title, StringComparison.Ordinal)).Select(item => item.Id).ToArray();
-        var candidates = located.Length > 0 ? located : sections.Where(item =>
-            Text(item.Data, "contentMarkdown").Contains('$') || Text(item.Data, "contentMarkdown").Contains("![", StringComparison.Ordinal))
-            .Select(item => item.Id).ToArray();
-        return error + " Betroffene Formel-/Abbildungsabschnitte eingrenzen: " + string.Join(", ", candidates)
-            + ". Korrigiere nur den fehlerhaften Abschnitt mit research.update; die vorherige PDF bleibt erhalten.";
+        var targets = SectionRepairTargets(state, error);
+        if (error.Contains("Publikationstitel", StringComparison.OrdinalIgnoreCase))
+            return error + " Kürze nur den fachlichen Publikationstitel mit research.update(title), ohne Auslassungspunkte oder Textverlust im Manuskript. Die vorherige PDF bleibt erhalten.";
+        return error + (targets.Count > 0 ? " Betroffene Formel-/Abbildungsabschnitte eingrenzen: "
+            + string.Join(", ", targets.Select(section => section.Id)) + "."
+            : " Der fehlerhafte Abschnitt konnte nicht eindeutig zugeordnet werden; lies den aktuellen Stand und grenze die konkrete Formel oder Abbildung gezielt ein.")
+            + " Korrigiere nur den fehlerhaften Abschnitt mit research.update; die vorherige PDF bleibt erhalten.";
     }
+
+    internal static IReadOnlyList<ScientificPresentationSectionFailure> SectionRepairTargets(ResearchWorkingState state, string error)
+    {
+        var sections = state.Items.Where(item => item.Kind == "section" && item.OwnerAgentId is null
+            && Text(item.Data, "status") != "withdrawn").ToArray();
+        var headings = Regex.Matches(error, "Abschnitt \"([^\"]+)\"", RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1))
+            .Select(match => match.Groups[1].Value).ToArray();
+        var expressions = Regex.Matches(error, @"Ausdruck:\s*(.*?)(?=,\s*Ursache:|;\s*Abschnitt\s|$)",
+                RegexOptions.Singleline | RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1))
+            .Select(match => NormalizeDiagnosticWhitespace(match.Groups[1].Value.Trim())).Where(value => value.Length > 0).ToArray();
+        var located = sections.Where(item =>
+        {
+            var content = Text(item.Data, "contentMarkdown");
+            var title = Text(item.Data, "title");
+            return headings.Contains(title, StringComparer.Ordinal)
+                || headings.Any(heading => StripHeadingNumber(heading) == StripHeadingNumber(title))
+                || (headings.Length == 0 && title.Length > 0 && error.Contains(title, StringComparison.Ordinal))
+                || content.Replace("\r", "", StringComparison.Ordinal).Split('\n').Any(line =>
+                    line.StartsWith('#') && headings.Contains(line.TrimStart('#').Trim(), StringComparer.Ordinal))
+                || expressions.Any(expression => NormalizeDiagnosticWhitespace(content).Contains(expression, StringComparison.Ordinal));
+        }).ToArray();
+        return located.Select(item => new ScientificPresentationSectionFailure(item.Id, item.Revision)).ToArray();
+    }
+
+    private static string NormalizeDiagnosticWhitespace(string value) => Regex.Replace(value, @"\s+", " ",
+        RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
 
     internal static string Text(JsonElement data, string property) => data.ValueKind == JsonValueKind.Object
         && data.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() ?? "" : "";
@@ -403,5 +439,11 @@ public sealed partial class ScientificPublicationService
         ? value.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.String).Select(item => item.GetString()!).ToArray() : [];
 }
 
-internal sealed class ScientificPublicationContentException(string message, Exception? innerException = null)
-    : InvalidOperationException(message, innerException);
+internal sealed class ScientificPublicationContentException(string message, Exception? innerException = null,
+    ResearchWorkingState? state = null, IReadOnlyList<ScientificPresentationSectionFailure>? sections = null)
+    : InvalidOperationException(message, innerException)
+{
+    internal long? PublicationRevision { get; } = state?.PublicationRevision;
+    internal IReadOnlyList<ScientificPresentationSectionFailure> Sections { get; } = sections
+        ?? (state is null ? [] : ScientificPublicationService.SectionRepairTargets(state, message));
+}

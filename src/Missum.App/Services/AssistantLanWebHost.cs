@@ -326,8 +326,11 @@ internal sealed class AssistantLanWebHost : IAsyncDisposable
         var resource = ResourceResolver is null ? null : await ResourceResolver(kind, id, context.RequestAborted).ConfigureAwait(false);
         if (resource is null) return Results.NotFound();
         var download = kind == "settings-resources" || context.Request.Query["download"] == "1";
-        var inline = IsSafeInlineContentType(resource.ContentType);
-        context.Response.Headers["Content-Security-Policy"] = "default-src 'none'; sandbox; base-uri 'none'; form-action 'none'";
+        var simulation = kind == "science-resources" && resource.ContentType.Split(';', 2)[0].Trim().Equals("text/html", StringComparison.OrdinalIgnoreCase);
+        var inline = simulation || IsSafeInlineContentType(resource.ContentType);
+        context.Response.Headers["Content-Security-Policy"] = simulation
+            ? ScientificSimulationHtml.ContentSecurityPolicy + "; frame-ancestors 'self'"
+            : "default-src 'none'; sandbox; base-uri 'none'; form-action 'none'";
         return Results.Stream(resource.Content, inline ? resource.ContentType : "application/octet-stream",
             download || !inline ? resource.FileName : null, enableRangeProcessing: true);
     }

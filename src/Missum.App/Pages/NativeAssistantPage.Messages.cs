@@ -230,11 +230,11 @@ public sealed partial class NativeAssistantPage
     private sealed class ToolStepView : Grid
     {
         internal event Action<string>? SubagentRequested;
-        private readonly TextBlock _title = new() { FontSize = 14, Foreground = Brush(160), TextTrimming = TextTrimming.CharacterEllipsis };
-        private readonly TextBlock _added = new() { FontSize = 13, Foreground = new SolidColorBrush(Color.FromArgb(255, 0x31, 0xC7, 0x7D)) };
-        private readonly TextBlock _removed = new() { FontSize = 13, Foreground = new SolidColorBrush(Color.FromArgb(255, 0xFF, 0x62, 0x5A)) };
+        private readonly TextBlock _title = new() { FontSize = 14, Foreground = ThemeBrush("MissumMutedTextBrush", 160), TextTrimming = TextTrimming.CharacterEllipsis };
+        private readonly TextBlock _added = new() { FontSize = 13, Foreground = ThemeBrush("MissumSuccessBrush", 160) };
+        private readonly TextBlock _removed = new() { FontSize = 13, Foreground = ThemeBrush("MissumDangerBrush", 160) };
         private readonly StackPanel _counts = new() { Orientation = Orientation.Horizontal, Spacing = 7, Visibility = Visibility.Collapsed };
-        private readonly FontIcon _chevron = new() { Glyph = "\uE76C", FontSize = 10, Foreground = Brush(140) };
+        private readonly FontIcon _chevron = new() { Glyph = "\uE76C", FontSize = 10, Foreground = ThemeBrush("MissumMutedTextBrush", 140) };
         private readonly TextBlock _status = new();
         private readonly FontIcon _compactIcon = new() { Glyph = "\uE70F", FontSize = 14, Foreground = new SolidColorBrush(ToolGlyphColor("tool", "")), VerticalAlignment = VerticalAlignment.Center };
         private JsonElement _step;

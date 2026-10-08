@@ -20,7 +20,7 @@ public sealed class NativeMathParagraph : UserControl
         FontFamily = new FontFamily("Segoe UI Variable Text");
         FontSize = 16;
         FontWeight = Microsoft.UI.Text.FontWeights.Normal;
-        Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 248, 248, 248));
+        Foreground = NativeThemeBrushes.Text;
         _text.FontFamily = FontFamily;
         _text.Blocks.Add(_paragraph);
         Content = _text;
@@ -65,7 +65,7 @@ public sealed class NativeMathParagraph : UserControl
             {
                 NativeStreamingMarkdown.InlineKind.Bold => new Bold { Inlines = { content } },
                 // WinUI Hyperlink rejects InlineUIContainer; the native formula button owns the link instead.
-                NativeStreamingMarkdown.InlineKind.Link when !piece.IsMath => new Hyperlink { NavigateUri = piece.Uri, Inlines = { content } },
+                NativeStreamingMarkdown.InlineKind.Link when !piece.IsMath => new Hyperlink { NavigateUri = piece.Uri, Foreground = NativeThemeBrushes.ReadableAccent, Inlines = { content } },
                 _ => content,
             };
             if (i < _runs.Count) { _paragraph.Inlines.RemoveAt(i); _paragraph.Inlines.Insert(i, inline); _runs[i] = (piece, inline, run); }

@@ -5,7 +5,6 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Documents;
 using Microsoft.UI.Xaml.Media;
 using Windows.ApplicationModel.DataTransfer;
-using Windows.UI;
 
 namespace Missum.App.Controls;
 
@@ -89,11 +88,11 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
             FontWeight = Microsoft.UI.Text.FontWeights.Normal,
             FontSize = kind == SectionKind.Code ? 15 : BodyFontSize,
             LineHeight = 26,
-            Foreground = Gray(kind == SectionKind.Code ? (byte)220 : (byte)248),
+            Foreground = NativeThemeBrushes.Text,
         };
         if (kind is SectionKind.Paragraph or SectionKind.Math or SectionKind.Table) return new SectionView(text, text);
 
-        var language = new TextBlock { FontSize = 12, Foreground = Gray(160), VerticalAlignment = VerticalAlignment.Center };
+        var language = new TextBlock { FontSize = 12, Foreground = NativeThemeBrushes.MutedText, VerticalAlignment = VerticalAlignment.Center };
         var copy = new Button
         {
             Content = "Code kopieren",
@@ -111,7 +110,7 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
         panel.Children.Add(header);
         var codeHost = new ContentControl { Content = text, HorizontalContentAlignment = HorizontalAlignment.Stretch };
         panel.Children.Add(codeHost);
-        var border = new Border { Child = panel, Background = Gray(32), CornerRadius = new CornerRadius(10), Padding = new Thickness(14) };
+        var border = new Border { Child = panel, Background = NativeThemeBrushes.Resource("MissumLayerBrush", 32), CornerRadius = new CornerRadius(10), Padding = new Thickness(14) };
         var section = new SectionView(border, text) { Language = language, CodeHost = codeHost };
         copy.Click += (_, _) =>
         {
@@ -189,7 +188,7 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
             Inline element = piece.Kind switch
             {
                 InlineKind.Bold => new Bold { Inlines = { run } },
-                InlineKind.Link => new Hyperlink { NavigateUri = piece.Uri, Inlines = { run } },
+                InlineKind.Link => new Hyperlink { NavigateUri = piece.Uri, Foreground = NativeThemeBrushes.ReadableAccent, Inlines = { run } },
                 _ => run,
             };
             var replacement = new InlineView(piece.Kind, element, run);
@@ -454,8 +453,6 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
         return result;
     }
 
-    private static SolidColorBrush Gray(byte value) => new(Color.FromArgb(255, value, value, value));
-
     internal static double SectionFontSize(int headingLevel) => headingLevel switch
     {
         1 => BodyFontSize + 8, 2 => BodyFontSize + 6, 3 => BodyFontSize + 4,
@@ -524,7 +521,7 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
         {
             HorizontalAlignment = HorizontalAlignment.Stretch;
             HorizontalContentAlignment = HorizontalAlignment.Stretch;
-            Content = new Border { BorderBrush = Gray(62), BorderThickness = new Thickness(1),
+            Content = new Border { BorderBrush = NativeThemeBrushes.Resource("MissumStrokeBrush", 62), BorderThickness = new Thickness(1),
                 CornerRadius = new CornerRadius(6), Child = _grid };
         }
 
@@ -553,8 +550,8 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
                 if (index >= _cells.Count)
                 {
                     var text = new NativeMathParagraph { FontSize = BodyFontSize, HorizontalAlignment = HorizontalAlignment.Stretch };
-                    var border = new Border { Child = text, Padding = new Thickness(11, 8, 11, 8), BorderBrush = Gray(55),
-                        BorderThickness = new Thickness(0, 0, 0, 1), Background = Gray(row == 0 ? (byte)43 : row % 2 == 0 ? (byte)31 : (byte)35) };
+                    var border = new Border { Child = text, Padding = new Thickness(11, 8, 11, 8), BorderBrush = NativeThemeBrushes.Resource("MissumStrokeBrush", 55),
+                        BorderThickness = new Thickness(0, 0, 0, 1), Background = NativeThemeBrushes.Resource(row == 0 ? "MissumHoverBrush" : row % 2 == 0 ? "MissumWindowBrush" : "MissumLayerBrush", 35) };
                     _cells.Add((border, text));
                     _grid.Children.Add(border);
                     Grid.SetRow(border, row);
@@ -562,7 +559,7 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
                 }
                 var cell = _cells[index];
                 cell.Text.FontWeight = row == 0 ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal;
-                cell.Text.Foreground = Gray(row == 0 ? (byte)248 : (byte)225);
+                cell.Text.Foreground = NativeThemeBrushes.Text;
                 cell.Text.TextAlignment = specification.Alignments[column];
                 cell.Text.UpdateTokenizedText(row == 0 ? specification.Headers[column] : specification.Rows[row - 1][column], tokenPrefix);
             }

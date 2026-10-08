@@ -33,6 +33,29 @@ function appearanceHarness() {
   return { api: context.missumAppearance, root, values, priorities };
 }
 
+function contrast(a, b) {
+  const luminance = value => {
+    const rgb = [1,3,5].map(i => parseInt(value.slice(i,i+2),16) / 255).map(c => c <= .04045 ? c / 12.92 : ((c+.055)/1.055)**2.4);
+    return rgb[0]*.2126 + rgb[1]*.7152 + rgb[2]*.0722;
+  };
+  const x=luminance(a),y=luminance(b); return (Math.max(x,y)+.05)/(Math.min(x,y)+.05);
+}
+test("light text and readable accent retain contrast without changing the user's accent or dark ink", () => {
+  const h=appearanceHarness();
+  h.api.preview({theme:"light",accentColor:"#A970FF",backgroundColor:"#181818"},"light");
+  assert.equal(h.values.get("--accent"),"#A970FF");
+  for (const ink of ["--text","--muted","--accent-readable","--link-readable"])
+    for (const paper of ["--bg","--composer","--layer-strong"])
+      assert.ok(contrast(h.values.get(ink),h.values.get(paper))>=4.5,`${ink} against ${paper}`);
+  h.api.preview({theme:"dark",accentColor:"#A970FF",backgroundColor:"#181818"},"dark");
+  assert.equal(h.values.get("--accent-readable"),"#A970FF");
+});
+test("an older PC's stale white light-mode text cannot make the web interface white on white", () => {
+  const h=appearanceHarness();h.api.apply({values:{theme:"light"},resolvedAppearance:{theme:"light",colors:{window:"#FFFFFF",input:"#FFFFFF",layer:"#FFFFFF",layerStrong:"#FFFFFF",text:"#FFFFFF",mutedText:"#EEEEEE"}}});
+  assert.ok(contrast(h.values.get("--text"),"#FFFFFF")>=4.5);
+  assert.ok(contrast(h.values.get("--muted"),"#FFFFFF")>=4.5);
+});
+
 test("fallback palette follows native background weights, alpha and midpoint-to-even rounding", () => {
   const dark = fallbackPalette({ theme: "dark", accentColor: "#B0B0B0", backgroundColor: "#181818" });
   assert.equal(dark.colors.window, "#1f1f1f");

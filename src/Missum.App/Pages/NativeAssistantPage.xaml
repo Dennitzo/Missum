@@ -3,7 +3,7 @@
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
  xmlns:controls="using:Missum.App.Controls"
  xmlns:primitives="using:Microsoft.UI.Xaml.Controls.Primitives"
- FontFamily="Segoe UI Variable Text" FontWeight="Normal" Background="{ThemeResource MissumWindowBrush}" Loaded="OnLoaded">
+ FontFamily="Segoe UI Variable Text" FontWeight="Normal" Foreground="{ThemeResource MissumTextBrush}" Background="{ThemeResource MissumWindowBrush}" Loaded="OnLoaded">
  <Page.Resources>
   <StaticResource x:Key="RoundIconHoverBackground" ResourceKey="MissumHoverBrush"/>
   <StaticResource x:Key="RoundIconHoverBorder" ResourceKey="MissumStrokeBrush"/>
@@ -139,7 +139,7 @@
            <controls:NativeContextRing x:Name="ContextRing" Value="0" Maximum="100"/>
           </Button>
           <Button x:Name="ModelButton" Click="OnReasoningClick" CornerRadius="18" Padding="11,5" Background="{ThemeResource MissumLayerStrongBrush}" ToolTipService.ToolTip="Modell und Reasoning auswählen">
-           <StackPanel Orientation="Horizontal" Spacing="6"><TextBlock x:Name="ModelLabel" Text="Modell auswählen" FontSize="14" MaxWidth="170" TextTrimming="CharacterEllipsis"/><TextBlock x:Name="ReasoningLabel" Text="" FontSize="14" Foreground="{ThemeResource MissumAccentBrush}"/><FontIcon Glyph="&#xE76C;" FontSize="9"/></StackPanel>
+           <StackPanel Orientation="Horizontal" Spacing="6"><TextBlock x:Name="ModelLabel" Text="Modell auswählen" FontSize="14" MaxWidth="170" TextTrimming="CharacterEllipsis"/><TextBlock x:Name="ReasoningLabel" Text="" FontSize="14" Foreground="{ThemeResource MissumAccentReadableBrush}"/><FontIcon Glyph="&#xE76C;" FontSize="9"/></StackPanel>
           </Button>
          </StackPanel>
          <Button x:Name="DictationButton" Grid.Column="3" Style="{StaticResource ComposerRoundIconButtonStyle}" HorizontalAlignment="Left" Click="OnMicrophone" ToolTipService.ToolTip="Diktieren" AutomationProperties.Name="Diktieren"><Grid><FontIcon x:Name="DictationIcon" Glyph="&#xE720;" FontSize="18" Foreground="{ThemeResource MissumIconSpeechBrush}"/><StackPanel x:Name="DictationBars" Orientation="Horizontal" Spacing="2" VerticalAlignment="Center" Visibility="Collapsed"/></Grid></Button>

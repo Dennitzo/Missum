@@ -30,6 +30,7 @@ internal sealed class NativeConversationSelection
     private bool _crossed;
     private string _selectedText = "";
     internal Func<FrameworkElement, Point, MenuFlyout?>? ReadFromMenuFactory { get; set; }
+    internal Action<string, Action>? UiProjectionCallback { get; set; }
     internal string SelectedText => _selectedText;
     internal bool HasSelection => _selectedText.Length > 0;
 
@@ -43,9 +44,21 @@ internal sealed class NativeConversationSelection
         host.ContextRequested += ContextRequested;
         host.PointerCanceled += (_, _) => StopDrag();
         host.Unloaded += (_, _) => Clear();
-        _autoScroll.Tick += (_, _) =>
+        _autoScroll.Tick += (_, _) => OnAutoScrollTick();
+    }
+
+    private void OnAutoScrollTick()
+    {
+        if (!_dragging || !_crossed) return;
+        if (UiProjectionCallback is { } projectionCallback)
+            projectionCallback("ConversationSelection.AutoScroll.Tick", ProjectAutoScroll);
+        else ProjectAutoScroll();
+    }
+
+    private void ProjectAutoScroll()
+    {
+        try
         {
-            if (!_dragging || !_crossed) return;
             var local = _host.TransformToVisual(_scroll).TransformPoint(_lastPoint);
             var delta = local.Y < 28 ? -18 : local.Y > _scroll.ActualHeight - 28 ? 18 : 0;
             if (delta == 0) return;
@@ -53,7 +66,16 @@ internal sealed class NativeConversationSelection
             _scroll.UpdateLayout();
             _lastPoint = _scroll.TransformToVisual(_host).TransformPoint(local);
             Extend(_lastPoint);
-        };
+        }
+        catch
+        {
+            // End only this text-selection gesture. The page records the
+            // original projection failure; no chat/model operation is touched.
+            if (UiProjectionCallback is { } projectionCallback)
+                projectionCallback("ConversationSelection.AutoScroll.StopDrag", StopDrag);
+            else StopDrag();
+            throw;
+        }
     }
 
     private void Pressed(object sender, PointerRoutedEventArgs e)
@@ -188,7 +210,7 @@ internal sealed class NativeConversationSelection
             {
                 Background = Application.Current.Resources.TryGetValue("MissumAccentBrush", out var accent) && accent is Brush accentBrush
                     ? accentBrush : new SolidColorBrush(Windows.UI.Color.FromArgb(180, 111, 76, 175)),
-                Foreground = new SolidColorBrush(Microsoft.UI.Colors.White),
+                Foreground = NativeThemeBrushes.Resource("MissumAccentTextBrush", Microsoft.UI.Colors.White),
             };
             highlight.Ranges.Add(new TextRange { StartIndex = prefixLength, Length = text.Length });
             node.Highlighters.Add(highlight); _highlights.Add((node, highlight));

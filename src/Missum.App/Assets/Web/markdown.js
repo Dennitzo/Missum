@@ -20,16 +20,39 @@
   }
 
   function normalizeEscapedLatex(tex) {
-    return String(tex || "")
-      // AI-generated Markdown occasionally contains JSON-escaped LaTeX. Preserve a genuine
-      // TeX row break (two slashes before whitespace), but turn escaped commands and spacing
-      // operators back into the single leading slash KaTeX expects.
-      .replace(/\\\\\\\\/g, "\\\\")
-      .replace(/\\\\(?=[A-Za-z])/g, "\\")
-      .replace(/\\\\(?=[,;!:{}])/g, "\\");
+    const source = String(tex || "");
+    // Match NativeMathRenderer: decode retained JSON escaping only when every
+    // control word is escaped. A valid matrix row break may be immediately
+    // followed by a letter (B_p\\\\B_\\phi); its whitespace is not significant.
+    let escapedCommands = false;
+    for (let index = 0; index < source.length; index += 1) {
+      if (source[index] !== "\\") continue;
+      const start = index;
+      while (source[index] === "\\") index += 1;
+      const slashes = index - start;
+      if (index >= source.length || !/[A-Za-z]/.test(source[index])) continue;
+      if (slashes % 2 === 1) return source;
+      if (slashes === 2 && index + 1 < source.length && /[A-Za-z]/.test(source[index + 1])) escapedCommands = true;
+    }
+    if (!escapedCommands) return source;
+
+    let normalized = "";
+    for (let index = 0; index < source.length; index += 1) {
+      if (source[index] !== "\\") {
+        normalized += source[index];
+        continue;
+      }
+      const start = index;
+      while (source[index] === "\\") index += 1;
+      const slashes = index - start;
+      const commandFollows = index < source.length && /[A-Za-z,;!:{}]/.test(source[index]);
+      normalized += "\\".repeat(slashes >= 4 && slashes % 2 === 0 ? slashes / 2 : slashes === 2 && commandFollows ? 1 : slashes);
+      index -= 1;
+    }
+    return normalized;
   }
 
-  function normalizedMathParts(rawMath) {
+  function normalizedMathParts(rawMath, renderLatex) {
     const source = String(rawMath || "").trim();
     let display = false;
     let tex = source;
@@ -45,7 +68,7 @@
       tex = source.slice(1, -1).trim();
     }
 
-    tex = normalizeEscapedLatex(tex)
+    tex = normalizeEscapedLatex(renderLatex ?? tex)
       .replace(/\u00a0/g, "~")
       .replace(/[\u2009\u202f]/g, "\\,")
       .replace(/\\text\{([^{}]*[\u00b7\u22c5][^{}]*)\}/g, (_match, body) => (
@@ -55,12 +78,13 @@
     return { source, tex, display };
   }
 
-  function cachedKatexHtml(tex, displayMode) {
-    if (!globalThis.katex || typeof globalThis.katex.renderToString !== "function") return "";
+  function cachedKatexResult(tex, displayMode) {
+    if (!globalThis.katex || typeof globalThis.katex.renderToString !== "function") return { html: "", error: "Der Formelrenderer ist nicht verfügbar." };
     const key = `${displayMode ? "display" : "inline"}\n${tex}`;
     if (mathRenderCache.has(key)) return mathRenderCache.get(key);
 
     let html = "";
+    let error = "";
     try {
       html = globalThis.katex.renderToString(tex, {
         displayMode,
@@ -69,20 +93,19 @@
         strict: katexStrictMode,
         trust: false
       });
-    } catch {
-      html = "";
+    } catch (exception) {
+      error = String(exception?.message || "Die Formel konnte nicht dargestellt werden.").slice(0, 500);
     }
-    if (!html) return "";
-
-    mathRenderCache.set(key, html);
+    const result = { html, error };
+    mathRenderCache.set(key, result);
     if (mathRenderCache.size > maxMathRenderCacheEntries) {
       mathRenderCache.delete(mathRenderCache.keys().next().value);
     }
-    return html;
+    return result;
   }
 
-  function createSelectableMathNode(rawMath) {
-    const { source, tex, display } = normalizedMathParts(rawMath);
+  function createSelectableMathNode(rawMath, renderLatex) {
+    const { source, tex, display } = normalizedMathParts(rawMath, renderLatex);
     const wrapper = document.createElement("span");
     wrapper.className = `math-selectable${display ? " display" : ""}`;
     wrapper.setAttribute("aria-label", `LaTeX: ${source}`);
@@ -91,19 +114,21 @@
     const rendered = document.createElement("span");
     rendered.className = "math-render";
     rendered.setAttribute("aria-hidden", "true");
-    const katexHtml = cachedKatexHtml(tex, display);
+    const katexResult = cachedKatexResult(tex, display);
 
     const sourceText = document.createElement("span");
     sourceText.className = "math-source-text";
     sourceText.textContent = source;
 
-    if (katexHtml) {
-      rendered.innerHTML = katexHtml;
+    if (katexResult.html) {
+      rendered.innerHTML = katexResult.html;
       rendered.dataset.mathTypeset = "true";
       wrapper.append(rendered, sourceText);
     } else {
       sourceText.classList.add("fallback");
       wrapper.classList.add("invalid");
+      wrapper.dataset.mathError = katexResult.error;
+      wrapper.title += `\n${katexResult.error}`;
       wrapper.append(sourceText);
     }
 
@@ -151,27 +176,246 @@
     return -1;
   }
 
+  // Presentation-only counterpart of NativeLooseMath. Older persisted replies
+  // often contain scientific notation without TeX delimiters. Recover only the
+  // same bounded, unambiguous fragments; their original text remains selectable.
+  const looseLetter = value => /^\p{L}$/u.test(value || "");
+  const looseDigit = value => /^\p{Nd}$/u.test(value || "");
+  const looseLetterOrDigit = value => looseLetter(value) || looseDigit(value);
+  const looseAsciiDigit = value => /^[0-9]$/.test(value || "");
+  const looseUppercase = value => /^\p{Lu}+$/u.test(value || "");
+  const looseLabels = new Set(["std", "eff", "max", "min", "tot", "eq", "crit"]);
+  const looseSuperscripts = Object.freeze({ "⁰": "0", "¹": "1", "²": "2", "³": "3", "⁴": "4", "⁵": "5", "⁶": "6", "⁷": "7", "⁸": "8", "⁹": "9", "⁻": "-", "⁺": "+" });
+
+  function looseScientificSymbol(text) {
+    if (text.length === 1 && looseLetter(text[0])) return true;
+    if (text.length === 2 && ["d", "Δ"].includes(text[0]) && looseLetter(text[1])) return true;
+    if (text.length < 3 || !looseLetter(text[0]) || text[1] !== "_") return false;
+    const label = text.slice(2);
+    return label.length === 1 || looseLabels.has(label) || looseUppercase(label);
+  }
+
+  function looseLiteralEnd(text, start) {
+    if (text.startsWith("](", start)) {
+      let end = start + 2, depth = 1;
+      while (end < text.length && !/[\r\n]/.test(text[end]) && depth > 0) {
+        if (text[end] === "(") depth += 1;
+        if (text[end] === ")") depth -= 1;
+        end += 1;
+      }
+      return end;
+    }
+    if (start > 0 && !/\s/.test(text[start - 1]) && !"([<\"':".includes(text[start - 1])) return start;
+    if (!looseLetterOrDigit(text[start]) && !"/\\".includes(text[start])
+      && !text.startsWith("./", start) && !text.startsWith("../", start)) return start;
+    let end = start;
+    const limit = Math.min(text.length, start + 4096);
+    while (end < limit && !/\s/.test(text[end]) && !"`|>".includes(text[end])) end += 1;
+    const token = text.slice(start, end), slash = token.search(/[\\/]/), dot = token.lastIndexOf(".");
+    const identifier = value => /^[\p{L}\p{Nd}_.-]+$/u.test(value);
+    const isPath = token.startsWith("./") || token.startsWith("../") || token.startsWith("/")
+      || token.startsWith("\\\\") || /^[A-Za-z]:[\\/]/.test(token)
+      || slash > 0 && !/[=^(]/.test(token.slice(0, slash)) && identifier(token.slice(0, slash))
+        && (slash === 1 || !looseScientificSymbol(token.slice(0, slash)));
+    const host = token.split(/[/?#]/, 1)[0], hostDot = host.lastIndexOf(".");
+    const isDomain = hostDot > 0 && host.length - hostDot >= 3 && host.length - hostDot <= 25
+      && /^[A-Za-z0-9.-]+$/.test(host.slice(0, hostDot)) && /^[A-Za-z]+$/.test(host.slice(hostDot + 1));
+    const isUrl = /^(?:https?:\/\/|www\.)/i.test(token) || token.includes("@") || isDomain;
+    const equal = token.indexOf("=");
+    const isAssignment = equal > 0 && identifier(token.slice(0, equal)) && !looseScientificSymbol(token.slice(0, equal));
+    const isFile = dot > 0 && dot + 1 < token.length && !/[=()]/.test(token.slice(0, dot))
+      && /^(?:cs|py|tex|md|json|xml|yaml|yml|pdf|png|jpg|txt|exe|dll)$/i.test(token.slice(dot + 1).replace(/[,;)\]"'.]+$/g, ""));
+    if (!isPath && !isUrl && !isFile && !isAssignment) return start;
+    while (end < text.length && !/\s/.test(text[end]) && !"`|>".includes(text[end])) end += 1;
+    return end;
+  }
+
+  function looseMathAt(text, start) {
+    if (start > 0 && (looseLetterOrDigit(text[start - 1]) || "_\\".includes(text[start - 1]))) return null;
+    if (!looseLetterOrDigit(text[start]) && text[start] !== "(") return null;
+    const limit = Math.min(text.length, start + 1024);
+    let position = start, depth = 0, evidence = false, incomplete = false;
+    const space = () => { while (position < limit && /[ \t]/.test(text[position])) position += 1; };
+    const nested = read => {
+      depth += 1;
+      if (depth > 16) { incomplete = true; depth -= 1; return null; }
+      const value = read(); depth -= 1; return value;
+    };
+    function script(subscript) {
+      if (position >= limit) return null;
+      const braced = text[position] === "{";
+      if (braced) position += 1;
+      const begin = position;
+      if (!subscript && /[+−-]/.test(text[position] || "")) position += 1;
+      if (!braced && !subscript) {
+        if (looseAsciiDigit(text[position])) while (position < limit && looseAsciiDigit(text[position])) position += 1;
+        else if (position < limit && looseLetter(text[position])) position += 1;
+      } else while (position < limit && looseLetterOrDigit(text[position])) position += 1;
+      if (position === begin || position - begin > 8) return null;
+      const value = text.slice(begin, position).replace(/−/g, "-");
+      if (["+", "-"].includes(value)) return null;
+      if (braced) { if (position >= limit || text[position] !== "}") return null; position += 1; }
+      return value;
+    }
+    function atom() {
+      space();
+      if (position >= limit || /[\r\n]/.test(text[position])) return null;
+      const character = text[position];
+      if (/[+−-]/.test(character)) { position += 1; const value = nested(atom); return value === null ? null : (character === "+" ? "+" : "-") + value; }
+      if (character === "(") {
+        position += 1;
+        const value = nested(expression); space();
+        if (value === null || position >= limit || text[position] !== ")") { incomplete = true; return null; }
+        position += 1; return `(${value})`;
+      }
+      if (looseAsciiDigit(character)) {
+        const begin = position++;
+        while (position < limit && looseAsciiDigit(text[position])) position += 1;
+        if (position + 1 < limit && /[.,]/.test(text[position]) && looseAsciiDigit(text[position + 1])) {
+          position += 1; while (position < limit && looseAsciiDigit(text[position])) position += 1;
+        }
+        let value = text.slice(begin, position).replace(/,/g, "{,}");
+        if (position < limit && /[eE]/.test(text[position])) {
+          const exponentStart = position + 1;
+          let exponentEnd = exponentStart;
+          if (/[+-]/.test(text[exponentEnd] || "")) exponentEnd += 1;
+          const digitsStart = exponentEnd;
+          while (exponentEnd < limit && looseAsciiDigit(text[exponentEnd])) exponentEnd += 1;
+          if (exponentEnd > digitsStart) { position = exponentEnd; evidence = true; value += `\\cdot 10^{${text.slice(exponentStart, exponentEnd)}}`; }
+        }
+        return value;
+      }
+      if (!looseLetter(character)) return null;
+      const begin = position++;
+      while (position < limit && looseLetter(text[position])) position += 1;
+      const value = text.slice(begin, position);
+      if (["ln", "log", "sin", "cos", "tan", "exp"].includes(value)) {
+        evidence = true; const argument = nested(power);
+        if (argument === null) { incomplete = true; return null; }
+        return `\\${value} ${argument}`;
+      }
+      if (value.length === 2 && value[0] === "Δ") { evidence = true; return value; }
+      if (value.length === 1 || value.length === 2 && value[0] === "d" || value === "mc") return value;
+      position = begin; return null;
+    }
+    function power() {
+      let value = atom();
+      if (value === null) return null;
+      let subscript = false, exponent = false;
+      while (position < limit) {
+        const marker = text[position];
+        if (marker === "_" || marker === "^") {
+          if (marker === "_" ? subscript : exponent) { incomplete = true; return null; }
+          if (marker === "_") subscript = true; else exponent = true;
+          position += 1;
+          const content = script(marker === "_");
+          if (content === null) { incomplete = true; return null; }
+          if (marker === "^" || content.length === 1 || looseUppercase(content) || looseLabels.has(content)) evidence = true;
+          value += `${marker}{${content}}`;
+        } else if (looseSuperscripts[marker] !== undefined) {
+          if (exponent) { incomplete = true; return null; }
+          exponent = true;
+          let content = "";
+          while (position < limit && looseSuperscripts[text[position]] !== undefined) content += looseSuperscripts[text[position++]];
+          if (!/[0-9]/.test(content)) { incomplete = true; return null; }
+          evidence = true; value += `^{${content}}`;
+        } else break;
+      }
+      return value;
+    }
+    function product() {
+      const first = power(); if (first === null) return null;
+      let value = first;
+      while (position < limit) {
+        const beforeSpace = position; space();
+        if (position >= limit || text.startsWith("**", position)) break;
+        const character = text[position];
+        if ("*·×/".includes(character)) {
+          position += 1;
+          if (character === "·" || character === "×" || character === "/" && (first.startsWith("d") || text.startsWith("dt", position))) evidence = true;
+          const right = power(); if (right === null) { incomplete = true; return null; }
+          value += (character === "/" ? "/" : "\\cdot ") + right;
+        } else if (beforeSpace === position && (looseLetter(character) || character === "(")
+          && (looseDigit(text[beforeSpace - 1]) || text[beforeSpace - 1] === ")" || character === "(" && looseScientificSymbol(first))
+          || position > beforeSpace && looseScientificSymbol(first) && scriptedSymbolAhead()) {
+          const right = power(); if (right === null) break; value += " " + right;
+        } else break;
+      }
+      return value;
+    }
+    function scriptedSymbolAhead() {
+      if (position >= limit || !looseLetter(text[position])) return false;
+      let marker = position + 1;
+      if (["d", "Δ"].includes(text[position]) && marker < limit && looseLetter(text[marker])) marker += 1;
+      return marker < limit && (["_", "^"].includes(text[marker]) || looseSuperscripts[text[marker]] !== undefined);
+    }
+    function sum() {
+      let value = product(); if (value === null) return null;
+      while (position < limit) {
+        space(); if (position >= limit || !"+-−".includes(text[position])) break;
+        const operation = text[position++] === "+" ? "+" : "-";
+        const right = product(); if (right === null) { incomplete = true; return null; }
+        value += operation + right;
+      }
+      return value;
+    }
+    function expression() {
+      let value = sum(); if (value === null) return null;
+      const relations = { "=": "=", "~": "\\sim", "≈": "\\approx", "≠": "\\ne", "≤": "\\le", "≥": "\\ge", "∝": "\\propto" };
+      while (position < limit) {
+        space(); const relation = position < limit && relations[text[position]];
+        if (!relation) break;
+        position += 1; const right = sum();
+        if (right === null) { incomplete = true; return null; }
+        value += ` ${relation} ${right}`;
+      }
+      return value;
+    }
+    const latex = expression();
+    if (!evidence) return null;
+    if (latex === null || incomplete || position >= limit && limit < text.length && !/[\r\n]/.test(text[limit])) {
+      let blockedUntil = start;
+      while (blockedUntil < text.length && !/[\r\n]/.test(text[blockedUntil])) blockedUntil += 1;
+      return { blockedUntil };
+    }
+    let end = position;
+    while (end > start && /[ \t]/.test(text[end - 1])) end -= 1;
+    if (end <= start || end < text.length && (looseLetterOrDigit(text[end]) || "_^\\".includes(text[end])
+      || text[end] === "." && end + 1 < text.length && looseLetter(text[end + 1]))) return null;
+    return {end,latex};
+  }
+
   function protectMarkdownSegments(text) {
     const source = String(text || "");
     const segments = [];
     let protectedText = "";
     let index = 0;
+    let legacyBlockedUntil = 0;
 
-    const appendProtected = (value, kind) => {
+    const appendProtected = (value, kind, renderLatex, codeDelimiterLength = 1) => {
       const token = `\uE000MISSUM_MATH_${segments.length.toString(36).toUpperCase()}\uE001`;
-      segments.push({ token, source: value, kind });
+      segments.push({ token, source: value, kind, renderLatex, codeDelimiterLength });
       protectedText += token;
     };
 
     while (index < source.length) {
       if (source[index] === "`") {
-        const close = source.indexOf("`", index + 1);
-        if (close > index + 1) {
-          appendProtected(source.slice(index, close + 1), "code");
-          index = close + 1;
+        let length = 1;
+        while (source[index + length] === "`") length += 1;
+        let close = source.indexOf("`".repeat(length), index + length);
+        while (close >= 0 && (source[close - 1] === "`" || source[close + length] === "`"))
+          close = source.indexOf("`".repeat(length), close + length);
+        if (close >= index + length) {
+          appendProtected(source.slice(index, close + length), "code", undefined, length);
+          index = close + length;
           continue;
         }
+        appendProtected(source.slice(index), "literal");
+        break;
       }
+
+      const literalEnd = looseLiteralEnd(source, index);
+      if (literalEnd > index) { protectedText += source.slice(index, literalEnd); index = literalEnd; continue; }
 
       let open = "";
       let close = "";
@@ -209,6 +453,15 @@
           index = end;
           continue;
         }
+      }
+
+      if (!open && index >= legacyBlockedUntil) {
+        const legacy = looseMathAt(source, index);
+        if (legacy?.end > index) {
+          appendProtected(source.slice(index, legacy.end), "math", legacy.latex);
+          index = legacy.end; continue;
+        }
+        if (legacy?.blockedUntil) legacyBlockedUntil = legacy.blockedUntil;
       }
 
       protectedText += source[index];
@@ -281,10 +534,10 @@
           parent.append(document.createTextNode(segment?.source || match[1]));
         } else if (segment.kind === "code") {
           const code = document.createElement("code");
-          code.textContent = segment.source.slice(1, -1);
+          code.textContent = segment.source.slice(segment.codeDelimiterLength, -segment.codeDelimiterLength);
           parent.append(code);
         } else {
-          parent.append(createSelectableMathNode(segment.source));
+          parent.append(createSelectableMathNode(segment.source, segment.renderLatex));
         }
       } else if (match[2] !== undefined) {
         const strong = document.createElement("strong");

@@ -212,6 +212,7 @@ public partial class App : Application
         {
             SetBrushColors(AccentBrushKeys, color);
             SetBrushColors(AccentTextBrushKeys, ContrastForeground(color));
+            UpdateReadableAccentBrush();
         }
 
         CacheResolvedAppearance();
@@ -230,6 +231,7 @@ public partial class App : Application
         if (!IsHighContrastEnabled())
         {
             ApplyBackgroundSurfaceColors(color);
+            UpdateReadableAccentBrush();
         }
 
         CacheResolvedAppearance();
@@ -817,6 +819,7 @@ public partial class App : Application
             ApplyBackgroundSurfaceColors(background);
         }
 
+        UpdateReadableAccentBrush();
         CacheResolvedAppearance();
         ThemeChanged?.Invoke(this, EventArgs.Empty);
     }
@@ -867,6 +870,7 @@ public partial class App : Application
             ["mutedText"] = ReadBrush("MissumMutedTextBrush", foreground),
             ["text"] = CssColor(foreground, 1),
             ["accent"] = ReadBrush("MissumAccentBrush", foreground),
+            ["accentReadable"] = ReadBrush("MissumAccentReadableBrush", foreground),
             ["accentForeground"] = ReadBrush("MissumAccentTextBrush", Microsoft.UI.Colors.Black),
             ["accentSubtle"] = ReadBrush("MissumAccentSubtleBrush", foreground),
         };
@@ -915,6 +919,10 @@ public partial class App : Application
             colors["accent"] = CssColor(contrast.Accent, 1); colors["accentForeground"] = CssColor(contrast.AccentForeground, 1);
             colors["accentSubtle"] = CssColor(contrast.Accent, .14);
         }
+        var surfaces = light ? LightTextSurfaces(background) : [Microsoft.UI.Colors.Black];
+        colors["accentReadable"] = CssColor(highContrast is { } high
+            ? ReadableAccentColor(high.Accent, [high.Background])
+            : light ? ReadableAccentColor(accent, surfaces) : accent, 1);
         colors["titlebar"] = ComposeCssColors(colors["accentSubtle"], colors["window"]);
         foreach (var name in new[] { "Web", "Research", "Image", "Audio", "Speech", "Pdf", "Document", "Plan", "Code", "Folder", "Navigation", "Link", "Add", "Danger", "Settings", "Subagent" })
             colors["icon" + name] = CssColor(Controls.NativeIconPalette.ColorFor(name), 1);
@@ -994,6 +1002,8 @@ public partial class App : Application
         SetBrushColor("MissumPressedBrush", palette.Background);
         SetBrushColor("MissumStrokeBrush", palette.Foreground);
         SetBrushColor("MissumMutedTextBrush", palette.Foreground);
+        SetBrushColor("MissumTextBrush", palette.Foreground);
+        ApplyCodePalette(light: false, highContrast: palette);
     }
 
     internal HighContrastPalette ResolveHighContrastPalette()
@@ -1033,6 +1043,9 @@ public partial class App : Application
     {
         var isLight = _appliedTheme == AppTheme.Light
             || (_appliedTheme == AppTheme.System && _themeRoot?.ActualTheme == ElementTheme.Light);
+        SetBrushColor("MissumTextBrush", isLight ? Windows.UI.Color.FromArgb(228, 0, 0, 0) : Microsoft.UI.Colors.White);
+        SetBrushColor("MissumMutedTextBrush", isLight ? Windows.UI.Color.FromArgb(255, 0x51, 0x46, 0x5D) : Windows.UI.Color.FromArgb(255, 0x99, 0x99, 0x99));
+        ApplyCodePalette(isLight);
         if (isLight)
         {
             SetBrushColor("MissumWindowBrush", MixBackground(0xF3F0F5, background, 0.07, 0xFF));
@@ -1052,6 +1065,78 @@ public partial class App : Application
         SetBrushColor("MissumHoverBrush", MixBackground(0x303030, background, 0.23, 0xFF));
         SetBrushColor("MissumPressedBrush", MixBackground(0x383838, background, 0.28, 0xFF));
         SetBrushColor("MissumStrokeBrush", MixBackground(0xFFFFFF, background, 0.28, 0x42));
+    }
+
+    private void ApplyCodePalette(bool light, HighContrastPalette? highContrast = null)
+    {
+        SetBrushColor("MissumSuccessBrush", highContrast?.Foreground ?? (light ? Windows.UI.Color.FromArgb(255, 0x06, 0x65, 0x40) : Windows.UI.Color.FromArgb(255, 0x42, 0xD3, 0x92)));
+        SetBrushColor("MissumWarningBrush", highContrast?.Foreground ?? (light ? Windows.UI.Color.FromArgb(255, 0x87, 0x48, 0) : Windows.UI.Color.FromArgb(255, 0xF4, 0xB8, 0x60)));
+        SetBrushColor("MissumDangerBrush", highContrast?.Foreground ?? (light ? Windows.UI.Color.FromArgb(255, 0xB3, 0x1E, 0x3A) : Windows.UI.Color.FromArgb(255, 0xFF, 0x66, 0x7A)));
+        foreach (var (name, dark, bright) in new (string, uint, uint)[] {
+            ("Keyword", 0xC586C0, 0x800080), ("Type", 0x4EC9B0, 0x267F99), ("String", 0xCE9178, 0xA31515),
+            ("Number", 0xB5CEA8, 0x006B43), ("Comment", 0x6A9955, 0x006400), ("Function", 0xDCDCAA, 0x795E26),
+            ("Property", 0x9CDCFE, 0x001080), ("Tag", 0x569CD6, 0x800000) })
+        {
+            _ = SetColor(light ? bright : dark, out var color);
+            SetBrushColor("MissumCode" + name + "Brush", highContrast?.Foreground ?? color);
+        }
+        _ = SetColor(light ? 0xE7F3EAu : 0x133325u, out var added);
+        _ = SetColor(light ? 0xFCEAE9u : 0x3B1D1Au, out var removed);
+        SetBrushColor("MissumDiffAddedBackgroundBrush", highContrast?.Background ?? added);
+        SetBrushColor("MissumDiffRemovedBackgroundBrush", highContrast?.Background ?? removed);
+    }
+
+    private void UpdateReadableAccentBrush()
+    {
+        if (IsHighContrastEnabled())
+        {
+            var palette = ResolveHighContrastPalette();
+            SetBrushColor("MissumAccentReadableBrush", ReadableAccentColor(palette.Accent, [palette.Background]));
+            return;
+        }
+        _ = TryParsePaletteColor(AccentColor, out var accent);
+        _ = TryParsePaletteColor(BackgroundColor, out var background);
+        var light = _appliedTheme == AppTheme.Light || (_appliedTheme == AppTheme.System && _themeRoot?.ActualTheme == ElementTheme.Light);
+        SetBrushColor("MissumAccentReadableBrush", light ? ReadableAccentColor(accent, LightTextSurfaces(background)) : accent);
+    }
+
+    private static Windows.UI.Color[] LightTextSurfaces(Windows.UI.Color background) =>
+    [
+        MixBackground(0xF3F0F5, background, .07, 255), MixBackground(0xFFFFFF, background, .04, 255),
+        MixBackground(0xFAF8FC, background, .08, 255), MixBackground(0xFFFFFF, background, .09, 255),
+        MixBackground(0xF5F1F7, background, .13, 255), MixBackground(0xEEE9F1, background, .18, 255),
+    ];
+
+    internal static Windows.UI.Color ReadableAccentColor(Windows.UI.Color accent, Windows.UI.Color[] surfaces)
+    {
+        if (surfaces.Length == 0 || surfaces.All(surface => TextContrastRatio(accent, surface) >= 4.5)) return accent;
+        var black = Microsoft.UI.Colors.Black; var white = Microsoft.UI.Colors.White;
+        var destination = surfaces.Min(surface => TextContrastRatio(black, surface)) >= surfaces.Min(surface => TextContrastRatio(white, surface)) ? black : white;
+        double low = 0, high = 1;
+        Windows.UI.Color Blend(double amount) => Windows.UI.Color.FromArgb(255,
+            (byte)Math.Round(accent.R + (destination.R - accent.R) * amount),
+            (byte)Math.Round(accent.G + (destination.G - accent.G) * amount),
+            (byte)Math.Round(accent.B + (destination.B - accent.B) * amount));
+        for (var attempt = 0; attempt < 24; attempt++)
+        {
+            var middle = (low + high) / 2;
+            if (surfaces.All(surface => TextContrastRatio(Blend(middle), surface) >= 4.5)) high = middle;
+            else low = middle;
+        }
+        return Blend(high);
+    }
+
+    internal static double TextContrastRatio(Windows.UI.Color foreground, Windows.UI.Color background)
+    {
+        static double Linear(double channel) => channel <= .04045 ? channel / 12.92 : Math.Pow((channel + .055) / 1.055, 2.4);
+        static double Luminance(Windows.UI.Color color) => .2126 * Linear(color.R / 255d) + .7152 * Linear(color.G / 255d) + .0722 * Linear(color.B / 255d);
+        var alpha = foreground.A / 255d;
+        var composited = Windows.UI.Color.FromArgb(255,
+            (byte)Math.Round(foreground.R * alpha + background.R * (1 - alpha)),
+            (byte)Math.Round(foreground.G * alpha + background.G * (1 - alpha)),
+            (byte)Math.Round(foreground.B * alpha + background.B * (1 - alpha)));
+        var first = Luminance(composited); var second = Luminance(background);
+        return (Math.Max(first, second) + .05) / (Math.Min(first, second) + .05);
     }
 
     private void SetBrushColors(IEnumerable<string> keys, Windows.UI.Color color)

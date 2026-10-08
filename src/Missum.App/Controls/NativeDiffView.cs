@@ -14,14 +14,14 @@ public sealed partial class NativeDiffView : UserControl
 {
     private readonly StackPanel _rows = new();
     private readonly bool _wrapLines;
-    private readonly SolidColorBrush _neutralForeground = ColorBrush(0xD7, 0xD7, 0xD7);
-    private readonly SolidColorBrush _mutedForeground = ColorBrush(0x8D, 0x8D, 0x8D);
-    private readonly SolidColorBrush _neutralBackground = ColorBrush(0x19, 0x19, 0x19);
-    private readonly SolidColorBrush _addedForeground = ColorBrush(0x31, 0xC7, 0x7D);
-    private readonly SolidColorBrush _addedBackground = ColorBrush(0x13, 0x33, 0x25);
-    private readonly SolidColorBrush _removedForeground = ColorBrush(0xFF, 0x62, 0x5A);
-    private readonly SolidColorBrush _removedBackground = ColorBrush(0x3B, 0x1D, 0x1A);
-    private readonly SolidColorBrush _metaBackground = ColorBrush(0x24, 0x24, 0x24);
+    private readonly SolidColorBrush _neutralForeground = NativeThemeBrushes.Text;
+    private readonly SolidColorBrush _mutedForeground = NativeThemeBrushes.MutedText;
+    private readonly SolidColorBrush _neutralBackground = NativeThemeBrushes.Resource("MissumLayerBrush", 25);
+    private readonly SolidColorBrush _addedForeground = NativeThemeBrushes.Resource("MissumSuccessBrush", Color.FromArgb(255, 0x31, 0xC7, 0x7D));
+    private readonly SolidColorBrush _addedBackground = NativeThemeBrushes.Resource("MissumDiffAddedBackgroundBrush", Color.FromArgb(255, 0x13, 0x33, 0x25));
+    private readonly SolidColorBrush _removedForeground = NativeThemeBrushes.Resource("MissumDangerBrush", Color.FromArgb(255, 0xFF, 0x62, 0x5A));
+    private readonly SolidColorBrush _removedBackground = NativeThemeBrushes.Resource("MissumDiffRemovedBackgroundBrush", Color.FromArgb(255, 0x3B, 0x1D, 0x1A));
+    private readonly SolidColorBrush _metaBackground = NativeThemeBrushes.Resource("MissumHoverBrush", 36);
     private string _diff = "";
 
     public NativeDiffView(string diff, bool wrapLines = false)
@@ -197,7 +197,6 @@ public sealed partial class NativeDiffView : UserControl
 
     private static string FormatLineNumber(int? value) => value?.ToString(CultureInfo.InvariantCulture) ?? "";
     private static int? ParseNumber(string value) => int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var number) ? number : null;
-    private static SolidColorBrush ColorBrush(byte red, byte green, byte blue) => new(Color.FromArgb(255, red, green, blue));
 
     [GeneratedRegex(@"^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@", RegexOptions.CultureInvariant)]
     private static partial Regex HunkHeader();

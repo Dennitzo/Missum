@@ -8,7 +8,6 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Windows.Storage;
 using Windows.System;
-using Windows.UI;
 
 namespace Missum.App.Controls;
 
@@ -35,6 +34,7 @@ public sealed partial class NativeArtifactLinks : StackPanel
         _previews = App.Current.GetService<AssistantArtifactPreviewService>();
         _messageId = messageId;
         Spacing = 8;
+        NativeNotice.Attach(_error);
         Children.Add(_links);
         Children.Add(_error);
         UpdateArtifacts(artifacts);
@@ -121,13 +121,11 @@ public sealed partial class NativeArtifactLinks : StackPanel
         value.ValueKind == JsonValueKind.Object && value.TryGetProperty(property, out var text) && text.ValueKind == JsonValueKind.String
             ? text.GetString() ?? fallback : fallback;
 
-    private static SolidColorBrush Gray(byte value) => new(Color.FromArgb(255, value, value, value));
-
     private sealed class ArtifactLinkView
     {
         private readonly FontIcon _icon = new() { Glyph = "\uE8A5", FontSize = 20, Foreground = NativeIconPalette.BrushFor("document"), VerticalAlignment = VerticalAlignment.Center };
-        private readonly TextBlock _name = new() { FontSize = 14, Foreground = Gray(235), TextTrimming = TextTrimming.CharacterEllipsis };
-        private readonly TextBlock _details = new() { FontSize = 12, Foreground = Gray(160), TextTrimming = TextTrimming.CharacterEllipsis };
+        private readonly TextBlock _name = new() { FontSize = 14, Foreground = NativeThemeBrushes.Text, TextTrimming = TextTrimming.CharacterEllipsis };
+        private readonly TextBlock _details = new() { FontSize = 12, Foreground = NativeThemeBrushes.MutedText, TextTrimming = TextTrimming.CharacterEllipsis };
 
         public ArtifactLinkView()
         {
@@ -139,7 +137,7 @@ public sealed partial class NativeArtifactLinks : StackPanel
             var labels = new StackPanel { Spacing = 3 };
             labels.Children.Add(_name); labels.Children.Add(_details);
             Grid.SetColumn(labels, 1); row.Children.Add(labels);
-            var open = new TextBlock { Text = "Öffnen", FontSize = 12, Foreground = Gray(190), VerticalAlignment = VerticalAlignment.Center };
+            var open = new TextBlock { Text = "Öffnen", FontSize = 12, Foreground = NativeThemeBrushes.MutedText, VerticalAlignment = VerticalAlignment.Center };
             Grid.SetColumn(open, 2); row.Children.Add(open);
             Button = new Button
             {
@@ -149,8 +147,8 @@ public sealed partial class NativeArtifactLinks : StackPanel
                 Padding = new Thickness(12),
                 CornerRadius = new CornerRadius(12),
                 BorderThickness = new Thickness(1),
-                BorderBrush = Gray(55),
-                Background = Gray(33),
+                BorderBrush = NativeThemeBrushes.Resource("MissumStrokeBrush", 55),
+                Background = NativeThemeBrushes.Resource("MissumLayerBrush", 33),
             };
         }
 

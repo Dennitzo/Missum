@@ -605,7 +605,7 @@ public sealed class AssistantHost : IAsyncDisposable
         var figures = presentation.Simulation?.Artifacts.Select(item => new
         {
             item.Id, item.Title, url = Register(item.ImagePath), scriptUrl = Register(item.ScriptPath), dataUrl = Register(item.DataPath),
-            item.Provenance, item.IsResearchData, item.Sha256,
+            item.Provenance, item.IsResearchData, item.Sha256, item.Kind, item.ContentType,
         }).ToArray();
         await PublishAsync(clientId, "science.presentation", new
         {
@@ -652,7 +652,7 @@ public sealed class AssistantHost : IAsyncDisposable
         && value.TryGetProperty(name, out var property) && property.ValueKind == JsonValueKind.String ? property.GetString() ?? fallback : fallback;
     private static Guid Session(JsonElement payload) => Guid.Parse(Text(payload, "sessionId"));
     private static string ContentType(string file) => Path.GetExtension(file).ToLowerInvariant() switch
-    { ".pdf" => "application/pdf", ".zip" => "application/zip", ".png" => "image/png", ".jpg" or ".jpeg" => "image/jpeg", ".svg" => "image/svg+xml", ".json" => "application/json", _ => "text/plain" };
+    { ".pdf" => "application/pdf", ".zip" => "application/zip", ".png" => "image/png", ".jpg" or ".jpeg" => "image/jpeg", ".svg" => "image/svg+xml", ".json" => "application/json", ".html" or ".htm" => "text/html", _ => "text/plain" };
 
     public async ValueTask DisposeAsync()
     {

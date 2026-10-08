@@ -342,7 +342,9 @@ test("profile queue state stays visible across session snapshots and position ch
     runQueue: { active, pending: [waiting], queueDepth: 1, isIdle: false }
   }));
   assert.equal(state.runQueue.active.sessionId, "session-a");
-  assert.match(elements.sessionList.textContent, /Aktiver AuftragLäuft/);
+  assert.doesNotMatch(elements.sessionList.textContent, /Läuft/);
+  assert.equal(elements.sessionList.querySelectorAll(".session-item__spinner").length, 1);
+  assert.equal(elements.sessionList.querySelector(".session-item__activity").getAttribute("aria-label"), "Auftrag läuft");
   assert.match(elements.sessionList.textContent, /Wartender AuftragWarteschlange · Platz 1/);
 
   emit("queue.changed", {
@@ -353,7 +355,8 @@ test("profile queue state stays visible across session snapshots and position ch
       isIdle: false
     }
   });
-  assert.match(elements.sessionList.textContent, /Wartender AuftragLäuft/);
+  assert.doesNotMatch(elements.sessionList.textContent, /Läuft/);
+  assert.equal(elements.sessionList.querySelectorAll(".session-item__spinner").length, 1);
   assert.match(elements.sessionList.textContent, /Aktiver AuftragWarteschlange · Platz 1/);
 });
 

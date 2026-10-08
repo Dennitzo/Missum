@@ -10,7 +10,7 @@ const webRoot = path.resolve(__dirname, "../../src/Missum.App/Assets/Web");
 const source = name => fs.readFileSync(path.join(webRoot, name), "utf8");
 const plain = value => JSON.parse(JSON.stringify(value));
 
-function harness(initial = {}, saved = new Map()) {
+function harness(initial = {}, saved = new Map(), preferences = {}) {
   const ids = new Map(), events = new Map(), documentEvents = new Map(), posts = [], timers = [];
   const body = new TestNode("body");
   const document = { body, activeElement: null, createElement(tag) {
@@ -34,12 +34,13 @@ function harness(initial = {}, saved = new Map()) {
   const context = vm.createContext({ URL, document, window: { innerWidth: 1200, innerHeight: 800 }, location: {
     href: "http://192.168.1.2:8080/assistant/", origin: "http://192.168.1.2:8080", hostname: "192.168.1.2", hash: ""
   }, sessionStorage: { getItem: key => saved.get(key) || null, setItem: (key, value) => saved.set(key, value) },
+    localStorage: preferences.storage || { getItem: key => saved.get(key) || null, setItem: (key, value) => saved.set(key, value) },
     setTimeout: callback => { timers.push(callback); return timers.length; },
     addEventListener: (type, callback) => events.set(type, callback),
     dispatchEvent: event => events.get(event.type)?.(event),
     CustomEvent: class { constructor(type, options) { this.type = type; this.detail = options?.detail; } },
     missumModelCatalog: modelCatalog, missumApp: { getState: () => current, toggleSidebar() {} },
-    missumBridge: { isLanBrowser: true, clientId: "mac.tab", resourceUrl: value => value,
+    missumBridge: { isLanBrowser: true, clientId: preferences.clientId || "mac.tab", deviceId: preferences.deviceId, resourceUrl: value => value,
       post(type, payload) { posts.push({ type, payload }); return `request-${posts.length}`; } } });
   vm.runInContext(source("browser-panels.js"), context, { filename: "browser-panels.js" });
   const flush = () => { while (timers.length) timers.shift()(); };
@@ -55,6 +56,61 @@ const message = (id, extra = {}) => ({ id, role: "assistant", status: "completed
 
 const agent = (index, extra = {}) => ({ agentId: `agent-${index}`, runId: `run-${index}`, sessionId: "chat-a", title: `Aufgabe ${index}`, status: index % 2 ? "completed" : "cancelled", planetIndex: index,
   createdAt: `2026-10-06T${String(index).padStart(2,"0")}:00:00Z`, messages: [message(`child-${index}`)], ...extra });
+
+test("explicit outputs preference survives both on and off reloads without changing native server settings", async () => {
+  const saved = new Map(), first = harness({}, saved);
+  assert.equal(first.ids.get("output-inspector").hidden, true);
+  assert.equal(saved.has("assistant.outputs-visible:v1:mac"), false, "initial read must not invent a stored preference");
+  await first.click(first.ids.get("inspector-toggle"));
+  assert.equal(saved.get("assistant.outputs-visible:v1:mac"), "1");
+  const reopened = harness({}, saved);
+  assert.equal(reopened.ids.get("output-inspector").hidden, false);
+  assert.equal(reopened.ids.get("inspector-toggle").getAttribute("aria-expanded"), "true");
+  await reopened.click(reopened.ids.get("inspector-toggle"));
+  assert.equal(saved.get("assistant.outputs-visible:v1:mac"), "0");
+  const closed = harness({}, saved); assert.equal(closed.ids.get("output-inspector").hidden, true);
+  assert.equal([...first.posts, ...reopened.posts, ...closed.posts].some(item => item.type === "settings.update" || item.type === "ui.outputs"), false);
+});
+
+test("new browser tabs share device outputs preference while another browser device has its own default", async () => {
+  const saved = new Map(), first = harness({}, saved, { clientId: "device.tab-a", deviceId: "device" });
+  await first.click(first.ids.get("inspector-toggle"));
+  const second = harness({}, saved, { clientId: "device.tab-b", deviceId: "device" });
+  assert.equal(second.ids.get("output-inspector").hidden, false);
+  const other = harness({}, saved, { clientId: "other.tab-c", deviceId: "other" });
+  assert.equal(other.ids.get("output-inspector").hidden, true);
+  const fallback = harness({}, saved, { clientId: "device.tab-new" });
+  assert.equal(fallback.ids.get("output-inspector").hidden, false, "legacy bridge fallback removes the tab segment");
+});
+
+test("automatic Sources hide keeps the persistent open intent across reload and return to chat", async () => {
+  const saved = new Map(), first = harness({}, saved);
+  await first.click(first.ids.get("inspector-toggle"));
+  first.context.missumPanels.setView("sources");
+  assert.equal(first.ids.get("output-inspector").hidden, true);
+  assert.equal(saved.get("assistant.outputs-visible:v1:mac"), "1");
+  const reopened = harness({ activeSessionId: null }, saved);
+  reopened.current.activeSessionId = "chat-a";
+  reopened.emit("state.snapshot", {});
+  assert.equal(reopened.pane.dataset.view, "sources");
+  assert.equal(reopened.ids.get("output-inspector").hidden, true);
+  assert.equal(reopened.ids.get("inspector-toggle").getAttribute("aria-expanded"), "false");
+  reopened.context.missumPanels.setView("chat");
+  assert.equal(reopened.ids.get("output-inspector").hidden, false);
+  assert.equal(saved.get("assistant.outputs-visible:v1:mac"), "1");
+});
+
+test("unavailable or damaged browser storage keeps outputs functional without writing server preferences", async () => {
+  const blocked = { getItem() { throw new Error("storage blocked"); }, setItem() { throw new Error("storage blocked"); } };
+  const h = harness({}, new Map(), { storage: blocked });
+  assert.equal(h.ids.get("output-inspector").hidden, true);
+  await h.click(h.ids.get("inspector-toggle")); assert.equal(h.ids.get("output-inspector").hidden, false);
+  h.context.missumPanels.setView("sources"); h.context.missumPanels.setView("chat");
+  assert.equal(h.ids.get("output-inspector").hidden, false);
+  const bad = harness({}, new Map([["assistant.outputs-visible:v1:mac", "bad-value"]]));
+  assert.equal(bad.ids.get("output-inspector").hidden, true);
+  assert.equal(h.posts.some(item => item.type === "settings.update"), false);
+});
 
 test("dedicated view tabs automatically hide outputs and their toggle while restoring the prior chat choice", async () => {
   for (const view of ["sources", "review", "publication", "simulation", "subagents", "settings"]) {
@@ -351,6 +407,10 @@ test("Science renders real figure resources without filename hints or optional s
   h.context.missumPanels.setView("simulation");
   assert.equal(h.ids.get("browser-view-panel").querySelector("img").src, "http://192.168.1.2:8080/assistant/science-resources/figure");
   assert.equal(h.ids.get("browser-view-panel").querySelector("iframe").src, "http://192.168.1.2:8080/assistant/science-resources/html");
+  assert.equal(h.ids.get("browser-view-panel").querySelector("iframe").getAttribute("sandbox"), "allow-scripts");
+  assert.equal(h.ids.get("browser-view-panel").querySelector(".simulation-source summary").textContent, "HTML-/JavaScript-Code");
+  assert.equal(h.ids.get("browser-view-panel").querySelectorAll("a").some(link => /\/(html|script)$/.test(link.href)), false,
+    "interactive simulations and their source stay inside the Simulation tab");
 });
 
 test("the outputs overlay opens and closes through its accessible controls and keeps the native compact structure", async () => {

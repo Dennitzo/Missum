@@ -108,6 +108,9 @@ public sealed class NativeMathRendererTests
     [InlineData(@"\frac{1}{2}", @"\\frac{1}{2}")]
     [InlineData(@"\begin{aligned}a&=b+c\\d&=e-f\end{aligned}", @"\\begin{aligned}a&=b+c\\\\d&=e-f\\end{aligned}")]
     [InlineData(@"\begin{pmatrix}1&2\\3&4\end{pmatrix}", @"\\begin{pmatrix}1&2\\\\3&4\\end{pmatrix}")]
+    [InlineData(@"\begin{pmatrix}B_p\\B_\phi\end{pmatrix}", @"\\begin{pmatrix}B_p\\\\B_\\phi\\end{pmatrix}")]
+    [InlineData(@"\begin{pmatrix}-\eta_p & \alpha\\\omega_\Omega & -\eta_\phi\end{pmatrix}",
+        @"\\begin{pmatrix}-\\eta_p & \\alpha\\\\\\omega_\\Omega & -\\eta_\\phi\\end{pmatrix}")]
     public void JsonEscapedCommandsNormalizeWithoutLosingMatrixRowBreaks(string expected, string escaped)
     {
         var regular = NativeMathRenderer.Render(expected, display: true);

@@ -368,6 +368,23 @@ def multi_gpu_split_mode():
     return value if value in ("layer", "row", "tensor") else "layer"
 
 
+def vision_batch_policy(model, policy):
+    """Keep every non-causal image decode inside the physical microbatch.
+
+    llama/mtmd passes up to n_batch image tokens to llama_decode, which aborts
+    for non-causal attention when n_ubatch is smaller. A projector can use this
+    path even on a coding/general alias. Lower the logical batch instead of
+    increasing the measured GPU allocation; text-only and embedding models
+    retain their existing policies. Defaults are those of the native runtime.
+    """
+    if not model.get("projector") or model["role"] == "embedding":
+        return policy
+    safe = dict(policy)
+    size = min(policy.get("batchSize", 2048), policy.get("ubatchSize", 512))
+    safe.update(batchSize=size, ubatchSize=size)
+    return safe
+
+
 def model_runtime_policy(model, placement=None, *, split_mode="layer", fit_target="2048", gpu_layers="auto"):
     """Resolve once before a load; active KV must not follow later environment changes."""
     embedding = model["role"] == "embedding"
@@ -388,7 +405,7 @@ def model_runtime_policy(model, placement=None, *, split_mode="layer", fit_targe
                              "Choose a measured VRAM-safe limit, or use split mode layer for automatic fitting.")
         policy.update(fit="off", gpuLayers="999", context=min(model["context"], int(value)),
                       contextPolicy="explicit-limit")
-    return policy
+    return vision_batch_policy(model, policy)
 
 
 def write_presets(root, target, placements=None, managed_gpu=False, fit_target="2048", gpu_layers="auto",
@@ -439,6 +456,7 @@ def write_presets(root, target, placements=None, managed_gpu=False, fit_target="
             # override is validated/applied only at the next actual load.
             policy = model_runtime_policy(model, placement, split_mode="layer" if managed_gpu else multi_gpu_split_mode(),
                                           fit_target=fit_target, gpu_layers=gpu_layers)
+        policy = vision_batch_policy(model, policy)
         if placement:
             lines += [f"device = {placement}", "main-gpu = 0"]
             if model.get("projector"):
@@ -655,7 +673,7 @@ def measured_model_policy(model, profile, fit_target):
     for key in ("mmprojDevice", "batchSize", "ubatchSize"):
         if key in profile:
             policy[key] = profile[key]
-    return policy
+    return vision_batch_policy(model, policy)
 
 
 def choose_single_gpu(model, devices, reserve_mib=2048):
@@ -781,12 +799,18 @@ class GpuLoadManager:
         metadata = model_metadata(path, allow_metadata_only=True) or {}
         policy = self.policies.get(model_id) or model_runtime_policy(
             model, self.placements.get(model_id), fit_target=self.fit_target, gpu_layers=self.gpu_layers)
+        policy = vision_batch_policy(model, policy)
         # Preserve the existing default layer/single-GPU snapshot identity:
         # the same loaded configuration must not force a large prefix re-eval.
         fingerprint = dict(version=1, files=identity, context=model["context"], cache="q8_0", slots=1,
                            template=german_reasoning_template(metadata.get("tokenizer.chat_template", "")),
                            placement=self.placements.get(model_id), fit=self.fit_target, gpuLayers=self.gpu_layers,
                            split="layer" if policy["split"] == "none" else policy["split"])
+        if model.get("projector") and model["role"] != "embedding":
+            # Default/fitted vision loads also changed their physical batching.
+            # A snapshot must describe the effective decoder, not the unsafe
+            # logical batch recorded by an older measured profile.
+            fingerprint["visionBatch"] = {key: policy[key] for key in ("batchSize", "ubatchSize")}
         if policy["split"] == "tensor" or policy.get("profileId") or policy.get("contextPolicy") == "profile-fallback-full-context":
             # Explicit tensor/profiled loads have distinct fitting, context,
             # projector and batch settings; include their effective config.
@@ -1029,6 +1053,10 @@ class GpuLoadManager:
                     # template. A child never spills onto its parent's device.
                     props = self.router("props?model=" + urllib.parse.quote(base, safe=""))
                     policy = dict(policy, context=props["default_generation_settings"]["n_ctx"])
+                    for key in ("batchSize", "ubatchSize"):
+                        if key in self.policies.get(base, {}):
+                            policy[key] = self.policies[base][key]
+                policy = vision_batch_policy(model, policy)
                 if attempt == 0:
                     self.sessions.invalidate(model_id)
                 self.placements[model_id] = device

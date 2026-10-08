@@ -15,6 +15,7 @@
       <Color x:Key="MissumLayerStrongColor">#303030</Color>
       <Color x:Key="MissumStrokeColor">#303030</Color>
       <Color x:Key="MissumMutedTextColor">#999999</Color>
+      <Color x:Key="MissumTextColor">#FFFFFF</Color>
       <Color x:Key="MissumAccentColor">#A970FF</Color>
       <Color x:Key="MissumAccentTextColor">#FFFFFF</Color>
       <Color x:Key="MissumSuccessColor">#42D392</Color>
@@ -27,6 +28,7 @@
       <Color x:Key="MissumLayerStrongColor">#FFF8F5FC</Color>
       <Color x:Key="MissumStrokeColor">#45241D2F</Color>
       <Color x:Key="MissumMutedTextColor">#51465D</Color>
+      <Color x:Key="MissumTextColor">#E4000000</Color>
       <Color x:Key="MissumAccentColor">#6425C4</Color>
       <Color x:Key="MissumAccentTextColor">#FFFFFF</Color>
       <Color x:Key="MissumSuccessColor">#066540</Color>
@@ -39,6 +41,7 @@
       <Color x:Key="MissumLayerStrongColor">#000000</Color>
       <Color x:Key="MissumStrokeColor">#FFFFFF</Color>
       <Color x:Key="MissumMutedTextColor">#FFFFFF</Color>
+      <Color x:Key="MissumTextColor">#FFFFFF</Color>
       <Color x:Key="MissumAccentColor">#FFFF00</Color>
       <Color x:Key="MissumAccentTextColor">#000000</Color>
       <Color x:Key="MissumSuccessColor">#00FF00</Color>
@@ -55,7 +58,19 @@
   <SolidColorBrush x:Key="MissumPressedBrush" Color="{ThemeResource MissumLayerStrongColor}" />
   <SolidColorBrush x:Key="MissumStrokeBrush" Color="{ThemeResource MissumStrokeColor}" />
   <SolidColorBrush x:Key="MissumMutedTextBrush" Color="{ThemeResource MissumMutedTextColor}" />
+  <SolidColorBrush x:Key="MissumTextBrush" Color="{ThemeResource MissumTextColor}" />
   <SolidColorBrush x:Key="MissumAccentBrush" Color="{ThemeResource MissumAccentColor}" />
+  <SolidColorBrush x:Key="MissumAccentReadableBrush" Color="{ThemeResource MissumAccentColor}" />
+  <SolidColorBrush x:Key="MissumCodeKeywordBrush" Color="#C586C0" />
+  <SolidColorBrush x:Key="MissumCodeTypeBrush" Color="#4EC9B0" />
+  <SolidColorBrush x:Key="MissumCodeStringBrush" Color="#CE9178" />
+  <SolidColorBrush x:Key="MissumCodeNumberBrush" Color="#B5CEA8" />
+  <SolidColorBrush x:Key="MissumCodeCommentBrush" Color="#6A9955" />
+  <SolidColorBrush x:Key="MissumCodeFunctionBrush" Color="#DCDCAA" />
+  <SolidColorBrush x:Key="MissumCodePropertyBrush" Color="#9CDCFE" />
+  <SolidColorBrush x:Key="MissumCodeTagBrush" Color="#569CD6" />
+  <SolidColorBrush x:Key="MissumDiffAddedBackgroundBrush" Color="#133325" />
+  <SolidColorBrush x:Key="MissumDiffRemovedBackgroundBrush" Color="#3B1D1A" />
   <SolidColorBrush x:Key="MissumAccentSubtleBrush" Color="{ThemeResource MissumAccentColor}" Opacity="0.14" />
   <SolidColorBrush x:Key="MissumAccentTextBrush" Color="{ThemeResource MissumAccentTextColor}" />
   <SolidColorBrush x:Key="MissumSuccessBrush" Color="{ThemeResource MissumSuccessColor}" />

@@ -3,13 +3,32 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using Missum.App.Services;
+using Missum.Ai.Contracts;
 using Missum.Core.Contracts;
+using Missum.Core.Models;
 using Missum.Core.Research;
 
 namespace Missum.Tests;
 
 public sealed class ScientificSimulationTests
 {
+    [Fact]
+    public void NativeNavigationAllowsOnlyItsExactHostDocumentAndBlankFrame()
+    {
+        var document = ScientificSimulationHtml.NativeDocument(InteractiveHtml);
+        var trusted = ScientificSimulationHtml.HostDocumentUri(document);
+        Assert.StartsWith("data:text/html;charset=utf-8;base64,", trusted, StringComparison.Ordinal);
+        Assert.True(ScientificSimulationHtml.IsHostNavigationAllowed(trusted, trusted));
+        Assert.True(ScientificSimulationHtml.IsHostNavigationAllowed("about:blank", trusted));
+        Assert.True(ScientificSimulationHtml.IsHostNavigationAllowed("about:srcdoc", trusted));
+        Assert.False(ScientificSimulationHtml.IsHostNavigationAllowed(ScientificSimulationHtml.HostDocumentUri("<script>window.open('http://example.test')</script>"), trusted));
+        Assert.False(ScientificSimulationHtml.IsHostNavigationAllowed("data:text/html,other", trusted));
+        Assert.False(ScientificSimulationHtml.IsHostNavigationAllowed("https://example.test", trusted));
+        Assert.False(ScientificSimulationHtml.IsHostNavigationAllowed("file:///C:/secret", trusted));
+        Assert.False(ScientificSimulationHtml.IsHostNavigationAllowed("javascript:alert(1)", trusted));
+        Assert.False(ScientificSimulationHtml.IsHostNavigationAllowed(trusted, null));
+    }
+
     [Fact]
     public void ArtifactPathsRejectEscapesAndRootAliases()
     {
@@ -42,6 +61,179 @@ public sealed class ScientificSimulationTests
         Assert.Equal(0, sandbox.Executions);
         Assert.Empty(Directory.EnumerateFileSystemEntries(layout.WorkPath));
         Assert.False(File.Exists(Path.Combine(layout.RootPath, "last-visualization.json")));
+    }
+
+    [Fact]
+    public async Task StandaloneRealtimeSimulationRestoresInItsProjectWithoutPythonExecution()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var (repository, project) = await CreateProjectAsync(environment, "interactive");
+        var sandbox = new RecordingSandbox(Path.Combine(environment.Directory, "simulation"));
+        var layout = await sandbox.EnsureProjectAsync(project.Id);
+        var path = Path.Combine(layout.WorkPath, "animation.html");
+        await File.WriteAllTextAsync(path, InteractiveHtml);
+        using var service = new ScientificSimulationService(repository, sandbox);
+
+        var first = await service.RefreshAsync(project.Id);
+        using var restarted = new ScientificSimulationService(repository, sandbox);
+        var restored = await restarted.RefreshAsync(project.Id);
+
+        Assert.Equal("ready", restored.Status);
+        var artifact = Assert.Single(restored.Artifacts);
+        Assert.Equal(Assert.Single(first.Artifacts), artifact);
+        Assert.Equal(path, artifact.ImagePath);
+        Assert.Equal(path, artifact.ScriptPath);
+        Assert.Equal("Erdmagnetfeld – Echtzeit", artifact.Title);
+        Assert.Equal("interactive", artifact.Kind);
+        Assert.Equal("text/html", artifact.ContentType);
+        Assert.False(artifact.IsResearchData);
+        Assert.Null(artifact.Execution);
+        Assert.StartsWith("Interaktive Simulation · Projektdatei", artifact.Provenance, StringComparison.Ordinal);
+        Assert.DoesNotContain("ProcessSucceeded", artifact.Provenance, StringComparison.Ordinal);
+        Assert.Equal(Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(path))), artifact.Sha256);
+        Assert.Equal(0, sandbox.Executions);
+        Assert.Empty((await repository.LoadResultSnapshotAsync(project.Id)).Experiments);
+    }
+
+    [Fact]
+    public async Task HtmlDiscoveryKeepsProjectScopeAndRejectsDocumentsAndPublicationPreviews()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var (repository, project) = await CreateProjectAsync(environment, "interactive-scope");
+        var sandbox = new RecordingSandbox(Path.Combine(environment.Directory, "simulation"));
+        var layout = await sandbox.EnsureProjectAsync(project.Id);
+        var other = await sandbox.EnsureProjectAsync("other-project");
+        await File.WriteAllTextAsync(Path.Combine(other.WorkPath, "animation.html"), InteractiveHtml);
+        await File.WriteAllTextAsync(Path.Combine(layout.WorkPath, "report.html"), "<!doctype html><html><script>let a=1;</script><p>Publikation</p></html>");
+        Directory.CreateDirectory(Path.Combine(layout.ArtifactsPath, "publication"));
+        await File.WriteAllTextAsync(Path.Combine(layout.ArtifactsPath, "publication", "preview.html"), InteractiveHtml);
+        using var service = new ScientificSimulationService(repository, sandbox);
+
+        Assert.Empty((await service.RefreshAsync(project.Id)).Artifacts);
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.ResolveInteractiveSimulationAsync(project.Id,
+            Path.Combine(other.WorkPath, "animation.html")));
+        await Assert.ThrowsAsync<InvalidDataException>(() => service.ResolveInteractiveSimulationAsync(project.Id,
+            "work/report.html"));
+        Assert.Equal(0, sandbox.Executions);
+    }
+
+    [Fact]
+    public async Task ChangedSimulationGetsANewHashAndInvalidOrOversizedHtmlIsNotRestored()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var (repository, project) = await CreateProjectAsync(environment, "interactive-update");
+        var sandbox = new RecordingSandbox(Path.Combine(environment.Directory, "simulation"));
+        var layout = await sandbox.EnsureProjectAsync(project.Id);
+        var path = Path.Combine(layout.WorkPath, "animation.html");
+        await File.WriteAllTextAsync(path, InteractiveHtml);
+        using var service = new ScientificSimulationService(repository, sandbox);
+        var old = Assert.Single((await service.RefreshAsync(project.Id)).Artifacts);
+        await File.WriteAllTextAsync(path, InteractiveHtml.Replace("let t=0", "let t=1", StringComparison.Ordinal));
+        var current = Assert.Single((await service.RefreshAsync(project.Id)).Artifacts);
+        Assert.NotEqual(old.Sha256, current.Sha256);
+        Assert.NotEqual(old.Id, current.Id);
+        await File.WriteAllTextAsync(path, "<!doctype html><canvas></canvas>");
+        Assert.Empty((await service.RefreshAsync(project.Id)).Artifacts);
+        await File.WriteAllTextAsync(path, InteractiveHtml + new string(' ', ScientificSimulationHtml.MaximumBytes));
+        Assert.Empty((await service.RefreshAsync(project.Id)).Artifacts);
+        Assert.Equal(0, sandbox.Executions);
+    }
+
+    [Fact]
+    public void NativeSimulationUsesOnlyOpaqueSandboxedInlineDocument()
+    {
+        var document = ScientificSimulationHtml.NativeDocument(InteractiveHtml);
+        Assert.Contains("sandbox=\"allow-scripts\"", document, StringComparison.Ordinal);
+        Assert.DoesNotContain("allow-same-origin", document, StringComparison.Ordinal);
+        Assert.DoesNotContain("allow-popups", document, StringComparison.Ordinal);
+        Assert.DoesNotContain("file://", document, StringComparison.Ordinal);
+        Assert.DoesNotContain("chrome.webview", document, StringComparison.Ordinal);
+        Assert.Contains("connect-src 'none'", ScientificSimulationHtml.ContentSecurityPolicy, StringComparison.Ordinal);
+        Assert.Contains("frame-src 'none'", ScientificSimulationHtml.ContentSecurityPolicy, StringComparison.Ordinal);
+        var start = document.IndexOf("atob('", StringComparison.Ordinal) + "atob('".Length;
+        var end = document.IndexOf("')", start, StringComparison.Ordinal);
+        var frameSource = Encoding.UTF8.GetString(Convert.FromBase64String(document[start..end]));
+        Assert.Contains(InteractiveHtml, frameSource, StringComparison.Ordinal);
+        Assert.Contains("Content-Security-Policy", frameSource, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ScienceWorkspaceOpenRegistersRealtimeSimulationWithoutAnExternalProcess()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var chats = environment.Get<IChatRepository>();
+        var session = await chats.CreateSessionAsync("Erdmagnetfeld", ChatMode.ClaudeScience);
+        var repository = environment.Get<IScientificResearchRepository>();
+        var now = DateTimeOffset.UtcNow;
+        var project = new ScientificResearchProject("research-" + session.Id.ToString("N"), session.Id, "scientificEvidence",
+            "Erdmagnetfeld", "Erdmagnetfeld", "codingWorkspaceResearch", "multiPath", "active", 2, 1, now, now);
+        await repository.UpsertProjectAsync(project);
+        var states = Assert.IsAssignableFrom<IScientificResearchStateRepository>(repository);
+        var working = await states.ApplyWorkingUpdateAsync(project.Id, "simulation-fixture-section", null, "Erdmagnetfeld",
+            [new("grundlagen", "section", 0, JsonSerializer.SerializeToElement(new
+            {
+                title = "Modellannahmen", contentMarkdown = "Die Echtzeit-Simulation untersucht ein ausdrücklich hypothetisches Modell.",
+                status = "unresolved", order = 10,
+            }))]);
+        Assert.True(working.Success);
+        var sandbox = new RecordingSandbox(Path.Combine(environment.Directory, "Science"));
+        var layout = await sandbox.EnsureProjectAsync(project.Id);
+        var path = Path.Combine(layout.WorkPath, "animation.html");
+        await File.WriteAllTextAsync(path, InteractiveHtml);
+        using var simulations = new ScientificSimulationService(repository, sandbox);
+        var renders = 0;
+        using var publications = new ScientificPublicationService(repository, async (source, token) =>
+        {
+            Interlocked.Increment(ref renders);
+            var pdf = Path.ChangeExtension(source, ".pdf");
+            await File.WriteAllBytesAsync(pdf, Encoding.ASCII.GetBytes("%PDF-1.7\n" + new string(' ', 2048) + "\n%%EOF\n"), token);
+            return pdf;
+        }, Path.Combine(environment.Directory, "publications"), sandbox: sandbox);
+        using var presentation = new ScientificPresentationCoordinator(publications, simulations, static (_, _) => Task.CompletedTask);
+        var broker = new LocalToolBroker(null!, null!, null!, chats,
+            sciencePresentation: presentation, scientificResearch: repository, scientificSimulations: simulations);
+        var requested = Path.GetRelativePath(environment.Directory, path);
+        var proposal = new ToolProposal("open-simulation", "science-run", WorkspaceTools.Open,
+            JsonSerializer.SerializeToElement(new { path = requested }), ToolRiskClass.Process,
+            "Echtzeit-Simulation anzeigen", DateTimeOffset.UtcNow.AddMinutes(1));
+
+        var opened = await broker.ExecuteAsync(proposal, session.Id, null, environment.Directory);
+
+        Assert.Equal("completed", opened.Status);
+        Assert.False(opened.Result.GetProperty("opened").GetBoolean());
+        Assert.True(opened.Result.GetProperty("available").GetBoolean());
+        Assert.False(opened.Result.GetProperty("displayed").GetBoolean());
+        Assert.True(opened.Result.GetProperty("registered").GetBoolean());
+        Assert.True(opened.Result.GetProperty("integrated").GetBoolean());
+        Assert.Equal("simulation", opened.Result.GetProperty("view").GetString());
+        Assert.Equal(project.Id, opened.Result.GetProperty("projectId").GetString());
+        Assert.Equal(requested, opened.Result.GetProperty("path").GetString());
+        Assert.Equal(Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(path))),
+            opened.Result.GetProperty("sha256").GetString());
+        var instruction = opened.Result.GetProperty("instruction").GetString()!;
+        Assert.Contains("registriert, wurde aber nicht angezeigt", instruction, StringComparison.Ordinal);
+        Assert.Contains("aktuelle Nutzeransicht bleibt erhalten", instruction, StringComparison.Ordinal);
+        Assert.Contains("Chat statt der Simulation", instruction, StringComparison.Ordinal);
+        Assert.Contains("image.input operation=file", instruction, StringComparison.Ordinal);
+        Assert.Contains("keine ungeprüfte HTML-Animation", instruction, StringComparison.Ordinal);
+        Assert.False(opened.Result.TryGetProperty("processId", out _));
+        await presentation.WaitForIdleAsync(project.Id);
+        var snapshot = Assert.IsType<ScientificPresentationSnapshot>(presentation.GetSnapshot(project.Id));
+        Assert.NotNull(snapshot.Publication);
+        Assert.Null(snapshot.PublicationError);
+        Assert.Equal("interactive", Assert.Single(snapshot.Simulation!.Artifacts).Kind);
+        Assert.Equal(1, renders);
+        var other = await sandbox.EnsureProjectAsync("other-project");
+        await File.WriteAllTextAsync(Path.Combine(other.WorkPath, "animation.html"), InteractiveHtml);
+        var outside = await broker.ExecuteAsync(proposal with
+        {
+            ProposalId = "open-other-simulation", Arguments = JsonSerializer.SerializeToElement(new
+            { path = Path.GetRelativePath(environment.Directory, Path.Combine(other.WorkPath, "animation.html")) }),
+        }, session.Id, null, environment.Directory);
+        Assert.Equal("failed", outside.Status);
+        Assert.Equal("client.tool_failed", outside.ErrorCode);
+        Assert.False(outside.Result.TryGetProperty("processId", out _));
+        Assert.Equal(0, sandbox.Executions);
     }
 
     [Fact]
@@ -245,6 +437,8 @@ public sealed class ScientificSimulationTests
 
     private static readonly byte[] Png = Convert.FromBase64String(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
+
+    private const string InteractiveHtml = "<!doctype html><html><head><meta charset=\"utf-8\"><title>Erdmagnetfeld – Echtzeit</title></head><body><button>Pause</button><canvas id=\"plot\"></canvas><script>let t=0;function tick(){t++;requestAnimationFrame(tick)};tick();</script></body></html>";
 
     private sealed class RecordingSandbox(string root) : IResearchSandboxService
     {

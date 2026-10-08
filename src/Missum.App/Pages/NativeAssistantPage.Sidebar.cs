@@ -49,7 +49,7 @@ public sealed partial class NativeAssistantPage
             projectHeader.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(32) });
             var expanded = !string.Equals(S(group, "isCollapsed"), "True", StringComparison.OrdinalIgnoreCase);
             var folderButton = SidebarButton("\uE8B7", name);
-            ((TextBlock)((Grid)folderButton.Content).Children[1]).Foreground = Brush(180);
+            ((TextBlock)((Grid)folderButton.Content).Children[1]).Foreground = ThemeBrush("MissumMutedTextBrush", 180);
             var projectChildren = new StackPanel { Visibility = expanded || search.Length > 0 ? Visibility.Visible : Visibility.Collapsed };
             ToolTipService.SetToolTip(folderButton, path.Length == 0 ? name : path);
             folderButton.Click += async (_, _) =>
@@ -98,7 +98,7 @@ public sealed partial class NativeAssistantPage
             {
                 projectChildren.Children.Add(new TextBlock
                 {
-                    Text = "Keine Chats", FontSize = 13, Foreground = Brush(105),
+                    Text = "Keine Chats", FontSize = 13, Foreground = ThemeBrush("MissumMutedTextBrush", 105),
                     Margin = new Thickness(32, 3, 8, 9),
                 });
             }
@@ -112,7 +112,7 @@ public sealed partial class NativeAssistantPage
             ProjectsPanel.Children.Add(project);
         }
         if (ProjectsPanel.Children.Count == 0 && Items(_snapshot, "sessionGroups").Length == 0)
-            ProjectsPanel.Children.Add(new TextBlock { Text = "Projekt hinzufügen", Foreground = Brush(110), FontSize = 13, Margin = new Thickness(10, 4, 0, 8) });
+            ProjectsPanel.Children.Add(new TextBlock { Text = "Projekt hinzufügen", Foreground = ThemeBrush("MissumMutedTextBrush", 110), FontSize = 13, Margin = new Thickness(10, 4, 0, 8) });
 
         UpdateSidebarActivity(_snapshot);
     }
@@ -241,7 +241,7 @@ public sealed partial class NativeAssistantPage
         }
         var textColumn = row.ColumnDefinitions.Count;
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        var text = new TextBlock { Text = label, FontSize = 14, TextTrimming = TextTrimming.CharacterEllipsis,
+        var text = new TextBlock { Text = label, FontSize = 14, Foreground = ThemeBrush("MissumTextBrush", 230), TextTrimming = TextTrimming.CharacterEllipsis,
             TextWrapping = TextWrapping.NoWrap, VerticalAlignment = VerticalAlignment.Center };
         Grid.SetColumn(text, textColumn); row.Children.Add(text);
         var button = new Button { Content = row, HorizontalAlignment = HorizontalAlignment.Stretch,

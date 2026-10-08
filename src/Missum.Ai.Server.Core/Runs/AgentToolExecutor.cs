@@ -3,6 +3,7 @@ using Missum.Ai.Server.Core.Configuration;
 using Missum.Ai.Server.Core.Models;
 using Missum.Ai.Server.Core.Policies;
 using Missum.Ai.Server.Core.Research;
+using Missum.Ai.Server.Core.Runtime;
 using Missum.Ai.Server.Core.Storage;
 using Missum.Ai.Server.Core.Workers;
 using Microsoft.Extensions.Options;
@@ -37,6 +38,7 @@ public sealed class AgentToolExecutor
     private readonly GpuLeaseScheduler _scheduler;
     private readonly ServiceActivityTracker _serviceActivities;
     private readonly MissumAiServerOptions _options;
+    private readonly ServerRuntimeState _runtime;
     private readonly JsonSerializerOptions _jsonOptions = MissumAiProtocol.CreateJsonOptions();
 
     public AgentToolExecutor(
@@ -47,7 +49,8 @@ public sealed class AgentToolExecutor
         ModelRuntimeClient modelRuntime,
         GpuLeaseScheduler scheduler,
         ServiceActivityTracker serviceActivities,
-        IOptions<MissumAiServerOptions> options)
+        IOptions<MissumAiServerOptions> options,
+        ServerRuntimeState? runtime = null)
     {
         _research = research;
         _workers = workers;
@@ -57,6 +60,7 @@ public sealed class AgentToolExecutor
         _scheduler = scheduler;
         _serviceActivities = serviceActivities;
         _options = options.Value;
+        _runtime = runtime ?? new ServerRuntimeState(options);
     }
 
     public Task<AgentToolExecutionResult> ExecuteAsync(string name, JsonElement arguments, string runId,
@@ -94,14 +98,15 @@ public sealed class AgentToolExecutor
         string? reasoningEffort, IReadOnlyList<string>? currentUploadIds, string? runtimeInstanceId,
         CancellationToken cancellationToken = default)
     {
+        var mediaContext = new MediaOperationContext(selectedModelId);
         try
         {
             return name switch
             {
                 "web.search" => await SearchAsync(arguments, runId, cancellationToken).ConfigureAwait(false),
                 "web.fetch" => await FetchAsync(arguments, runId, cancellationToken).ConfigureAwait(false),
-                "media.inspect" => await InspectMediaAsync(arguments, runId, analyze: false, selectedModelId, reasoningEffort, currentUploadIds, runtimeInstanceId, cancellationToken).ConfigureAwait(false),
-                "media.analyze" => await InspectMediaAsync(arguments, runId, analyze: true, selectedModelId, reasoningEffort, currentUploadIds, runtimeInstanceId, cancellationToken).ConfigureAwait(false),
+                "media.inspect" => await InspectMediaAsync(arguments, runId, analyze: false, selectedModelId, reasoningEffort, currentUploadIds, runtimeInstanceId, mediaContext, cancellationToken).ConfigureAwait(false),
+                "media.analyze" => await InspectMediaAsync(arguments, runId, analyze: true, selectedModelId, reasoningEffort, currentUploadIds, runtimeInstanceId, mediaContext, cancellationToken).ConfigureAwait(false),
                 "image.generate" => await GenerateImagesAsync(arguments, runId, cancellationToken).ConfigureAwait(false),
                 "speech.synthesize" => await SynthesizeSpeechAsync(arguments, runId, cancellationToken).ConfigureAwait(false),
                 "math.evaluate" => EvaluateMath(arguments),
@@ -133,18 +138,40 @@ public sealed class AgentToolExecutor
         catch (Exception exception) when (IsRecoverableMediaFailure(name, exception))
         {
             var failure = DescribeMediaFailure(exception);
+            var cause = SanitizeMediaFailureDetail(exception is WorkerRequestException worker ? worker.Detail ?? worker.Message : exception.Message);
+            var message = failure.Message + $" Phase: {mediaContext.Stage}."
+                + (mediaContext.ModelId is null ? "" : $" Modell: {mediaContext.ModelId}.")
+                + (cause.Length == 0 ? "" : $" Ursache: {cause}");
+            _runtime.WriteLog("Warning", "media.pipeline.failed", JsonSerializer.Serialize(new
+            {
+                runId, tool = name, stage = mediaContext.Stage, modelId = mediaContext.ModelId,
+                selectedModelId, uploadId = mediaContext.UploadId, failure.ErrorCode,
+                exceptionType = exception.GetType().FullName, exception.HResult,
+                cause, exceptions = DescribeMediaExceptionChain(exception),
+                stackTrace = SanitizeMediaFailureDetail(exception.StackTrace ?? "", 3000),
+            }, _jsonOptions));
             return Result(
                 new
                 {
                     success = false,
                     errorCode = failure.ErrorCode,
-                    message = failure.Message,
+                    message,
                     retryable = failure.Retryable,
+                    stage = mediaContext.Stage,
+                    modelId = mediaContext.ModelId,
+                    selectedModelId,
+                    uploadId = mediaContext.UploadId,
+                    providerPhase = (exception as ModelProviderRequestException)?.Phase,
+                    providerCode = (exception as ModelGenerationTerminatedException)?.ProviderCode,
+                    workerErrorCode = (exception as WorkerRequestException)?.ErrorCode,
+                    httpStatus = exception is HttpRequestException { StatusCode: { } status } ? (int?)status : null,
+                    cause,
+                    recovery = MediaFailureRecovery(failure),
                     currentUploadIds = currentUploadIds ?? [],
                 },
                 succeeded: false,
                 errorCode: failure.ErrorCode,
-                errorMessage: failure.Message);
+                errorMessage: message);
         }
     }
 
@@ -176,17 +203,69 @@ public sealed class AgentToolExecutor
     {
         KeyNotFoundException => new(
             "media.upload_unavailable",
-            "Der angeforderte temporäre Medien-Upload ist nicht mehr verfügbar. Verwende ausschließlich eine aktuelle uploadId aus der neuesten Nutzernachricht; liegt bereits eine erfolgreiche Bildanalyse vor, arbeite mit deren Befunden weiter.",
+            "Der angeforderte temporäre Medien-Upload ist nicht mehr verfügbar. Verwende eine aktuelle uploadId aus image.input oder der neuesten Nutzernachricht; liegt bereits eine erfolgreiche Bildanalyse vor, arbeite mit deren Befunden weiter.",
             false),
+        WorkerRequestException worker => new(
+            worker.ErrorCode?.StartsWith("media.", StringComparison.Ordinal) == true ? worker.ErrorCode : "media.worker_failed",
+            $"Der {worker.WorkerName}-Worker konnte das Medium nicht verarbeiten (HTTP {(int)worker.StatusCode!}).",
+            IsRetryableMediaStatus(worker.StatusCode)),
+        ModelProviderRequestException provider => new(
+            "media.provider_unavailable",
+            $"Die native Vision-Modellanfrage scheiterte bei {provider.Phase}.",
+            IsRetryableMediaStatus(provider.StatusCode)),
+        ModelGenerationTerminatedException generation => new(
+            generation.ProviderCode == "model_stall_timeout" ? "media.provider_stalled" : "media.provider_generation_failed",
+            $"Die Vision-Modellgenerierung wurde beendet ({generation.ProviderCode}).",
+            true),
         ReasoningLoopDetectedException => new(
             "media.reasoning_loop",
             "Das Vision-Modell wiederholte seinen Denkprozess auch beim direkten Wiederholungsversuch. Arbeite mit vorhandenen Bildbefunden weiter und analysiere erst nach einer neuen Render-Etappe erneut.",
             true),
+        HttpRequestException transport => new(
+            "media.transport_failed",
+            "Die Verbindung zum Medienworker oder zum nativen Vision-Modell ist fehlgeschlagen.",
+            IsRetryableMediaStatus(transport.StatusCode)),
         _ => new(
             "media.analysis_unavailable",
             "Die Medienanalyse konnte in diesem Schritt nicht abgeschlossen werden. Der übrige Projektlauf kann mit vorhandenen Befunden fortgesetzt werden.",
             true),
     };
+
+    private static bool IsRetryableMediaStatus(System.Net.HttpStatusCode? status) => status is null
+        || (int)status >= 500 || status is System.Net.HttpStatusCode.Conflict
+            or System.Net.HttpStatusCode.RequestTimeout or System.Net.HttpStatusCode.TooManyRequests;
+
+    private static string MediaFailureRecovery(ResearchToolFailure failure) => failure.ErrorCode switch
+    {
+        "media.upload_unavailable" => "Lade das Bild erneut mit image.input und verwende die zurückgegebene uploadId.",
+        "media.reasoning_loop" => "Keine erneute unmittelbare Analyseschleife; kennzeichne die Sichtprüfung als offen und verwende nur vorhandene echte Bildbefunde.",
+        _ when failure.Retryable => "Die Analyse enthält keine bestätigten Sichtbefunde. Wiederhole höchstens einmal mit derselben aktuellen uploadId, wenn der Provider wieder bereit ist; bei erneutem Fehler kennzeichne die Sichtprüfung als offen und arbeite mit vorhandenen Befunden weiter.",
+        _ => "Korrigiere den genannten Eingabe- oder Workerfehler vor einem neuen Versuch. Behaupte keine erfolgreiche Sichtprüfung.",
+    };
+
+    internal static string SanitizeMediaFailureDetail(string value, int maximumCharacters = 1200)
+    {
+        var bounded = value[..Math.Min(value.Length, 8192)];
+        bounded = Regex.Replace(bounded, @"data:[^\s""'<>]+", "[Medieninhalt]", RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+        bounded = Regex.Replace(bounded, @"[A-Za-z0-9+/=_-]{256,}", "[Medieninhalt]", RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+        bounded = string.Concat(bounded.Select(static character => char.IsControl(character) ? ' ' : character)).Trim();
+        return bounded[..Math.Min(bounded.Length, maximumCharacters)];
+    }
+
+    private static object[] DescribeMediaExceptionChain(Exception exception)
+    {
+        var chain = new List<object>();
+        for (Exception? current = exception; current is not null && chain.Count < 4; current = current.InnerException)
+            chain.Add(new { type = current.GetType().FullName, current.HResult, message = SanitizeMediaFailureDetail(current.Message) });
+        return chain.ToArray();
+    }
+
+    private sealed class MediaOperationContext(string? selectedModelId)
+    {
+        public string Stage { get; set; } = "upload_resolution";
+        public string? ModelId { get; set; } = selectedModelId;
+        public string? UploadId { get; set; }
+    }
 
     private async Task<AgentToolExecutionResult> SynthesizeSpeechAsync(JsonElement args, string runId, CancellationToken token)
     {
@@ -330,10 +409,12 @@ public sealed class AgentToolExecutor
         string? reasoningEffort,
         IReadOnlyList<string>? currentUploadIds,
         string? runtimeInstanceId,
+        MediaOperationContext context,
         CancellationToken cancellationToken)
     {
         var requestedUploadId = arguments.GetProperty("uploadId").GetString()!;
         var uploadId = requestedUploadId;
+        context.UploadId = uploadId;
         var upload = await _uploads.GetCompletedAsync(uploadId, cancellationToken).ConfigureAwait(false);
         if (upload is null)
         {
@@ -347,6 +428,7 @@ public sealed class AgentToolExecutor
             if (fallbackId is null)
                 throw new KeyNotFoundException("Completed media upload not found and no unambiguous current upload is available.");
             uploadId = fallbackId;
+            context.UploadId = uploadId;
             upload = currentUploads.Single(item => string.Equals(item.UploadId, fallbackId, StringComparison.Ordinal));
         }
         if (analyze && upload.MediaType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase))
@@ -354,12 +436,14 @@ public sealed class AgentToolExecutor
             // Reine Audiodateien benötigen weder FFmpeg-Frameextraktion noch ein
             // Vision-Modell. Der kurze Pfad vermeidet einen zusätzlichen Workerlauf:
             // Speech-to-Text -> genau eine fachliche General-AI-Auswertung.
+            context.Stage = "transcription";
             var audioTranscription = await _workers.TranscribeAsync(
                 new TranscriptionRequest(uploadId),
                 runId,
                 cancellationToken).ConfigureAwait(false);
             var transcriptPrompt = GetString(arguments, "prompt")
                 ?? GeneralAgentPolicies.DefaultTranscriptAnalysis;
+            context.Stage = "audio_analysis";
             var transcriptAnalysis = await AnalyzeTranscriptAsync(
                 transcriptPrompt,
                 audioTranscription.Text,
@@ -385,6 +469,7 @@ public sealed class AgentToolExecutor
         }
 
         var detailWindows = ReadDetailWindows(arguments);
+        context.Stage = "media_processing";
         var processed = await _workers.InspectMediaAsync(
             new WorkerMediaRequest(uploadId, upload.MediaType, detailWindows),
             runId,
@@ -407,6 +492,7 @@ public sealed class AgentToolExecutor
         {
             try
             {
+                context.Stage = "transcription";
                 transcription = await _workers.TranscribeAsync(
                     new TranscriptionRequest(uploadId),
                     runId,
@@ -424,6 +510,7 @@ public sealed class AgentToolExecutor
 
         var imagePaths = new List<string>();
         var referenceCount = 0;
+        context.Stage = "artifact_resolution";
         if (upload.MediaType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
         {
             // Reference images (artwork, photos, dimension sheets) precede the
@@ -433,12 +520,15 @@ public sealed class AgentToolExecutor
             // counting before the model sees the prompt.
             foreach (var referenceId in ReadReferenceUploadIds(arguments))
             {
+                context.Stage = "reference_resolution";
                 var reference = await _uploads.GetCompletedAsync(referenceId, cancellationToken).ConfigureAwait(false)
                     ?? throw new KeyNotFoundException($"Completed reference upload {referenceId} not found.");
                 if (!reference.MediaType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
                     throw new InvalidDataException("referenceUploadIds must reference image uploads.");
+                context.Stage = "reference_processing";
                 var normalizedReference = await _workers.InspectMediaAsync(
                     new WorkerMediaRequest(referenceId, reference.MediaType), runId, cancellationToken).ConfigureAwait(false);
+                context.Stage = "artifact_resolution";
                 imagePaths.Add(await ResolveVisionInputAsync(normalizedReference, cancellationToken).ConfigureAwait(false));
                 referenceCount++;
             }
@@ -524,14 +614,21 @@ public sealed class AgentToolExecutor
         {
             prompt += $"\n\n{transcriptionWarning} Analysiere den Clip anhand der zeitcodierten Bilder weiter.";
         }
+        context.Stage = "vision_model_selection";
         var integratedModel = await _modelRuntime.ResolveIntegratedVisionAsync(selectedModelId, cancellationToken).ConfigureAwait(false);
         var visionModel = integratedModel ?? _options.VisionModelId;
+        context.ModelId = visionModel;
         var fusionModel = integratedModel ?? _options.GeneralModelId;
         var visionInstance = integratedModel is not null ? runtimeInstanceId : null;
-        var visionAnalysis = await AnalyzeWithVisionAsync(prompt, imagePaths, runId, visionModel, reasoningEffort, visionInstance, cancellationToken).ConfigureAwait(false);
+        var visionAnalysis = await AnalyzeWithVisionAsync(prompt, imagePaths, runId, visionModel, reasoningEffort, visionInstance, context, cancellationToken).ConfigureAwait(false);
         var hasVideoTranscript = upload.MediaType.StartsWith("video/", StringComparison.OrdinalIgnoreCase)
             && transcription is not null
             && !string.IsNullOrWhiteSpace(transcription.Text);
+        if (hasVideoTranscript)
+        {
+            context.Stage = "video_audio_fusion";
+            context.ModelId = fusionModel;
+        }
         var analysis = hasVideoTranscript
             ? await FuseVideoAndAudioAnalysisAsync(
                 GetString(arguments, "prompt") ?? GeneralAgentPolicies.DefaultVideoAnalysis,
@@ -614,19 +711,22 @@ public sealed class AgentToolExecutor
         string modelId,
         string? reasoningEffort,
         string? runtimeInstanceId,
+        MediaOperationContext context,
         CancellationToken cancellationToken)
     {
+        context.Stage = "vision_model_preparation";
         await using var lease = await _scheduler.AcquireAsync(
             "vision",
             runId,
             runtimeInstanceId is null ? GpuLeaseMode.Exclusive : GpuLeaseMode.CodingSecondary,
             cancellationToken).ConfigureAwait(false);
         if (runtimeInstanceId is null)
-            _ = await _workers.PrepareLmModelAsync(modelId, modelId == _options.VisionModelId ? _options.VisionContextLength : 0, cancellationToken).ConfigureAwait(false);
+            context.ModelId = await _workers.PrepareLmModelAsync(modelId, modelId == _options.VisionModelId ? _options.VisionContextLength : 0, cancellationToken).ConfigureAwait(false);
         else
-            _ = await _modelRuntime.EnsureModelPreparedAsync(modelId, 0, null, runtimeInstanceId, cancellationToken).ConfigureAwait(false);
+            context.ModelId = (await _modelRuntime.EnsureModelPreparedAsync(modelId, 0, null, runtimeInstanceId, cancellationToken).ConfigureAwait(false)).InstanceId;
         try
         {
+            context.Stage = "vision_generation";
             return await _modelRuntime.AnalyzeImagesAsync(
                 modelId,
                 prompt,
@@ -641,6 +741,7 @@ public sealed class AgentToolExecutor
             // model circles in hidden reasoning, retry once with reasoning disabled
             // and a direct-result contract instead of turning the tool card and the
             // whole authoring run into a terminal failure.
+            context.Stage = "vision_generation_recovery";
             return await _modelRuntime.AnalyzeImagesAsync(
                 modelId,
                 BuildVisionLoopRecoveryPrompt(prompt),

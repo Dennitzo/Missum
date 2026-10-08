@@ -1,5 +1,7 @@
 using System.Text.Json;
+using Missum.App.Controls;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml;
 
 namespace Missum.App.Pages;
 
@@ -159,8 +161,16 @@ public sealed partial class NativeAssistantPage
         await VerifyToolIconColorsSmokeAsync();
         await VerifyContinuationSmokeAsync(original);
         await VerifySourcesSmokeAsync(original);
+        await VerifyTabRetentionSmokeAsync(original);
+        var callbackGuard = await VerifyUiCallbackGuardSmokeAsync();
+        await VerifyNoticeSelectionSmokeAsync();
+        await File.WriteAllTextAsync(Path.Combine(App.Current.DataDirectory, "native-ui-callback-validation.json"),
+            JsonSerializer.Serialize(callbackGuard));
         await VerifyChangesReviewSmokeAsync();
         await VerifyScienceViewsSmokeAsync();
+        var simulationLifecycle = await VerifySimulationTabLifecycleSmokeAsync();
+        await File.WriteAllTextAsync(Path.Combine(App.Current.DataDirectory, "native-simulation-lifecycle-validation.json"),
+            JsonSerializer.Serialize(simulationLifecycle, JsonOptions));
         await VerifySubagentSmokeAsync(original);
         await VerifyPlanetPaletteSmokeAsync();
         ApplyEvent("state.snapshot", original);
@@ -227,7 +237,9 @@ public sealed partial class NativeAssistantPage
         var sourceLabels = ((Grid)((Button)SourcesPanel.Children[0]).Content).Children.OfType<StackPanel>().Single()
             .Children.OfType<TextBlock>().ToArray();
         if (sourceLabels.Length != 2 || sourceLabels[0].Text != SourcePageTitle(latestSource, latestSource.Urls[0])
-            || sourceLabels[1].Text != latestSource.Urls[0] || sourceLabels[1].Opacity >= sourceLabels[0].Opacity
+            || sourceLabels[1].Text != latestSource.Urls[0]
+            || !ReferenceEquals(sourceLabels[0].Foreground, NativeThemeBrushes.Text)
+            || !ReferenceEquals(sourceLabels[1].Foreground, NativeThemeBrushes.MutedText)
             || sourceLabels[1].FontSize >= sourceLabels[0].FontSize)
             throw new InvalidOperationException("Web sources must display the page title above a quieter, smaller URL.");
         var allSources = (Button)SourcesPanel.Children[^1];
@@ -414,6 +426,8 @@ public sealed partial class NativeAssistantPage
     private async Task VerifyScienceViewsSmokeAsync()
     {
         var previousMode = _mode;
+        var previousScienceDiagnostics = Environment.GetEnvironmentVariable("MISSUM_SCIENCE_QA_DIAGNOSTICS");
+        Environment.SetEnvironmentVariable("MISSUM_SCIENCE_QA_DIAGNOSTICS", "1");
         try
         {
             _mode = "claudescience";
@@ -462,7 +476,7 @@ public sealed partial class NativeAssistantPage
             {
                 scienceState.Error = "Simulation-Smoke: Darstellung konnte nicht geladen werden.";
                 RenderResearchView();
-                if (ReferenceEquals(ResearchHost.Content, simulationRoot) || ResearchHost.Content is not Grid errorRoot
+                if (!ReferenceEquals(ResearchHost.Content, simulationRoot) || ResearchHost.Content is not Grid errorRoot
                     || errorRoot.Children[1] is not StackPanel errorDescription
                     || !errorDescription.Children.OfType<InfoBar>().Any(bar => bar.Message == scienceState.Error))
                     throw new InvalidOperationException("Simulation errors must update the view even when its artifacts have not changed.");
@@ -471,39 +485,55 @@ public sealed partial class NativeAssistantPage
             var fixture = Environment.GetEnvironmentVariable("MISSUM_SCIENCE_PDF_SMOKE_PATH");
             if (!string.IsNullOrWhiteSpace(fixture) && File.Exists(fixture))
             {
+                _simulationView = false; _scienceViewSignature = null; RenderResearchView();
                 var pdf = new Missum.App.Controls.NativePublicationView();
-                ResearchHost.Content = pdf;
-                await pdf.LoadAsync(fixture);
-                if (pdf.PageCount == 0 || !pdf.HasRenderedPage) throw new InvalidOperationException("Native scientific PDF preview failed.");
-                if (pdf.PageVisualCount != pdf.PageCount || Descendants(pdf).OfType<Button>().Any())
-                    throw new InvalidOperationException("Native PDF must contain every page in one continuous view without page buttons.");
-                UpdateLayout(); await SaveMathPreviewAsync(pdf, "native-publication-preview.png");
-                await pdf.ScrollToEndAsync();
-                if (!pdf.IsLastPageRendered) throw new InvalidOperationException("Scrolling through the native PDF did not render its final page: " + pdf.ScrollDiagnostics);
-                await SaveMathPreviewAsync(pdf, "native-publication-last-page-preview.png");
+                _scienceBody!.Children.Add(pdf);
+                foreach (var pane in _scienceBody.Children.OfType<FrameworkElement>())
+                    pane.Visibility = ReferenceEquals(pane, pdf) ? Microsoft.UI.Xaml.Visibility.Visible : Microsoft.UI.Xaml.Visibility.Collapsed;
+                pdf.SetActive(true);
+                await pdf.LoadAsync(fixture).WaitAsync(TimeSpan.FromSeconds(20));
+                UpdateLayout(); await Task.Delay(40);
+                if (!_scienceRoot!.Padding.Equals(new Thickness(0)) || _scienceRoot.Children[0].Visibility != Visibility.Collapsed
+                    || _scienceControls!.Children.Count != 0 || pdf.ActualWidth <= 0
+                    || Math.Abs(pdf.ActualWidth - _scienceBody.ActualWidth) > 1)
+                    throw new InvalidOperationException("The browser PDF viewer must fill the chat viewport without outer headings or buttons.");
+                await File.WriteAllTextAsync(Path.Combine(App.Current.DataDirectory, "native-publication-layout-validation.json"),
+                    JsonSerializer.Serialize(new { passed = true, processId = Environment.ProcessId, viewportWidth = _scienceBody.ActualWidth,
+                        viewerWidth = pdf.ActualWidth, fullWidth = true, headingsHidden = true, externalPdfButtonsRemoved = true,
+                        browserViewer = true, pdf.PageCount, pdf.PdfSource }, JsonOptions));
+                if (pdf.PageCount == 0 || !pdf.HasCompletedNavigation || !pdf.IsInitialized)
+                    throw new InvalidOperationException("The real browser PDF preview failed to load.");
+                await Task.Delay(500);
+                await pdf.CapturePreviewAsync(Path.Combine(App.Current.DataDirectory, "native-publication-preview.png"));
                 // Exercise real loaded/unloaded PDF visuals, not only an offscreen measurement.
                 for (var iteration = 0; iteration < 12; iteration++)
                 {
                     ResearchHost.Visibility = Microsoft.UI.Xaml.Visibility.Collapsed; BodyGrid.Visibility = Microsoft.UI.Xaml.Visibility.Visible;
+                    pdf.SetActive(false);
                     UpdateLayout(); await Task.Delay(30);
                     BodyGrid.Visibility = Microsoft.UI.Xaml.Visibility.Collapsed; ResearchHost.Visibility = Microsoft.UI.Xaml.Visibility.Visible;
+                    pdf.SetActive(true);
                     UpdateLayout(); await Task.Delay(30);
-                    if (!pdf.HasRenderedPage) throw new InvalidOperationException("Tab switching lost the rendered publication.");
+                    if (!pdf.HasCompletedNavigation || pdf.NavigationCount != 1 || pdf.BrowserFaultCount != 0)
+                        throw new InvalidOperationException("Tab switching reloaded or faulted the browser PDF viewer.");
                 }
-                ResearchHost.Content = null;
                 _publicationViews[_session] = pdf;
                 for (var iteration = 0; iteration < 6; iteration++)
                 {
-                    var container = new Grid(); container.Children.Add(pdf); ResearchHost.Content = container;
-                    UpdateLayout(); await Task.Delay(30);
-                    ResearchHost.Content = null; container.Children.Remove(pdf);
                     _simulationView = true; _scienceViewSignature = null; RenderResearchView();
                     UpdateLayout(); await Task.Delay(30);
+                    foreach (var pane in _scienceBody.Children.OfType<FrameworkElement>())
+                        pane.Visibility = ReferenceEquals(pane, pdf) ? Microsoft.UI.Xaml.Visibility.Visible : Microsoft.UI.Xaml.Visibility.Collapsed;
+                    pdf.SetActive(true);
+                    UpdateLayout(); await Task.Delay(30);
+                    if (pdf.Parent != _scienceBody || !pdf.HasCompletedNavigation || pdf.NavigationCount != 1 || pdf.BrowserFaultCount != 0)
+                        throw new InvalidOperationException("Publication and simulation must retain their native visual parents during tab switching.");
                 }
             }
         }
         finally
         {
+            Environment.SetEnvironmentVariable("MISSUM_SCIENCE_QA_DIAGNOSTICS", previousScienceDiagnostics);
             _mode = previousMode; ShowChatView(); RenderSessionTabs();
         }
         if (_simulationTabButton?.Parent == SessionTabsPanel) throw new InvalidOperationException("Science tabs leaked into another mode.");

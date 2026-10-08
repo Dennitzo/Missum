@@ -43,7 +43,7 @@ public sealed partial class NativeAssistantPage
         var owner = _session;
         // Reveal only on explicit navigation. Background child snapshots keep
         // the user's position in the horizontal tab strip unchanged.
-        DispatcherQueue.TryEnqueue(() =>
+        DispatcherQueue.TryEnqueue(() => RunUiCallback("SubagentOverview.RevealTab", () =>
         {
             if (_disposed || _session != owner || _activeSubagentOverviewSession != owner
                 || _subagentOverviewTabContainer is not { } tab || tab.Parent != SessionTabsPanel
@@ -57,7 +57,7 @@ public sealed partial class NativeAssistantPage
             else if (right > scroll.ViewportWidth) offset += right - scroll.ViewportWidth + 4;
             else return;
             scroll.ChangeView(Math.Clamp(offset, 0, scroll.ScrollableWidth), null, null, disableAnimation: true);
-        });
+        }));
     }
 
     private ScrollViewer? SubagentOverviewTabScroll()
@@ -101,7 +101,7 @@ public sealed partial class NativeAssistantPage
             Grid.SetColumn(avatar, Grid.GetColumn(oldIcon)); row.Children.Remove(oldIcon); row.Children.Add(avatar);
             var oldTitle = row.Children.OfType<TextBlock>().Single();
             var labels = new StackPanel { Spacing = 2, VerticalAlignment = VerticalAlignment.Center };
-            labels.Children.Add(new TextBlock { Text = child.Title, FontSize = 16, Foreground = Brush(230), TextWrapping = TextWrapping.Wrap });
+            labels.Children.Add(new TextBlock { Text = child.Title, FontSize = 16, Foreground = ThemeBrush("MissumTextBrush", 230), TextWrapping = TextWrapping.Wrap });
             labels.Children.Add(new TextBlock { Text = status, FontSize = 14,
                 Foreground = ThemeBrush("MissumMutedTextBrush", 145), Opacity = .75 });
             Grid.SetColumn(labels, Grid.GetColumn(oldTitle)); row.Children.Remove(oldTitle); row.Children.Add(labels);
@@ -112,11 +112,11 @@ public sealed partial class NativeAssistantPage
             body.Children.Add(button);
         }
         var content = new ScrollViewer { Content = body, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
-        if (offset > 0) content.Loaded += (_, _) =>
+        if (offset > 0) content.Loaded += (_, _) => RunUiCallback("SubagentOverview.RestoreScroll", () =>
         {
             if (_subagentOverviewContentOwner == _session)
                 content.ChangeView(null, offset, null, disableAnimation: true);
-        };
+        });
         _subagentOverviewHost.Content = content;
     }
 
@@ -157,12 +157,11 @@ public sealed partial class NativeAssistantPage
         }
         var select = _subagentOverviewTabButton!;
         ApplyTabAppearance(_subagentOverviewTabContainer, select, _activeSubagentOverviewSession == _session);
-        select.IsEnabled = !_sessionTabNavigationBusy;
-        AutomationProperties.SetHelpText(select,
+        SetTabEnabled(select, !_sessionTabNavigationBusy);
+        SetTabHelp(select,
             _activeSubagentOverviewSession == _session ? "Aktive Subagentenübersicht" : "Alle Subagenten dieser Sitzung öffnen");
-        ToolTipService.SetToolTip(select, "Alle Subagenten dieser Sitzung");
-        SessionTabsPanel.Children.Remove(_subagentOverviewTabContainer);
-        SessionTabsPanel.Children.Insert(Math.Min(index, SessionTabsPanel.Children.Count), _subagentOverviewTabContainer);
+        SetTabToolTip(select, "Alle Subagenten dieser Sitzung");
+        PositionTab(_subagentOverviewTabContainer, index);
         return index + 1;
     }
 }
