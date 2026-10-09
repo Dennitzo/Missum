@@ -1,4 +1,5 @@
 using System.Text;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Missum.App.Services;
@@ -111,6 +112,82 @@ public sealed class ScientificPublicationImagesTests : IDisposable
         Assert.DoesNotContain("<b>", prepared.Markdown);
         Assert.Contains("&lt;b&gt;Figure&lt;/b&gt;", prepared.Markdown);
         Assert.Contains("&lt;script&gt;", prepared.Markdown);
+    }
+
+    [Fact]
+    public async Task SixtyFourImagesAreIncludedAndTheNextImageProducesExplicitCapacityFeedback()
+    {
+        var sandbox = CreateSandbox("many-plots");
+        var references = new List<string>();
+        for (var index = 0; index < 65; index++)
+        {
+            var path = "plot-" + index + ".png";
+            await File.WriteAllBytesAsync(Path.Combine(sandbox.Layout.ArtifactsPath, path), PngWithMetadata(index));
+            references.Add("![Plot " + index + "](" + path + ")");
+        }
+        var prepared = await ScientificPublicationImages.PrepareAsync(string.Join('\n', references.Take(64)),
+            sandbox.Layout.ProjectId, sandbox, DateTimeOffset.MinValue);
+        Assert.Equal(64, prepared.Images.Length);
+        Assert.DoesNotContain("nicht verfügbar", prepared.Markdown);
+        var error = await Assert.ThrowsAsync<ScientificPublicationContentException>(() => ScientificPublicationImages.PrepareAsync(
+            string.Join('\n', references), sandbox.Layout.ProjectId, sandbox, DateTimeOffset.MinValue));
+        Assert.Contains("64", error.Message);
+        Assert.Contains("still ausgelassen", error.Message);
+    }
+
+    [Fact]
+    public async Task OversizedPlotIsReportedInsteadOfBecomingUnavailableCaption()
+    {
+        var sandbox = CreateSandbox("large-plot");
+        await File.WriteAllBytesAsync(Path.Combine(sandbox.Layout.ArtifactsPath, "large.png"), new byte[8 * 1024 * 1024 + 1]);
+        var error = await Assert.ThrowsAsync<ScientificPublicationContentException>(() => ScientificPublicationImages.PrepareAsync(
+            "![Großer Plot](large.png)", sandbox.Layout.ProjectId, sandbox, DateTimeOffset.MinValue));
+        Assert.Contains("8 MiB", error.Message);
+    }
+
+    [Fact]
+    public async Task WorkPlotRequiresCanonicalExecutionHashAndRejectsChangedOrForeignBytes()
+    {
+        var sandbox = CreateSandbox("work-plot");
+        Directory.CreateDirectory(sandbox.Layout.WorkPath);
+        var source = Path.Combine(sandbox.Layout.WorkPath, "fig1_time_series.png");
+        await File.WriteAllBytesAsync(source, Png);
+        const string markdown = "![Zeitreihe](work/fig1_time_series.png)";
+        var hashes = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["work/fig1_time_series.png"] = Convert.ToHexStringLower(SHA256.HashData(Png)),
+        };
+        var legacy = await ScientificPublicationImages.PrepareAsync(markdown, sandbox.Layout.ProjectId, sandbox, DateTimeOffset.MinValue);
+        Assert.Empty(legacy.Images);
+        var canonical = await ScientificPublicationImages.PrepareCanonicalAsync(markdown, sandbox.Layout.ProjectId, sandbox, hashes);
+        Assert.Single(canonical.Images);
+        Assert.DoesNotContain("nicht verfügbar", canonical.Markdown);
+        var unknown = await ScientificPublicationImages.PrepareCanonicalAsync(markdown, sandbox.Layout.ProjectId, sandbox,
+            new Dictionary<string, string>(StringComparer.Ordinal));
+        Assert.Empty(unknown.Images);
+        var foreign = await ScientificPublicationImages.PrepareCanonicalAsync(markdown, "foreign-project", sandbox, hashes);
+        Assert.Empty(foreign.Images);
+        await File.WriteAllBytesAsync(source, PngWithMetadata(17));
+        var changed = await ScientificPublicationImages.PrepareCanonicalAsync(markdown, sandbox.Layout.ProjectId, sandbox, hashes);
+        Assert.Empty(changed.Images);
+        Assert.Contains("nicht verfügbar", changed.Markdown);
+    }
+
+    private static byte[] PngWithMetadata(int index)
+    {
+        var data = Encoding.ASCII.GetBytes("Plot\0" + index);
+        var chunk = new byte[data.Length + 12];
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(chunk, data.Length);
+        "tEXt"u8.CopyTo(chunk.AsSpan(4));
+        data.CopyTo(chunk, 8);
+        uint crc = uint.MaxValue;
+        foreach (var value in chunk.AsSpan(4, data.Length + 4))
+        {
+            crc ^= value;
+            for (var bit = 0; bit < 8; bit++) crc = (crc >> 1) ^ ((crc & 1) == 1 ? 0xedb88320u : 0u);
+        }
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(chunk.AsSpan(chunk.Length - 4), ~crc);
+        return [.. Png[..^12], .. chunk, .. Png[^12..]];
     }
 
     [Fact]

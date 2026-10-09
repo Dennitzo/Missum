@@ -16,6 +16,24 @@ public sealed class ScientificInteractiveCompletionTests
     }
 
     [Theory]
+    [InlineData("missing")]
+    [InlineData("stale")]
+    [InlineData("foreign")]
+    [InlineData("failed")]
+    public void TechnicalPdfAndSimulationCannotCompleteWithoutTheActualCurrentScientificReview(string failure)
+    {
+        var review = failure == "missing" ? null : new
+        {
+            protocol = "science-review-v1", projectId = failure == "foreign" ? "other" : "research-state",
+            ready = failure != "failed", revision = failure == "stale" ? 1 : 2, publicationRevision = 1,
+            stateSha256 = new string('c', 64),
+        };
+        var assessment = Assess(Simulation(), review);
+        Assert.False(assessment.Complete);
+        Assert.Contains(assessment.Missing, message => message.Contains("fachlichen Prüfbericht", StringComparison.Ordinal));
+    }
+
+    [Theory]
     [InlineData("hash")]
     [InlineData("scope")]
     [InlineData("project")]
@@ -55,7 +73,11 @@ public sealed class ScientificInteractiveCompletionTests
         } },
     };
 
-    private static ScientificCompletionAssessment Assess(object simulation)
+    private static ScientificCompletionAssessment Assess(object simulation) => Assess(simulation,
+        new { protocol = "science-review-v1", projectId = "research-state", ready = true,
+            revision = 2, publicationRevision = 1, stateSha256 = new string('c', 64) });
+
+    private static ScientificCompletionAssessment Assess(object simulation, object? review)
     {
         var request = new RunRequest(MissumAiProtocol.Version, RunMode.General,
             [new("user", [new("text", Text: "Erstelle eine interaktive Echtzeit-Simulation.")])],
@@ -69,6 +91,7 @@ public sealed class ScientificInteractiveCompletionTests
                 success = true, projectId = "research-state",
                 research = new { protocol = "section-delta-v1", revision = 2, publicationRevision = 1, ready = true },
                 publication = new { ready = true, revision = 1, pdfPath = "Publikation.pdf", sourceSha256 = new string('a', 64) },
+                scientificReview = review,
                 simulation,
             },
         }), ToolCallId: "verify") };

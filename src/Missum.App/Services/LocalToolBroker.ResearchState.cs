@@ -93,19 +93,28 @@ public sealed partial class LocalToolBroker
         var before = await stateRepository.LoadWorkingStateAsync(projectId, token).ConfigureAwait(false);
         var changes = proposal.Arguments.GetProperty("changes").EnumerateArray().Select(change => new ResearchWorkingChange(
             change.GetProperty("id").GetString()!, change.GetProperty("kind").GetString()!,
-            change.GetProperty("expectedRevision").GetInt64(), change.GetProperty("data").Clone())).ToArray();
+            change.GetProperty("expectedRevision").GetInt64(),
+            change.TryGetProperty("data", out var data) ? data.Clone() : default,
+            change.TryGetProperty("patch", out var patch) ? patch.Clone() : null)).ToArray();
         // Identity comes from the authenticated proposal and forwarded child envelope, never model arguments.
         var receipt = await stateRepository.ApplyWorkingUpdateAsync(projectId,
             proposal.RunId + ":" + proposal.ProposalId, actorAgentId,
             StateText(proposal.Arguments, "title"), changes, token).ConfigureAwait(false);
         var publicationChanged = !receipt.Replayed && receipt.State.PublicationRevision != before.PublicationRevision;
+        var reviewBadgeChanged = false;
+        if (receipt.Success && !receipt.Replayed && !publicationChanged && receipt.State.Revision != before.Revision)
+        {
+            var protectedReviews = await stateRepository.LoadExecutionVerificationsAsync(projectId, token).ConfigureAwait(false);
+            reviewBadgeChanged = ScientificResearchReview.HasCurrentReview(before, protectedReviews)
+                && !ScientificResearchReview.HasCurrentReview(receipt.State, protectedReviews);
+        }
         JsonElement? feedback = null;
         if (receipt.Success && sciencePresentation is not null)
         {
             var feedbackState = receipt.Replayed
                 ? await stateRepository.LoadWorkingStateAsync(projectId, token).ConfigureAwait(false) : receipt.State;
             feedback = await sciencePresentation.ObserveFeedbackAsync(feedbackState,
-                refresh: publicationChanged || receipt.Replayed && feedbackState.PublicationRevision > 0,
+                refresh: publicationChanged || reviewBadgeChanged || receipt.Replayed && feedbackState.PublicationRevision > 0,
                 TimeSpan.FromSeconds(8), token).ConfigureAwait(false);
         }
         return ResearchUpdateReceipt(proposal.ProposalId, receipt, publicationChanged, feedback);
@@ -205,15 +214,19 @@ public sealed partial class LocalToolBroker
         foreach (var change in changes.EnumerateArray())
         {
             if (change.ValueKind != JsonValueKind.Object) throw new InvalidDataException("Eine Forschungsänderung muss ein Objekt sein.");
-            ValidateProperties(change, ["id", "kind", "expectedRevision", "data"], ["id", "kind", "expectedRevision", "data"]);
+            ValidateProperties(change, ["id", "kind", "expectedRevision"], ["id", "kind", "expectedRevision", "data", "patch"]);
             ValidateString(change, "id", 1, 200);
             if (ValidateString(change, "kind", 1, 32) is not ("hypothesis" or "claim" or "requirement" or "section" or "contribution"))
                 throw new InvalidDataException("Unbekannte Art eines Forschungsobjekts.");
             if (change.GetProperty("expectedRevision").ValueKind != JsonValueKind.Number
                 || !change.GetProperty("expectedRevision").TryGetInt64(out var revision) || revision < 0)
                 throw new InvalidDataException("expectedRevision muss die gespeicherte Revision sein (0 bei neuen Objekten).");
-            if (change.GetProperty("data").ValueKind != JsonValueKind.Object)
-                throw new InvalidDataException("Forschungsdaten müssen ein Objekt sein.");
+            var hasData = change.TryGetProperty("data", out var data);
+            var hasPatch = change.TryGetProperty("patch", out var patch);
+            if (hasData == hasPatch || (hasPatch ? patch : data).ValueKind != JsonValueKind.Object)
+                throw new InvalidDataException("Genau eines von data oder patch muss ein Forschungsobjekt enthalten.");
+            if (hasPatch && (revision == 0 || !patch.EnumerateObject().Any()))
+                throw new InvalidDataException("patch benötigt ein bestehendes Objekt mit expectedRevision>0 und mindestens ein geändertes Feld.");
         }
     }
 }

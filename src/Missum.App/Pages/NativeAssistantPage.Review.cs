@@ -13,6 +13,7 @@ public sealed partial class NativeAssistantPage
 {
     private readonly List<ChangesReviewTab> _reviewTabs = [];
     private Guid? _activeReviewRunId;
+    private const int ReviewFilesPerPage = 50;
 
     private void OpenEmptyChangesReview()
     {
@@ -85,13 +86,10 @@ public sealed partial class NativeAssistantPage
     {
         var revision = ReviewRevision(summary);
         if (tab.Revision > 0 && revision < tab.Revision) return false;
-        var signature = string.Join("\n", Items(summary, "files").Select(file => file.GetRawText()))
-            + "\n" + S(summary, "isPartial") + "\n" + S(summary, "notice") + "\n" + S(summary, "workspacePath");
+        if (revision > 0 && revision == tab.Revision) return false;
         tab.Summary = summary.Clone();
         tab.Revision = revision;
         tab.Title = ReviewTitle(summary);
-        if (tab.Signature == signature) return false;
-        tab.Signature = signature;
         return true;
     }
 
@@ -145,6 +143,7 @@ public sealed partial class NativeAssistantPage
     {
         if (_sessionTabNavigationBusy || _disposed) return;
         if (_activeReviewRunId == tab.RunId) ShowChatView();
+        foreach (var card in tab.Files.Values) card.Diff?.Dispose();
         _reviewTabs.Remove(tab);
         SessionTabsPanel.Children.Remove(tab.Container);
         RenderSessionTabs();
@@ -242,37 +241,106 @@ public sealed partial class NativeAssistantPage
         if (files.Length == 0)
             ReviewChangesPanel.Children.Add(new TextBlock { Text = partial ? "Noch keine Datei-Diffs verfügbar." : "Keine erfassten Dateiänderungen vorhanden.",
                 Foreground = ThemeBrush("MissumMutedTextBrush", 170), TextWrapping = TextWrapping.Wrap });
-        foreach (var file in files)
+        var pageCount = Math.Max(1, (files.Length + ReviewFilesPerPage - 1) / ReviewFilesPerPage);
+        tab.FilePage = Math.Clamp(tab.FilePage, 0, pageCount - 1);
+        if (pageCount > 1)
         {
-            var panel = new StackPanel { Spacing = 0 };
-            var header = new Grid { Padding = new Thickness(14, 12, 14, 12), ColumnSpacing = 12 };
-            header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            header.Children.Add(new TextBlock { Text = S(file, "path", "Datei"), FontSize = 15,
-                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true });
+            var pager = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10 };
+            var previous = new Button { Content = "Zurück", IsEnabled = tab.FilePage > 0 };
+            var next = new Button { Content = "Weiter", IsEnabled = tab.FilePage + 1 < pageCount };
+            pager.Children.Add(previous);
+            pager.Children.Add(new TextBlock { Text = $"Dateiseite {tab.FilePage + 1:N0} / {pageCount:N0}", VerticalAlignment = VerticalAlignment.Center });
+            pager.Children.Add(next);
+            previous.Click += (_, _) => { tab.FilePage--; tab.ScrollOffset = 0; RenderReviewContent(tab); };
+            next.Click += (_, _) => { tab.FilePage++; tab.ScrollOffset = 0; RenderReviewContent(tab); };
+            ReviewChangesPanel.Children.Add(pager);
+        }
+        var visiblePaths = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var file in files.Skip(tab.FilePage * ReviewFilesPerPage).Take(ReviewFilesPerPage))
+        {
+            var path = S(file, "path", "Datei");
+            visiblePaths.Add(path);
+            if (!tab.Files.TryGetValue(path, out var card))
+            {
+                card = CreateReviewFileCard(tab, path);
+                tab.Files[path] = card;
+            }
+            card.File = file;
+            card.Path.Text = path;
             var binary = S(file, "isBinary") == "True";
-            var counts = new TextBlock { FontSize = 13, VerticalAlignment = VerticalAlignment.Center };
-            if (binary) counts.Text = "Binärdatei";
+            card.Open.IsEnabled = !binary;
+            card.Counts.Inlines.Clear();
+            if (binary) card.Counts.Text = "Binärdatei";
             else if (TryReviewLineCount(file, "addedLines", out var added) && TryReviewLineCount(file, "removedLines", out var removed))
             {
-                counts.Inlines.Add(new Run { Text = $"+{added:N0}", Foreground = ThemeBrush("MissumSuccessBrush", 160) });
-                counts.Inlines.Add(new Run { Text = $"  −{removed:N0}", Foreground = ThemeBrush("MissumDangerBrush", 160) });
+                card.Counts.Text = "";
+                card.Counts.Inlines.Add(new Run { Text = $"+{added:N0}", Foreground = ThemeBrush("MissumSuccessBrush", 160) });
+                card.Counts.Inlines.Add(new Run { Text = $"  −{removed:N0}", Foreground = ThemeBrush("MissumDangerBrush", 160) });
             }
-            else counts.Text = "Zeilenzahlen nicht verfügbar";
-            Grid.SetColumn(counts, 1); header.Children.Add(counts); panel.Children.Add(header);
-            if (binary)
-                panel.Children.Add(ReviewNotice("Binärdatei geändert; ein Text-Diff ist für dieses Format nicht verfügbar."));
-            else
-            {
-                var diff = new NativeDiffView(S(file, "diff"), wrapLines: true);
-                panel.Children.Add(diff);
-            }
-            if (S(file, "diffTruncated") == "True") panel.Children.Add(ReviewNotice("Dieser Diff ist gekürzt. Die Quittung enthält nicht alle geänderten Zeilen."));
-            ReviewChangesPanel.Children.Add(new Border { Child = panel, Background = ThemeBrush("MissumLayerBrush", 30), BorderBrush = ThemeBrush("MissumStrokeBrush", 52),
-                BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(12) });
+            else card.Counts.Text = "Zeilenzahlen nicht verfügbar";
+            if (card.IsExpanded) UpdateReviewFileContent(card);
+            ReviewChangesPanel.Children.Add(card.Container);
         }
-        ReviewChangesPanel.UpdateLayout();
-        ReviewScroll.ChangeView(null, Math.Min(tab.ScrollOffset, ReviewScroll.ScrollableHeight), null, true);
+        // Retain only the displayed file page, not hundreds of hidden XAML trees.
+        foreach (var path in tab.Files.Keys.Where(path => !visiblePaths.Contains(path)).ToArray())
+        {
+            tab.Files[path].Diff?.Dispose(); tab.Files.Remove(path);
+        }
+        // Avoid a synchronous layout of all diff rows on every live snapshot.
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+        {
+            if (!_disposed && _activeReviewRunId == tab.RunId)
+                ReviewScroll.ChangeView(null, Math.Min(tab.ScrollOffset, ReviewScroll.ScrollableHeight), null, true);
+        });
+    }
+
+    private static ReviewFileCard CreateReviewFileCard(ChangesReviewTab tab, string path)
+    {
+        var panel = new StackPanel { Spacing = 0 };
+        var header = new Grid { Padding = new Thickness(14, 12, 14, 12), ColumnSpacing = 12 };
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        var label = new TextBlock { Text = path, FontSize = 15, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+            TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true };
+        var counts = new TextBlock { FontSize = 13, VerticalAlignment = VerticalAlignment.Center };
+        var open = new Button { Content = "Diff anzeigen" };
+        var body = new StackPanel { Visibility = Visibility.Collapsed };
+        header.Children.Add(label); Grid.SetColumn(counts, 1); header.Children.Add(counts);
+        Grid.SetColumn(open, 2); header.Children.Add(open);
+        panel.Children.Add(header); panel.Children.Add(body);
+        var container = new Border { Child = panel, Background = ThemeBrush("MissumLayerBrush", 30), BorderBrush = ThemeBrush("MissumStrokeBrush", 52),
+            BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(12) };
+        var card = new ReviewFileCard(container, label, counts, open, body);
+        AutomationProperties.SetName(open, "Datei-Diff anzeigen: " + path);
+        open.Click += (_, _) => SetReviewFileExpanded(tab, card, !card.IsExpanded);
+        return card;
+    }
+
+    private static void SetReviewFileExpanded(ChangesReviewTab tab, ReviewFileCard card, bool expanded)
+    {
+        foreach (var other in tab.Files.Values.Where(other => other.IsExpanded && (!ReferenceEquals(other, card) || !expanded)))
+        {
+            other.IsExpanded = false; other.Open.Content = "Diff anzeigen";
+            other.Diff?.Dispose();
+            other.Body.Children.Clear(); other.Body.Visibility = Visibility.Collapsed; other.Diff = null;
+        }
+        card.IsExpanded = expanded;
+        card.Open.Content = expanded ? "Diff ausblenden" : "Diff anzeigen";
+        card.Body.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
+        if (expanded) UpdateReviewFileContent(card);
+    }
+
+    private static void UpdateReviewFileContent(ReviewFileCard card)
+    {
+        var diff = S(card.File, "diff");
+        if (card.Diff is null)
+        {
+            card.Diff = new NativeDiffView(diff, wrapLines: true);
+            card.Body.Children.Add(card.Diff);
+            if (S(card.File, "diffTruncated") == "True") card.Body.Children.Add(ReviewNotice("Dieser Diff ist gekürzt. Die Quittung enthält nicht alle geänderten Zeilen."));
+        }
+        else card.Diff.UpdateDiff(diff);
     }
 
     private void OnReviewSizeChanged(object sender, SizeChangedEventArgs e) =>
@@ -297,7 +365,8 @@ public sealed partial class NativeAssistantPage
         public Guid RunId { get; } = runId;
         public JsonElement Summary { get; set; }
         public long Revision { get; set; }
-        public string Signature { get; set; } = "";
+        public int FilePage { get; set; }
+        public Dictionary<string, ReviewFileCard> Files { get; } = new(StringComparer.Ordinal);
         public string Title { get; set; } = "Änderungen";
         public double ScrollOffset { get; set; }
         public Border Container { get; } = container;
@@ -305,4 +374,16 @@ public sealed partial class NativeAssistantPage
         public Button Select { get; } = select;
         public Button Close { get; } = close;
     }
+    private sealed class ReviewFileCard(Border container, TextBlock path, TextBlock counts, Button open, StackPanel body)
+    {
+        public Border Container { get; } = container;
+        public TextBlock Path { get; } = path;
+        public TextBlock Counts { get; } = counts;
+        public Button Open { get; } = open;
+        public StackPanel Body { get; } = body;
+        public JsonElement File { get; set; }
+        public bool IsExpanded { get; set; }
+        public NativeDiffView? Diff { get; set; }
+    }
+
 }

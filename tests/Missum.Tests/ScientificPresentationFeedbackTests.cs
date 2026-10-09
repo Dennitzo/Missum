@@ -303,6 +303,46 @@ public sealed class ScientificPresentationFeedbackTests
         Assert.Equal(0, renders);
     }
 
+    [Fact]
+    public async Task ReviewOnlyPatchRequeuesWhenItInvalidatesAnActuallyTrustedPublicationBadge()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var fixture = await Fixture.CreateAsync(environment);
+        var stored = await fixture.SaveAsync("seed-review-badge", 0, "Eine begrenzte wissenschaftliche Untersuchung.");
+        var hash = ScientificResearchReview.Fingerprint(stored.State);
+        var report = JsonSerializer.Serialize(new { protocol = ScientificResearchReview.Protocol,
+            projectId = fixture.ProjectId, revision = stored.State.Revision,
+            publicationRevision = stored.State.PublicationRevision, stateSha256 = hash, ready = true });
+        await fixture.States.SaveExecutionVerificationAsync(new("review-" + hash, fixture.ProjectId, "publication-review",
+            fixture.ProjectId, "SourcesCalculationsContradictions", ScientificResearchReview.Method, "ReviewedWithEvidence", report, DateTimeOffset.UtcNow));
+        var renders = 0;
+        using var publications = fixture.Publications(async (source, token) =>
+        {
+            Interlocked.Increment(ref renders);
+            return await PdfAsync(source, token);
+        });
+        using var simulations = fixture.Simulations();
+        using var coordinator = new ScientificPresentationCoordinator(publications, simulations, static (_, _) => Task.CompletedTask);
+        coordinator.Queue(fixture.ProjectId);
+        await coordinator.WaitForIdleAsync(fixture.ProjectId);
+        Assert.False(coordinator.GetSnapshot(fixture.ProjectId)!.Publication!.IsDraft);
+        var originalPath = coordinator.GetSnapshot(fixture.ProjectId)!.Publication!.PdfPath;
+        var broker = fixture.Broker(publications, coordinator);
+        var patch = Proposal("change-review-metadata", ClientToolNames.ResearchUpdate, new
+        {
+            projectId = fixture.ProjectId,
+            changes = new[] { new { id = "model", kind = "section", expectedRevision = 1,
+                patch = new { classification = "hypothesis", assumptions = "Begrenztes Beispiel, keine universelle Behauptung." } } },
+        });
+        var result = await broker.ExecuteAsync(patch, fixture.SessionId, null);
+        Assert.True(result.Result.GetProperty("success").GetBoolean());
+        Assert.False(result.Result.GetProperty("publicationChanged").GetBoolean());
+        await coordinator.WaitForIdleAsync(fixture.ProjectId);
+        Assert.True(coordinator.GetSnapshot(fixture.ProjectId)!.Publication!.IsDraft);
+        Assert.NotEqual(originalPath, coordinator.GetSnapshot(fixture.ProjectId)!.Publication!.PdfPath);
+        Assert.Equal(2, renders);
+    }
+
     private static JsonElement Presentation(ClientToolResult receipt) => receipt.Result.GetProperty("presentation");
     private static JsonElement PublicationError(ClientToolResult receipt) => Presentation(receipt).GetProperty("publication").GetProperty("error");
 

@@ -11,7 +11,7 @@ public sealed partial class AgentToolCatalog
         Client(ClientToolNames.ResearchRead, "Lies view=overview für den kompakten Forschungsstand; knownStateStamp spart unveränderte Inhalte. view=task liefert den vollständigen ursprünglichen Auftrag in Textseiten. objects/sources/experiments/checks laden ihren eigenen Bereich; ids liefern gezielte Details (sources auch Evidenz-IDs). Folge nextCursor nur innerhalb derselben Ansicht/ids; bei research.cursor_stale ohne Cursor neu beginnen. Ohne view bleiben frühere offset-Aufrufe kompatibel.", ToolRiskClass.ReadOnly, NormalizeResearchStateSchema(Parse("""
             {"type":"object","properties":{"projectId":{"type":"string","pattern":"^[A-Za-z0-9._-]{1,128}$"},"view":{"type":"string","enum":["overview","task","objects","sources","experiments","checks"]},"cursor":{"type":"string","minLength":1,"maxLength":2048},"knownStateStamp":{"type":"string","pattern":"^[a-fA-F0-9]{64}$"},"ids":{"type":"array","maxItems":32,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":256}},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["projectId"],"additionalProperties":false}
             """))),
-        Client(ClientToolNames.ResearchUpdate, "Speichere nur neue oder fachlich geänderte Forschungsobjekte dauerhaft. Stabile id, kind und expectedRevision aus research.read verwenden; neue Objekte erwarten Revision 0. Bei kind section/contribution muss data.title UND data.contentMarkdown enthalten; description/method/limit ersetzen den wissenschaftlichen Markdowntext nicht. Bei hypothesis/claim/requirement muss data.statement enthalten. Der Hauptagent schreibt einzelne Publikationsabschnitte, der Subagent eigene contributions und Hypothesen mit seiner Agent-ID als Präfix. data enthält den vollständigen aktuellen Inhalt nur dieses Objekts. Quellen, Experimente und Prüfnachweise über echte IDs referenzieren. Status verified erfordert einen tatsächlichen passenden gespeicherten Prüfbeleg; ein erfolgreicher Prozess allein belegt keine Aussage. Konflikte gezielt lesen und beheben, nicht die ganze Publikation erneut schreiben.", ToolRiskClass.LocalMutation, NormalizeResearchStateSchema(Parse("""
+        Client(ClientToolNames.ResearchUpdate, "Speichere nur neue oder fachlich geänderte Forschungsobjekte dauerhaft. Stabile id, kind und expectedRevision aus research.read verwenden; neue Objekte erwarten Revision 0. Bei kind section/contribution muss data.title UND data.contentMarkdown enthalten; description/method/limit ersetzen den wissenschaftlichen Markdowntext nicht. Bei hypothesis/claim/requirement muss data.statement enthalten. data ersetzt genau ein vollständiges Objekt. Für vorhandene Objekte nutze stattdessen patch mit ausschließlich geänderten Feldern: insbesondere status, review und Beleg-IDs; unveränderter Manuskripttext und nicht angegebene Felder bleiben erhalten. Genau eines von data oder patch angeben; patch benötigt expectedRevision>0. Arrays werden vollständig ersetzt; null entfernt optionale Felder, aber keine erforderlichen Inhalte oder verbindlichen Ziele. Jede eingereichte review benötigt ausdrücklich den tatsächlich erreichten status und itemRevision=expectedRevision+1. Der Hauptagent schreibt Publikationsabschnitte, Subagenten eigene Beiträge mit ihrer Agent-ID als Präfix. Quellen und Prüfnachweise über echte IDs referenzieren. verified erfordert passende gespeicherte Prüfnachweise; ein erfolgreicher Prozess allein belegt keine Aussage. Konflikte gezielt beheben, nicht die Publikation wiederholen.", ToolRiskClass.LocalMutation, NormalizeResearchStateSchema(Parse("""
             {"type":"object","properties":{"projectId":{"type":"string","pattern":"^[A-Za-z0-9._-]{1,128}$"},"title":{"type":"string","minLength":1,"maxLength":1000},"changes":{"type":"array","minItems":1,"maxItems":64,"items":{"type":"object","properties":{"id":{"type":"string","minLength":1,"maxLength":256},"kind":{"type":"string","enum":["hypothesis","claim","requirement","section","contribution"]},"expectedRevision":{"type":"integer","minimum":0},"data":{"type":"object","minProperties":1,"properties":{"title":{"type":"string","maxLength":1000},"contentMarkdown":{"type":"string","maxLength":64000},"statement":{"type":"string","maxLength":16000},"status":{"type":"string","enum":["planned","active","supported","provisionallySupported","verified","refuted","blocked","unresolved","superseded","withdrawn","completed","openLimit","draft"]},"assumptions":{"anyOf":[{"type":"string","maxLength":16000},{"type":"array","maxItems":64,"items":{"type":"string","maxLength":2000}}]},"prediction":{"type":"string","maxLength":16000},"nextCheck":{"type":"string","maxLength":4000},"reason":{"type":"string","maxLength":16000},"required":{"type":"boolean"},"order":{"type":"integer"},"sourceIds":{"type":"array","maxItems":128,"items":{"type":"string","minLength":1,"maxLength":256}},"claimIds":{"type":"array","maxItems":128,"items":{"type":"string","minLength":1,"maxLength":256}},"experimentIds":{"type":"array","maxItems":128,"items":{"type":"string","minLength":1,"maxLength":256}},"checkIds":{"type":"array","maxItems":128,"items":{"type":"string","minLength":1,"maxLength":256}}},"additionalProperties":false}},"required":["id","kind","expectedRevision","data"],"additionalProperties":false}}},"required":["projectId","changes"],"additionalProperties":false}
             """))),
     ];
@@ -39,10 +39,11 @@ public sealed partial class AgentToolCatalog
                 data[name] = JsonNode.Parse("""{"type":"string","maxLength":16000}""");
             data["units"] = JsonNode.Parse("""{"type":"array","maxItems":128,"items":{"type":"object","properties":{"symbol":{"type":"string","minLength":1,"maxLength":200},"meaning":{"type":"string","minLength":1,"maxLength":2000},"unit":{"type":"string","minLength":1,"maxLength":200}},"required":["symbol","meaning","unit"],"additionalProperties":false}}""");
             data["figureCaptions"] = JsonNode.Parse("""{"type":"array","maxItems":32,"items":{"type":"object","properties":{"experimentId":{"type":"string","minLength":1,"maxLength":200},"artifactPath":{"type":"string","minLength":1,"maxLength":2048},"caption":{"type":"string","minLength":1,"maxLength":4000}},"required":["experimentId","artifactPath","caption"],"additionalProperties":false}}""");
+            data["review"] = JsonNode.Parse("""{"type":"object","properties":{"itemRevision":{"type":"integer","minimum":1},"sourceAssessment":{"type":"string","minLength":1,"maxLength":4000},"calculationAssessment":{"type":"string","minLength":1,"maxLength":4000},"contradictionAssessment":{"type":"string","minLength":1,"maxLength":4000},"scope":{"type":"string","minLength":1,"maxLength":4000}},"required":["itemRevision","sourceAssessment","calculationAssessment","contradictionAssessment","scope"],"additionalProperties":false}""");
             var changeSchema = changes["items"]!.AsObject();
             // Native llama schemas parse anyOf before sibling properties and do
             // not implement if/then. Keep the root object and give each nested
-            // alternative its complete shape; the kind sets are disjoint.
+            // alternative its complete shape; replacement kinds and patch payloads are disjoint.
             var manuscript = changeSchema.DeepClone().AsObject();
             manuscript["properties"]!["kind"]!["enum"] = new JsonArray("section", "contribution");
             manuscript["properties"]!["data"]!["required"] = new JsonArray("title", "contentMarkdown");
@@ -53,7 +54,17 @@ public sealed partial class AgentToolCatalog
             assertion["properties"]!["data"]!["required"] = new JsonArray("statement");
             assertion["properties"]!["data"]!["properties"]!["statement"]!["minLength"] = 1;
             assertion["properties"]!["data"]!["properties"]!["contentMarkdown"]!["minLength"] = 1;
-            changes["items"] = new JsonObject { ["anyOf"] = new JsonArray(manuscript, assertion) };
+            var patch = changeSchema.DeepClone().AsObject();
+            var patchProperties = patch["properties"]!.AsObject();
+            var patchData = patchProperties["data"]!.DeepClone().AsObject();
+            var patchFields = patchData["properties"]!.AsObject();
+            foreach (var name in patchFields.Select(field => field.Key).ToArray())
+                patchFields[name] = new JsonObject { ["anyOf"] = new JsonArray(patchFields[name]!.DeepClone(), new JsonObject { ["type"] = "null" }) };
+            patchProperties.Remove("data");
+            patchProperties["patch"] = patchData;
+            patchProperties["expectedRevision"]!["minimum"] = 1;
+            patch["required"] = new JsonArray("id", "kind", "expectedRevision", "patch");
+            changes["items"] = new JsonObject { ["anyOf"] = new JsonArray(manuscript, assertion, patch) };
         }
         return JsonSerializer.SerializeToElement(schema);
     }
@@ -104,8 +115,8 @@ public sealed partial class AgentToolCatalog
         foreach (var change in changes.EnumerateArray())
         {
             if (change.ValueKind != JsonValueKind.Object || change.EnumerateObject().Any(static item =>
-                item.Name is not ("id" or "kind" or "expectedRevision" or "data")))
-                throw new ArgumentException("Each change requires only id, kind, expectedRevision and data.");
+                item.Name is not ("id" or "kind" or "expectedRevision" or "data" or "patch")))
+                throw new ArgumentException("Each change requires id, kind, expectedRevision and exactly one of data or patch.");
             var id = RequireString(change, "id", 1, 200);
             if (id.Any(char.IsControl) || !seen.Add(id)) throw new ArgumentException("Object IDs must be unique and contain no control characters.");
             var kind = RequireString(change, "kind", 1, 32);
@@ -114,12 +125,30 @@ public sealed partial class AgentToolCatalog
             if (!change.TryGetProperty("expectedRevision", out var revision) || revision.ValueKind != JsonValueKind.Number
                 || !revision.TryGetInt64(out var number) || number < 0)
                 throw new ArgumentException("expectedRevision must be a nonnegative integer.");
-            if (!change.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Object)
-                throw new ArgumentException("data must be a scientific object.");
+            var hasData = change.TryGetProperty("data", out var replacement);
+            var isPatch = change.TryGetProperty("patch", out var patch);
+            var data = isPatch ? patch : replacement;
+            if (hasData == isPatch || data.ValueKind != JsonValueKind.Object)
+                throw new ArgumentException("Exactly one of data or patch must be a scientific object.");
+            if (isPatch && (number == 0 || !data.EnumerateObject().Any()))
+                throw new ArgumentException("patch requires an existing object with expectedRevision>0 and at least one changed field.");
             var requiredContent = kind is "section" or "contribution" ? "contentMarkdown" : "statement";
-            RequireResearchContent(data, requiredContent, requiredContent == "contentMarkdown" ? 64_000 : 16_000, id, kind);
-            if (kind is "section" or "contribution") RequireResearchContent(data, "title", 500, id, kind);
+            if (!isPatch)
+            {
+                RequireResearchContent(data, requiredContent, requiredContent == "contentMarkdown" ? 64_000 : 16_000, id, kind);
+                if (kind is "section" or "contribution") RequireResearchContent(data, "title", 500, id, kind);
+            }
+            if (data.TryGetProperty("review", out var suppliedReview) && suppliedReview.ValueKind != JsonValueKind.Null
+                && (!data.TryGetProperty("status", out var suppliedStatus) || suppliedStatus.ValueKind != JsonValueKind.String))
+                throw new ArgumentException($"research.update: Objekt '{id}' benötigt mit review ausdrücklich status. Nutze patch mit dem tatsächlich erreichten Status: completed/supported/verified (mit Prüfnachweis), refuted/superseded oder openLimit mit reason; ungeprüfte Inhalte bleiben ausdrücklich draft/active/unresolved. Der gespeicherte aktuelle Status ist mit research.read ids abrufbar. Unveränderten Manuskripttext nicht wiederholen.");
             foreach (var field in data.EnumerateObject())
+            {
+                if (isPatch && field.Value.ValueKind == JsonValueKind.Null)
+                {
+                    if (!ResearchPatchFields.Contains(field.Name, StringComparer.Ordinal))
+                        throw new ArgumentException($"Unknown research data field: {field.Name}.");
+                    continue;
+                }
                 switch (field.Name)
                 {
                     case "contentMarkdown": RequireString(data, field.Name, 1, 64_000); break;
@@ -146,11 +175,27 @@ public sealed partial class AgentToolCatalog
                     case "description": case "method": case "expectedResult": case "classification": case "conclusion": case "limit": OptionalString(data, field.Name, 0, 16_000); break;
                     case "units": ValidateResearchUnits(field.Value); break;
                     case "figureCaptions": ValidateResearchCaptions(field.Value); break;
+                    case "review":
+                        var review = field.Value;
+                        if (review.ValueKind != JsonValueKind.Object || review.EnumerateObject().Count() != 5
+                            || !review.TryGetProperty("itemRevision", out var reviewedRevision)
+                            || reviewedRevision.ValueKind != JsonValueKind.Number || !reviewedRevision.TryGetInt64(out var itemRevision)
+                            || itemRevision != number + 1)
+                            throw new ArgumentException("review.itemRevision must equal expectedRevision+1 for the actual reviewed object content.");
+                        foreach (var key in new[] { "sourceAssessment", "calculationAssessment", "contradictionAssessment", "scope" })
+                            _ = RequireString(review, key, 1, 4000);
+                        break;
                     default: throw new ArgumentException($"Unknown research data field: {field.Name}.");
                 }
+            }
         }
         if (value.GetRawText().Length > 128_000) throw new ArgumentException("Split the scientific update into smaller independent object changes.");
     }
+
+    private static readonly string[] ResearchPatchFields =
+        ["title", "contentMarkdown", "statement", "status", "assumptions", "prediction", "nextCheck", "reason", "required", "order",
+         "sourceIds", "claimIds", "experimentIds", "checkIds", "evidenceIds", "hypothesisIds", "requirementIds", "contributionIds", "targetIds",
+         "description", "method", "expectedResult", "classification", "conclusion", "limit", "units", "figureCaptions", "review"];
 
     private static void RequireResearchContent(JsonElement data, string field, int maximum, string id, string kind)
     {

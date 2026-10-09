@@ -372,7 +372,8 @@ try {
     }
     $simulationLifecycle = Get-Content -LiteralPath $simulationLifecyclePath -Raw | ConvertFrom-Json
     if ($simulationLifecycle.passed -ne $true -or $simulationLifecycle.processId -ne $process.Id -or
-        $simulationLifecycle.tabCycles -lt 40 -or $simulationLifecycle.suspendResumeCycles -lt 4 -or $simulationLifecycle.navigationCount -ne 2 -or
+        $simulationLifecycle.tabCycles -lt 40 -or $simulationLifecycle.suspendResumeCycles -lt 4 -or $simulationLifecycle.navigationCount -ne 3 -or
+        -not $simulationLifecycle.controls.passed -or $simulationLifecycle.explicitReloadNavigations -ne 1 -or
         $simulationLifecycle.browserFaults -ne 0 -or $simulationLifecycle.uiFaults -ne 0) {
         throw 'Native interactive simulation failed the real-process tab lifecycle checks.'
     }

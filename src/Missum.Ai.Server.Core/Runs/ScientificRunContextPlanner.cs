@@ -9,10 +9,24 @@ namespace Missum.Ai.Server.Core.Runs;
 /// <summary>Reduces research history without truncating its current scientific or execution evidence.</summary>
 internal static class ScientificRunContextPlanner
 {
-    internal static ContextPlan Prepare(IReadOnlyList<LmChatMessage> source, int contextLength, int? maximumOutputTokens)
+    internal const int CanonicalWorkingInputTokens = 128 * 1024;
+
+    internal static ContextPlan Prepare(IReadOnlyList<LmChatMessage> source, int contextLength, int? maximumOutputTokens,
+        bool preserveConversationPrefix = false, int? maximumInputTokens = null)
     {
         ArgumentNullException.ThrowIfNull(source);
         var budget = ContextPlanner.ComputeInputTokenBudget(contextLength, maximumOutputTokens);
+        if (maximumInputTokens is { } workingBudget)
+        {
+            ArgumentOutOfRangeException.ThrowIfLessThan(workingBudget, 1024);
+            budget = Math.Min(budget, workingBudget);
+        }
+        var originalTokens = ContextPlanner.EstimateTokens(source);
+        // Already evaluated scientific turns include reasoning and chronological
+        // host instructions. Removing either below the working limit rewrites the
+        // KV prefix and makes every following tool turn prefill old research again.
+        if (preserveConversationPrefix && originalTokens <= budget)
+            return new(source.ToArray(), originalTokens, budget, false, null);
         var messages = source.ToArray();
         var keep = Enumerable.Repeat(true, messages.Length).ToArray();
         var protect = new HashSet<int>();
@@ -136,7 +150,7 @@ internal static class ScientificRunContextPlanner
         var estimated = ContextPlanner.EstimateTokens(result);
         if (estimated > budget) throw new ContextBudgetException(estimated, budget);
         return new(result, estimated, budget, changed, changed
-            ? $"Der aktuelle Forschungsauftrag, die aktuelle Publikation und ihre Werkzeugbelege bleiben vollständig erhalten. {removed} ältere Kontextnachrichten wurden entfernt; das vollständige Laufjournal bleibt erhalten." : null);
+            ? $"Der Forschungs-Arbeitskontext wurde gezielt auf {estimated:N0} von {budget:N0} Eingabetoken verdichtet. Der aktuelle Forschungsauftrag, die aktuelle Publikation und ihre Werkzeugbelege bleiben vollständig erhalten. {removed} ältere Kontextnachrichten wurden aus dem Arbeitskontext entfernt; das vollständige Laufjournal bleibt erhalten. Forschungsdetails können mit research.read erneut geladen werden." : null);
     }
 
     private static void ProtectCurrentToolEvidence(LmChatMessage[] messages, IReadOnlyList<ToolGroup> groups, HashSet<int> protect)

@@ -17,7 +17,7 @@ public sealed partial class SqliteScientificResearchRepository
         { "title", "contentMarkdown", "statement", "status", "assumptions", "prediction", "nextCheck", "reason",
             "required", "order", "sourceIds", "claimIds", "experimentIds", "checkIds", "evidenceIds",
             "hypothesisIds", "requirementIds", "contributionIds", "figureCaptions", "units", "description",
-            "method", "expectedResult", "classification", "conclusion", "limit", "targetIds" };
+            "method", "expectedResult", "classification", "conclusion", "limit", "targetIds", "review" };
     private static readonly string[] WorkingReferenceFields =
         ["sourceIds", "claimIds", "experimentIds", "checkIds", "evidenceIds", "hypothesisIds", "requirementIds", "contributionIds", "targetIds"];
     private static readonly string[] LimitEvidenceFields = ["sourceIds", "evidenceIds", "experimentIds", "checkIds"];
@@ -188,8 +188,10 @@ public sealed partial class SqliteScientificResearchRepository
                 conflicts.Add(new("$title", "owner_required", "Nur der Hauptagent führt den Publikationstitel zusammen."));
             var current = state.Items.ToDictionary(item => item.Id, StringComparer.Ordinal);
             var seen = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var change in changes)
+            var resolvedChanges = new List<ResearchWorkingChange>(changes.Count);
+            foreach (var submitted in changes)
             {
+                var change = submitted;
                 if (string.IsNullOrWhiteSpace(change.Id) || change.Id.Length > 256 || change.Id.StartsWith('$') || change.Id.Any(char.IsControl))
                 {
                     conflicts.Add(new(change.Id ?? "", "invalid_id", "Das Forschungsobjekt benötigt eine stabile Kennung bis 256 Zeichen."));
@@ -206,7 +208,19 @@ public sealed partial class SqliteScientificResearchRepository
                     previous is not null && !string.Equals(previous.OwnerAgentId, actorAgentId, StringComparison.Ordinal) ||
                     previous is null && !change.Id.StartsWith(actorAgentId + ":", StringComparison.Ordinal)))
                     conflicts.Add(new(change.Id, "owner_required", "Subagenten bearbeiten eigene Objekte mit ihrer Kennung als Präfix; Publikationsabschnitte führt der Hauptagent zusammen.", previous?.Revision));
-                ValidateWorkingData(change, conflicts);
+                var payload = change.Patch ?? change.Data;
+                if (payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty("review", out var suppliedReview)
+                    && suppliedReview.ValueKind != JsonValueKind.Null
+                    && (!payload.TryGetProperty("status", out var suppliedStatus) || suppliedStatus.ValueKind != JsonValueKind.String))
+                    conflicts.Add(new(change.Id, "review_status_required",
+                        $"Eine eingereichte fachliche Prüfung benötigt ausdrücklich status. Aktueller Status: {(previous is { } prior && prior.Data.TryGetProperty("status", out var previousStatus) ? previousStatus.GetString() : "draft/fehlt")}. "
+                        + "Setze nur den tatsächlich erreichten Status: completed, supported, verified (mit Prüfnachweis), refuted, superseded oder openLimit (mit reason); ein noch ungeprüfter Stand bleibt ausdrücklich draft/active/unresolved. Nutze patch mit status und review, ohne unveränderten Manuskripttext zu wiederholen.", previous?.Revision));
+                if (ResolveWorkingChange(change, previous, conflicts) is not { } resolved) continue;
+                change = resolved;
+                resolvedChanges.Add(change);
+                var unchanged = submitted.Patch is not null && !payload.TryGetProperty("review", out _)
+                    && previous is not null && CanonicalWorkingJson(previous.Data) == CanonicalWorkingJson(change.Data);
+                ValidateWorkingData(change, conflicts, unchanged);
                 if (previous is { Kind: "requirement", OwnerAgentId: null } && previous.Data.ValueKind == JsonValueKind.Object
                     && previous.Data.TryGetProperty("required", out var wasRequired) && wasRequired.ValueKind == JsonValueKind.True
                     && change.Data.ValueKind == JsonValueKind.Object)
@@ -221,7 +235,7 @@ public sealed partial class SqliteScientificResearchRepository
                 }
             }
             if (conflicts.Count == 0)
-                await ValidateWorkingReferencesAsync(connection, transaction, projectId, current, changes, conflicts, token).ConfigureAwait(false);
+                await ValidateWorkingReferencesAsync(connection, transaction, projectId, current, resolvedChanges, conflicts, token).ConfigureAwait(false);
             if (conflicts.Count != 0)
             {
                 await SaveWorkingReceiptAsync(connection, transaction, projectId, operationId, actorAgentId, digest,
@@ -229,7 +243,7 @@ public sealed partial class SqliteScientificResearchRepository
                 return new(false, state, [], conflicts);
             }
 
-            var accepted = changes.Where(change => !current.TryGetValue(change.Id, out var previous)
+            var accepted = resolvedChanges.Where(change => !current.TryGetValue(change.Id, out var previous)
                 || !string.Equals(CanonicalWorkingJson(previous.Data), CanonicalWorkingJson(change.Data), StringComparison.Ordinal)).ToArray();
             var titleChanged = title is not null && !string.Equals(title, state.Title, StringComparison.Ordinal);
             var changedIds = accepted.Select(change => change.Id).ToList();
@@ -263,7 +277,46 @@ public sealed partial class SqliteScientificResearchRepository
         }, cancellationToken);
     }
 
-    private static void ValidateWorkingData(ResearchWorkingChange change, List<ResearchWorkingConflict> conflicts)
+    private static ResearchWorkingChange? ResolveWorkingChange(ResearchWorkingChange change, ResearchWorkingItem? previous,
+        List<ResearchWorkingConflict> conflicts)
+    {
+        if (change.Patch is not { } patch) return change;
+        if (change.Data.ValueKind != JsonValueKind.Undefined)
+        {
+            conflicts.Add(new(change.Id, "ambiguous_update", "Gib genau eines von data (vollständiger Ersatz) oder patch (gezielte Felder) an."));
+            return null;
+        }
+        if (previous is null || change.ExpectedRevision == 0)
+        {
+            conflicts.Add(new(change.Id, "patch_requires_existing", "patch benötigt ein vorhandenes Objekt und dessen expectedRevision; neue Objekte mit vollständigem data anlegen."));
+            return null;
+        }
+        if (patch.ValueKind != JsonValueKind.Object || !patch.EnumerateObject().Any())
+        {
+            conflicts.Add(new(change.Id, "invalid_patch", "patch muss mindestens ein gezielt geändertes Feld enthalten."));
+            return null;
+        }
+        var fields = previous.Data.EnumerateObject().ToDictionary(field => field.Name, field => field.Value.Clone(), StringComparer.Ordinal);
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var field in patch.EnumerateObject())
+        {
+            if (!names.Add(field.Name)) conflicts.Add(new(change.Id, "duplicate_field", $"Das Feld {field.Name} ist mehrfach angegeben."));
+            if (!WorkingDataFields.Contains(field.Name))
+                conflicts.Add(new(change.Id, "unsupported_field", $"Das Feld {field.Name} ist nicht vorgesehen. Ausführungs- und Prüfnachweise werden ausschließlich von Missum gespeichert."));
+            if (field.Value.ValueKind == JsonValueKind.Null) fields.Remove(field.Name);
+            else fields[field.Name] = field.Value.Clone();
+        }
+        var merged = JsonSerializer.SerializeToElement(fields, WorkingJsonOptions);
+        // A changed object invalidates its prior review. A no-op preserves its revision and review.
+        if (!patch.TryGetProperty("review", out _) && CanonicalWorkingJson(merged) != CanonicalWorkingJson(previous.Data))
+        {
+            fields.Remove("review");
+            merged = JsonSerializer.SerializeToElement(fields, WorkingJsonOptions);
+        }
+        return change with { Data = merged, Patch = null };
+    }
+
+    private static void ValidateWorkingData(ResearchWorkingChange change, List<ResearchWorkingConflict> conflicts, bool unchanged = false)
     {
         if (change.Data.ValueKind != JsonValueKind.Object)
         {
@@ -297,6 +350,9 @@ public sealed partial class SqliteScientificResearchRepository
             conflicts.Add(new(change.Id, "invalid_assumptions", "assumptions enthält Text oder eine Liste von Annahmen."));
         if (change.Data.TryGetProperty("order", out var order) && (order.ValueKind != JsonValueKind.Number || !order.TryGetInt32(out _)))
             conflicts.Add(new(change.Id, "invalid_order", "order muss eine ganze Zahl sein."));
+        if (change.Data.TryGetProperty("review", out var review) && (!ScientificResearchReview.ValidReview(review)
+            || review.GetProperty("itemRevision").GetInt64() != change.ExpectedRevision + (unchanged ? 0 : 1)))
+            conflicts.Add(new(change.Id, "invalid_review", "review benötigt itemRevision=expectedRevision+1 sowie konkrete sourceAssessment, calculationAssessment, contradictionAssessment und scope als Text. Neue Inhaltsänderungen benötigen eine neue fachliche Prüfung."));
         ValidateWorkingMetadata(change, "units", ["symbol", "meaning", "unit"], conflicts);
         ValidateWorkingMetadata(change, "figureCaptions", ["experimentId", "artifactPath", "caption"], conflicts);
         foreach (var field in WorkingReferenceFields)
@@ -394,8 +450,11 @@ public sealed partial class SqliteScientificResearchRepository
 
     private static bool PublicationAffected(Dictionary<string, ResearchWorkingItem> current, IReadOnlyList<ResearchWorkingChange> accepted)
     {
-        if (accepted.Any(change => change.Kind == "section")) return true;
-        var affected = accepted.Select(change => change.Id).ToHashSet(StringComparer.Ordinal);
+        var changed = accepted.Where(change => !current.TryGetValue(change.Id, out var previous)
+            ? change.Kind is "section" or "claim" or "hypothesis"
+            : PublicationFields(change.Kind, previous.Data) != PublicationFields(change.Kind, change.Data)).ToArray();
+        if (changed.Any(change => change.Kind == "section")) return true;
+        var affected = changed.Select(change => change.Id).ToHashSet(StringComparer.Ordinal);
         var discovered = true;
         while (discovered)
         {
@@ -405,6 +464,17 @@ public sealed partial class SqliteScientificResearchRepository
                     discovered |= affected.Add(item.Id);
         }
         return current.Values.Any(item => item.Kind == "section" && affected.Contains(item.Id));
+    }
+
+    private static readonly string[] SectionPublicationFields =
+        ["title", "contentMarkdown", "status", "order", "units", "figureCaptions", "sourceIds", "claimIds", "hypothesisIds", "experimentIds"];
+    private static readonly string[] AssertionPublicationFields = ["statement", "status", "sourceIds", "hypothesisIds"];
+    private static string PublicationFields(string kind, JsonElement data)
+    {
+        var fields = kind == "section" ? SectionPublicationFields : kind is "claim" or "hypothesis" ? AssertionPublicationFields : [];
+        return CanonicalWorkingJson(JsonSerializer.SerializeToElement(data.EnumerateObject()
+            .Where(field => fields.Contains(field.Name, StringComparer.Ordinal))
+            .ToDictionary(field => field.Name, field => field.Value), WorkingJsonOptions));
     }
 
     private static IEnumerable<string> WorkingRefs(JsonElement data, string field) =>
@@ -524,8 +594,11 @@ public sealed partial class SqliteScientificResearchRepository
     private static string WorkingDigest(string? actorAgentId, string? title, IReadOnlyList<ResearchWorkingChange> changes)
     {
         var json = JsonSerializer.SerializeToElement(new { actorAgentId, title,
-            changes = changes.OrderBy(change => change.Id, StringComparer.Ordinal).Select(change => new
-                { change.Id, change.Kind, change.ExpectedRevision, data = change.Data.ValueKind == JsonValueKind.Undefined ? (JsonElement?)null : change.Data }) });
+            changes = changes.OrderBy(change => change.Id, StringComparer.Ordinal).Select(change => change.Patch is null
+                ? JsonSerializer.SerializeToElement(new { change.Id, change.Kind, change.ExpectedRevision,
+                    data = change.Data.ValueKind == JsonValueKind.Undefined ? (JsonElement?)null : change.Data })
+                : JsonSerializer.SerializeToElement(new { change.Id, change.Kind, change.ExpectedRevision,
+                    data = change.Data.ValueKind == JsonValueKind.Undefined ? (JsonElement?)null : change.Data, patch = change.Patch })) });
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(CanonicalWorkingJson(json)))).ToLowerInvariant();
     }
 

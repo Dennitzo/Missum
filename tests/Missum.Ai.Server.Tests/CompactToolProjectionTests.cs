@@ -101,6 +101,12 @@ public sealed class CompactToolProjectionTests
         foreach (var alternative in update.GetProperty("properties").GetProperty("changes").GetProperty("items").GetProperty("anyOf").EnumerateArray())
         {
             var fields = alternative.GetProperty("properties");
+            if (fields.TryGetProperty("patch", out var patch))
+            {
+                Assert.Equal(1, fields.GetProperty("expectedRevision").GetProperty("minimum").GetInt32());
+                Assert.True(patch.GetProperty("properties").TryGetProperty("status", out _));
+                continue;
+            }
             var data = fields.GetProperty("data");
             Assert.Equal(64000, data.GetProperty("properties").GetProperty("contentMarkdown").GetProperty("maxLength").GetInt32());
             Assert.True(data.GetProperty("properties").TryGetProperty("description", out _));

@@ -13,6 +13,66 @@ public sealed class ScientificRunContextPlannerTests
     private static IReadOnlyList<AgentToolSpec> Tools() => new AgentToolCatalog().GetAvailableTools(ScientificRunCompletionPolicyTests.Request());
 
     [Fact]
+    public void EvaluatedScientificPrefixBelowTheWorkingLimitRetainsReasoningAndChronologicalInstructions()
+    {
+        var messages = InitialInstructions();
+        messages.Add(new("assistant", "Frühere fachliche Entscheidung.", ReasoningContent: "Die Herleitung verwendet SI-Einheiten."));
+        messages.Add(new("user", "Missum-Laufanweisung zur Sprache: Frühere Sprachbindung."));
+        messages.Add(new("user", "Missum-Laufanweisung:\nBewahre die gespeicherten Randbedingungen."));
+        messages.Add(new("user", "Missum-Laufanweisung:\nBewahre die gespeicherten Randbedingungen."));
+        AddReceipt(messages, "web.fetch", new { url = "https://example.org/source" }, new { success = true, content = "Beleg" });
+        messages.Add(new("assistant", "Aktuelle Entscheidung.", ReasoningContent: "Die Dimensionsprüfung ist konsistent."));
+        messages.Add(new("user", "Missum-Laufanweisung zur Sprache: Aktuelle Sprachbindung."));
+        var original = messages.ToArray();
+
+        var plan = ScientificRunContextPlanner.Prepare(messages, 1_048_576, null,
+            preserveConversationPrefix: true, maximumInputTokens: ScientificRunContextPlanner.CanonicalWorkingInputTokens);
+
+        Assert.False(plan.WasCompacted);
+        Assert.Null(plan.Notice);
+        Assert.Equal(original, plan.Messages);
+        Assert.Equal(original, messages);
+        Assert.Equal(ScientificRunContextPlanner.CanonicalWorkingInputTokens, plan.InputTokenBudget);
+        AssertValidToolPairs(plan.Messages);
+    }
+
+    [Fact]
+    public void CanonicalWorkingLimitCompactsLongHistoryWithoutChangingTheNativeWindowOrCurrentEvidence()
+    {
+        var messages = InitialInstructions();
+        AddOldLogs(messages, 200);
+        var current = ScientificRunCompletionPolicyTests.SuccessfulWork();
+        messages.AddRange(current);
+        ScientificRunCompletionPolicyTests.AddVerification(messages, success: true);
+        var journal = messages.ToArray();
+        Assert.True(ContextPlanner.EstimateTokens(messages) > ScientificRunContextPlanner.CanonicalWorkingInputTokens);
+
+        var plan = ScientificRunContextPlanner.Prepare(messages, 1_048_576, null,
+            preserveConversationPrefix: true, maximumInputTokens: ScientificRunContextPlanner.CanonicalWorkingInputTokens);
+
+        Assert.True(plan.WasCompacted);
+        Assert.Equal(ScientificRunContextPlanner.CanonicalWorkingInputTokens, plan.InputTokenBudget);
+        Assert.InRange(plan.EstimatedInputTokens, 1, plan.InputTokenBudget);
+        Assert.Equal(journal, messages);
+        Assert.Contains("Laufjournal bleibt erhalten", plan.Notice);
+        Assert.True(ScientificRunCompletionPolicy.Assess(ScientificRunCompletionPolicyTests.Request(), plan.Messages, Tools()).Complete);
+        foreach (var message in current) Assert.Contains(message, plan.Messages);
+        AssertValidToolPairs(plan.Messages);
+    }
+
+    [Fact]
+    public void WorkingLimitNeverSilentlyTruncatesAnOversizedCurrentUserTask()
+    {
+        var messages = InitialInstructions();
+        messages.Add(new("user", new string('q', 400_000)));
+        var original = messages.ToArray();
+
+        Assert.Throws<ContextBudgetException>(() => ScientificRunContextPlanner.Prepare(messages, 1_048_576, null,
+            preserveConversationPrefix: true, maximumInputTokens: ScientificRunContextPlanner.CanonicalWorkingInputTokens));
+        Assert.Equal(original, messages);
+    }
+
+    [Fact]
     public void MoreThanOneThousandOldManuscriptsRemindersAndLogsDoNotTruncateCurrentEvidence()
     {
         var messages = InitialInstructions();

@@ -65,8 +65,12 @@ public sealed class ScientificDeliverablesVerifierTests
     {
         var now = DateTimeOffset.UtcNow;
         return new("research-test", 1, 1, "Erdmagnetfeld",
-            [new("grundlagen", "section", 1, null, JsonSerializer.SerializeToElement(new
-                { title = "Modellannahmen", contentMarkdown = "Explizit hypothetisches Modell." }), now),
+             [new("grundlagen", "section", 1, null, JsonSerializer.SerializeToElement(new
+                { title = "Modellannahmen", contentMarkdown = "Explizit hypothetisches Modell.", status = "openLimit",
+                    classification = "hypothesis", reason = "Keine Aussage über empirische Bestätigung.",
+                    review = new { itemRevision = 1, sourceAssessment = "Als hypothetisches Modell ohne externe Bestätigungsbehauptung geprüft.",
+                        calculationAssessment = "Keine numerischen oder formalen Schlussfolgerungen behauptet.",
+                        contradictionAssessment = "Der illustrative Geltungsbereich ist ausdrücklich begrenzt.", scope = "Technische Animation, keine bestätigte Theorie." } }), now),
              new("simulation", "requirement", 1, null, JsonSerializer.SerializeToElement(new
                 { title, method, required = true, status = "completed" }), now)], now);
     }

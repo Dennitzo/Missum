@@ -48,9 +48,8 @@ public sealed partial class ScientificPublicationService
         item.Kind == "section" && item.OwnerAgentId is null && Text(item.Data, "status") != "withdrawn"
         && !string.IsNullOrWhiteSpace(Text(item.Data, "contentMarkdown")));
 
-    private static bool IsCanonicalDraft(ResearchWorkingState state) => state.Items.Any(item => item.Kind == "section"
-        && (Text(item.Data, "status") is not ("completed" or "supported" or "verified" or "refuted" or "withdrawn" or "openLimit")
-            || LinkedScientificItems(item, state).Any(link => Text(link.Data, "status") is "refuted" or "blocked" or "unresolved")));
+    private static bool IsCanonicalDraft(ResearchWorkingState state, IReadOnlyList<ResearchVerification>? trustedChecks) =>
+        !ScientificResearchReview.HasCurrentReview(state, trustedChecks ?? []);
 
     private static async Task<ResearchWorkingState> ImportLegacyManuscriptAsync(IScientificResearchStateRepository repository,
         ResearchWorkingState state, ChatMessage? manuscript, ResearchStoredReport? report,
@@ -117,21 +116,23 @@ public sealed partial class ScientificPublicationService
     }
 
     internal static string FormatCanonicalPublication(ResearchWorkingState state,
-        IReadOnlyList<ResearchLiteratureEntry> works, ResearchResultSnapshot results)
+        IReadOnlyList<ResearchLiteratureEntry> works, ResearchResultSnapshot results, IReadOnlyList<ResearchVerification>? trustedChecks = null)
     {
         var sections = OrderedPublicationSections(state);
         if (sections.Length == 0) throw new InvalidOperationException("Noch kein fachlicher Publikationsabschnitt vorhanden.");
         if (string.IsNullOrWhiteSpace(state.Title)) throw new ScientificPublicationContentException(
             "Der fachliche Publikationstitel fehlt. Ergänze nur den Titel mit research.update.", state: state, sections: []);
         var text = new StringBuilder().Append("# ").AppendLine(OneLine(state.Title)).AppendLine()
-            .Append("**Missum · Claude Science**  \n").Append(IsCanonicalDraft(state) ? "Arbeitsfassung" : "Forschungsstand").Append(" · Revision ")
+            .Append("**Missum · Claude Science**  \n").Append(IsCanonicalDraft(state, trustedChecks) ? "Arbeitsfassung" : "Geprüfter Forschungsstand").Append(" · Revision ")
             .AppendLine(state.PublicationRevision.ToString(CultureInfo.InvariantCulture)).AppendLine();
         var referenced = new HashSet<string>(StringComparer.Ordinal);
         var citedBySection = sections.ToDictionary(section => section.Id, section => SectionSources(section, state), StringComparer.Ordinal);
         var sourceNumbers = works.Where(work => citedBySection.Values.Any(ids => ids.Contains(work.WorkId)))
             .OrderBy(work => work.WorkId, StringComparer.Ordinal).Select((work, index) => (work.WorkId, Number: index + 1))
             .ToDictionary(item => item.WorkId, item => item.Number, StringComparer.Ordinal);
-        var usedFigures = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var usedFigures = DeclaredPlotPaths(sections);
+        var scopedExperiments = results.Experiments.Where(item => item.ProjectId == state.ProjectId).ToArray();
+        var latestPlots = LatestMeasuredPlots(scopedExperiments);
         foreach (var section in sections)
         {
             var title = Text(section.Data, "title");
@@ -141,7 +142,8 @@ public sealed partial class ScientificPublicationService
                 "refuted" => "Widerlegter Ansatz – zur fachlichen Einordnung erhalten.",
                 "superseded" => "Durch einen späteren Ansatz ersetzt.",
                 "openLimit" or "blocked" => "Offene Nachweisgrenze.",
-                "supported" or "completed" or "verified" => "Dokumentierter Forschungsstand; der jeweilige Nachweisumfang gilt.",
+                "supported" or "completed" or "verified" when ScientificResearchReview.HasCurrentReview(state, trustedChecks ?? [])
+                    => "Geprüfter Forschungsstand; der dokumentierte Nachweisumfang gilt.",
                 _ => "Vorläufiger Forschungsstand – fachlich noch nicht abschließend geprüft.",
             };
             text.Append("> ").AppendLine(stateLabel).AppendLine();
@@ -175,7 +177,7 @@ public sealed partial class ScientificPublicationService
                 {
                     var experimentId = Text(figure, "experimentId");
                     var path = Text(figure, "artifactPath").Replace('\\', '/');
-                    var experiment = results.Experiments.FirstOrDefault(item => item.Id == experimentId
+                    var experiment = scopedExperiments.FirstOrDefault(item => item.Id == experimentId
                         && Ids(section.Data, "experimentIds").Contains(item.Id));
                     if (experiment is null || !MeasuredImageHashes(experiment).ContainsKey(path))
                         throw new ScientificPublicationContentException($"Abschnitt {section.Id}: Abbildung {path} besitzt keinen zugeordneten erfolgreichen Ausführungsbeleg. Korrigiere nur figureCaptions/experimentIds.",
@@ -185,7 +187,7 @@ public sealed partial class ScientificPublicationService
                     usedFigures.Add(path);
                 }
             }
-            AppendMeasuredPlots(text, results.Experiments.Where(experiment => Ids(section.Data, "experimentIds").Contains(experiment.Id)),
+            AppendMeasuredPlots(text, latestPlots.Where(image => Ids(section.Data, "experimentIds").Contains(image.ExperimentId)),
                 usedFigures, includeHeading: false);
             var sectionSources = citedBySection[section.Id].Where(sourceNumbers.ContainsKey).OrderBy(id => sourceNumbers[id]).ToArray();
             referenced.UnionWith(sectionSources);
@@ -194,7 +196,7 @@ public sealed partial class ScientificPublicationService
                     .Append(string.Join(", ", sectionSources.Select(id => "[" + sourceNumbers[id].ToString(CultureInfo.InvariantCulture) + "]")))
                     .AppendLine(".*").AppendLine();
         }
-        AppendMeasuredPlots(text, results.Experiments, usedFigures, includeHeading: true);
+        AppendMeasuredPlots(text, latestPlots, usedFigures, includeHeading: true);
         var sources = works.Where(work => referenced.Contains(work.WorkId)).OrderBy(work => work.WorkId, StringComparer.Ordinal).ToArray();
         if (sources.Length > 0)
         {
@@ -208,6 +210,7 @@ public sealed partial class ScientificPublicationService
                 text.AppendLine().AppendLine();
             }
         }
+        AppendOutlineMetadata(text, sections);
         return text.ToString();
     }
 
@@ -243,10 +246,11 @@ public sealed partial class ScientificPublicationService
         var experimentIds = selected.SelectMany(item => Ids(item.Data, "experimentIds")).ToHashSet(StringComparer.Ordinal);
         return Fingerprint(JsonSerializer.Serialize(new
         {
+            reviewed = ScientificResearchReview.HasCurrentReview(state, snapshot.TrustedChecks ?? []),
             sources = snapshot.Works.Where(work => sourceIds.Contains(work.WorkId)).OrderBy(work => work.WorkId)
                 .Select(work => new { work.WorkId, work.Title, work.CanonicalUrl }),
-            experiments = snapshot.Results.Experiments.Where(experiment => experimentIds.Contains(experiment.Id)
-                || MeasuredImageHashes(experiment).Count > 0).OrderBy(experiment => experiment.Id)
+            experiments = snapshot.Results.Experiments.Where(experiment => experiment.ProjectId == snapshot.Project.Id
+                && (experimentIds.Contains(experiment.Id) || MeasuredImageHashes(experiment).Count > 0)).OrderBy(experiment => experiment.Id)
                 .Select(experiment => new { experiment.Id, experiment.StdoutEvidence, experiment.VerificationStatus }),
         }));
     }
@@ -262,13 +266,14 @@ public sealed partial class ScientificPublicationService
             foreach (var run in runs.EnumerateArray())
             {
                 if (!run.TryGetProperty("exitCode", out var code) || !code.TryGetInt32(out var exit) || exit != 0
+                    || run.TryGetProperty("timedOut", out var timedOut) && timedOut.ValueKind == JsonValueKind.True
                     || Text(run, "runId").Length == 0 || Text(run, "snapshotId").Length == 0
                     || !run.TryGetProperty("inputHashes", out var inputs) || inputs.ValueKind != JsonValueKind.Object
                     || !run.TryGetProperty("outputHashes", out var output) || output.ValueKind != JsonValueKind.Object) continue;
                 foreach (var property in output.EnumerateObject())
                 {
                     var path = property.Name;
-                    if (property.Value.ValueKind != JsonValueKind.String || !path.StartsWith("artifacts/", StringComparison.Ordinal)
+                    if (property.Value.ValueKind != JsonValueKind.String || !(path.StartsWith("artifacts/", StringComparison.Ordinal) || path.StartsWith("work/", StringComparison.Ordinal))
                         || path.Contains('\\') || path.Contains(':') || path.Any(char.IsControl)
                         || path.Split('/').Any(part => part is "" or "." or "..")
                         || Path.GetExtension(path).ToLowerInvariant() is not (".png" or ".jpg" or ".jpeg")) continue;
@@ -284,14 +289,22 @@ public sealed partial class ScientificPublicationService
     private static void ValidateCanonicalImages(PublicationSnapshot snapshot, ScientificPublicationImages.PreparedImages images)
     {
         var sections = snapshot.WorkingState!.Items.Where(item => item.Kind == "section" && Text(item.Data, "status") != "withdrawn").ToArray();
+        var automaticHashes = AutomaticPlotHashes(snapshot.WorkingState!, snapshot.Results).ToArray();
+        if (automaticHashes.Any(hash => !images.Images.Any(image => image.Sha256.Equals(hash, StringComparison.OrdinalIgnoreCase))))
+            throw new ScientificPublicationContentException("Die Simulationsabbildungen stimmen nicht mit den gespeicherten Ausführungsbelegen überein. Erzeuge fehlende oder veränderte Plots erneut; die vorherige PDF bleibt erhalten.",
+                state: snapshot.WorkingState, sections: sections.Where(section => Ids(section.Data, "experimentIds").Count > 0)
+                    .Select(section => new ScientificPresentationSectionFailure(section.Id, section.Revision)).ToArray());
         // Imported historical text keeps its original figure handling; it cannot establish a new successful verification.
         if (sections.All(section => section.Id.StartsWith("legacy-section-", StringComparison.Ordinal))) return;
         var allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var required = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var experiment in snapshot.Results.Experiments) allowed.UnionWith(MeasuredImageHashes(experiment).Values);
+        required.UnionWith(automaticHashes);
+        foreach (var experiment in snapshot.Results.Experiments.Where(item => item.ProjectId == snapshot.Project.Id))
+            allowed.UnionWith(MeasuredImageHashes(experiment).Values);
         foreach (var section in sections)
         {
-            var referenced = snapshot.Results.Experiments.Where(experiment => Ids(section.Data, "experimentIds").Contains(experiment.Id)).ToArray();
+            var referenced = snapshot.Results.Experiments.Where(experiment => experiment.ProjectId == snapshot.Project.Id
+                && Ids(section.Data, "experimentIds").Contains(experiment.Id)).ToArray();
             foreach (var experiment in referenced) allowed.UnionWith(MeasuredImageHashes(experiment).Values);
             if (!section.Data.TryGetProperty("figureCaptions", out var figures) || figures.ValueKind != JsonValueKind.Array) continue;
             foreach (var figure in figures.EnumerateArray())

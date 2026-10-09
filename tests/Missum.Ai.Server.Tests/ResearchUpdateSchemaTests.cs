@@ -8,6 +8,8 @@ namespace Missum.Ai.Server.Tests;
 public sealed class ResearchUpdateSchemaTests
 {
     private static readonly string[] RequiredChangeFields = ["id", "kind", "expectedRevision", "data"];
+    private static readonly string[] RequiredPatchChangeFields = ["id", "kind", "expectedRevision", "patch"];
+    private static readonly string[] InvalidSourceIds = [""];
     private static readonly string[] ManuscriptFields = ["title", "contentMarkdown"];
     private static readonly string[] AssertionFields = ["statement"];
     private static readonly string[] ScientificKinds = ["claim", "contribution", "hypothesis", "requirement", "section"];
@@ -87,12 +89,23 @@ public sealed class ResearchUpdateSchemaTests
         Assert.False(schema.TryGetProperty("allOf", out _));
         Assert.False(schema.TryGetProperty("if", out _));
         var alternatives = schema.GetProperty("properties").GetProperty("changes").GetProperty("items").GetProperty("anyOf");
-        Assert.Equal(2, alternatives.GetArrayLength());
+        Assert.Equal(3, alternatives.GetArrayLength());
         var kinds = new HashSet<string>(StringComparer.Ordinal);
         foreach (var alternative in alternatives.EnumerateArray())
         {
             Assert.Equal("object", alternative.GetProperty("type").GetString());
             Assert.False(alternative.GetProperty("additionalProperties").GetBoolean());
+            if (alternative.GetProperty("properties").TryGetProperty("patch", out var patch))
+            {
+                Assert.Equal(RequiredPatchChangeFields, Strings(alternative.GetProperty("required")));
+                Assert.False(alternative.GetProperty("properties").TryGetProperty("data", out _));
+                Assert.Equal(1, alternative.GetProperty("properties").GetProperty("expectedRevision").GetProperty("minimum").GetInt32());
+                Assert.Equal(1, patch.GetProperty("minProperties").GetInt32());
+                Assert.False(patch.GetProperty("additionalProperties").GetBoolean());
+                Assert.False(patch.TryGetProperty("required", out _));
+                Assert.True(patch.GetProperty("properties").TryGetProperty("review", out _));
+                continue;
+            }
             Assert.Equal(RequiredChangeFields, Strings(alternative.GetProperty("required")));
             var properties = alternative.GetProperty("properties");
             Assert.Equal(200, properties.GetProperty("id").GetProperty("maxLength").GetInt32());
@@ -117,6 +130,36 @@ public sealed class ResearchUpdateSchemaTests
     }
 
     [Fact]
+    public void MetadataPatchDoesNotRequireRepeatingExistingManuscriptAndCannotCreateNewObjects()
+    {
+        var tool = ResearchUpdateTool();
+        _catalog.Validate(tool, PatchArguments(new { status = "completed" }));
+        _catalog.Validate(tool, PatchArguments(new { reason = (string?)null }));
+        _catalog.Validate(tool, PatchArguments(new { status = "draft", review = new { itemRevision = 2,
+            sourceAssessment = "Originalbelege gelesen", calculationAssessment = "Rechnung geprüft",
+            contradictionAssessment = "Offene Grenze dokumentiert", scope = "Modellannahmen" } }));
+        Assert.Throws<ArgumentException>(() => _catalog.Validate(tool, PatchArguments(new { status = "completed" }, 0)));
+        Assert.Throws<ArgumentException>(() => _catalog.Validate(tool, PatchArguments(new { unsupported = (string?)null })));
+        Assert.Throws<ArgumentException>(() => _catalog.Validate(tool, PatchArguments(new { sourceIds = InvalidSourceIds })));
+    }
+
+    [Fact]
+    public void AmbiguousDataAndPatchOrReviewWithoutExplicitStatusHasAnActionableError()
+    {
+        var tool = ResearchUpdateTool();
+        var ambiguous = JsonSerializer.SerializeToElement(new { projectId = "research-test", changes = new[]
+        {
+            new { id = "section", kind = "section", expectedRevision = 1,
+                data = new { title = "Titel", contentMarkdown = "Text" }, patch = new { status = "completed" } },
+        } });
+        Assert.Throws<ArgumentException>(() => _catalog.Validate(tool, ambiguous));
+        var error = Assert.Throws<ArgumentException>(() => _catalog.Validate(tool, PatchArguments(new { review = new { itemRevision = 2,
+            sourceAssessment = "Quelle", calculationAssessment = "Rechnung", contradictionAssessment = "Grenze", scope = "Modell" } })));
+        Assert.Contains("ausdrücklich status", error.Message, StringComparison.Ordinal);
+        Assert.Contains("patch", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TitleOnlyUpdateRemainsSupportedAndUnknownDataNeverBecomesScientificText()
     {
         var tool = ResearchUpdateTool();
@@ -138,4 +181,8 @@ public sealed class ResearchUpdateSchemaTests
     });
 
     private static string[] Strings(JsonElement array) => array.EnumerateArray().Select(static item => item.GetString()!).ToArray();
+    private static JsonElement PatchArguments(object patch, long expectedRevision = 1) => JsonSerializer.SerializeToElement(new
+    {
+        projectId = "research-test", changes = new[] { new { id = "section", kind = "section", expectedRevision, patch } },
+    });
 }

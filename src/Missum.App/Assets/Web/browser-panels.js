@@ -26,7 +26,7 @@
   const childTabs = new Map();
   let observationOrder = 0;
   let planetSequence = 0;
-  let previewArtifactId = null;
+  let simulationPane = null;
   function node(tag, className, text) {
     const element = document.createElement(tag);
     if (className) element.className = className;
@@ -263,7 +263,6 @@
     const source = action.sources[0], row = link(source.title, source.href); row.className = "inspector-source-row"; row.replaceChildren(node("span", "inspector-icon inspector-icon--web"));
     const labels = node("span", "inspector-source-labels"); labels.append(node("span", "inspector-source-title", source.title), node("span", "inspector-source-url", source.href)); row.append(labels); row.title = `${source.title}\n${source.href}`; return row;
   }
-  function openSources() { sourceTabs.add(state().activeSessionId); setView("sources"); }
   function changeCounts(summary) {
     const files = summary?.files || [], textFiles = files.filter(file => !file.isBinary);
     return { added: textFiles.every(file => Number.isSafeInteger(file.addedLines) && file.addedLines >= 0) ? textFiles.reduce((sum, file) => sum + file.addedLines, 0) : null,
@@ -283,9 +282,8 @@
     if (inspector.hidden) return;
     const current = state(), child = children.get(childId), localChildren = [...children.values()].filter(item => item.sessionId === current.activeSessionId);
     const messages = view === "subagent" ? child?.messages || [] : [...current.messages, ...localChildren.flatMap(item => item.messages || [])];
-    const sources = sourceActions(current, messages), artifacts = new Map();
-    for (const message of messages) for (const artifact of message.artifacts || []) if (String(artifact.metadata?.role).toLowerCase() !== "vision_input") artifacts.set(artifact.id, artifact);
-    const signature = JSON.stringify([current.activeSessionId, current.workspacePath, current.changesSummary, sources, localChildren.map(item => [item.agentId || item.runId, item.title || item.name, item.status, item.isRunning, item.planetIndex, childCreated(item), item._observationOrder]), [...artifacts.values()], previewArtifactId, current.artifactPreviewUrls?.get(String(previewArtifactId)),document.documentElement?.lang]);
+    const sources = sourceActions(current, messages);
+    const signature = JSON.stringify([current.activeSessionId, current.workspacePath, current.changesSummary, sources, localChildren.map(item => [item.agentId || item.runId, item.title || item.name, item.status, item.isRunning, item.planetIndex, childCreated(item), item._observationOrder]),document.documentElement?.lang]);
     if (inspectorSignature === signature) return; inspectorSignature = signature;
     const header = node("header", "inspector-heading"), close = button("×", toggleInspector, "icon-button"); close.setAttribute("aria-label", "Ausgaben schließen"); header.append(node("span", "", "Ausgaben"), close); inspector.replaceChildren(header);
     const workspace = node("div", "inspector-workspace"); workspace.append(node("span", "inspector-icon inspector-icon--folder"), node("span", "inspector-workspace-label", current.workspacePath?.replace(/[\\/]+$/, "").split(/[\\/]/).at(-1) || "Kein Projekt ausgewählt")); workspace.title = current.workspacePath || "Kein Projekt ausgewählt";
@@ -306,22 +304,15 @@
       agents.append(summary); inspector.append(agents);
     }
     const sourceSection = node("section", "inspector-section inspector-sources"); sourceSection.append(node("h2", "", "Quellen"));
-    if (sources.length) { sourceSection.append(sourceRow(sources[0])); const all = button("", openSources, "inspector-all-sources"); all.append(icon("link"),node("span","","Alle anzeigen")); all.setAttribute("aria-label", "Alle Quellen anzeigen"); sourceSection.append(all); } else sourceSection.append(node("p", "inspector-empty", "Noch keine Quellen")); inspector.append(sourceSection);
-    if (artifacts.size) {
-      const outputs = node("section", "inspector-section"); outputs.append(node("h2", "", "Dateien und Ergebnisse"));
-      for (const artifact of artifacts.values()) {
-        const item = node("div", "inspector-artifact"); item.append(node("span", "inspector-artifact-name", artifact.fileName || artifact.title || "Artefakt"));
-        const controls = node("div", "inspector-artifact-actions");
-        if (/^(image|audio|video)\//i.test(artifact.contentType || "") || artifact.previewSupported === true) controls.append(button("Vorschau", () => { previewArtifactId = previewArtifactId === artifact.id ? null : artifact.id; if (previewArtifactId) post("artifact.preview", { artifactId: artifact.id }); renderInspector(); }));
-        controls.append(button("Öffnen", () => post("artifact.open", { artifactId: artifact.id, sessionId: current.activeSessionId })), button("Herunterladen", () => post("artifact.save", { artifactId: artifact.id, sessionId: current.activeSessionId }))); item.append(controls);
-        if (previewArtifactId === artifact.id) {
-          const preview = current.artifactPreviewUrls?.get(String(artifact.id)), resource = url(preview?.url, true);
-          if (resource) { const media = node(/^audio\//i.test(artifact.contentType) ? "audio" : /^video\//i.test(artifact.contentType) ? "video" : "img", "inspector-preview"); media.src = resource; if (media.tagName === "IMG") media.alt = artifact.fileName; else { media.controls = true; media.preload = "metadata"; } item.append(media); } else item.append(node("p", "inspector-empty", "Vorschau wird geladen …"));
-        }
-        outputs.append(item);
-      }
-      inspector.append(outputs);
+    if (sources.length) {
+      sourceSection.append(sourceRow(sources[0]));
+      const all = button("", () => setView("sources"), "inspector-all-sources");
+      all.append(icon("link"), node("span", "", "Alle anzeigen"));
+      all.setAttribute("aria-label", "Alle Quellen anzeigen");
+      sourceSection.append(all);
     }
+    else sourceSection.append(node("p", "inspector-empty", "Noch keine Quellen"));
+    inspector.append(sourceSection);
   }
   function toggleInspector() {
     if (view !== "chat" && view !== "subagent") return;
@@ -357,47 +348,125 @@
       panel.append(publicationView);
       return;
     }
-    const card = section("Simulation", "Reproduzierbare Python-Analysen mit Daten und Quellcode");
-    card.classList.add("science-presentation-card");
-    const toolbar = node("div", "browser-panel-toolbar"); toolbar.append(button("Aktualisieren", () => { post("research.list", { sessionId: current.activeSessionId }); if (current.scientificResearch.selectedProjectId) post("research.open", { sessionId: current.activeSessionId, projectId: current.scientificResearch.selectedProjectId }); })); card.append(toolbar);
-    if ((current.scientificResearch.projects || []).length > 1) {
+    renderSimulation(current, simulation, data.simulationError);
+  }
+
+  function simulationDisclosure(label, resource) {
+    if (!resource) return null;
+    const disclosure = node("details", "simulation-source"); disclosure.append(node("summary", "", label));
+    const text = node("pre", "", "Inhalt wird geladen …"); disclosure.append(text); let loaded = false;
+    disclosure.addEventListener("toggle", async () => {
+      if (!disclosure.open || loaded) return;
+      try {
+        const response = await fetch(resource, { credentials: "same-origin" });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const code = await response.text();
+        text.textContent = code.slice(0, 100000) + (code.length > 100000 ? "\nVorschau auf 100.000 Zeichen begrenzt." : ""); loaded = true;
+      } catch (error) { text.textContent = `Inhalt konnte nicht geladen werden: ${error.message}`; }
+    });
+    return disclosure;
+  }
+
+  function createSimulationCard(key, artifact, resource, interactive) {
+    const item = node("section", "browser-panel-card simulation-card"); item.dataset.simulationId = key;
+    const heading = node("h2", "", artifact.title || artifact.fileName || "Simulation");
+    const provenance = node("p", "browser-muted");
+    const toolbar = node("div", "simulation-toolbar");
+    const viewport = node("div", "simulation-viewport");
+    const media = node(interactive ? "iframe" : "img", interactive ? "simulation-frame" : "simulation-image");
+    if (interactive) { media.title = artifact.title || "Interaktive Simulation"; media.setAttribute("sandbox", "allow-scripts"); }
+    else media.alt = artifact.title || artifact.fileName || "Simulationsergebnis";
+    if (resource) media.src = resource;
+    const imageSurface = interactive ? null : node("div", "simulation-image-surface");
+    if (imageSurface) { imageSurface.append(media); viewport.append(imageSurface); } else viewport.append(media);
+    const sources = node("div", "simulation-sources");
+    const entry = { item, heading, provenance, viewport, media, imageSurface, sources, scale: 1, resource, interactive, available: true };
+    entry.open = node("a", "secondary simulation-open", "Öffnen");
+    if (interactive) { entry.open.target = "_blank"; entry.open.rel = "noopener noreferrer"; }
+    const zoom = scale => {
+      entry.scale = Math.max(.5, Math.min(2, scale)); reset.textContent = `${Math.round(entry.scale * 100)} %`;
+      if (interactive) { media.style.zoom = String(entry.scale); media.style.width = `${100 / entry.scale}%`; media.style.height = `${680 / entry.scale}px`; }
+      else imageSurface.style.transform = `scale(${entry.scale})`;
+    };
+    const reset = button("100 %", () => zoom(1)); reset.setAttribute("aria-label", "Zoom auf 100 Prozent zurücksetzen");
+    const smaller = button("−", () => zoom(entry.scale - .25)); smaller.setAttribute("aria-label", "Verkleinern");
+    const larger = button("+", () => zoom(entry.scale + .25)); larger.setAttribute("aria-label", "Vergrößern");
+    const reload = button("Neu laden", () => {
+      if (!entry.resource) return;
+      if (interactive) media.src = entry.resource;
+      else { const fresh = new URL(entry.resource); fresh.searchParams.set("reload", String(Date.now())); media.src = fresh.href; }
+    });
+    const toggle = disclosure => { if (!disclosure) return; disclosure.open = !disclosure.open; if (disclosure.open) disclosure.scrollIntoView?.({ block: "nearest" }); };
+    entry.sourceButton = button("Quellcode", () => toggle(entry.source));
+    entry.dataButton = button("Daten", () => toggle(entry.data));
+    toolbar.append(entry.open, reload, smaller, reset, larger, entry.sourceButton, entry.dataButton);
+    item.append(heading, provenance, toolbar, viewport, sources);
+    return entry;
+  }
+
+  function renderSimulation(current, simulation, error) {
+    const research = current.scientificResearch;
+    const paneKey = `${current.activeSessionId}:${research.selectedProjectId || ""}`;
+    if (simulationPane?.key !== paneKey) {
+      const root = section("Simulation", "Simulationen und Python-Analysen mit Daten und Quellcode");
+      root.classList.add("science-presentation-card", "simulation-pane");
+      const toolbar = node("div", "browser-panel-toolbar");
+      toolbar.append(button("Aktualisieren", () => { post("research.list", { sessionId: state().activeSessionId }); if (state().scientificResearch.selectedProjectId) post("research.open", { sessionId: state().activeSessionId, projectId: state().scientificResearch.selectedProjectId }); }));
       const picker = node("select", "science-project-picker"); picker.setAttribute("aria-label", "Forschungsvorhaben auswählen");
-      for (const project of current.scientificResearch.projects) { const option = node("option", "", project.interpretedQuestion || project.originalQuestion || project.id); option.value = project.id; picker.append(option); }
-      picker.value = current.scientificResearch.selectedProjectId || "";
-      picker.addEventListener("change", () => post("research.open", { sessionId: current.activeSessionId, projectId: picker.value })); toolbar.append(picker);
+      picker.addEventListener("change", () => post("research.open", { sessionId: state().activeSessionId, projectId: picker.value })); toolbar.append(picker);
+      const notice = node("p", "browser-panel-error"), detail = node("p", "browser-muted");
+      const artifacts = node("div", "simulation-artifacts"), empty = node("p", "browser-empty-state");
+      root.append(toolbar, notice, detail, artifacts, empty);
+      simulationPane = { key: paneKey, root, picker, notice, detail, artifacts, empty, cards: new Map() };
     }
-    const error = data.simulationError || (simulation?.status === "failed" ? simulation.detail : null);
-    if (error) card.append(node("p", "browser-panel-error", error));
-    if (view === "simulation") {
-      if (simulation?.detail) card.append(node("p", "browser-muted", simulation.detail));
-      const artifacts = simulation?.artifacts || [];
-      for (const artifact of artifacts) {
-        const item = section(artifact.title || artifact.fileName || artifact.kind || "Ergebnis");
-        const resource = url(artifact.url || artifact.previewUrl, true);
-        const interactive = /html|interactive/i.test(`${artifact.kind} ${artifact.contentType} ${artifact.fileName}`);
-        if (resource && interactive) {
-          const frame = node("iframe", "simulation-frame"); frame.title = artifact.title || "Interaktive Simulation"; frame.src = resource; frame.setAttribute("sandbox", "allow-scripts"); item.append(frame);
-        } else if (resource) {
-          // ScientificSimulationArtifact always represents a real ImagePath.
-          // Its HTTP resource ID has no file suffix and scripts are optional.
-          const image = node("img", "simulation-image"); image.src = resource; image.alt = artifact.title || artifact.fileName || "Simulationsergebnis"; item.append(image);
-        }
-        if (resource && !interactive) item.append(link("Öffnen / herunterladen", resource));
-        if (interactive && resource) {
-          const source = node("details", "simulation-source"); source.append(node("summary", "", "HTML-/JavaScript-Code"));
-          const text = node("pre", "", "Quellcode wird geladen …"); source.append(text); let loaded = false;
-          source.addEventListener("toggle", async () => {
-            if (!source.open || loaded) return;
-            try { const response = await fetch(resource, { credentials: "same-origin" }); if (!response.ok) throw new Error(`HTTP ${response.status}`); const code = await response.text(); text.textContent = code.slice(0, 100000) + (code.length > 100000 ? "\nVorschau auf 100.000 Zeichen begrenzt." : ""); loaded = true; }
-            catch (error) { text.textContent = `Quellcode konnte nicht geladen werden: ${error.message}`; }
-          }); item.append(source);
-        } else if (artifact.sourceUrl || artifact.scriptUrl) item.append(link("Quellcode", artifact.sourceUrl || artifact.scriptUrl)); if (artifact.dataUrl) item.append(link("Daten", artifact.dataUrl));
-        if (artifact.provenance) { const detail = node("details", "simulation-provenance"); detail.append(node("summary", "", "Provenienz"), node("pre", "", typeof artifact.provenance === "string" ? artifact.provenance : JSON.stringify(artifact.provenance, null, 2))); item.append(detail); }
-        card.append(item);
+    const pane = simulationPane;
+    if (pane.root.parentNode !== panel) panel.replaceChildren(pane.root);
+    pane.picker.replaceChildren();
+    for (const project of research.projects || []) { const option = node("option", "", project.interpretedQuestion || project.originalQuestion || project.id); option.value = project.id; pane.picker.append(option); }
+    pane.picker.value = research.selectedProjectId || ""; pane.picker.hidden = (research.projects || []).length <= 1;
+    pane.notice.textContent = error || (simulation?.status === "failed" ? simulation.detail : ""); pane.notice.hidden = !pane.notice.textContent;
+    pane.detail.textContent = simulation?.detail || ""; pane.detail.hidden = !pane.detail.textContent;
+    const artifacts = simulation?.artifacts || [], available = new Set();
+    for (const artifact of artifacts) {
+      const key = String(artifact.id || artifact.url || artifact.previewUrl), resource = url(artifact.url || artifact.previewUrl, true);
+      const interactive = /html|interactive/i.test(`${artifact.kind} ${artifact.contentType} ${artifact.fileName}`);
+      available.add(key);
+      let entry = pane.cards.get(key);
+      if (!entry || entry.interactive !== interactive) {
+        entry?.item.remove(); entry = createSimulationCard(key, artifact, resource, interactive); pane.cards.set(key, entry); pane.artifacts.append(entry.item);
       }
-      if (!artifacts.length) card.append(node("p", "browser-empty-state", simulation?.status === "running" ? "Simulation läuft …" : "Ergebnisse, Plots, Daten und Quellcode erscheinen nach einer Analyse hier."));
+      // Status/revision polling keeps the real frame, animation and disclosure
+      // state. Only changed content or an explicit reload replaces its document.
+      if (entry.resource !== resource || entry.hash !== artifact.sha256) { if (resource) entry.media.src = resource; entry.resource = resource; entry.hash = artifact.sha256; }
+      if (resource) {
+        if (interactive) entry.open.href = resource;
+        else {
+          const download = new URL(resource); download.searchParams.set("download", "1"); entry.open.href = download.href;
+          const extension = /jpe?g/i.test(artifact.contentType || "") ? ".jpg" : ".png";
+          const filename = String(artifact.fileName || `${artifact.title || "Simulation"}${extension}`).replace(/[<>:"/\\|?*\u0000-\u001f]/g, "-");
+          entry.open.download = filename;
+        }
+      } else entry.open.removeAttribute("href");
+      entry.open.setAttribute("aria-label", interactive ? "HTML-Simulation im Browser öffnen" : "Abbildung herunterladen und anschließend lokal öffnen");
+      entry.heading.textContent = artifact.title || artifact.fileName || "Simulation";
+      if (interactive) entry.media.title = entry.heading.textContent; else entry.media.alt = entry.heading.textContent;
+      entry.provenance.textContent = typeof artifact.provenance === "string" ? artifact.provenance : artifact.provenance ? JSON.stringify(artifact.provenance) : "";
+      entry.provenance.hidden = !entry.provenance.textContent;
+      const sourceUrl = interactive ? resource : url(artifact.sourceUrl || artifact.scriptUrl, true), dataUrl = url(artifact.dataUrl, true);
+      const sourcesKey = JSON.stringify([sourceUrl, dataUrl, artifact.sha256]);
+      if (entry.sourcesKey !== sourcesKey) {
+        entry.sources.replaceChildren();
+        entry.source = simulationDisclosure(interactive ? "HTML-/JavaScript-Code" : "Python-Code", sourceUrl);
+        entry.data = simulationDisclosure("Daten", dataUrl);
+        if (entry.source) entry.sources.append(entry.source); if (entry.data) entry.sources.append(entry.data);
+        entry.sourcesKey = sourcesKey;
+      }
+      entry.sourceButton.disabled = !entry.source; entry.dataButton.disabled = !entry.data;
     }
-    panel.append(card);
+    for (const [key, entry] of pane.cards) entry.available = available.has(key);
+    for (const entry of pane.cards.values()) entry.item.hidden = !entry.available;
+    pane.empty.hidden = artifacts.length > 0;
+    pane.empty.textContent = simulation?.status === "running" ? "Simulation läuft …" : "Ergebnisse, Plots, Daten und Quellcode erscheinen nach einer Analyse hier.";
   }
   function renderSubagent() {
     const child = children.get(childId); if (!child) { setView("chat"); return; }
@@ -457,7 +526,9 @@
       view === "review" && state().changesSummary, view === "review" && document.documentElement?.lang, view === "subagent" && children.get(childId),
       view === "subagents" && sessionChildren().map(child => [child.agentId, childTitle(child),child.status,child.planetIndex,childCreated(child),child._observationOrder]),
       view === "sources" && sourceActions(state(), [...state().messages, ...[...children.values()].filter(item => item.sessionId === state().activeSessionId).flatMap(item => item.messages || [])])]);
-    if (signature === panelSignature) return; panelSignature = signature; panel.replaceChildren();
+    if (signature === panelSignature) return; panelSignature = signature;
+    if (view === "simulation") { renderScience(); return; }
+    panel.replaceChildren();
     if (view === "publication" || view === "simulation") renderScience(); else if (view === "subagent") renderSubagent(); else if(view === "subagents")renderSubagentOverview(); else if (view === "review") renderReview(); else if (view === "sources") renderSources();
   }
   function render() {

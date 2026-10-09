@@ -18,6 +18,7 @@ public sealed class CodingGitChangeTracker : IDisposable
     private string? _baseline;
     private string? _lastTree;
     private CodingWorkspaceChangesSnapshot? _last;
+    private CodingGeneratedArtifactFilter _generated = CodingGeneratedArtifactFilter.Empty;
 
     public CodingGitChangeTracker(string workspace, string storage)
     {
@@ -101,12 +102,16 @@ public sealed class CodingGitChangeTracker : IDisposable
         var index = Path.Combine(_storage, $".git-index-{Guid.NewGuid():N}");
         try
         {
+            _generated = CodingGeneratedArtifactFilter.Discover(_workspace, cancellationToken);
             // Git applies .gitignore; unlike a normal git diff, this also captures new files.
-            await GitAsync(["add", "--all", "--", "."], cancellationToken, index: index).ConfigureAwait(false);
+            var capture = new List<string> { "." };
+            capture.AddRange(_generated.ExcludedPaths.Select(path => ":(top,exclude,literal)" + path));
+            await GitAsync(["add", "--all", "--pathspec-from-file=-", "--pathspec-file-nul"], cancellationToken,
+                input: string.Join('\0', capture) + "\0", index: index, literalPathspecs: false).ConfigureAwait(false);
             // Files already tracked by the user remain tracked even if subsequently ignored.
             var tracked = await GitAsync(["ls-files", "-z", "--cached", "--", "."], cancellationToken, isolated: false).ConfigureAwait(false);
             var existing = tracked.Split('\0', StringSplitOptions.RemoveEmptyEntries)
-                .Where(path => File.Exists(Path.Combine(_workspace, path))).ToArray();
+                .Where(path => !_generated.IsExcluded(path) && File.Exists(Path.Combine(_workspace, path))).ToArray();
             if (existing.Length > 0)
                 await GitAsync(["add", "--force", "--pathspec-from-file=-", "--pathspec-file-nul"], cancellationToken,
                     input: string.Join('\0', existing) + "\0", index: index).ConfigureAwait(false);
@@ -141,6 +146,9 @@ public sealed class CodingGitChangeTracker : IDisposable
             var added = binary ? 0 : int.Parse(columns[0], System.Globalization.CultureInfo.InvariantCulture);
             var removed = binary ? 0 : int.Parse(columns[1], System.Globalization.CultureInfo.InvariantCulture);
             var path = columns[2];
+            // Old baselines may contain generated revisions. Omit both sides of that
+            // comparison rather than reporting their exclusion as authored deletions.
+            if (_generated.IsExcluded(path)) continue;
             var diff = await GitAsync(["diff", "--no-renames", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=3", _baseline, tree, "--", path], cancellationToken).ConfigureAwait(false);
             files.Add(new(path, added, removed, diff, false, kinds.GetValueOrDefault(path, "modified"), binary));
         }
@@ -148,7 +156,8 @@ public sealed class CodingGitChangeTracker : IDisposable
         return _last = new(files, false, null, files.Count, DateTimeOffset.UtcNow);
     }
 
-    private async Task<string> GitAsync(string[] arguments, CancellationToken cancellationToken, bool isolated = true, string? input = null, string? index = null)
+    private async Task<string> GitAsync(string[] arguments, CancellationToken cancellationToken, bool isolated = true, string? input = null, string? index = null,
+        bool literalPathspecs = true)
     {
         var installed = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Git", "cmd", "git.exe");
         var start = new ProcessStartInfo(OperatingSystem.IsWindows() && File.Exists(installed) ? installed : "git")
@@ -157,9 +166,10 @@ public sealed class CodingGitChangeTracker : IDisposable
             RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = input is not null,
             StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8,
         };
-        foreach (var name in new[] { "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY" }) start.Environment.Remove(name);
+        foreach (var name in new[] { "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
+            "GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS" }) start.Environment.Remove(name);
         if (index is not null) start.Environment["GIT_INDEX_FILE"] = index;
-        start.ArgumentList.Add("--literal-pathspecs");
+        if (literalPathspecs) start.ArgumentList.Add("--literal-pathspecs");
         if (isolated)
         {
             start.ArgumentList.Add("--git-dir=" + _repository);

@@ -131,10 +131,10 @@ test("dedicated view tabs automatically hide outputs and their toggle while rest
   }
 });
 
-test("All sources hides the current overlay without permanently switching off its remembered preference", async () => {
+test("the sources view hides the overlay without switching off its remembered preference", async () => {
   const h = harness({ messages: [message("source", { sources: [{ url: "https://one.example/source", title: "Ergebnis" }] })] });
   const inspector = h.ids.get("output-inspector"), toggle = h.ids.get("inspector-toggle");
-  await h.click(toggle); await h.click(inspector.querySelector(".inspector-all-sources"));
+  await h.click(toggle); h.context.missumPanels.setView("sources");
   assert.equal(h.pane.dataset.view, "sources"); assert.equal(inspector.hidden, true);
   h.context.missumPanels.setView("chat"); assert.equal(inspector.hidden, false);
   await h.click(toggle); assert.equal(inspector.hidden, true);
@@ -227,7 +227,7 @@ test("review and sources tabs are lazy, closeable, and use independent native SV
   assert.equal(tabs.children.at(-1).textContent,"Änderungen · 1 Datei");
   await h.click(tabs.children.at(-1).querySelector(".session-view-tab__close"));
   assert.equal(h.pane.dataset.view,"chat"); assert.equal(tabs.children.length,3);
-  await h.click(h.ids.get("output-inspector").querySelector(".inspector-all-sources"));
+  h.context.missumPanels.setView("sources");
   assert.equal(tabs.children.at(-1).textContent,"Quellen");
   await h.click(tabs.children.at(-1).querySelector(".session-view-tab__close"));
   assert.equal(tabs.children.length,3); assert.equal(h.pane.dataset.view,"chat");
@@ -333,7 +333,7 @@ test("native tool glyphs distinguish blue web globes, violet code braces and res
   assert.match(css,/data-icon-key=web\]\s*\{[^}]*var\(--icon-web/);assert.match(css,/data-icon-key=code\]\s*\{[^}]*var\(--icon-code/);
 });
 
-test("native sidebar selection fills the project row and outputs use chain and open-window glyphs", async () => {
+test("native sidebar selection fills the project row and outputs retain the open-window glyph", async () => {
   const css=source("browser-panels.css"),html=source("index.html");
   assert.match(css,/\.session-group__body\s*\{\s*padding-left:\s*0/);
   assert.match(css,/\.session-item__open\s*\{[^}]*padding:\s*5px 8px 5px 36px/);
@@ -409,8 +409,63 @@ test("Science renders real figure resources without filename hints or optional s
   assert.equal(h.ids.get("browser-view-panel").querySelector("iframe").src, "http://192.168.1.2:8080/assistant/science-resources/html");
   assert.equal(h.ids.get("browser-view-panel").querySelector("iframe").getAttribute("sandbox"), "allow-scripts");
   assert.equal(h.ids.get("browser-view-panel").querySelector(".simulation-source summary").textContent, "HTML-/JavaScript-Code");
-  assert.equal(h.ids.get("browser-view-panel").querySelectorAll("a").some(link => /\/(html|script)$/.test(link.href)), false,
-    "interactive simulations and their source stay inside the Simulation tab");
+  const htmlOpen = h.ids.get("browser-view-panel").querySelectorAll(".simulation-open")[1];
+  assert.equal(htmlOpen.href, "http://192.168.1.2:8080/assistant/science-resources/html");
+  assert.equal(htmlOpen.target, "_blank");
+  assert.equal(h.ids.get("browser-view-panel").querySelectorAll("a").some(link => /\/script$/.test(link.href)), false,
+    "source remains an embedded disclosure while explicit HTML Open uses a browser tab");
+});
+
+test("explicit HTML Open uses a browser tab and plot Open downloads the client image while matching inline controls remain", async () => {
+  const h = harness({ chatMode: "claudescience", scientificResearch: { projects: [], selectedProjectId: "project", detail: null } });
+  const artifacts = [
+    { id: "plot", title: "Messwerte", fileName: "Messwerte.png", url: "/assistant/science-resources/plot", scriptUrl: "/assistant/science-resources/python", dataUrl: "/assistant/science-resources/data", sha256: "plot-v1" },
+    { id: "html", title: "Animation", url: "/assistant/science-resources/animation", kind: "interactive", sha256: "html-v1" },
+  ];
+  h.emit("science.presentation", { projectId: "project", revision: 1, simulation: { artifacts } });
+  h.context.missumPanels.setView("simulation");
+  const panel = h.ids.get("browser-view-panel"), cards = panel.querySelectorAll(".simulation-card");
+  const frame = cards[1].querySelector("iframe"), image = cards[0].querySelector("img");
+  assert.equal(cards.length, 2);
+  for (const card of cards) assert.deepEqual(card.querySelector(".simulation-toolbar").children.map(item => item.textContent),
+    ["Öffnen", "Neu laden", "−", "100 %", "+", "Quellcode", "Daten"]);
+  const htmlOpen = cards[1].querySelector(".simulation-open"), plotOpen = cards[0].querySelector(".simulation-open");
+  assert.equal(htmlOpen.href, "http://192.168.1.2:8080/assistant/science-resources/animation");
+  assert.equal(htmlOpen.target, "_blank"); assert.equal(htmlOpen.rel, "noopener noreferrer");
+  assert.equal(plotOpen.href, "http://192.168.1.2:8080/assistant/science-resources/plot?download=1");
+  assert.equal(plotOpen.download, "Messwerte.png");
+  assert.equal(plotOpen.getAttribute("aria-label"), "Abbildung herunterladen und anschließend lokal öffnen");
+  await h.click(htmlOpen);
+  assert.equal(cards[0].hidden, false); assert.equal(cards[1].hidden, false); assert.equal(h.pane.dataset.view, "simulation");
+  assert.equal(cards[1].querySelector("iframe"), frame);
+  await h.click(h.buttons(cards[1], "+")[0]); assert.equal(frame.style.zoom, "1.25");
+  await h.click(h.buttons(cards[1], "125 %")[0]); assert.equal(frame.style.zoom, "1");
+  assert.equal(frame.getAttribute("sandbox"), "allow-scripts");
+  await h.click(plotOpen);
+  assert.equal(cards[1].hidden, false); assert.equal(cards[0].querySelector("img"), image);
+  await h.click(h.buttons(cards[0], "+")[0]);
+  assert.equal(cards[0].querySelector(".simulation-image-surface").style.transform, "scale(1.25)");
+  await h.click(h.buttons(cards[0], "125 %")[0]);
+  assert.equal(cards[0].querySelector(".simulation-image-surface").style.transform, "scale(1)");
+  assert.equal(h.buttons(cards[0], "Daten")[0].disabled, false);
+  assert.equal(h.buttons(cards[1], "Daten")[0].disabled, true);
+});
+
+test("Simulation polling retains the HTML frame and open source while removed results are hidden", async () => {
+  const h = harness({ chatMode: "claudescience", scientificResearch: { projects: [], selectedProjectId: "project", detail: null } });
+  const artifact = { id: "html", title: "Animation", url: "/assistant/science-resources/html", kind: "interactive", sha256: "revision-one" };
+  h.emit("science.presentation", { projectId: "project", revision: 1, simulation: { artifacts: [artifact] } });
+  h.context.missumPanels.setView("simulation");
+  const panel = h.ids.get("browser-view-panel"), card = panel.querySelector(".simulation-card"), frame = card.querySelector("iframe"), source = card.querySelector("details");
+  await h.click(card.querySelector(".simulation-open")); source.open = true;
+  h.emit("science.presentation", { projectId: "project", revision: 2, simulation: { detail: "Aktualisierter Status", artifacts: [{ ...artifact, title: "Aktualisierter Titel" }] } });
+  assert.equal(panel.querySelector("iframe"), frame); assert.equal(card.querySelector("details"), source); assert.equal(source.open, true);
+  assert.equal(card.hidden, false);
+  assert.equal(card.querySelector("h2").textContent, "Aktualisierter Titel");
+  h.emit("science.presentation", { projectId: "project", revision: 3, simulation: { artifacts: [{ id: "plot", title: "Neuer Plot", url: "/assistant/science-resources/plot" }] } });
+  assert.equal(card.hidden, true);
+  const next = panel.querySelectorAll(".simulation-card")[1]; assert.equal(next.hidden, false);
+  assert.equal(next.querySelector(".simulation-open").download, "Neuer Plot.png");
 });
 
 test("the outputs overlay opens and closes through its accessible controls and keeps the native compact structure", async () => {
@@ -483,7 +538,7 @@ test("replayed source receipts deduplicate by action and fetch redirect aliases 
   assert.deepEqual(Array.from(actions[0].sources, source => source.title), ["Titel aus dem Forschungskatalog", "Titel aus dem Forschungskatalog"]);
 });
 
-test("only child sessions belonging to the active chat contribute sources and artifacts, including after a delayed foreign snapshot", async () => {
+test("only child sessions belonging to the active chat contribute overlay sources, including after a delayed foreign snapshot", async () => {
   const h = harness();
   const child = (id, sessionId, domain) => ({ agentId: id, sessionId, name: id, messages: [message(id, { toolSteps: [
     receipt(`${id}-web`, "web.fetch", { url: `https://${domain}/source` }, {})
@@ -492,11 +547,11 @@ test("only child sessions belonging to the active chat contribute sources and ar
   await h.click(h.ids.get("inspector-toggle"));
   const inspector = h.ids.get("output-inspector");
   assert.ok(inspector.textContent.includes("https://local.example/source"));
-  assert.ok(inspector.textContent.includes("local.txt"));
+  assert.equal(inspector.textContent.includes("local.txt"), false, "artifact rows are omitted even for the current session");
   assert.equal(inspector.textContent.includes("foreign.example"), false);
   assert.equal(inspector.textContent.includes("foreign.txt"), false);
   assert.equal(inspector.textContent.includes("unowned"), false);
-  await h.click(inspector.querySelector(".inspector-all-sources"));
+  h.context.missumPanels.setView("sources");
   assert.ok(h.ids.get("browser-view-panel").textContent.includes("https://local.example/source"));
   assert.equal(h.ids.get("browser-view-panel").textContent.includes("foreign.example"), false);
   h.current.activeSessionId = "chat-b";
@@ -507,7 +562,7 @@ test("only child sessions belonging to the active chat contribute sources and ar
   assert.equal(inspector.textContent.includes("late-local.txt"), false);
 });
 
-test("all sources opens the complete sources tab and preserves attachment removal routing and inert source titles", async () => {
+test("the sources view preserves attachment removal routing and inert source titles", async () => {
   const h = harness({ documents: [{ id: "document", fileName: "Anleitung.pdf", pageCount: 7, createdAt: "2026-10-05T11:00:00Z" }],
     attachments: [{ id: "attachment", fileName: "Daten.csv", createdAt: "2026-10-05T10:30:00Z" }],
     messages: [message("sources", { toolSteps: [receipt("search", "web.search", { query: "Test" }, { results: [
@@ -516,7 +571,7 @@ test("all sources opens the complete sources tab and preserves attachment remova
   await h.click(h.ids.get("inspector-toggle"));
   const inspector = h.ids.get("output-inspector");
   assert.equal(inspector.querySelectorAll(".inspector-source-row").length, 1, "the compact overlay shows the newest source action only");
-  await h.click(inspector.querySelector(".inspector-all-sources"));
+  h.context.missumPanels.setView("sources");
   const panel = h.ids.get("browser-view-panel");
   assert.equal(panel.hidden, false);
   assert.equal(h.ids.get("conversation-pane").hidden, true);
@@ -596,27 +651,38 @@ test("the review marks unknown and binary counts and truncated receipts without 
   assert.equal(files[0].querySelectorAll(".review-diff-header").length, 4);
 });
 
-test("artifact preview, open and download controls use the shared host and render safe client media", async () => {
-  const artifact = { id: "plot", fileName: "Ergebnis.png", contentType: "image/png" };
-  const h = harness({ messages: [message("artifact", { artifacts: [artifact, artifact, { id: "vision", fileName: "Input.png", metadata: { role: "vision_input" } }] })] });
+test("outputs keep all-sources while omitting file actions after artifact replay and preview events", async () => {
+  const artifact = { id: "plot", fileName: "thumbnail.jpg", contentType: "image/jpeg" };
+  const h = harness({ workspacePath: "C:\\Projects\\Science", messages: [message("artifact", {
+    sources: [{ url: "https://science.example/source", title: "Wissenschaftliche Quelle" }],
+    artifacts: [artifact, artifact, { id: "vision", fileName: "Input.png", metadata: { role: "vision_input" } }]
+  })] });
   await h.click(h.ids.get("inspector-toggle"));
-  const inspector = h.ids.get("output-inspector");
-  assert.equal(inspector.querySelectorAll(".inspector-artifact").length, 1, "replayed artifact references are deduplicated and vision inputs remain excluded");
-  await h.click(h.buttons(inspector, "Vorschau")[0]);
-  assert.deepEqual(plain(h.posts.at(-1)), { type: "artifact.preview", payload: { artifactId: "plot" } });
-  assert.match(inspector.textContent, /Vorschau wird geladen/);
-  h.current.artifactPreviewUrls.set("plot", { url: "/assistant/resources/plot.png" });
-  h.emit("artifact.previewReady", { artifactId: "plot", url: "/assistant/resources/plot.png" });
-  assert.equal(inspector.querySelector("img").src, "http://192.168.1.2:8080/assistant/resources/plot.png");
-  assert.equal(inspector.querySelector("img").alt, "Ergebnis.png");
-  await h.click(h.buttons(inspector, "Öffnen")[0]); await h.click(h.buttons(inspector, "Herunterladen")[0]);
-  assert.deepEqual(plain(h.posts.slice(-2)), [
-    { type: "artifact.open", payload: { artifactId: "plot", sessionId: "chat-a" } },
-    { type: "artifact.save", payload: { artifactId: "plot", sessionId: "chat-a" } }
-  ]);
-  h.current.artifactPreviewUrls.set("plot", { url: "https://foreign.example/plot.png" });
-  h.emit("artifact.previewReady", { artifactId: "plot", url: "https://foreign.example/plot.png" });
-  assert.equal(inspector.querySelector("img"), null, "foreign preview URLs never become embedded resources");
+  const inspector = h.ids.get("output-inspector"), originalChildren = [...inspector.children];
+  const assertCompact = () => {
+    assert.equal(inspector.querySelector(".inspector-all-sources").getAttribute("aria-label"), "Alle Quellen anzeigen");
+    assert.equal(inspector.querySelector(".inspector-artifact"), null);
+    assert.equal(inspector.querySelector(".inspector-preview"), null);
+    assert.doesNotMatch(inspector.textContent, /Dateien und Ergebnisse|thumbnail\.jpg|Input\.png/);
+    for (const label of ["Vorschau", "Öffnen", "Herunterladen"]) assert.equal(h.buttons(inspector, label).length, 0);
+    assert.ok(inspector.querySelector(".inspector-changes"));
+    assert.equal(inspector.querySelector(".inspector-workspace-label").textContent, "Science");
+    assert.equal(inspector.querySelector(".inspector-source-row").href, "https://science.example/source");
+  };
+  assertCompact();
+  h.current.artifactPreviewUrls.set("plot", { url: "/assistant/resources/plot.jpg" });
+  h.emit("artifact.previewReady", { artifactId: "plot", url: "/assistant/resources/plot.jpg" });
+  h.current.messages[0].artifacts.push({ id: "new-plot", fileName: "thumbnail.jpg", contentType: "image/jpeg" });
+  h.emit("state.snapshot", {});
+  assertCompact();
+  assert.ok(originalChildren.every((child, index) => inspector.children[index] === child), "artifact-only updates do not rebuild the remaining overlay");
+  assert.equal(h.posts.some(post => /^artifact\.(preview|open|save)$/.test(post.type)), false);
+  assert.equal(h.current.messages[0].artifacts.length, 4, "removal is confined to the overlay, preserving the shared artifacts");
+  await h.click(inspector.querySelector(".inspector-all-sources"));
+  assert.equal(h.pane.dataset.view, "sources");
+  assert.equal(inspector.hidden, true);
+  assert.equal(h.ids.get("browser-view-panel").querySelector(".inspector-source-row").href, "https://science.example/source");
+  assert.equal(JSON.parse(h.saved.get("assistant.view:mac.tab:chat-a")).view, "sources");
 });
 
 test("catalog snapshots preserve an open model draft and model changes commit only after the dialog is closed", async () => {

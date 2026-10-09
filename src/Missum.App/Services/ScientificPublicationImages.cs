@@ -10,8 +10,8 @@ namespace Missum.App.Services;
 public static partial class ScientificPublicationImages
 {
     private const int MaximumImageBytes = 8 * 1024 * 1024;
-    private const int MaximumTotalBytes = 32 * 1024 * 1024;
-    private const int MaximumImages = 12;
+    internal const int MaximumTotalBytes = 128 * 1024 * 1024;
+    internal const int MaximumImages = 64;
 
     public sealed record ImageArtifact(string RelativePath, string Sha256, ImmutableArray<byte> Bytes);
 
@@ -20,6 +20,8 @@ public static partial class ScientificPublicationImages
         public async Task WriteImagesAsync(string stagingDirectory, CancellationToken cancellationToken = default)
         {
             if (Images.IsDefaultOrEmpty) return;
+            if (Images.Length > MaximumImages || Images.Sum(image => (long)image.Bytes.Length) > MaximumTotalBytes)
+                throw new InvalidDataException("Die Publikationsabbildungen überschreiten die Grenze von 64 Bildern bzw. 128 MiB.");
             var root = Path.GetFullPath(stagingDirectory);
             Directory.CreateDirectory(root);
             var directory = ScientificSimulationService.SafePath(root, "figures");
@@ -39,8 +41,18 @@ public static partial class ScientificPublicationImages
         }
     }
 
-    public static async Task<PreparedImages> PrepareAsync(string markdown, string projectId,
-        IResearchSandboxService sandbox, DateTimeOffset? runStartedAt, CancellationToken cancellationToken = default)
+    public static Task<PreparedImages> PrepareAsync(string markdown, string projectId,
+        IResearchSandboxService sandbox, DateTimeOffset? runStartedAt, CancellationToken cancellationToken = default) =>
+        PrepareCoreAsync(markdown, projectId, sandbox, runStartedAt, null, cancellationToken);
+
+    internal static Task<PreparedImages> PrepareCanonicalAsync(string markdown, string projectId,
+        IResearchSandboxService sandbox, IReadOnlyDictionary<string, string> measuredHashes,
+        CancellationToken cancellationToken = default) =>
+        PrepareCoreAsync(markdown, projectId, sandbox, DateTimeOffset.MinValue, measuredHashes, cancellationToken);
+
+    private static async Task<PreparedImages> PrepareCoreAsync(string markdown, string projectId,
+        IResearchSandboxService sandbox, DateTimeOffset? runStartedAt, IReadOnlyDictionary<string, string>? measuredHashes,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(markdown);
         ArgumentNullException.ThrowIfNull(sandbox);
@@ -71,6 +83,7 @@ public static partial class ScientificPublicationImages
                 output.Append(match.Value); continue;
             }
             ImageArtifact? image = null;
+            string? capacityFailure = null;
             try
             {
                 if (runStartedAt is not null && reference is not null && SafeIdentifier().IsMatch(projectId))
@@ -81,20 +94,28 @@ public static partial class ScientificPublicationImages
                         layout = await sandbox.EnsureProjectAsync(projectId, cancellationToken).ConfigureAwait(false);
                         if (layout.ProjectId != projectId) layout = null;
                     }
-                    if (layout is not null && RelativeArtifactPath(reference) is { } relative)
+                    if (layout is not null && ResolvePublicationImage(layout, reference, measuredHashes) is { } resolved)
                     {
-                        _ = ScientificSimulationService.SafePath(layout.RootPath, Path.GetRelativePath(layout.RootPath, layout.ArtifactsPath));
-                        var path = ScientificSimulationService.SafePath(layout.ArtifactsPath, relative);
-                        if (!byPath.TryGetValue(path, out image) && images.Count < MaximumImages)
+                        var path = resolved.Path;
+                        if (!byPath.TryGetValue(path, out image))
                         {
+                            if (File.Exists(path) && new FileInfo(path).Length > MaximumImageBytes)
+                                capacityFailure = "Eine Publikationsabbildung ist größer als 8 MiB. Komprimiere den Plot; keine erforderliche Abbildung wurde still ausgelassen.";
                             var loaded = await ReadImageAsync(path, runStartedAt.Value,
-                                MaximumTotalBytes - totalBytes, cancellationToken).ConfigureAwait(false);
+                                MaximumImageBytes, cancellationToken).ConfigureAwait(false);
+                            if (loaded is not null && resolved.ExpectedHash is not null
+                                && !loaded.Sha256.Equals(resolved.ExpectedHash, StringComparison.OrdinalIgnoreCase)) loaded = null;
                             if (loaded is not null)
                             {
                                 if (!byHash.TryGetValue(loaded.Sha256, out image))
                                 {
-                                    image = loaded; images.Add(image); byHash.Add(image.Sha256, image);
-                                    totalBytes += image.Bytes.Length;
+                                    if (images.Count >= MaximumImages || (long)totalBytes + loaded.Bytes.Length > MaximumTotalBytes)
+                                        capacityFailure = "Die Publikationsabbildungen überschreiten die Grenze von 64 verschiedenen Bildern bzw. 128 MiB. Teile den Bildumfang fachlich auf; keine erforderliche Abbildung wurde still ausgelassen.";
+                                    else
+                                    {
+                                        image = loaded; images.Add(image); byHash.Add(image.Sha256, image);
+                                        totalBytes += image.Bytes.Length;
+                                    }
                                 }
                             }
                             byPath[path] = image;
@@ -107,6 +128,7 @@ public static partial class ScientificPublicationImages
             {
                 // An unavailable or unsafe picture must never suppress the mandatory publication.
             }
+            if (capacityFailure is not null) throw new ScientificPublicationContentException(capacityFailure);
             if (image is null) output.Append(UnavailableCaption(match.Groups["alt"].Value));
             else output.Append("![").Append(EscapeCaption(match.Groups["alt"].Value)).Append("](").Append(image.RelativePath).Append(')');
         }
@@ -165,6 +187,26 @@ public static partial class ScientificPublicationImages
         var parts = reference.Split('/');
         if (parts.Any(part => part.Length == 0 || part is "." or ".." || part.EndsWith(' ') || part.EndsWith('.'))) return null;
         return Path.GetExtension(reference).ToLowerInvariant() is ".png" or ".jpg" or ".jpeg" ? reference : null;
+    }
+
+    private static (string Path, string? ExpectedHash)? ResolvePublicationImage(ResearchSandboxLayout layout,
+        string reference, IReadOnlyDictionary<string, string>? measuredHashes)
+    {
+        if (reference.StartsWith("/sandbox/work/", StringComparison.Ordinal)) reference = reference[9..];
+        if (reference.StartsWith("work/", StringComparison.Ordinal))
+        {
+            if (measuredHashes is null || !measuredHashes.TryGetValue(reference, out var expected)
+                || expected.Length != 64 || !expected.All(char.IsAsciiHexDigit)) return null;
+            var relative = reference[5..];
+            if (RelativeArtifactPath(relative) != relative) return null;
+            _ = ScientificSimulationService.SafePath(layout.RootPath, Path.GetRelativePath(layout.RootPath, layout.WorkPath));
+            return (ScientificSimulationService.SafePath(layout.WorkPath, relative), expected);
+        }
+        if (RelativeArtifactPath(reference) is not { } artifact) return null;
+        _ = ScientificSimulationService.SafePath(layout.RootPath, Path.GetRelativePath(layout.RootPath, layout.ArtifactsPath));
+        var artifactKey = "artifacts/" + artifact;
+        var expectedHash = measuredHashes is not null && measuredHashes.TryGetValue(artifactKey, out var hash) ? hash : null;
+        return (ScientificSimulationService.SafePath(layout.ArtifactsPath, artifact), expectedHash);
     }
 
     private static string UnavailableCaption(string caption)

@@ -7,7 +7,8 @@ public static class AgentNarrationPolicy
 {
     public const string Instructions = """
         Sichtbare Arbeitsbegleitung: Schreibe vor der ersten Arbeitsaktion oder dem ersten Werkzeugaufruf
-        eine auftragsbezogene Einleitung in ein bis zwei Sätzen: Ziel und nächster Schritt. Erkläre zwischen
+        eine auftragsbezogene Einleitung in ein bis zwei Sätzen: konkretes Thema, Ziel und nächster Schritt.
+        Formuliere sie selbst auch beim Fortsetzen; keine generische Start- oder Fortsetzungsfloskel. Erkläre zwischen
         wesentlichen Etappen knapp den Fortschritt, die belegte Erkenntnis und den nächsten Schritt als normale
         AI-Nachrichten, nicht im Reasoning-Kanal. Bündele zusammengehörige Aufrufe; keine Tickmeldungen,
         Wiederholungen oder Kommentare zu jedem Werkzeug. Keine privaten Gedankengänge oder unbelegten Erfolge.

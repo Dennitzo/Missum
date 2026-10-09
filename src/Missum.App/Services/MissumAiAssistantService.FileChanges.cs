@@ -309,14 +309,24 @@ internal sealed class CodingChangesMonitor : IAsyncDisposable
             await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete,
                 bufferSize: 4096, FileOptions.Asynchronous | FileOptions.SequentialScan);
             var summary = await JsonSerializer.DeserializeAsync<CodingChangesSummary>(stream, JsonOptions, cancellationToken).ConfigureAwait(false);
-            return summary is not null && summary.Files is not null && Path.IsPathFullyQualified(summary.WorkspacePath)
-                && summary.Files.All(static file => file is not null && file.Path is not null && file.Diff is not null)
-                ? summary : null;
+            if (summary is null || summary.Files is null || !Path.IsPathFullyQualified(summary.WorkspacePath)
+                || !summary.Files.All(static file => file is not null && file.Path is not null && file.Diff is not null)) return null;
+            // Older immutable baselines/latest receipts also contain automatic PDF
+            // revisions. Filter the read projection only; do not rewrite their journal.
+            return await Task.Run(() => FilterGeneratedArtifacts(summary, cancellationToken), cancellationToken).ConfigureAwait(false);
         }
         catch (IOException) { return null; }
         catch (UnauthorizedAccessException) { return null; }
         catch (JsonException) { return null; }
         catch (ArgumentException) { return null; }
+    }
+
+    internal static CodingChangesSummary FilterGeneratedArtifacts(CodingChangesSummary summary,
+        CancellationToken cancellationToken = default)
+    {
+        var filter = CodingGeneratedArtifactFilter.Discover(summary.WorkspacePath, cancellationToken);
+        var files = summary.Files.Where(file => !filter.IsExcluded(file.Path)).ToArray();
+        return files.Length == summary.Files.Count ? summary : summary with { Files = files };
     }
 
     private static bool IsStorageError(Exception exception) =>

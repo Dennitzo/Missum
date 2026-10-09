@@ -166,7 +166,8 @@ public static class CompactAgentContextPolicy
         if (toolNames.Contains(SubagentToolNames.Spawn, StringComparer.Ordinal)) sections.Add(Delegation);
         if (toolNames.Contains(ClientToolNames.ResearchRead, StringComparer.Ordinal)
             || toolNames.Contains(ClientToolNames.ResearchDeliverablesVerify, StringComparer.Ordinal))
-            sections.Add(Science + "\n\n" + ScientificDerivationPolicy.Instructions);
+            sections.Add(Science + "\n\n" + ScientificStateAgentPolicy.PublicationWorkflowInstructions
+                + "\n\n" + ScientificDerivationPolicy.Instructions);
         return string.Join("\n\n", sections);
     }
 

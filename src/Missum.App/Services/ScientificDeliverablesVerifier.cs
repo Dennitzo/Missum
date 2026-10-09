@@ -7,11 +7,17 @@ namespace Missum.App.Services;
 /// <summary>Checks real files behind the current presentation, without treating generated prose as an execution receipt.</summary>
 internal static class ScientificDeliverablesVerifier
 {
+    private static readonly JsonSerializerOptions VerificationJsonOptions = new(JsonSerializerDefaults.Web);
     internal static Task<JsonElement> VerifyAsync(string projectId, ScientificPresentationSnapshot? snapshot,
         CancellationToken cancellationToken = default) => VerifyAsync(projectId, snapshot, null, null, cancellationToken);
 
     internal static async Task<JsonElement> VerifyAsync(string projectId, ScientificPresentationSnapshot? snapshot,
         ResearchWorkingState? state, ResearchResultSnapshot? receipts, CancellationToken cancellationToken = default)
+        => await VerifyAsync(projectId, snapshot, state, receipts, [], [], cancellationToken).ConfigureAwait(false);
+
+    internal static async Task<JsonElement> VerifyAsync(string projectId, ScientificPresentationSnapshot? snapshot,
+        ResearchWorkingState? state, ResearchResultSnapshot? receipts, IReadOnlyList<ResearchLiteratureEntry> sources,
+        IReadOnlyList<ResearchEvidenceRecord> evidence, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var publication = snapshot?.Publication;
@@ -94,6 +100,9 @@ internal static class ScientificDeliverablesVerifier
                 : "Noch keine darstellbare Abbildung aus einem erfolgreichen Python-Experiment vorhanden.");
         var missing = state is null ? new List<string>()
             : await ResearchMissingAsync(state, receipts, publication, verifiedFigureExperiments, interactiveReady, cancellationToken).ConfigureAwait(false);
+        var scientificReview = state is null ? null : ScientificResearchReview.Assess(state, sources, evidence,
+            receipts?.Experiments ?? [], receipts?.Verifications ?? []);
+        if (scientificReview is not null) missing.AddRange(scientificReview.Missing);
         if (!publicationReady) missing.Add(publicationError ?? "Die Publikation entspricht noch nicht dem aktuellen fachlichen Stand.");
         if (simulationRequired && !simulationReady) missing.Add(simulationError ?? "Die erforderliche Darstellung fehlt.");
         var ready = publicationReady && (!simulationRequired || simulationReady) && missing.Count == 0;
@@ -105,13 +114,14 @@ internal static class ScientificDeliverablesVerifier
                 : string.Join(" ", missing),
             research = state is null ? null : new { protocol = "section-delta-v1", revision = state.Revision,
                 publicationRevision = state.PublicationRevision, ready, missing },
+            scientificReview,
             publication = new { ready = publicationReady, pdfPath = publicationReady ? publication!.PdfPath : null,
                 sourceSha256 = sourceHash, revision = publication?.Revision ?? 0, error = publicationError },
             simulation = new { required = simulationRequired, ready = simulationReady, executed, executionRequired,
                 interactiveRequired, interactiveReady, artifacts = files, interactiveArtifacts = interactiveFiles,
                 error = simulationRequired ? simulationError : null },
             retryable = true,
-        });
+        }, VerificationJsonOptions);
     }
 
     private static async Task<List<string>> ResearchMissingAsync(ResearchWorkingState state, ResearchResultSnapshot? receipts,

@@ -19,7 +19,7 @@ public sealed class DeepResearchClientIntegrationTests
     private static readonly bool?[] ResearchSelections = [true, false, null];
 
     [Fact]
-    public async Task ScienceIntroductionIsStreamedAndStoredBeforeTheGatewayRequest()
+    public async Task ScienceIntroductionWaitsForTheModelInsteadOfInventingNarrationBeforeTheGatewayRequest()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var chats = environment.Get<IChatRepository>();
@@ -73,10 +73,8 @@ public sealed class DeepResearchClientIntegrationTests
                 }
                 return Task.CompletedTask;
             }, deadline.Token);
-        Assert.True(introductions.Count >= 2);
-        Assert.Contains("Recherche im bestehenden Projekt", introductions[0]);
+        Assert.Empty(introductions);
         Assert.Equal(session.Title, (await chats.GetSessionAsync(session.Id))!.Title);
-        Assert.Contains("Quellen", introductions[^1]);
         Assert.Single(requests);
         var scienceRequest = requests[0].Messages[^1].Content[0].Text!;
         Assert.Contains(prompt, scienceRequest);
@@ -93,9 +91,7 @@ public sealed class DeepResearchClientIntegrationTests
         Assert.DoesNotContain("<!-- MISSUM_PUBLICATION_BEGIN -->", scienceRequest);
         Assert.Contains("Missum übernimmt Speicherung, Layout, Formelsatz und PDF-Erstellung", scienceRequest);
         var messages = await chats.ListMessagesAsync(session.Id);
-        var introduction = Assert.Single(messages[^1].ToolSteps!, step => step.Tool == "assistant.narration");
-        Assert.Equal("completed", introduction.Status);
-        Assert.Equal(0, introduction.ContentOffset);
+        Assert.DoesNotContain(messages[^1].ToolSteps ?? [], step => step.Tool == "assistant.narration");
     }
 
     [Theory]

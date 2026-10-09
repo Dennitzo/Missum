@@ -220,9 +220,6 @@ public sealed partial class MissumAiAssistantService(
 
             try
             {
-                if (session.ChatMode == ChatMode.ClaudeScience && action is not (PromptTriggerAction.Transcription
-                    or PromptTriggerAction.VoiceInput or PromptTriggerAction.LiveCaptions or PromptTriggerAction.LiveTranslation))
-                    assistant = await StreamScienceIntroductionAsync(session, assistant, update, _activeCancellation.Token).ConfigureAwait(false);
                 var completed = action switch
                 {
                     PromptTriggerAction.Transcription => await CompleteTranscriptionAsync(assistant, trigger!, update, _activeCancellation.Token).ConfigureAwait(false),

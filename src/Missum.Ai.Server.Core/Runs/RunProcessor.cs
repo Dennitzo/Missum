@@ -20,6 +20,7 @@ public sealed partial class RunProcessor : BackgroundService
     internal const string InterruptedTurnEventType = "model.interruptedTurn";
     internal const int MaximumRequiredToolCallRetries = 1;
     internal const int MaximumEmptyResponseRetries = 2;
+    internal const int CanonicalDefaultOutputTokensPerTurn = 32 * 1024;
     internal const string EmptyResponseRepairPrompt = """
         Missum: Die letzte Modellantwort endete ohne Antworttext und ohne vollständigen strukturierten Werkzeugaufruf.
         Eine Überlegung oder Ankündigung im Reasoning-Kanal führt kein Werkzeug aus. Setze die bestehende Aufgabe
@@ -201,6 +202,15 @@ public sealed partial class RunProcessor : BackgroundService
         return generalRounds;
     }
 
+    internal static int? ResolveMaximumOutputTokensPerTurn(RunRequest request) =>
+        // A large native context is input capacity, not a request for hundreds of
+        // thousands of reasoning/output tokens in every metadata or tool turn.
+        // Explicit user limits remain authoritative; the runtime still clamps
+        // them to its exact tokenized available window. This bounds one turn,
+        // never the complete research task or its number of productive steps.
+        request.Limits?.MaximumOutputTokens
+            ?? (ScientificStateCompletionPolicy.Enabled(request) ? CanonicalDefaultOutputTokensPerTurn : null);
+
     private async Task ProcessConversationAsync(
         string runId,
         RunRequest request,
@@ -220,7 +230,7 @@ public sealed partial class RunProcessor : BackgroundService
         var contextLength = Math.Min(
             selection.ContextLength,
             request.Limits?.MaximumContextTokens ?? selection.ContextLength);
-        var maximumOutputTokens = request.Limits?.MaximumOutputTokens;
+        var maximumOutputTokens = ResolveMaximumOutputTokensPerTurn(request);
         var codingBudget = CodingRunBudget.FromOptions(_options);
         var requestsEarlyDelegation = RequestsEarlyResearchDelegation(request);
         var canonicalStateEnabled = ScientificStateCompletionPolicy.Enabled(request);
@@ -300,6 +310,7 @@ public sealed partial class RunProcessor : BackgroundService
                 if (request.ClientCapabilities?.Contains("research.deliverables", StringComparer.OrdinalIgnoreCase) == true)
                 {
                     if (!compactContext && canonicalStateEnabled) EnsureScientificStateInstructions(initialNarration);
+                    if (canonicalStateEnabled) ScientificStateAgentPolicy.EnsurePublicationWorkflowAtNewRunBoundary(initialNarration);
                     ScientificDerivationPolicy.EnsureAtNewRunBoundary(initialNarration);
                 }
                 checkpoint = checkpoint with { Messages = initialNarration };
@@ -646,6 +657,9 @@ public sealed partial class RunProcessor : BackgroundService
                         scientificStateProgress = await ObserveScientificStateReceiptAsync(runId, request, call,
                             SerializeClientToolResult(clientResult), clientResult.Status == "completed", scientificStateProgress,
                             messages, inputTokens, outputTokens, cancellationToken).ConfigureAwait(false);
+                        if (canonicalStateEnabled)
+                            ScientificStateCompletionPolicy.AppendVerificationRepairPrompt(messages, request, call,
+                                SerializeClientToolResult(clientResult));
                         if (compactContext && call.Name == ClientToolNames.ResearchRead && clientResult.Status == "completed"
                             && ScientificStateCompletionPolicy.Text(clientResult.Result, "stateStamp") is { Length: > 0 } readStamp)
                             researchStateStamp = readStamp;
@@ -1120,7 +1134,9 @@ public sealed partial class RunProcessor : BackgroundService
                 {
                     var planningMessages = WithWorkingState(messages, workingState, workingStatePromptIncluded);
                     contextPlan = ScientificRunCompletionPolicy.Applies(request)
-                        ? ScientificRunContextPlanner.Prepare(planningMessages, contextLength, maximumOutputTokens)
+                        ? ScientificRunContextPlanner.Prepare(planningMessages, contextLength, maximumOutputTokens,
+                            preserveConversationPrefix: preserveSessionPromptPrefix,
+                            maximumInputTokens: canonicalStateEnabled ? ScientificRunContextPlanner.CanonicalWorkingInputTokens : null)
                         : ContextPlanner.Prepare(
                         planningMessages,
                         contextLength,

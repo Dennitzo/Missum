@@ -1,5 +1,5 @@
 using System.Globalization;
-using System.Text.RegularExpressions;
+using Missum.Core.Coding;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
@@ -10,7 +10,7 @@ using Windows.UI;
 namespace Missum.App.Controls;
 
 /// <summary>A selectable, native unified diff with independent old and new line numbers.</summary>
-public sealed partial class NativeDiffView : UserControl
+public sealed partial class NativeDiffView : UserControl, IDisposable
 {
     private readonly StackPanel _rows = new();
     private readonly bool _wrapLines;
@@ -23,10 +23,30 @@ public sealed partial class NativeDiffView : UserControl
     private readonly SolidColorBrush _removedBackground = NativeThemeBrushes.Resource("MissumDiffRemovedBackgroundBrush", Color.FromArgb(255, 0x3B, 0x1D, 0x1A));
     private readonly SolidColorBrush _metaBackground = NativeThemeBrushes.Resource("MissumHoverBrush", 36);
     private string _diff = "";
+    private CodingDiffDocument? _document;
+    private readonly StackPanel _pager = new() { Orientation = Orientation.Horizontal, Spacing = 10, Padding = new Thickness(12, 8, 12, 8) };
+    private readonly Button _previous = new() { Content = "Zurück" };
+    private readonly Button _next = new() { Content = "Weiter" };
+    private readonly TextBlock _pageStatus = new() { VerticalAlignment = VerticalAlignment.Center };
+    private long _preparation;
+    private CancellationTokenSource? _prepareCancellation;
+    private readonly Microsoft.UI.Dispatching.DispatcherQueue _dispatcher;
+    private bool _disposed, _resumePreparation;
+    public int CurrentPage { get; private set; }
+    public int PageCount => _document?.PageCount ?? 0;
+    public int RenderedLineCount { get; private set; }
+    public bool IsPreparing { get; private set; }
+
 
     public NativeDiffView(string diff, bool wrapLines = false)
     {
         _wrapLines = wrapLines;
+        _dispatcher = DispatcherQueue;
+        Loaded += OnDiffLoaded;
+        Unloaded += OnDiffUnloaded;
+        _pager.Children.Add(_previous); _pager.Children.Add(_pageStatus); _pager.Children.Add(_next);
+        _previous.Click += (_, _) => ShowPage(CurrentPage - 1);
+        _next.Click += (_, _) => ShowPage(CurrentPage + 1);
         HorizontalContentAlignment = HorizontalAlignment.Stretch;
         if (wrapLines)
         {
@@ -68,82 +88,108 @@ public sealed partial class NativeDiffView : UserControl
     /// <summary>Replaces the unified diff. Empty and incomplete diff fragments remain displayable.</summary>
     public void UpdateDiff(string diff)
     {
+        ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(diff);
         if (_diff == diff && _rows.Children.Count > 0) return;
-        _diff = diff;
+        _diff = diff; _document = null; CurrentPage = 0; RenderedLineCount = 0;
+        var preparation = ++_preparation;
+        _prepareCancellation?.Cancel(); _prepareCancellation?.Dispose(); _prepareCancellation = null;
         _rows.Children.Clear();
-
-        if (string.IsNullOrWhiteSpace(diff))
+        if (diff.Length == 0) { IsPreparing = false; AddMeta("Keine Textänderungen verfügbar."); return; }
+        if (diff.Length <= 64 * 1024)
         {
-            AddMeta("Keine Textänderungen verfügbar.");
-            return;
+            _document = CodingDiffDocument.Parse(diff); IsPreparing = false; ShowPage(0); return;
         }
+        // A large receipt is parsed on a worker. Only the requested page creates
+        // XAML rows, so a 82,000-line diff cannot block the UI dispatcher.
+        IsPreparing = true;
+        AddMeta("Dateivergleich wird vorbereitet …");
+        _prepareCancellation = new();
+        _ = PrepareAsync(diff, preparation, _prepareCancellation.Token);
+    }
 
-        int? oldLine = null;
-        int? newLine = null;
-        var oldRemaining = 0;
-        var newRemaining = 0;
-        var language = "";
-        var lines = diff.ReplaceLineEndings("\n").Split('\n');
-        for (var index = 0; index < lines.Length; index++)
+    public void Deactivate()
+    {
+        _preparation++; _prepareCancellation?.Cancel(); _prepareCancellation?.Dispose(); _prepareCancellation = null;
+        IsPreparing = false;
+    }
+
+    private void OnDiffUnloaded(object sender, RoutedEventArgs e)
+    {
+        // A temporarily detached view may be shown again. Release only this
+        // display parser's token, and resume its current source on Loaded.
+        _resumePreparation = IsPreparing;
+        Deactivate();
+    }
+
+    private void OnDiffLoaded(object sender, RoutedEventArgs e)
+    {
+        if (_disposed || !_resumePreparation) return;
+        _resumePreparation = false;
+        _rows.Children.Clear();
+        UpdateDiff(_diff);
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true; _resumePreparation = false;
+        Deactivate();
+        Loaded -= OnDiffLoaded; Unloaded -= OnDiffUnloaded;
+        _document = null;
+        GC.SuppressFinalize(this);
+    }
+
+    private async Task PrepareAsync(string diff, long preparation, CancellationToken cancellationToken)
+    {
+        try
         {
-            var line = lines[index];
-            // A terminal newline is a separator, not an extra context line.
-            if (line.Length == 0 && index == lines.Length - 1) continue;
-            var hunk = HunkHeader().Match(line);
-            if (hunk.Success)
+            var document = await Task.Run(() => CodingDiffDocument.Parse(diff, cancellationToken), cancellationToken).ConfigureAwait(false);
+            _dispatcher.TryEnqueue(() =>
             {
-                oldLine = ParseNumber(hunk.Groups[1].Value);
-                newLine = ParseNumber(hunk.Groups[3].Value);
-                oldRemaining = hunk.Groups[2].Success ? ParseNumber(hunk.Groups[2].Value) ?? 0 : 1;
-                newRemaining = hunk.Groups[4].Success ? ParseNumber(hunk.Groups[4].Value) ?? 0 : 1;
-                AddMeta(line);
-                continue;
-            }
+                if (preparation != _preparation) return;
+                _prepareCancellation?.Dispose(); _prepareCancellation = null;
+                _document = document; IsPreparing = false; ShowPage(0);
+            });
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            _dispatcher.TryEnqueue(() =>
+            {
+                if (preparation != _preparation) return;
+                _prepareCancellation?.Dispose(); _prepareCancellation = null;
+                IsPreparing = false; _rows.Children.Clear(); AddMeta("Der Dateivergleich konnte nicht dargestellt werden: " + exception.Message);
+            });
+        }
+    }
 
-            var insideHunk = oldRemaining > 0 || newRemaining > 0;
-            if (line.StartsWith("diff ", StringComparison.Ordinal)
-                || line.StartsWith("index ", StringComparison.Ordinal)
-                || (!insideHunk && (line.StartsWith("---", StringComparison.Ordinal) || line.StartsWith("+++", StringComparison.Ordinal))))
+    public void ShowPage(int page)
+    {
+        if (_disposed) return;
+        if (_document is null) return;
+        CurrentPage = Math.Clamp(page, 0, _document.PageCount - 1);
+        _rows.Children.Clear(); RenderedLineCount = 0;
+        if (_document.PageCount > 1)
+        {
+            _pageStatus.Text = $"Seite {CurrentPage + 1:N0} / {_document.PageCount:N0} · {_document.LineCount:N0} Diffzeilen";
+            _previous.IsEnabled = CurrentPage > 0; _next.IsEnabled = CurrentPage + 1 < _document.PageCount;
+            _rows.Children.Add(_pager);
+        }
+        foreach (var line in _document.Page(CurrentPage))
+        {
+            RenderedLineCount++;
+            var text = line.Text.Length <= 8192 ? line.Text : line.Text[..8192] + "\n[Sehr lange Zeile gekürzt; der vollständige Diff ist über das Kontextmenü kopierbar.]";
+            var language = NativeCodeHighlighter.LanguageForPath(line.Path);
+            switch (line.Kind)
             {
-                if (line.StartsWith("diff ", StringComparison.Ordinal)) language = "";
-                else if (line.StartsWith("--- ", StringComparison.Ordinal) || line.StartsWith("+++ ", StringComparison.Ordinal))
-                {
-                    var path = line[4..].Split('\t')[0].Trim('"');
-                    if (path != "/dev/null") language = NativeCodeHighlighter.LanguageForPath(path);
-                }
-                oldLine = newLine = null;
-                oldRemaining = newRemaining = 0;
-                AddMeta(line);
-                continue;
-            }
-
-            if (line.StartsWith('+'))
-            {
-                AddLine(line[1..], "+", null, insideHunk ? newLine : null, _addedForeground, _addedBackground, language);
-                if (newLine.HasValue) newLine++;
-                newRemaining = Math.Max(0, newRemaining - 1);
-            }
-            else if (line.StartsWith('-'))
-            {
-                AddLine(line[1..], "−", insideHunk ? oldLine : null, null, _removedForeground, _removedBackground, language);
-                if (oldLine.HasValue) oldLine++;
-                oldRemaining = Math.Max(0, oldRemaining - 1);
-            }
-            else if (line.StartsWith(' '))
-            {
-                AddLine(line[1..], "", insideHunk ? oldLine : null, insideHunk ? newLine : null, _neutralForeground, _neutralBackground, language);
-                if (oldLine.HasValue) oldLine++;
-                if (newLine.HasValue) newLine++;
-                oldRemaining = Math.Max(0, oldRemaining - 1);
-                newRemaining = Math.Max(0, newRemaining - 1);
-            }
-            else
-            {
-                // Metadata, no-newline markers and truncation notices never consume source lines.
-                AddMeta(line);
+                case CodingDiffLineKind.Metadata: AddMeta(text); break;
+                case CodingDiffLineKind.Added: AddLine(text, "+", line.OldLine, line.NewLine, _addedForeground, _addedBackground, language); break;
+                case CodingDiffLineKind.Removed: AddLine(text, "−", line.OldLine, line.NewLine, _removedForeground, _removedBackground, language); break;
+                default: AddLine(text, "", line.OldLine, line.NewLine, _neutralForeground, _neutralBackground, language); break;
             }
         }
+        if (_document.LineCount == 0) AddMeta("Keine Textänderungen verfügbar.");
     }
 
     private void AddMeta(string text)
@@ -196,8 +242,4 @@ public sealed partial class NativeDiffView : UserControl
     };
 
     private static string FormatLineNumber(int? value) => value?.ToString(CultureInfo.InvariantCulture) ?? "";
-    private static int? ParseNumber(string value) => int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var number) ? number : null;
-
-    [GeneratedRegex(@"^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@", RegexOptions.CultureInvariant)]
-    private static partial Regex HunkHeader();
 }

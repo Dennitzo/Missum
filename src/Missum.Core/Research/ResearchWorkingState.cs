@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Missum.Core.Research;
 
@@ -19,7 +20,10 @@ public sealed record ResearchWorkingItem(
     JsonElement Data,
     DateTimeOffset UpdatedAt);
 
-public sealed record ResearchWorkingChange(string Id, string Kind, long ExpectedRevision, JsonElement Data);
+/// <summary>Data replaces one object; Patch merges only explicitly supplied fields into an existing object.</summary>
+public sealed record ResearchWorkingChange(string Id, string Kind, long ExpectedRevision,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] JsonElement Data = default,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] JsonElement? Patch = null);
 
 public sealed record ResearchWorkingConflict(string Id, string Code, string Message, long? ActualRevision = null);
 

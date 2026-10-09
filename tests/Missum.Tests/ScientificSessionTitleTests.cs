@@ -93,15 +93,4 @@ public sealed class ScientificSessionTitleTests
         Assert.Equal(topic, ScientificSessionTitle.FromPrompt(topic));
     }
 
-    [Fact]
-    public void ScienceIntroductionKeepsTheCompleteStoredTitleBeyondOneHundredTwentyCharacters()
-    {
-        const string title = "Konsistenz der Einsteinschen Feldgleichungen und quantisierten Materiefelder in gekrümmten Raumzeiten mit nachvollziehbaren Grenzfällen";
-        Assert.True(title.Length > 120);
-        Assert.True(title.Length <= ScientificSessionTitle.MaximumLength);
-
-        var parts = MissumAiAssistantService.ScienceIntroductionParts(title);
-
-        Assert.StartsWith("**" + title + "**\n\n", parts[0]);
-    }
 }

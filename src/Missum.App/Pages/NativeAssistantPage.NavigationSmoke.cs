@@ -375,11 +375,16 @@ public sealed partial class NativeAssistantPage
                 throw new InvalidOperationException("A file receipt must only update the overlay summary, without file lists in chat or outputs.");
 
             OpenChangesReview(summary); UpdateLayout(); await Task.Delay(30);
-            var diffs = Descendants(ReviewChangesPanel).OfType<Missum.App.Controls.NativeDiffView>().ToArray();
-            if (diffs.Length != 2 || ReviewScroll.ScrollableWidth > .5 || ReviewScroll.ScrollableHeight <= 0
+            if (Descendants(ReviewChangesPanel).OfType<NativeDiffView>().Any())
+                throw new InvalidOperationException("The review overview eagerly materialized source diffs before a file was selected.");
+            var reviewTab = _reviewTabs.Single(tab => tab.RunId == run);
+            SetReviewFileExpanded(reviewTab, reviewTab.Files["first.cs"], true);
+            UpdateLayout(); await Task.Delay(30);
+            var diffs = Descendants(ReviewChangesPanel).OfType<NativeDiffView>().ToArray();
+            if (diffs.Length != 1 || ReviewScroll.ScrollableWidth > .5 || ReviewScroll.ScrollableHeight <= 0
                 || diffs.Any(diff => Descendants(diff).OfType<ScrollViewer>().Any()
                     || diff.ActualWidth > ReviewChangesPanel.ActualWidth + .5))
-                throw new InvalidOperationException("The changes tab must have one vertical scroll area and no nested or horizontal diff scrolling.");
+                throw new InvalidOperationException("The changes tab must show only the selected file with one vertical scroll area and no nested or horizontal diff scrolling.");
             var firstRows = diffs[0].Content as StackPanel
                 ?? throw new InvalidOperationException("The review diff is not in its inline layout.");
             var code = firstRows.Children.OfType<Grid>().SelectMany(row => row.Children.OfType<TextBlock>())
@@ -397,12 +402,36 @@ public sealed partial class NativeAssistantPage
             var bottom = second.TransformToVisual(ReviewScroll).TransformPoint(new Windows.Foundation.Point()).Y + second.ActualHeight;
             if (ReviewScroll.VerticalOffset <= 0 || bottom > ReviewScroll.ActualHeight + .5)
                 throw new InvalidOperationException("The outer changes scroll area cannot reach the second file.");
+            SetReviewFileExpanded(reviewTab, reviewTab.Files["second.cs"], true);
+            UpdateLayout(); await Task.Delay(30);
+            if (Descendants(ReviewChangesPanel).OfType<NativeDiffView>().Count() != 1
+                || reviewTab.Files["first.cs"].IsExpanded || reviewTab.Files["second.cs"].Diff?.RenderedLineCount != 5)
+                throw new InvalidOperationException("Switching review files must release the previous diff without losing the new file.");
+            var largeDiff = "diff --git a/large.py b/large.py\n--- /dev/null\n+++ b/large.py\n@@ -0,0 +1,82000 @@\n"
+                + string.Join("\n", Enumerable.Range(1, 82_000).Select(index => $"+value_{index} = {index}"));
+            var large = reviewTab.Files["second.cs"].Diff!;
+            large.UpdateDiff(largeDiff);
+            var parsedBy = DateTimeOffset.UtcNow.AddSeconds(15);
+            while (large.IsPreparing && DateTimeOffset.UtcNow < parsedBy) await Task.Delay(20);
+            if (large.IsPreparing || large.PageCount != 274 || large.RenderedLineCount > Missum.Core.Coding.CodingDiffDocument.PageSize)
+                throw new InvalidOperationException("An 82,000-line diff must parse asynchronously and materialize only a bounded page.");
+            large.ShowPage(large.PageCount - 1);
+            UpdateLayout(); await Task.Delay(30);
+            if (large.CurrentPage != 273 || large.RenderedLineCount > Missum.Core.Coding.CodingDiffDocument.PageSize
+                || !Descendants(large).OfType<TextBlock>().Any(text => text.Inlines.OfType<Microsoft.UI.Xaml.Documents.Run>()
+                    .Any(inline => inline.Text.Contains("value_82000", StringComparison.Ordinal))))
+                throw new InvalidOperationException("Diff paging must reach the final source line with its original content and line number.");
+
         }
         finally
         {
             ShowChatView();
             var fixtureTab = _reviewTabs.FirstOrDefault(tab => tab.RunId == run);
-            if (fixtureTab is not null) { _reviewTabs.Remove(fixtureTab); SessionTabsPanel.Children.Remove(fixtureTab.Container); }
+            if (fixtureTab is not null)
+            {
+                foreach (var card in fixtureTab.Files.Values) card.Diff?.Dispose();
+                _reviewTabs.Remove(fixtureTab); SessionTabsPanel.Children.Remove(fixtureTab.Container);
+            }
             ApplyEvent("state.snapshot", original); RenderMessagesNow();
             if (originalSummary.ValueKind == JsonValueKind.Object) RenderChanges(originalSummary);
             if (previousReview is not null && previousReview.SessionId == _session) ShowReviewTab(previousReview);

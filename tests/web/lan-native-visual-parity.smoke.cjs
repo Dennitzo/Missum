@@ -83,6 +83,7 @@ async function main() {
     assert.ok(indices.every(index=>children.some(child=>child.planetIndex===index)));
     assert.equal(await inspector.locator(".inspector-copy-path svg").count(),1);
     assert.equal(await inspector.locator(".inspector-copy-path").evaluate(button=>getComputedStyle(button).borderTopWidth),"0px");
+    assert.equal(await inspector.locator(".inspector-artifact, .inspector-preview").count(),0);
     const chain=await inspector.locator(".inspector-all-sources path").getAttribute("d");assert.ok(chain.includes("a3 3"));
     const inspectorIcon=await page.locator("#inspector-toggle path").getAttribute("d");assert.equal(inspectorIcon,"M14 3h7v7M21 3 10 14M11 5H4v15h15v-7");
     const toolGlyphs=await page.locator("#message-list .coding-step__icon").evaluateAll(icons=>icons.map(icon=>({key:icon.dataset.iconKey,width:icon.getBoundingClientRect().width,color:getComputedStyle(icon).color,path:icon.querySelector("path")?.getAttribute("d")})));

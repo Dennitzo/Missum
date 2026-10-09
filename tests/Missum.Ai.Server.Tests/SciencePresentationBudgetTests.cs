@@ -47,6 +47,49 @@ public sealed class SciencePresentationBudgetTests
         Assert.Equal(0, RunProcessor.ResolveMaximumToolCalls(request, options, tools));
     }
 
+    [Fact]
+    public void CanonicalScienceBoundsAutomaticOutputPerTurnWhileResearchRemainsUnbounded()
+    {
+        var request = Request(sandbox: true) with
+        {
+            ClientCapabilities = ["research.sandbox", "research.deliverables"],
+            ResearchOptions = new(ProtocolVersion: 2, ProjectId: "research-fixture"),
+            Limits = new(MaximumContextTokens: 1_048_576),
+        };
+        var options = new MissumAiServerOptions();
+        var tools = new AgentToolCatalog().GetAvailableTools(request);
+
+        Assert.Equal(32_768, RunProcessor.ResolveMaximumOutputTokensPerTurn(request));
+        Assert.Equal(0, RunProcessor.ResolveMaximumModelRounds(request, options, tools));
+        Assert.Equal(0, RunProcessor.ResolveMaximumToolCalls(request, options, tools));
+        Assert.Equal(1_048_576, request.Limits.MaximumContextTokens);
+    }
+
+    [Theory]
+    [InlineData(8_192)]
+    [InlineData(32_768)]
+    [InlineData(65_536)]
+    public void ExplicitCanonicalOutputSelectionSurvivesTheAutomaticTurnDefault(int requested)
+    {
+        var request = Request(sandbox: true) with
+        {
+            ClientCapabilities = ["research.deliverables"],
+            ResearchOptions = new(ProtocolVersion: 2, ProjectId: "research-fixture"),
+            Limits = new(MaximumOutputTokens: requested),
+        };
+
+        Assert.Equal(requested, RunProcessor.ResolveMaximumOutputTokensPerTurn(request));
+    }
+
+    [Fact]
+    public void LegacyResearchAndOrdinaryChatRetainTheirExistingAutomaticOutputPolicy()
+    {
+        var legacy = Request(sandbox: true);
+        Assert.Null(RunProcessor.ResolveMaximumOutputTokensPerTurn(legacy));
+        Assert.Null(RunProcessor.ResolveMaximumOutputTokensPerTurn(legacy with { DeepResearch = false }));
+        Assert.Equal(16_384, RunProcessor.ResolveMaximumOutputTokensPerTurn(legacy with { Limits = new(MaximumOutputTokens: 16_384) }));
+    }
+
     private static RunRequest Request(bool sandbox) => new(MissumAiProtocol.Version, RunMode.General,
         [new("user", [new("text", Text: "Untersuche die Frage mit Python.")])], [],
         ClientCapabilities: sandbox ? ["research.sandbox"] : [], DeepResearch: true,

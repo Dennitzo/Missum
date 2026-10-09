@@ -117,14 +117,16 @@ public sealed partial class ScientificPublicationService : IDisposable, IScienti
             }
             renderingState = snapshot.WorkingState;
             var markdown = snapshot.WorkingState is { } canonical
-                ? FormatCanonicalPublication(canonical, snapshot.Works, snapshot.Results)
+                ? FormatCanonicalPublication(canonical, snapshot.Works, snapshot.Results, snapshot.TrustedChecks)
                 : FormatPublication(snapshot.Project, snapshot.Results, snapshot.Works, snapshot.Evidence, snapshot.Report, snapshot.Manuscript);
             ScientificPublicationImages.PreparedImages? images = null;
             if (_sandbox is not null)
             {
-                images = await ScientificPublicationImages.PrepareAsync(markdown, projectId, _sandbox,
-                    snapshot.WorkingState is null ? PublicationRunStart(snapshot.Report) ?? snapshot.Manuscript?.CreatedAt
-                        : DateTimeOffset.MinValue, cancellationToken).ConfigureAwait(false);
+                images = snapshot.WorkingState is not null
+                    ? await ScientificPublicationImages.PrepareCanonicalAsync(markdown, projectId, _sandbox,
+                        CanonicalImageHashes(snapshot), cancellationToken).ConfigureAwait(false)
+                    : await ScientificPublicationImages.PrepareAsync(markdown, projectId, _sandbox,
+                        PublicationRunStart(snapshot.Report) ?? snapshot.Manuscript?.CreatedAt, cancellationToken).ConfigureAwait(false);
                 if (snapshot.WorkingState is not null) ValidateCanonicalImages(snapshot, images);
                 markdown = images.Markdown;
             }
@@ -214,9 +216,11 @@ public sealed partial class ScientificPublicationService : IDisposable, IScienti
         var archive = await _repository.LoadArchiveSnapshotAsync(projectId, token).ConfigureAwait(false);
         var manuscript = await ReadManuscriptAsync(project, archive.Report, token).ConfigureAwait(false);
         var state = await GetWorkingStateAsync(projectId, token).ConfigureAwait(false);
+        var trustedChecks = _repository is IScientificResearchStateRepository states
+            ? await states.LoadExecutionVerificationsAsync(projectId, token).ConfigureAwait(false) : [];
         var current = await _repository.GetProjectAsync(projectId, token).ConfigureAwait(false);
         if (state is null && current != project) return null;
-        return new(project, results, archive.Works, archive.Evidence, archive.Report, manuscript, state);
+        return new(project, results, archive.Works, archive.Evidence, archive.Report, manuscript, state, trustedChecks);
     }
 
     private static DateTimeOffset? PublicationRunStart(ResearchStoredReport? report)
@@ -542,12 +546,12 @@ public sealed partial class ScientificPublicationService : IDisposable, IScienti
 
     private static ScientificPublicationArtifact Artifact(PublicationSnapshot snapshot, string source, string pdf, string fingerprint) =>
         new(snapshot.Project.Id, snapshot.WorkingState?.PublicationRevision ?? snapshot.Project.Revision, source, pdf,
-            snapshot.WorkingState is { } state ? IsCanonicalDraft(state) : IsDraft(snapshot.Project, snapshot.Report, snapshot.Manuscript),
+            snapshot.WorkingState is { } state ? IsCanonicalDraft(state, snapshot.TrustedChecks) : IsDraft(snapshot.Project, snapshot.Report, snapshot.Manuscript),
             snapshot.WorkingState?.UpdatedAt ?? PublicationUpdatedAt(snapshot.Project, snapshot.Manuscript), fingerprint,
             snapshot.WorkingState is not null);
 
     private static string Fingerprint(string text) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
-    private static string PublicationFingerprint(string text) => Fingerprint("scientific-publication-v7\n" + text);
+    private static string PublicationFingerprint(string text) => Fingerprint("scientific-publication-v8-single-column\n" + text);
     private static string OneLine(string text) => text.Replace('\r', ' ').Replace('\n', ' ').Trim();
     private static string EscapeLabel(string text) => OneLine(text).Replace("*", "\\*", StringComparison.Ordinal)
         .Replace("[", "\\[", StringComparison.Ordinal).Replace("]", "\\]", StringComparison.Ordinal);
@@ -591,7 +595,7 @@ public sealed partial class ScientificPublicationService : IDisposable, IScienti
 
     private sealed record PublicationSnapshot(ScientificResearchProject Project, ResearchResultSnapshot Results,
         IReadOnlyList<ResearchLiteratureEntry> Works, IReadOnlyList<ResearchEvidenceRecord> Evidence, ResearchStoredReport? Report,
-        ChatMessage? Manuscript, ResearchWorkingState? WorkingState = null);
+        ChatMessage? Manuscript, ResearchWorkingState? WorkingState = null, IReadOnlyList<ResearchVerification>? TrustedChecks = null);
 }
 
 public sealed record ScientificPublicationArtifact(string ProjectId, long Revision, string MarkdownPath, string PdfPath,

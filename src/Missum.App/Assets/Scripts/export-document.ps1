@@ -92,13 +92,20 @@ $katexCssUri = Convert-ToFileUri (Join-Path $katexRoot 'katex.min.css')
 $katexScriptUri = Convert-ToFileUri (Join-Path $katexRoot 'katex.min.js')
 
 $sourceText = [IO.File]::ReadAllText($source, [Text.Encoding]::UTF8)
+$outlineBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('[]'))
+$outlineMatch = [regex]::Match($sourceText, '<!-- MISSUM_PUBLICATION_OUTLINE:(?<payload>[A-Za-z0-9+/=]+) -->')
+if ($outlineMatch.Success) {
+    $outlineBase64 = $outlineMatch.Groups['payload'].Value
+    $sourceText = $sourceText.Replace($outlineMatch.Value, '')
+}
 $localFigures = [Collections.Generic.List[object]]::new()
 if ($ScientificPublication) {
     $sourceDirectory = [IO.Path]::GetDirectoryName($source).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
     $sourceText = [regex]::Replace($sourceText, '!\[(?<label>[^\]\r\n]*)\]\((?<path>[^\)\r\n]+)\)', {
         param($match)
         $requested = $match.Groups['path'].Value.Trim().Trim('<', '>')
-        if ($requested -notmatch '^figures/(?<hash>[0-9a-f]{64})\.(?<type>png|jpg)$' -or $localFigures.Count -ge 12) { return $match.Value }
+        if ($requested -notmatch '^figures/(?<hash>[0-9a-f]{64})\.(?<type>png|jpg)$') { return $match.Value }
+        if ($localFigures.Count -ge 64) { throw 'Die Publikation enthält mehr als 64 Abbildungen. Reduziere Wiederholungen oder teile den Bildumfang fachlich auf; es werden keine Bilder still ausgelassen.' }
         $expectedHash = $Matches['hash']
         $imageType = $Matches['type']
         try { $figurePath = [IO.Path]::GetFullPath((Join-Path $sourceDirectory ([Uri]::UnescapeDataString($requested)))) }
@@ -107,12 +114,13 @@ if ($ScientificPublication) {
             -not (Test-Path -LiteralPath $figurePath -PathType Leaf)) { return $match.Value }
         $fileInfo = Get-Item -LiteralPath $figurePath
         $figureDirectory = Get-Item -LiteralPath ([IO.Path]::GetDirectoryName($figurePath))
+        if ($fileInfo.Length -gt 8MB) { throw 'Eine Publikationsabbildung ist größer als 8 MiB. Komprimiere den Plot; die bisherige PDF bleibt erhalten.' }
         if (($fileInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
             ($figureDirectory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
-            $fileInfo.Length -lt 8 -or $fileInfo.Length -gt 8MB) { return $match.Value }
+            $fileInfo.Length -lt 8) { return $match.Value }
         $totalBytes = 0L
         foreach ($existingFigure in $localFigures) { $totalBytes += $existingFigure.length }
-        if ($totalBytes + $fileInfo.Length -gt 32MB) { return $match.Value }
+        if ($totalBytes + $fileInfo.Length -gt 128MB) { throw 'Die Publikationsabbildungen überschreiten zusammen 128 MiB. Komprimiere die Plots oder teile den Bildumfang fachlich auf; es werden keine Bilder still ausgelassen.' }
         $bytes = [IO.File]::ReadAllBytes($figurePath)
         $validSignature = if ($imageType -eq 'png') {
             [BitConverter]::ToString($bytes, 0, 8) -eq '89-50-4E-47-0D-0A-1A-0A'
@@ -174,7 +182,7 @@ if ($ScientificPublication) {
       display: block !important; width: 100% !important; max-width: none !important;
       font: inherit !important; line-height: inherit !important;
     }
-    .scientific-publication .message-content { column-count: 2; column-gap: 5mm; column-fill: auto; }
+    .scientific-publication .message-content { column-count: 1; column-gap: 0; width: 100% !important; }
     .scientific-publication .pdf-book__header,
     .scientific-publication .pdf-book__end-mark { display: none !important; }
     .scientific-publication .message { margin: 0 !important; }
@@ -229,11 +237,13 @@ if ($ScientificPublication) {
       margin: 5mm 0 2.5mm;
       font-size: 12.5pt !important;
       color: #111 !important;
+      overflow-wrap: anywhere; hyphens: auto; break-after: avoid-page;
     }
     .scientific-publication .message-content h3 {
       margin: 3.5mm 0 2mm;
       font: 700 9.5pt/1.2 Arial, sans-serif !important;
       color: #008fbd !important;
+      overflow-wrap: anywhere; hyphens: auto; break-after: avoid-page;
     }
     .scientific-publication .message-content p { margin-bottom: 2mm; orphans: 3; widows: 3; text-align: justify; }
     .scientific-publication .message-content li { margin-bottom: 1mm; }
@@ -258,7 +268,7 @@ if ($ScientificPublication) {
     .scientific-publication .message-content th, .scientific-publication .message-content td { padding: 1.3mm !important; }
     .scientific-publication .math-selectable.display {
       display: flex !important; align-items: center; gap: 2mm;
-      position: relative; box-sizing: border-box; width: 82mm !important; max-width: 100% !important;
+      position: relative; box-sizing: border-box; width: 169mm !important; max-width: 100% !important;
       margin: 3mm 0 !important; padding: 2mm !important; border: 0 !important; border-radius: 0 !important;
       background: #fffbe6 !important; break-inside: avoid; overflow: visible !important; font-size: 9.2pt !important;
     }
@@ -313,27 +323,64 @@ $html = @"
     if (document.body.classList.contains('scientific-publication')) {
       const title = documentContent.querySelector(':scope > h1');
       const headingText = title ? title.textContent.trim() : 'Wissenschaftliche Untersuchung';
-      const explicitChapter = headingText.match(/^(\d+)\s+/);
-      const chapter = explicitChapter ? explicitChapter[1] : '1';
-      const chapterText = explicitChapter ? headingText.replace(/^\d+\s+/, '') : headingText;
-      if (title && !explicitChapter) title.prepend(document.createTextNode(chapter + '  '));
+      const chapter = '1';
+      const chapterText = headingText;
+      const knownNumberedTitles = new Set(JSON.parse(decodeUtf8('$outlineBase64')));
+      if (title) title.prepend(document.createTextNode(chapter + '  '));
       const runningHeader = document.createElement('style');
-      runningHeader.textContent = '@page { @top-center { content: ' + JSON.stringify(chapter + '  ' + chapterText.slice(0, 88)) +
-        '; } @left-middle { content: ' + JSON.stringify(chapterText.slice(0, 42)) +
-        '; writing-mode: vertical-rl; background: #008fbd; color: white; width: 14mm; height: 57mm; margin-right: 10mm; padding-top: 3mm; padding-bottom: 3mm; text-align: center; vertical-align: middle; font: 700 9pt Arial, sans-serif; } }';
+      runningHeader.textContent = '@page { @top-center { content: ' + JSON.stringify(chapter + '  ' + chapterText) +
+        '; white-space: nowrap; } @left-middle { content: ' + JSON.stringify(chapterText) +
+        '; writing-mode: vertical-rl; background: #008fbd; color: white; width: 14mm; height: 110mm; margin-right: 10mm; padding-top: 3mm; padding-bottom: 3mm; text-align: center; vertical-align: middle; font: 700 9pt Arial, sans-serif; } }';
       document.head.append(runningHeader);
       if (title && title.nextElementSibling && title.nextElementSibling.tagName === 'P') {
         title.nextElementSibling.classList.add('publication-metadata');
       }
       let sectionNumber = 0;
-      for (const heading of documentContent.querySelectorAll(':scope > h2')) {
-        if (/^(Zusammenfassung|Abstract|Literatur|Quellen|Erg.nzende Originalquellen)/i.test(heading.textContent.trim())) continue;
-        if (!/^\d+(?:\.\d+)*[.)]?\s+/.test(heading.textContent.trim())) {
-          sectionNumber += 1;
-          const number = document.createElement('span');
-          number.textContent = chapter + '.' + sectionNumber + '  ';
-          heading.prepend(number);
+      let numberedSection = false;
+      const subordinateNumbers = [0, 0, 0, 0];
+      const headingNumbers = new Map();
+      const ambiguousHeadingNumbers = new Set();
+      let sourceSectionNumber = null;
+      for (const heading of documentContent.querySelectorAll('h2, h3, h4, h5, h6')) {
+        heading.dataset.missumOriginalHeading = heading.textContent.trim();
+        const level = Number(heading.tagName.slice(1));
+        const originalNumber = heading.dataset.missumOriginalHeading.match(/^\s*(\d+[a-z]?(?:\.\d+[a-z]?)*)(?:[.)])?\s+/)?.[1];
+        const removableNumber = level === 2 ? knownNumberedTitles.has(heading.dataset.missumOriginalHeading)
+          : sourceSectionNumber && originalNumber?.startsWith(sourceSectionNumber + '.');
+        const firstText = document.createTreeWalker(heading, NodeFilter.SHOW_TEXT).nextNode();
+        if (firstText && removableNumber) firstText.textContent = firstText.textContent.replace(/^\s*\d+[a-z]?(?:\.\d+[a-z]?)*[.)]?\s+/, '');
+        if (level === 2) {
+          sourceSectionNumber = removableNumber ? originalNumber : null;
+          numberedSection = !/^(Zusammenfassung|Abstract|Literatur|Quellen|Erg.nzende Originalquellen)/i.test(heading.textContent.trim());
+          subordinateNumbers.fill(0);
+          if (numberedSection) sectionNumber += 1;
         }
+        if (!numberedSection) continue;
+        if (level > 2) {
+          for (let index = 0; index < level - 3; index++) if (subordinateNumbers[index] === 0) subordinateNumbers[index] = 1;
+          subordinateNumbers[level - 3] += 1;
+          subordinateNumbers.fill(0, level - 2);
+        }
+        const number = document.createElement('span');
+        const newNumber = chapter + '.' + sectionNumber + (level > 2 ? '.' + subordinateNumbers.slice(0, level - 2).join('.') : '');
+        number.textContent = newNumber + '  ';
+        const oldNumber = removableNumber ? originalNumber : null;
+        if (oldNumber) {
+          if (headingNumbers.has(oldNumber)) ambiguousHeadingNumbers.add(oldNumber);
+          else headingNumbers.set(oldNumber, newNumber);
+        }
+        heading.prepend(number);
+      }
+      // Preserve explicit textual section references when their original number
+      // identifies exactly one heading. Mathematical values, code and ambiguous
+      // references remain unchanged and require the scientific author's review.
+      const references = document.createTreeWalker(documentContent, NodeFilter.SHOW_TEXT);
+      let referenceText;
+      while ((referenceText = references.nextNode())) {
+        if (referenceText.parentElement?.closest('h1,h2,h3,h4,h5,h6,pre,code,.math-selectable,.katex,script,style')) continue;
+        referenceText.textContent = referenceText.textContent.replace(/(\b(?:Abschnitt|Kapitel|Unterabschnitt|Kap\.|Abschn\.)\s+)(\d+[a-z]?(?:\.\d+[a-z]?)*)(?=[\s,;:)\].]|$)/g,
+          (match, prefix, oldNumber) => headingNumbers.has(oldNumber) && !ambiguousHeadingNumbers.has(oldNumber)
+            ? prefix + headingNumbers.get(oldNumber) : match);
       }
       let equationNumber = 0;
       for (const formula of documentContent.querySelectorAll('.math-selectable.display')) {
@@ -385,7 +432,7 @@ $html = @"
           const math = formula.querySelector('.math-render');
           if (!math) continue;
           const number = formula.querySelector('.equation-number');
-          const available = Math.min(math.clientWidth, 82 * 96 / 25.4 - 6 * 96 / 25.4 - (number ? number.getBoundingClientRect().width : 0));
+          const available = Math.min(math.clientWidth, 169 * 96 / 25.4 - 6 * 96 / 25.4 - (number ? number.getBoundingClientRect().width : 0));
           const bounds = math.getBoundingClientRect();
           const width = Math.max(math.scrollWidth, ...Array.from(math.querySelectorAll('.base')).map(item => item.getBoundingClientRect().right - bounds.left));
           if (available > 0 && width > available) {
@@ -405,12 +452,37 @@ $html = @"
         Array.from(documentContent.querySelectorAll('.math-selectable.invalid')).slice(0, 8).map(formula => {
           const preceding = headings.filter(heading => Boolean(heading.compareDocumentPosition(formula) & Node.DOCUMENT_POSITION_FOLLOWING));
           const heading = preceding.length ? preceding[preceding.length - 1] : null;
-          return { section: heading ? heading.textContent.trim().slice(0, 500) : '',
+          return { section: heading ? (heading.dataset.missumOriginalHeading || heading.textContent.trim()).slice(0, 500) : '',
             source: (formula.querySelector('.math-source-text')?.textContent || '').slice(0, 500),
             reason: (formula.dataset.mathError || '').slice(0, 500) };
         })));
       document.body.dataset.missumKatexRendered = String(documentContent.querySelectorAll('.math-render[data-math-typeset="true"] .katex').length);
       document.body.dataset.missumFigureInvalid = String(Array.from(documentContent.querySelectorAll('.publication-figure img')).filter(image => !image.complete || image.naturalWidth === 0).length);
+      if (document.body.classList.contains('scientific-publication')) {
+        const issues = [];
+        const title = documentContent.querySelector(':scope > h1');
+        const titleText = title ? title.textContent.trim().replace(/^1\s+/, '') : '';
+        const context = document.createElement('canvas').getContext('2d');
+        if (context && titleText) {
+          context.font = '700 9pt Arial';
+          const sideWidth = context.measureText(titleText).width;
+          context.font = '8pt Arial';
+          const headWidth = context.measureText('1  ' + titleText).width;
+          if (sideWidth > 104 * 96 / 25.4 || headWidth > 158 * 96 / 25.4)
+            issues.push({ target: 'title', section: '', text: titleText,
+              reason: 'Publikationstitel passt nicht vollständig in Seitenmarke oder laufende Kopfzeile; fachlich kürzen.' });
+        }
+        for (const heading of documentContent.querySelectorAll('h2, h3, h4, h5, h6')) {
+          const bounds = heading.getBoundingClientRect();
+          const style = getComputedStyle(heading);
+          const lineHeight = parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.2;
+          if (heading.scrollWidth > heading.clientWidth + 1 || bounds.height > lineHeight * 2.15)
+            issues.push({ target: 'section', section: heading.dataset.missumOriginalHeading || heading.textContent.trim(),
+              text: heading.textContent.trim(), reason: 'Überschrift überschreitet die Satzbreite oder zwei Zeilen; fachlich kürzen.' });
+        }
+        document.body.dataset.missumHeadingInvalid = String(issues.length);
+        document.body.dataset.missumHeadingErrors = encodeURIComponent(JSON.stringify(issues.slice(0, 12)));
+      }
     };
     if (document.body.classList.contains('scientific-publication')) {
       const images = Array.from(documentContent.querySelectorAll('img')).map(image => image.decode ? image.decode().catch(() => {}) : image.complete ? Promise.resolve() :
@@ -466,6 +538,17 @@ try {
     }
     if ($ScientificPublication -and $renderedDom -match 'data-missum-figure-invalid="([1-9][0-9]*)"') {
         throw "Die Publikation enthaelt $($Matches[1]) nicht lesbare Abbildungen. Die bisherige PDF bleibt erhalten."
+    }
+    if ($ScientificPublication -and $renderedDom -match 'data-missum-heading-invalid="([1-9][0-9]*)"') {
+        $headingDetails = ''
+        if ($renderedDom -match 'data-missum-heading-errors="([^"]*)"') {
+            $headingErrors = [Uri]::UnescapeDataString($Matches[1]) | ConvertFrom-Json
+            $headingDetails = (@($headingErrors) | ForEach-Object {
+                if ($_.target -eq 'title') { 'Publikationstitel "' + $_.text + '": ' + $_.reason }
+                else { 'Abschnitt "' + $_.section + '": ' + $_.reason }
+            }) -join '; '
+        }
+        throw "Die PDF wurde nicht erzeugt, weil eine Überschrift nicht vollständig lesbar ist. $headingDetails Die vorherige PDF bleibt erhalten."
     }
 
     $arguments = $commonArguments + @(

@@ -28,6 +28,7 @@ public sealed partial class NativeAssistantPage
     private InfoBar? _scienceNotice;
     private string? _scienceControlsKey, _scienceProjectKey;
     private bool _scienceRendering, _scienceRenderAgain, _sciencePickerUpdating;
+    private Func<string, Task<bool>>? _simulationOpenSmokeAdapter;
 
     private void RenderSimulationTab(int index)
     {
@@ -267,6 +268,7 @@ public sealed partial class NativeAssistantPage
                 && item.Provenance.StartsWith("Forschungsexperiment · ", StringComparison.Ordinal))).ToArray() ?? [];
 
     private static string SimulationViewKey(Guid owner, string projectId, string path) => owner + "|" + projectId + "|" + path;
+    private static string SimulationCardKey(ScientificSimulationArtifact artifact) => artifact.Kind + "|" + artifact.ImagePath;
 
     private void UpdateSimulationPane(SimulationPane pane, ScientificSimulationSnapshot? snapshot, bool projectSelected, bool loading, Guid owner)
     {
@@ -283,7 +285,7 @@ public sealed partial class NativeAssistantPage
         var row = 0;
         foreach (var artifact in artifacts)
         {
-            var artifactKey = artifact.Kind + "|" + artifact.ImagePath;
+            var artifactKey = SimulationCardKey(artifact);
             visible.Add(artifactKey);
             if (!pane.Cards.TryGetValue(artifactKey, out var card))
             {
@@ -292,14 +294,10 @@ public sealed partial class NativeAssistantPage
                 // refresh, project switch or new artifact may never move it.
                 if (card.Interactive is { } interactive)
                     _interactiveSimulationViews.Add(SimulationViewKey(owner, snapshot!.ProjectId, artifact.ImagePath), interactive);
-                else
-                {
-                    var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
-                    actions.Children.Add(ScienceButton("Abbildung öffnen", async () => await OpenScienceFileAsync(artifact.ImagePath, owner)));
-                    card.Content.Children.Add(actions);
-                }
+                ConfigureSimulationCard(card);
                 pane.Cards.Add(artifactKey, card); pane.Artifacts.Children.Add(card.Container);
             }
+            card.Artifact = artifact;
             card.Title.Text = artifact.Title; card.Provenance.Text = artifact.Provenance;
             if (card.Interactive is { } view) _ = view.LoadAsync(artifact, _lifetime.Token);
             else if (card.LastHash != artifact.Sha256)
@@ -308,31 +306,86 @@ public sealed partial class NativeAssistantPage
                 AutomationProperties.SetName(card.Image, artifact.Title);
             }
             // Preserve source disclosure state when only status text changes.
-            var sourcesKey = artifact.ScriptPath + "|" + artifact.DataPath + "|" + artifact.Sha256;
+            var sourcePath = artifact.ScriptPath ?? (artifact.Kind == "interactive" ? artifact.ImagePath : null);
+            var sourcesKey = sourcePath + "|" + artifact.DataPath + "|" + artifact.Sha256;
             if (card.SourcesKey != sourcesKey)
             {
                 card.Sources.Children.Clear();
-                if (!string.IsNullOrEmpty(artifact.ScriptPath)) card.Sources.Children.Add(ScienceSource(
-                    artifact.Kind == "interactive" ? "HTML-/JavaScript-Code" : "Python-Code", artifact.ScriptPath,
+                if (!string.IsNullOrEmpty(sourcePath)) card.Sources.Children.Add(ScienceSource(
+                    artifact.Kind == "interactive" ? "HTML-/JavaScript-Code" : "Python-Code", sourcePath,
                     artifact.Kind == "interactive" ? "html" : "python", owner));
                 if (!string.IsNullOrEmpty(artifact.DataPath)) card.Sources.Children.Add(ScienceSource("Daten", artifact.DataPath, "json", owner));
                 card.SourcesKey = sourcesKey;
             }
             card.LastHash = artifact.Sha256;
+            card.SourceButton.IsEnabled = !string.IsNullOrEmpty(sourcePath);
+            card.DataButton.IsEnabled = !string.IsNullOrEmpty(artifact.DataPath);
             while (pane.Artifacts.RowDefinitions.Count <= row) pane.Artifacts.RowDefinitions.Add(new() { Height = GridLength.Auto });
             if (Grid.GetRow(card.Container) != row) Grid.SetRow(card.Container, row);
             row++;
-            if (card.Container.Visibility != Visibility.Visible) card.Container.Visibility = Visibility.Visible;
         }
         foreach (var (key, existing) in pane.Cards)
-            if (!visible.Contains(key) && existing.Container.Visibility != Visibility.Collapsed)
-                existing.Container.Visibility = Visibility.Collapsed;
+            existing.Container.Visibility = visible.Contains(key) ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void ConfigureSimulationCard(SimulationCard card)
+    {
+        card.OpenButton = ScienceButton("Öffnen", async () =>
+        {
+            if (card.Artifact is { } artifact) await OpenSimulationFileAsync(artifact);
+        });
+        void Zoom(double scale)
+        {
+            card.Scale = Math.Clamp(scale, .5, 2);
+            card.ZoomButton.Content = Math.Round(card.Scale * 100) + " %";
+            card.Interactive?.SetScale(card.Scale);
+            card.ImageViewport?.ChangeView(null, null, (float)card.Scale);
+        }
+        var reload = ScienceButton("Neu laden", () =>
+        {
+            if (card.Interactive is { } interactive) interactive.Reload();
+            else if (card.Artifact is { } artifact)
+                card.Image!.Source = new BitmapImage { CreateOptions = BitmapCreateOptions.IgnoreImageCache, UriSource = new Uri(artifact.ImagePath) };
+            return Task.CompletedTask;
+        });
+        card.ZoomButton = ScienceButton("100 %", () => { Zoom(1); return Task.CompletedTask; });
+        card.SourceButton = ScienceButton("Quellcode", () => { ToggleSimulationSource(card, "HTML-/JavaScript-Code", "Python-Code"); return Task.CompletedTask; });
+        card.DataButton = ScienceButton("Daten", () => { ToggleSimulationSource(card, "Daten"); return Task.CompletedTask; });
+        foreach (var button in new[] { card.OpenButton, reload,
+            ScienceButton("−", () => { Zoom(card.Scale - .25); return Task.CompletedTask; }), card.ZoomButton,
+            ScienceButton("+", () => { Zoom(card.Scale + .25); return Task.CompletedTask; }), card.SourceButton, card.DataButton })
+            card.Toolbar.Children.Add(button);
+        if (card.ImageViewport is { } viewport)
+            viewport.ViewChanged += (_, _) =>
+            {
+                card.Scale = viewport.ZoomFactor;
+                card.ZoomButton.Content = Math.Round(card.Scale * 100) + " %";
+            };
+    }
+
+    private async Task OpenSimulationFileAsync(ScientificSimulationArtifact artifact)
+    {
+        var path = Path.GetFullPath(artifact.ImagePath);
+        if (!File.Exists(path)) throw new FileNotFoundException("Die Simulationsdatei ist nicht mehr vorhanden.", path);
+        var adapter = _simulationOpenSmokeAdapter;
+        if (adapter is not null && string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("MISSUM_SMOKE_INSTANCE_KEY")))
+            throw new InvalidOperationException("Die Dateistart-Diagnostik ist ausschließlich im isolierten Portable-Smoke erlaubt.");
+        var opened = adapter is not null ? await adapter(path) : await Launcher.LaunchFileAsync(await StorageFile.GetFileFromPathAsync(path));
+        if (!opened) throw new InvalidOperationException("Die Simulationsdatei konnte mit der Windows-Dateizuordnung nicht geöffnet werden.");
+    }
+
+    private static void ToggleSimulationSource(SimulationCard card, params string[] labels)
+    {
+        var expander = card.Sources.Children.OfType<Expander>().FirstOrDefault(item => labels.Contains(item.Header?.ToString()));
+        if (expander is null) return;
+        expander.IsExpanded = !expander.IsExpanded;
+        if (expander.IsExpanded) expander.StartBringIntoView();
     }
 
     private sealed class SimulationPane
     {
         internal Grid Root { get; } = new();
-        internal Grid Artifacts { get; } = new() { RowSpacing = 20, MaxWidth = 1150, HorizontalAlignment = HorizontalAlignment.Stretch };
+        internal Grid Artifacts { get; } = new() { RowSpacing = 20, HorizontalAlignment = HorizontalAlignment.Stretch };
         internal ScrollViewer Scroll { get; }
         internal ScrollViewer EmptyScroll { get; }
         internal TextBlock EmptyHeading { get; } = ScienceText("", 20, true);
@@ -360,19 +413,50 @@ public sealed partial class NativeAssistantPage
         internal TextBlock Title { get; } = ScienceText("", 18, true);
         internal TextBlock Provenance { get; } = ScienceText("", 13);
         internal StackPanel Sources { get; } = new() { Spacing = 10 };
+        internal StackPanel Toolbar { get; } = new() { Orientation = Orientation.Horizontal, Spacing = 8 };
+        internal Button OpenButton { get; set; } = null!;
+        internal Button ZoomButton { get; set; } = null!;
+        internal Button SourceButton { get; set; } = null!;
+        internal Button DataButton { get; set; } = null!;
         internal NativeSimulationView? Interactive { get; }
         internal Image? Image { get; }
+        internal ScrollViewer? ImageViewport { get; }
+        internal ScientificSimulationArtifact? Artifact { get; set; }
+        internal double Scale { get; set; } = 1;
         internal string? LastHash { get; set; }
         internal string? SourcesKey { get; set; }
 
         internal SimulationCard(bool interactive)
         {
             Content.Children.Add(Title); Content.Children.Add(Provenance);
+            Content.Children.Add(new ScrollViewer { Content = Toolbar, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Disabled });
             if (interactive) { Interactive = new NativeSimulationView(); Content.Children.Add(Interactive); }
-            else { Image = new Image { Stretch = Stretch.Uniform, MaxHeight = 740 }; Content.Children.Add(Image); }
+            else
+            {
+                Image = new Image { Stretch = Stretch.Uniform };
+                ImageViewport = new ScrollViewer { Content = Image, Height = 680, MinHeight = 460, ZoomMode = ZoomMode.Enabled,
+                    MinZoomFactor = .5f, MaxZoomFactor = 2, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+                    VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalContentAlignment = HorizontalAlignment.Stretch,
+                    VerticalContentAlignment = VerticalAlignment.Stretch };
+                ImageViewport.SizeChanged += (_, _) => FitImageToViewport();
+                ImageViewport.Loaded += (_, _) => FitImageToViewport();
+                Content.Children.Add(ImageViewport);
+            }
             Content.Children.Add(Sources);
             Container = new Border { Child = Content, Padding = new Thickness(20), CornerRadius = new CornerRadius(12),
                 Background = ThemeBrush("MissumLayerBrush", 31) };
+        }
+
+        private void FitImageToViewport()
+        {
+            if (Image is null || ImageViewport is null || ImageViewport.ActualWidth <= 0 || ImageViewport.ActualHeight <= 0) return;
+            // ScrollViewer measures scrollable content without a width bound.
+            // Define the unzoomed image surface from the available viewport,
+            // so 100% fits both a large bitmap and a resized application window.
+            // The viewer's independent ZoomFactor preserves the user's choice.
+            if (Math.Abs(Image.Width - ImageViewport.ActualWidth) > .5 || double.IsNaN(Image.Width)) Image.Width = ImageViewport.ActualWidth;
+            if (Math.Abs(Image.Height - ImageViewport.ActualHeight) > .5 || double.IsNaN(Image.Height)) Image.Height = ImageViewport.ActualHeight;
         }
     }
 
@@ -420,12 +504,6 @@ public sealed partial class NativeAssistantPage
         _interactiveSimulationViews.Clear();
         _simulationPanes.Clear();
         _scienceEmptyBodies.Clear();
-    }
-    private async Task OpenScienceFileAsync(string path, Guid owner)
-    {
-        try { await Launcher.LaunchFileAsync(await StorageFile.GetFileFromPathAsync(path)); }
-        catch (Exception exception) when (exception is not (OutOfMemoryException or AccessViolationException or StackOverflowException)
-            && exception.HResult != unchecked((int)0x8007000E)) { ShowResearchError(owner, exception.Message); }
     }
     private static TextBlock ScienceText(string text, double size, bool heading = false) => new()
     {

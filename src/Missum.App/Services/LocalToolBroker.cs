@@ -81,8 +81,36 @@ public sealed partial class LocalToolBroker(
                     ? await stateRepository.LoadWorkingStateAsync(projectId, cancellationToken).ConfigureAwait(false) : null;
                 var receipts = scientificResearch is null ? null
                     : await scientificResearch.LoadResultSnapshotAsync(projectId, cancellationToken).ConfigureAwait(false);
+                var archive = scientificResearch is null ? default
+                    : await scientificResearch.LoadArchiveSnapshotAsync(projectId, cancellationToken).ConfigureAwait(false);
+                var protectedChecks = scientificResearch is Missum.Core.Research.IScientificResearchStateRepository reviewRepository
+                    ? await reviewRepository.LoadExecutionVerificationsAsync(projectId, cancellationToken).ConfigureAwait(false) : [];
+                if (receipts is not null) receipts = receipts with { Verifications = protectedChecks };
+                var checkedPresentation = sciencePresentation.GetSnapshot(projectId);
                 var verified = await ScientificDeliverablesVerifier.VerifyAsync(projectId,
-                    sciencePresentation.GetSnapshot(projectId), workingState, receipts, cancellationToken).ConfigureAwait(false);
+                    checkedPresentation, workingState, receipts, archive.Works ?? [], archive.Evidence ?? [],
+                    cancellationToken).ConfigureAwait(false);
+                if (workingState is not null && scientificResearch is Missum.Core.Research.IScientificResearchStateRepository reviewStore)
+                {
+                    var currentState = await reviewStore.LoadWorkingStateAsync(projectId, cancellationToken).ConfigureAwait(false);
+                    if (!ScientificResearchReviewPersistence.IsCurrent(workingState, checkedPresentation,
+                        currentState, sciencePresentation.GetSnapshot(projectId)))
+                        verified = ScientificResearchReviewPersistence.RejectStale(verified, currentState);
+                    else if (ScientificResearchReviewPersistence.Create(workingState, verified) is { } reviewReceipt)
+                    {
+                        await reviewStore.SaveExecutionVerificationAsync(reviewReceipt, cancellationToken).ConfigureAwait(false);
+                        // The trusted current review changes annotation, not research content or revisions.
+                        sciencePresentation.Queue(projectId);
+                        await sciencePresentation.WaitForIdleAsync(projectId, cancellationToken).ConfigureAwait(false);
+                        checkedPresentation = sciencePresentation.GetSnapshot(projectId);
+                        verified = await ScientificDeliverablesVerifier.VerifyAsync(projectId, checkedPresentation, workingState,
+                            receipts, archive.Works ?? [], archive.Evidence ?? [], cancellationToken).ConfigureAwait(false);
+                        currentState = await reviewStore.LoadWorkingStateAsync(projectId, cancellationToken).ConfigureAwait(false);
+                        if (!ScientificResearchReviewPersistence.IsCurrent(workingState, checkedPresentation,
+                            currentState, sciencePresentation.GetSnapshot(projectId)))
+                            verified = ScientificResearchReviewPersistence.RejectStale(verified, currentState);
+                    }
+                }
                 return Result(proposal, "completed", verified);
             }
             if (extensionTool is not null)
