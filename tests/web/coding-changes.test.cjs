@@ -50,7 +50,7 @@ function harness() {
   for (const name of ["renderCodingChanges", "applyCodingChanges", "updateContextStripVisibility",
     "sortCommittedMessages", "conversationMessagesDiffer", "applyConversationSnapshot", "isTerminalMessageStatus",
     "upsertLiveMessage", "applyLiveDelta", "handleHostMessage", "belongsToActiveSession", "persistMeasuredContext",
-    "cleanStatusMetadata", "uniqueStatusParts", "renderSpeechStatus"])
+    "cleanStatusMetadata", "uniqueStatusParts", "renderSpeechStatus", "updateSpeechControlIdentity"])
     loadAppFunction(context, name);
   context.renderMessages = () => context.renderCodingChanges();
   context.renderContext = () => context.renderCodingChanges();

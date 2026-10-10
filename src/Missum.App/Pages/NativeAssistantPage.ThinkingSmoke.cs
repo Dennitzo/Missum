@@ -65,9 +65,10 @@ public sealed partial class NativeAssistantPage
             var body = MessageBody(_messageViews[messageId].View);
             AssertChatCursorAbsent(body);
             if (!row.IsHitTestVisible || !row.ToggleButton.IsTabStop || row.IsExpanded
-                || body.Children.OfType<FrameworkElement>().Last(child => child.Visibility == Visibility.Visible) != row
+                || body.Children.OfType<FrameworkElement>().Last(child => child.Visibility == Visibility.Visible
+                    && !ReferenceEquals(child, _messageActionViews[messageId].Panel)) != row
                 || row.Label.Text != $"Denke nach · {1025:N0} Token")
-                throw new InvalidOperationException("Thinking must remain a compact, collapsed disclosure without a cursor host below it.");
+                throw new InvalidOperationException("Thinking must remain a compact, collapsed disclosure before the message footer, without a cursor host.");
 
             // Prompt evaluation must honestly precede thinking without creating
             // another control, invented reasoning, or generated-token counts.

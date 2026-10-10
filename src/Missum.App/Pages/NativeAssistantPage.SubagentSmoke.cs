@@ -293,7 +293,8 @@ public sealed partial class NativeAssistantPage
             var childBody = MessageBody(childBubble);
             if (!childBody.Children.OfType<NativeStreamingMarkdown>().SelectMany(markdown => markdown.Children)
                     .OfType<NativeMathParagraph>().Any()
-                || _messageActionViews[childMessage].Panel.Visibility != Visibility.Collapsed)
+                || _messageActionViews[childMessage].Panel.Visibility != Visibility.Visible
+                || !_messageActionViews[childMessage].Copy.IsEnabled || !_messageActionViews[childMessage].Read.IsEnabled)
                 throw new InvalidOperationException("Child mathematics or streaming footer behavior differs from the parent renderer.");
             Inspector.Visibility = Visibility.Collapsed;
             await SaveMathPreviewAsync(LayoutRoot, "native-subagent-chat-preview.png");

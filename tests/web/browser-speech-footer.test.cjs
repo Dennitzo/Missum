@@ -24,6 +24,7 @@ function harness() {
   }
   const body = new Node("body");
   document = { body, activeElement: null, createElement: tag => new Node(tag), createTextNode: value => new Node("#text", value),
+    createDocumentFragment: () => new Node("#fragment"),
     querySelectorAll: selector => body.querySelectorAll(selector), querySelector: selector => body.querySelector(selector) };
   const elements = Object.fromEntries(["activeTools", "documents", "contextStrip", "codingChanges", "prompt", "messageList", "messageScroll"].map(name => [name, new Node("div")]));
   for (const item of Object.values(elements)) body.append(item);
@@ -32,6 +33,7 @@ function harness() {
     documents: [], attachments: [], pendingDocumentImports: [], chatMode: "general", messageRunStatus: new Map(), selectedToolAction: null,
     selectedExtensionActionId: null, isRunning: false, isAiBusy: false, activeActionIds: new Set() };
   const context = vm.createContext({ document, state, elements, URL, setTimeout() {},
+    missumBridge: { isLanBrowser: true, clientId: "client-a" },
     post: (type, payload) => { posts.push({ type, payload }); return `request-${posts.length}`; },
     renderMessages: () => calls.messages++, renderContext: () => calls.context++, renderStatus: () => calls.status++,
     renderMicrophone() {}, clearSpeechHighlight: () => calls.highlights++, applySpeechHighlight: () => calls.highlights++,
@@ -46,8 +48,9 @@ function harness() {
     vm.runInContext(`globalThis.${name} = ${declaration[1]};`, context); allowedIcons.add(context[name]);
   }
   for (const name of ["createMessageIconAction", "createMessageFooterLink", "flashMessageAction", "isMessageSpeechActive",
-    "updateMessageSpeechFooter", "createMessageFooter", "updateContextStripVisibility", "renderSpeechStatus", "updateSpeechProgress", "handleHostMessage"])
+    "updateMessageSpeechFooter", "createMessageFooter", "updateContextStripVisibility", "renderSpeechStatus", "updateSpeechControlIdentity", "updateSpeechProgress", "handleHostMessage"])
     vm.runInContext(extract(name), context, { filename: `app.js:${name}` });
+  vm.runInContext(fs.readFileSync(path.join(root, "coding-timeline.js"), "utf8"), context, { filename: "coding-timeline.js" });
   const renderContext = extract("renderContext");
   const make = (extra = {}) => {
     const message = { id: "answer-a", sessionId: "session-a", role: "assistant", status: "completed", content: "Eine verständliche Antwort.", ...extra };
@@ -58,7 +61,7 @@ function harness() {
       pause: () => footer.querySelector(".message-action--speech-pause"), status: () => footer.querySelector(".message-speech-status") };
   };
   const dispatch = (type, payload) => context.handleHostMessage({ detail: { type, payload } });
-  const progress = (extra = {}) => ({ playbackId: "playback-1", eventSequence: 1, sessionId: "session-a", sourceMessageId: "answer-a", sourceKind: "message", sourceUnits: [], sourceUnitIds: [], state: "buffering", ...extra });
+  const progress = (extra = {}) => ({ playbackId: "playback-1", eventSequence: 1, sessionId: "session-a", sourceMessageId: "answer-a", sourceKind: "message", ownerClientId: "client-a", sourceUnits: [], sourceUnitIds: [], state: "buffering", ...extra });
   const activate = extra => { state.speechStatus = { active: true, status: "Vorlesen", detail: "F5" }; state.microphone = { isSpeaking: true, canPauseSpeech: true, isSpeechPaused: false, status: "Vorlesen" }; dispatch("speech.progress", progress(extra)); };
   return { context, document, elements, state, posts, calls, make, dispatch, progress, activate,
     renderChips() { vm.runInContext(renderContext, context); context.renderContext(); } };
@@ -104,12 +107,14 @@ test("global speaking state and text similarity cannot activate an unrelated or 
 test("footer read, pause, resume and stop dispatch their source-specific or playback commands without an AI run", async () => {
   const h = harness(), source = h.make();
   await source.read().dispatch("click"); assert.deepEqual(JSON.parse(JSON.stringify(h.posts.at(-1))), { type: "microphone.speak", payload: { sessionId: "session-a", messageId: "answer-a", text: source.message.content } });
-  h.activate(); await source.pause().dispatch("click"); assert.equal(h.posts.at(-1).type, "microphone.toggleSpeechPause");
+  h.activate(); await source.pause().dispatch("click");
+  assert.deepEqual(JSON.parse(JSON.stringify(h.posts.at(-1))), { type: "microphone.toggleSpeechPause", payload: { sessionId: "session-a", messageId: "answer-a", playbackId: "playback-1" } });
   h.dispatch("microphone.changed", { isSpeaking: true, canPauseSpeech: true, isSpeechPaused: true, status: "Pausiert" });
   assert.equal(source.pause().getAttribute("aria-label"), "Vorlesen fortsetzen"); assert.equal(source.pause().getAttribute("aria-pressed"), "true");
   assert.equal(source.status().textContent, "Vorlesen pausiert");
   await source.pause().dispatch("click"); assert.equal(h.posts.at(-1).type, "microphone.toggleSpeechPause");
-  await source.read().dispatch("click"); assert.equal(h.posts.at(-1).type, "microphone.stopSpeech");
+  await source.read().dispatch("click");
+  assert.deepEqual(JSON.parse(JSON.stringify(h.posts.at(-1))), { type: "microphone.stopSpeech", payload: { sessionId: "session-a", messageId: "answer-a", playbackId: "playback-1" } });
   assert.equal(h.posts.some(command => /^(chat\.|session\.|settings\.)/.test(command.type)), false);
 });
 
@@ -124,13 +129,88 @@ test("speech progress and repeated microphone updates preserve focused controls 
   assert.equal(h.calls.messages, 0); assert.equal(h.calls.context, 0); assert.equal(h.elements.prompt.value, "Privater unveränderter Entwurf");
 });
 
-test("controls exist before automatic speech begins and update at the native hidden streaming footer without chat rerender", () => {
+test("copy and read-aloud remain visible while the answer streams, including automatic playback", () => {
   const h = harness(), source = h.make({ status: "streaming", content: "Die Antwort wächst." });
-  assert.equal(source.footer.hidden, true); assert.ok(source.read()); assert.ok(source.pause()); assert.ok(source.status());
-  assert.equal(source.read().disabled, true); assert.equal(source.pause().hidden, true);
-  h.activate(); assert.equal(source.footer.hidden, true, "native streaming visibility is preserved");
+  assert.equal(source.footer.hidden, false); assert.ok(source.read()); assert.ok(source.pause()); assert.ok(source.status());
+  assert.equal(source.read().disabled, false); assert.equal(source.pause().hidden, true);
+  h.activate(); assert.equal(source.footer.hidden, false);
   assert.equal(source.read().getAttribute("aria-label"), "Vorlesen beenden"); assert.equal(source.read().disabled, false);
   assert.equal(source.pause().hidden, false); assert.equal(h.calls.messages, 0);
+});
+
+test("an empty pending answer keeps its footer and enables read-aloud when its first text arrives", async () => {
+  const h = harness(), source = h.make({ status: "pending", content: "" });
+  const read = source.read(), pause = source.pause(), copy = source.footer.firstChild;
+  assert.equal(source.footer.hidden, false); assert.equal(read.disabled, true); assert.equal(pause.hidden, true);
+  await read.dispatch("click"); assert.equal(h.posts.length, 0);
+  const updated = { ...source.message, status: "streaming", content: "Erster Satz." };
+  h.state.messages = [updated];
+  const next = h.context.createMessageFooter(updated, source.article, source.footer);
+  const retained = h.context.missumCodingTimeline.reconcile(source.footer, next);
+  assert.equal(retained, source.footer); assert.equal(source.read(), read); assert.equal(source.pause(), pause);
+  assert.equal(source.footer.firstChild, copy); assert.equal(read.disabled, false);
+  await read.dispatch("click"); assert.equal(h.posts.at(-1).payload.text, "Erster Satz.");
+});
+
+test("streaming message rerenders preserve focused playback controls and copy the newest text", async () => {
+  const h = harness(), source = h.make({ status: "streaming", content: "Anfang." }); h.activate();
+  const read = source.read(), pause = source.pause(), status = source.status(), copy = source.footer.firstChild;
+  pause.focus(); pause.classList.add("hover-probe");
+  for (let revision = 1; revision <= 4; revision++) {
+    const updated = { ...source.message, content: `Anfang. Neuer Abschnitt ${revision}.`, status: revision === 4 ? "completed" : "streaming" };
+    h.state.messages = [updated];
+    const next = h.context.createMessageFooter(updated, source.article, source.footer);
+    assert.equal(source.footer.parentNode, source.article, "constructing the next render does not detach the live footer");
+    assert.equal(h.context.missumCodingTimeline.reconcile(source.footer, next), source.footer);
+    assert.equal(source.footer.firstChild, copy); assert.equal(source.read(), read); assert.equal(source.pause(), pause); assert.equal(source.status(), status);
+    assert.equal(h.document.activeElement, pause); assert.equal(pause.isConnected, true); assert.equal(pause.classList.contains("hover-probe"), true);
+    await copy.dispatch("click"); assert.equal(h.posts.at(-1).payload.text, updated.content);
+  }
+  h.dispatch("speech.status", { active: false, ownerClientId: "client-a", playbackId: "playback-1" });
+  await read.dispatch("click"); assert.equal(h.posts.at(-1).type, "microphone.speak"); assert.equal(h.posts.at(-1).payload.text, "Anfang. Neuer Abschnitt 4.");
+  assert.equal(h.elements.prompt.value, "Privater unveränderter Entwurf");
+});
+
+test("automatic reset and status bind buffering playback to its footer before any audio progress arrives", async () => {
+  const h = harness(), source = h.make({ status: "streaming", content: "Der erste Satz." }), other = h.make({ id: "other-answer" });
+  const identity = { playbackId: "auto-playback", sessionId: "session-a", sourceMessageId: "answer-a", ownerClientId: "client-a" };
+  h.dispatch("speech.reset", identity);
+  h.dispatch("microphone.changed", { isSpeaking: true, canPauseSpeech: true, isSpeechPaused: false, status: "Spricht" });
+  const messagesBeforeStatus = h.calls.messages;
+  h.dispatch("speech.status", { ...identity, active: true, status: "Antwort wird fortlaufend vorgelesen" });
+  assert.equal(source.read().getAttribute("aria-label"), "Vorlesen beenden"); assert.equal(source.pause().hidden, false);
+  assert.equal(other.pause().hidden, true); assert.equal(h.state.speechProgress.eventSequence, 0); assert.equal(h.calls.messages, messagesBeforeStatus);
+  await source.pause().dispatch("click");
+  assert.deepEqual(JSON.parse(JSON.stringify(h.posts.at(-1).payload)), { sessionId: "session-a", messageId: "answer-a", playbackId: "auto-playback" });
+  await source.read().dispatch("click"); assert.equal(h.posts.at(-1).type, "microphone.stopSpeech");
+});
+
+test("foreign client speech events cannot select or stop another client's footer", () => {
+  const h = harness(), source = h.make(), other = h.make({ id: "other-answer" }); h.activate();
+  const before = h.state.speechProgress;
+  const foreign = { playbackId: "foreign", sessionId: "session-a", sourceMessageId: "other-answer", ownerClientId: "client-b" };
+  h.dispatch("speech.reset", foreign); h.dispatch("speech.status", { ...foreign, active: true });
+  h.dispatch("speech.progress", h.progress({ ...foreign, eventSequence: 100, state: "buffering" }));
+  h.dispatch("speech.status", { ...foreign, active: false });
+  assert.equal(h.state.speechProgress, before); assert.equal(h.state.speechStatus.active, true);
+  assert.equal(source.pause().hidden, false); assert.equal(other.pause().hidden, true);
+  h.state.speechProgress = { ...before, ownerClientId: "client-b" }; h.context.renderSpeechStatus();
+  assert.equal(source.pause().hidden, true);
+});
+
+test("native automatic chunk controls use their owning message and queue without inventing highlight source IDs", async () => {
+  const h = harness(), source = h.make({ status: "streaming" }); h.context.missumBridge.isLanBrowser = false;
+  h.activate({ ownerClientId: "desktop", sourceMessageId: null, controlMessageId: "answer-a", controlPlaybackId: "native-queue", playbackId: "native-chunk" });
+  assert.equal(h.state.speechProgress.sourceMessageId, null); assert.equal(source.pause().hidden, false);
+  await source.pause().dispatch("click");
+  assert.deepEqual(JSON.parse(JSON.stringify(h.posts.at(-1).payload)), { sessionId: "session-a", messageId: "answer-a", playbackId: "native-queue" });
+  await source.read().dispatch("click"); assert.equal(h.posts.at(-1).payload.playbackId, "native-queue");
+  h.state.speechProgress.sourceMessageId = "answer-a";
+  const omittedSource = h.progress({ ownerClientId: "desktop", controlMessageId: "answer-a", controlPlaybackId: "native-queue", playbackId: "native-chunk", eventSequence: 2, state: "playing" });
+  delete omittedSource.sourceMessageId;
+  h.dispatch("speech.progress", omittedSource);
+  assert.equal(h.state.speechProgress.sourceMessageId, null, "WhenWritingNull DTOs cannot retain an unrelated highlight identity");
+  assert.equal(source.pause().hidden, false);
 });
 
 test("terminal progress wins over a lagging active status and stale playback events cannot re-enable its controls", () => {
@@ -141,8 +221,18 @@ test("terminal progress wins over a lagging active status and stale playback eve
   assert.equal(source.pause().hidden, true);
   h.dispatch("speech.progress", h.progress({ playbackId: "old-playback", eventSequence: 50, state: "playing" }));
   assert.equal(source.pause().hidden, true);
+  h.dispatch("speech.status", { active: true, playbackId: "playback-1", sessionId: "session-a", sourceMessageId: "answer-a", ownerClientId: "client-a" });
+  h.dispatch("speech.progress", h.progress({ eventSequence: 10, state: "playing" }));
+  assert.equal(source.pause().hidden, true, "late active telemetry cannot revive a completed playback");
   h.dispatch("speech.status", { active: false, status: "Abgebrochen" });
   assert.equal(source.status().hidden, true); assert.equal(h.state.speechProgress.sourceMessageId, null);
+  h.dispatch("speech.reset", { playbackId: "playback-2", sessionId: "session-a", sourceMessageId: "answer-a", ownerClientId: "client-a" });
+  h.dispatch("speech.status", { active: true, playbackId: "playback-2", sessionId: "session-a", sourceMessageId: "answer-a", ownerClientId: "client-a" });
+  assert.equal(source.pause().hidden, false, "an explicitly started new playback can use the same message again");
+  h.dispatch("speech.status", { active: false, playbackId: "playback-1", ownerClientId: "client-a" });
+  assert.equal(source.pause().hidden, false, "the old playback cannot terminate its replacement");
+  h.dispatch("speech.status", { active: true, playbackId: "playback-1", sessionId: "session-a", sourceMessageId: "other-answer", ownerClientId: "client-a" });
+  assert.equal(h.state.speechProgress.playbackId, "playback-2"); assert.equal(source.pause().hidden, false);
 });
 
 test("navigation and a recreated footer use playback truth instead of an optimistic paused state", () => {

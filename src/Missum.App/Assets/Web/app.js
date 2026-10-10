@@ -1256,7 +1256,39 @@
     // leave prose unmarked instead of incorrectly flashing the whole paragraph.
   }
 
+  function updateSpeechControlIdentity(payload, reset = false) {
+    const owner = payload?.ownerClientId || payload?.clientId;
+    const receiver = globalThis.missumBridge?.isLanBrowser ? globalThis.missumBridge.clientId : "desktop";
+    if (owner && receiver && String(owner) !== String(receiver)) return false;
+    const current = state.speechProgress || {};
+    const playbackId = String(payload?.playbackId || "");
+    const fresh = playbackId && playbackId !== String(current.playbackId || "");
+    // LAN playback starts with reset, just like the audio queue. A delayed
+    // status packet must not replace the identity of a newer playback.
+    if (!reset && fresh && current.playbackId && globalThis.missumBridge?.isLanBrowser) return false;
+    if (reset && !playbackId) {
+      state.speechProgress = { ...current, sessionId: null, sourceMessageId: null, sourceKind: null,
+        controlMessageId: null, controlPlaybackId: null, sourceUnits: [], activeSourceUnitIds: [], state: "cancelled" };
+      return true;
+    }
+    if (reset && !fresh && ["completed", "cancelled", "stopped"].includes(String(current.state || "").toLowerCase())) return false;
+    state.speechProgress = {
+      ...(fresh || reset ? { eventSequence: 0, sourceUnits: [], activeSourceUnitIds: [], state: "buffering" } : current),
+      sessionId: payload?.sessionId ?? current.sessionId ?? null,
+      sourceMessageId: Object.prototype.hasOwnProperty.call(payload || {}, "sourceMessageId") ? payload.sourceMessageId : fresh ? null : current.sourceMessageId ?? null,
+      sourceKind: payload?.sourceKind ?? current.sourceKind ?? null,
+      playbackId: playbackId || current.playbackId || null,
+      controlMessageId: payload?.controlMessageId ?? (fresh ? null : current.controlMessageId) ?? null,
+      controlPlaybackId: payload?.controlPlaybackId ?? (fresh ? null : current.controlPlaybackId) ?? null,
+      ownerClientId: owner || (fresh ? null : current.ownerClientId) || null,
+    };
+    return true;
+  }
+
   function updateSpeechProgress(payload) {
+    const owner = payload?.ownerClientId || payload?.clientId;
+    const receiver = globalThis.missumBridge?.isLanBrowser ? globalThis.missumBridge.clientId : "desktop";
+    if (owner && receiver && String(owner) !== String(receiver)) return;
     const playbackState = String(payload?.state || "").toLowerCase();
     const incomingPlaybackId = String(payload?.playbackId || "");
     const incomingSequence = Number(payload?.eventSequence) || 0;
@@ -1270,12 +1302,18 @@
       && incomingPlaybackId !== currentPlaybackId) return;
     if (!isNewPlayback && incomingSequence > 0
       && incomingSequence <= (Number(current.eventSequence) || 0)) return;
+    if (!isNewPlayback && incomingPlaybackId && incomingPlaybackId === currentPlaybackId
+      && ["completed", "cancelled", "stopped"].includes(String(current.state || "").toLowerCase())
+      && !["completed", "cancelled", "stopped"].includes(playbackState)) return;
 
     if (["completed", "cancelled"].includes(playbackState)) {
       state.speechProgress = {
         sessionId: null,
         sourceMessageId: null,
         sourceKind: null,
+        controlMessageId: null,
+        controlPlaybackId: null,
+        ownerClientId: owner || current.ownerClientId || null,
         playbackId: incomingPlaybackId || currentPlaybackId || null,
         eventSequence: incomingSequence,
         sourceUnits: [],
@@ -1293,10 +1331,13 @@
     const incomingUnits = Array.isArray(payload?.sourceUnits) ? payload.sourceUnits : null;
     const shouldAdvanceHighlight = playbackState === "playing" || playbackState === "paused";
     state.speechProgress = {
-      sessionId: payload?.sessionId || current.sessionId || null,
-      sourceMessageId: payload?.sourceMessageId || current.sourceMessageId || null,
-      sourceKind: payload?.sourceKind || current.sourceKind || null,
+      sessionId: payload?.sessionId ?? (isNewPlayback ? null : current.sessionId) ?? null,
+      sourceMessageId: Object.prototype.hasOwnProperty.call(payload || {}, "sourceMessageId") ? payload.sourceMessageId : isNewPlayback || payload?.controlMessageId ? null : current.sourceMessageId || null,
+      sourceKind: payload?.sourceKind ?? (isNewPlayback ? null : current.sourceKind) ?? null,
       playbackId: incomingPlaybackId || current.playbackId || null,
+      controlMessageId: payload?.controlMessageId ?? (isNewPlayback ? null : current.controlMessageId) ?? null,
+      controlPlaybackId: payload?.controlPlaybackId ?? (isNewPlayback ? null : current.controlPlaybackId) ?? null,
+      ownerClientId: owner || current.ownerClientId || null,
       eventSequence: incomingSequence || current.eventSequence || 0,
       sourceUnits: incomingUnits || (sourceChanged ? [] : current.sourceUnits || []),
       activeSourceUnitIds: shouldAdvanceHighlight
@@ -1366,10 +1407,14 @@
 
   function isMessageSpeechActive(messageId, sessionId) {
     const progress = state.speechProgress || {};
+    const owner = progress.ownerClientId || progress.clientId;
+    const receiver = globalThis.missumBridge?.isLanBrowser ? globalThis.missumBridge.clientId : "desktop";
+    if (owner && receiver && String(owner) !== String(receiver)) return false;
+    const controlMessageId = progress.controlMessageId || progress.sourceMessageId;
     return Boolean((state.speechStatus?.active || state.microphone?.isSpeaking)
-      && progress.sourceMessageId && progress.sessionId
+      && controlMessageId && progress.sessionId
       && !["completed", "cancelled", "stopped"].includes(String(progress.state || "").toLowerCase())
-      && String(progress.sourceMessageId) === String(messageId)
+      && String(controlMessageId) === String(messageId)
       && String(progress.sessionId) === String(sessionId));
   }
 
@@ -1406,63 +1451,90 @@
     status.title = active ? state.speechStatus?.detail || label : "";
   }
 
-  function createMessageFooter(message, article) {
+  function createMessageFooter(message, article, previousFooter = null) {
     const sessionId = message.sessionId || state.activeSessionId;
     const showAssistantActions = String(message.role).toLowerCase() === "assistant";
-    const footer = document.createElement("div");
+    const retained = previousFooter?._footerMessage
+      && previousFooter.dataset.speechMessageId === String(message.id)
+      && previousFooter.dataset.speechSessionId === String(sessionId)
+      && String(previousFooter._footerMessage.role).toLowerCase() === String(message.role).toLowerCase();
+    const footer = retained ? previousFooter : document.createElement("div");
     footer.className = "message-footer";
+    footer.dataset.timelineKey = "message-footer";
     footer.dataset.speechMessageId = String(message.id);
     footer.dataset.speechSessionId = String(sessionId);
     footer.dataset.streaming = String(showAssistantActions && ["pending", "streaming"].includes(String(message.status).toLowerCase()));
+    footer._footerMessage = message;
+    footer.hidden = false;
     const messageText = message.content || "";
-    const canReadAloud = ["completed", "cancelled", "interrupted", "failed"]
-        .includes(String(message.status || "").toLowerCase())
-      && messageText.trim().length > 0;
+    const canReadAloud = messageText.trim().length > 0;
 
-    footer.append(createMessageIconAction("Nachricht kopieren", messageCopyIcon, button => {
-      post("message.copy", { text: messageText });
+    if (!retained) footer.append(createMessageIconAction("Nachricht kopieren", messageCopyIcon, button => {
+      post("message.copy", { text: footer._footerMessage.content || "" });
       flashMessageAction(button, messageCopyIcon, "Nachricht kopieren");
     }));
     footer.dataset.canRead = String(canReadAloud);
-    if (showAssistantActions || canReadAloud || isMessageSpeechActive(message.id, sessionId)) {
+    if ((showAssistantActions || canReadAloud || isMessageSpeechActive(message.id, sessionId))
+      && !footer.querySelector(".message-action--speech")) {
       const read = createMessageIconAction("Nachricht vorlesen", messageSpeechIcon, () => {
-        if (isMessageSpeechActive(message.id, sessionId)) { post("microphone.stopSpeech", {}); return; }
+        if (read.disabled) return;
+        const progress = state.speechProgress || {};
+        const sessionId = footer.dataset.speechSessionId, messageId = footer.dataset.speechMessageId;
+        if (isMessageSpeechActive(messageId, sessionId)) {
+          post("microphone.stopSpeech", { sessionId, messageId, playbackId: progress.controlPlaybackId || progress.playbackId }); return;
+        }
         post("microphone.speak", {
           sessionId,
-          messageId: String(message.id),
-          text: messageText
+          messageId,
+          text: footer._footerMessage.content || ""
         });
       });
       read.classList.add("message-action--speech"); footer.append(read);
       const pause = createMessageIconAction("Vorlesen pausieren", messageSpeechPauseIcon, () => {
-        if (isMessageSpeechActive(message.id, sessionId) && state.microphone?.canPauseSpeech)
-          post("microphone.toggleSpeechPause", {});
+        const sessionId = footer.dataset.speechSessionId, messageId = footer.dataset.speechMessageId;
+        if (isMessageSpeechActive(messageId, sessionId) && state.microphone?.canPauseSpeech) {
+          const progress = state.speechProgress || {};
+          post("microphone.toggleSpeechPause", { sessionId, messageId, playbackId: progress.controlPlaybackId || progress.playbackId });
+        }
       });
       pause.classList.add("message-action--speech-pause"); pause.hidden = true; footer.append(pause);
       const status = document.createElement("span"); status.className = "message-speech-status";
       status.setAttribute("role", "status"); status.setAttribute("aria-live", "polite"); status.hidden = true;
       footer.append(status);
-      updateMessageSpeechFooter(footer);
     }
+    updateMessageSpeechFooter(footer);
     const conversation = (state.messages || []).filter(item => ["user", "assistant"].includes(item.role));
     const terminalStatus = String(message.status || "").toLowerCase();
     const hasResumableContent = (message.toolSteps || []).some(step => !["assistant.continuation", "assistant.progress"].includes(step.tool))
       || messageText.trim() && messageText.trim() !== String(message.error || "").trim()
         && !/^(?:\*\*Fehler|Der AI-Lauf ist fehlgeschlagen|Der Missum-AI-Auftrag konnte nicht abgeschlossen werden\.)/.test(messageText.trim());
-    if (showAssistantActions && conversation.at(-1)?.id === message.id
+    const showResume = showAssistantActions && conversation.at(-1)?.id === message.id
       && conversation.slice(0, -1).some(item => item.role === "user" && String(item.content || "").trim())
-      && (["cancelled", "interrupted"].includes(terminalStatus) || terminalStatus === "failed" && hasResumableContent)) {
-      const resume = createMessageFooterLink("Fortsetzen", () => {
+      && (["cancelled", "interrupted"].includes(terminalStatus) || terminalStatus === "failed" && hasResumableContent);
+    let resume = footer.querySelector(".continuation-step");
+    if (showResume && !resume) {
+      resume = createMessageFooterLink("Fortsetzen", () => {
         if (resume.disabled) return;
         elements.prompt.focus();
-        state.pendingResume = post("chat.resume", { sessionId: state.activeSessionId, messageId: message.id });
+        state.pendingResume = post("chat.resume", { sessionId: footer.dataset.speechSessionId, messageId: footer.dataset.speechMessageId });
         resume.disabled = true; resume.textContent = "Wird vorbereitet …";
       });
       resume.classList.add("continuation-step");
-      resume.disabled = Boolean(state.isAiBusy || state.isRunning || state.pendingChatSend || state.pendingResume);
       footer.append(resume);
     }
-    if (showAssistantActions && ["pending", "streaming"].includes(String(message.status).toLowerCase())) footer.hidden = true;
+    if (showResume) {
+      resume.disabled = Boolean(state.isAiBusy || state.isRunning || state.pendingChatSend || state.pendingResume);
+      resume.textContent = state.pendingResume ? "Wird vorbereitet …" : "Fortsetzen";
+    } else resume?.remove();
+    if (retained) {
+      // The previous footer stays in its live DOM while the message is built.
+      // Reconciliation retains it without detaching focused playback controls.
+      const placeholder = document.createElement("div");
+      placeholder.className = "message-footer";
+      placeholder.dataset.timelineKey = "message-footer";
+      placeholder._codingKeep = footer;
+      return placeholder;
+    }
     return footer;
   }
 
@@ -1672,7 +1744,7 @@
       body.append(error);
     }
     if (!message.isLiveCaption) {
-      body.append(createMessageFooter(message, article));
+      body.append(createMessageFooter(message, article, previousArticle?.querySelector(".message-footer")));
     }
 
     article.append(body);
@@ -4192,7 +4264,20 @@
         renderStatus();
         break;
       }
-      case "speech.status":
+      case "speech.reset":
+        if (!updateSpeechControlIdentity(payload, true)) break;
+        clearSpeechHighlight();
+        renderSpeechStatus();
+        break;
+      case "speech.status": {
+        const owner = payload?.ownerClientId || payload?.clientId;
+        const receiver = globalThis.missumBridge?.isLanBrowser ? globalThis.missumBridge.clientId : "desktop";
+        if (owner && receiver && String(owner) !== String(receiver)) break;
+        const current = state.speechProgress || {};
+        if (!payload?.active && payload?.playbackId && current.playbackId
+          && String(payload.playbackId) !== String(current.playbackId)
+          && String(payload.playbackId) !== String(current.controlPlaybackId || "")) break;
+        if (payload?.active && !updateSpeechControlIdentity(payload)) break;
         state.speechStatus = {
           active: Boolean(payload?.active),
           status: payload?.status || null,
@@ -4207,11 +4292,14 @@
             sessionId: null,
             sourceMessageId: null,
             sourceKind: null,
-            playbackId: null,
-            eventSequence: 0,
+            controlMessageId: null,
+            controlPlaybackId: null,
+            ownerClientId: owner || current.ownerClientId || null,
+            playbackId: payload?.playbackId || current.playbackId || null,
+            eventSequence: current.eventSequence || 0,
             sourceUnits: [],
             activeSourceUnitIds: [],
-            state: null
+            state: ["completed", "cancelled"].includes(current.state) ? current.state : "stopped"
           };
           clearSpeechHighlight();
           clearCompletedOneShotToolAction();
@@ -4222,6 +4310,7 @@
         renderStatus();
         if (state.speechStatus.error) showToast(state.speechStatus.error, true);
         break;
+      }
       case "speech.progress":
         updateSpeechProgress(payload);
         break;

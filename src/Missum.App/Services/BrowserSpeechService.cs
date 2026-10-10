@@ -44,12 +44,16 @@ public sealed class BrowserSpeechService : IAsyncDisposable
             case "microphone.speak":
                 var request = ParseRequest(envelope.Payload);
                 var manual = Replace(clientId, emit, envelope.RequestId, cancellationToken);
+                manual.SessionId = request.SessionId;
+                manual.MessageId = request.MessageId;
                 Track(manual, RunManualAsync(manual, request));
                 return true;
             case "microphone.stopSpeech":
+                if (!MatchesPlaybackControl(clientId, envelope.Payload)) return true;
                 await StopAsync(clientId, emit, envelope.RequestId).ConfigureAwait(false);
                 return true;
             case "microphone.toggleSpeechPause":
+                if (!MatchesPlaybackControl(clientId, envelope.Payload)) return true;
                 if (_clients.TryGetValue(clientId, out var paused))
                 {
                     var isPaused = envelope.Payload.TryGetProperty("paused", out var requestedPause)
@@ -165,8 +169,10 @@ public sealed class BrowserSpeechService : IAsyncDisposable
 
     private async Task ResetAsync(Playback playback)
     {
-        await playback.Emit("speech.reset", new { playbackId = playback.Id, firstSequence = 0 }, playback.RequestId)
+        await playback.Emit("speech.reset", new { playbackId = playback.Id, firstSequence = 0,
+                sessionId = playback.SessionId, sourceMessageId = playback.MessageId, ownerClientId = playback.ClientId }, playback.RequestId)
             .ConfigureAwait(false);
+        await ProgressAsync(playback, 0, [], SpeechPlaybackState.Buffering).ConfigureAwait(false);
         await StatusAsync(playback, true, "Vorlesen wird vorbereitet").ConfigureAwait(false);
     }
 
@@ -362,12 +368,14 @@ public sealed class BrowserSpeechService : IAsyncDisposable
         if (!IsCurrent(playback)) return Task.CompletedTask;
         return playback.Emit("speech.progress", SpeechPlaybackProgressBridge.ToPayload(new(playback.SessionId,
             playback.MessageId, playback.SourceKind, playback.Id, Interlocked.Increment(ref playback.ProgressSequence),
-            segment, playback.SegmentCount, ids, state, units)), playback.RequestId);
+            segment, playback.SegmentCount, ids, state, units, OwnerClientId: playback.ClientId)), playback.RequestId);
     }
 
     private Task StatusAsync(Playback playback, bool active, string status, string? error = null) =>
         IsCurrent(playback) ? playback.Emit("speech.status", new
-        { active, status, model = "Supertonic F5 Ultra", cacheHit = false, error }, playback.RequestId) : Task.CompletedTask;
+        { active, status, model = "Supertonic F5 Ultra", cacheHit = false, error,
+            sessionId = playback.SessionId, sourceMessageId = playback.MessageId, playbackId = playback.Id,
+            ownerClientId = playback.ClientId }, playback.RequestId) : Task.CompletedTask;
 
     private async Task FailAsync(Playback playback, string error)
     {
@@ -387,16 +395,33 @@ public sealed class BrowserSpeechService : IAsyncDisposable
 
     private async Task StopAsync(string clientId, Func<string, object, string?, Task> emit, string? requestId)
     {
+        Guid? endedPlaybackId = null, endedSessionId = null, endedMessageId = null;
         if (_clients.TryRemove(clientId, out var playback))
         {
+            endedPlaybackId = playback.Id;
+            endedSessionId = playback.SessionId;
+            endedMessageId = playback.MessageId;
             playback.Cancel();
             await emit("speech.progress", SpeechPlaybackProgressBridge.ToPayload(new(playback.SessionId,
                 playback.MessageId, playback.SourceKind, playback.Id, Interlocked.Increment(ref playback.ProgressSequence),
-                0, playback.SegmentCount, [], SpeechPlaybackState.Cancelled)), requestId).ConfigureAwait(false);
+                0, playback.SegmentCount, [], SpeechPlaybackState.Cancelled, OwnerClientId: playback.ClientId)), requestId).ConfigureAwait(false);
             if (Volatile.Read(ref playback.ProducerExited) != 0) playback.Dispose();
         }
-        await emit("speech.reset", new { playbackId = (Guid?)null }, requestId).ConfigureAwait(false);
-        await emit("speech.status", new { active = false, status = "Abgebrochen" }, requestId).ConfigureAwait(false);
+        await emit("speech.reset", new { playbackId = (Guid?)null, ownerClientId = clientId }, requestId).ConfigureAwait(false);
+        await emit("speech.status", new { active = false, status = "Abgebrochen", playbackId = endedPlaybackId,
+            sessionId = endedSessionId, sourceMessageId = endedMessageId, ownerClientId = clientId }, requestId).ConfigureAwait(false);
+    }
+
+    private bool MatchesPlaybackControl(string clientId, JsonElement payload)
+    {
+        if (!_clients.TryGetValue(clientId, out var playback))
+            return payload.ValueKind != JsonValueKind.Object || !payload.TryGetProperty("playbackId", out _);
+        if (payload.ValueKind != JsonValueKind.Object) return true;
+        bool Matches(string key, Guid? expected) => !payload.TryGetProperty(key, out var value)
+            || value.ValueKind == JsonValueKind.Null && expected is null
+            || value.ValueKind == JsonValueKind.String && value.TryGetGuid(out var id) && id == expected;
+        return Matches("playbackId", playback.Id) && Matches("sessionId", playback.SessionId)
+            && Matches("messageId", playback.MessageId);
     }
 
     private static async Task ReleaseGatewayAsync(Playback playback)

@@ -286,6 +286,23 @@ try {
     }
     Copy-Item -LiteralPath $imagePositionPreview -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-artifact-position-preview.png')) -Force
     Write-Host 'Native image creation positions retained during streaming, original recovery and reload verified.'
+    $messageFooterPath = Join-Path $smokeData 'native-message-footer-streaming-validation.json'
+    if (-not (Test-Path -LiteralPath $messageFooterPath -PathType Leaf) -or
+        (Get-Item -LiteralPath $messageFooterPath).LastWriteTimeUtc -lt $startedAt.AddSeconds(-1)) {
+        throw 'Missing or stale native streaming message footer evidence.'
+    }
+    $messageFooter = Get-Content -LiteralPath $messageFooterPath -Raw | ConvertFrom-Json
+    if ($messageFooter.processId -ne $process.Id) { throw 'Streaming message footer evidence belongs to another process.' }
+    foreach ($messageFooterCheck in @('passed','streamingFooterVisible','buttonsRetainedAcrossDeltas','copyUsesLatestVisibleText','manualReadDuringStreaming','pauseResumeStop','automaticPlaybackControlled','queueControlIdsWithoutHighlights','stoppedPlaybackEventsIgnored','otherClientIgnored','controlsBelongToCorrectMessage','aiRunRemainsActive')) {
+        if ($messageFooter.$messageFooterCheck -ne $true) { throw "Native message footer check failed: $messageFooterCheck" }
+    }
+    Copy-Item -LiteralPath $messageFooterPath -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-message-footer-streaming-validation.json')) -Force
+    $messageFooterPreview = Join-Path $smokeData 'native-message-footer-streaming-preview.png'
+    if (-not (Test-Path -LiteralPath $messageFooterPreview -PathType Leaf) -or (Get-Item -LiteralPath $messageFooterPreview).Length -lt 100) {
+        throw 'Native streaming message footer preview is missing.'
+    }
+    Copy-Item -LiteralPath $messageFooterPreview -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-message-footer-streaming-preview.png')) -Force
+    Write-Host 'Native streaming copy/read footer, automatic audio owner and pause/resume/stop controls verified.'
     $looseMathValidationPath = Join-Path $smokeData 'native-loose-math-validation.json'
     if (-not (Test-Path -LiteralPath $looseMathValidationPath -PathType Leaf) -or
         (Get-Item -LiteralPath $looseMathValidationPath).LastWriteTimeUtc -lt $startedAt.AddSeconds(-1)) {

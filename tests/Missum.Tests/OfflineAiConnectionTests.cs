@@ -28,7 +28,9 @@ public sealed class OfflineAiConnectionTests
         var running = false;
         using var runtime = new NativeModelRuntimeService(_ => true, _ => Task.FromResult(running), async token =>
         {
-            await Task.Delay(100, token);
+            // Keep startup longer than the probe budget, without a 50 ms
+            // scheduler/JIT race when the full test suite runs in parallel.
+            await Task.Delay(1000, token);
             if (nativeStartFails) throw new FileNotFoundException("Native binary missing: C:/missing/llama-server.exe");
             running = true;
         });
@@ -38,11 +40,11 @@ public sealed class OfflineAiConnectionTests
         }));
         await settings.InitializeAsync();
         using var connection = new MissumAiConnectionService(settings, NullLogger<MissumAiConnectionService>.Instance,
-            () => probe, TimeSpan.FromMilliseconds(50), runtime);
+            () => probe, TimeSpan.FromMilliseconds(500), runtime);
 
         var status = await connection.TestAsync();
 
-        Assert.True(status.IsReachable);
+        Assert.True(status.IsReachable, status.Message);
         Assert.Equal(!nativeStartFails, status.IsReady);
         Assert.Equal(3, probe.Paths.Count);
         if (nativeStartFails) Assert.Contains("C:/missing/llama-server.exe", status.Message, StringComparison.Ordinal);

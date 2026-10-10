@@ -41,7 +41,10 @@ public sealed record SpeechPlaybackProgress(
     int SegmentCount,
     IReadOnlyList<string> SourceUnitIds,
     SpeechPlaybackState State,
-    IReadOnlyList<SpeechSourceUnit>? SourceUnits = null);
+    IReadOnlyList<SpeechSourceUnit>? SourceUnits = null,
+    Guid? ControlMessageId = null,
+    Guid? ControlPlaybackId = null,
+    string? OwnerClientId = null);
 
 public sealed record SpeechStartAnchor(string Kind, int BlockIndex);
 
@@ -63,6 +66,9 @@ internal static class SpeechPlaybackProgressBridge
         progress.SessionId,
         progress.SourceMessageId,
         progress.SourceKind,
+        progress.ControlMessageId,
+        progress.ControlPlaybackId,
+        progress.OwnerClientId,
         progress.PlaybackId,
         progress.EventSequence,
         progress.SegmentIndex,

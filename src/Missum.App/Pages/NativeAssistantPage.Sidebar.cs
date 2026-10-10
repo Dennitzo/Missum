@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Missum.App.Controls;
+using Missum.App.Services;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
@@ -32,12 +33,14 @@ public sealed partial class NativeAssistantPage
             var path = S(group, "workspacePath");
             var members = new List<JsonElement>();
             var seen = new HashSet<Guid>();
-            // The coordinator supplies GUID strings, ordered like its session list.
+            // Membership is separate from order: selecting a session never
+            // takes priority over the conversation's modification date.
             foreach (var value in Items(group, "sessionIds"))
             {
                 if (value.ValueKind == JsonValueKind.String && value.TryGetGuid(out var id)
                     && seen.Add(id) && byId.TryGetValue(id, out var member)) members.Add(member);
             }
+            members = AssistantSidebarSessionOrder.Sort(members).ToList();
             var nameMatches = name.Contains(search, StringComparison.CurrentCultureIgnoreCase);
             var visibleMembers = nameMatches ? members : members.Where(session =>
                 S(session, "title", "Neue Sitzung").Contains(search, StringComparison.CurrentCultureIgnoreCase)).ToList();

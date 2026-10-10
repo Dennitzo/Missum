@@ -322,7 +322,7 @@ public sealed class AssistantIntegrationTests
         Assert.Contains("renderActionMenu()", app, StringComparison.Ordinal);
         Assert.Contains("Vorlesen", app, StringComparison.Ordinal);
         Assert.Contains("post(\"microphone.speak\", {", app, StringComparison.Ordinal);
-        Assert.Contains("messageId: String(message.id)", app, StringComparison.Ordinal);
+        Assert.Contains("const sessionId = footer.dataset.speechSessionId, messageId = footer.dataset.speechMessageId;", app, StringComparison.Ordinal);
         Assert.DoesNotContain("speechMessageId: String(message.id)", app, StringComparison.Ordinal);
     }
 
@@ -1420,7 +1420,7 @@ public sealed class AssistantIntegrationTests
         Assert.DoesNotContain("Vorheriger Absatz", html, StringComparison.Ordinal);
         Assert.DoesNotContain("Absatz überspringen", html, StringComparison.Ordinal);
         Assert.Contains("function isMessageSpeechActive(messageId, sessionId)", app, StringComparison.Ordinal);
-        Assert.Contains("String(progress.sourceMessageId) === String(messageId)", app, StringComparison.Ordinal);
+        Assert.Contains("String(controlMessageId) === String(messageId)", app, StringComparison.Ordinal);
         Assert.Contains("String(progress.sessionId) === String(sessionId)", app, StringComparison.Ordinal);
         Assert.Contains("footer.dataset.speechMessageId = String(message.id)", app, StringComparison.Ordinal);
         Assert.Contains("footer.dataset.speechSessionId = String(sessionId)", app, StringComparison.Ordinal);
@@ -1434,7 +1434,8 @@ public sealed class AssistantIntegrationTests
         Assert.Contains("case \"speech.status\":", app, StringComparison.Ordinal);
         Assert.Contains("renderSpeechStatus();", app, StringComparison.Ordinal);
         Assert.Contains("post(\"microphone.toggleSpeechPause\"", app, StringComparison.Ordinal);
-        Assert.Contains("if (isMessageSpeechActive(message.id, sessionId))", app, StringComparison.Ordinal);
+        Assert.Contains("if (isMessageSpeechActive(messageId, sessionId))", app, StringComparison.Ordinal);
+        Assert.Contains("playbackId: progress.controlPlaybackId || progress.playbackId", app, StringComparison.Ordinal);
         Assert.Contains("post(\"microphone.stopSpeech\", {});", app, StringComparison.Ordinal);
         var speechRenderStart = app.IndexOf("function renderSpeechStatus()", StringComparison.Ordinal);
         var captionRenderStart = app.IndexOf("function renderLiveCaption()", speechRenderStart, StringComparison.Ordinal);
@@ -1455,7 +1456,7 @@ public sealed class AssistantIntegrationTests
         Assert.DoesNotContain("\"chat.removed\"", app, StringComparison.Ordinal);
         Assert.DoesNotContain("microphone.previousSpeechParagraph", app, StringComparison.Ordinal);
         Assert.DoesNotContain("microphone.skipSpeechParagraph", app, StringComparison.Ordinal);
-        Assert.Contains("messageId: String(message.id)", app, StringComparison.Ordinal);
+        Assert.Contains("const sessionId = footer.dataset.speechSessionId, messageId = footer.dataset.speechMessageId;", app, StringComparison.Ordinal);
         Assert.Contains("sessionId: state.activeSessionId", app, StringComparison.Ordinal);
         Assert.Contains("\"speech.status\"", bridge, StringComparison.Ordinal);
         Assert.DoesNotContain("Erneut senden", app, StringComparison.Ordinal);
@@ -1571,7 +1572,7 @@ public sealed class AssistantIntegrationTests
     }
 
     [Fact]
-    public void FooterSpeechAcceptsEveryStableStoredAssistantMessage()
+    public void FooterSpeechAcceptsStoredAndStreamingAssistantMessages()
     {
         var now = DateTimeOffset.UtcNow;
         foreach (var status in new[]
@@ -1580,6 +1581,8 @@ public sealed class AssistantIntegrationTests
                      MessageStatus.Cancelled,
                      MessageStatus.Interrupted,
                      MessageStatus.Failed,
+                     MessageStatus.Streaming,
+                     MessageStatus.Pending,
                  })
         {
             var message = new ChatMessage(
@@ -1601,7 +1604,8 @@ public sealed class AssistantIntegrationTests
             MessageStatus.Streaming,
             now,
             now);
-        Assert.False(MissumAiAssistantService.IsReadableSpeechMessage(invalid));
+        Assert.True(MissumAiAssistantService.IsReadableSpeechMessage(invalid));
+        Assert.False(MissumAiAssistantService.IsReadableSpeechMessage(invalid with { Role = ChatRole.User }));
         Assert.True(MissumAiAssistantService.IsReadableSpeechMessage(
             invalid with { Role = ChatRole.User, Status = MessageStatus.Completed }));
         Assert.False(MissumAiAssistantService.IsReadableSpeechMessage(
@@ -2198,7 +2202,7 @@ public sealed class AssistantIntegrationTests
         Assert.Equal("AI-Sitzung in „Planung“ umbenannt", settings.Current.LastActivityText);
 
         await HandleAsync(coordinator, "session.open", new { sessionId });
-        Assert.Equal("AI-Sitzung „Planung“ geöffnet", settings.Current.LastActivityText);
+        Assert.Equal("AI-Sitzung in „Planung“ umbenannt", settings.Current.LastActivityText);
 
         await HandleAsync(coordinator, "session.delete", new { sessionId });
         Assert.Equal("AI-Sitzung „Planung“ gelöscht", settings.Current.LastActivityText);

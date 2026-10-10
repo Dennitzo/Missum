@@ -6,6 +6,7 @@ public sealed partial class MissumAiAssistantService
 {
     private readonly object _automaticSpeechGate = new();
     private SpeechStreamingSession? _automaticSpeechSession;
+    private Guid? _automaticSpeechRunId;
 
     internal void ObserveAutomaticSpeech(MissumAiAssistantUpdate update,
         Func<MissumAiSpeechUpdate, Task> status,
@@ -14,6 +15,11 @@ public sealed partial class MissumAiAssistantService
         if (Volatile.Read(ref _disposed) != 0 || update.Message.Role != ChatRole.Assistant) return;
         lock (_automaticSpeechGate)
         {
+            // Replayed Started events cannot undo a footer Stop for this run.
+            // A new continuation of the same message has a different run ID.
+            if (update.Kind == MissumAiAssistantUpdateKind.Started
+                && _automaticSpeechSession?.MessageId == update.Message.Id
+                && _automaticSpeechSession.WasCancelled && _automaticSpeechRunId == update.LocalRunId) return;
             if (update.Kind == MissumAiAssistantUpdateKind.Started
                 && (_automaticSpeechSession?.MessageId != update.Message.Id || _automaticSpeechSession.WasCancelled))
             {
@@ -25,18 +31,19 @@ public sealed partial class MissumAiAssistantService
                     await SpeakCoreAsync(update.Message.SessionId, text, null,
                         speech =>
                         {
-                            if (!IsCurrentAutomaticSpeech(session)) return Task.CompletedTask;
+                            if (!IsCurrentAutomaticSpeech(session) || session!.WasCancelled && speech.IsActive) return Task.CompletedTask;
                             if (!speech.IsActive)
                             {
                                 if (speech.Status == "Abgebrochen") session!.Cancel();
                                 // The queue owns completion and stop state across all chunks.
                                 return speech.Error is null && !session!.WasCancelled
-                                    ? status(new(true, "Antwort wird fortlaufend vorgelesen", "Warte auf weiteren Antworttext."))
+                                    ? status(AutomaticSpeechStatus(session, new(true, "Antwort wird fortlaufend vorgelesen", "Warte auf weiteren Antworttext.")))
                                     : Task.CompletedTask;
                             }
-                            return status(speech);
+                            return status(AutomaticSpeechStatus(session!, speech));
                         },
-                        playback => IsCurrentAutomaticSpeech(session) ? progress(playback) : Task.CompletedTask,
+                        playback => IsCurrentAutomaticSpeech(session) ? progress(playback with
+                        { ControlMessageId = session!.MessageId, ControlPlaybackId = session.PlaybackId, OwnerClientId = "desktop" }) : Task.CompletedTask,
                         null, null,
                         // Never resolve an attachment or the full saved message for a delta.
                         // Live source ranges are deliberately omitted; a chunk is not the
@@ -45,6 +52,8 @@ public sealed partial class MissumAiAssistantService
                 }, microphone.WaitForSpeechResumeAsync, microphone.BeginSpeechSession(resetPause: true),
                     CancellationToken.None);
                 _automaticSpeechSession = session;
+                _automaticSpeechRunId = update.LocalRunId;
+                _ = PublishAutomaticSpeechStartAsync(session, status);
                 _ = ObserveAutomaticSpeechCompletionAsync(session, status);
             }
             _automaticSpeechSession?.Observe(update);
@@ -59,11 +68,11 @@ public sealed partial class MissumAiAssistantService
     private async Task ObserveAutomaticSpeechCompletionAsync(SpeechStreamingSession session, Func<MissumAiSpeechUpdate, Task> status)
     {
         await session.Completion.ConfigureAwait(false);
-        if ((!session.HasPlayed && session.Failure is null) || !IsCurrentAutomaticSpeech(session)) return;
+        if (!IsCurrentAutomaticSpeech(session)) return;
         try
         {
-            await status(new(false, session.Failure is not null ? "Vorlesen fehlgeschlagen"
-                : session.WasCancelled ? "Abgebrochen" : "Abgeschlossen", Error: session.Failure?.Message)).ConfigureAwait(false);
+            await status(AutomaticSpeechStatus(session, new(false, session.Failure is not null ? "Vorlesen fehlgeschlagen"
+                : session.WasCancelled ? "Abgebrochen" : "Abgeschlossen", Error: session.Failure?.Message))).ConfigureAwait(false);
         }
         catch (Exception exception) when (exception is not OutOfMemoryException)
         {
@@ -75,5 +84,20 @@ public sealed partial class MissumAiAssistantService
     private void CancelAutomaticSpeech()
     {
         lock (_automaticSpeechGate) _automaticSpeechSession?.Cancel();
+    }
+
+    private static MissumAiSpeechUpdate AutomaticSpeechStatus(SpeechStreamingSession session, MissumAiSpeechUpdate status)
+        => status with { SessionId = session.SessionId, SourceMessageId = session.MessageId,
+            PlaybackId = session.PlaybackId, IsAutomatic = true };
+
+    private async Task PublishAutomaticSpeechStartAsync(SpeechStreamingSession session, Func<MissumAiSpeechUpdate, Task> status)
+    {
+        try
+        {
+            if (IsCurrentAutomaticSpeech(session) && !session.WasCancelled)
+                await status(AutomaticSpeechStatus(session, new(true, "Antwort wird fortlaufend vorgelesen", "Warte auf Antworttext."))).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        { RunDiagnostic(logger, session.MessageId.ToString("D"), "automatic-speech-start-detached", exception); }
     }
 }

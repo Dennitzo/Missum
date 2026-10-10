@@ -1218,9 +1218,6 @@ public sealed partial class AssistantCoordinator(
         var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Die Sitzung wurde nicht gefunden.");
         await ActivateSessionAsync(session, cancellationToken).ConfigureAwait(false);
-        await recentActivity.RecordAsync(
-            $"AI-Sitzung „{session.Title}“ geöffnet",
-            CancellationToken.None).ConfigureAwait(false);
         await emit("session.changed", await BuildSnapshotAsync(cancellationToken), requestId);
     }
 
@@ -1928,6 +1925,11 @@ public sealed partial class AssistantCoordinator(
             missumAi?.ObserveAutomaticSpeech(update,
                 speech => emit("speech.status", new
                 {
+                    sessionId = speech.SessionId,
+                    sourceMessageId = speech.SourceMessageId,
+                    playbackId = speech.PlaybackId,
+                    automatic = speech.IsAutomatic,
+                    ownerClientId = "desktop",
                     active = speech.IsActive,
                     status = speech.Status,
                     detail = speech.Detail,

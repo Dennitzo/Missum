@@ -38,6 +38,7 @@ internal sealed class SpeechStreamingSession : IDisposable
     }
 
     public Guid MessageId { get; }
+    public Guid PlaybackId { get; } = Guid.NewGuid();
     public Guid SessionId { get; }
     public Task Completion { get; }
     public Exception? Failure { get; private set; }

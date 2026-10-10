@@ -73,8 +73,9 @@ public sealed partial class NativeAssistantPage
         var body = MessageBody(_messageViews[activeId].View);
         UpdateMessageBlocks(activeId, activeMessage, body);
         UpdateMessageActions(activeId, activeMessage);
-        if (_messageActionViews[activeId].Panel.Visibility != Microsoft.UI.Xaml.Visibility.Collapsed)
-            throw new InvalidOperationException("The streaming message footer must remain hidden until completion.");
+        if (_messageActionViews[activeId].Panel.Visibility != Microsoft.UI.Xaml.Visibility.Visible
+            || !_messageActionViews[activeId].Copy.IsEnabled || !_messageActionViews[activeId].Read.IsEnabled)
+            throw new InvalidOperationException("The streaming message footer must expose copy and read-aloud before completion.");
         var header = _messageBlocks[activeId]["header"];
         UpdateMessageHeader(header, activeMessage);
         var label = (TextBlock)((StackPanel)header).Children[0];
@@ -157,6 +158,7 @@ public sealed partial class NativeAssistantPage
         await VerifyMarkdownHeadingSmokeAsync(original);
         await VerifyLooseMathSmokeAsync(original);
         await VerifyAnswerStreamingSmokeAsync(original);
+        await VerifyStreamingMessageFooterSmokeAsync(original);
         await VerifyThinkingIndicatorSmokeAsync(original);
         await VerifyToolIconColorsSmokeAsync();
         await VerifyContinuationSmokeAsync(original);

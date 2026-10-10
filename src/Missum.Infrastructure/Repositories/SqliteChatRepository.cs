@@ -41,7 +41,7 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
             FROM chat_sessions
             WHERE ($mode IS NULL OR chat_mode=$mode)
               AND ($search='' OR rowid IN (SELECT rowid FROM session_search WHERE session_search MATCH $fts))
-            ORDER BY updated_at DESC,id DESC;
+            ORDER BY updated_at DESC,created_at DESC,id DESC;
             """;
         command.Parameters.AddWithValue("$mode", mode is null ? DBNull.Value : SqliteMapping.EnumName(mode.Value));
         command.Parameters.AddWithValue("$search", search?.Trim() ?? string.Empty);
@@ -99,7 +99,17 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
     }
 
     public Task SaveDraftAsync(Guid id, string draft, CancellationToken cancellationToken = default) =>
-        UpdateSessionAsync(id, "draft=$value", draft ?? string.Empty, cancellationToken);
+        database.WriteAsync(async (connection, transaction, token) =>
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            // Drafts are view state. Flushing the composer while navigating
+            // must not turn an old conversation into the most recently changed one.
+            command.CommandText = "UPDATE chat_sessions SET draft=$value WHERE id=$id AND draft<>$value;";
+            command.Parameters.AddWithValue("$id", id.ToString("D"));
+            command.Parameters.AddWithValue("$value", draft ?? string.Empty);
+            await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+        }, cancellationToken);
 
     public Task ClearDraftIfMatchesAsync(Guid id, string expectedDraft, CancellationToken cancellationToken = default) =>
         database.WriteAsync(async (connection, transaction, token) =>

@@ -62,7 +62,11 @@ public sealed record MissumAiSpeechUpdate(
     string? Model = null,
     string? Error = null,
     bool CacheHit = false,
-    string? DirectionModel = null);
+    string? DirectionModel = null,
+    Guid? SessionId = null,
+    Guid? SourceMessageId = null,
+    Guid? PlaybackId = null,
+    bool IsAutomatic = false);
 
 public sealed class MissumAiStreamDetachedException : OperationCanceledException
 {
@@ -896,6 +900,7 @@ public sealed partial class MissumAiAssistantService(
         {
             var selected = history.FirstOrDefault(message => message.Id == requestedMessageId)
                 ?? throw new InvalidOperationException("Die ausgewählte AI-Nachricht wurde nicht gefunden.");
+            selected = ResolveStreamingSpeechSnapshot(selected, explicitText);
             if (startAnchor is null)
             {
                 if (!IsReadableSpeechMessage(selected))
@@ -983,7 +988,7 @@ public sealed partial class MissumAiAssistantService(
         SpeechStartAnchor anchor)
     {
         if (message.SessionId != sessionId
-            || !IsReadableSpeechMessage(message))
+            || !IsStableSpeechMessage(message))
         {
             throw new InvalidOperationException("Diese AI-Nachricht kann nicht ab der gewählten Stelle vorgelesen werden.");
         }
@@ -999,7 +1004,7 @@ public sealed partial class MissumAiAssistantService(
 
     internal static void ValidateSpeechExcerpt(ChatMessage message, Guid sessionId, DateTimeOffset? expectedUpdatedAt, string excerpt)
     {
-        if (message.SessionId != sessionId || !IsReadableSpeechMessage(message)
+        if (message.SessionId != sessionId || !IsStableSpeechMessage(message)
             || expectedUpdatedAt is null || message.UpdatedAt.ToUniversalTime() != expectedUpdatedAt.Value.ToUniversalTime())
             throw new InvalidOperationException("Die Nachricht wurde inzwischen geändert. Wähle die Vorlesestelle erneut aus.");
         if (string.IsNullOrWhiteSpace(excerpt)) throw new InvalidOperationException("Ab dieser Stelle ist kein vorlesbarer Text vorhanden.");
@@ -1007,11 +1012,27 @@ public sealed partial class MissumAiAssistantService(
 
     internal static bool IsReadableSpeechMessage(ChatMessage message) =>
         message.Role is (ChatRole.Assistant or ChatRole.User)
-        && message.Status is (MessageStatus.Completed
+        && (message.Status is (MessageStatus.Completed
             or MessageStatus.Cancelled
             or MessageStatus.Interrupted
             or MessageStatus.Failed)
+            || message.Role == ChatRole.Assistant && message.Status is (MessageStatus.Streaming or MessageStatus.Pending))
         && !string.IsNullOrWhiteSpace(message.Content);
+
+    private static bool IsStableSpeechMessage(ChatMessage message) => IsReadableSpeechMessage(message)
+        && message.Status is (MessageStatus.Completed or MessageStatus.Cancelled or MessageStatus.Interrupted or MessageStatus.Failed);
+
+    internal static ChatMessage ResolveStreamingSpeechSnapshot(ChatMessage stored, string? visibleText)
+    {
+        if (stored.Role != ChatRole.Assistant || stored.Status is not (MessageStatus.Streaming or MessageStatus.Pending)
+            || string.IsNullOrWhiteSpace(visibleText)) return stored;
+        var saved = stored.Content.ReplaceLineEndings("\n");
+        var visible = visibleText.ReplaceLineEndings("\n");
+        if (saved.StartsWith(visible, StringComparison.Ordinal)) return stored;
+        if (!visible.StartsWith(saved, StringComparison.Ordinal))
+            throw new InvalidOperationException("Der sichtbare Antworttext passt nicht mehr zum gespeicherten Nachrichtenstand. Bitte erneut vorlesen.");
+        return stored with { Content = visible };
+    }
 
     internal static IReadOnlyList<SpeechSourceUnit> SelectSpeechUnitsFromAnchor(
         IReadOnlyList<SpeechSourceUnit> sourceUnits,

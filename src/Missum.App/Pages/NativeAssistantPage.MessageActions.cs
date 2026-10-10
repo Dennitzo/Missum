@@ -15,9 +15,16 @@ public sealed partial class NativeAssistantPage
     private CancellationTokenSource? _messageSpeechCancellation;
     private Task? _messageSpeechTask;
     private Guid? _messageSpeechSessionId, _messageSpeechMessageId;
+    private Guid? _messageSpeechPlaybackId;
+    private readonly HashSet<Guid> _stoppedMessageSpeechPlaybacks = [];
+    private readonly Queue<Guid> _stoppedMessageSpeechPlaybackOrder = new();
     private string _messageSpeechStatus = "";
     private long _messageSpeechRequest;
     private bool _messageActionsSubscribed, _messageActionsDisposed, _messageSpeechActionBusy, _messageSpeechStopRequested;
+    private bool _messageSpeechAutomatic;
+    private Action<string>? _messageCopySmokeAdapter;
+    private Func<string, string?, Task>? _messageSpeechSmokeAdapter;
+    private MicrophoneSnapshot? _messageSpeechMicrophoneSmokeSnapshot;
 
     private StackPanel MessageActionsFor(string messageId, JsonElement message)
     {
@@ -31,7 +38,7 @@ public sealed partial class NativeAssistantPage
         return _messageActionViews[messageId].Menu;
     }
 
-    /// <summary>Call even when the content signature is unchanged: terminal status enables read-aloud.</summary>
+    /// <summary>Keep controls current while the same message streams and audio changes independently.</summary>
     private void UpdateMessageActions(string messageId, JsonElement message)
     {
         if (!_messageActionsSubscribed && !_messageActionsDisposed)
@@ -44,9 +51,10 @@ public sealed partial class NativeAssistantPage
         view.SessionId = Guid.TryParse(S(message, "sessionId"), out var sessionId) ? sessionId : _session;
         view.Text = S(message, "content");
         view.IsAssistant = string.Equals(S(message, "role"), "assistant", StringComparison.OrdinalIgnoreCase);
-        view.IsStreaming = view.IsAssistant && S(message, "status").ToLowerInvariant() is "streaming" or "pending";
+        var status = S(message, "status").ToLowerInvariant();
+        view.IsStreaming = view.IsAssistant && status is "streaming" or "pending";
         view.CanRead = (view.IsAssistant || S(message, "role") == "user") && !string.IsNullOrWhiteSpace(view.Text)
-            && S(message, "status").ToLowerInvariant() is "completed" or "cancelled" or "interrupted" or "failed";
+            && (view.IsStreaming || status is "completed" or "cancelled" or "interrupted" or "failed");
         RefreshMessageActionView(view);
         RefreshContinuationStep(messageId, message);
     }
@@ -60,11 +68,11 @@ public sealed partial class NativeAssistantPage
             if (IsMessageSpeechSource(view) && _speaking) await StopMessageSpeechAsync();
             else await StartMessageSpeechAsync(view);
         };
-        view.Pause.Click += async (_, _) => await ToggleMessageSpeechPauseAsync();
+        view.Pause.Click += async (_, _) => { if (IsMessageSpeechSource(view)) await ToggleMessageSpeechPauseAsync(); };
         view.CopyMenu.Click += (_, _) => CopyMessageText(view);
         view.ReadMenu.Click += async (_, _) => await StartMessageSpeechAsync(view);
-        view.PauseMenu.Click += async (_, _) => await ToggleMessageSpeechPauseAsync();
-        view.StopMenu.Click += async (_, _) => await StopMessageSpeechAsync();
+        view.PauseMenu.Click += async (_, _) => { if (IsMessageSpeechSource(view)) await ToggleMessageSpeechPauseAsync(); };
+        view.StopMenu.Click += async (_, _) => { if (IsMessageSpeechSource(view)) await StopMessageSpeechAsync(); };
         view.Panel.Children.Add(view.Copy);
         view.Panel.Children.Add(view.Read);
         view.Panel.Children.Add(view.Pause);
@@ -80,7 +88,7 @@ public sealed partial class NativeAssistantPage
     {
         foreach (var (id, entry) in _messageViews)
         {
-            if (!_messageActionViews.TryGetValue(id, out var view) || !view.CanRead || view.SessionId != _session) continue;
+            if (!_messageActionViews.TryGetValue(id, out var view) || !view.CanRead || view.IsStreaming || view.SessionId != _session) continue;
             var blocks = MessageBody(entry.View).Children.OfType<Missum.App.Controls.NativeStreamingMarkdown>().Cast<FrameworkElement>().ToArray();
             var excerpt = Missum.App.Controls.NativeConversationSelection.ReadableSuffix(blocks, target);
             if (excerpt.Length == 0) continue;
@@ -101,9 +109,13 @@ public sealed partial class NativeAssistantPage
     {
         try
         {
-            var package = new DataPackage();
-            package.SetText(view.Text);
-            Clipboard.SetContent(package);
+            if (_messageCopySmokeAdapter is { } copy && IsMessageFooterSmoke) copy(view.Text);
+            else
+            {
+                var package = new DataPackage();
+                package.SetText(view.Text);
+                Clipboard.SetContent(package);
+            }
             var version = ++view.CopyVersion;
             if (view.Copy.Content is FontIcon icon)
             {
@@ -132,12 +144,15 @@ public sealed partial class NativeAssistantPage
     {
         if (_disposed || _messageActionsDisposed || _messageSpeechActionBusy || !view.CanRead) return;
         if (!Guid.TryParse(view.MessageId, out var messageId)) { ShowMessageActionError("Die gespeicherte Nachricht hat keine gültige ID."); return; }
+        if (_messageSpeechSmokeAdapter is { } smoke && IsMessageFooterSmoke)
+        { await smoke("start", view.MessageId); return; }
         _messageSpeechActionBusy = true;
         _messageSpeechStopRequested = false;
         RefreshAllMessageActions();
         try
         {
             // Read-aloud is independent of chat generation. Replace only the preceding audio operation.
+            RememberStoppedMessageSpeechPlayback(_messageSpeechPlaybackId);
             _messageSpeechCancellation?.Cancel();
             var service = App.Current.GetService<MissumAiAssistantService>();
             if (service.IsSpeaking || _microphone.Current.IsSpeaking) await service.CancelSpeechAsync(CancellationToken.None);
@@ -148,6 +163,8 @@ public sealed partial class NativeAssistantPage
             _messageSpeechCancellation = cancellation;
             _messageSpeechSessionId = view.SessionId;
             _messageSpeechMessageId = messageId;
+            _messageSpeechPlaybackId = null;
+            _messageSpeechAutomatic = false;
             _messageSpeechStatus = "Vorlesen wird vorbereitet";
             _speaking = true;
             var request = ++_messageSpeechRequest;
@@ -170,11 +187,15 @@ public sealed partial class NativeAssistantPage
         {
             // Supplying the stored message ID makes the service validate and load its persisted text.
             var childMessage = _subagents.Values.Any(child => child.SessionId == sessionId && child.Messages.ContainsKey(messageId.ToString()));
-            var explicitText = childMessage && _messageActionViews.TryGetValue(messageId.ToString(), out var childView) ? excerpt ?? childView.Text : null;
+            var explicitText = _messageActionViews.TryGetValue(messageId.ToString(), out var sourceView)
+                && (childMessage || sourceView.IsStreaming) ? excerpt ?? sourceView.Text : null;
             await service.SpeakAsync(sessionId, explicitText: explicitText, sourceMessageId: childMessage ? null : messageId,
                 update => DispatchMessageActionAsync(() =>
                 {
-                    if (request != _messageSpeechRequest) return;
+                    if (request != _messageSpeechRequest || IsStoppedMessageSpeechPlayback(update.PlaybackId)
+                        || _messageSpeechStopRequested && update.IsActive) return;
+                    _messageSpeechPlaybackId = update.PlaybackId ?? _messageSpeechPlaybackId;
+                    _messageSpeechAutomatic = update.IsAutomatic;
                     _speaking = update.IsActive;
                     _messageSpeechStatus = update.Status;
                     if (!string.IsNullOrWhiteSpace(update.Error)) ShowMessageActionError(update.Error);
@@ -182,9 +203,12 @@ public sealed partial class NativeAssistantPage
                 }),
                 progress => DispatchMessageActionAsync(() =>
                 {
-                    if (request != _messageSpeechRequest) return;
+                    var controlPlayback = progress.ControlPlaybackId ?? progress.PlaybackId;
+                    if (request != _messageSpeechRequest || IsStoppedMessageSpeechPlayback(controlPlayback)
+                        || _messageSpeechStopRequested && (progress.State is SpeechPlaybackState.Buffering or SpeechPlaybackState.Playing or SpeechPlaybackState.Paused)) return;
                     _messageSpeechSessionId = progress.SessionId;
-                    _messageSpeechMessageId = childMessage ? messageId : progress.SourceMessageId;
+                    _messageSpeechMessageId = progress.ControlMessageId ?? (childMessage ? messageId : progress.SourceMessageId);
+                    _messageSpeechPlaybackId = controlPlayback;
                     if (progress.State == SpeechPlaybackState.Paused) _messageSpeechStatus = "Vorlesen pausiert";
                     RefreshAllMessageActions();
                 }),
@@ -211,14 +235,27 @@ public sealed partial class NativeAssistantPage
     private async Task StopMessageSpeechAsync()
     {
         if (_messageActionsDisposed) return;
+        var stoppedPlayback = _messageSpeechPlaybackId;
+        var stoppedRequest = _messageSpeechRequest;
+        var stoppedTask = _messageSpeechTask;
         _messageSpeechStopRequested = true;
+        RememberStoppedMessageSpeechPlayback(_messageSpeechPlaybackId);
+        if (_messageSpeechSmokeAdapter is { } smoke && IsMessageFooterSmoke)
+        {
+            await smoke("stop", _messageSpeechMessageId?.ToString());
+            _speaking = false; _messageSpeechStatus = "Vorlesen beendet";
+            RefreshAllMessageActions(); return;
+        }
         try
         {
             _messageSpeechCancellation?.Cancel();
             await App.Current.GetService<MissumAiAssistantService>().CancelSpeechAsync(CancellationToken.None);
-            if (_messageSpeechTask is { IsCompleted: false }) await _messageSpeechTask;
-            _speaking = false;
-            _messageSpeechStatus = "Vorlesen beendet";
+            if (stoppedTask is { IsCompleted: false }) await stoppedTask;
+            if (stoppedRequest == _messageSpeechRequest && stoppedPlayback == _messageSpeechPlaybackId)
+            {
+                _speaking = false;
+                _messageSpeechStatus = "Vorlesen beendet";
+            }
         }
         catch (Exception exception) when (exception is not OutOfMemoryException) { ShowMessageActionError(exception.Message); }
         finally { RefreshAllMessageActions(); }
@@ -226,7 +263,9 @@ public sealed partial class NativeAssistantPage
 
     private async Task ToggleMessageSpeechPauseAsync()
     {
-        if (_disposed || !_microphone.Current.CanPauseSpeech) return;
+        if (_disposed || !MessageFooterMicrophone.CanPauseSpeech) return;
+        if (_messageSpeechSmokeAdapter is { } smoke && IsMessageFooterSmoke)
+        { await smoke("pause", _messageSpeechMessageId?.ToString()); RefreshAllMessageActions(); return; }
         try
         {
             var snapshot = await _microphone.ToggleSpeechPauseAsync(_lifetime.Token);
@@ -240,6 +279,16 @@ public sealed partial class NativeAssistantPage
     /// <summary>Handle global coordinator speech events before filtering events by the visible chat.</summary>
     private void ApplyMessageSpeechStatus(JsonElement data)
     {
+        var client = S(data, "ownerClientId");
+        if (client.Length > 0 && client != "desktop") return;
+        var playback = MessageSpeechGuid(data, "playbackId");
+        if (IsStoppedMessageSpeechPlayback(playback)) return;
+        if (MessageSpeechGuid(data, "sessionId") is { } owner) _messageSpeechSessionId = owner;
+        if ((MessageSpeechGuid(data, "sourceMessageId") ?? MessageSpeechGuid(data, "messageId")) is { } source)
+            _messageSpeechMessageId = source;
+        if (playback is not null) _messageSpeechPlaybackId = playback;
+        if (data.ValueKind == JsonValueKind.Object && data.TryGetProperty("automatic", out _))
+            _messageSpeechAutomatic = S(data, "automatic") == "True";
         // A composer request resolved to speech rather than a generated chat turn.
         // Only that request releases the pending chat UI; independent audio never does.
         if (S(data, "isPromptRequest") == "True" && Guid.TryParse(S(data, "sessionId"), out var sessionId) && sessionId == _session)
@@ -253,8 +302,14 @@ public sealed partial class NativeAssistantPage
 
     private void ApplyMessageSpeechProgress(JsonElement data)
     {
+        var client = S(data, "ownerClientId");
+        if (client.Length > 0 && client != "desktop") return;
+        var playback = MessageSpeechGuid(data, "controlPlaybackId") ?? MessageSpeechGuid(data, "playbackId");
+        if (IsStoppedMessageSpeechPlayback(playback)) return;
         if (Guid.TryParse(S(data, "sessionId"), out var sessionId)) _messageSpeechSessionId = sessionId;
-        _messageSpeechMessageId = Guid.TryParse(S(data, "sourceMessageId"), out var messageId) ? messageId : null;
+        _messageSpeechMessageId = MessageSpeechGuid(data, "controlMessageId") ?? MessageSpeechGuid(data, "sourceMessageId");
+        if (playback is not null) _messageSpeechPlaybackId = playback;
+        if (MessageSpeechGuid(data, "controlPlaybackId") is not null) _messageSpeechAutomatic = true;
         if (S(data, "state") == "paused") _messageSpeechStatus = "Vorlesen pausiert";
         RefreshAllMessageActions();
     }
@@ -297,15 +352,16 @@ public sealed partial class NativeAssistantPage
     private void RefreshMessageActionView(MessageActionView view)
     {
         var active = _speaking && IsMessageSpeechSource(view);
-        var microphone = _microphone.Current;
-        view.Panel.Visibility = !view.IsStreaming && !string.IsNullOrWhiteSpace(view.Text) ? Visibility.Visible : Visibility.Collapsed;
+        var microphone = MessageFooterMicrophone;
+        view.Panel.Visibility = active || view.IsStreaming || !string.IsNullOrWhiteSpace(view.Text) ? Visibility.Visible : Visibility.Collapsed;
         view.Copy.IsEnabled = view.CopyMenu.IsEnabled = !string.IsNullOrWhiteSpace(view.Text);
         view.Read.Visibility = Visibility.Visible;
         view.Read.IsEnabled = active || view.CanRead && !_messageSpeechActionBusy;
         var readIcon = (FontIcon)view.Read.Content;
         readIcon.Glyph = active ? "\uE71A" : "\uE767";
         readIcon.Foreground = NativeIconPalette.BrushFor(active ? "danger" : "speech");
-        var readLabel = active ? "Vorlesen beenden" : view.CanRead ? "Nachricht vorlesen" : "Nach Abschluss vorlesen";
+        var readLabel = active ? _messageSpeechAutomatic ? "Automatisches Vorlesen beenden" : "Vorlesen beenden"
+            : view.CanRead ? "Nachricht vorlesen" : "Noch kein vorlesbarer Text";
         ToolTipService.SetToolTip(view.Read, readLabel);
         AutomationProperties.SetName(view.Read, readLabel);
         view.ReadMenu.IsEnabled = view.CanRead && !active && !_messageSpeechActionBusy;
@@ -335,6 +391,23 @@ public sealed partial class NativeAssistantPage
         if (_disposed || _messageActionsDisposed) return;
         ShowError(message);
     }
+
+    private static Guid? MessageSpeechGuid(JsonElement data, string property) =>
+        Guid.TryParse(S(data, property), out var id) && id != Guid.Empty ? id : null;
+
+    private bool IsStoppedMessageSpeechPlayback(Guid? playback) => playback is { } id && _stoppedMessageSpeechPlaybacks.Contains(id);
+
+    private void RememberStoppedMessageSpeechPlayback(Guid? playback)
+    {
+        if (playback is not { } id || !_stoppedMessageSpeechPlaybacks.Add(id)) return;
+        _stoppedMessageSpeechPlaybackOrder.Enqueue(id);
+        while (_stoppedMessageSpeechPlaybackOrder.Count > 64)
+            _stoppedMessageSpeechPlaybacks.Remove(_stoppedMessageSpeechPlaybackOrder.Dequeue());
+    }
+
+    private static bool IsMessageFooterSmoke => !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("MISSUM_SMOKE_INSTANCE_KEY"));
+    private MicrophoneSnapshot MessageFooterMicrophone => IsMessageFooterSmoke && _messageSpeechMicrophoneSmokeSnapshot is { } snapshot
+        ? snapshot : _microphone.Current;
 
     private void DisposeMessageActions()
     {

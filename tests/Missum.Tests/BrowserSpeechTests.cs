@@ -12,6 +12,59 @@ namespace Missum.Tests;
 
 public sealed class BrowserSpeechTests
 {
+    [Fact]
+    public async Task AutomaticFooterOwnerIsAvailableBeforeAnySynthesisOrVisibleText()
+    {
+        using var gateway = new FakeGateway();
+        await using var service = CreateService(gateway, BrowserSpeechPlan.Create(Guid.NewGuid(), null, "Text", "Test."));
+        var events = new EventSink();
+        var now = DateTimeOffset.UtcNow;
+        var message = new ChatMessage(Guid.NewGuid(), Guid.NewGuid(), ChatRole.Assistant, "", MessageStatus.Streaming, now, now);
+
+        service.ObserveAutomaticSpeech("mac-owner", new(MissumAiAssistantUpdateKind.Started, message), events.Emit);
+        var buffered = await events.Next("speech.progress");
+        var active = await events.Next("speech.status");
+
+        Assert.Equal("buffering", buffered.Payload.GetProperty("state").GetString());
+        Assert.Equal(message.SessionId, buffered.Payload.GetProperty("sessionId").GetGuid());
+        Assert.Equal(message.Id, buffered.Payload.GetProperty("sourceMessageId").GetGuid());
+        Assert.Equal("mac-owner", buffered.Payload.GetProperty("ownerClientId").GetString());
+        Assert.Equal(message.Id, active.Payload.GetProperty("sourceMessageId").GetGuid());
+        Assert.Equal(buffered.Payload.GetProperty("playbackId").GetGuid(), active.Payload.GetProperty("playbackId").GetGuid());
+        Assert.Empty(gateway.Paragraphs);
+        await service.HandleAsync("mac-owner", Envelope("microphone.stopSpeech", new { playbackId = buffered.Payload.GetProperty("playbackId").GetGuid(),
+            sessionId = message.SessionId, messageId = message.Id }), events.Emit);
+    }
+
+    [Fact]
+    public async Task OldFooterControlsCannotStopOrPauseAReplacementPlaybackOrAnotherDevice()
+    {
+        using var gateway = new FakeGateway();
+        var plan = BrowserSpeechPlan.Create(Guid.NewGuid(), Guid.NewGuid(), "AI-Nachricht", "Ein Satz.");
+        await using var service = CreateService(gateway, plan);
+        var events = new EventSink();
+        await service.HandleAsync("mac", Envelope("microphone.speak", new { sessionId = plan.SessionId, messageId = plan.MessageId }), events.Emit);
+        var first = await events.Next("speech.audio");
+        await events.Next("speech.complete");
+        await service.HandleAsync("mac", Envelope("microphone.speak", new { sessionId = plan.SessionId, messageId = plan.MessageId }), events.Emit);
+        var second = await events.Next("speech.audio");
+        await events.Next("speech.complete");
+        var oldId = first.Payload.GetProperty("playbackId").GetGuid();
+        var currentId = second.Payload.GetProperty("playbackId").GetGuid();
+        var count = events.All.Count;
+
+        await service.HandleAsync("mac", Envelope("microphone.toggleSpeechPause", new { playbackId = oldId, sessionId = plan.SessionId, messageId = plan.MessageId }), events.Emit);
+        await service.HandleAsync("mac", Envelope("microphone.stopSpeech", new { playbackId = oldId, sessionId = plan.SessionId, messageId = plan.MessageId }), events.Emit);
+        await service.HandleAsync("another-mac", Envelope("microphone.stopSpeech", new { playbackId = currentId }), events.Emit);
+
+        Assert.Equal(count, events.All.Count);
+        await service.HandleAsync("mac", Envelope("microphone.toggleSpeechPause", new { playbackId = currentId, sessionId = plan.SessionId, messageId = plan.MessageId }), events.Emit);
+        Assert.True((await events.Next("speech.pause")).Payload.GetProperty("paused").GetBoolean());
+        await service.HandleAsync("mac", Envelope("microphone.stopSpeech", new { playbackId = currentId, sessionId = plan.SessionId, messageId = plan.MessageId }), events.Emit);
+        Assert.Contains(events.All, item => item.Type == "speech.progress" && item.Payload.GetProperty("playbackId").GetGuid() == currentId
+            && item.Payload.GetProperty("state").GetString() == "cancelled");
+    }
+
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
     [Fact]

@@ -60,7 +60,7 @@ function harness({ speech = false, codingToolStepsExpanded = false } = {}) {
   for (const name of ["visibleModelLabel", "codingToolLabel", "codingToolSummary", "codingStepState", "normalizeCodingStep", "recordCodingActivity", "compareReasoningStepUpdates",
     "createCodingActivity", "mergeCodingToolSteps", "codingPreviewHtml", "openCodingPreview", "closeCodingPreview", "enhanceCodingCodeBlocks", "renderCodingWorkspace", "renderCodingChanges", "applyCodingChanges", "cleanStatusMetadata",
     "uniqueStatusParts", "isTerminalMessageStatus", "statusLabel", "runStatusText", "sanitizeVisibleMessageContent", "createMessage",
-    "createMessageFooter", "isMessageSpeechActive", "updateMessageSpeechFooter", "createMessageIconAction", "createMessageFooterLink", "flashMessageAction", "scrollMessageToTop", "renderMessages", "renderCodingMessages",
+    "createMessageFooter", "isMessageSpeechActive", "updateMessageSpeechFooter", "updateSpeechControlIdentity", "createMessageIconAction", "createMessageFooterLink", "flashMessageAction", "scrollMessageToTop", "renderMessages", "renderCodingMessages",
     "conversationMessagesDiffer", "sortCommittedMessages", "pruneTerminalMessageRunStatuses", "requestConversationRefresh", "acceptCommittedRevision",
     "applyCommittedMessage", "applyConversationSnapshot", "belongsToActiveSession", "upsertLiveMessage", "applyLiveDelta", "handleHostMessage",
     "preparePdfMedia", "preparePdfMessage"]) {
@@ -726,6 +726,30 @@ test("message footer actions still execute in Coding and General", () => {
     assert.equal(posts[1].payload.messageId, answer.id);
     assert.equal(posts[1].payload.sessionId, "session-a");
     assert.equal(elements.messageScroll.scrollTop, 50);
+  }
+});
+
+test("streaming chat reconciliation retains footer buttons in Coding and General and copies the current answer", () => {
+  for (const mode of ["coding", null]) {
+    const { context, state, posts, elements } = harness();
+    state.selectedToolAction = mode; state.isRunning = true;
+    const answer = message({ content: "Erster Absatz.", status: "streaming" });
+    state.messages = [answer]; context.renderMessages(false);
+    const article = elements.messageList.firstChild, footer = article.querySelector(".message-footer");
+    const copy = footer.firstChild, read = footer.querySelector(".message-action--speech");
+    assert.equal(footer.hidden, false); assert.equal(read.disabled, false);
+    read.classList.add("hover-probe");
+    for (let revision = 1; revision <= 3; revision++) {
+      const updated = { ...answer, content: `Erster Absatz. Weiterer Text ${revision}.`, status: revision === 3 ? "completed" : "streaming" };
+      state.messages = [updated]; context.renderMessages(false);
+      assert.equal(elements.messageList.firstChild, article); assert.equal(article.querySelector(".message-footer"), footer);
+      assert.equal(footer.firstChild, copy); assert.equal(footer.querySelector(".message-action--speech"), read);
+      assert.equal(read.classList.contains("hover-probe"), true);
+      copy.listeners.click({ preventDefault() {}, stopPropagation() {} });
+      assert.equal(posts.at(-1).type, "message.copy"); assert.equal(posts.at(-1).payload.text, updated.content);
+    }
+    read.listeners.click({ preventDefault() {}, stopPropagation() {} });
+    assert.equal(posts.at(-1).type, "microphone.speak"); assert.equal(posts.at(-1).payload.text, "Erster Absatz. Weiterer Text 3.");
   }
 });
 
