@@ -102,12 +102,42 @@ if (Test-Path -LiteralPath $smokeRoot) { throw "Smoke directory already exists: 
 New-Item -ItemType Directory -Path $smokeRoot | Out-Null
 $smokeData = Join-Path $smokeRoot 'Data'
 $smokeInstance = [Guid]::NewGuid().ToString('N')
+# The smoke must not bind the original application's LAN port. The OS chooses
+# an available loopback port; skip configured gateway/native/control ports.
+$reservedPorts = [Collections.Generic.HashSet[int]]::new()
+foreach ($reserved in @(8080, 8081, 8082, 8090, 8180, 8181, 8182)) { $null = $reservedPorts.Add($reserved) }
+foreach ($portName in @('ASSISTANT_GATEWAY_PORT', 'ASSISTANT_NATIVE_PORT', 'ASSISTANT_NATIVE_CONTROL_PORT', 'ASSISTANT_LAN_WEB_PORT')) {
+    $configuredPort = 0
+    if ([int]::TryParse([Environment]::GetEnvironmentVariable($portName, 'Process'), [ref]$configuredPort) -and
+        $configuredPort -ge 1024 -and $configuredPort -le 65535) {
+        $null = $reservedPorts.Add($configuredPort)
+        if ($portName -eq 'ASSISTANT_NATIVE_PORT' -and $configuredPort -lt 65535) { $null = $reservedPorts.Add($configuredPort + 1) }
+    }
+}
+$configuredGatewayText = [Environment]::GetEnvironmentVariable('ASSISTANT_GATEWAY_URL', 'Process')
+[Uri]$configuredGateway = $null
+if (-not [string]::IsNullOrWhiteSpace($configuredGatewayText) -and
+    [Uri]::TryCreate([string]$configuredGatewayText, [UriKind]::Absolute, [ref]$configuredGateway)) {
+    $null = $reservedPorts.Add($configuredGateway.Port)
+}
+$smokeLanPort = 0
+for ($attempt = 0; $attempt -lt 32 -and $smokeLanPort -eq 0; $attempt++) {
+    $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+    try {
+        $listener.Start()
+        $candidatePort = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+        if ($candidatePort -ge 1024 -and -not $reservedPorts.Contains($candidatePort)) { $smokeLanPort = $candidatePort }
+    }
+    finally { $listener.Stop() }
+}
+if ($smokeLanPort -eq 0) { throw 'No isolated LAN port could be allocated for the smoke.' }
 $smokeEnvironment = @{
     ASSISTANT_PROFILE = 'stable'
     ASSISTANT_DATA_ROOT = $smokeData
     ASSISTANT_INSTANCE_KEY = $smokeInstance
     ASSISTANT_NATIVE_STATE_ROOT = (Join-Path $smokeRoot 'NativeRuntime')
     ASSISTANT_DISABLE_RUNTIME_AUTOSTART = '1'
+    ASSISTANT_LAN_WEB_PORT = [string]$smokeLanPort
     MISSUM_DATA_DIRECTORY = $smokeData
     MISSUM_SMOKE_INSTANCE_KEY = $smokeInstance
     DOTNET_BUNDLE_EXTRACT_BASE_DIR = (Join-Path $smokeRoot 'Bundle')
@@ -218,6 +248,44 @@ try {
     }
     Copy-Item -LiteralPath $headingPreview -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-markdown-headings-preview.png')) -Force
     Write-Host 'Native headings in streamed answers and reasoning verified.'
+    $imageValidationPath = Join-Path $smokeData 'native-artifact-image-validation.json'
+    if (-not (Test-Path -LiteralPath $imageValidationPath) -or
+        (Get-Item -LiteralPath $imageValidationPath).LastWriteTimeUtc -lt $startedAt.AddSeconds(-1)) {
+        throw 'Native original-image smoke did not produce fresh evidence.'
+    }
+    $imageValidation = Get-Content -LiteralPath $imageValidationPath -Raw | ConvertFrom-Json
+    if ($imageValidation.processId -ne $process.Id -or $imageValidation.passed -ne $true) {
+        throw 'Native original-image smoke failed.'
+    }
+    Copy-Item -LiteralPath $imageValidationPath -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-artifact-image-validation.json')) -Force
+    foreach ($imagePreviewName in @('native-artifact-image-preview.png','native-artifact-image-narrow-preview.png','native-artifact-image-portrait-preview.png')) {
+        $imagePreviewPath = Join-Path $smokeData $imagePreviewName
+        if (-not (Test-Path -LiteralPath $imagePreviewPath) -or (Get-Item -LiteralPath $imagePreviewPath).Length -lt 100) {throw 'Native original-image preview evidence is missing.'}
+        Copy-Item -LiteralPath $imagePreviewPath -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.' + $imagePreviewName)) -Force
+    }
+    Write-Host 'Native original-image preview, responsive sizing and original-file opening verified.'
+    if ($imageValidation.recovery.passed -ne $true -or $imageValidation.recovery.automaticRetryRecovered -ne $true) {
+        throw 'Native original-image connection recovery failed.'
+    }
+    $imagePositionPath = Join-Path $smokeData 'native-artifact-position-validation.json'
+    if (-not (Test-Path -LiteralPath $imagePositionPath -PathType Leaf) -or
+        (Get-Item -LiteralPath $imagePositionPath).LastWriteTimeUtc -lt $startedAt.AddSeconds(-1)) {
+        throw 'Native artifact position smoke did not produce fresh evidence.'
+    }
+    $imagePositions = Get-Content -LiteralPath $imagePositionPath -Raw | ConvertFrom-Json
+    if ($imagePositions.processId -ne $process.Id -or $imagePositions.images -ne 2) {
+        throw 'Native artifact position evidence does not match this process.'
+    }
+    foreach ($imagePositionCheck in @('passed','afterOwningToolStep','anchorsRetainedWhileStreaming','originalRecoveryRetainsAnchor','thumbnailsNotDuplicated','duplicateArtifactNotificationsCoalesced','persistedReloadRetainsPositions')) {
+        if ($imagePositions.$imagePositionCheck -ne $true) { throw "Native artifact position check failed: $imagePositionCheck" }
+    }
+    Copy-Item -LiteralPath $imagePositionPath -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-artifact-position-validation.json')) -Force
+    $imagePositionPreview = Join-Path $smokeData 'native-artifact-position-preview.png'
+    if (-not (Test-Path -LiteralPath $imagePositionPreview -PathType Leaf) -or (Get-Item -LiteralPath $imagePositionPreview).Length -lt 100) {
+        throw 'Native artifact position preview is missing.'
+    }
+    Copy-Item -LiteralPath $imagePositionPreview -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-artifact-position-preview.png')) -Force
+    Write-Host 'Native image creation positions retained during streaming, original recovery and reload verified.'
     $looseMathValidationPath = Join-Path $smokeData 'native-loose-math-validation.json'
     if (-not (Test-Path -LiteralPath $looseMathValidationPath -PathType Leaf) -or
         (Get-Item -LiteralPath $looseMathValidationPath).LastWriteTimeUtc -lt $startedAt.AddSeconds(-1)) {

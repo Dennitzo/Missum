@@ -98,6 +98,17 @@ public sealed class SqliteBinaryObjectStore(SqliteDatabase database) : IBinaryOb
         var required = remaining > (long.MaxValue - fixedReserve) / 2 ? long.MaxValue : (remaining * 2) + fixedReserve;
         var root = Path.GetPathRoot(Path.GetFullPath(database.DatabasePath));
         if (string.IsNullOrWhiteSpace(root)) return;
+        if (root.StartsWith(@"\\", StringComparison.Ordinal))
+        {
+            var parts = root.Trim('\\').Split('\\');
+            // DriveInfo accepts drive letters, not UNC roots. A local admin
+            // share uses the same disk; remote shares rely on SQLite's write
+            // errors because DriveInfo cannot establish their free space.
+            if (parts.Length != 2 || !(parts[0].Equals("localhost", StringComparison.OrdinalIgnoreCase)
+                    || parts[0].Equals(Environment.MachineName, StringComparison.OrdinalIgnoreCase))
+                || parts[1].Length != 2 || !char.IsAsciiLetter(parts[1][0]) || parts[1][1] != '$') return;
+            root = parts[1][0] + ":\\";
+        }
         try
         {
             var available = new DriveInfo(root).AvailableFreeSpace;

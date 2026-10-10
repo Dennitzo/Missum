@@ -22,7 +22,10 @@ function Invoke-ContextCheck {
         # Windows PowerShell represents native stderr as ErrorRecords even for
         # ordinary test diagnostics. The process exit code is authoritative.
         $ErrorActionPreference = 'Continue'
-        & $Executable @Arguments *> $log
+        & $Executable @Arguments 2>&1 | ForEach-Object {
+            if ($_ -is [Management.Automation.ErrorRecord]) { $_.Exception.Message }
+            else { $_.ToString() }
+        } | Set-Content -LiteralPath $log -Encoding UTF8
         $code = $LASTEXITCODE
     }
     finally { $ErrorActionPreference = $savedErrorAction }

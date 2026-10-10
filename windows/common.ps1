@@ -257,7 +257,141 @@ function Assert-MissumArtifactPath {
         throw "Artifact path must stay below '$artifactRoot': $resolved"
     }
 
+    # A lexical prefix cannot confine a junction or symbolic link to artifacts.
+    $ancestor = $resolved.TrimEnd('\', '/')
+    while ($ancestor.Length -ge $artifactRoot.Length) {
+        if (Test-Path -LiteralPath $ancestor) {
+            $item = Get-Item -LiteralPath $ancestor -Force
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Artifact paths must not traverse reparse points: $ancestor"
+            }
+        }
+        if ([string]::Equals($ancestor, $artifactRoot, [StringComparison]::OrdinalIgnoreCase)) { break }
+        $ancestor = [IO.Path]::GetDirectoryName($ancestor)
+    }
+
     return $resolved
+}
+
+function Assert-MissumArtifactTree {
+    param([Parameter(Mandatory = $true)][string] $Path)
+    $resolved = Assert-MissumArtifactPath -Path $Path
+    if (Test-Path -LiteralPath $resolved) {
+        $pending = [Collections.Generic.Stack[string]]::new()
+        $pending.Push($resolved)
+        while ($pending.Count -gt 0) {
+            $entry = Get-Item -LiteralPath $pending.Pop() -Force
+            if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Artifact trees must not contain reparse points: $($entry.FullName)"
+            }
+            if ($entry.PSIsContainer) {
+                foreach ($child in Get-ChildItem -LiteralPath $entry.FullName -Force) { $pending.Push($child.FullName) }
+            }
+        }
+    }
+    return $resolved
+}
+
+function Assert-MissumPublishDirectoryIdle {
+    param([Parameter(Mandatory = $true)][string] $Path)
+    $resolved = Assert-MissumArtifactPath -Path $Path
+    $prefix = $resolved.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    foreach ($candidate in @(Get-Process -Name Missum, ExtensionHost -ErrorAction SilentlyContinue)) {
+        try {
+            if ($candidate.HasExited) { continue }
+            $executablePath = $candidate.Path
+        }
+        catch { throw "Cannot establish the executable path of process $($candidate.Id); publish has not replaced any artifact." }
+        if ([string]::IsNullOrWhiteSpace($executablePath)) {
+            throw "Cannot establish the executable path of process $($candidate.Id); publish has not replaced any artifact."
+        }
+        if ([IO.Path]::GetFullPath($executablePath).StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Publish directory is in use by process $($candidate.Id): $executablePath. The running application will not be stopped."
+        }
+    }
+}
+
+function Get-MissumPublishSidecarFiles {
+    param([Parameter(Mandatory = $true)][string] $Directory)
+    $resolved = Assert-MissumArtifactPath -Path $Directory
+    $parent = [IO.Path]::GetDirectoryName($resolved.TrimEnd('\', '/'))
+    $prefix = [IO.Path]::GetFileName($resolved.TrimEnd('\', '/')) + '.'
+    if (-not (Test-Path -LiteralPath $parent -PathType Container)) { return }
+    foreach ($file in Get-ChildItem -LiteralPath $parent -File -Force) {
+        if (-not $file.Name.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { continue }
+        $suffix = $file.Name.Substring($prefix.Length)
+        if ($suffix -match '^(manifest\.json|native-[A-Za-z0-9._-]+\.(json|jsonl|png)|math-[A-Za-z0-9._-]+\.png|chat-streaming-validation\.json|simulation-view\.jsonl|publication-view\.jsonl|crash\.log)$') {
+            $null = Assert-MissumArtifactPath -Path $file.FullName
+            $file
+        }
+    }
+}
+
+function Install-MissumPublishStage {
+    param([Parameter(Mandatory = $true)][string] $StageDirectory,
+        [Parameter(Mandatory = $true)][string] $OutputDirectory)
+    $stage = (Assert-MissumArtifactTree -Path $StageDirectory).TrimEnd('\', '/')
+    $output = (Assert-MissumArtifactTree -Path $OutputDirectory).TrimEnd('\', '/')
+    $parent = [IO.Path]::GetDirectoryName($output)
+    $leaf = [IO.Path]::GetFileName($output)
+    if (-not [string]::Equals([IO.Path]::GetDirectoryName($stage), $parent, [StringComparison]::OrdinalIgnoreCase) -or
+        [IO.Path]::GetFileName($stage) -notmatch ('^' + [regex]::Escape($leaf) + '\.staging-[a-f0-9]{32}$')) {
+        throw 'Publish staging must be a fresh sibling directory of the final artifact.'
+    }
+    if (-not (Test-Path -LiteralPath $stage -PathType Container) -or
+        -not (Test-Path -LiteralPath ($stage + '.manifest.json') -PathType Leaf)) {
+        throw 'Publish staging is incomplete; the previous artifact has not been replaced.'
+    }
+    Assert-MissumPublishDirectoryIdle -Path $output
+    Assert-MissumPublishDirectoryIdle -Path $stage
+    $backup = Assert-MissumArtifactPath -Path (Join-Path $parent ($leaf + '.previous-' + [Guid]::NewGuid().ToString('N')))
+    $stageSidecars = @(Get-MissumPublishSidecarFiles -Directory $stage)
+    $oldSidecars = @(Get-MissumPublishSidecarFiles -Directory $output)
+    $moves = [Collections.Generic.List[object]]::new()
+    function Move-PublishEntry {
+        param([string] $Source, [string] $Destination)
+        $null = Assert-MissumArtifactTree -Path $Source
+        $null = Assert-MissumArtifactPath -Path $Destination
+        if (Test-Path -LiteralPath $Destination) { throw "Publish move destination already exists: $Destination" }
+        Move-Item -LiteralPath $Source -Destination $Destination -ErrorAction Stop
+        $moves.Add([pscustomobject]@{ Source = $Source; Destination = $Destination })
+    }
+    try {
+        if (Test-Path -LiteralPath $output) { Move-PublishEntry $output $backup }
+        foreach ($file in $oldSidecars) { Move-PublishEntry $file.FullName ($backup + $file.FullName.Substring($output.Length)) }
+        Move-PublishEntry $stage $output
+        foreach ($file in $stageSidecars) { Move-PublishEntry $file.FullName ($output + $file.FullName.Substring($stage.Length)) }
+    }
+    catch {
+        $publishError = $_
+        $rollbackErrors = [Collections.Generic.List[string]]::new()
+        for ($index = $moves.Count - 1; $index -ge 0; $index--) {
+            $move = $moves[$index]
+            try {
+                $null = Assert-MissumArtifactTree -Path $move.Destination
+                $null = Assert-MissumArtifactPath -Path $move.Source
+                if (Test-Path -LiteralPath $move.Source) { throw "Rollback destination already exists: $($move.Source)" }
+                if (Test-Path -LiteralPath $move.Destination -PathType Container) { Assert-MissumPublishDirectoryIdle -Path $move.Destination }
+                Move-Item -LiteralPath $move.Destination -Destination $move.Source -ErrorAction Stop
+            }
+            catch { $rollbackErrors.Add($_.Exception.Message) }
+        }
+        if ($rollbackErrors.Count -gt 0) {
+            throw "Publish failed: $($publishError.Exception.Message). Rollback could not finish: $($rollbackErrors -join ' '). Preserved backup: $backup"
+        }
+        throw $publishError
+    }
+    # A cleanup failure may retain an old backup; it must not undo a verified publish.
+    try {
+        if (Test-Path -LiteralPath $backup) {
+            $null = Assert-MissumArtifactTree -Path $backup
+            Assert-MissumPublishDirectoryIdle -Path $backup
+            Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction Stop
+        }
+        foreach ($file in @(Get-MissumPublishSidecarFiles -Directory $backup)) { Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop }
+    }
+    catch { Write-Warning "Verified publish is installed; previous backup cleanup was deferred: $($_.Exception.Message)" }
+    return $output
 }
 
 function Reset-MissumArtifactDirectory {
@@ -266,7 +400,7 @@ function Reset-MissumArtifactDirectory {
         [string] $Path
     )
 
-    $resolved = Assert-MissumArtifactPath -Path $Path
+    $resolved = Assert-MissumArtifactTree -Path $Path
     if (Test-Path -LiteralPath $resolved) {
         Remove-Item -LiteralPath $resolved -Recurse -Force
     }

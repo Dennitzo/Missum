@@ -93,6 +93,32 @@ public sealed class MissumAiStackLifecycleService : IDisposable
         finally { _gate.Release(); }
     }
 
+    /// <summary>Starts only the local gateway and proxy for stored artifacts, without warming AI workers.</summary>
+    public async Task EnsureGatewayStartedAsync(Uri gateway, CancellationToken cancellationToken = default)
+    {
+        if (Volatile.Read(ref _stopping) != 0 || !CanManage(gateway)) return;
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (Volatile.Read(ref _stopping) != 0) return;
+            var endpoint = await ResolveDockerEndpointAsync(cancellationToken).ConfigureAwait(false);
+            await EnsureDockerDaemonAsync(endpoint, cancellationToken).ConfigureAwait(false);
+            var containers = await ReadContainersAsync(endpoint, includeRunners: false, cancellationToken).ConfigureAwait(false);
+            ValidateInstalledStack(containers, gateway, requireInstalled: true);
+            foreach (var container in containers.Where(static container => !container.Running
+                         && container.Service is ("gateway" or "caddy"))
+                         .OrderBy(static container => ServiceOrder(container.Service)))
+            {
+                var result = await DockerAsync(endpoint, ["start", container.Id], cancellationToken).ConfigureAwait(false);
+                EnsureSuccess(result, "Der Missum-Gateway konnte für die gespeicherte Datei nicht gestartet werden");
+            }
+            // This partial start must not populate the full-stack probe cache:
+            // a later AI request still needs to inspect and start its workers.
+            // The caller separately waits for gateway HTTP liveness.
+        }
+        finally { _gate.Release(); }
+    }
+
     public void BeginShutdown() => Interlocked.Exchange(ref _stopping, 1);
 
     public async Task StopAsync(Uri gateway, CancellationToken cancellationToken = default)

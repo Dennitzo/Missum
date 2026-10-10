@@ -551,7 +551,9 @@ public sealed partial class ScientificPublicationService : IDisposable, IScienti
             snapshot.WorkingState is not null);
 
     private static string Fingerprint(string text) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
-    private static string PublicationFingerprint(string text) => Fingerprint("scientific-publication-v8-single-column\n" + text);
+    // Renderer-only changes receive an immutable new edition without changing
+    // the scientific manuscript, object revisions or publication revision.
+    private static string PublicationFingerprint(string text) => Fingerprint("scientific-publication-v9-linked-table-of-contents\n" + text);
     private static string OneLine(string text) => text.Replace('\r', ' ').Replace('\n', ' ').Trim();
     private static string EscapeLabel(string text) => OneLine(text).Replace("*", "\\*", StringComparison.Ordinal)
         .Replace("[", "\\[", StringComparison.Ordinal).Replace("]", "\\]", StringComparison.Ordinal);

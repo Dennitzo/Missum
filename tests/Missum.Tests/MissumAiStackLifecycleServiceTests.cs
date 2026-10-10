@@ -1,10 +1,140 @@
 using System.Text.Json;
+using System.Net;
+using System.Text;
+using Missum.Ai.Contracts;
 using Missum.App.Services;
+using Missum.Core.Contracts;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Missum.Tests;
 
 public sealed class MissumAiStackLifecycleServiceTests
 {
+    [Fact]
+    public async Task ArtifactClientFactoryStartsOnlyHttpServicesAndNeverProbesOrStartsNativeModels()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        var docker = new FakeDocker();
+        await settings.UpdateAsync(current => current with { MissumAiServerUrl = docker.Profile.GatewayUri.AbsoluteUri });
+        using var stack = Create(docker);
+        var starts = 0;
+        var probes = 0;
+        using var native = new NativeModelRuntimeService(_ => true,
+            _ => { probes++; return Task.FromResult(false); },
+            _ => { starts++; return Task.CompletedTask; });
+        var http = new ArtifactGatewayHandler(docker);
+        using var connection = new MissumAiConnectionService(settings, NullLogger<MissumAiConnectionService>.Instance,
+            () => http, nativeRuntime: native, stackLifecycle: stack);
+
+        using var client = await connection.CreateArtifactClientAsync();
+
+        Assert.Equal(docker.Profile.GatewayUri, client.BaseAddress);
+        Assert.Equal(2, docker.Mutations.Count);
+        Assert.Equal(["start", docker.Gateway.Id], docker.Mutations[0]);
+        Assert.Equal(["start", docker.Proxy.Id], docker.Mutations[1]);
+        Assert.All(docker.Containers.Where(container => container.Service is not ("gateway" or "caddy")),
+            container => Assert.False(container.Running));
+        Assert.Equal(0, starts);
+        Assert.Equal(0, probes);
+        Assert.Null(connection.NativeRuntimeError);
+        Assert.Equal(1, http.Requests);
+    }
+
+    [Fact]
+    public async Task ArtifactAccessStartsOnlyGatewayAndProxyAndDoesNotCacheAFullStackStart()
+    {
+        var docker = new FakeDocker();
+        using var service = Create(docker);
+
+        await service.EnsureGatewayStartedAsync(docker.Profile.GatewayUri);
+
+        Assert.Equal(2, docker.Mutations.Count);
+        Assert.Equal(["start", docker.Gateway.Id], docker.Mutations[0]);
+        Assert.Equal(["start", docker.Proxy.Id], docker.Mutations[1]);
+        Assert.All(docker.Containers.Where(container => container.Service is not ("gateway" or "caddy")),
+            container => Assert.False(container.Running));
+        await service.EnsureStartedAsync(docker.Profile.GatewayUri);
+        Assert.Equal(3, docker.Mutations.Count);
+        Assert.Equal(4, docker.Mutations[2].Length - 1);
+        Assert.DoesNotContain(docker.Gateway.Id, docker.Mutations[2]);
+        Assert.DoesNotContain(docker.Proxy.Id, docker.Mutations[2]);
+        Assert.All(docker.Containers, container => Assert.True(container.Running));
+    }
+
+    [Fact]
+    public async Task ArtifactAccessPreservesRunningWorkersAndUnrelatedContainers()
+    {
+        var docker = new FakeDocker();
+        foreach (var container in docker.Containers.Where(container => container.Service is not ("gateway" or "caddy")))
+            container.Running = true;
+        docker.AddRunner(running: true);
+        var foreign = docker.AddForeign();
+        using var service = Create(docker);
+
+        await Task.WhenAll(Enumerable.Range(0, 4).Select(_ => service.EnsureGatewayStartedAsync(docker.Profile.GatewayUri)));
+
+        Assert.Equal(2, docker.Mutations.Count);
+        Assert.All(docker.Containers, container => Assert.True(container.Running));
+        Assert.All(docker.Mutations, command => Assert.DoesNotContain(foreign.Id, command));
+        Assert.All(docker.Mutations, command => Assert.DoesNotContain(docker.Runner!.Id, command));
+    }
+
+    [Fact]
+    public async Task ArtifactAccessCannotRestartAfterShutdownBegins()
+    {
+        var docker = new FakeDocker();
+        using var service = Create(docker);
+        service.BeginShutdown();
+
+        await service.EnsureGatewayStartedAsync(docker.Profile.GatewayUri);
+
+        Assert.Empty(docker.Commands);
+    }
+
+    [Fact]
+    public async Task ArtifactAccessHonorsStableLocalAndDisabledOwnershipRules()
+    {
+        var docker = new FakeDocker();
+        using (var service = Create(docker))
+            await service.EnsureGatewayStartedAsync(new Uri("https://external.example:8080"));
+        using (var service = new MissumAiStackLifecycleService(docker.Profile, docker.RunAsync,
+                   disabled: () => true, environment: _ => null))
+            await service.EnsureGatewayStartedAsync(docker.Profile.GatewayUri);
+        using (var service = new MissumAiStackLifecycleService(docker.Profile with { Name = "preview" }, docker.RunAsync,
+                   environment: _ => null))
+            await service.EnsureGatewayStartedAsync(docker.Profile.GatewayUri);
+
+        Assert.Empty(docker.Commands);
+    }
+
+    [Fact]
+    public async Task ArtifactAccessRejectsForeignDataRootBeforeStartingAnything()
+    {
+        var docker = new FakeDocker { GatewayDataRoot = @"C:\another-project\data" };
+        using var service = Create(docker);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => service.EnsureGatewayStartedAsync(docker.Profile.GatewayUri));
+
+        Assert.Contains("anderen Missum-Datenverzeichnis", exception.Message, StringComparison.Ordinal);
+        Assert.Empty(docker.Mutations);
+    }
+
+    [Fact]
+    public async Task ArtifactAccessRejectsMismatchedPortAndRemoteDockerEngine()
+    {
+        var wrongPort = new FakeDocker { PublishedPort = 9090 };
+        using (var service = Create(wrongPort))
+            await Assert.ThrowsAsync<InvalidOperationException>(() => service.EnsureGatewayStartedAsync(wrongPort.Profile.GatewayUri));
+        Assert.Empty(wrongPort.Mutations);
+        var remote = new FakeDocker { Endpoint = "ssh://research-server" };
+        using (var service = Create(remote))
+            await Assert.ThrowsAsync<InvalidOperationException>(() => service.EnsureGatewayStartedAsync(remote.Profile.GatewayUri));
+        Assert.Single(remote.Commands);
+        Assert.Empty(remote.Mutations);
+    }
+
     [Fact]
     public async Task StartsInstalledWorkersBeforeGatewayAndProxyWithoutRepositoryFiles()
     {
@@ -213,6 +343,26 @@ public sealed class MissumAiStackLifecycleServiceTests
 
     private static MissumAiStackLifecycleService Create(FakeDocker docker) => new(docker.Profile, docker.RunAsync,
         environment: _ => null);
+
+    private sealed class ArtifactGatewayHandler(FakeDocker docker) : HttpMessageHandler
+    {
+        public int Requests { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Requests++;
+            Assert.Equal("/v1/health/live", request.RequestUri!.AbsolutePath);
+            Assert.Equal(HttpMethod.Get, request.Method);
+            Assert.True(docker.Gateway.Running);
+            Assert.True(docker.Proxy.Running);
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(JsonSerializer.Serialize(new HealthSnapshot("live", MissumAiProtocol.Version, DateTimeOffset.UtcNow),
+                    MissumAiProtocol.CreateJsonOptions()), Encoding.UTF8, "application/json"),
+            });
+        }
+    }
 
     private sealed class FakeDocker
     {

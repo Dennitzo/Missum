@@ -1623,8 +1623,12 @@
       body.append(meta);
     }
 
+    const artifactSteps = hasTimeline ? mergeCodingToolSteps(contentMessage) : [];
+    const artifactItems = typeof resolveImageArtifactAnchors === "function"
+      ? resolveImageArtifactAnchors(message.artifacts, artifactSteps)
+      : Array.isArray(message.artifacts) ? message.artifacts : [];
     const timeline = hasTimeline
-      ? createCodingActivity(contentMessage, previousArticle?.querySelector(".coding-timeline")) : null;
+      ? createCodingActivity(contentMessage, previousArticle?.querySelector(".coding-timeline"), artifactItems) : null;
     if (timeline) {
       body.append(timeline);
       annotateReadableSpeechBlocks(contentMessage, article, timeline);
@@ -1651,9 +1655,10 @@
     }
     // Media artifacts bound to a tool step render inside the coding timeline.
     // Only unanchored captures/documents stay at the message end.
-    const artifactItems = Array.isArray(message.artifacts) ? message.artifacts : [];
-    const anchoredStepIds = new Set(timeline ? mergeCodingToolSteps(contentMessage).map(step => String(step.id)) : []);
-    const trailingArtifacts = artifactItems.filter(item => !item?.stepId || !anchoredStepIds.has(String(item.stepId)));
+    const anchoredStepIds = new Set(timeline ? artifactSteps.map(step => String(step.id)) : []);
+    const imageStepIds = new Set(timeline ? [...timeline.querySelectorAll(".coding-step")].map(step => step.dataset.stepId) : []);
+    const trailingArtifacts = artifactItems.filter(item => !item?.stepId
+      || !(String(item.contentType || "").toLowerCase().startsWith("image/") ? imageStepIds : anchoredStepIds).has(String(item.stepId)));
     if (trailingArtifacts.length) body.append(createArtifactList(trailingArtifacts));
     if (role === "assistant" && message.error) {
       const error = document.createElement("div");
@@ -1674,6 +1679,65 @@
     return article;
   }
 
+  function resolveImageArtifactAnchors(items, steps) {
+    const artifacts = Array.isArray(items) ? items : [];
+    const image = item => String(item?.contentType || "").toLowerCase().startsWith("image/");
+    const role = item => String(item?.metadata?.role || "").toLowerCase();
+    const originalImages = artifacts.filter(item => image(item) && role(item) === "original");
+    const byId = new Map(artifacts.filter(item => item?.id).map(item => [String(item.id), item]));
+    const stepById = new Map(steps.map(step => [String(step.id), step]));
+    const seenImages = new Set();
+    const receipts = new Map();
+    const parsed = value => { try { return typeof value === "string" ? JSON.parse(value) : value; } catch { return null; } };
+    const receipt = step => {
+      if (!receipts.has(step.id)) {
+        const output = parsed(step.outputJson);
+        receipts.set(step.id, { input: parsed(step.inputJson), output: output?.result || output });
+      }
+      return receipts.get(step.id);
+    };
+    const matchingStep = id => {
+      if (!id) return null;
+      if (stepById.has(String(id))) return stepById.get(String(id));
+      const canonical = String(id).replace(/^server-/, "");
+      const matches = steps.filter(step => String(step.id).replace(/^server-/, "") === canonical);
+      return matches.length === 1 ? matches[0] : null;
+    };
+    return artifacts.filter(item => {
+      if (!image(item)) return true;
+      const id = String(item.id || "");
+      if (id && seenImages.has(id)) return false;
+      if (id) seenImages.add(id);
+      return !originalImages.some(original => original !== item && String(original.id) !== id
+        && (original.metadata?.replacesArtifactId === id || role(item) === "thumbnail"
+          && (item.metadata?.originalArtifactId && item.metadata.originalArtifactId === original.serverArtifactId
+            || item.metadata?.sourceUploadId && item.metadata.sourceUploadId === original.metadata?.sourceUploadId)));
+    }).map(item => {
+      if (!image(item)) return item;
+      let step = matchingStep(item.stepId);
+      const replaced = byId.get(String(item.metadata?.replacesArtifactId || ""));
+      if (!step && replaced) step = matchingStep(replaced.stepId);
+      if (!step && (item.serverArtifactId || item.artifactId || item.sha256 || item.metadata?.sourceUploadId)) {
+        // A recovered original keeps the producing receipt's position. Match
+        // durable server identity or upload provenance, never an arbitrary URL.
+        const serverId = item.serverArtifactId || item.artifactId;
+        const matches = steps.filter(candidate => {
+          const { input, output } = receipt(candidate);
+          const results = Array.isArray(output?.artifacts) ? output.artifacts : [];
+          if (serverId && results.some(result => (result.artifactId || result.id) === serverId)) return true;
+          if (item.sha256 && results.some(result => result.sha256 === item.sha256)) return true;
+          const upload = item.metadata?.sourceUploadId;
+          if (!upload || !["media.analyze", "media.inspect"].includes(candidate.tool)) return false;
+          if (output?.resolvedUploadId) return output.resolvedUploadId === upload;
+          const sources = results.map(result => result.metadata?.sourceUploadId).filter(Boolean);
+          return sources.length ? sources.includes(upload) : input?.uploadId === upload;
+        });
+        if (matches.length === 1) step = matches[0];
+      }
+      return step && String(item.stepId || "") !== String(step.id) ? { ...item, stepId: String(step.id) } : item;
+    });
+  }
+
   function createArtifactList(items) {
     const list = document.createElement("div");
     list.className = "message-artifacts";
@@ -1687,16 +1751,30 @@
         card.classList.add("artifact-card--capture");
       }
       const mediaType = String(artifact.contentType || "application/octet-stream").toLowerCase();
+      const cached = state.artifactPreviewUrls.get(String(artifact.id));
+      const originalImageUrl = mediaType.startsWith("image/")
+        ? resourceUrl(artifact.originalUrl || artifact.url || cached?.originalUrl)
+        : "";
+      const openTitle = globalThis.missumBridge?.isLanBrowser
+        ? `${artifact.fileName || "Artefakt"} herunterladen`
+        : `${artifact.fileName || "Artefakt"} im Standardprogramm öffnen`;
       if (mediaType.startsWith("image/")) {
+        list.classList.add("message-artifacts--images");
+        card.classList.add("artifact-card--image");
         const open = document.createElement("button");
         open.type = "button";
         open.className = "artifact-card__open-image";
-        open.title = `${artifact.fileName || "Bild"} im Standardprogramm öffnen`;
+        open.title = openTitle;
         open.setAttribute("aria-label", open.title);
         const image = document.createElement("img");
         image.alt = artifact.fileName || "Erzeugtes Bild";
         image.loading = "lazy";
         image.decoding = "async";
+        if (originalImageUrl) {
+          image.dataset.originalUrl = originalImageUrl;
+          image.src = originalImageUrl;
+        }
+        image.addEventListener("load", () => card.classList.remove("artifact-card--failed"));
         image.addEventListener("error", () => {
           card.classList.add("artifact-card--failed");
           image.alt = `${artifact.fileName || "Bild"} konnte nicht als Vorschau geladen werden`;
@@ -1727,7 +1805,7 @@
       open.type = "button";
       open.className = "artifact-card__open";
       open.textContent = "Öffnen";
-      open.title = `${artifact.fileName || "Artefakt"} im Standardprogramm öffnen`;
+      open.title = openTitle;
       open.addEventListener("click", () => post("artifact.open", { artifactId: artifact.id }));
       const save = document.createElement("button");
       save.type = "button";
@@ -1743,12 +1821,11 @@
       card.append(footer);
       list.append(card);
       if (mediaType.startsWith("image/") || mediaType.startsWith("audio/") || mediaType.startsWith("video/")) {
-        const cached = state.artifactPreviewUrls.get(String(artifact.id));
         if (cached) {
           const image = card.querySelector("img");
           const audio = card.querySelector("audio");
           const video = card.querySelector("video");
-          if (image && cached.url) image.src = resourceUrl(cached.url);
+          if (image && !originalImageUrl && cached.url) image.src = resourceUrl(cached.url);
           if (audio && cached.url) {
             audio.src = resourceUrl(cached.url);
             audio.load();
@@ -1758,7 +1835,7 @@
             if (cached.posterUrl) video.poster = resourceUrl(cached.posterUrl);
             video.load();
           }
-        } else if (!state.artifactPreviewPending.has(String(artifact.id))) {
+        } else if (!originalImageUrl && !state.artifactPreviewPending.has(String(artifact.id))) {
           state.artifactPreviewPending.add(String(artifact.id));
           post("artifact.preview", { artifactId: artifact.id });
         }
@@ -1939,13 +2016,26 @@
     }
   }
 
-  function createCodingActivity(message, previousTimeline = null) {
+  function createCodingActivity(message, previousTimeline = null, resolvedArtifacts = null) {
     const allSteps = mergeCodingToolSteps(message).filter(step => step.kind === "tool");
-    const steps = allSteps;
     const live = isTerminalMessageStatus(message.status) ? null : state.messageRunStatus.get(String(message.id));
-    if (!steps.length && !live?.status) return null;
+    if (!allSteps.length && !live?.status) return null;
     const sessionId = state.activeSessionId;
-    return globalThis.missumCodingTimeline.render(message, steps, {
+    const artifactItems = resolvedArtifacts || (typeof resolveImageArtifactAnchors === "function"
+      ? resolveImageArtifactAnchors(message.artifacts, allSteps) : message.artifacts);
+    let steps = allSteps;
+    if ((artifactItems || []).some(item => item?.stepId && String(item.contentType || "").toLowerCase().startsWith("image/")
+      && String(item.metadata?.role || "").toLowerCase() !== "vision_input")) {
+      // A live receipt may arrive before its persisted predecessor snapshot.
+      // Keep image placement at its committed text offset instead of at the
+      // incidental end of the live-step merge; unknown offsets retain slots.
+      const positioned = allSteps.map((step, index) => ({ step, index }))
+        .filter(item => Number.isInteger(item.step.contentOffset))
+        .sort((left, right) => left.step.contentOffset - right.step.contentOffset || left.index - right.index);
+      let index = 0;
+      steps = allSteps.map(step => Number.isInteger(step.contentOffset) ? positioned[index++].step : step);
+    }
+    return globalThis.missumCodingTimeline.render({ ...message, artifacts: artifactItems }, steps, {
       codingToolStepsExpanded: state.codingToolStepsExpanded,
       previousTimeline,
       renderMarkdown: text => globalThis.missumMarkdown.render(text),
@@ -4217,9 +4307,11 @@
         const artifactId = String(payload?.artifactId || "");
         state.artifactPreviewPending.delete(artifactId);
         const previewUrl = resourceUrl(payload?.url);
+        const originalUrl = resourceUrl(payload?.originalUrl);
         const posterUrl = resourceUrl(payload?.posterUrl);
-        if (artifactId && previewUrl) state.artifactPreviewUrls.set(artifactId, {
+        if (artifactId && (previewUrl || originalUrl)) state.artifactPreviewUrls.set(artifactId, {
           url: previewUrl,
+          originalUrl: originalUrl || state.artifactPreviewUrls.get(artifactId)?.originalUrl || null,
           posterUrl: posterUrl || null
         });
         for (const card of document.querySelectorAll(".artifact-card")) {
@@ -4227,9 +4319,10 @@
           const image = card.querySelector("img");
           const audio = card.querySelector("audio");
           const video = card.querySelector("video");
-          if (image && previewUrl) {
-            image.addEventListener("load", () => card.classList.remove("artifact-card--failed"), { once: true });
-            image.src = previewUrl;
+          const imageUrl = image?.dataset.originalUrl || state.artifactPreviewUrls.get(artifactId)?.originalUrl || previewUrl;
+          if (image && imageUrl) {
+            if (!image.dataset.originalUrl && originalUrl) image.dataset.originalUrl = originalUrl;
+            image.src = imageUrl;
           }
           if (audio && previewUrl) {
             audio.src = previewUrl;

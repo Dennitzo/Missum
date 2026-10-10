@@ -2482,7 +2482,7 @@ public sealed partial class AssistantCoordinator(
             message.Revision,
             tool = message.ToolExecution,
             toolSteps = message.ToolSteps ?? [],
-            artifacts = (messageArtifacts ?? []).Select(ToArtifactDto),
+            artifacts = AssistantArtifactOriginalResolver.DisplayArtifacts(messageArtifacts ?? [], message.ToolSteps).Select(ToArtifactDto),
         };
     }
 

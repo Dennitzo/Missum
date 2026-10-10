@@ -477,10 +477,23 @@ public sealed class WorkerOrchestrator : IDisposable
         {
             var result = await _workers.InspectMediaAsync(request, cancellationToken).ConfigureAwait(false);
             var artifacts = new List<ArtifactDescriptor>();
-            foreach (var item in result.Artifacts.Concat(result.Frames))
+            ArtifactDescriptor? original = null;
+            // Import the image original before its derivatives, so every
+            // thumbnail has an explicit original reference in persisted metadata.
+            foreach (var item in result.Artifacts.Concat(result.Frames)
+                .OrderByDescending(static item => item.Role == "original"))
             {
                 var metadata = new Dictionary<string, string>(item.Metadata ?? new Dictionary<string, string>(), StringComparer.Ordinal);
                 metadata["visibility"] = "internal";
+                metadata["sourceUploadId"] = request.UploadId;
+                metadata["runId"] = runId;
+                if (original is not null && item.Role != "original")
+                {
+                    metadata["originalArtifactId"] = original.ArtifactId;
+                    metadata["originalSha256"] = original.Sha256;
+                    metadata["originalFileName"] = original.FileName;
+                    metadata["originalMediaType"] = original.MediaType;
+                }
                 if (!string.IsNullOrWhiteSpace(item.Role))
                 {
                     metadata["role"] = item.Role;
@@ -496,12 +509,14 @@ public sealed class WorkerOrchestrator : IDisposable
                     metadata["timecodeSeconds"] = timecode.ToString(System.Globalization.CultureInfo.InvariantCulture);
                 }
 
-                artifacts.Add(await ImportAsync(
+                var imported = await ImportAsync(
                     item.RelativePath,
                     item.FileName,
                     item.MediaType,
                     metadata,
-                    cancellationToken).ConfigureAwait(false));
+                    cancellationToken).ConfigureAwait(false);
+                artifacts.Add(imported);
+                if (item.Role == "original") original = imported;
             }
 
             return new ProcessedMediaResult(result.Kind, result.Metadata.Clone(), artifacts);

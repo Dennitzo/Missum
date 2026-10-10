@@ -85,8 +85,19 @@ public sealed partial class NativeAssistantPage
                 hitTarget.Click += (_, _) => ScrollToPrompt(capturedId);
                 hitTarget.PointerEntered += (_, _) => SetTimelineMarkerPointer(capturedId, true);
                 hitTarget.PointerExited += (_, _) => SetTimelineMarkerPointer(capturedId, false);
+                // GettingFocus preserves the requested state. UIElement.FocusState
+                // is coerced from Programmatic to Keyboard when the last input
+                // device was a keyboard, which does not imply timeline navigation.
+                hitTarget.GettingFocus += (_, args) => SetTimelineMarkerFocusRequest(capturedId, args.FocusState);
                 hitTarget.RegisterPropertyChangedCallback(UIElement.FocusStateProperty,
-                    (_, _) => SetTimelineMarkerFocus(capturedId, hitTarget.FocusState == FocusState.Keyboard));
+                    (_, _) => RefreshTimelineMarkerFocus(capturedId));
+                hitTarget.GotFocus += (_, _) => RefreshTimelineMarkerFocus(capturedId);
+                hitTarget.LostFocus += (_, _) =>
+                {
+                    // Routed focus events can arrive after another transfer.
+                    // Do not erase the intent of a newly regained focus owner.
+                    if (hitTarget.FocusState == FocusState.Unfocused) ResetTimelineMarkerFocus(capturedId);
+                };
                 Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(hitTarget,
                     $"Zu Prompt {index + 1} springen: {NativePromptTimelineState.PreviewText(S(prompt, "content"), 80)}");
                 marker = new PromptTimelineMarker(hitTarget, line, scale);
@@ -97,7 +108,19 @@ public sealed partial class NativeAssistantPage
             var stride = Math.Min(14, available / Math.Max(1, prompts.Length - 1));
             Canvas.SetTop(marker.HitTarget, (available - stride * (prompts.Length - 1)) / 2 + index * stride);
             ToolTipService.SetPlacement(marker.HitTarget, PlacementMode.Right);
-            if (!marker.IsHovered) ToolTipService.SetToolTip(marker.HitTarget, new ToolTip { Content = CreatePromptPreview(messages, prompt), Placement = PlacementMode.Right });
+            if (!marker.IsHovered)
+            {
+                var preview = new ToolTip { Content = CreatePromptPreview(messages, prompt), Placement = PlacementMode.Right };
+                preview.Opened += (_, _) =>
+                {
+                    // ToolTipService may also react to the coerced focus state.
+                    // Only the actual pointer/keyboard intent owns this popup.
+                    if (!_promptTimelineMarkers.TryGetValue(id, out var current) || !ReferenceEquals(current, marker)
+                        || !marker.IsHovered || !ReferenceEquals(ToolTipService.GetToolTip(marker.HitTarget), preview))
+                        preview.IsOpen = false;
+                };
+                ToolTipService.SetToolTip(marker.HitTarget, preview);
+            }
         }
         UpdatePromptTimelineSelection();
     }
@@ -208,11 +231,39 @@ public sealed partial class NativeAssistantPage
         UpdateTimelineMarkerPreview(id, marker);
     }
 
+    private void SetTimelineMarkerFocusRequest(string id, FocusState requested)
+    {
+        if (!_promptTimelineMarkers.TryGetValue(id, out var marker)) return;
+        marker.RequestedFocusState = requested;
+        marker.HasKeyboardFocusIntent = requested == FocusState.Keyboard;
+    }
+
+    private void RefreshTimelineMarkerFocus(string id)
+    {
+        if (!_promptTimelineMarkers.TryGetValue(id, out var marker)) return;
+        if (marker.HitTarget.FocusState == FocusState.Unfocused)
+        {
+            ResetTimelineMarkerFocus(id);
+            return;
+        }
+        SetTimelineMarkerFocus(id, marker.HasKeyboardFocusIntent && marker.HitTarget.FocusState == FocusState.Keyboard);
+    }
+
+    private void ResetTimelineMarkerFocus(string id)
+    {
+        if (!_promptTimelineMarkers.TryGetValue(id, out var marker)) return;
+        marker.RequestedFocusState = FocusState.Unfocused;
+        marker.HasKeyboardFocusIntent = false;
+        SetTimelineMarkerFocus(id, false);
+    }
+
     private void DismissPromptTimelinePreviews()
     {
         foreach (var (id, marker) in _promptTimelineMarkers)
         {
             marker.IsPointerOver = false;
+            marker.RequestedFocusState = FocusState.Unfocused;
+            marker.HasKeyboardFocusIntent = false;
             marker.IsKeyboardFocused = false;
             UpdateTimelineMarkerPreview(id, marker);
         }
@@ -259,6 +310,8 @@ public sealed partial class NativeAssistantPage
         public double TargetOffset { get; set; }
         public double TargetScale { get; set; } = scale.ScaleX;
         public bool IsPointerOver { get; set; }
+        public FocusState RequestedFocusState { get; set; } = FocusState.Unfocused;
+        public bool HasKeyboardFocusIntent { get; set; }
         public bool IsKeyboardFocused { get; set; }
         public bool IsHovered { get; set; }
     }

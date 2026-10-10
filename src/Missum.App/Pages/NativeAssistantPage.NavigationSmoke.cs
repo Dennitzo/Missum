@@ -164,6 +164,8 @@ public sealed partial class NativeAssistantPage
         await VerifyTabRetentionSmokeAsync(original);
         var callbackGuard = await VerifyUiCallbackGuardSmokeAsync();
         await VerifyNoticeSelectionSmokeAsync();
+        await VerifyArtifactImageSmokeAsync();
+        await VerifyArtifactPositionSmokeAsync(original);
         await File.WriteAllTextAsync(Path.Combine(App.Current.DataDirectory, "native-ui-callback-validation.json"),
             JsonSerializer.Serialize(callbackGuard));
         await VerifyChangesReviewSmokeAsync();

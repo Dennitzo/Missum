@@ -378,6 +378,9 @@ public sealed class MissumAiClient : IDisposable
         CancellationToken cancellationToken = default) =>
         GetAsync<UploadCreated>($"v1/uploads/{Uri.EscapeDataString(uploadId)}", cancellationToken);
 
+    public Task<ArtifactDescriptor> ExportOriginalUploadAsync(string uploadId, CancellationToken cancellationToken = default) =>
+        PostAsync<object, ArtifactDescriptor>($"v1/uploads/{Uri.EscapeDataString(uploadId)}/original-artifact", new { }, cancellationToken);
+
     public async Task DeleteUploadAsync(
         string uploadId,
         CancellationToken cancellationToken = default)

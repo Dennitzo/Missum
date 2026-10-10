@@ -25,16 +25,21 @@ if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
         $OutputDirectory = Resolve-MissumRepositoryPath -RelativePath ("artifacts\windows\app-{0}-folder" -f $RuntimeIdentifier)
     }
 }
-$OutputDirectory = Reset-MissumArtifactDirectory -Path $OutputDirectory
-$manifestPath = Assert-MissumArtifactPath -Path ($OutputDirectory + '.manifest.json')
-if (Test-Path -LiteralPath $manifestPath) {
-    Remove-Item -LiteralPath $manifestPath -Force
-}
+$OutputDirectory = (Assert-MissumArtifactTree -Path $OutputDirectory).TrimEnd('\', '/')
+if (Test-Path -LiteralPath $OutputDirectory -PathType Leaf) { throw "Publish output is not a directory: $OutputDirectory" }
+Assert-MissumPublishDirectoryIdle -Path $OutputDirectory
+$stageParent = [IO.Path]::GetDirectoryName($OutputDirectory)
+$stageName = [IO.Path]::GetFileName($OutputDirectory) + '.staging-' + [Guid]::NewGuid().ToString('N')
+$stageDirectory = Assert-MissumArtifactPath -Path (Join-Path $stageParent $stageName)
+$manifestPath = Assert-MissumArtifactPath -Path ($stageDirectory + '.manifest.json')
+if (Test-Path -LiteralPath $stageDirectory) { throw "Publish staging already exists: $stageDirectory" }
+New-Item -ItemType Directory -Path $stageDirectory | Out-Null
 
 $configuration = if ($Mode -eq 'SingleFile') { 'Portable' } else { 'Release' }
 $singleFile = if ($Mode -eq 'SingleFile') { 'true' } else { 'false' }
 $extractAll = if ($Mode -eq 'SingleFile') { 'true' } else { 'false' }
 
+try {
 Invoke-MissumDotNet -CommandArguments @(
     'restore', $appProject,
     '--runtime', $RuntimeIdentifier,
@@ -49,7 +54,7 @@ Invoke-MissumDotNet -CommandArguments @(
     '--runtime', $RuntimeIdentifier,
     '--self-contained', 'true',
     '--no-restore',
-    '--output', $OutputDirectory,
+    '--output', $stageDirectory,
     '-p:Platform=x64',
     '-p:EnableMsixTooling=true',
     '-p:WindowsAppSDKSelfContained=true',
@@ -60,7 +65,8 @@ Invoke-MissumDotNet -CommandArguments @(
     '--nologo'
 )
 
-$executable = Join-Path $OutputDirectory 'Missum.exe'
+$null = Assert-MissumArtifactTree -Path $stageDirectory
+$executable = Join-Path $stageDirectory 'Missum.exe'
 if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
     throw "Published Missum executable is missing: $executable"
 }
@@ -74,9 +80,9 @@ $manifest = [ordered]@{
     buildId = Get-MissumBuildId
     builtAtUtc = Get-MissumBuiltAt
     executableSha256 = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
-    files = @(Get-ChildItem -LiteralPath $OutputDirectory -Recurse -File | Sort-Object FullName | ForEach-Object {
+    files = @(Get-ChildItem -LiteralPath $stageDirectory -Recurse -File | Sort-Object FullName | ForEach-Object {
         [ordered]@{
-            path = ($_.FullName.Substring($OutputDirectory.TrimEnd('\', '/').Length).TrimStart('\', '/') -replace '\\', '/')
+            path = ($_.FullName.Substring($stageDirectory.Length).TrimStart('\', '/') -replace '\\', '/')
             length = $_.Length
             sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
         }
@@ -86,9 +92,18 @@ $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath -En
 
 if (-not $SkipSmoke) {
     & (Join-Path $PSScriptRoot 'smoke.ps1') `
-        -PublishDirectory $OutputDirectory `
+        -PublishDirectory $stageDirectory `
         -ManifestPath $manifestPath `
         -Mode $Mode
+}
+
+# The previous directory and its manifest remain intact through publish and smoke.
+# Install moves the verified sibling into place and restores every move on failure.
+$OutputDirectory = Install-MissumPublishStage -StageDirectory $stageDirectory -OutputDirectory $OutputDirectory
+}
+catch {
+    Write-Warning "Publish did not complete. Staging and diagnostics are retained at $stageDirectory; the previous artifact is preserved or restored."
+    throw
 }
 
 Write-Host "Missum publish artifact: $OutputDirectory" -ForegroundColor Green

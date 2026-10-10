@@ -55,23 +55,45 @@ public sealed partial class NativeAssistantPage
             var timelineMarker = _promptTimelineMarkers[currentUser.ToString()];
             // Establish a different focus owner before testing programmatic
             // transfer. WinUI can preserve the state of an already focused target.
-            Composer.Focus(FocusState.Programmatic);
+            void FocusComposerForTimelineSmoke(FocusState requested = FocusState.Programmatic)
+            {
+                if (!Composer.Focus(requested) || !ReferenceEquals(Microsoft.UI.Xaml.Input.FocusManager.GetFocusedElement(XamlRoot), Composer))
+                    throw new InvalidOperationException("The composer did not become the distinct focus owner before the timeline focus test.");
+            }
+            FocusComposerForTimelineSmoke();
             DismissPromptTimelinePreviews();
             UpdateLayout();
             var programmaticFocused = timelineMarker.HitTarget.Focus(FocusState.Programmatic);
-            if (!programmaticFocused || timelineMarker.IsHovered
+            if (!programmaticFocused || timelineMarker.IsHovered || timelineMarker.HasKeyboardFocusIntent
+                || timelineMarker.RequestedFocusState != FocusState.Programmatic
                 || ToolTipService.GetToolTip(timelineMarker.HitTarget) is not ToolTip { IsOpen: false })
                 throw new InvalidOperationException("Automatic focus transfer must not open a prompt timeline preview. "
                     + $"Focused={programmaticFocused}, state={timelineMarker.HitTarget.FocusState}, loaded={timelineMarker.HitTarget.IsLoaded}, "
                     + $"hover={timelineMarker.IsHovered}, pointer={timelineMarker.IsPointerOver}, keyboard={timelineMarker.IsKeyboardFocused}, "
+                    + $"requested={timelineMarker.RequestedFocusState}, intent={timelineMarker.HasKeyboardFocusIntent}, "
                     + $"preview={(ToolTipService.GetToolTip(timelineMarker.HitTarget) as ToolTip)?.IsOpen}.");
-            Composer.Focus(FocusState.Programmatic);
+            FocusComposerForTimelineSmoke();
             var keyboardFocused = timelineMarker.HitTarget.Focus(FocusState.Keyboard);
             await Task.Delay(20);
-            if (!keyboardFocused || !timelineMarker.IsHovered
+            if (!keyboardFocused || !timelineMarker.IsHovered || !timelineMarker.HasKeyboardFocusIntent
+                || timelineMarker.RequestedFocusState != FocusState.Keyboard
                 || ToolTipService.GetToolTip(timelineMarker.HitTarget) is not ToolTip { IsOpen: true })
                 throw new InvalidOperationException($"Deliberate keyboard navigation must still show the timeline preview. "
                     + $"Focused={keyboardFocused}, state={timelineMarker.HitTarget.FocusState}, hover={timelineMarker.IsHovered}, "
+                    + $"requested={timelineMarker.RequestedFocusState}, intent={timelineMarker.HasKeyboardFocusIntent}, "
+                    + $"preview={(ToolTipService.GetToolTip(timelineMarker.HitTarget) as ToolTip)?.IsOpen}.");
+            // A prior keyboard focus must not authorize a later automatic
+            // transfer, even when WinUI displays that transfer as Keyboard.
+            FocusComposerForTimelineSmoke(FocusState.Keyboard);
+            DismissPromptTimelinePreviews();
+            var afterKeyboardProgrammatic = timelineMarker.HitTarget.Focus(FocusState.Programmatic);
+            await Task.Delay(20);
+            if (!afterKeyboardProgrammatic || timelineMarker.HasKeyboardFocusIntent || timelineMarker.IsHovered
+                || timelineMarker.RequestedFocusState != FocusState.Programmatic
+                || ToolTipService.GetToolTip(timelineMarker.HitTarget) is not ToolTip { IsOpen: false })
+                throw new InvalidOperationException($"A previous keyboard interaction leaked into programmatic timeline focus. "
+                    + $"state={timelineMarker.HitTarget.FocusState}, requested={timelineMarker.RequestedFocusState}, "
+                    + $"intent={timelineMarker.HasKeyboardFocusIntent}, pointer={timelineMarker.IsPointerOver}, "
                     + $"preview={(ToolTipService.GetToolTip(timelineMarker.HitTarget) as ToolTip)?.IsOpen}.");
             SetTimelineMarkerPointer(currentUser.ToString(), true);
             if (!step.ContinueButton.Focus(FocusState.Pointer))

@@ -279,6 +279,12 @@ if ($ScientificPublication) {
     .scientific-publication .equation-number { flex: 0 0 auto; font: 8pt "Times New Roman", serif; color: #222; }
     .scientific-publication .katex-display { margin: 0 !important; }
     .scientific-publication .katex { font-size: 1em !important; }
+    .scientific-publication .publication-toc { margin: 7mm 0 0; break-after: page; }
+    .scientific-publication .publication-toc > h2 { margin: 0 0 3mm !important; break-after: avoid; }
+    .scientific-publication .publication-toc ul { list-style: none !important; margin: 0 !important; padding: 0 !important; }
+    .scientific-publication .publication-toc li { margin: 0 0 1.6mm !important; padding-left: calc(var(--toc-depth) * 3.5mm); break-inside: avoid; }
+    .scientific-publication .publication-toc a { display: block; color: #006f94 !important; text-decoration: none !important; line-height: 1.35; overflow-wrap: anywhere; }
+    .scientific-publication .publication-toc .publication-toc-chapter { font-weight: 700; }
 '@
 }
 
@@ -425,6 +431,40 @@ $html = @"
           current = next;
         } while (current && current.tagName !== 'H2');
       }
+      // Use the final rendered order and numbering, including unnumbered front
+      // matter and references. Unique targets keep repeated titles unambiguous.
+      const outlineHeadings = Array.from(documentContent.querySelectorAll('h2, h3, h4, h5, h6'));
+      if (outlineHeadings.length) {
+        const contents = document.createElement('nav');
+        contents.className = 'publication-toc';
+        contents.setAttribute('aria-label', 'Inhaltsverzeichnis');
+        const contentsHeading = document.createElement('h2');
+        contentsHeading.textContent = 'Inhaltsverzeichnis';
+        const entries = document.createElement('ul');
+        outlineHeadings.forEach((heading, index) => {
+          heading.id = 'missum-publication-section-' + (index + 1);
+          const entry = document.createElement('li');
+          entry.style.setProperty('--toc-depth', String(Number(heading.tagName.slice(1)) - 2));
+          const destination = document.createElement('a');
+          destination.href = '#' + heading.id;
+          // Keep the displayed KaTeX label rather than mixing its visible text,
+          // hidden MathML and raw TeX into a duplicated plain-text caption.
+          const label = heading.cloneNode(true);
+          label.querySelectorAll('.math-source-text, .katex-mathml').forEach(source => source.remove());
+          label.querySelectorAll('a').forEach(link => link.replaceWith(...link.childNodes));
+          const caption = label.textContent.trim();
+          heading.setAttribute('aria-label', caption);
+          destination.setAttribute('aria-label', caption);
+          destination.append(...label.childNodes);
+          if (heading.tagName === 'H2') destination.className = 'publication-toc-chapter';
+          entry.append(destination);
+          entries.append(entry);
+        });
+        contents.append(contentsHeading, entries);
+        const firstSection = Array.from(documentContent.children).find(element => /^H[2-6]$/.test(element.tagName));
+        if (firstSection) firstSection.before(contents);
+        else documentContent.append(contents);
+      }
     }
     const finishDocument = () => {
       if (document.body.classList.contains('scientific-publication')) {
@@ -473,6 +513,7 @@ $html = @"
               reason: 'Publikationstitel passt nicht vollständig in Seitenmarke oder laufende Kopfzeile; fachlich kürzen.' });
         }
         for (const heading of documentContent.querySelectorAll('h2, h3, h4, h5, h6')) {
+          if (heading.closest('.publication-toc')) continue;
           const bounds = heading.getBoundingClientRect();
           const style = getComputedStyle(heading);
           const lineHeight = parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.2;
@@ -551,7 +592,11 @@ try {
         throw "Die PDF wurde nicht erzeugt, weil eine Überschrift nicht vollständig lesbar ist. $headingDetails Die vorherige PDF bleibt erhalten."
     }
 
-    $arguments = $commonArguments + @(
+    $publicationArguments = @()
+    if ($ScientificPublication) {
+        $publicationArguments = @('--export-tagged-pdf', '--generate-pdf-document-outline')
+    }
+    $arguments = $commonArguments + $publicationArguments + @(
         ('--user-data-dir=' + $printProfilePath),
         '--no-pdf-header-footer',
         ('--print-to-pdf=' + $temporaryPdf),

@@ -5,6 +5,7 @@ using Missum.Infrastructure.Storage;
 using Microsoft.Data.Sqlite;
 using System.Globalization;
 using System.Net.Http.Headers;
+using System.Security.Cryptography;
 using System.Text.Json;
 
 namespace Missum.Infrastructure.Repositories;
@@ -480,6 +481,43 @@ public sealed class SqliteChatArtifactRepository(
         var existing = await FindByServerIdAsync(messageId, serverArtifactId, cancellationToken).ConfigureAwait(false);
         if (existing is not null)
         {
+            if (existing.StepId is null && !string.IsNullOrWhiteSpace(stepId) && stepId.Length <= 200
+                && existing.Length == length && existing.ContentType == safeContentType
+                && string.Equals(existing.Sha256, sha256, StringComparison.OrdinalIgnoreCase))
+            {
+                // Older imports can predate the durable server anchor. Verify
+                // the replay's actual bytes before assigning an anchor to the
+                // existing owner; an existing anchor is never replaced.
+                var actualSha = Convert.ToHexString(await SHA256.HashDataAsync(content, cancellationToken).ConfigureAwait(false));
+                if (!actualSha.Equals(existing.Sha256, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("Das erneut gelieferte Artefakt stimmt nicht mit dem gespeicherten Inhalt überein.");
+                await database.WriteAsync(async (connection, transaction, token) =>
+                {
+                    await using var command = connection.CreateCommand();
+                    command.Transaction = transaction;
+                    command.CommandText = """
+                        UPDATE chat_artifacts SET step_id=$step
+                        WHERE id=$id AND message_id=$message AND server_artifact_id=$server
+                          AND step_id IS NULL AND sha256=$sha AND length=$length AND content_type=$type;
+                        """;
+                    command.Parameters.AddWithValue("$step", stepId);
+                    command.Parameters.AddWithValue("$id", existing.Id.ToString("D"));
+                    command.Parameters.AddWithValue("$message", messageId.ToString("D"));
+                    command.Parameters.AddWithValue("$server", serverArtifactId);
+                    command.Parameters.AddWithValue("$sha", existing.Sha256);
+                    command.Parameters.AddWithValue("$length", length);
+                    command.Parameters.AddWithValue("$type", safeContentType);
+                    if (await command.ExecuteNonQueryAsync(token).ConfigureAwait(false) == 0) return;
+                    command.CommandText = """
+                        UPDATE chat_messages SET revision=revision+1,updated_at=$now WHERE id=$message;
+                        UPDATE chat_sessions SET conversation_revision=conversation_revision+1,updated_at=$now
+                            WHERE id=(SELECT session_id FROM chat_messages WHERE id=$message);
+                        """;
+                    command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToDb());
+                    await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+                }, cancellationToken).ConfigureAwait(false);
+                return await FindByServerIdAsync(messageId, serverArtifactId, cancellationToken).ConfigureAwait(false) ?? existing;
+            }
             return existing;
         }
 

@@ -6,6 +6,27 @@ namespace Missum.App.Services;
 
 public sealed partial class MissumAiConnectionService
 {
+    /// <summary>Original files need a live HTTP gateway, without starting a model or media worker.</summary>
+    internal async Task<MissumAiClient> CreateArtifactClientAsync(CancellationToken cancellationToken = default)
+    {
+        var client = await CreateClientAsync(null, ensureProfileNativeRuntime: false, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var address = client.BaseAddress ?? throw new InvalidOperationException("Die Gatewayadresse fehlt.");
+            if (stackLifecycle is not null)
+                await stackLifecycle.EnsureGatewayStartedAsync(address, cancellationToken).ConfigureAwait(false);
+            await WaitForGatewayAsync(client, settings.Current.MissumAiProtocolVersion,
+                NativeModelRuntimeService.IsLocalGateway(address), TimeSpan.FromSeconds(30),
+                TimeSpan.FromMilliseconds(250), cancellationToken).ConfigureAwait(false);
+            return client;
+        }
+        catch
+        {
+            client.Dispose();
+            throw;
+        }
+    }
+
     internal Task WaitForGatewayAsync(MissumAiClient client, CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);

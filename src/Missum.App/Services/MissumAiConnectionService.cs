@@ -35,8 +35,9 @@ public sealed partial class MissumAiConnectionService(
         ILogger<MissumAiConnectionService> logger,
         Func<HttpMessageHandler> httpHandlerFactory,
         TimeSpan? probeTimeout = null,
-        NativeModelRuntimeService? nativeRuntime = null)
-        : this(settings, logger, nativeRuntime)
+        NativeModelRuntimeService? nativeRuntime = null,
+        MissumAiStackLifecycleService? stackLifecycle = null)
+        : this(settings, logger, nativeRuntime, stackLifecycle)
     {
         _httpHandlerFactory = httpHandlerFactory ?? throw new ArgumentNullException(nameof(httpHandlerFactory));
         if (probeTimeout is { } timeout)

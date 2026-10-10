@@ -100,20 +100,43 @@ public sealed partial class NativeAssistantPage
             desired.Add(element);
         }
         var messageSteps = Items(message, "toolSteps");
+        var artifacts = VisibleNativeMessageArtifacts(Items(message, "artifacts"));
+        var stepIds = messageSteps.Select(step => S(step, "id")).Where(id => id.Length > 0).ToHashSet(StringComparer.Ordinal);
+        var stepArtifacts = artifacts.Where(artifact => stepIds.Contains(S(artifact, "stepId")))
+            .GroupBy(artifact => S(artifact, "stepId"), StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal);
+        var renderedArtifactSteps = new HashSet<string>(StringComparer.Ordinal);
+        void ArtifactLinks(string key, JsonElement[] items)
+        {
+            if (items.Length == 0) return;
+            if (!blocks.TryGetValue(key, out var links))
+                blocks[key] = links = new NativeArtifactLinks(items, Guid.TryParse(messageId, out var parsed) ? parsed : null);
+            else ((NativeArtifactLinks)links).UpdateArtifacts(items);
+            desired.Add(links);
+        }
+        void ArtifactsAfterStep(string id)
+        {
+            // The durable step, not the evolving answer length or file arrival
+            // time, owns this position. Original recovery updates this same
+            // container when a legacy thumbnail is replaced by its original.
+            if (renderedArtifactSteps.Add(id) && stepArtifacts.TryGetValue(id, out var items))
+                ArtifactLinks("artifacts:step:" + id, items);
+        }
         var reasoningOwner = ActiveSubagent?.AgentId ?? "";
         var latestReasoning = messageSteps.LastOrDefault(step => S(step, "tool") == "assistant.reasoning"
             && NativeThinkingIndicatorState.IsOwnedStep(S(step, "agentId"), reasoningOwner));
         FrameworkElement? latestReasoningView = null;
         var subagentReceipts = messageSteps.Where(step => S(step, "tool") == "subagent").ToArray();
-        foreach (var step in messageSteps)
+        var positionedSteps = stepArtifacts.Count > 0 ? OrderNativeArtifactSteps(messageSteps) : messageSteps;
+        foreach (var step in positionedSteps)
         {
-            var next = step.TryGetProperty("contentOffset", out var position) && position.TryGetInt32(out var n) ? Math.Clamp(n, offset, content.Length) : offset;
+            var next = TryNativeStepOffset(step, out var n) ? Math.Clamp(n, offset, content.Length) : offset;
             Text("text:" + offset, content[offset..next]); offset = next;
             var id = S(step, "id", "step:" + sequence++);
             var tool = S(step, "tool");
             // The persisted child receipt owns its lifecycle row. Keep rejected
             // manager calls visible, and coalesce only calls for an accepted child.
-            if (IsAcceptedSubagentManagementStep(step, subagentReceipts)) continue;
+            if (IsAcceptedSubagentManagementStep(step, subagentReceipts)) { ArtifactsAfterStep(id); continue; }
             if (tool is "subagent" or "subagent.completed")
             {
                 var lifecycleKey = "tool:" + id;
@@ -128,6 +151,7 @@ public sealed partial class NativeAssistantPage
                 }
                 ((SubagentLifecycleView)lifecycle).Update(step, FindSubagentForStep(step));
                 desired.Add(lifecycle);
+                ArtifactsAfterStep(id);
                 continue;
             }
             if (S(step, "status") is "running" or "pending" && NativeThinkingIndicatorState.IsOwnedStep(S(step, "agentId"), reasoningOwner)
@@ -143,17 +167,19 @@ public sealed partial class NativeAssistantPage
                         Child = new TextBlock { TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true, FontSize = 16 } };
                 ((TextBlock)((Border)steeringView).Child).Text = detail;
                 desired.Add(steeringView);
+                ArtifactsAfterStep(id);
                 continue;
             }
             if (tool == "assistant.narration")
             {
                 Text("narration:" + id, detail);
                 if (!string.IsNullOrWhiteSpace(detail)) visibleAnswer.Append('\0').Append(id).Append('\0').Append(detail.TrimEnd());
+                ArtifactsAfterStep(id);
                 continue;
             }
             // The preparation receipt stores an idempotent request before the
             // server accepts it. Only an accepted continuation is a visible step.
-            if (tool == "assistant.continuation" && S(step, "status") != "completed") continue;
+            if (tool == "assistant.continuation" && S(step, "status") != "completed") { ArtifactsAfterStep(id); continue; }
             var key = "tool:" + id;
             if (!blocks.TryGetValue(key, out var element))
             {
@@ -168,6 +194,7 @@ public sealed partial class NativeAssistantPage
             if (tool == "assistant.reasoning") element.Visibility = Visibility.Visible;
             if (latestReasoning.ValueKind == JsonValueKind.Object && S(latestReasoning, "id") == id) latestReasoningView = element;
             desired.Add(element);
+            ArtifactsAfterStep(id);
         }
         Text("text:" + offset, content[offset..]);
         if (assistant && latestReasoning.ValueKind == JsonValueKind.Object && S(latestReasoning, "status") is "running" or "pending"
@@ -185,13 +212,9 @@ public sealed partial class NativeAssistantPage
             _modelPhases[messageId] = (_modelPhases.GetValueOrDefault(messageId) ?? new NativeModelPhasePresentation())
                 .ObserveContent(DateTimeOffset.UtcNow);
         if (S(message, "error") is { Length: > 0 } error && error != content) Text("error", error);
-        var artifacts = Items(message, "artifacts");
-        if (artifacts.Length > 0)
-        {
-            if (!blocks.TryGetValue("artifacts", out var links)) blocks["artifacts"] = links = new NativeArtifactLinks(artifacts, Guid.TryParse(messageId, out var parsed) ? parsed : null);
-            else ((NativeArtifactLinks)links).UpdateArtifacts(artifacts);
-            desired.Add(links);
-        }
+        // Unassociated files keep their existing footer placement. In
+        // particular, anchored images are never repeated in that collection.
+        ArtifactLinks("artifacts", artifacts.Where(artifact => !stepArtifacts.ContainsKey(S(artifact, "stepId"))).ToArray());
         if (assistant && IsResumableAssistantStatus(message))
         {
             if (!blocks.TryGetValue("continuation", out var continuation))
@@ -225,6 +248,42 @@ public sealed partial class NativeAssistantPage
         }
         foreach (var stale in blocks.Where(pair => !desired.Contains(pair.Value)).Select(pair => pair.Key).ToArray()) blocks.Remove(stale);
         RefreshThinkingIndicators();
+    }
+
+    private static JsonElement[] VisibleNativeMessageArtifacts(JsonElement[] artifacts)
+    {
+        var unique = artifacts.Where(artifact => Guid.TryParse(S(artifact, "id"), out var id) && id != Guid.Empty)
+            .DistinctBy(artifact => Guid.Parse(S(artifact, "id"))).ToArray();
+        var replaced = unique.Where(artifact => string.Equals(S(ResearchObject(artifact, "metadata"), "role"), "original", StringComparison.OrdinalIgnoreCase))
+            .Select(artifact => S(ResearchObject(artifact, "metadata"), "replacesArtifactId"))
+            .Where(id => Guid.TryParse(id, out _)).Select(Guid.Parse).ToHashSet();
+        // A snapshot can briefly carry both the recovered original and its
+        // legacy thumbnail. Their explicit relationship prevents a second card.
+        return unique.Where(artifact => !replaced.Contains(Guid.Parse(S(artifact, "id")))
+            || !string.Equals(S(ResearchObject(artifact, "metadata"), "role"), "thumbnail", StringComparison.OrdinalIgnoreCase)).ToArray();
+    }
+
+    private static bool TryNativeStepOffset(JsonElement step, out int offset)
+    {
+        offset = 0;
+        return step.ValueKind == JsonValueKind.Object && step.TryGetProperty("contentOffset", out var position)
+            && position.ValueKind == JsonValueKind.Number && position.TryGetInt32(out offset) && offset >= 0;
+    }
+
+    private static JsonElement[] OrderNativeArtifactSteps(JsonElement[] steps)
+    {
+        // Live receipts can be appended after newer persisted receipts. Sort
+        // only positioned slots, so their offsets cannot be clamped forward by
+        // an unrelated later receipt. Unpositioned slots and offset ties retain
+        // their existing order; no chronology is invented for unknown offsets.
+        var positioned = steps.Select((step, index) => (Step: step, Index: index,
+            Offset: TryNativeStepOffset(step, out var offset) ? (int?)offset : null))
+            .Where(item => item.Offset is not null).ToArray();
+        if (positioned.Length < 2) return steps;
+        var sorted = positioned.OrderBy(item => item.Offset).ThenBy(item => item.Index).ToArray();
+        var result = steps.ToArray();
+        for (var index = 0; index < positioned.Length; index++) result[positioned[index].Index] = sorted[index].Step;
+        return result;
     }
 
     private sealed class ToolStepView : Grid

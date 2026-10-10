@@ -2008,14 +2008,17 @@ public sealed partial class RunProcessor : BackgroundService
             workload.Height ?? 1024,
             workload.Seed,
             workload.Count ?? 1);
-        await BeginWorkerRunAsync(runId, "image.generate", "Z-Image-Turbo Q4_K", cancellationToken).ConfigureAwait(false);
+        var stepId = WorkerToolStepId(runId, "image.generate");
+        await BeginWorkerRunAsync(runId, "image.generate", "Z-Image-Turbo Q4_K", stepId,
+            JsonSerializer.SerializeToElement(request, MissumAiProtocol.CreateJsonOptions()), cancellationToken).ConfigureAwait(false);
         var artifacts = await _workers.GenerateImagesAsync(request, runId, cancellationToken).ConfigureAwait(false);
         foreach (var artifact in artifacts)
         {
-            await _repository.AppendEventAsync(runId, RunEventTypes.ArtifactCreated, artifact, cancellationToken).ConfigureAwait(false);
+            await _repository.AppendEventAsync(runId, RunEventTypes.ArtifactCreated, artifact with { StepId = stepId }, cancellationToken).ConfigureAwait(false);
         }
 
-        await CompleteWorkerRunAsync(runId, "Bildgenerierung", "Z-Image-Turbo Q4_K", artifacts, cancellationToken).ConfigureAwait(false);
+        await CompleteWorkerRunAsync(runId, "Bildgenerierung", "Z-Image-Turbo Q4_K", artifacts,
+            "image.generate", stepId, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task ProcessMediaAnalysisAsync(
@@ -2031,7 +2034,6 @@ public sealed partial class RunProcessor : BackgroundService
             throw new InvalidOperationException("Media type is missing.");
         }
 
-        await BeginWorkerRunAsync(runId, "media.analyze", "Missum Media Pipeline", cancellationToken).ConfigureAwait(false);
         var arguments = JsonSerializer.SerializeToElement(
             new
             {
@@ -2040,6 +2042,9 @@ public sealed partial class RunProcessor : BackgroundService
                 detailWindows = workload.DetailWindows,
             },
             MissumAiProtocol.CreateJsonOptions());
+        var stepId = WorkerToolStepId(runId, "media.analyze");
+        await BeginWorkerRunAsync(runId, "media.analyze", "Missum Media Pipeline", stepId,
+            arguments, cancellationToken).ConfigureAwait(false);
         var result = await _toolExecutor.ExecuteAsync(
             "media.analyze",
             arguments,
@@ -2048,7 +2053,7 @@ public sealed partial class RunProcessor : BackgroundService
         await _repository.AppendEventAsync(
             runId,
             RunEventTypes.ServerToolCompleted,
-            new { tool = "media.analyze", success = result.Succeeded, errorCode = result.ErrorCode,
+            new { tool = "media.analyze", callId = stepId, toolCallId = stepId, success = result.Succeeded, errorCode = result.ErrorCode,
                 errorMessage = result.ErrorMessage, result = result.Result },
             cancellationToken).ConfigureAwait(false);
         if (!result.Succeeded)
@@ -2060,7 +2065,7 @@ public sealed partial class RunProcessor : BackgroundService
         var visibleArtifacts = result.Artifacts.Where(IsVisibleArtifact).ToArray();
         foreach (var artifact in visibleArtifacts)
         {
-            await _repository.AppendEventAsync(runId, RunEventTypes.ArtifactCreated, artifact, cancellationToken).ConfigureAwait(false);
+            await _repository.AppendEventAsync(runId, RunEventTypes.ArtifactCreated, artifact with { StepId = stepId }, cancellationToken).ConfigureAwait(false);
         }
 
         await CompleteWorkerRunAsync(
@@ -2068,18 +2073,23 @@ public sealed partial class RunProcessor : BackgroundService
             "Medienanalyse",
             result.ModelId ?? "Missum Media Pipeline",
             visibleArtifacts,
+            "media.analyze", stepId,
             cancellationToken).ConfigureAwait(false);
     }
 
     private static bool IsVisibleArtifact(ArtifactDescriptor artifact) =>
-        artifact.Metadata is null
-        || !artifact.Metadata.TryGetValue("visibility", out var visibility)
-        || !string.Equals(visibility, "internal", StringComparison.OrdinalIgnoreCase);
+        artifact.Metadata?.GetValueOrDefault("role") != "vision_input"
+        && (artifact.Metadata?.GetValueOrDefault("role") == "original"
+            || artifact.Metadata is null
+            || !artifact.Metadata.TryGetValue("visibility", out var visibility)
+            || !string.Equals(visibility, "internal", StringComparison.OrdinalIgnoreCase));
 
     private async Task BeginWorkerRunAsync(
         string runId,
         string tool,
         string provider,
+        string stepId,
+        JsonElement arguments,
         CancellationToken cancellationToken)
     {
         await _repository.AppendEventAsync(
@@ -2089,7 +2099,8 @@ public sealed partial class RunProcessor : BackgroundService
             cancellationToken).ConfigureAwait(false);
         await _repository.UpdateStateAsync(runId, RunState.Running, provider, cancellationToken: cancellationToken).ConfigureAwait(false);
         await _repository.AppendEventAsync(runId, RunEventTypes.RunStarted, new { protocolVersion = MissumAiProtocol.Version }, cancellationToken).ConfigureAwait(false);
-        await _repository.AppendEventAsync(runId, RunEventTypes.ServerToolStarted, new { tool }, cancellationToken).ConfigureAwait(false);
+        await _repository.AppendEventAsync(runId, RunEventTypes.ServerToolStarted,
+            new { tool, callId = stepId, toolCallId = stepId, arguments }, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task CompleteWorkerRunAsync(
@@ -2097,12 +2108,14 @@ public sealed partial class RunProcessor : BackgroundService
         string title,
         string provider,
         IReadOnlyList<ArtifactDescriptor> artifacts,
+        string tool,
+        string stepId,
         CancellationToken cancellationToken)
     {
         await _repository.AppendEventAsync(
             runId,
             RunEventTypes.ServerToolCompleted,
-            new { provider, artifactCount = artifacts.Count },
+            new { tool, callId = stepId, toolCallId = stepId, provider, artifactCount = artifacts.Count },
             cancellationToken).ConfigureAwait(false);
         await _repository.AppendEventAsync(
             runId,
@@ -2112,6 +2125,8 @@ public sealed partial class RunProcessor : BackgroundService
         await _repository.UpdateStateAsync(runId, RunState.Completed, provider, title, cancellationToken: cancellationToken).ConfigureAwait(false);
         _runtime.WriteLog("Information", "run.completed", $"Worker-Run {runId} erfolgreich beendet.");
     }
+
+    internal static string WorkerToolStepId(string runId, string tool) => $"{runId}:worker:{tool}";
 
     private async Task<LmChatResult> ExecuteStagedWebResearchModelAsync(
         string runId,

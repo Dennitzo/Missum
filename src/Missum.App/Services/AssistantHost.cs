@@ -514,8 +514,9 @@ public sealed class AssistantHost : IAsyncDisposable
 
     private async Task<LanArtifactResource?> ResolveArtifactAsync(Guid id, CancellationToken token)
     {
-        var artifact = await _services.GetRequiredService<IChatArtifactRepository>().GetAsync(id, token).ConfigureAwait(false);
-        if (artifact is null) return null;
+        var stored = await _services.GetRequiredService<IChatArtifactRepository>().GetAsync(id, token).ConfigureAwait(false);
+        if (stored is null) return null;
+        var artifact = await _services.GetRequiredService<AssistantArtifactPreviewService>().ResolveOriginalArtifactAsync(id, token).ConfigureAwait(false);
         var buffer = new MemoryStream();
         await _services.GetRequiredService<IBinaryObjectStore>().ExportAsync(artifact.BlobId, buffer, token).ConfigureAwait(false);
         buffer.Position = 0;

@@ -120,6 +120,7 @@ public partial class App : Application
                 services.AddSingleton<SystemAudioAnalysisCaptureService>();
                 services.AddSingleton<DesktopScreenshotService>();
                 services.AddSingleton<ScreenClipCaptureService>();
+                services.AddSingleton<AssistantArtifactOriginalResolver>();
                 services.AddSingleton<AssistantArtifactPreviewService>();
                 services.AddSingleton<ShellViewModel>();
                 services.AddSingleton<RecentActivityService>();

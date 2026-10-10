@@ -686,10 +686,29 @@ public sealed class AgentToolExecutor
 
     internal static IReadOnlyList<ArtifactDescriptor> VisibleMediaArtifacts(
         IReadOnlyList<ArtifactDescriptor> artifacts)
-        => artifacts.Where(static item => item.Metadata is null
-                || !item.Metadata.TryGetValue("role", out var role)
-                || !string.Equals(role, "vision_input", StringComparison.Ordinal))
-            .ToArray();
+    {
+        var originals = artifacts.Where(item => Metadata(item, "role") == "original").ToArray();
+        var originalIds = originals.Select(static item => item.ArtifactId).ToHashSet(StringComparer.Ordinal);
+        var originalUploads = originals.Select(item => Metadata(item, "sourceUploadId"))
+            .OfType<string>().ToHashSet(StringComparer.Ordinal);
+        var singleImageResult = originals.Length == 1 && artifacts.All(item =>
+            Metadata(item, "role") is ("original" or "vision_input" or "thumbnail")
+            && Metadata(item, "group") is null && Metadata(item, "timecodeSeconds") is null);
+        return artifacts.Where(item =>
+        {
+            var role = Metadata(item, "role");
+            if (role == "vision_input") return false;
+            if (role != "thumbnail" || originals.Length == 0) return true;
+            // Keep video/frame previews and unrelated images. Only replace a
+            // thumbnail when the corresponding exact original is present.
+            if (Metadata(item, "originalArtifactId") is { } originalId) return !originalIds.Contains(originalId);
+            if (Metadata(item, "sourceUploadId") is { } uploadId) return !originalUploads.Contains(uploadId);
+            return !singleImageResult;
+        }).ToArray();
+
+        static string? Metadata(ArtifactDescriptor item, string key) =>
+            item.Metadata is { } metadata && metadata.TryGetValue(key, out var value) ? value : null;
+    }
 
     internal static IReadOnlyList<string> ReadReferenceUploadIds(JsonElement arguments)
     {

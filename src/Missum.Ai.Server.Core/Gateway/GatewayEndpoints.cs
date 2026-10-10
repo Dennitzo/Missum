@@ -42,6 +42,7 @@ internal static class GatewayEndpoints
 
         endpoints.MapPost("/v1/uploads", CreateUploadAsync);
         endpoints.MapGet("/v1/uploads/{uploadId}", GetUploadAsync);
+        endpoints.MapPost("/v1/uploads/{uploadId}/original-artifact", ExportOriginalUploadAsync);
         endpoints.MapPut("/v1/uploads/{uploadId}/chunks/{index:int}", PutUploadChunkAsync);
         endpoints.MapPost("/v1/uploads/{uploadId}/complete", CompleteUploadAsync);
         endpoints.MapDelete("/v1/uploads/{uploadId}", DeleteUploadAsync);
@@ -371,6 +372,33 @@ internal static class GatewayEndpoints
             throw new KeyNotFoundException("Upload not found.");
         }
 
+        await WriteJsonAsync(context, result).ConfigureAwait(false);
+    }
+
+    private static async Task ExportOriginalUploadAsync(HttpContext context)
+    {
+        var uploads = context.RequestServices.GetRequiredService<UploadService>();
+        var id = GetRouteString(context, "uploadId");
+        var upload = await uploads.GetCompletedAsync(id, context.RequestAborted).ConfigureAwait(false)
+            ?? throw new KeyNotFoundException("The original image upload is no longer available.");
+        if (!upload.MediaType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException("Only original image uploads can be exported here.");
+        var path = await uploads.ResolveCompletedPathAsync(id, context.RequestAborted).ConfigureAwait(false)
+            ?? throw new KeyNotFoundException("The original image payload is no longer available.");
+        await using (var source = File.OpenRead(path))
+        {
+            var sha = Convert.ToHexStringLower(await System.Security.Cryptography.SHA256.HashDataAsync(source, context.RequestAborted).ConfigureAwait(false));
+            if (source.Length != upload.Length || !sha.Equals(upload.Sha256, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("The original image does not match the verified upload.");
+        }
+        var artifacts = context.RequestServices.GetRequiredService<ArtifactService>();
+        var result = await artifacts.ImportAsync(path, upload.FileName, upload.MediaType,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["role"] = "original", ["sourceUploadId"] = id,
+            }, context.RequestAborted).ConfigureAwait(false);
+        if (result.Length != upload.Length || !result.Sha256.Equals(upload.Sha256, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("The original image does not match the verified upload.");
         await WriteJsonAsync(context, result).ConfigureAwait(false);
     }
 

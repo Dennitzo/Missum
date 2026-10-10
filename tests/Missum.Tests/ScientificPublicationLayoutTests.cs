@@ -4,6 +4,8 @@ using Missum.App.Services;
 using Missum.Core.Research;
 using Microsoft.Extensions.Logging.Abstractions;
 using UglyToad.PdfPig;
+using UglyToad.PdfPig.Actions;
+using UglyToad.PdfPig.Outline;
 
 namespace Missum.Tests;
 
@@ -190,7 +192,7 @@ public sealed class ScientificPublicationLayoutTests
             var before = await File.ReadAllBytesAsync(pdfPath, timeout.Token);
             using (var pdf = PdfDocument.Open(pdfPath))
             {
-                var words = pdf.GetPage(1).GetWords().ToArray();
+                var words = pdf.GetPages().Single(page => page.GetWords().Any(word => word.Text == "FULLWIDTHSTART")).GetWords().ToArray();
                 var marker = Assert.Single(words, word => word.Text == "FULLWIDTHSTART");
                 var line = words.Where(word => Math.Abs(word.BoundingBox.Bottom - marker.BoundingBox.Bottom) < 1.5
                     && word.BoundingBox.Left >= marker.BoundingBox.Left).OrderBy(word => word.BoundingBox.Left).ToArray();
@@ -210,6 +212,46 @@ public sealed class ScientificPublicationLayoutTests
             Assert.Contains("Publikationstitel", error.Message);
             Assert.Contains("nicht vollständig", error.Message);
             Assert.Equal(before, await File.ReadAllBytesAsync(pdfPath, timeout.Token));
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    [Trait("Category", "Live")]
+    public async Task RealPublicationHasInternalContentsLinksAndChapterBookmarks()
+    {
+        if (Environment.GetEnvironmentVariable("MISSUM_PUBLICATION_LAYOUT_LIVE") != "1") return;
+        var root = Path.Combine(Path.GetTempPath(), "missum-publication-contents", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var source = Path.Combine(root, "Publikation.md");
+            var body = string.Join("\n\n", Enumerable.Repeat(
+                "Die Prüfung beschreibt Annahmen, Gültigkeitsgrenzen und nachvollziehbare Belege des Modells.", 35));
+            await File.WriteAllTextAsync(source, "# Erdpolumkehr\n\n## Zusammenfassung\n\nÜberblick über die Untersuchung."
+                + "\n\n## Modell\n\n### Prüfung\n\n" + body
+                + "\n\n## Modell\n\n### Prüfung\n\n" + body
+                + "\n\n## Geltung $R/R_c$\n\nDie Annahmen sind eingeschränkt."
+                + "\n\n## Quellen\n\nDie Originalquellen bleiben überprüfbar.");
+            using var exporter = new DocumentPdfExporter(NullLogger<DocumentPdfExporter>.Instance);
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+            var pdfPath = await exporter.EnsureCurrentAsync(source, sourceChanged: true, scientificPublication: true, cancellationToken: timeout.Token);
+            Assert.NotNull(pdfPath);
+            using var pdf = PdfDocument.Open(pdfPath);
+            var contentsPage = pdf.GetPages().Single(page => page.GetWords().Any(word => word.Text == "Inhaltsverzeichnis"));
+            var destinations = contentsPage.GetAnnotations().Select(annotation => annotation.Action).OfType<GoToAction>().ToArray();
+            Assert.Equal(7, destinations.Length);
+            Assert.DoesNotContain("$R/R_c$", string.Join(' ', contentsPage.GetWords().Select(word => word.Text)));
+            Assert.All(destinations, action => Assert.InRange(action.Destination.PageNumber, 1, pdf.NumberOfPages));
+            Assert.Contains(destinations, action => action.Destination.PageNumber > contentsPage.Number);
+            Assert.True(pdf.TryGetBookmarks(out var bookmarks));
+            var chapters = bookmarks.GetNodes().OfType<DocumentBookmarkNode>().ToArray();
+            var first = Assert.Single(chapters, bookmark => bookmark.Title == "1.1 Modell");
+            var second = Assert.Single(chapters, bookmark => bookmark.Title == "1.2 Modell");
+            Assert.True(second.PageNumber > first.PageNumber, "Repeated titles still navigate to their distinct chapters.");
+            Assert.Contains(chapters, bookmark => bookmark.Title == "1.1.1 Prüfung");
+            Assert.Contains(chapters, bookmark => bookmark.Title == "1.2.1 Prüfung");
+            Assert.Contains(destinations, action => action.Destination.PageNumber == second.PageNumber);
         }
         finally { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
     }

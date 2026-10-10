@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import shutil
 import subprocess
 import threading
 import uuid
@@ -105,6 +106,18 @@ def _inspect_image(source: Path) -> dict:
         with Image.open(source) as image:
             width, height = image.size
             image_format = image.format or "unknown"
+            # Keep the original upload unchanged for opening and chat preview.
+            # Its suffix and MIME describe the actual decoded container, not the
+            # payload.bin transport name or the JPEG used only by the model.
+            extension = {
+                "JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp", "GIF": ".gif",
+                "BMP": ".bmp", "TIFF": ".tiff", "ICO": ".ico", "PPM": ".ppm",
+            }.get(image_format)
+            if extension is None:
+                extension = next((suffix for suffix, name in Image.registered_extensions().items()
+                                  if name == image_format), ".bin")
+            original = job_dir / ("original" + extension)
+            original_media_type = Image.MIME.get(image_format, "image/" + image_format.lower())
             # llama.cpp's multimodal loader is deliberately fed a decoded JPEG
             # instead of the upload container. In particular, otherwise valid
             # WebP files are not supported consistently by every Windows vision
@@ -118,12 +131,14 @@ def _inspect_image(source: Path) -> dict:
             if image.mode not in {"RGB", "L"}:
                 image = image.convert("RGB")
             image.save(thumbnail, "JPEG", quality=88, optimize=True)
+        shutil.copyfile(source, original)
     except (OSError, ValueError, SyntaxError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exception:
         raise HTTPException(400, detail={"errorCode": "media.invalid_image"}) from exception
     return {
         "kind": "image",
         "metadata": {"width": width, "height": height, "format": image_format},
         "artifacts": [
+            _artifact(original, original_media_type, "original"),
             _artifact(vision_input, "image/jpeg", "vision_input"),
             _artifact(thumbnail, "image/jpeg", "thumbnail"),
         ],

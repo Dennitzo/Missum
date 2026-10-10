@@ -1,4 +1,6 @@
 using Missum.Core.Contracts;
+using Missum.Core.Models;
+using System.Security.Cryptography;
 using Windows.Graphics.Imaging;
 using Windows.Storage;
 using Windows.Storage.FileProperties;
@@ -13,6 +15,7 @@ public sealed class AssistantArtifactPreviewService : IDisposable
     public const string VirtualHost = "assistant-preview.local";
     private readonly IChatArtifactRepository _artifacts;
     private readonly IBinaryObjectStore _blobs;
+    private readonly AssistantArtifactOriginalResolver? _originals;
     private readonly SemaphoreSlim _gate = new(1, 1);
     public string CacheRoot { get; }
 
@@ -21,6 +24,17 @@ public sealed class AssistantArtifactPreviewService : IDisposable
         IBinaryObjectStore blobs)
         : this(artifacts, blobs, Path.Combine(App.Current.DataDirectory, "PreviewCache", "Artifacts"))
     {
+    }
+
+    public AssistantArtifactPreviewService(IChatArtifactRepository artifacts, IBinaryObjectStore blobs,
+        AssistantArtifactOriginalResolver originals)
+        : this(artifacts, blobs, Path.Combine(App.Current.DataDirectory, "PreviewCache", "Artifacts")) => _originals = originals;
+
+    public async Task<ChatArtifact> ResolveOriginalArtifactAsync(Guid artifactId, CancellationToken token)
+    {
+        var artifact = await _artifacts.GetAsync(artifactId, token).ConfigureAwait(false)
+            ?? throw new KeyNotFoundException("Das lokale Artefakt wurde nicht gefunden.");
+        return _originals is null ? artifact : await _originals.ResolveAsync(artifact, token).ConfigureAwait(false);
     }
 
     internal AssistantArtifactPreviewService(
@@ -97,16 +111,23 @@ public sealed class AssistantArtifactPreviewService : IDisposable
 
     public async Task<string> MaterializeOriginalAsync(Guid artifactId, CancellationToken cancellationToken)
     {
+        var original = await ResolveOriginalArtifactAsync(artifactId, cancellationToken).ConfigureAwait(false);
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var artifact = await _artifacts.GetAsync(artifactId, cancellationToken).ConfigureAwait(false)
-                ?? throw new KeyNotFoundException("Das lokale Artefakt wurde nicht gefunden.");
+            var artifact = original;
             var directory = Path.Combine(CacheRoot, artifact.Id.ToString("N"));
             Directory.CreateDirectory(directory);
             var extension = SafeExtension(artifact.FileName, artifact.ContentType);
             var path = Path.Combine(directory, "original" + extension);
-            if (!File.Exists(path) || new FileInfo(path).Length != artifact.Length)
+            var valid = false;
+            if (File.Exists(path) && new FileInfo(path).Length == artifact.Length)
+            {
+                await using var cached = File.OpenRead(path);
+                valid = Convert.ToHexStringLower(await SHA256.HashDataAsync(cached, cancellationToken).ConfigureAwait(false))
+                    .Equals(artifact.Sha256, StringComparison.OrdinalIgnoreCase);
+            }
+            if (!valid)
             {
                 await WriteOriginalAsync(artifact.BlobId, path, cancellationToken).ConfigureAwait(false);
             }
