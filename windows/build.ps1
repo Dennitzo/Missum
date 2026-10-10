@@ -4,6 +4,11 @@ param(
     [ValidateSet('Debug', 'Release')]
     [string] $Configuration = 'Release',
 
+    [switch] $RunTests,
+
+    [switch] $RunSmoke,
+
+    # Retained for callers that explicitly skipped validation before it became opt-in.
     [switch] $SkipTests,
 
     [switch] $SkipSmoke,
@@ -57,19 +62,19 @@ Invoke-MissumDotNet -CommandArguments @(
     ("-p:RuntimeIdentifier={0}" -f $RuntimeIdentifier),
     '--nologo'
 )
-if (-not $SkipTests) {
+if ($RunTests -and -not $SkipTests) {
     & (Join-Path $PSScriptRoot 'test.ps1') -Configuration $Configuration
     # Includes DeepSeek integrated-vision routing and native projector/preset tests.
     & (Join-Path $PSScriptRoot 'test-agent-context.ps1') -Configuration $Configuration -SkipClientTests
 }
 if (-not $SkipPublish) {
-    # Publish smoke verifies the bundled native catalog against current sources,
-    # including DeepSeek vision support; stale runtime assets fail the build.
+    # The normal portable build never launches test suites or a QA window.
+    # Native smoke is available only when explicitly requested with -RunSmoke.
     & (Join-Path $PSScriptRoot 'publish.ps1') `
         -Mode SingleFile `
         -RuntimeIdentifier $RuntimeIdentifier `
         -OutputDirectory $PortableOutputDirectory `
-        -SkipSmoke:$SkipSmoke
+        -SkipSmoke:($SkipSmoke -or -not $RunSmoke)
 
     $portableExecutable = Join-Path $PortableOutputDirectory 'Missum.exe'
     $portableManifest = Assert-MissumArtifactPath -Path ($PortableOutputDirectory + '.manifest.json')

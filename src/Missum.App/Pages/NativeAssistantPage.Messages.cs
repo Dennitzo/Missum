@@ -19,6 +19,7 @@ public sealed partial class NativeAssistantPage
 
     private void UpdateRunDurations()
     {
+        if (_conversationSelection?.IsSelecting == true) return;
         var second = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         if (_lastHeaderSecond == second) return;
         _lastHeaderSecond = second;

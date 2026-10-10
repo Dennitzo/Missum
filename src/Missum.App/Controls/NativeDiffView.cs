@@ -4,7 +4,6 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using Windows.ApplicationModel.DataTransfer;
 using Windows.UI;
 
 namespace Missum.App.Controls;
@@ -73,11 +72,11 @@ public sealed partial class NativeDiffView : UserControl, IDisposable
         }
 
         var copy = new MenuFlyoutItem { Text = "Gesamten Diff kopieren" };
-        copy.Click += (_, _) =>
+        copy.Click += async (_, _) =>
         {
-            var package = new DataPackage();
-            package.SetText(_diff);
-            Clipboard.SetContent(package);
+            var copied = await NativeClipboard.WriteTextAsync(_diff);
+            ToolTipService.SetToolTip(copy, copied ? "Diff kopiert"
+                : NativeClipboard.UnavailableMessage);
         };
         var menu = new MenuFlyout();
         menu.Items.Add(copy);

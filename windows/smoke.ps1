@@ -327,6 +327,35 @@ try {
         Copy-Item -LiteralPath $looseMathPreview -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.' + $looseMathPreviewName + '.png')) -Force
     }
     Write-Host 'Loose scientific formulas, protected literals, matching sizes and answer/reasoning streaming verified.'
+    $physicsPath = Join-Path $smokeData 'native-physics-latex-validation.json'
+    if (-not (Test-Path -LiteralPath $physicsPath -PathType Leaf) -or (Get-Item -LiteralPath $physicsPath).LastWriteTimeUtc -lt $startedAt.AddSeconds(-1)) {
+        throw 'Missing or stale native physics formula evidence.'
+    }
+    $physics = Get-Content -LiteralPath $physicsPath -Raw | ConvertFrom-Json
+    if ($physics.processId -ne $process.Id -or $physics.exactStoredFormulas -ne 2) { throw 'Physics formula evidence does not match this process.' }
+    foreach ($physicsCheck in @('passed','singleLineDisplayRecognized','streamingPrefixesRemainLiteral','completedFormulaTypesetsDuringStreaming','appendedProseRetainsFormula','unsupportedSizingDisplaysWithoutRawFallback','originalFormulaCopyTextPreserved')) {
+        if ($physics.$physicsCheck -ne $true) { throw "Native physics formula check failed: $physicsCheck" }
+    }
+    Copy-Item -LiteralPath $physicsPath -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-physics-latex-validation.json')) -Force
+    $physicsPreview = Join-Path $smokeData 'native-physics-latex-preview.png'
+    if (-not (Test-Path -LiteralPath $physicsPreview -PathType Leaf) -or (Get-Item -LiteralPath $physicsPreview).Length -lt 100) { throw 'Native physics formula preview is missing.' }
+    Copy-Item -LiteralPath $physicsPreview -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-physics-latex-preview.png')) -Force
+    Write-Host 'Exact stored physics LaTeX, sizing compatibility and original copy source verified.'
+    $boxedPath = Join-Path $smokeData 'native-boxed-latex-validation.json'
+    if (-not (Test-Path -LiteralPath $boxedPath -PathType Leaf) -or
+        (Get-Item -LiteralPath $boxedPath).LastWriteTimeUtc -lt $startedAt.AddSeconds(-1)) {
+        throw 'Native boxed-formula smoke did not produce fresh evidence.'
+    }
+    $boxedValidation = Get-Content -LiteralPath $boxedPath -Raw | ConvertFrom-Json
+    if ($boxedValidation.processId -ne $process.Id) { throw 'Native boxed-formula smoke used another process.' }
+    foreach ($boxedCheck in @('passed', 'exactScreenshotFormula', 'boxedTypeset', 'longArrowAndGermanTextPreserved', 'partialBoxesTypeset', 'nestedBoxesTypeset', 'incompleteStreamingFormulaRemainsLiteral', 'appendedTextRetainsFormula', 'originalCopySourcePreserved')) {
+        if ($boxedValidation.PSObject.Properties.Name -notcontains $boxedCheck -or $boxedValidation.$boxedCheck -ne $true) {
+            throw "Native boxed-formula smoke failed: $boxedCheck"
+        }
+    }
+    Copy-Item -LiteralPath $boxedPath -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-boxed-latex-validation.json')) -Force
+    Copy-Item -LiteralPath (Join-Path $smokeData 'native-boxed-latex-preview.png') -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-boxed-latex-preview.png')) -Force
+    Write-Host 'Exact boxed metric relation, nested boxes and original LaTeX copy source verified.'
     foreach ($composerPreviewName in @('native-composer-preview', 'native-composer-hover-preview', 'native-composer-narrow-preview', 'native-selection-preview')) {
         $composerPreview = Join-Path $smokeData ($composerPreviewName + '.png')
         if (-not (Test-Path -LiteralPath $composerPreview -PathType Leaf)) { throw "Missing native composer preview: $composerPreviewName" }
@@ -450,6 +479,40 @@ try {
     }
     Copy-Item -LiteralPath $noticePath -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-notice-selection-validation.json')) -Force
     Write-Host 'Native selectable errors and exact LaTeX/Unicode copy text verified.'
+    $chatSelectionPath = Join-Path $smokeData 'native-selection-clipboard-validation.json'
+    if (-not (Test-Path -LiteralPath $chatSelectionPath -PathType Leaf) -or
+        (Get-Item -LiteralPath $chatSelectionPath).LastWriteTimeUtc -lt $startedAt.AddSeconds(-1)) {
+        throw 'Native chat selection and clipboard smoke did not produce fresh evidence.'
+    }
+    $chatSelection = Get-Content -LiteralPath $chatSelectionPath -Raw | ConvertFrom-Json
+    if ($chatSelection.processId -ne $process.Id -or $chatSelection.streamingUpdates -ne 100 -or $chatSelection.retryAttempts -ne 3) {
+        throw 'Native chat selection smoke did not exercise streaming and clipboard retries in the real process.'
+    }
+    foreach ($selectionCheck in @('passed', 'partialWordSelection', 'readMenuPreservesSelection', 'selectedRunsRetained', 'selectionAndScrollStable', 'modelContinues', 'footerSnapshotCurrent', 'busyClipboardRecovered', 'uiThreadRetained', 'permanentLockHandled', 'selectionPreservedAfterCopyFailure', 'latestSnapshotRenderedAfterClear', 'newSelectionCopiesCurrentRange', 'pasteTextPreserved', 'composerClearsChatSelection')) {
+        if ($chatSelection.PSObject.Properties.Name -notcontains $selectionCheck -or $chatSelection.$selectionCheck -ne $true) {
+            throw "Native chat selection and clipboard smoke failed: $selectionCheck"
+        }
+    }
+    Copy-Item -LiteralPath $chatSelectionPath -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-selection-clipboard-validation.json')) -Force
+    Copy-Item -LiteralPath (Join-Path $smokeData 'native-selection-streaming-preview.png') -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-selection-streaming-preview.png')) -Force
+    Write-Host 'Native partial-text selection, 100 streaming updates and locked-clipboard recovery verified.'
+    $scrollSelectionPath = Join-Path $smokeData 'native-selection-scroll-validation.json'
+    if (-not (Test-Path -LiteralPath $scrollSelectionPath -PathType Leaf) -or
+        (Get-Item -LiteralPath $scrollSelectionPath).LastWriteTimeUtc -lt $startedAt.AddSeconds(-1)) {
+        throw 'Native mouse/wheel selection smoke did not produce fresh evidence.'
+    }
+    $scrollSelection = Get-Content -LiteralPath $scrollSelectionPath -Raw | ConvertFrom-Json
+    if ($scrollSelection.processId -ne $process.Id -or $scrollSelection.wheels -lt 8 -or $scrollSelection.autoScrollSteps -lt 2) {
+        throw 'Native scroll selection smoke did not exercise real mouse, wheel and autoscroll events.'
+    }
+    foreach ($scrollCheck in @('passed', 'realMouseInput', 'realWheelInput', 'partialWordDrag', 'releasedWheelSelectionStable', 'scrollbarSelectionStable', 'heldWheelSelectionStable', 'heldSingleBlockWheelStable', 'dragAfterWheelHitsVisibleCharacter', 'unchangedEndpointRetainsProjection', 'releaseAfterWheelStable', 'crossBlockAnchorStable', 'edgeAutoScrollMonotonic', 'captureLossStopsGesture', 'copyAfterScrollingExact', 'modelUnchanged')) {
+        if ($scrollSelection.PSObject.Properties.Name -notcontains $scrollCheck -or $scrollSelection.$scrollCheck -ne $true) {
+            throw "Native mouse/wheel selection smoke failed: $scrollCheck"
+        }
+    }
+    Copy-Item -LiteralPath $scrollSelectionPath -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-selection-scroll-validation.json')) -Force
+    Copy-Item -LiteralPath (Join-Path $smokeData 'native-selection-scroll-preview.png') -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-selection-scroll-preview.png')) -Force
+    Write-Host 'Real mouse/wheel input, scrollbar dragging, cross-block autoscroll and capture-loss recovery verified.'
     $simulationLifecyclePath = Join-Path $smokeData 'native-simulation-lifecycle-validation.json'
     if (-not (Test-Path -LiteralPath $simulationLifecyclePath -PathType Leaf) -or
         (Get-Item -LiteralPath $simulationLifecyclePath).LastWriteTimeUtc -lt $startedAt.AddSeconds(-1)) {

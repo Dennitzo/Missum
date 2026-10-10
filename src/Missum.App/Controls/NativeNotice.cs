@@ -7,7 +7,6 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using Windows.ApplicationModel.DataTransfer;
 
 namespace Missum.App.Controls;
 
@@ -72,8 +71,8 @@ public static class NativeNotice
             _notice = notice;
             AutomationProperties.SetName(_copy, CopyLabel);
             ToolTipService.SetToolTip(_copy, CopyLabel);
-            _copy.Click += (_, _) => TryUiUpdate("copy.Click", () => Copy(_copy));
-            _copyMenu.Click += (_, _) => TryUiUpdate("copyMenu.Click", () => Copy(_copyMenu));
+            _copy.Click += async (_, _) => await CopyAsync(_copy);
+            _copyMenu.Click += async (_, _) => await CopyAsync(_copyMenu);
             if (_notice.ActionButton is null) _notice.ActionButton = _copy;
             // Preserve existing actions and menus. A context copy action also
             // covers notices whose primary ActionButton already has a purpose.
@@ -203,34 +202,19 @@ public static class NativeNotice
             }
         }
 
-        private void Copy(DependencyObject action)
-        {
-            var text = GetCopyText(_notice);
-            if (text.Length == 0) return;
-            var copied = TryCopy(text);
-            ToolTipService.SetToolTip(action, copied ? "Fehlermeldung kopiert"
-                : "Zwischenablage vorübergehend nicht verfügbar. Bitte erneut kopieren.");
-        }
-
-        private static bool TryCopy(string text)
+        private async Task CopyAsync(DependencyObject action)
         {
             try
             {
-                var package = new DataPackage { RequestedOperation = DataPackageOperation.Copy };
-                package.SetText(text);
-                Clipboard.SetContent(package);
-                Clipboard.Flush();
-                return true;
+                var text = GetCopyText(_notice);
+                if (text.Length == 0) return;
+                var copied = await NativeClipboard.WriteTextAsync(text);
+                TryUiUpdate("copy.ToolTip", () => ToolTipService.SetToolTip(action, copied
+                    ? "Fehlermeldung kopiert" : NativeClipboard.UnavailableMessage));
             }
-            catch (COMException exception) when (exception.HResult != unchecked((int)0x8007000E))
+            catch (Exception exception) when (IsRecoverableUiFailure(exception))
             {
-                // An application may hold the clipboard open. Keep the error
-                // and selection intact so the user can retry immediately.
-                return false;
-            }
-            catch (UnauthorizedAccessException)
-            {
-                return false;
+                ReportUiFailure("copy", exception);
             }
         }
     }

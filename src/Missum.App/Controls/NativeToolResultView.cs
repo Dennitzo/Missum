@@ -2,7 +2,6 @@ using System.Text.Json;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using Windows.ApplicationModel.DataTransfer;
 using Windows.Foundation;
 
 namespace Missum.App.Controls;
@@ -72,8 +71,10 @@ public sealed class NativeToolResultView : StackPanel
         var button = new Button { Content = title, FontSize = 12, Padding = new(7, 3, 7, 3), Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new(0) };
         button.Click += async (_, _) =>
         {
-            var package = new DataPackage(); package.SetText(text); Clipboard.SetContent(package);
-            button.Content = "✓ Kopiert";
+            var copied = await NativeClipboard.WriteTextAsync(text);
+            button.Content = copied ? "✓ Kopiert" : title;
+            ToolTipService.SetToolTip(button, copied ? "Kopiert"
+                : NativeClipboard.UnavailableMessage);
             await Task.Delay(2000);
             button.Content = title;
         };

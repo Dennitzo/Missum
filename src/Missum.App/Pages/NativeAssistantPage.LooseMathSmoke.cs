@@ -6,6 +6,11 @@ namespace Missum.App.Pages;
 
 public sealed partial class NativeAssistantPage
 {
+    private static readonly string[] StoredPhysicsDisplaySmokeSources =
+    [
+        @"$$\int \frac{d^{D}q}{(2\pi)^{D}}\; \frac{1}{q^{2}(q+k)^{2}} \;=\; \frac{i}{16\pi^{2}}\left[-\frac{1}{\varepsilon} \;+\; \text{endliche Konstanten} \;+\; \ln\!\Bigl(\frac{\mu^{2}}{-k^{2}}\Bigr) \;+\; \ldots\right]$$",
+        @"$$\int d^{4}x\;\sqrt{-g}\;\Big[a\, R_{\mu\nu\rho\sigma}R^{\mu\nu\rho\sigma} \;+\; b\, R_{\mu\nu}R^{\mu\nu} \;+\; c\, R^{2} \;+\; \ldots\Bigr]$$",
+    ];
     private const string LooseMathSmokeSource = "## Temperatur, Leistung und Verdampfungszeit\n"
         + "Die Zusammenhänge werden mit unverändertem mathematischem Inhalt dargestellt.\n\n"
         + "T_ECT = T_HH/ln 2\n\n"
@@ -110,6 +115,7 @@ public sealed partial class NativeAssistantPage
                 JsonSerializer.Serialize(new { renderer = "WinUI3", passed = true, answerMath = true, reasoningMath = true,
                     visibleStreamingDeltas = streamedSources.Length, formulaControlRetained = true, reasoningDisclosureRetained = true, incompleteFormulaPreserved = true,
                     codePathsUrlsProtected = true, formulaFontMatchesText = true, chatCursorAbsent = true }));
+            await VerifyStoredPhysicsDisplaySmokeAsync(original);
         }
         finally { ApplyEvent("state.snapshot", original); RenderMessagesNow(); }
 
@@ -139,5 +145,67 @@ public sealed partial class NativeAssistantPage
                 || AutomationProperties.GetName(formula).TrimEnd().EndsWith('^')))
                 throw new InvalidOperationException("An incomplete streamed mathematical operator was prematurely rendered as a formula.");
         }
+    }
+
+    private async Task VerifyStoredPhysicsDisplaySmokeAsync(JsonElement original)
+    {
+        if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("MISSUM_SMOKE_INSTANCE_KEY")))
+            throw new InvalidOperationException("Der gespeicherte Physikformel-Smoke ist ausschließlich im isolierten Portable-Smoke erlaubt.");
+        var owner = Guid.NewGuid();
+        var messageId = Guid.NewGuid().ToString();
+        var at = DateTimeOffset.UtcNow;
+        JsonElement Snapshot(string content, string status)
+        {
+            var state = original.Deserialize<Dictionary<string, JsonElement>>(JsonOptions)!;
+            state["activeSessionId"] = JsonSerializer.SerializeToElement(owner);
+            state["chatMode"] = JsonSerializer.SerializeToElement("general");
+            state["isRunning"] = JsonSerializer.SerializeToElement(status == "streaming");
+            state["messages"] = JsonSerializer.SerializeToElement(new[]
+            { new { id = messageId, sessionId = owner, role = "assistant", content, status, createdAt = at, updatedAt = at } });
+            return JsonSerializer.SerializeToElement(state);
+        }
+        try
+        {
+            foreach (var source in StoredPhysicsDisplaySmokeSources)
+            {
+                ApplyEvent("state.snapshot", Snapshot("", "streaming")); RenderMessagesNow();
+                foreach (var prefix in new[] { source[..Math.Min(72, source.Length - 2)], source[..^2] })
+                {
+                    ApplyEvent("chat.delta", JsonSerializer.SerializeToElement(new { sessionId = owner, messageId, content = prefix }));
+                    await Task.Delay(180, _lifetime.Token);
+                    if (Descendants(MessageBody(_messageViews[messageId].View)).OfType<NativeFormulaView>().Any())
+                        throw new InvalidOperationException("Eine noch offene Displayformel wurde vor ihrem schließenden Delimiter als vollständige Formel dargestellt.");
+                }
+                ApplyEvent("chat.delta", JsonSerializer.SerializeToElement(new { sessionId = owner, messageId, content = source }));
+                await Task.Delay(180, _lifetime.Token);
+                var formula = Descendants(MessageBody(_messageViews[messageId].View)).OfType<NativeFormulaView>().Single();
+                if (!formula.IsTypeset || formula.RenderedHeight < 15 || formula.FontSize != NativeStreamingMarkdown.BodyFontSize
+                    || AutomationProperties.GetName(formula) != "Formel: " + source)
+                    throw new InvalidOperationException("Eine vollständig gespeicherte Physikformel blieb roh oder verlor ihren unveränderten Kopiertext: " + source);
+                ApplyEvent("chat.delta", JsonSerializer.SerializeToElement(new
+                { sessionId = owner, messageId, content = source + "\n\nDie Rechnung wird weiter erläutert." }));
+                await Task.Delay(180, _lifetime.Token);
+                if (!Descendants(MessageBody(_messageViews[messageId].View)).OfType<NativeFormulaView>().Any(item => ReferenceEquals(item, formula)))
+                    throw new InvalidOperationException("Ein weiterer Textabschnitt hat die bereits korrekt dargestellte Physikformel neu aufgebaut.");
+            }
+            var completed = "## Physikformeln aus der gespeicherten Antwort\n\n" + string.Join("\n\n", StoredPhysicsDisplaySmokeSources)
+                + "\n\nDie Größenbefehle werden ausschließlich für die Darstellung angepasst; der ursprüngliche LaTeX-Text bleibt erhalten.";
+            ApplyEvent("state.snapshot", Snapshot(completed, "completed")); RenderMessagesNow(); UpdateLayout();
+            var completedFormulas = Descendants(MessageBody(_messageViews[messageId].View)).OfType<NativeFormulaView>().ToArray();
+            if (completedFormulas.Length != 2 || completedFormulas.Any(formula => !formula.IsTypeset)
+                || StoredPhysicsDisplaySmokeSources.Any(source => !completedFormulas.Any(formula => AutomationProperties.GetName(formula) == "Formel: " + source)))
+                throw new InvalidOperationException("Die beiden vollständig gepaarten Originalformeln werden im abgeschlossenen Chat nicht originalgetreu dargestellt.");
+            await SaveMathPreviewAsync(ConversationScroll, "native-physics-latex-preview.png");
+            await File.WriteAllTextAsync(Path.Combine(App.Current.DataDirectory, "native-physics-latex-validation.json"),
+                JsonSerializer.Serialize(new
+                {
+                    passed = true, processId = Environment.ProcessId, renderer = "WinUI3", exactStoredFormulas = 2,
+                    singleLineDisplayRecognized = true, streamingPrefixesRemainLiteral = true,
+                    completedFormulaTypesetsDuringStreaming = true, appendedProseRetainsFormula = true,
+                    unsupportedSizingDisplaysWithoutRawFallback = true, originalFormulaCopyTextPreserved = true,
+                    aiRequests = 0, userDataModified = false,
+                }), _lifetime.Token);
+        }
+        finally { ApplyEvent("state.snapshot", original); RenderMessagesNow(); }
     }
 }

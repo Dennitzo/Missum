@@ -157,8 +157,11 @@ public sealed partial class NativeAssistantPage
         await VerifyMarkdownTableSmokeAsync(body);
         await VerifyMarkdownHeadingSmokeAsync(original);
         await VerifyLooseMathSmokeAsync(original);
+        await VerifyBoxedMathSmokeAsync(original);
         await VerifyAnswerStreamingSmokeAsync(original);
         await VerifyStreamingMessageFooterSmokeAsync(original);
+        await VerifySelectionClipboardSmokeAsync(original);
+        await VerifySelectionScrollSmokeAsync(original);
         await VerifyThinkingIndicatorSmokeAsync(original);
         await VerifyToolIconColorsSmokeAsync();
         await VerifyContinuationSmokeAsync(original);

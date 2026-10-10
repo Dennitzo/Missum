@@ -4,7 +4,6 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Documents;
 using Microsoft.UI.Xaml.Media;
-using Windows.ApplicationModel.DataTransfer;
 
 namespace Missum.App.Controls;
 
@@ -112,11 +111,11 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
         panel.Children.Add(codeHost);
         var border = new Border { Child = panel, Background = NativeThemeBrushes.Resource("MissumLayerBrush", 32), CornerRadius = new CornerRadius(10), Padding = new Thickness(14) };
         var section = new SectionView(border, text) { Language = language, CodeHost = codeHost };
-        copy.Click += (_, _) =>
+        copy.Click += async (_, _) =>
         {
-            var package = new DataPackage();
-            package.SetText(section.Specification.Text);
-            Clipboard.SetContent(package);
+            var copied = await NativeClipboard.WriteTextAsync(section.Specification.Text);
+            ToolTipService.SetToolTip(copy, copied ? "Code kopiert"
+                : NativeClipboard.UnavailableMessage);
         };
         return section;
     }

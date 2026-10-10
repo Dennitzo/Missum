@@ -5,7 +5,6 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using Windows.ApplicationModel.DataTransfer;
 
 namespace Missum.App.Pages;
 
@@ -112,10 +111,13 @@ public sealed partial class NativeAssistantPage
             if (_messageCopySmokeAdapter is { } copy && IsMessageFooterSmoke) copy(view.Text);
             else
             {
-                var package = new DataPackage();
-                package.SetText(view.Text);
-                Clipboard.SetContent(package);
+                if (!await NativeClipboard.WriteTextAsync(view.Text, _lifetime.Token))
+                {
+                    if (!_disposed) ShowMessageActionError(NativeClipboard.UnavailableMessage);
+                    return;
+                }
             }
+            if (_disposed) return;
             var version = ++view.CopyVersion;
             if (view.Copy.Content is FontIcon icon)
             {

@@ -61,6 +61,19 @@ function pipeline(source, typeset = false) {
 function descendants(node, predicate) {
   return [node, ...node.childNodes.flatMap(child => descendants(child, () => true))].filter(predicate);
 }
+
+test("the boxed metric relation typesets and keeps its exact original copy source", async () => {
+  const source = String.raw`$$\boxed{\text{Metrik (Krümmung)} \quad \longleftrightarrow \quad \text{Energie-Impuls-Dichte}}$$`;
+  const { root, copied, mathCalls } = pipeline(source, true);
+  const rendered = classes(root, "math-render");
+  assert.equal(rendered.length, 1);
+  assert.equal(rendered[0].dataset.mathTypeset, "true");
+  assert.equal(mathCalls[0].tex, source.slice(2, -2));
+  assert.equal(classes(root, "math-source-text")[0].textContent, source);
+  classes(root, "math-selectable")[0].listeners.click({ preventDefault() {}, stopPropagation() {} });
+  await Promise.resolve();
+  assert.equal(copied[0].payload.text, source);
+});
 const tags = (root, tag) => descendants(root, node => node.tagName === tag);
 const classes = (root, name) => descendants(root, node => node.className.split(" ").includes(name));
 
@@ -171,7 +184,7 @@ test("the geomagnetic publication matrix retains row breaks before letters and r
   assert.equal(classes(inlineResult.root, "math-source-text")[0].textContent, inline);
 });
 
-test("retained JSON escaping is decoded only for a consistently escaped formula", () => {
+test("two four and eight retained JSON backslashes normalize only consistently escaped formulas", () => {
   const cases = [
     String.raw`\frac{1}{2}`,
     String.raw`\begin{aligned}a&=b+c\\d&=e-f\end{aligned}`,
@@ -179,20 +192,60 @@ test("retained JSON escaping is decoded only for a consistently escaped formula"
     String.raw`\begin{pmatrix}1&2\\3&4\end{pmatrix}`
   ];
   for (const tex of cases) {
-    const { root, mathCalls } = pipeline(`$$${tex.replace(/\\/g, "\\\\")}$$`, true);
-    assert.equal(classes(root, "invalid").length, 0, tex);
-    assert.equal(mathCalls[0].tex, tex);
+    for (const factor of [2, 4, 8]) {
+      const source = `$$${tex.replace(/\\/g, "\\".repeat(factor))}$$`;
+      const { root, mathCalls } = pipeline(source, true);
+      assert.equal(classes(root, "invalid").length, 0, `escaping factor ${factor}: ${tex}`);
+      assert.equal(mathCalls[0].tex, tex, `escaping factor ${factor}: ${tex}`);
+      assert.equal(classes(root, "math-source-text")[0].textContent, source);
+    }
   }
 });
 
+test("the two persisted quantum gravity formulas render with Bigl Bigr and exact original copy text", async () => {
+  // Original completed assistant response 5f013b62…; both displays already
+  // have real ASCII closing dollars and a single backslash per TeX command.
+  const cases = [
+    String.raw`$$\int \frac{d^{D}q}{(2\pi)^{D}}\; \frac{1}{q^{2}(q+k)^{2}} \;=\; \frac{i}{16\pi^{2}}\left[-\frac{1}{\varepsilon} \;+\; \text{endliche Konstanten} \;+\; \ln\!\Bigl(\frac{\mu^{2}}{-k^{2}}\Bigr) \;+\; \ldots\right]$$`,
+    String.raw`$$\int d^{4}x\;\sqrt{-g}\;\Bigl[a\, R_{\mu\nu\rho\sigma}R^{\mu\nu\rho\sigma} \;+\; b\, R_{\mu\nu}R^{\mu\nu} \;+\; c\, R^{2} \;+\; \ldots\Bigr]$$`
+  ];
+  for (const source of cases) {
+    const { root, copied, mathCalls, sanitized } = pipeline(source, true);
+    assert.equal(sanitized, source); assert.equal(classes(root, "math-selectable").length, 1);
+    assert.equal(classes(root, "display").length, 1); assert.equal(classes(root, "invalid").length, 0);
+    assert.equal(classes(root, "math-render")[0].dataset.mathTypeset, "true");
+    assert.equal(mathCalls[0].tex, source.slice(2, -2), "valid TeX retains its commands and spacing internally");
+    assert.equal(mathCalls[0].display, true);
+    assert.equal(classes(root, "math-source-text")[0].textContent, source);
+    classes(root, "math-selectable")[0].listeners.click({ preventDefault() {}, stopPropagation() {} });
+    await Promise.resolve(); assert.equal(copied[0].payload.text, source);
+  }
+});
+
+test("live incomplete formulas stay literal while code paths and links keep their backslashes", () => {
+  for (const source of [String.raw`$$\int \frac{d^{D}q}{(2\pi)^{D}}`, String.raw`\[\int d^{4}x\;\sqrt{-g}\;\Bigl[`, String.raw`$$\\\\frac{1}{`]) {
+    const { root, sanitized, mathCalls } = pipeline(source, true);
+    assert.equal(sanitized, source); assert.equal(root.textContent, source);
+    assert.equal(classes(root, "math-selectable").length, 0); assert.equal(mathCalls.length, 0);
+  }
+  const literal = String.raw`C:\\tmp\\Bigl\\formula.tex`;
+  const { root, mathCalls } = pipeline(`${literal}\n\n\`${String.raw`$$\\\\frac{1}{2}$$`}\`\n\n[Quelle](https://example.org/Bigl?value=x²)`, true);
+  assert.ok(root.textContent.includes(literal)); assert.equal(tags(root, "code")[0].textContent, String.raw`$$\\\\frac{1}{2}$$`);
+  assert.equal(tags(root, "a")[0].href, "https://example.org/Bigl?value=x%C2%B2"); assert.equal(mathCalls.length, 0);
+});
+
 test("an invalid formula keeps its exact copy source and the real KaTeX parse diagnostic", () => {
-  const source = String.raw`$$\MissumUnknownCommand{1}$$`;
-  const { root } = pipeline(source, true);
-  const invalid = classes(root, "invalid");
-  assert.equal(invalid.length, 1);
-  assert.equal(classes(root, "math-source-text")[0].textContent, source);
-  assert.ok(invalid[0].dataset.mathError.includes("Undefined control sequence"));
-  assert.ok(invalid[0].dataset.mathError.includes(String.raw`\MissumUnknownCommand`));
+  const tex = String.raw`\MissumUnknownCommand{1}`;
+  for (const factor of [1, 4, 8]) {
+    const source = `$$${tex.replace(/\\/g, "\\".repeat(factor))}$$`;
+    const { root, mathCalls } = pipeline(source, true);
+    const invalid = classes(root, "invalid");
+    assert.equal(invalid.length, 1);
+    assert.equal(classes(root, "math-source-text")[0].textContent, source);
+    assert.equal(mathCalls[0].tex, tex);
+    assert.ok(invalid[0].dataset.mathError.includes("Undefined control sequence"));
+    assert.ok(invalid[0].dataset.mathError.includes(String.raw`\MissumUnknownCommand`));
+  }
 });
 
 test("legacy title metadata is removed while surrounding Markdown remains intact", () => {

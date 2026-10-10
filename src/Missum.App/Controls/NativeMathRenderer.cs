@@ -33,11 +33,14 @@ public static class NativeMathRenderer
         LaTeXSettings.Commands.Select(pair => pair.Key).ToHashSet(StringComparer.Ordinal));
     private static int _cachedBytes;
 
+    static NativeMathRenderer() => NativeBoxedMathPainter.RegisterCommands();
+
     public static NativeMathBitmap Render(string latex, bool display, double fontSize = 16, bool dark = true)
     {
         if (string.IsNullOrWhiteSpace(latex)) return Failure("Die Formel ist leer.");
         if (latex.Length > MaximumFormulaLength) return Failure("Die Formel ist zu lang für die Vorschau.");
         latex = NormalizeEscapedLatex(latex);
+        latex = NormalizeSizedDelimiters(latex);
         if (ExceedsNestingLimit(latex)) return Failure("Die Formel ist zu tief verschachtelt für die Vorschau.");
         if (!double.IsFinite(fontSize) || fontSize is < 8 or > 64)
             return Failure("Die Schriftgröße der Formel liegt außerhalb des unterstützten Bereichs.");
@@ -72,7 +75,7 @@ public static class NativeMathRenderer
     {
         try
         {
-            var painter = new MathPainter
+            var painter = new NativeBoxedMathPainter
             {
                 FontSize = (float)key.FontSize,
                 LineStyle = key.Display ? LineStyle.Display : LineStyle.Text,
@@ -130,7 +133,20 @@ public static class NativeMathRenderer
         return false;
     }
 
-    private static string NormalizeEscapedLatex(string latex)
+    internal static string NormalizeEscapedLatex(string latex)
+    {
+        // Undo at most three JSON-escape layers, stopping as soon as genuine
+        // TeX control words occur. Aligned/matrix row separators stay distinct.
+        for (var layer = 0; layer < 3; layer++)
+        {
+            var normalized = NormalizeEscapedLatexLayer(latex);
+            if (normalized == latex) break;
+            latex = normalized;
+        }
+        return latex;
+    }
+
+    private static string NormalizeEscapedLatexLayer(string latex)
     {
         // Some model replies retain JSON escaping. Decode only when all commands have
         // doubled slashes; genuine aligned/matrix row breaks must remain untouched.
@@ -143,7 +159,7 @@ public static class NativeMathRenderer
             var slashes = index - start;
             if (index >= latex.Length || !char.IsAsciiLetter(latex[index])) continue;
             if (slashes % 2 == 1) return latex;
-            if (slashes == 2 && index + 1 < latex.Length && char.IsAsciiLetter(latex[index + 1])) escapedCommands = true;
+            if (slashes >= 2 && index + 1 < latex.Length && char.IsAsciiLetter(latex[index + 1])) escapedCommands = true;
         }
         if (!escapedCommands) return latex;
 
@@ -164,6 +180,45 @@ public static class NativeMathRenderer
             index--;
         }
         return normalized.ToString();
+    }
+
+    private static string NormalizeSizedDelimiters(string latex)
+    {
+        // CSharpMath lacks TeX's explicit big/Big delimiter sizing. Remove only
+        // those unsupported visual prefixes before a real delimiter; retain
+        // every delimiter and mathematical token. The original source remains
+        // available for selection/copy in NativeFormulaView.
+        var result = new StringBuilder(latex.Length);
+        for (var index = 0; index < latex.Length;)
+        {
+            if (latex[index] != '\\') { result.Append(latex[index++]); continue; }
+            var start = index++;
+            if (index >= latex.Length || !char.IsAsciiLetter(latex[index]))
+            {
+                result.Append(latex[start]);
+                if (index < latex.Length) result.Append(latex[index++]);
+                continue;
+            }
+            while (index < latex.Length && char.IsAsciiLetter(latex[index])) index++;
+            var command = latex[(start + 1)..index];
+            var size = command.EndsWith('l') || command.EndsWith('r') || command.EndsWith('m') ? command[..^1] : command;
+            if (size is not ("big" or "Big" or "bigg" or "Bigg") || KnownCommands.Value.Contains("\\" + command))
+            { result.Append(latex.AsSpan(start, index - start)); continue; }
+            var next = index;
+            while (next < latex.Length && char.IsWhiteSpace(latex[next])) next++;
+            var delimiter = next < latex.Length && "()[]|.<>/".Contains(latex[next]);
+            if (!delimiter && next < latex.Length && latex[next] == '\\')
+            {
+                var end = next + 1;
+                while (end < latex.Length && char.IsAsciiLetter(latex[end])) end++;
+                if (end == next + 1 && end < latex.Length) end++;
+                delimiter = latex[next..end] is "\\{" or "\\}" or "\\|" or "\\langle" or "\\rangle"
+                    or "\\lbrace" or "\\rbrace" or "\\lvert" or "\\rvert" or "\\lVert" or "\\rVert"
+                    or "\\vert" or "\\Vert" or "\\backslash" or "\\lfloor" or "\\rfloor" or "\\lceil" or "\\rceil";
+            }
+            if (!delimiter) result.Append(latex.AsSpan(start, index - start));
+        }
+        return result.ToString();
     }
 
     private static string NormalizeCommandBoundaries(string latex)

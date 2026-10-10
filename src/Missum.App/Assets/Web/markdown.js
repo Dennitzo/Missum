@@ -20,36 +20,39 @@
   }
 
   function normalizeEscapedLatex(tex) {
-    const source = String(tex || "");
+    let source = String(tex || "");
     // Match NativeMathRenderer: decode retained JSON escaping only when every
     // control word is escaped. A valid matrix row break may be immediately
     // followed by a letter (B_p\\\\B_\\phi); its whitespace is not significant.
-    let escapedCommands = false;
-    for (let index = 0; index < source.length; index += 1) {
-      if (source[index] !== "\\") continue;
-      const start = index;
-      while (source[index] === "\\") index += 1;
-      const slashes = index - start;
-      if (index >= source.length || !/[A-Za-z]/.test(source[index])) continue;
-      if (slashes % 2 === 1) return source;
-      if (slashes === 2 && index + 1 < source.length && /[A-Za-z]/.test(source[index + 1])) escapedCommands = true;
-    }
-    if (!escapedCommands) return source;
-
-    let normalized = "";
-    for (let index = 0; index < source.length; index += 1) {
-      if (source[index] !== "\\") {
-        normalized += source[index];
-        continue;
+    for (let round = 0; round < 3; round += 1) {
+      let escapedCommands = false;
+      for (let index = 0; index < source.length; index += 1) {
+        if (source[index] !== "\\") continue;
+        const start = index;
+        while (source[index] === "\\") index += 1;
+        const slashes = index - start;
+        if (index >= source.length || !/[A-Za-z]/.test(source[index])) continue;
+        if (slashes % 2 === 1) return source;
+        if (slashes >= 2 && index + 1 < source.length && /[A-Za-z]/.test(source[index + 1])) escapedCommands = true;
       }
-      const start = index;
-      while (source[index] === "\\") index += 1;
-      const slashes = index - start;
-      const commandFollows = index < source.length && /[A-Za-z,;!:{}]/.test(source[index]);
-      normalized += "\\".repeat(slashes >= 4 && slashes % 2 === 0 ? slashes / 2 : slashes === 2 && commandFollows ? 1 : slashes);
-      index -= 1;
+      if (!escapedCommands) return source;
+
+      let normalized = "";
+      for (let index = 0; index < source.length; index += 1) {
+        if (source[index] !== "\\") {
+          normalized += source[index];
+          continue;
+        }
+        const start = index;
+        while (source[index] === "\\") index += 1;
+        const slashes = index - start;
+        const commandFollows = index < source.length && /[A-Za-z,;!:{}]/.test(source[index]);
+        normalized += "\\".repeat(slashes >= 4 && slashes % 2 === 0 ? slashes / 2 : slashes === 2 && commandFollows ? 1 : slashes);
+        index -= 1;
+      }
+      source = normalized;
     }
-    return normalized;
+    return source;
   }
 
   function normalizedMathParts(rawMath, renderLatex) {

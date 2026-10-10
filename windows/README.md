@@ -2,11 +2,16 @@
 
 ## Missum-Client
 
-Der vollständige Clientbuild führt Restore, Release-Build, Tests, win-x64-Single-file-Publish und Portable-Smoke aus:
+Der normale Clientbuild führt Restore, Release-Build und win-x64-Single-file-Publish aus. Er startet keine Tests und keinen Portable-Smoke:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\build.ps1
 ```
+
+Tests bleiben separat über `windows/test.ps1`, `windows/test-agent-context.ps1` und `windows/smoke.ps1` verfügbar.
+Mit `-RunTests` beziehungsweise `-RunSmoke` können sie ausdrücklich zum Build zugeschaltet werden.
+Die bisherigen Schalter `-SkipTests` und `-SkipSmoke` bleiben kompatibel und haben Vorrang vor diesen Optionen.
+Die Veröffentlichung erstellt weiterhin das Manifest und prüft die SHA-256 der erzeugten `Missum.exe`.
 
 Die vollständige Portable-Werkzeugabnahme wird ausdrücklich zugeschaltet. Sie veröffentlicht zuerst eine
 frische, manifest- und SHA-256-geprüfte `Missum.exe` und führt danach die nativen Vertragsprüfungen sowie die
@@ -38,8 +43,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\build.ps1 `
   -DeepSeekVisionModelId 'vision/DeepSeek-...~revision'
 ```
 
-`-RunLiveToolAcceptance` ist nicht mit `-SkipPublish` kombinierbar. Für das vollständige Release-Gate sollte auch
-`-SkipTests` nicht gesetzt werden. Die Live-Abnahme kann wegen lokaler Modellinferenz, Bild-/Spracherzeugung und
+`-RunLiveToolAcceptance` ist nicht mit `-SkipPublish` kombinierbar. Für ein ausdrücklich angefordertes vollständiges Release-Gate
+werden zusätzlich `-RunTests -RunSmoke` gesetzt. Die Live-Abnahme kann wegen lokaler Modellinferenz, Bild-/Spracherzeugung und
 Deep Research längere Zeit benötigen und darf nicht parallel zu einem zweiten Modell- oder Buildlauf gestartet
 werden.
 

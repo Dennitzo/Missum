@@ -46,14 +46,15 @@ public sealed partial class NativeAssistantPage
     // the existing timer; label changes share the header's once-per-second tick.
     private void RefreshThinkingIndicators(bool refreshTokens = false)
     {
-        if (_thinkingIndicators.Count == 0) return;
+        if (_thinkingIndicators.Count == 0 || _conversationSelection?.IsSelecting == true) return;
         var now = DateTimeOffset.UtcNow;
         var visible = IsLoaded && BodyGrid.Visibility == Visibility.Visible;
-        var follow = visible && _conversationSelection?.HasSelection != true
+        var follow = visible && _conversationSelection?.IsSelecting != true
             && ConversationScroll.ScrollableHeight - ConversationScroll.VerticalOffset < 90;
         var changed = false;
         foreach (var (id, view) in _thinkingIndicators)
         {
+            if (_messageViews.TryGetValue(id, out var selected) && _conversationSelection?.PreserveSelectionWithin(selected.View) == true) continue;
             var phase = _modelPhases.GetValueOrDefault(id);
             var active = IsConversationMessageRunning(id) && view.IsMessageActive;
             var inConversation = visible && DisplayMessages.ContainsKey(id);

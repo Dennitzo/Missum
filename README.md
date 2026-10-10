@@ -16,7 +16,7 @@ Windows 10 19041+ / Windows 11, .NET SDK 10, Windows App SDK.
 The launcher uses the newest existing Release or portable executable, and builds
 Release if neither exists. For a self-contained portable distribution:
 
-    .\windows\publish.ps1 -Mode SingleFile
+    .\windows\build.ps1
 
 This produces `artifacts/portable/win-x64/Missum.exe` and its separate
 `ExtensionHost` companion folder. Keep that folder beside the executable for
@@ -24,15 +24,19 @@ extension tools. The desktop executable extracts its bundled native runtime and
 XAML resources automatically. `-Mode Folder` creates a conventional distribution
 under `artifacts/windows/app-win-x64-folder` instead.
 
-The publish script runs a native startup smoke check by default. It verifies all
+The normal build restores, compiles and publishes without tests or a startup smoke.
+It still creates the publish manifest and verifies the executable hash.
+Add `-RunTests` or `-RunSmoke` to request those checks explicitly.
+
+Invoking `windows/publish.ps1` directly runs a native startup smoke check by default. It verifies all
 manifest hashes, launches a fresh isolated profile, confirms the native page has
 opened a persisted chat, and rejects a WebView2 profile. Smoke runs do not start
 or stop shared model services. This checks packaging and native startup; it does
 not replace a live model response and tool run.
 
-Run the client regression suite separately with `./windows/test.ps1`. The full
-`./windows/build.ps1` pipeline also invokes the context/server checks and portable
-publish. Run these sequentially so outputs are not locked by concurrent builds.
+Run the client regression suite separately with `./windows/test.ps1`, and the
+context/server checks with `./windows/test-agent-context.ps1`. Run build and test
+scripts sequentially so outputs are not locked by concurrent builds.
 
 ## Browser access in the home network
 

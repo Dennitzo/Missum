@@ -551,7 +551,7 @@ public sealed partial class AssistantPage : Page, IDisposable
                     await ExportPdfAsync(args.Envelope, bridge, selectedMessageOnly: true);
                     break;
                 case "message.copy":
-                    CopyToClipboard(args.Envelope.Payload);
+                    await CopyToClipboardAsync(args.Envelope.Payload);
                     break;
                 case "artifact.save":
                     await SaveArtifactAsync(args.Envelope.Payload, bridge);
@@ -2169,7 +2169,7 @@ public sealed partial class AssistantPage : Page, IDisposable
         }
     }
 
-    private static void CopyToClipboard(JsonElement payload)
+    private static async Task CopyToClipboardAsync(JsonElement payload)
     {
         if (!payload.TryGetProperty("text", out var property)
             || property.ValueKind != JsonValueKind.String)
@@ -2183,10 +2183,8 @@ public sealed partial class AssistantPage : Page, IDisposable
             throw new InvalidOperationException("Der Text ist zu groß für diese Aktion.");
         }
 
-        var package = new DataPackage();
-        package.SetText(text);
-        Clipboard.SetContent(package);
-        Clipboard.Flush();
+        if (!await NativeClipboard.WriteTextAsync(text))
+            throw new InvalidOperationException(NativeClipboard.UnavailableMessage);
     }
 
     private async Task SaveArtifactAsync(JsonElement payload, AssistantWebBridge bridge)

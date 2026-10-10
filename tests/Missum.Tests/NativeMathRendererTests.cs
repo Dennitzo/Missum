@@ -6,6 +6,110 @@ namespace Missum.Tests;
 public sealed class NativeMathRendererTests
 {
     [Theory]
+    [InlineData(@"\boxed{\text{Metrik (Krümmung)} \quad \longleftrightarrow \quad \text{Energie-Impuls-Dichte}}")]
+    [InlineData(@"E=\boxed{mc^2}+1")]
+    [InlineData(@"\boxed{x}+\boxed{y}")]
+    [InlineData(@"\boxed{a+\boxed{b}}")]
+    [InlineData(@"\boxed{\frac{a+b}{c+d}}")]
+    [InlineData(@"x^{\boxed{n+1}}")]
+    public void BoxedMathematicsTypesetsInBothThemes(string latex)
+    {
+        foreach (var dark in new[] { true, false })
+        {
+            var image = NativeMathRenderer.Render(latex, display: true, dark: dark);
+            Assert.True(image.Error is null, image.Error);
+            Assert.NotEmpty(image.Png);
+            using var bitmap = SKBitmap.Decode(image.Png);
+            Assert.Contains(bitmap.Pixels, pixel => pixel.Alpha > 128);
+            Assert.Equal(0, bitmap.GetPixel(0, 0).Alpha);
+        }
+    }
+
+    [Fact]
+    public void ABoxReservesSpaceForItsFrameAndKeepsTransparentBackground()
+    {
+        var plain = NativeMathRenderer.Render("x", display: true);
+        var boxed = NativeMathRenderer.Render(@"\boxed{x}", display: true);
+        Assert.Null(boxed.Error);
+        Assert.True(boxed.Width > plain.Width + 3);
+        Assert.True(boxed.Height > plain.Height + 3);
+        Assert.True(boxed.BaselineOffset > plain.BaselineOffset);
+        Assert.True(boxed.Descent > plain.Descent);
+        Assert.Same(boxed, NativeMathRenderer.Render(@"\boxed{x}", display: true));
+    }
+
+    [Theory]
+    [InlineData(@"\boxed{\frac{1}{2}")]
+    [InlineData(@"\boxed{\thisCommandDoesNotExist{x}}")]
+    [InlineData(@"\boxed")]
+    public void InvalidBoxedMathematicsRetainsTheNormalFailurePath(string latex)
+        => Assert.NotNull(NativeMathRenderer.Render(latex, display: true).Error);
+
+    [Theory]
+    [InlineData(@"\int \frac{d^{D}q}{(2\pi)^{D}}\; \frac{1}{q^{2}(q+k)^{2}} \;=\; \frac{i}{16\pi^{2}}\left[-\frac{1}{\varepsilon} \;+\; \text{endliche Konstanten} \;+\; \ln\!\Bigl(\frac{\mu^{2}}{-k^{2}}\Bigr) \;+\; \ldots\right]")]
+    [InlineData(@"\int d^{4}x\;\sqrt{-g}\;\Big[a\, R_{\mu\nu\rho\sigma}R^{\mu\nu\rho\sigma} \;+\; b\, R_{\mu\nu}R^{\mu\nu} \;+\; c\, R^{2} \;+\; \ldots\Bigr]")]
+    public void StoredPhysicsFormulasTypesetInsteadOfFallingBackToSource(string latex)
+    {
+        foreach (var dark in new[] { true, false })
+        {
+            var image = NativeMathRenderer.Render(latex, display: true, dark: dark);
+            Assert.True(image.Error is null, image.Error);
+            Assert.NotEmpty(image.Png);
+            Assert.InRange(image.Width, 50, 1500);
+            Assert.InRange(image.Height, 15, 300);
+        }
+    }
+
+    [Theory]
+    [InlineData(@"\bigl(x\bigr)", "(x)")]
+    [InlineData(@"\Bigl[x\Bigr]", "[x]")]
+    [InlineData(@"\biggl\{x\biggr\}", @"\{x\}")]
+    [InlineData(@"\Biggl\langle x\Biggr\rangle", @"\langle x\rangle")]
+    [InlineData(@"a\Bigm|b", "a|b")]
+    public void UnsupportedVisualDelimiterPrefixesPreserveAllMathematicalTokens(string sized, string plain)
+    {
+        var result = NativeMathRenderer.Render(sized, display: true);
+        var equivalent = NativeMathRenderer.Render(plain, display: true);
+        Assert.True(result.Error is null, result.Error);
+        Assert.Null(equivalent.Error);
+        Assert.Equal(equivalent.Png, result.Png);
+    }
+
+    [Theory]
+    [InlineData(@"\Bigunknown[x]")]
+    [InlineData(@"\Big x")]
+    public void InvalidCommandsAreNotSilentlyRemovedAsDelimiterSizing(string latex)
+    {
+        Assert.NotNull(NativeMathRenderer.Render(latex, display: true).Error);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public void RepeatedJsonEscapingKeepsMatrixRowsAndTheirFollowingControlWords(int layers)
+    {
+        const string regular = @"\begin{pmatrix}-\eta_p & \alpha\\\omega_\Omega & -\eta_\phi\end{pmatrix}";
+        var escaped = regular;
+        for (var layer = 0; layer < layers; layer++) escaped = escaped.Replace("\\", "\\\\", StringComparison.Ordinal);
+        var expected = NativeMathRenderer.Render(regular, display: true);
+        var actual = NativeMathRenderer.Render(escaped, display: true);
+        Assert.Null(expected.Error);
+        Assert.True(actual.Error is null, actual.Error);
+        Assert.Same(expected, actual);
+    }
+
+    [Fact]
+    public void ExistingMatrixRowsAndMixedEscapesAreNotReinterpretedAsJson()
+    {
+        const string regular = @"\begin{matrix}a&b\\c&d\end{matrix}";
+        Assert.Null(NativeMathRenderer.Render(regular, display: true).Error);
+        const string mixed = @"\frac{1}{2}+\\alpha";
+        Assert.Equal(regular, NativeMathRenderer.NormalizeEscapedLatex(regular));
+        Assert.Equal(mixed, NativeMathRenderer.NormalizeEscapedLatex(mixed));
+    }
+
+    [Theory]
     [InlineData(@"\frac{a+b}{c+d}")]
     [InlineData(@"\sqrt{x^2+y^2}")]
     [InlineData(@"\int_0^\infty e^{-x}\,dx=1")]

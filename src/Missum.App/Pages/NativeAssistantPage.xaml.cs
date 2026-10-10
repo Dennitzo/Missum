@@ -54,6 +54,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     private readonly MicrophoneTranscriptionService _microphone;
 
     private NativeConversationSelection? _conversationSelection;
+    private bool _selectionInputSmokeActive;
 
     public NativeAssistantPage()
     {
@@ -63,6 +64,8 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         {
             ReadFromMenuFactory = CreateReadFromMenu,
             UiProjectionCallback = (phase, projection) => RunUiCallback(phase, projection),
+            SelectionChangedCallback = () => _messagesDirty = true,
+            CopyFailed = message => ShowError(message),
         };
         ResetChangesSummary();
         ComposerChipsScroll.SizeChanged += (_, _) => RunUiCallback("ComposerChips.SizeChanged", () =>
@@ -93,7 +96,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
-        if (_initialised) { await RefreshForExternalActivationAsync(); return; }
+        if (_initialised) { if (!_selectionInputSmokeActive || !IsMessageFooterSmoke) await RefreshForExternalActivationAsync(); return; }
         _initialised = true;
         await CommandAsync("app.ready", new { });
         var navigationSmokeVisits = 0;
@@ -414,8 +417,16 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     private void RenderMessagesNow()
     {
         ReconcilePendingMessages();
+        if (_conversationSelection?.IsSelecting == true)
+        {
+            // Keep every paragraph and its viewport position stable throughout
+            // a character selection, including a drag across several messages.
+            // The model still streams into _messages and copy/audio footers stay current.
+            foreach (var message in DisplayMessages.Values) UpdateMessageActions(S(message, "id"), message);
+            return;
+        }
         RenderSources(_snapshot);
-        var follow = _conversationSelection?.HasSelection != true && ConversationScroll.ScrollableHeight - ConversationScroll.VerticalOffset < 90;
+        var follow = _conversationSelection?.IsSelecting != true && ConversationScroll.ScrollableHeight - ConversationScroll.VerticalOffset < 90;
         var index = 0;
         foreach (var stale in _messageViews.Keys.Where(id => !IsKnownConversationMessage(id)).ToArray())
         { MessagesPanel.Children.Remove(_messageViews[stale].View); _messageViews.Remove(stale); _messageBlocks.Remove(stale); _messageActionViews.Remove(stale); _thinkingIndicators.Remove(stale); _thinkingStates.Remove(stale); }
@@ -433,6 +444,11 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                 { MessagesPanel.Children.Remove(cached.View); MessagesPanel.Children.Insert(index, cached.View); }
                 index++; continue;
             }
+            // Mutating a selected Run makes WinUI expand/shift character ranges.
+            // Retain this bubble until the user clears its range; incoming content
+            // and footer controls continue to update in the committed snapshot.
+            if (cached.View is not null && _conversationSelection?.PreserveSelectionWithin(cached.View) == true)
+            { index++; continue; }
             var bubble = cached.View;
             if (bubble is null)
             {
@@ -461,6 +477,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             if (MessagesPanel.Children.IndexOf(bubble) != index)
             { MessagesPanel.Children.Remove(bubble); MessagesPanel.Children.Insert(index, bubble); }
             UpdateMessageBlocks(id, message, MessageBody(bubble));
+            _conversationSelection?.PreserveSelectionWithin(bubble);
             _messageViews[id] = (signature, bubble); index++;
         }
         ConversationContent.UpdateLayout();
@@ -492,6 +509,9 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     }
     public async Task RefreshForExternalActivationAsync()
     {
+        // Showing the previously hidden QA window raises Loaded again. Keep its
+        // synthetic gesture fixture rather than reloading the empty test repository.
+        if (_selectionInputSmokeActive && IsMessageFooterSmoke) return;
         var externalNavigation = !_navigationState.IsNavigating && _settings.Current.ActiveSessionId is { } active && active != _session;
         var generation = externalNavigation ? _navigationState.BeginNavigation() : _navigationState.Generation;
         if (externalNavigation) UpdateComposerNavigationState();
@@ -511,8 +531,11 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     private void OnSearchClick(object sender, RoutedEventArgs e) { SearchBox.Visibility = SearchBox.Visibility == Visibility.Visible ? Visibility.Collapsed : Visibility.Visible; SearchBox.Focus(FocusState.Programmatic); }
     private void OnSearchChanged(object sender, TextChangedEventArgs e) { if (_initialised) RenderSidebar(); }
     private void OnDraftChanged(object sender, TextChangedEventArgs e) { if (_initialised) SetRunning(); if (!_rendering && _initialised) { _draftTimer.Stop(); _draftTimer.Start(); } }
-    private void OnComposerGotFocus(object sender, RoutedEventArgs e) =>
+    private void OnComposerGotFocus(object sender, RoutedEventArgs e)
+    {
+        _conversationSelection?.Clear();
         ComposerSurface.BorderBrush = ThemeBrush("MissumAccentBrush", 0xB0);
+    }
     private void OnComposerLostFocus(object sender, RoutedEventArgs e) =>
         ComposerSurface.BorderBrush = ThemeBrush("MissumStrokeBrush", 0x3D);
     public void OnToggleSidebar(object sender, RoutedEventArgs e)

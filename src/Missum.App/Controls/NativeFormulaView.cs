@@ -3,7 +3,6 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
-using Windows.ApplicationModel.DataTransfer;
 
 namespace Missum.App.Controls;
 
@@ -11,6 +10,7 @@ namespace Missum.App.Controls;
 public sealed class NativeFormulaView : Button
 {
     private readonly string _source;
+    internal string Source => _source;
     private readonly bool _display;
     private readonly double _fontSize;
     private readonly string? _renderLatex;
@@ -35,16 +35,18 @@ public sealed class NativeFormulaView : Button
         var copyLabel = renderLatex is null ? "LaTeX kopieren" : "Formeltext kopieren";
         var tooltip = linkUri is null ? copyLabel : "Link öffnen: " + linkUri + " · Rechtsklick: " + copyLabel;
         ToolTipService.SetToolTip(this, tooltip);
-        void CopySource() { var package = new DataPackage(); package.SetText(_source); Clipboard.SetContent(package); }
+        async Task<bool> CopySourceAsync() => await NativeClipboard.WriteTextAsync(_source);
         var menu = new MenuFlyout();
         var copyItem = new MenuFlyoutItem { Text = copyLabel };
-        copyItem.Click += (_, _) => CopySource();
+        copyItem.Click += async (_, _) => await CopySourceAsync();
         menu.Items.Add(copyItem); ContextFlyout = menu;
         Click += async (_, _) =>
         {
             if (linkUri is not null) { await Windows.System.Launcher.LaunchUriAsync(linkUri); return; }
-            CopySource();
-            ToolTipService.SetToolTip(this, renderLatex is null ? "✓ LaTeX kopiert" : "✓ Formeltext kopiert");
+            var copied = await CopySourceAsync();
+            ToolTipService.SetToolTip(this, copied
+                ? renderLatex is null ? "✓ LaTeX kopiert" : "✓ Formeltext kopiert"
+                : NativeClipboard.UnavailableMessage);
             await Task.Delay(2000);
             ToolTipService.SetToolTip(this, tooltip);
         };
