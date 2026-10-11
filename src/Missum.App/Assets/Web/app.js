@@ -3553,6 +3553,35 @@
     return false;
   }
 
+  function mergeStreamingSnapshotMessage(existing, incoming, sessionId) {
+    if (!existing || !incoming?.id || !sessionId || existing.status !== "streaming" || isTerminalMessageStatus(incoming.status)
+      || String(existing.id || "") !== String(incoming.id || "")
+      || String(existing.sessionId || sessionId || "") !== String(sessionId || "")
+      || String(incoming.sessionId || sessionId || "") !== String(sessionId || "")) return incoming;
+    const timestamp = value => {
+      if (typeof value !== "string") return null;
+      const match = value.match(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.(\d{1,9}))?(?:Z|[+-]\d{2}:\d{2})$/);
+      const milliseconds = Date.parse(value);
+      return match && Number.isFinite(milliseconds)
+        ? { milliseconds, remainder: (match[1] || "").padEnd(9, "0").slice(3) } : null;
+    };
+    const live = timestamp(existing.updatedAt);
+    const saved = timestamp(incoming.updatedAt);
+    if (!live || !saved || live.milliseconds < saved.milliseconds
+      || live.milliseconds === saved.milliseconds && live.remainder <= saved.remainder) return incoming;
+    // A snapshot can have been read before a newer fragment reached this tab.
+    // Keep only its newer live fields; durable metadata and artifacts still win.
+    return { ...incoming, content: existing.content ?? incoming.content,
+      toolSteps: existing.toolSteps ?? incoming.toolSteps, updatedAt: existing.updatedAt };
+  }
+
+  function mergeStreamingSnapshotMessages(incoming, sessionId) {
+    const messages = Array.isArray(incoming) ? incoming : [];
+    if (String(sessionId || "") !== String(state.activeSessionId || "")) return messages;
+    const existing = new Map(state.messages.map(message => [String(message.id || ""), message]));
+    return messages.map(message => mergeStreamingSnapshotMessage(existing.get(String(message.id || "")), message, sessionId));
+  }
+
   function contextProfileForSnapshot(payload) {
     return JSON.stringify([payload.activeSessionId || "", payload.reasoningRole || "general",
       payload.reasoningModelId || "", String(payload.workspacePath || payload.codingWorkspacePath || "").toLocaleLowerCase()]);
@@ -3573,10 +3602,11 @@
     state.contextSource = payload.contextSource === "measured" ? "measured" : "estimated";
     state.contextMeasurementMessageId = payload.contextMessageId || state.messages.at(-1)?.id || null;
     state.contextUsed = Number.isFinite(payload.contextUsed) ? payload.contextUsed : 0;
-    state.contextLimit = Number.isFinite(payload.contextLimit) && payload.contextLimit > 0 ? payload.contextLimit : 8192;
+    const hasHostLimit = Number.isFinite(payload.contextLimit) && payload.contextLimit > 0;
+    state.contextLimit = hasHostLimit ? payload.contextLimit : 8192;
     state.contextWasTruncated = Boolean(payload.contextWasTruncated);
     state.contextNotice = payload.contextNotice || null;
-    if (state.contextSource !== "measured") {
+    if (state.contextSource !== "measured" && !payload.isRunning) {
       try {
         const saved = JSON.parse(readMigratedStorage(
           `assistant.context.measurement.v1:${state.contextProfile}`,
@@ -3584,9 +3614,9 @@
         if (saved && saved.messageId === (state.messages.at(-1)?.id || null)
           && Number.isFinite(saved.used) && saved.used >= 0 && Number.isFinite(saved.limit) && saved.limit > 0) {
           state.contextUsed = saved.used;
-          // Snapshot estimates use the catalog maximum. The last measured run
-          // may have fitted a smaller native context, which remains authoritative.
-          state.contextLimit = saved.limit;
+          // A cached token count does not describe the currently available window.
+          // Keep the host's current limit, including genuinely smaller fitted contexts.
+          if (!hasHostLimit) state.contextLimit = saved.limit;
           state.contextWasTruncated = Boolean(saved.truncated);
           state.contextSource = "measured";
           state.contextNotice = null;
@@ -3639,7 +3669,7 @@
         .filter(Boolean));
     }
     if (sessionChanged) { closeCodingPreview(); state.changesSummary = null; }
-    const nextMessages = Array.isArray(payload.messages) ? payload.messages : [];
+    const nextMessages = mergeStreamingSnapshotMessages(payload.messages, nextSessionId);
     const currentSessionMessagesChanged = !sessionChanged
       && conversationMessagesDiffer(state.messages, nextMessages);
     if (sessionChanged && previousSessionId) persistSessionScrollPosition(previousSessionId);
@@ -3787,7 +3817,7 @@
       return;
     }
     state.codingToolStepsExpanded = Boolean(payload.codingToolStepsExpanded);
-    const nextMessages = Array.isArray(payload.messages) ? payload.messages : [];
+    const nextMessages = mergeStreamingSnapshotMessages(payload.messages, payload.activeSessionId);
     const messagesChanged = conversationMessagesDiffer(state.messages, nextMessages);
     state.messages = nextMessages;
     sortCommittedMessages();
@@ -3819,7 +3849,7 @@
       const existingRevision = Number(state.messages[index].revision) || 0;
       const incomingRevision = Number(message.revision) || 0;
       if (incomingRevision < existingRevision) return;
-      state.messages[index] = message;
+      state.messages[index] = mergeStreamingSnapshotMessage(state.messages[index], message, state.activeSessionId);
     } else {
       state.messages.push(message);
     }
@@ -3960,7 +3990,7 @@
         }
         if (Number.isFinite(payload.contextUsed)) {
           state.contextUsed = payload.contextUsed;
-          state.contextSource = "measured";
+          state.contextSource = payload.contextSource === "measured" ? "measured" : "estimated";
           state.contextMeasurementMessageId = payload.message?.id || state.messages.at(-1)?.id || null;
         }
         if (Number.isFinite(payload.contextLimit) && payload.contextLimit > 0) state.contextLimit = payload.contextLimit;
@@ -4237,7 +4267,7 @@
           if (payload.model) state.model = payload.model;
           if (Number.isFinite(payload.contextUsed)) {
             state.contextUsed = payload.contextUsed;
-            state.contextSource = "measured";
+            state.contextSource = payload.contextSource === "measured" ? "measured" : "estimated";
             state.contextMeasurementMessageId = statusMessageId || state.messages.at(-1)?.id || null;
           }
           if (Number.isFinite(payload.contextLimit) && payload.contextLimit > 0) state.contextLimit = payload.contextLimit;

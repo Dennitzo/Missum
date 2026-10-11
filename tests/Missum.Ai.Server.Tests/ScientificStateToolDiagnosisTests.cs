@@ -72,6 +72,29 @@ public sealed class ScientificStateToolDiagnosisTests
     }
 
     [Fact]
+    public void RepeatedReviewStatusOmissionsKeepTheExactSiblingFieldInTheRepairHint()
+    {
+        var catalog = new AgentToolCatalog();
+        var tool = catalog.Resolve(ClientToolNames.ResearchUpdate, catalog.GetAvailableTools(Request()));
+        LmToolCall Call(string id) => new("call-" + id, ClientToolNames.ResearchUpdate, JsonSerializer.SerializeToElement(new {
+            projectId = "science-project", changes = new[] { new { id, kind = "section", expectedRevision = 1,
+                patch = new { review = new { itemRevision = 2, sourceAssessment = "Quellen", calculationAssessment = "Rechnung",
+                    contradictionAssessment = "Grenzen", scope = "Modell" } } } } }));
+        var messages = new List<LmChatMessage>();
+        var progress = new ScientificStateRunProgress();
+        foreach (var id in new[] { "sec-foundation", "sec-other" })
+        {
+            var call = Call(id);
+            var error = Assert.Throws<ArgumentException>(() => catalog.Validate(tool, call.Arguments));
+            progress = Observe(progress, call, Failure(error.Message), messages);
+        }
+        var hint = Assert.Single(messages).Content!;
+        Assert.Contains("changes[].patch.status", hint, StringComparison.Ordinal);
+        Assert.Contains("patch.review.status ist nicht erlaubt", hint, StringComparison.Ordinal);
+        Assert.Equal(2, Assert.Single(progress.Failures!).Count);
+    }
+
+    [Fact]
     public void AnAcceptedCanonicalSectionResetsFailuresAndNeedsTwoNewFailuresForAnotherHint()
     {
         var messages = new List<LmChatMessage>();

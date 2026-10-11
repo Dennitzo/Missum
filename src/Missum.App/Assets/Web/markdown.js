@@ -111,6 +111,7 @@
     const { source, tex, display } = normalizedMathParts(rawMath, renderLatex);
     const wrapper = document.createElement("span");
     wrapper.className = `math-selectable${display ? " display" : ""}`;
+    wrapper.dataset.mathSource = source;
     wrapper.setAttribute("aria-label", `LaTeX: ${source}`);
     wrapper.title = "LaTeX kopieren";
 
@@ -152,6 +153,74 @@
     });
     return wrapper;
   }
+
+  function selectedFormulaText(selection, scope) {
+    if (!selection || selection.isCollapsed || !selection.rangeCount || !scope) return null;
+    const mathParent = node => (node?.nodeType === 1 ? node : node?.parentElement)?.closest(".math-selectable");
+    const ranges = [];
+    let hasFormula = false;
+    for (let index = 0; index < selection.rangeCount; index += 1) {
+      const original = selection.getRangeAt(index);
+      if (!scope.contains(original.startContainer) || !scope.contains(original.endContainer)) return null;
+      if (original.collapsed) continue;
+      const range = original.cloneRange();
+      // A rendered formula is an atomic expression. Copying a boundary inside
+      // its glyphs must include its complete original TeX, without changing
+      // the user's visible selection or the surrounding selected prose.
+      const startMath = mathParent(range.startContainer);
+      const endMath = mathParent(range.endContainer);
+      if (startMath) range.setStartBefore(startMath);
+      if (endMath) range.setEndAfter(endMath);
+      const fragment = range.cloneContents();
+      for (const formula of fragment.querySelectorAll(".math-selectable")) {
+        const source = formula.dataset.mathSource ?? formula.querySelector(".math-source-text")?.textContent;
+        if (source == null) continue;
+        if (formula.classList.contains("display")) {
+          const block = document.createElement("div");
+          block.textContent = source;
+          formula.replaceWith(block);
+        } else formula.replaceWith(document.createTextNode(source));
+        hasFormula = true;
+      }
+      ranges.push(fragment);
+    }
+    if (!hasFormula) return null;
+    return ranges.map(fragment => {
+      let result = "", boundary = "";
+      const emit = text => {
+        if (!text) return;
+        if (result && boundary && !result.endsWith("\n") && !text.startsWith("\n")) result += boundary;
+        boundary = "";
+        result += text;
+      };
+      const visit = node => {
+        if (node.nodeType === 3) { emit(node.nodeValue); return; }
+        if (node.nodeType === 1) {
+          if (node.matches("button,script,style,.message-footer,.message-meta,.code-header,[aria-hidden='true']")) return;
+          if (node.tagName === "BR") { emit("\n"); return; }
+          if (node.tagName === "PRE") { boundary = "\n"; emit(node.textContent); boundary = "\n"; return; }
+        }
+        const block = node.nodeType === 1 && /^(P|DIV|H[1-6]|LI|BLOCKQUOTE|TR|TABLE)$/.test(node.tagName);
+        if (block) boundary = "\n";
+        for (const child of node.childNodes) visit(child);
+        if (block) boundary = "\n";
+        else if (node.nodeType === 1 && /^(TD|TH)$/.test(node.tagName)) boundary = "\t";
+      };
+      visit(fragment);
+      return result;
+    }).join("\n");
+  }
+
+  document.addEventListener?.("copy", event => {
+    if (event.defaultPrevented || !event.clipboardData
+        || event.target?.isContentEditable || event.target?.closest?.("input,textarea")) return;
+    try {
+      const text = selectedFormulaText(globalThis.getSelection?.(), document.getElementById("message-list"));
+      if (text === null) return;
+      event.clipboardData.setData("text/plain", text);
+      event.preventDefault();
+    } catch { /* A detached selection must not break the browser's normal copy action. */ }
+  });
 
   function isInlineDollarMath(rawMath) {
     const source = String(rawMath || "");
@@ -974,5 +1043,5 @@
     return root;
   }
 
-  globalThis.missumMarkdown = Object.freeze({ render });
+  globalThis.missumMarkdown = Object.freeze({ render, selectedFormulaText });
 })();

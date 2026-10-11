@@ -53,7 +53,8 @@ function harness(storage = new Map()) {
     "normalizeScheduledRun", "normalizeRunQueue", "scheduledRunForSession", "applyRunQueue", "removeScheduledRun",
     "normalizeChatMode", "sessionMatchesMode", "sessionBelongsToGroup", "readMigratedStorage", "readUngroupedCollapsed", "persistUngroupedCollapsed", "createSessionItem", "createProjectRow",
     "createWorkspaceProject", "renderSessions", "contextProfileForSnapshot", "persistMeasuredContext", "restoreSnapshotContext",
-    "belongsToActiveSession", "restoreDeepResearch", "clearCompletedOneShotToolAction", "applySnapshot",
+    "belongsToActiveSession", "restoreDeepResearch", "clearCompletedOneShotToolAction",
+    "mergeStreamingSnapshotMessage", "mergeStreamingSnapshotMessages", "applySnapshot",
     "sortCommittedMessages", "requestConversationRefresh", "applyConversationSnapshot", "acceptCommittedRevision", "applyCommittedMessage",
     "upsertLiveMessage", "applyLiveDelta", "handleHostMessage", "isTerminalMessageStatus", "pruneTerminalMessageRunStatuses", "conversationMessagesDiffer",
     "renderComposerAction", "renderStatus"]) {
@@ -72,6 +73,75 @@ function snapshot(extra = {}) {
     reasoningModelId: "model-a", reasoningRole: "general", contextUsed: 300, contextLimit: 32768,
     contextSource: "estimated", chatMode: "general", isRunning: false, ...extra };
 }
+
+for (const route of ["full", "conversation", "committed"]) {
+  test(`${route} snapshots retain newer streaming text while accepting durable metadata and artifacts`, () => {
+    const { context, state, posts } = harness();
+    const original = { id: "answer-a", sessionId: "session-a", role: "assistant", status: "streaming",
+      revision: 1, content: "Anfang", updatedAt: "2026-10-11T20:00:00.1234000+00:00", toolSteps: [] };
+    context.applySnapshot(snapshot({ messages: [original], conversationRevision: 1 }));
+    context.applyLiveDelta({ sessionId: "session-a", messageId: "answer-a", content: "Anfang und neuer Text",
+      updatedAt: "2026-10-11T20:00:00.1234999+00:00", toolSteps: [{ id: "step-live", status: "running" }] });
+    const incoming = { ...original, revision: 2, contextSummary: "Neue Metadaten", artifacts: [{ id: "artifact-new" }] };
+    if (route === "full") context.applySnapshot(snapshot({ messages: [incoming], conversationRevision: 2 }));
+    else if (route === "conversation") context.applyConversationSnapshot({ activeSessionId: "session-a", messages: [incoming], conversationRevision: 2 });
+    else context.applyCommittedMessage({ sessionId: "session-a", message: incoming, conversationRevision: 2 });
+
+    const result = state.messages[0];
+    assert.equal(result.content, "Anfang und neuer Text");
+    assert.equal(result.updatedAt, "2026-10-11T20:00:00.1234999+00:00", "preserves submillisecond ordering from SQLite timestamps");
+    assert.equal(result.toolSteps[0].id, "step-live");
+    assert.equal(result.revision, 2);
+    assert.equal(result.contextSummary, "Neue Metadaten");
+    assert.equal(result.artifacts[0].id, "artifact-new");
+    assert.equal(state.conversationRevision, 2);
+    assert.equal(posts.length, 0, "a retained live fragment does not request another whole conversation");
+  });
+
+  test(`${route} snapshots accept terminal messages even when their timestamp predates a live fragment`, () => {
+    const { context, state } = harness();
+    const original = { id: "answer-a", sessionId: "session-a", role: "assistant", status: "streaming",
+      revision: 1, content: "Live", updatedAt: "2026-10-11T20:00:02Z", toolSteps: [{ id: "live" }] };
+    context.applySnapshot(snapshot({ messages: [original], conversationRevision: 1 }));
+    const incoming = { ...original, revision: 2, status: "completed", content: "Fertige Antwort",
+      updatedAt: "2026-10-11T20:00:01Z", toolSteps: [{ id: "finished" }] };
+    if (route === "full") context.applySnapshot(snapshot({ messages: [incoming], conversationRevision: 2 }));
+    else if (route === "conversation") context.applyConversationSnapshot({ activeSessionId: "session-a", messages: [incoming], conversationRevision: 2 });
+    else context.applyCommittedMessage({ sessionId: "session-a", message: incoming, conversationRevision: 2 });
+    assert.equal(state.messages[0].status, "completed");
+    assert.equal(state.messages[0].content, "Fertige Antwort");
+    assert.equal(state.messages[0].toolSteps[0].id, "finished");
+  });
+}
+
+test("stream snapshot merge requires matching session and message identity and comparable newer timestamps", () => {
+  const { context, state } = harness();
+  const live = { id: "answer-a", sessionId: "session-a", status: "streaming", content: "Neu",
+    updatedAt: "2026-10-11T20:00:02Z" };
+  const stored = { ...live, content: "Alt", updatedAt: "2026-10-11T20:00:01Z" };
+  for (const incoming of [
+    { ...stored, id: "different" }, { ...stored, sessionId: "session-b" },
+    { ...stored, updatedAt: undefined }, { ...stored, updatedAt: "invalid" },
+    { ...stored, updatedAt: live.updatedAt }, { ...stored, updatedAt: "2026-10-11T20:00:03Z" }
+  ]) assert.equal(context.mergeStreamingSnapshotMessage(live, incoming, "session-a"), incoming);
+  assert.equal(context.mergeStreamingSnapshotMessage({ ...live, updatedAt: "invalid" }, stored, "session-a"), stored);
+  assert.equal(context.mergeStreamingSnapshotMessage({ ...live, status: "completed" }, stored, "session-a"), stored);
+  const offsetTimestamp = { ...stored, updatedAt: "2026-10-11T22:00:01+02:00" };
+  assert.equal(context.mergeStreamingSnapshotMessage(live, offsetTimestamp, "session-a").content, "Neu");
+
+  context.applySnapshot(snapshot({ messages: [live] }));
+  const foreign = { ...stored, sessionId: "session-b" };
+  context.applySnapshot(snapshot({ activeSessionId: "session-b", messages: [foreign] }));
+  assert.equal(state.messages[0].content, "Alt", "navigation never imports the previous session's live fields");
+});
+
+test("stream snapshot merge does not resurrect deleted messages", () => {
+  const { context, state } = harness();
+  context.applySnapshot(snapshot({ messages: [{ id: "answer-a", sessionId: "session-a", status: "streaming",
+    content: "Noch sichtbar", updatedAt: "2026-10-11T20:00:02Z" }], conversationRevision: 1 }));
+  context.applyConversationSnapshot({ activeSessionId: "session-a", messages: [], conversationRevision: 2 });
+  assert.equal(state.messages.length, 0);
+});
 
 test("workspace headers keep every session visible and project compose emits its exact workspace", async () => {
   const { context, elements, posts, state } = harness();
@@ -419,7 +489,7 @@ test("context measurement survives app restart and model switch without reviving
     const restart = harness(first.storage);
     restart.context.applySnapshot({ ...completed, contextSource: "estimated", contextUsed: 100, contextLimit: 262144 });
     assert.equal(restart.state.contextUsed, 14000);
-    assert.equal(restart.state.contextLimit, 32768, "the observed fitted context beats the catalog estimate after restart");
+    assert.equal(restart.state.contextLimit, 262144, "the current host window takes precedence over an older cached limit");
     assert.equal(restart.state.isRunning, false);
     assert.equal(restart.state.messageRunStatus.size, 0);
     restart.context.applySnapshot({ ...completed, reasoningModelId: "model-b", contextSource: "estimated", contextUsed: 200 });
@@ -429,6 +499,61 @@ test("context measurement survives app restart and model switch without reviving
     restart.context.applySnapshot({ ...completed, contextSource: "estimated", contextUsed: 500,
       messages: [{ id: "next-turn", role: "assistant", status: "completed" }] });
     assert.equal(restart.state.contextUsed, 500, "another prompt cannot restore the earlier message measurement");
+  }
+});
+
+test("current model windows override old cached limits in either direction", () => {
+  for (const [oldLimit, currentLimit] of [[131072, 1048576], [1048576, 65536]]) {
+    const first = harness();
+    const completed = snapshot({ contextUsed: 60000, contextLimit: oldLimit, contextSource: "measured",
+      messages: [{ id: "answer-a", sessionId: "session-a", role: "assistant", status: "completed" }] });
+    first.context.applySnapshot(completed);
+    const reload = harness(first.storage);
+    reload.context.applySnapshot({ ...completed, contextUsed: 200, contextLimit: currentLimit, contextSource: "estimated" });
+    assert.equal(reload.state.contextUsed, 60000, "the message's measured numerator can survive reload");
+    assert.equal(reload.state.contextLimit, currentLimit, "both larger and smaller current host windows are authoritative");
+    assert.equal(reload.elements.contextLabel.textContent, `${Math.round(60000 / currentLimit * 100)}%`);
+    assert.ok(reload.elements.context.title.includes(currentLimit.toLocaleString("de-DE")));
+  }
+});
+
+test("an active run's fresh context cannot be rolled back by a saved measurement", () => {
+  const first = harness();
+  first.context.applySnapshot(snapshot({ contextUsed: 60000, contextLimit: 131072, contextSource: "measured" }));
+  const reload = harness(first.storage);
+  reload.context.applySnapshot(snapshot({ contextUsed: 90000, contextLimit: 1048576, contextSource: "estimated", isRunning: true }));
+  assert.equal(reload.state.contextUsed, 90000);
+  assert.equal(reload.state.contextLimit, 1048576);
+  assert.equal(reload.state.contextSource, "estimated");
+  assert.equal(reload.elements.contextLabel.textContent, "9%");
+});
+
+test("cached context limit is only a fallback when the host has no current limit", () => {
+  const first = harness();
+  first.context.applySnapshot(snapshot({ contextUsed: 60000, contextLimit: 1048576, contextSource: "measured" }));
+  const reload = harness(first.storage);
+  reload.context.applySnapshot(snapshot({ contextLimit: null }));
+  assert.equal(reload.state.contextLimit, 1048576);
+  assert.equal(reload.state.contextUsed, 60000);
+});
+
+test("chat start and streaming status persist only explicitly measured context", () => {
+  for (const type of ["chat.started", "status.changed"]) {
+    const { context, state, storage, emit, elements } = harness();
+    context.applySnapshot(snapshot({ isRunning: true, runMessageId: "answer-a" }));
+    const event = { sessionId: "session-a", messageId: "answer-a", message: state.messages[0],
+      contextUsed: 60000, contextLimit: 1048576, contextSource: "estimated" };
+    emit(type, event);
+    const key = `assistant.context.measurement.v1:${state.contextProfile}`;
+    assert.equal(state.contextSource, "estimated");
+    assert.equal(storage.has(key), false, "estimates must not be saved as measurements");
+    assert.equal(elements.contextLabel.textContent, "6%");
+    assert.equal(elements.context.title, "Kontext: 60.000 von 1.048.576 Tokens");
+    emit(type, { ...event, contextSource: "measured" });
+    assert.equal(state.contextSource, "measured");
+    assert.equal(JSON.parse(storage.get(key)).limit, 1048576);
+    emit(type, { ...event, contextSource: null });
+    assert.equal(state.contextSource, "estimated", "unknown provenance is not a tokenizer measurement");
   }
 });
 
@@ -589,7 +714,7 @@ test("a new prompt without token progress cannot label an older measurement as i
   const restarted = harness(first.storage);
   restarted.context.applySnapshot(snapshot({ messages: first.state.messages, contextUsed: 700 }));
   assert.equal(restarted.state.contextUsed, 700);
-  first.emit("status.changed", { sessionId: "session-a", messageId: "next-answer", contextUsed: 17000 });
+  first.emit("status.changed", { sessionId: "session-a", messageId: "next-answer", contextUsed: 17000, contextSource: "measured" });
   restarted.context.applySnapshot(snapshot({ messages: first.state.messages, contextUsed: 700 }));
   assert.equal(restarted.state.contextUsed, 17000);
 });

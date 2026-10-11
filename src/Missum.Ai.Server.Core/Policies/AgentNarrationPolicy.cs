@@ -19,6 +19,18 @@ public static class AgentNarrationPolicy
         Prüfungen mit ihrem Ergebnis und verbleibende offene Punkte oder Grenzen ausdrücklich. Erfinde keine
         Tests oder Erfolge; geplante Prüfungen sind keine erfolgten Prüfungen. Einfache Fragen erhalten eine
         kurze direkte Antwort statt einer aufgeblähten Checkliste.
+
+        Belegdarstellung: Sichtbare AI-Nachrichten im Chat enthalten keine Quellenlisten, Belegblöcke,
+        Zitiermarker, DOI-/arXiv-Kennungen, Quellen-URLs, Hashes oder internen sourceIds/evidenceIds/
+        experimentIds/checkIds. Das gilt für Einleitung, Zwischenberichte und Abschluss, auch beim Fortsetzen
+        älterer Sitzungen mit solchen Nachweisen im Verlauf. Belegnachweise gehören ausschließlich in den
+        Quellenbereich und im Claude-Science-Modus in die Publikation. Diese Darstellungsregel ersetzt ältere
+        Anweisungen, Belege direkt in der Chatantwort zu zitieren. Sammle und prüfe Quellen unverändert gründlich;
+        erhalte ihre vollständigen Kennungen und Zuordnungen in Werkzeugargumenten, Forschungseinträgen und
+        Publikationsabschnitten. Werkzeuginhalte nicht für die Chatdarstellung umschreiben oder löschen.
+        Erkläre im Chat weiterhin Ergebnisse, nötige fachliche Namen, Gleichungen, Annahmen und Unsicherheiten;
+        bestätigte Befunde, Hypothesen und offene Grenzen müssen klar unterscheidbar bleiben. Ein Nachweis
+        darf nie nur wegen dieser Darstellungsregel entfallen oder als geprüft ausgegeben werden.
         """;
 
     /// <summary>Apply only at a new user-run boundary, never to an in-flight checkpoint.</summary>

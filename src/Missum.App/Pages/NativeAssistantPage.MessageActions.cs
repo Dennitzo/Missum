@@ -355,8 +355,16 @@ public sealed partial class NativeAssistantPage
     {
         var active = _speaking && IsMessageSpeechSource(view);
         var microphone = MessageFooterMicrophone;
-        view.Panel.Visibility = active || view.IsStreaming || !string.IsNullOrWhiteSpace(view.Text) ? Visibility.Visible : Visibility.Collapsed;
-        view.Copy.IsEnabled = view.CopyMenu.IsEnabled = !string.IsNullOrWhiteSpace(view.Text);
+        var hasText = !string.IsNullOrWhiteSpace(view.Text);
+        var renderState = new MessageActionRenderState(hasText, view.IsStreaming, view.CanRead, active,
+            _messageSpeechActionBusy, active && microphone.CanPauseSpeech, active && microphone.IsSpeechPaused,
+            active && _messageSpeechAutomatic, active ? _messageSpeechStatus : "");
+        // Text still updates above for Copy/Read, but another streamed token does
+        // not change the footer. Avoid resetting WinUI properties and tooltips.
+        if (view.RenderState == renderState) return;
+        view.RenderState = renderState;
+        view.Panel.Visibility = active || view.IsStreaming || hasText ? Visibility.Visible : Visibility.Collapsed;
+        view.Copy.IsEnabled = view.CopyMenu.IsEnabled = hasText;
         view.Read.Visibility = Visibility.Visible;
         view.Read.IsEnabled = active || view.CanRead && !_messageSpeechActionBusy;
         var readIcon = (FontIcon)view.Read.Content;
@@ -369,13 +377,13 @@ public sealed partial class NativeAssistantPage
         view.ReadMenu.IsEnabled = view.CanRead && !active && !_messageSpeechActionBusy;
         view.ReadMenu.Visibility = Visibility.Visible;
         view.Pause.Visibility = active ? Visibility.Visible : Visibility.Collapsed;
-        view.Pause.IsEnabled = active && microphone.CanPauseSpeech;
+        view.Pause.IsEnabled = renderState.CanPause;
         view.PauseMenu.IsEnabled = view.Pause.IsEnabled;
         view.PauseMenu.Visibility = view.StopMenu.Visibility = active ? Visibility.Visible : Visibility.Collapsed;
-        var pauseLabel = microphone.IsSpeechPaused ? "Vorlesen fortsetzen" : "Vorlesen pausieren";
+        var pauseLabel = renderState.IsPaused ? "Vorlesen fortsetzen" : "Vorlesen pausieren";
         var pauseIcon = (FontIcon)view.Pause.Content;
-        pauseIcon.Glyph = microphone.IsSpeechPaused ? "\uE768" : "\uE769";
-        pauseIcon.Foreground = NativeIconPalette.BrushFor(microphone.IsSpeechPaused ? "add" : "speech");
+        pauseIcon.Glyph = renderState.IsPaused ? "\uE768" : "\uE769";
+        pauseIcon.Foreground = NativeIconPalette.BrushFor(renderState.IsPaused ? "add" : "speech");
         ToolTipService.SetToolTip(view.Pause, pauseLabel);
         AutomationProperties.SetName(view.Pause, pauseLabel);
         view.PauseMenu.Text = pauseLabel;
@@ -384,7 +392,7 @@ public sealed partial class NativeAssistantPage
             pauseMenuIcon.Glyph = pauseIcon.Glyph;
             pauseMenuIcon.Foreground = pauseIcon.Foreground;
         }
-        view.Status.Text = active ? _messageSpeechStatus : "";
+        view.Status.Text = renderState.Status;
         ToolTipService.SetToolTip(view.Status, view.Status.Text);
     }
 
@@ -434,6 +442,9 @@ public sealed partial class NativeAssistantPage
         return button;
     }
 
+    private readonly record struct MessageActionRenderState(bool HasText, bool IsStreaming, bool CanRead,
+        bool Active, bool Busy, bool CanPause, bool IsPaused, bool Automatic, string Status);
+
     private sealed class MessageActionView(string messageId)
     {
         public string MessageId { get; } = messageId;
@@ -443,6 +454,7 @@ public sealed partial class NativeAssistantPage
         public bool IsStreaming { get; set; }
         public bool CanRead { get; set; }
         public long CopyVersion { get; set; }
+        public MessageActionRenderState? RenderState { get; set; }
         public StackPanel Panel { get; } = new() { Orientation = Orientation.Horizontal, Spacing = 3, MinHeight = 28 };
         public Button Copy { get; } = MessageActionButton("\uE8C8", "Nachricht kopieren");
         public Button Read { get; } = MessageActionButton("\uE767", "Nachricht vorlesen");

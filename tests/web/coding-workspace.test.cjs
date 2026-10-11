@@ -62,7 +62,8 @@ function harness({ speech = false, codingToolStepsExpanded = false } = {}) {
     "uniqueStatusParts", "isTerminalMessageStatus", "statusLabel", "runStatusText", "sanitizeVisibleMessageContent", "createMessage",
     "createMessageFooter", "isMessageSpeechActive", "updateMessageSpeechFooter", "updateSpeechControlIdentity", "createMessageIconAction", "createMessageFooterLink", "flashMessageAction", "scrollMessageToTop", "renderMessages", "renderCodingMessages",
     "conversationMessagesDiffer", "sortCommittedMessages", "pruneTerminalMessageRunStatuses", "requestConversationRefresh", "acceptCommittedRevision",
-    "applyCommittedMessage", "applyConversationSnapshot", "belongsToActiveSession", "upsertLiveMessage", "applyLiveDelta", "handleHostMessage",
+    "mergeStreamingSnapshotMessage", "mergeStreamingSnapshotMessages", "applyCommittedMessage", "applyConversationSnapshot",
+    "belongsToActiveSession", "upsertLiveMessage", "applyLiveDelta", "handleHostMessage",
     "preparePdfMedia", "preparePdfMessage"]) {
     const start = app.indexOf(`  function ${name}(`);
     const next = app.indexOf(name === "preparePdfMessage"

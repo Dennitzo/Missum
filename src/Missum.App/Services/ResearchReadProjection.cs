@@ -168,7 +168,7 @@ internal static class ResearchReadProjection
 
     private static int OverviewPriority(ResearchWorkingItem item)
     {
-        var active = Text(item.Data, "status") is "active" or "planned" or "pending" or "blocked" or "unresolved";
+        var active = Text(item.Data, "status") is "active" or "planned" or "pending" or "blocked" or "unresolved" or "openLimit";
         if (item.Kind == "requirement" && active) return 0;
         if (item.Kind == "hypothesis" && active) return 1;
         if (item.Kind == "section") return 2;

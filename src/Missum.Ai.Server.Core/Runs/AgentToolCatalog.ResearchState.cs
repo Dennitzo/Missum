@@ -11,7 +11,7 @@ public sealed partial class AgentToolCatalog
         Client(ClientToolNames.ResearchRead, "Lies view=overview für den kompakten Forschungsstand; knownStateStamp spart unveränderte Inhalte. view=task liefert den vollständigen ursprünglichen Auftrag in Textseiten. objects/sources/experiments/checks laden ihren eigenen Bereich; ids liefern gezielte Details (sources auch Evidenz-IDs). Folge nextCursor nur innerhalb derselben Ansicht/ids; bei research.cursor_stale ohne Cursor neu beginnen. Ohne view bleiben frühere offset-Aufrufe kompatibel.", ToolRiskClass.ReadOnly, NormalizeResearchStateSchema(Parse("""
             {"type":"object","properties":{"projectId":{"type":"string","pattern":"^[A-Za-z0-9._-]{1,128}$"},"view":{"type":"string","enum":["overview","task","objects","sources","experiments","checks"]},"cursor":{"type":"string","minLength":1,"maxLength":2048},"knownStateStamp":{"type":"string","pattern":"^[a-fA-F0-9]{64}$"},"ids":{"type":"array","maxItems":32,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":256}},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["projectId"],"additionalProperties":false}
             """))),
-        Client(ClientToolNames.ResearchUpdate, "Speichere nur neue oder fachlich geänderte Forschungsobjekte dauerhaft. Stabile id, kind und expectedRevision aus research.read verwenden; neue Objekte erwarten Revision 0. Bei kind section/contribution muss data.title UND data.contentMarkdown enthalten; description/method/limit ersetzen den wissenschaftlichen Markdowntext nicht. Bei hypothesis/claim/requirement muss data.statement enthalten. data ersetzt genau ein vollständiges Objekt. Für vorhandene Objekte nutze stattdessen patch mit ausschließlich geänderten Feldern: insbesondere status, review und Beleg-IDs; unveränderter Manuskripttext und nicht angegebene Felder bleiben erhalten. Genau eines von data oder patch angeben; patch benötigt expectedRevision>0. Arrays werden vollständig ersetzt; null entfernt optionale Felder, aber keine erforderlichen Inhalte oder verbindlichen Ziele. Jede eingereichte review benötigt ausdrücklich den tatsächlich erreichten status und itemRevision=expectedRevision+1. Der Hauptagent schreibt Publikationsabschnitte, Subagenten eigene Beiträge mit ihrer Agent-ID als Präfix. Quellen und Prüfnachweise über echte IDs referenzieren. verified erfordert passende gespeicherte Prüfnachweise; ein erfolgreicher Prozess allein belegt keine Aussage. Konflikte gezielt beheben, nicht die Publikation wiederholen.", ToolRiskClass.LocalMutation, NormalizeResearchStateSchema(Parse("""
+        Client(ClientToolNames.ResearchUpdate, "Speichere nur neue oder fachlich geänderte Forschungsobjekte dauerhaft. Stabile id, kind und expectedRevision aus research.read verwenden; neue Objekte erwarten Revision 0. Bei kind section/contribution muss data.title UND data.contentMarkdown enthalten; description/method/limit ersetzen den wissenschaftlichen Markdowntext nicht. Bei hypothesis/claim/requirement muss data.statement enthalten. data ersetzt genau ein vollständiges Objekt. Für vorhandene Objekte nutze stattdessen patch mit ausschließlich geänderten Feldern: insbesondere status, review und Beleg-IDs; unveränderter Manuskripttext und nicht angegebene Felder bleiben erhalten. Genau eines von data oder patch angeben; patch benötigt expectedRevision>0. Arrays werden vollständig ersetzt; null entfernt optionale Felder, aber keine erforderlichen Inhalte oder verbindlichen Ziele. Bei review ist data.status bzw. patch.status ein Pflichtfeld auf derselben Ebene wie review; review.status ist unzulässig. review.itemRevision=expectedRevision+1. Wähle nur den tatsächlich erreichten fachlichen Status. Der Hauptagent schreibt Publikationsabschnitte, Subagenten eigene Beiträge mit ihrer Agent-ID als Präfix. Quellen und Prüfnachweise über echte IDs referenzieren. verified erfordert passende gespeicherte Prüfnachweise; ein erfolgreicher Prozess allein belegt keine Aussage. Konflikte gezielt beheben, nicht die Publikation wiederholen.", ToolRiskClass.LocalMutation, NormalizeResearchStateSchema(Parse("""
             {"type":"object","properties":{"projectId":{"type":"string","pattern":"^[A-Za-z0-9._-]{1,128}$"},"title":{"type":"string","minLength":1,"maxLength":1000},"changes":{"type":"array","minItems":1,"maxItems":64,"items":{"type":"object","properties":{"id":{"type":"string","minLength":1,"maxLength":256},"kind":{"type":"string","enum":["hypothesis","claim","requirement","section","contribution"]},"expectedRevision":{"type":"integer","minimum":0},"data":{"type":"object","minProperties":1,"properties":{"title":{"type":"string","maxLength":1000},"contentMarkdown":{"type":"string","maxLength":64000},"statement":{"type":"string","maxLength":16000},"status":{"type":"string","enum":["planned","active","supported","provisionallySupported","verified","refuted","blocked","unresolved","superseded","withdrawn","completed","openLimit","draft"]},"assumptions":{"anyOf":[{"type":"string","maxLength":16000},{"type":"array","maxItems":64,"items":{"type":"string","maxLength":2000}}]},"prediction":{"type":"string","maxLength":16000},"nextCheck":{"type":"string","maxLength":4000},"reason":{"type":"string","maxLength":16000},"required":{"type":"boolean"},"order":{"type":"integer"},"sourceIds":{"type":"array","maxItems":128,"items":{"type":"string","minLength":1,"maxLength":256}},"claimIds":{"type":"array","maxItems":128,"items":{"type":"string","minLength":1,"maxLength":256}},"experimentIds":{"type":"array","maxItems":128,"items":{"type":"string","minLength":1,"maxLength":256}},"checkIds":{"type":"array","maxItems":128,"items":{"type":"string","minLength":1,"maxLength":256}}},"additionalProperties":false}},"required":["id","kind","expectedRevision","data"],"additionalProperties":false}}},"required":["projectId","changes"],"additionalProperties":false}
             """))),
     ];
@@ -40,6 +40,11 @@ public sealed partial class AgentToolCatalog
             data["units"] = JsonNode.Parse("""{"type":"array","maxItems":128,"items":{"type":"object","properties":{"symbol":{"type":"string","minLength":1,"maxLength":200},"meaning":{"type":"string","minLength":1,"maxLength":2000},"unit":{"type":"string","minLength":1,"maxLength":200}},"required":["symbol","meaning","unit"],"additionalProperties":false}}""");
             data["figureCaptions"] = JsonNode.Parse("""{"type":"array","maxItems":32,"items":{"type":"object","properties":{"experimentId":{"type":"string","minLength":1,"maxLength":200},"artifactPath":{"type":"string","minLength":1,"maxLength":2048},"caption":{"type":"string","minLength":1,"maxLength":4000}},"required":["experimentId","artifactPath","caption"],"additionalProperties":false}}""");
             data["review"] = JsonNode.Parse("""{"type":"object","properties":{"itemRevision":{"type":"integer","minimum":1},"sourceAssessment":{"type":"string","minLength":1,"maxLength":4000},"calculationAssessment":{"type":"string","minLength":1,"maxLength":4000},"contradictionAssessment":{"type":"string","minLength":1,"maxLength":4000},"scope":{"type":"string","minLength":1,"maxLength":4000}},"required":["itemRevision","sourceAssessment","calculationAssessment","contradictionAssessment","scope"],"additionalProperties":false}""");
+            data["quantitativeValidation"] = JsonNode.Parse("""
+                {"type":"object","description":"Verbindlicher numerischer Prüfvertrag. checks muss getrennte accuracy- und convergence-Messwerte enthalten, bei sampling=true zusätzlich uncertainty. Pearson/Korrelation ist kein accuracy-Kriterium. Die ausgeführte JSON-Datei enthält metrics mit denselben Kennungen und endlichen nichtnegativen Zahlen; Missum prüft jeden Wert <= maximum. Bestehende verbindliche Kriterien dürfen nicht entfernt oder abgeschwächt werden.","properties":{"observable":{"type":"string","minLength":1,"maxLength":2000},"reference":{"type":"string","minLength":1,"maxLength":2000},"artifactPath":{"type":"string","maxLength":1024,"pattern":"^(?:work|artifacts)/(?:[A-Za-z0-9_-][A-Za-z0-9_.-]*/)*[A-Za-z0-9_-][A-Za-z0-9_.-]*\\.json$"},"sampling":{"type":"boolean"},"checks":{"type":"array","minItems":2,"maxItems":32,"items":{"type":"object","properties":{"metric":{"type":"string","pattern":"^[A-Za-z][A-Za-z0-9_.-]{0,127}$","description":"Eindeutige Kennung aus metrics. Verschiedene Prüfarten brauchen getrennte Messwerte; accuracy darf nicht pearson, correlation oder korrelation enthalten."},"kind":{"type":"string","enum":["accuracy","convergence","uncertainty"]},"maximum":{"type":"number","minimum":0,"maximum":1.7976931348623157e308}},"required":["metric","kind","maximum"],"additionalProperties":false}}},"required":["observable","reference","artifactPath","sampling","checks"],"additionalProperties":false}
+                """);
+            data["status"]!["description"] = "Fachlicher Objektstatus. Bei review ausdrücklich hier angeben, neben review; nie innerhalb von review. Nur den tatsächlich erreichten Status wählen.";
+            data["review"]!["description"] = "Prüfnachweis zur nächsten Objektversion (itemRevision=expectedRevision+1). Benötigt status als Geschwisterfeld im selben data- bzw. patch-Objekt. review hat kein status-Feld.";
             var changeSchema = changes["items"]!.AsObject();
             // Native llama schemas parse anyOf before sibling properties and do
             // not implement if/then. Keep the root object and give each nested
@@ -64,9 +69,32 @@ public sealed partial class AgentToolCatalog
             patchProperties["patch"] = patchData;
             patchProperties["expectedRevision"]!["minimum"] = 1;
             patch["required"] = new JsonArray("id", "kind", "expectedRevision", "patch");
+            manuscript["properties"]!["data"] = ResearchReviewAlternatives(manuscript["properties"]!["data"]!.AsObject(), data, isPatch: false);
+            assertion["properties"]!["data"] = ResearchReviewAlternatives(assertion["properties"]!["data"]!.AsObject(), data, isPatch: false);
+            patchProperties["patch"] = ResearchReviewAlternatives(patchData, data, isPatch: true);
             changes["items"] = new JsonObject { ["anyOf"] = new JsonArray(manuscript, assertion, patch) };
         }
         return JsonSerializer.SerializeToElement(schema);
+    }
+
+    private static JsonObject ResearchReviewAlternatives(JsonObject payload, JsonObject fields, bool isPatch)
+    {
+        // Encode the validator's cross-field requirement in the actual generation
+        // schema. if/then/dependentRequired are not supported by native llama grammars.
+        // Keep the alternatives disjoint, including review:null for an explicit removal.
+        var withoutReview = payload.DeepClone().AsObject();
+        var withoutFields = withoutReview["properties"]!.AsObject();
+        if (isPatch) withoutFields["review"] = new JsonObject { ["type"] = "null" };
+        else withoutFields.Remove("review");
+        var withReview = payload.DeepClone().AsObject();
+        var reviewedFields = withReview["properties"]!.AsObject();
+        reviewedFields["status"] = fields["status"]!.DeepClone();
+        reviewedFields["review"] = fields["review"]!.DeepClone();
+        var required = withReview["required"]?.DeepClone().AsArray() ?? new JsonArray();
+        required.Add("status");
+        required.Add("review");
+        withReview["required"] = required;
+        return new JsonObject { ["anyOf"] = new JsonArray(withoutReview, withReview) };
     }
 
     private static readonly string[] ResearchStateExtraReferenceFields =
@@ -138,9 +166,20 @@ public sealed partial class AgentToolCatalog
                 RequireResearchContent(data, requiredContent, requiredContent == "contentMarkdown" ? 64_000 : 16_000, id, kind);
                 if (kind is "section" or "contribution") RequireResearchContent(data, "title", 500, id, kind);
             }
-            if (data.TryGetProperty("review", out var suppliedReview) && suppliedReview.ValueKind != JsonValueKind.Null
-                && (!data.TryGetProperty("status", out var suppliedStatus) || suppliedStatus.ValueKind != JsonValueKind.String))
-                throw new ArgumentException($"research.update: Objekt '{id}' benötigt mit review ausdrücklich status. Nutze patch mit dem tatsächlich erreichten Status: completed/supported/verified (mit Prüfnachweis), refuted/superseded oder openLimit mit reason; ungeprüfte Inhalte bleiben ausdrücklich draft/active/unresolved. Der gespeicherte aktuelle Status ist mit research.read ids abrufbar. Unveränderten Manuskripttext nicht wiederholen.");
+            var payloadName = isPatch ? "patch" : "data";
+            if (data.TryGetProperty("review", out var suppliedReview) && suppliedReview.ValueKind != JsonValueKind.Null)
+            {
+                if (suppliedReview.ValueKind == JsonValueKind.Object && suppliedReview.TryGetProperty("status", out _))
+                    throw new ArgumentException($"research.update: Objekt '{id}' (kind={kind}) enthält das unzulässige Feld {payloadName}.review.status. "
+                        + $"status gehört nach changes[].{payloadName}.status, als Geschwister von {payloadName}.review, nicht in review. "
+                        + "Verschiebe den tatsächlich erreichten fachlichen Status auf diese Ebene; keine Änderung wurde übernommen.");
+                if (!data.TryGetProperty("status", out var suppliedStatus) || suppliedStatus.ValueKind != JsonValueKind.String)
+                    throw new ArgumentException($"research.update: Objekt '{id}' (kind={kind}) benötigt ausdrücklich {payloadName}.status als String, weil {payloadName}.review eingereicht wurde. "
+                        + $"Feldposition: changes[].{payloadName}.status; {payloadName}.status und {payloadName}.review sind Geschwister. {payloadName}.review.status ist nicht erlaubt. "
+                        + "Setze nur den tatsächlich erreichten Status: completed/supported nach Prüfung, verified nur mit Prüfnachweis, refuted/superseded oder openLimit mit reason; ungeprüfte Inhalte bleiben draft/active/unresolved. "
+                        + "Für reine Metadatenkorrekturen vorhandener Objekte patch mit status und review verwenden, unveränderten Manuskripttext nicht wiederholen. "
+                        + "Behalte id/kind/expectedRevision; keine Änderung wurde übernommen.");
+            }
             foreach (var field in data.EnumerateObject())
             {
                 if (isPatch && field.Value.ValueKind == JsonValueKind.Null)
@@ -185,6 +224,7 @@ public sealed partial class AgentToolCatalog
                         foreach (var key in new[] { "sourceAssessment", "calculationAssessment", "contradictionAssessment", "scope" })
                             _ = RequireString(review, key, 1, 4000);
                         break;
+                    case "quantitativeValidation": ValidateQuantitativeValidation(field.Value); break;
                     default: throw new ArgumentException($"Unknown research data field: {field.Name}.");
                 }
             }
@@ -195,7 +235,56 @@ public sealed partial class AgentToolCatalog
     private static readonly string[] ResearchPatchFields =
         ["title", "contentMarkdown", "statement", "status", "assumptions", "prediction", "nextCheck", "reason", "required", "order",
          "sourceIds", "claimIds", "experimentIds", "checkIds", "evidenceIds", "hypothesisIds", "requirementIds", "contributionIds", "targetIds",
-         "description", "method", "expectedResult", "classification", "conclusion", "limit", "units", "figureCaptions", "review"];
+         "description", "method", "expectedResult", "classification", "conclusion", "limit", "units", "figureCaptions", "review", "quantitativeValidation"];
+
+    // Mirrors ScientificQuantitativeValidation in Missum.Core. Server.Core is intentionally independent of the native client core.
+    private static void ValidateQuantitativeValidation(JsonElement definition)
+    {
+        if (definition.ValueKind != JsonValueKind.Object || definition.EnumerateObject().Count() != 5
+            || QuantitativeDefinitionFields.Any(name => definition.EnumerateObject().Count(field => field.Name == name) != 1))
+            throw new ArgumentException("quantitativeValidation benötigt genau observable, reference, artifactPath, sampling und checks.");
+        if (string.IsNullOrWhiteSpace(RequireString(definition, "observable", 1, 2000))
+            || string.IsNullOrWhiteSpace(RequireString(definition, "reference", 1, 2000)))
+            throw new ArgumentException("quantitativeValidation.observable und reference müssen die tatsächlich verglichene Messgröße und Referenz beschreiben.");
+        var path = RequireString(definition, "artifactPath", 1, 1024);
+        if (path.Any(char.IsControl) || !System.Text.RegularExpressions.Regex.IsMatch(path,
+            @"^(?:work|artifacts)/(?:[A-Za-z0-9_-][A-Za-z0-9_.-]*/)*[A-Za-z0-9_-][A-Za-z0-9_.-]*\.json$",
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1)))
+            throw new ArgumentException("quantitativeValidation.artifactPath muss eine relative JSON-Ergebnisdatei unter work/ oder artifacts/ ohne Pfadwechsel sein.");
+        if (definition.GetProperty("sampling").ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+            throw new ArgumentException("quantitativeValidation.sampling muss true oder false sein.");
+        var checks = definition.GetProperty("checks");
+        if (checks.ValueKind != JsonValueKind.Array || checks.GetArrayLength() is < 2 or > 32)
+            throw new ArgumentException("quantitativeValidation.checks benötigt 2–32 Kriterien, mindestens accuracy und convergence; bei sampling=true zusätzlich uncertainty.");
+        var metrics = new HashSet<string>(StringComparer.Ordinal);
+        var kinds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var check in checks.EnumerateArray())
+        {
+            if (check.ValueKind != JsonValueKind.Object || check.EnumerateObject().Count() != 3
+                || QuantitativeCheckFields.Any(name => check.EnumerateObject().Count(field => field.Name == name) != 1))
+                throw new ArgumentException("Jedes quantitativeValidation.checks-Kriterium benötigt genau metric, kind und maximum.");
+            var metric = RequireString(check, "metric", 1, 128);
+            if (metric.Any(char.IsControl) || !System.Text.RegularExpressions.Regex.IsMatch(metric, @"^[A-Za-z][A-Za-z0-9_.-]{0,127}$",
+                System.Text.RegularExpressions.RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1)) || !metrics.Add(metric))
+                throw new ArgumentException("quantitativeValidation.checks[].metric benötigt eine eindeutige ASCII-Kennung mit Buchstabe zuerst. Für unterschiedliche Prüfarten getrennte Messwerte verwenden.");
+            var kind = RequireString(check, "kind", 1, 32);
+            if (kind is not ("accuracy" or "convergence" or "uncertainty"))
+                throw new ArgumentException($"Prüfkriterium {metric}: kind muss accuracy, convergence oder uncertainty sein.");
+            if (kind == "accuracy" && (metric.Contains("pearson", StringComparison.OrdinalIgnoreCase)
+                || metric.Contains("correlation", StringComparison.OrdinalIgnoreCase) || metric.Contains("korrelation", StringComparison.OrdinalIgnoreCase)))
+                throw new ArgumentException($"Prüfkriterium {metric}: Pearson/Korrelation ist kein quantitativer Genauigkeitsnachweis. Einen tatsächlichen Fehler gegenüber der Referenz als accuracy messen.");
+            var limit = check.GetProperty("maximum");
+            if (limit.ValueKind != JsonValueKind.Number || !limit.TryGetDouble(out var maximum) || !double.IsFinite(maximum) || maximum < 0)
+                throw new ArgumentException($"Prüfkriterium {metric}: maximum muss eine endliche nichtnegative Fehlerschranke sein.");
+            kinds.Add(kind);
+        }
+        if (!kinds.Contains("accuracy") || !kinds.Contains("convergence")
+            || definition.GetProperty("sampling").GetBoolean() && !kinds.Contains("uncertainty"))
+            throw new ArgumentException("quantitativeValidation.checks muss accuracy und convergence sowie bei sampling=true uncertainty abdecken. Getrennte Messwerte verwenden.");
+    }
+
+    private static readonly string[] QuantitativeDefinitionFields = ["observable", "reference", "artifactPath", "sampling", "checks"];
+    private static readonly string[] QuantitativeCheckFields = ["metric", "kind", "maximum"];
 
     private static void RequireResearchContent(JsonElement data, string field, int maximum, string id, string kind)
     {

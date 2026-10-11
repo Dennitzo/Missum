@@ -153,8 +153,11 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                     await _assistantHost.SaveDraftAsync("desktop", draftSession, draft);
                 if (!_navigationState.IsCurrent(generation)) return false;
             }
-            await _assistantHost.HandleAsync("desktop", new(2, type, requestId, arguments),
-                (eventType, data, id) => EmitAsync(eventType, data, id, generation, onError, requestSession), _lifetime.Token);
+            // SQLite's async operations can complete synchronously. In particular,
+            // research snapshots must not execute their reads on the XAML thread.
+            // EmitAsync remains the ordered dispatcher boundary for every reply.
+            await Task.Run(() => _assistantHost.HandleAsync("desktop", new(2, type, requestId, arguments),
+                (eventType, data, id) => EmitAsync(eventType, data, id, generation, onError, requestSession), _lifetime.Token), _lifetime.Token);
             if (navigation && !_navigationState.IsCurrent(generation)) return false;
             return !_failedRequests.Remove(requestId);
         }
@@ -277,8 +280,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                 _rendering = true;
                 if (changed) Composer.Text = S(data, "draft");
                 _rendering = false;
-                _messages.Clear();
-                foreach (var message in Items(data, "messages")) _messages[S(message, "id")] = message;
+                ApplyMessageSnapshot(data, preserveLive: !changed);
                 ReconcilePendingMessages();
                 SyncSubagents(data, changed);
                 ObserveThinkingProgress(data);
@@ -308,8 +310,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         if (type == "conversation.snapshot")
         {
             if (!ObserveChangesConversation(_session, data)) return;
-            _messages.Clear();
-            foreach (var message in Items(data, "messages")) _messages[S(message, "id")] = message;
+            ApplyMessageSnapshot(data, preserveLive: true);
             ReconcilePendingMessages();
             SyncSubagents(data, sessionChanged: false);
             RenderSessionTabs();
@@ -325,7 +326,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                 if (!_changeReceiptState.ObserveStarted(_session, startedId, ReadConversationRevision(data), startedRun)) return;
                 ResetChangesSummary();
             }
-            if (data.TryGetProperty("message", out var message)) { _messages[S(message, "id")] = message; RenderMessages(); }
+            if (data.TryGetProperty("message", out var message)) { _messages[S(message, "id")] = PreserveNewerLiveMessage(message); RenderMessages(); }
         }
         if (type == "chat.delta")
         {
@@ -335,6 +336,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                 var merged = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(previous.GetRawText())!;
                 merged["content"] = data.GetProperty("content");
                 if (data.TryGetProperty("toolSteps", out var steps)) merged["toolSteps"] = steps;
+                if (data.TryGetProperty("updatedAt", out var updatedAt)) merged["updatedAt"] = updatedAt;
                 _messages[id] = JsonSerializer.SerializeToElement(merged);
                 RenderMessages();
             }
@@ -369,6 +371,31 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     }
 
     private static DateTimeOffset MessageCreatedAt(JsonElement message) => DateTimeOffset.TryParse(S(message, "createdAt"), out var time) ? time : DateTimeOffset.MinValue;
+
+    private void ApplyMessageSnapshot(JsonElement data, bool preserveLive)
+    {
+        // A snapshot read can precede an already delivered live delta. Retain
+        // its newer text while still accepting snapshot metadata and artifacts.
+        var incoming = Items(data, "messages");
+        if (preserveLive) incoming = incoming.Select(PreserveNewerLiveMessage).ToArray();
+        _messages.Clear();
+        foreach (var message in incoming) _messages[S(message, "id")] = message;
+    }
+
+    private JsonElement PreserveNewerLiveMessage(JsonElement incoming)
+    {
+        if (!_messages.TryGetValue(S(incoming, "id"), out var current)
+            || S(current, "sessionId") != S(incoming, "sessionId")
+            || S(current, "status") is not ("streaming" or "pending")
+            || S(incoming, "status") is not ("streaming" or "pending")
+            || !DateTimeOffset.TryParse(S(current, "updatedAt"), out var liveAt)
+            || !DateTimeOffset.TryParse(S(incoming, "updatedAt"), out var snapshotAt)
+            || liveAt <= snapshotAt) return incoming;
+        var merged = incoming.Deserialize<Dictionary<string, JsonElement>>()!;
+        foreach (var field in new[] { "content", "toolSteps", "updatedAt" })
+            if (current.TryGetProperty(field, out var value)) merged[field] = value;
+        return JsonSerializer.SerializeToElement(merged);
+    }
 
     private void ReconcilePendingMessages()
     {
@@ -477,18 +504,22 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             if (MessagesPanel.Children.IndexOf(bubble) != index)
             { MessagesPanel.Children.Remove(bubble); MessagesPanel.Children.Insert(index, bubble); }
             UpdateMessageBlocks(id, message, MessageBody(bubble));
-            _conversationSelection?.PreserveSelectionWithin(bubble);
+            _conversationSelection?.TrackSelectionWithin(bubble);
             _messageViews[id] = (signature, bubble); index++;
         }
         ConversationContent.UpdateLayout();
-        RenderPromptTimeline();
+        RenderPromptTimeline(layoutCurrent: true);
         if (follow) ConversationScroll.ChangeView(null, ConversationScroll.ScrollableHeight, null, true);
         SyncOuterScroll();
     }
     private void RenderSources(JsonElement data)
     {
         var signature = ConversationViewKey + "|" + ResearchState(_session).Revision + "|"
-            + string.Join("|", OwnerSourceMessages().SelectMany(message => Items(message, "toolSteps")).Select(step => S(step, "id") + S(step, "updatedAt") + S(step, "outputJson").GetHashCode(StringComparison.Ordinal)))
+            // Reasoning/token updates cannot change source links. Including those
+            // steps here rebuilt every source button for each streamed fragment.
+            + string.Join("|", OwnerSourceMessages().SelectMany(message => Items(message, "toolSteps"))
+                .Where(IsSourceToolStep).Select(step => S(step, "id") + S(step, "updatedAt")
+                    + S(step, "inputJson").GetHashCode(StringComparison.Ordinal) + S(step, "outputJson").GetHashCode(StringComparison.Ordinal)))
             + string.Join("|", Items(data, "documents").Concat(Items(data, "attachments")).Select(item => S(item, "id")));
         if (_sourcesSignature == signature) return;
         _sourcesSignature = signature;

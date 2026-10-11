@@ -48,7 +48,8 @@ function harness() {
   for (const script of ["coding-timeline.js", "coding-changes.js"])
     vm.runInContext(fs.readFileSync(path.join(webRoot, script), "utf8"), context, { filename: script });
   for (const name of ["renderCodingChanges", "applyCodingChanges", "updateContextStripVisibility",
-    "sortCommittedMessages", "conversationMessagesDiffer", "applyConversationSnapshot", "isTerminalMessageStatus",
+    "sortCommittedMessages", "conversationMessagesDiffer", "mergeStreamingSnapshotMessage", "mergeStreamingSnapshotMessages",
+    "applyConversationSnapshot", "isTerminalMessageStatus",
     "upsertLiveMessage", "applyLiveDelta", "handleHostMessage", "belongsToActiveSession", "persistMeasuredContext",
     "cleanStatusMetadata", "uniqueStatusParts", "renderSpeechStatus", "updateSpeechControlIdentity"])
     loadAppFunction(context, name);
@@ -251,7 +252,7 @@ test("the changes overview has one responsive outer scroller and all required ca
   assert.match(css, /focus-visible/);
   const html = fs.readFileSync(path.join(webRoot, "index.html"), "utf8");
   for (const asset of ["styles.css", "coding-changes.css", "coding-timeline.css", "bridge.js", "coding-timeline.js", "coding-changes.js", "app.js"]) {
-    const revision = asset === "app.js" ? "20261006-lan-2"
+    const revision = asset === "app.js" ? "20261011-ui-streaming"
       : asset === "styles.css" ? "20260927-science-workbench-1"
       : asset === "coding-timeline.js" ? "20260920-artifacts-1"
       : asset === "bridge.js" ? "20261005-lan-1" : "20260913-3";

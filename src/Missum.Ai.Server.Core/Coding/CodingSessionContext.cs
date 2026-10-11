@@ -34,8 +34,10 @@ internal static class CodingSessionContext
                 + "Der folgende neue Nutzerauftrag ist maßgeblich.\n" + CodingEvidenceContext.Build(state).Content));
         result.Add(new LmChatMessage("user", "MISSUM_CODING_RUN_PLAN_SCOPE\n"
             + "Aktueller Lauf: steps und acceptanceCriteria starten leer. Plan-IDs und Planbestätigungen oben gehören zum vorherigen Lauf. "
-            + "Wenn der aktuelle Auftrag einen Plan benötigt, lege seine Einträge zuerst mit id, title und status an; "
-            + "erst nach erfolgreicher Bestätigung genügen Updates per id. Historische Befunde und Belege bleiben verfügbar. "
+            + "Wenn der aktuelle Auftrag einen Plan benötigt, sende pro übermitteltem Eintrag id, title und status; "
+            + "bei Updates den Originaltitel unverändert beibehalten und nur geänderte Einträge senden. "
+            + "steps und acceptanceCriteria können gemeinsam in einem Aufruf angelegt oder geändert werden. "
+            + "Historische Befunde und Belege bleiben verfügbar. "
             + "Dies beschreibt den Speicherzustand und ändert den folgenden Nutzerauftrag nicht."));
         result.Add(initial.Last(message => message.Role == "user" && !ContextPlanner.IsRuntimeContext(message)
             && !ContextPlanner.IsNativeRuntimeInstruction(message)));
@@ -80,5 +82,6 @@ internal static class CodingSessionContext
         RestoreWorkingState(previous) is { } state ? state with
         {
             OriginalTask = task, Plan = [], AcceptanceCriteria = [], NextStep = null, Phase = "planning", ConsecutivePlanNoOps = 0,
+            Failures = state.Failures.Where(static failure => failure.Tool != CodingWorkingStateTools.PlanTool).ToArray(),
         } : null;
 }

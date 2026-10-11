@@ -212,6 +212,21 @@ public sealed class ResearchReadProjectionTests
         Assert.Throws<InvalidDataException>(() => LocalToolBroker.ValidateProposal(proposal));
     }
 
+    [Fact]
+    public void AnUnresolvedOpenLimitRemainsAheadOfPublicationSectionsInOverview()
+    {
+        var snapshot = Snapshot();
+        var goal = snapshot.State.Items[0] with { Data = Args(new
+        {
+            statement = "Quantitative Genauigkeit erreichen", required = true, status = "openLimit",
+            reason = "Bisher nur qualitative Übereinstimmung",
+        }) };
+        snapshot = snapshot with { State = snapshot.State with { Items = [snapshot.State.Items[1], goal] } };
+        var overview = ResearchReadProjection.Create(snapshot, Args(new { view = "overview" }));
+        Assert.Equal(goal.Id, overview.GetProperty("items")[0].GetProperty("id").GetString());
+        Assert.Equal("openLimit", overview.GetProperty("items")[0].GetProperty("data").GetProperty("status").GetString());
+    }
+
     private static JsonElement Args<T>(T value) => JsonSerializer.SerializeToElement(value);
 
     private static ResearchWorkingReadSnapshot Snapshot(string originalQuestion = "Explain the scientific question completely.")

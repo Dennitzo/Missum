@@ -17,7 +17,7 @@ public sealed partial class SqliteScientificResearchRepository
         { "title", "contentMarkdown", "statement", "status", "assumptions", "prediction", "nextCheck", "reason",
             "required", "order", "sourceIds", "claimIds", "experimentIds", "checkIds", "evidenceIds",
             "hypothesisIds", "requirementIds", "contributionIds", "figureCaptions", "units", "description",
-            "method", "expectedResult", "classification", "conclusion", "limit", "targetIds", "review" };
+            "method", "expectedResult", "classification", "conclusion", "limit", "targetIds", "review", "quantitativeValidation" };
     private static readonly string[] WorkingReferenceFields =
         ["sourceIds", "claimIds", "experimentIds", "checkIds", "evidenceIds", "hypothesisIds", "requirementIds", "contributionIds", "targetIds"];
     private static readonly string[] LimitEvidenceFields = ["sourceIds", "evidenceIds", "experimentIds", "checkIds"];
@@ -221,11 +221,23 @@ public sealed partial class SqliteScientificResearchRepository
                 var unchanged = submitted.Patch is not null && !payload.TryGetProperty("review", out _)
                     && previous is not null && CanonicalWorkingJson(previous.Data) == CanonicalWorkingJson(change.Data);
                 ValidateWorkingData(change, conflicts, unchanged);
+                if (previous is { Kind: "requirement" } && previous.Data.ValueKind == JsonValueKind.Object
+                    && (!previous.Data.TryGetProperty("required", out var existingRequired) || existingRequired.ValueKind != JsonValueKind.False)
+                    && !previous.Data.TryGetProperty("quantitativeValidation", out _)
+                    && RequiresQuantitativeWorkingValidation(previous.Data) && !RequiresQuantitativeWorkingValidation(change.Data))
+                    conflicts.Add(new(change.Id, "quantitative_goal_preserved",
+                        "Die vorhandene verpflichtende numerische Berechnung darf nicht durch method=documentation, einen leeren method-Wert oder eine bloße Animation ersetzt werden. "
+                        + "Die numerische Methode beibehalten oder einen gültigen quantitativeValidation-Vertrag mit Messgröße, Referenz, Genauigkeits- und Konvergenzkriterien ergänzen; das ursprüngliche Ziel bleibt verbindlich.", previous.Revision));
+                if (previous is { Kind: "requirement" } && previous.Data.ValueKind == JsonValueKind.Object
+                    && (!previous.Data.TryGetProperty("required", out var quantitativeRequired) || quantitativeRequired.ValueKind != JsonValueKind.False)
+                    && previous.Data.TryGetProperty("quantitativeValidation", out var previousValidation)
+                    && QuantitativeContractChangeError(previousValidation, change.Data) is { } contractError)
+                    conflicts.Add(new(change.Id, "quantitative_goal_preserved", contractError, previous.Revision));
                 if (previous is { Kind: "requirement", OwnerAgentId: null } && previous.Data.ValueKind == JsonValueKind.Object
-                    && previous.Data.TryGetProperty("required", out var wasRequired) && wasRequired.ValueKind == JsonValueKind.True
+                    && (!previous.Data.TryGetProperty("required", out var wasRequired) || wasRequired.ValueKind != JsonValueKind.False)
                     && change.Data.ValueKind == JsonValueKind.Object)
                 {
-                    if (!change.Data.TryGetProperty("required", out var staysRequired) || staysRequired.ValueKind != JsonValueKind.True
+                    if (change.Data.TryGetProperty("required", out var staysRequired) && staysRequired.ValueKind == JsonValueKind.False
                         || change.Data.TryGetProperty("status", out var nextStatus) && nextStatus.ValueKind == JsonValueKind.String && nextStatus.GetString() == "withdrawn")
                         conflicts.Add(new(change.Id, "required_goal_preserved", "Ein bereits verbindliches Arbeitsergebnis darf nicht eigenständig gestrichen werden. required=true beibehalten; eine fachliche Grenze mit openLimit, Grund und vorhandenen Belegen dokumentieren.", previous.Revision));
                     if (change.Data.TryGetProperty("status", out var limitStatus) && limitStatus.ValueKind == JsonValueKind.String && limitStatus.GetString() == "openLimit"
@@ -353,6 +365,9 @@ public sealed partial class SqliteScientificResearchRepository
         if (change.Data.TryGetProperty("review", out var review) && (!ScientificResearchReview.ValidReview(review)
             || review.GetProperty("itemRevision").GetInt64() != change.ExpectedRevision + (unchanged ? 0 : 1)))
             conflicts.Add(new(change.Id, "invalid_review", "review benötigt itemRevision=expectedRevision+1 sowie konkrete sourceAssessment, calculationAssessment, contradictionAssessment und scope als Text. Neue Inhaltsänderungen benötigen eine neue fachliche Prüfung."));
+        if (change.Data.TryGetProperty("quantitativeValidation", out var quantitative)
+            && ScientificQuantitativeValidation.ValidateDefinition(quantitative) is { } quantitativeError)
+            conflicts.Add(new(change.Id, "invalid_quantitative_validation", quantitativeError));
         ValidateWorkingMetadata(change, "units", ["symbol", "meaning", "unit"], conflicts);
         ValidateWorkingMetadata(change, "figureCaptions", ["experimentId", "artifactPath", "caption"], conflicts);
         foreach (var field in WorkingReferenceFields)
@@ -361,6 +376,28 @@ public sealed partial class SqliteScientificResearchRepository
             if (refs.ValueKind != JsonValueKind.Array || refs.EnumerateArray().Any(value => value.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(value.GetString())))
                 conflicts.Add(new(change.Id, "invalid_reference", $"{field} muss eine Liste vorhandener Kennungen sein."));
         }
+    }
+
+    private static string? QuantitativeContractChangeError(JsonElement previous, JsonElement data)
+    {
+        const string preserved = "Der verbindliche quantitative Prüfvertrag darf nicht entfernt oder abgeschwächt werden. "
+            + "Bestehende Messgröße, Referenz und alle Kriterien beibehalten; Grenzwerte dürfen nur strenger werden. "
+            + "Neue Messdateien über artifactPath zuordnen, zusätzliche Kriterien ergänzen und bei Nichterfüllung fachlich weiterarbeiten statt das Ziel umzudefinieren.";
+        if (data.ValueKind != JsonValueKind.Object || !data.TryGetProperty("quantitativeValidation", out var next)) return preserved;
+        if (ScientificQuantitativeValidation.ValidateDefinition(next) is not null) return preserved;
+        // Never reinterpret a previously stored malformed legacy contract as authority.
+        if (ScientificQuantitativeValidation.ValidateDefinition(previous) is not null) return null;
+        if (data.TryGetProperty("required", out var required) && required.ValueKind == JsonValueKind.False
+            || data.TryGetProperty("status", out var status) && status.ValueKind == JsonValueKind.String && status.GetString() == "withdrawn"
+            || previous.GetProperty("observable").GetString() != next.GetProperty("observable").GetString()
+            || previous.GetProperty("reference").GetString() != next.GetProperty("reference").GetString()
+            || previous.GetProperty("sampling").GetBoolean() && !next.GetProperty("sampling").GetBoolean()) return preserved;
+        var checks = next.GetProperty("checks").EnumerateArray().ToDictionary(check => check.GetProperty("metric").GetString()!, StringComparer.Ordinal);
+        foreach (var check in previous.GetProperty("checks").EnumerateArray())
+            if (!checks.TryGetValue(check.GetProperty("metric").GetString()!, out var replacement)
+                || check.GetProperty("kind").GetString() != replacement.GetProperty("kind").GetString()
+                || replacement.GetProperty("maximum").GetDouble() > check.GetProperty("maximum").GetDouble()) return preserved;
+        return null;
     }
 
     private static void ValidateWorkingMetadata(ResearchWorkingChange change, string field, string[] keys,
@@ -380,7 +417,7 @@ public sealed partial class SqliteScientificResearchRepository
         List<ResearchWorkingConflict> conflicts, CancellationToken token)
     {
         var available = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
-        var checks = new Dictionary<string, (string TargetId, string Status, string Evidence)>(StringComparer.Ordinal);
+        var checks = new Dictionary<string, ResearchVerification>(StringComparer.Ordinal);
         var experimentArtifacts = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
         foreach (var (field, sql) in new[]
         {
@@ -397,7 +434,7 @@ public sealed partial class SqliteScientificResearchRepository
             available.Add(field, ids);
         }
         foreach (var check in await ReadExecutionVerificationsAsync(connection, transaction, projectId, token).ConfigureAwait(false))
-            checks.Add(check.Id, (check.TargetId, check.Status, check.EvidenceJson));
+            checks.Add(check.Id, check);
         available["checkIds"] = checks.Keys.ToHashSet(StringComparer.Ordinal);
         await using (var command = connection.CreateCommand())
         {
@@ -440,13 +477,69 @@ public sealed partial class SqliteScientificResearchRepository
             {
                 // Model-authored prose must never manufacture an execution/verification receipt.
                 var verified = WorkingRefs(change.Data, "checkIds").Any(id => checks.TryGetValue(id, out var check)
-                    && (check.TargetId == change.Id || WorkingRefs(change.Data, "experimentIds").Contains(check.TargetId, StringComparer.Ordinal))
-                    && check.Status is "verified" or "passed" or "succeeded"
-                    && !string.IsNullOrWhiteSpace(check.Evidence) && check.Evidence is not ("{}" or "[]" or "null"));
-                if (!verified) conflicts.Add(new(change.Id, "verification_required", "verified erfordert einen erfolgreichen, von Missum gespeicherten Prüfnachweis für genau dieses Objekt; bis dahin einen vorläufigen Status verwenden."));
+                    && IsScientificVerification(check, change));
+                if (!verified) conflicts.Add(new(change.Id, "verification_required",
+                    "verified benötigt einen geschützten fachlichen Prüfnachweis für genau diese Aussage oder einen zugeordneten tatsächlich KernelAccepted-formalen Beweis. "
+                    + "Eine erfolgreiche Ausführung (execution, ProcessSucceeded, passed) belegt keine wissenschaftliche Richtigkeit. Numerische Ergebnisse mit supported/completed einordnen und quantitativeValidation erfüllen; ungeprüfte Aussagen bleiben offen."));
             }
         }
     }
+
+    private static bool RequiresQuantitativeWorkingValidation(JsonElement data)
+    {
+        if (data.ValueKind != JsonValueKind.Object) return false;
+        if (data.TryGetProperty("quantitativeValidation", out var definition)
+            && ScientificQuantitativeValidation.ValidateDefinition(definition) is null) return true;
+        var method = WorkingText(data, "method");
+        var tokens = System.Text.RegularExpressions.Regex.Split(method.ToLowerInvariant(), @"[^\p{L}\p{N}]+",
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+        if (tokens.Any(token => token is "numeric" or "numerical" or "numerisch" or "numerische" or "numerik")) return true;
+        var exact = tokens.Any(token => token is "symbolic" or "symbolisch" or "symbolische" or "sympy" or "smt" or "lean" or "formal" or "formalproof");
+        var interactive = System.Text.RegularExpressions.Regex.IsMatch(string.Join(" ", method, WorkingText(data, "title"), WorkingText(data, "statement")),
+            @"\b(?:interactive|interaktiv\p{L}*|animation\p{L}*|animated|animiert\p{L}*|realtime|real[- ]time|echtzeit\p{L}*)\b",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+        return tokens.Contains("simulation", StringComparer.Ordinal) && (!interactive || exact)
+            || tokens.Contains("python", StringComparer.Ordinal) && !exact;
+    }
+
+    private static bool IsScientificVerification(ResearchVerification check, ResearchWorkingChange change)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(check.EvidenceJson);
+            var evidence = document.RootElement;
+            if (evidence.ValueKind != JsonValueKind.Object || !evidence.EnumerateObject().Any()
+                || evidence.TryGetProperty("success", out var success) && success.ValueKind == JsonValueKind.False) return false;
+            var boundToItem = check.TargetId == change.Id && check.TargetType == change.Kind;
+            if (check.Method == "math.formalProof")
+            {
+                var boundToExperiment = check.TargetType == "experiment"
+                    && WorkingRefs(change.Data, "experimentIds").Contains(check.TargetId, StringComparer.Ordinal);
+                return (boundToItem || boundToExperiment) && check.Dimension == "formal"
+                    && (check.Status.Equals("passed", StringComparison.OrdinalIgnoreCase)
+                        || check.Status.Equals("verified", StringComparison.OrdinalIgnoreCase) || check.Status == "KernelAccepted")
+                    && evidence.TryGetProperty("success", out var formalSuccess) && formalSuccess.ValueKind == JsonValueKind.True
+                    && WorkingText(evidence, "formalVerification") == "KernelAccepted"
+                    && evidence.TryGetProperty("runs", out var runs) && runs.ValueKind == JsonValueKind.Array && runs.GetArrayLength() > 0
+                    && runs.EnumerateArray().All(run => run.ValueKind == JsonValueKind.Object
+                        && run.TryGetProperty("exitCode", out var exit) && exit.TryGetInt32(out var code) && code == 0
+                        && run.TryGetProperty("timedOut", out var timeout) && timeout.ValueKind == JsonValueKind.False
+                        && WorkingText(run, "runId") is { Length: > 0 } runId && WorkingText(run, "snapshotId") == "execution-" + runId
+                        && run.TryGetProperty("inputHashes", out var inputs) && inputs.ValueKind == JsonValueKind.Object && inputs.EnumerateObject().Any()
+                        && run.TryGetProperty("outputHashes", out var outputs) && outputs.ValueKind == JsonValueKind.Object);
+            }
+            return boundToItem && !string.IsNullOrWhiteSpace(check.Dimension)
+                && !check.Dimension.Equals("execution", StringComparison.OrdinalIgnoreCase)
+                && !check.Method.StartsWith("research.code.", StringComparison.Ordinal)
+                && check.Method != ScientificResearchReview.Method
+                && (check.Status.Equals("verified", StringComparison.OrdinalIgnoreCase)
+                    || check.Status is "SymbolicallyVerified" or "KernelAccepted");
+        }
+        catch (JsonException) { return false; }
+    }
+
+    private static string WorkingText(JsonElement data, string name) => data.ValueKind == JsonValueKind.Object
+        && data.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() ?? "" : "";
 
     private static bool PublicationAffected(Dictionary<string, ResearchWorkingItem> current, IReadOnlyList<ResearchWorkingChange> accepted)
     {

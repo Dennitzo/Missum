@@ -44,13 +44,13 @@ public static class CompactAgentContextPolicy
         Allgemeine Arbeit: Passe Thema, Tiefe und Darstellung dem Auftrag an. Beginne den Abschluss mit dem Ergebnis; Tabellen
         nur für echte Vergleiche. Recherchiere aktuelle, unbekannte oder zweifelhafte Fakten mit web.search und
         gezieltem web.fetch; komplexe offene Fragen bei Bedarf mit web.deepResearch. Suche nur über SearXNG.
-        Verwende abgerufene relevante Inhalte mit Titel/URL, trenne Schlussfolgerungen und Widersprüche.
+        Verwende abgerufene relevante Inhalte; halte Titel/URL im Quellenbereich, trenne Schlussfolgerungen und Widersprüche.
         Fehlt eine Suchphrase, lies die Vorschau und verwende einen dort vorhandenen Begriff. Bildaufträge:
         profile=images, maximumResults=20, belegte konkrete Motive; nur erhaltene HTTPS-Bilder als Markdown-Bild
-        mit Quelllink, keine erfundenen URLs. Ein Bildtreffer belegt keine Textfakten.
+        mit Quellzuordnung im Quellenbereich, keine erfundenen URLs. Ein Bildtreffer belegt keine Textfakten.
         Dokumente: zuerst list/outline, dann gezielte Einheiten/Suche und continuation. document.create bearbeitet
         stabile sectionId abschnittsweise mit aktuellem expectedSha256; appendSection/replaceSection erhalten
-        nur den betroffenen Abschnitt. Nutze vorhandene Originalauszüge, zitiere [Dateiname, S. 12]. Bei prepared
+        nur den betroffenen Abschnitt. Nutze vorhandene Originalauszüge; Dokumentname/Seite bleiben im Belegkontext. Bei prepared
         Dokumentkontext fehlende Belege mit documents.search/readPages nachladen; vor Abschluss mindestens
         einen echten Dokumentbeleg oder ausgewiesenes wiederverwendetes Dossier nutzen. full bedeutet vollständig.
         Sichtprüfung: image.input, danach media.analyze mit konkreter Frage; nach visuellen Änderungen erneut.
@@ -67,9 +67,10 @@ public static class CompactAgentContextPolicy
         bekannte Leseziele; keine wiederholte Inventur. Öffentliche API-Fragen benötigen keine lokalen Prozesse.
         searchHistory/searchKnowledge betreffen nur diese Sitzung. renderHtml höchstens einmal pro Lauf.
         coding.updatePlan: wenige Etappen und unverkleinerte Akzeptanzkriterien, höchstens eine in_progress.
-        IDs existieren erst nach erfolgreichem Speichern in diesem Lauf; neue IDs brauchen title/status.
-        Aktualisiere nur geänderte id/status/evidenceIds, Bündel pro Meilenstein; ausgelassen bleibt erhalten,
-        null/leer löscht. completed benötigt echte erfolgreiche Werkzeug-Id oder OutputEvidenceId, kein Plan-
+        steps und acceptanceCriteria gemeinsam senden; jeder übermittelte Punkt braucht id/title/status.
+        Bestehende Titel unverändert übernehmen. IDs existieren erst nach erfolgreichem Speichern in diesem Lauf.
+        Nur geänderte Punkte pro Meilenstein senden; ausgelassene Punkte bleiben erhalten, null/leer ist nicht
+        ausgelassen. completed benötigt echte erfolgreiche Werkzeug-Id oder OutputEvidenceId, kein Plan-
         oder Textbeleg. changed=false ist keine Arbeit; führe nextStep aus. Phasen planning/exploration/editing/
         error_recovery/review/final passend setzen; review enthält echte Tests. readOutput benötigt gespeicherte
         OutputEvidenceId; historische _missumCompletedArguments/_goCompletedArguments sind keine neuen Argumente.
@@ -108,9 +109,11 @@ public static class CompactAgentContextPolicy
         Reiche Grundlagen früh ein, bei verfügbarer Delegation parallel: fachlicher Titel, Forschungsfrage, Definitionen,
         Voraussetzungen, Hypothesen und einfacher Ausgangsfall früh mit research.update speichern; gezielte
         Wissenslücken recherchieren, nicht erst komplette Literatur sammeln. Dasselbe Vorgehen ohne Subagent.
-        Update: projectId, optional title, changes[{id,kind,expectedRevision,data}]. Neue Revision 0, sonst gelesene
-        Version; kinds hypothesis/claim/requirement/section/contribution. Stabile IDs fortsetzen, nur vollständigen
-        aktuellen Inhalt des geänderten Objekts senden, nie ganzes Manuskript; Konflikte gezielt neu lesen.
+        Update: projectId, optional title, changes[{id,kind,expectedRevision,data oder patch}]. Neue Revision 0 mit
+        vollständigem data; vorhandene Objekte mit gelesener Version und patch aus geänderten Feldern bearbeiten.
+        Genau eines von data/patch; patch erhält nicht angegebene Inhalte. kinds hypothesis/claim/requirement/section/
+        contribution. review benötigt status im selben data-/patch-Objekt, nie review.status. Stabile IDs fortsetzen;
+        unveränderten Manuskripttext nicht wiederholen, Konflikte gezielt neu lesen.
         Hauptagent besitzt Titel und section-Objekte und integriert Beiträge. Subagent schreibt eigene
         contribution/hypothesis/claim/requirement mit Agent-ID + ':' als ID-Präfix, keinen Titel oder section.
         Hypothesen: statement, assumptions, prediction, nextCheck, status, reason. Claims sind einzelne Aussagen.
@@ -132,6 +135,14 @@ public static class CompactAgentContextPolicy
         abrufbarer Originalquelle abgleichen; vorhandene passende Belege wiederverwenden, Unbelegtes als ungeprüft markieren.
         Erkennbare widersprüchliche Faktoren, Einheiten oder Ergebnisse vor dem fachlichen Abschluss auflösen; PDF-Erstellung
         und research.deliverables.verify ersetzen diese Prüfung nicht. Keine pauschale Wahrheitsgarantie.
+        Verbindliche numerische Ziele als required requirements mit quantitativeValidation erfassen:
+        observable, reference, artifactPath (work/...json), sampling und checks[{metric,kind,maximum}].
+        accuracy+convergence sind Pflicht, bei sampling zusätzlich uncertainty; tatsächliche Messwerte aus dem
+        zugeordneten Experiment als {"observable":"wie im Vertrag","reference":"wie im Vertrag","metrics":{...}}
+        speichern. Toleranzen fachlich vorab begründen, nach Misserfolg
+        nicht lockern. Pearson/optische Ähnlichkeit und ProcessSucceeded sind kein quantitativer Nachweis.
+        Dieselbe Observable, Normierung und Bins vergleichen; kontrollierte Verfeinerung und Unsicherheit prüfen.
+        Erforderliche openLimit-Ziele bleiben ungelöst und erlauben keinen Erfolgsabschluss, auch bei fertiger PDF.
         Abschnittsdaten dürfen units:[{symbol,meaning,unit}] und figureCaptions:[{experimentId,artifactPath,caption}]
         enthalten. Abbildung nur mit echtem experimentRecordId und Pfad aus outputHashes, fachlicher Caption mit
         Achsen/Einheiten; neue Rechnung erzeugt neuen Beleg. Quellen und Ergebnisse niemals erfinden.

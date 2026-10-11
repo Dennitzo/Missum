@@ -5,7 +5,7 @@ using Missum.Core.Research;
 namespace Missum.App.Services;
 
 /// <summary>Checks real files behind the current presentation, without treating generated prose as an execution receipt.</summary>
-internal static class ScientificDeliverablesVerifier
+internal static partial class ScientificDeliverablesVerifier
 {
     private static readonly JsonSerializerOptions VerificationJsonOptions = new(JsonSerializerDefaults.Web);
     internal static Task<JsonElement> VerifyAsync(string projectId, ScientificPresentationSnapshot? snapshot,
@@ -100,6 +100,7 @@ internal static class ScientificDeliverablesVerifier
                 : "Noch keine darstellbare Abbildung aus einem erfolgreichen Python-Experiment vorhanden.");
         var missing = state is null ? new List<string>()
             : await ResearchMissingAsync(state, receipts, publication, verifiedFigureExperiments, interactiveReady, cancellationToken).ConfigureAwait(false);
+        var goalMissing = missing.ToArray();
         var scientificReview = state is null ? null : ScientificResearchReview.Assess(state, sources, evidence,
             receipts?.Experiments ?? [], receipts?.Verifications ?? []);
         if (scientificReview is not null) missing.AddRange(scientificReview.Missing);
@@ -113,7 +114,8 @@ internal static class ScientificDeliverablesVerifier
             message = ready ? "Der aktuelle Publikationsstand und die ausdrücklich erforderlichen Nachweise liegen vor."
                 : string.Join(" ", missing),
             research = state is null ? null : new { protocol = "section-delta-v1", revision = state.Revision,
-                publicationRevision = state.PublicationRevision, ready, missing },
+                publicationRevision = state.PublicationRevision, ready, missing,
+                goalStatus = goalMissing.Length == 0 ? "satisfied" : "unresolved", goalMissing },
             scientificReview,
             publication = new { ready = publicationReady, pdfPath = publicationReady ? publication!.PdfPath : null,
                 sourceSha256 = sourceHash, revision = publication?.Revision ?? 0, error = publicationError },
@@ -135,10 +137,13 @@ internal static class ScientificDeliverablesVerifier
         {
             var status = Text(requirement.Data, "status");
             var experiments = ScientificPublicationService.Ids(requirement.Data, "experimentIds");
-            if (status == "openLimit" && Text(requirement.Data, "reason").Length > 0
-                && (ScientificPublicationService.Ids(requirement.Data, "sourceIds").Count > 0
-                    || ScientificPublicationService.Ids(requirement.Data, "evidenceIds").Count > 0
-                    || receipts?.Experiments.Any(experiment => experiments.Contains(experiment.Id) && HasMeasuredReceipt(experiment, requireSuccess: false)) == true)) continue;
+            if (status == "openLimit")
+            {
+                missing.Add($"Arbeitsergebnis {requirement.Id}: erforderliches Ziel bleibt ungelöst (openLimit). "
+                    + (Text(requirement.Data, "reason") is { Length: > 0 } reason ? reason + " " : "")
+                    + "Eine dokumentierte Nachweisgrenze erhält die bisherigen Ergebnisse, erfüllt aber das Ziel nicht.");
+                continue;
+            }
             if (status is not ("completed" or "supported" or "verified"))
             {
                 missing.Add($"Arbeitsergebnis {requirement.Id}: noch offen; nächsten fachlichen Schritt oder begründete Nachweisgrenze dokumentieren.");
@@ -148,17 +153,25 @@ internal static class ScientificDeliverablesVerifier
             {
                 if (!interactiveReady)
                     missing.Add($"Arbeitsergebnis {requirement.Id}: der aktuelle projektgebundene HTML-/JavaScript-Quellbeleg für die interaktive Simulation fehlt.");
-                if (!RequiresScientificExecution(requirement.Data)) continue;
+                if (!RequiresScientificExecution(requirement.Data) && !RequiresQuantitativeValidation(requirement.Data)) continue;
             }
             var formal = HasMethod(requirement.Data, "lean", "formal", "formalproof");
             var symbolic = HasMethod(requirement.Data, "symbolic", "symbolisch", "symbolische", "sympy", "smt");
-            if (formal || symbolic || HasMethod(requirement.Data, "python", "numeric", "numerical", "numerisch", "numerische", "numerik")
+            var quantitative = RequiresQuantitativeValidation(requirement.Data);
+            var definition = requirement.Data.TryGetProperty("quantitativeValidation", out var validation) ? validation : default;
+            if (quantitative && ScientificQuantitativeValidation.ValidateDefinition(definition) is { } definitionError)
+            {
+                missing.Add($"Arbeitsergebnis {requirement.Id}: {definitionError}");
+                continue;
+            }
+            if (quantitative || formal || symbolic || HasMethod(requirement.Data, "python", "numeric", "numerical", "numerisch", "numerische", "numerik")
                 || IsFigureRequirement(requirement.Data))
             {
                 var accepted = false;
+                var measurementErrors = new List<string>();
                 foreach (var experiment in receipts?.Experiments ?? [])
                 {
-                    if (!experiments.Contains(experiment.Id) || experiment.VerificationStatus != "ProcessSucceeded"
+                    if (experiment.ProjectId != state.ProjectId || !experiments.Contains(experiment.Id) || experiment.VerificationStatus != "ProcessSucceeded"
                         || !HasMeasuredReceipt(experiment)) continue;
                     if (IsFigureRequirement(requirement.Data) && !verifiedFigureExperiments.Contains(experiment.Id)) continue;
                     if (formal && (!experiment.CommandText.StartsWith("math.formalProof ", StringComparison.Ordinal)
@@ -167,12 +180,24 @@ internal static class ScientificDeliverablesVerifier
                         || experiment.CommandText.StartsWith("math.smt ", StringComparison.Ordinal)
                         || experiment.CommandText.StartsWith("research.code.execute ", StringComparison.Ordinal))) continue;
                     if (publication is not null && await VerifyExperimentFilesAsync(experiment, publication.PdfPath, token).ConfigureAwait(false))
-                    { accepted = true; break; }
+                    {
+                        if (quantitative)
+                        {
+                            var errors = await VerifyQuantitativeArtifactAsync(definition, experiment, publication.PdfPath, token).ConfigureAwait(false);
+                            if (errors.Count > 0) { measurementErrors.AddRange(errors); continue; }
+                        }
+                        accepted = true;
+                        break;
+                    }
                 }
                 if (!accepted)
-                    missing.Add($"Arbeitsergebnis {requirement.Id}: ein zugeordneter erfolgreicher Ausführungsbeleg fehlt.");
+                    missing.Add($"Arbeitsergebnis {requirement.Id}: " + (measurementErrors.Count > 0
+                        ? string.Join(" ", measurementErrors.Distinct(StringComparer.Ordinal).Take(6))
+                        : quantitative ? "Ein zugeordneter aktueller Ausführungsbeleg mit unveränderten Eingaben und gemessener quantitativer Validierung fehlt."
+                        : "Ein zugeordneter erfolgreicher Ausführungsbeleg fehlt."));
             }
         }
+        AddUncoveredNumericalSections(state, receipts, requirements, missing);
         // A completed field is a workflow declaration, not certification of a scientific claim.
         // Only the referenced, durable execution records satisfy machine-checkable requirements.
         return missing;

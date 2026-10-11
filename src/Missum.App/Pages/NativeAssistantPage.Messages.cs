@@ -19,9 +19,9 @@ public sealed partial class NativeAssistantPage
 
     private void UpdateRunDurations()
     {
-        if (_conversationSelection?.IsSelecting == true) return;
         var second = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         if (_lastHeaderSecond == second) return;
+        if (_conversationSelection?.IsSelecting == true) return;
         _lastHeaderSecond = second;
         foreach (var (id, blocks) in _messageBlocks)
             if (blocks.TryGetValue("header", out var header) && DisplayMessages.TryGetValue(id, out var message))

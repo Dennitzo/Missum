@@ -89,7 +89,13 @@ public static class CodingLoopGuard
             var argumentHash = CodingWorkingStateReducer.ArgumentHash(candidate.Arguments);
             if (workingState.Failures.Any(failure => failure.Tool == candidate.Name && failure.ArgumentHash == argumentHash
                 && failure.EnvironmentRevision == workingState.EnvironmentRevision && failure.Count >= 2))
+            {
+                if (candidate.Name == CodingWorkingStateTools.PlanTool)
+                    throw new AgentRunLimitException("coding.updatePlan wurde im unveränderten Arbeitszustand bereits zweimal mit denselben Argumenten abgelehnt. "
+                        + "Dieser Aufruf wurde nicht erneut ausgeführt. Korrigiere die in der letzten Fehlermeldung genannten Planfelder. "
+                        + "steps und acceptanceCriteria können gemeinsam in einem korrigierten Aufruf gespeichert werden. Der Lauf bleibt aktiv.");
                 throw new AgentRunLimitException($"'{candidate.Name}' wurde im unveränderten Arbeitszustand bereits zweimal mit denselben Argumenten erfolglos aufgerufen. Dieser Aufruf wurde nicht erneut ausgeführt. Prüfe den vorhandenen Fehlerbeleg mit coding.readOutput oder coding.searchRunEvidence, korrigiere Befehl, Pfad oder Umgebung und setze den Nutzerauftrag mit einem anderen Ansatz fort. Der Lauf bleibt aktiv.");
+            }
             return;
         }
         var matchingIds = messages.SelectMany(static message => message.ToolCalls ?? [])

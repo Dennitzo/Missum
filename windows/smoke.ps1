@@ -595,6 +595,11 @@ try {
 
     Write-Host "Native WinUI 3 session and isolated local state verified: $($nativeState.sessionId)"
 
+    $responsivenessReport = Join-Path $smokeData 'native-responsiveness-validation.json'
+    if (Test-Path -LiteralPath $responsivenessReport -PathType Leaf) {
+        Copy-Item -LiteralPath $responsivenessReport -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-responsiveness-validation.json')) -Force
+        Copy-Item -LiteralPath (Join-Path $smokeData 'native-responsiveness-preview.png') -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-responsiveness-preview.png')) -Force
+    }
     if (-not $process.CloseMainWindow() -or -not $process.WaitForExit(5000)) {
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
         $process.WaitForExit(5000) | Out-Null

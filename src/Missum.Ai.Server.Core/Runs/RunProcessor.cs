@@ -545,14 +545,15 @@ public sealed partial class RunProcessor : BackgroundService
                 RunEventTypes.ContextChanged,
                 new ContextChangedEvent(
                     ContextPlanner.EstimateTokens(messages),
-                    ContextPlanner.ComputeInputTokenBudget(contextLength, maximumOutputTokens),
+                    contextLength,
                     research.FetchedSourceCount,
                     true,
                     $"SearXNG-Recherche aufbereitet: {research.SearchResultCount} Treffer, {research.FetchedSourceCount} Seiten oder Dokumente abgerufen; Modell {selection.ModelId}.",
                     "web",
                     0,
                     research.FetchedSourceCount,
-                    PreparationCompleted: true),
+                    PreparationCompleted: true,
+                    InputTokenBudget: ContextPlanner.ComputeInputTokenBudget(contextLength, maximumOutputTokens)),
                 cancellationToken).ConfigureAwait(false);
             await SaveCheckpointAsync().ConfigureAwait(false);
             }
@@ -596,7 +597,8 @@ public sealed partial class RunProcessor : BackgroundService
                         // Return a recoverable tool receipt instead of aborting the entire run.
                         // A pending client operation must still be collected exactly once.
                         if (isCoding
-                            && !canonicalStateEnabled && string.IsNullOrWhiteSpace(pendingProposalId))
+                            && (!canonicalStateEnabled || call.Name == CodingWorkingStateTools.PlanTool)
+                            && string.IsNullOrWhiteSpace(pendingProposalId))
                             CodingLoopGuard.ThrowIfRepeatedFailure(messages, call, workingState);
                         tool = _toolCatalog.Resolve(call.Name, availableTools);
                         _toolCatalog.Validate(tool, call.Arguments);
@@ -701,10 +703,16 @@ public sealed partial class RunProcessor : BackgroundService
                                 result = workingState.ConsecutivePlanNoOps > 0
                                     ? CodingPlanProgressGuard.NoOpReceipt(workingState, availableTools)
                                     : new(CodingWorkingStateTools.CreatePlanReceipt(workingState, call.Arguments), []);
+                                // Plan validation depends on the saved IDs and statuses. A real
+                                // change can make a previously rejected delta valid; no-op receipts
+                                // must not reset this guard or unrelated tool failure signatures.
+                                if (result.Succeeded && workingState.Failures.Any(static failure => failure.Tool == CodingWorkingStateTools.PlanTool))
+                                    workingState = workingState with { Failures = workingState.Failures
+                                        .Where(static failure => failure.Tool != CodingWorkingStateTools.PlanTool).ToArray() };
                             }
                             catch (ArgumentException exception)
                             {
-                                result = new(JsonSerializer.SerializeToElement(new { success = false, error = exception.Message }), [],
+                                result = new(JsonSerializer.SerializeToElement(new { success = false, errorCode = "agent.invalid_state_action", error = exception.Message }), [],
                                     Succeeded: false, ErrorCode: "agent.invalid_state_action", ErrorMessage: exception.Message);
                             }
                         }
@@ -771,7 +779,10 @@ public sealed partial class RunProcessor : BackgroundService
                             JsonSerializer.Serialize(new { status = result.Succeeded ? "completed" : "failed", result = result.Result },
                                 MissumAiProtocol.CreateJsonOptions()), result.Succeeded, scientificStateProgress,
                             messages, inputTokens, outputTokens, cancellationToken).ConfigureAwait(false);
-                        if (workingState is not null && tool.Name != CodingWorkingStateTools.PlanTool)
+                        // Successful plan acknowledgements are not work evidence. State-validation
+                        // failures still need durable tracking, including in Claude Science.
+                        if (workingState is not null && (tool.Name != CodingWorkingStateTools.PlanTool
+                            || result.ErrorCode == "agent.invalid_state_action"))
                             workingState = CodingWorkingStateReducer.ObserveToolResult(workingState, WithOperationIdentity(runId, "main", activeCallRound ?? roundCount, nextToolIndex, call), result.Result.GetRawText());
                         nextToolIndex++;
                         if (request.DeepResearch && !researchManagedByAgent && tool.Name == CodingDeepResearchPipeline.ToolName)
@@ -1126,8 +1137,9 @@ public sealed partial class RunProcessor : BackgroundService
                     ApplyCodingBudgetInstruction(messages, codingBudget, roundCount, toolCallCount, preserveSessionPromptPrefix);
                     await SaveCheckpointAsync().ConfigureAwait(false);
                     await _repository.AppendEventAsync(runId, RunEventTypes.ContextChanged,
-                        new ContextChangedEvent(ContextPlanner.EstimateTokens(messages), ContextPlanner.ComputeInputTokenBudget(contextLength, maximumOutputTokens),
-                            0, true, $"{compaction.ArchivedMessages} ältere Coding-Nachrichten wurden als fortsetzbarer Arbeitsstand gespeichert. Der ursprüngliche Auftrag und aktuelle Werkzeugbelege bleiben im Kontext; das vollständige Journal bleibt erhalten."),
+                        new ContextChangedEvent(ContextPlanner.EstimateTokens(messages), contextLength,
+                            0, true, $"{compaction.ArchivedMessages} ältere Coding-Nachrichten wurden als fortsetzbarer Arbeitsstand gespeichert. Der ursprüngliche Auftrag und aktuelle Werkzeugbelege bleiben im Kontext; das vollständige Journal bleibt erhalten.",
+                            InputTokenBudget: ContextPlanner.ComputeInputTokenBudget(contextLength, maximumOutputTokens)),
                         steeringCall.Token).ConfigureAwait(false);
                 }
                 try
@@ -1183,7 +1195,7 @@ public sealed partial class RunProcessor : BackgroundService
                     RunEventTypes.ContextChanged,
                     new ContextChangedEvent(
                         contextPlan.EstimatedInputTokens,
-                        contextPlan.InputTokenBudget,
+                        contextLength,
                         documentContext?.DocumentCount ?? 0,
                         documentPrepared
                             || request.SessionContext?.PreparedByAi == true
@@ -1194,7 +1206,8 @@ public sealed partial class RunProcessor : BackgroundService
                         documentContext?.IncludedPageCount ?? 0,
                         PreparationCompleted: true,
                         HistoryTokens: request.SessionContext?.EstimatedTokens ?? 0,
-                        HistoryWasCompacted: request.SessionContext?.PreparedByAi == true),
+                        HistoryWasCompacted: request.SessionContext?.PreparedByAi == true,
+                        InputTokenBudget: contextPlan.InputTokenBudget),
                     steeringCall.Token).ConfigureAwait(false);
 
                 if (isCoding || !string.IsNullOrWhiteSpace(request.SessionId))
@@ -1826,6 +1839,7 @@ public sealed partial class RunProcessor : BackgroundService
                     messages.Add(new LmChatMessage("assistant", content, ReasoningContent: lastNativeReasoning));
                 }
                 var assessment = await AssessScientificCompletionAsync(runId, request, messages, availableTools, cancellationToken).ConfigureAwait(false);
+                if (canonicalStateEnabled) assessment = ScientificStateCompletionPolicy.ApplyPlanRequirements(assessment, workingState);
                 if (!assessment.Complete)
                 {
                     scientificCompletionPending = true;

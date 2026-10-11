@@ -100,22 +100,22 @@ public sealed class ResearchUpdateSchemaTests
                 Assert.Equal(RequiredPatchChangeFields, Strings(alternative.GetProperty("required")));
                 Assert.False(alternative.GetProperty("properties").TryGetProperty("data", out _));
                 Assert.Equal(1, alternative.GetProperty("properties").GetProperty("expectedRevision").GetProperty("minimum").GetInt32());
-                Assert.Equal(1, patch.GetProperty("minProperties").GetInt32());
-                Assert.False(patch.GetProperty("additionalProperties").GetBoolean());
-                Assert.False(patch.TryGetProperty("required", out _));
-                Assert.True(patch.GetProperty("properties").TryGetProperty("review", out _));
+                var withoutReview = AssertReviewAlternatives(patch, [], isPatch: true);
+                Assert.Equal(1, withoutReview.GetProperty("minProperties").GetInt32());
                 continue;
             }
             Assert.Equal(RequiredChangeFields, Strings(alternative.GetProperty("required")));
             var properties = alternative.GetProperty("properties");
             Assert.Equal(200, properties.GetProperty("id").GetProperty("maxLength").GetInt32());
             Assert.Equal(0, properties.GetProperty("expectedRevision").GetProperty("minimum").GetInt32());
-            var data = properties.GetProperty("data");
+            var dataAlternatives = properties.GetProperty("data");
+            var data = dataAlternatives.GetProperty("anyOf")[0];
             Assert.False(data.GetProperty("additionalProperties").GetBoolean());
             foreach (var kind in Strings(properties.GetProperty("kind").GetProperty("enum")))
             {
                 Assert.True(kinds.Add(kind), "An object kind must match exactly one schema alternative.");
                 var expected = kind is "section" or "contribution" ? ManuscriptFields : AssertionFields;
+                AssertReviewAlternatives(dataAlternatives, expected, isPatch: false);
                 Assert.Equal(expected, Strings(data.GetProperty("required")));
                 foreach (var required in expected)
                     Assert.Equal(1, data.GetProperty("properties").GetProperty(required).GetProperty("minLength").GetInt32());
@@ -155,8 +155,47 @@ public sealed class ResearchUpdateSchemaTests
         Assert.Throws<ArgumentException>(() => _catalog.Validate(tool, ambiguous));
         var error = Assert.Throws<ArgumentException>(() => _catalog.Validate(tool, PatchArguments(new { review = new { itemRevision = 2,
             sourceAssessment = "Quelle", calculationAssessment = "Rechnung", contradictionAssessment = "Grenze", scope = "Modell" } })));
-        Assert.Contains("ausdrücklich status", error.Message, StringComparison.Ordinal);
-        Assert.Contains("patch", error.Message, StringComparison.Ordinal);
+        Assert.Contains("changes[].patch.status", error.Message, StringComparison.Ordinal);
+        Assert.Contains("patch.review.status ist nicht erlaubt", error.Message, StringComparison.Ordinal);
+        Assert.Contains("keine Änderung wurde übernommen", error.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(false, 0)]
+    [InlineData(false, 1)]
+    [InlineData(true, 1)]
+    public void ReviewRequiresAnExplicitSiblingStatusAndRejectsTheMisleadingNestedPlacement(bool patch, long revision)
+    {
+        var payloadName = patch ? "patch" : "data";
+        var review = new Dictionary<string, object?> { ["itemRevision"] = revision + 1,
+            ["sourceAssessment"] = "Quelle geprüft", ["calculationAssessment"] = "Rechnung geprüft",
+            ["contradictionAssessment"] = "Grenzen geprüft", ["scope"] = "Modell" };
+        var payload = new Dictionary<string, object?> { ["title"] = "Grundlagen", ["contentMarkdown"] = "Vorhandener Sachtext", ["review"] = review };
+        JsonElement Args() => JsonSerializer.SerializeToElement(new { projectId = "research-test", changes = new[] {
+            new Dictionary<string, object?> { ["id"] = "sec-foundation", ["kind"] = "section", ["expectedRevision"] = revision, [payloadName] = payload } } });
+        var tool = ResearchUpdateTool();
+        var missing = Assert.Throws<ArgumentException>(() => _catalog.Validate(tool, Args()));
+        Assert.Contains($"changes[].{payloadName}.status", missing.Message, StringComparison.Ordinal);
+        Assert.Contains("sind Geschwister", missing.Message, StringComparison.Ordinal);
+        payload["status"] = null;
+        Assert.Throws<ArgumentException>(() => _catalog.Validate(tool, Args()));
+        payload.Remove("status");
+        review["status"] = "supported";
+        var nested = Assert.Throws<ArgumentException>(() => _catalog.Validate(tool, Args()));
+        Assert.Contains($"unzulässige Feld {payloadName}.review.status", nested.Message, StringComparison.Ordinal);
+        Assert.Contains($"changes[].{payloadName}.status", nested.Message, StringComparison.Ordinal);
+        review.Remove("status");
+        payload["status"] = "draft";
+        _catalog.Validate(tool, Args()); // Recording a review must not imply scientific support.
+        Assert.Equal("draft", payload["status"]);
+        payload["status"] = "supported";
+        _catalog.Validate(tool, Args());
+        if (patch)
+        {
+            payload.Remove("status");
+            payload["review"] = null;
+            _catalog.Validate(tool, Args()); // Explicitly removing a review remains possible.
+        }
     }
 
     [Fact]
@@ -181,6 +220,37 @@ public sealed class ResearchUpdateSchemaTests
     });
 
     private static string[] Strings(JsonElement array) => array.EnumerateArray().Select(static item => item.GetString()!).ToArray();
+    private static JsonElement AssertReviewAlternatives(JsonElement payload, string[] requiredContent, bool isPatch)
+    {
+        // Verify the transported schema, not merely the catalog's after-the-fact validator.
+        Assert.False(payload.TryGetProperty("properties", out _));
+        var alternatives = payload.GetProperty("anyOf");
+        Assert.Equal(2, alternatives.GetArrayLength());
+        var withoutReview = alternatives[0];
+        var reviewed = alternatives[1];
+        foreach (var alternative in alternatives.EnumerateArray())
+        {
+            Assert.Equal("object", alternative.GetProperty("type").GetString());
+            Assert.False(alternative.GetProperty("additionalProperties").GetBoolean());
+        }
+        if (isPatch)
+        {
+            Assert.Equal("null", withoutReview.GetProperty("properties").GetProperty("review").GetProperty("type").GetString());
+            Assert.False(withoutReview.TryGetProperty("required", out _));
+        }
+        else
+        {
+            Assert.False(withoutReview.GetProperty("properties").TryGetProperty("review", out _));
+            Assert.Equal(requiredContent, Strings(withoutReview.GetProperty("required")));
+        }
+        Assert.Equal(requiredContent.Concat(["status", "review"]), Strings(reviewed.GetProperty("required")));
+        var fields = reviewed.GetProperty("properties");
+        Assert.Equal("string", fields.GetProperty("status").GetProperty("type").GetString());
+        Assert.Equal("object", fields.GetProperty("review").GetProperty("type").GetString());
+        Assert.False(fields.GetProperty("review").GetProperty("properties").TryGetProperty("status", out _));
+        Assert.Contains("draft", Strings(fields.GetProperty("status").GetProperty("enum")));
+        return withoutReview;
+    }
     private static JsonElement PatchArguments(object patch, long expectedRevision = 1) => JsonSerializer.SerializeToElement(new
     {
         projectId = "research-test", changes = new[] { new { id = "section", kind = "section", expectedRevision, patch } },

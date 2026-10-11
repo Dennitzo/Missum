@@ -55,7 +55,51 @@ public sealed class AgentNarrationPolicyTests
         Assert.Contains("offene Punkte oder Grenzen ausdrücklich", policy, StringComparison.Ordinal);
         Assert.Contains("geplante Prüfungen sind keine erfolgten Prüfungen", policy, StringComparison.Ordinal);
         Assert.Contains("statt einer aufgeblähten Checkliste", policy, StringComparison.Ordinal);
-        Assert.True(policy.Length < 1550, $"Shared narration contains {policy.Length} characters.");
+        Assert.True(policy.Length < 2800, $"Shared narration contains {policy.Length} characters.");
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("compact-v1")]
+    public void ScienceChatKeepsCitationDetailsInSourcesAndPublicationWithoutWeakeningEvidenceRequirements(string? contextProfile)
+    {
+        var request = new RunRequest(MissumAiProtocol.Version, RunMode.General,
+            [new("user", [new("text", "Untersuche die Gravitation und fasse die Ergebnisse zusammen.")])],
+            DeepResearch: true, ClientCapabilities: ["research.deliverables"],
+            ResearchOptions: new(ProjectId: "research-citations", ProtocolVersion: 2));
+        var messages = RunProcessor.CreateInitialMessages(request, "general",
+            [ClientToolNames.ResearchRead, ClientToolNames.ResearchUpdate, "web.search", "web.fetch"], contextProfile);
+        if (contextProfile is null) RunProcessor.EnsureScientificStateInstructions(messages);
+        var policy = messages[0].Content!;
+
+        Assert.Contains("Sichtbare AI-Nachrichten im Chat enthalten keine Quellenlisten", policy, StringComparison.Ordinal);
+        Assert.Contains("DOI-/arXiv-Kennungen", policy, StringComparison.Ordinal);
+        Assert.Contains("Quellenbereich und im Claude-Science-Modus in die Publikation", policy, StringComparison.Ordinal);
+        Assert.Contains("erhalte ihre vollständigen Kennungen und Zuordnungen", policy, StringComparison.Ordinal);
+        Assert.Contains("Annahmen und Unsicherheiten", policy, StringComparison.Ordinal);
+        Assert.Contains("science-review-v1", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("nenne Titel sowie URL", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("zitiere [Dateiname, S. 12]", policy, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ContinuedSessionAdoptsCitationPresentationWithoutAlteringPriorMessagesOrEvidence()
+    {
+        var previous = new LmChatMessage("assistant", "Belege: experiment-123, DOI 10.1234/example.");
+        var tool = new LmChatMessage("tool", "{\"sourceIds\":[\"source-123\"]}", ToolCallId: "read-1");
+        var continuation = new LmChatMessage("user", "Fortsetzen");
+        List<LmChatMessage> messages = [new("system", "Nenne Belege direkt in der Chatantwort."), previous, tool, continuation];
+
+        AgentNarrationPolicy.EnsureInstructions(messages);
+        var updated = messages.ToArray();
+        AgentNarrationPolicy.EnsureInstructions(messages);
+
+        Assert.Equal(updated, messages);
+        Assert.Contains("Diese Darstellungsregel ersetzt ältere", messages[0].Content, StringComparison.Ordinal);
+        Assert.Contains("auch beim Fortsetzen", messages[0].Content, StringComparison.Ordinal);
+        Assert.Same(previous, messages[1]);
+        Assert.Same(tool, messages[2]);
+        Assert.Same(continuation, messages[3]);
     }
 
     [Theory]

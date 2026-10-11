@@ -21,6 +21,8 @@ internal sealed class NativeConversationSelection
     private readonly ScrollViewer _scroll;
     private readonly DispatcherTimer _autoScroll = new() { Interval = TimeSpan.FromMilliseconds(30) };
     private readonly List<(Node Node, TextHighlighter Highlight)> _highlights = [];
+    private readonly List<(Node Node, Brush? Background)> _formulaHighlights = [];
+    private readonly List<Node> _rangeNodes = [];
     private readonly List<(Node Node, FlyoutBase? Context, FlyoutBase? Selection)> _menus = [];
     private List<Node> _nodes = [];
     private Node? _anchor;
@@ -43,6 +45,10 @@ internal sealed class NativeConversationSelection
     internal long RangeProjectionCount { get; private set; }
     private string _selectedText = "";
     private readonly ConditionalWeakTable<FrameworkElement, MenuFlyout> _nativeMenus = new();
+    // SelectionChanged owns presence; converting native ranges back to their
+    // original LaTeX belongs only to an explicit copy/read request. Polling the
+    // whole conversation here made every render tick traverse its visual tree.
+    private readonly Dictionary<FrameworkElement, Node> _nativeSelections = [];
     internal Func<FrameworkElement, Point, MenuFlyout?>? ReadFromMenuFactory { get; set; }
     internal Action<string, Action>? UiProjectionCallback { get; set; }
     internal Action? SelectionChangedCallback { get; set; }
@@ -50,7 +56,7 @@ internal sealed class NativeConversationSelection
     internal Func<string, Task<bool>>? CopySmokeAdapter { get; set; }
     internal Action<string, string, Point>? PointerSmokeObserver { get; set; }
     internal string SelectedText => ResolveSelectedText();
-    internal bool HasSelection => SelectedText.Length > 0;
+    internal bool HasSelection => _selectedText.Length > 0 || HasVisibleNativeSelection();
     internal bool IsSelecting => _dragging || HasSelection;
 
     public NativeConversationSelection(FrameworkElement host, Panel messages, ScrollViewer scroll)
@@ -64,6 +70,7 @@ internal sealed class NativeConversationSelection
         // Handle copy before TextBlock's built-in handler reaches Clipboard.SetContent.
         host.AddHandler(UIElement.PreviewKeyDownEvent, new KeyEventHandler(KeyDown), true);
         host.ContextRequested += ContextRequested;
+        host.GotFocus += (_, args) => GuardSelection("GotFocus", () => TrackNativeSource(args.OriginalSource as DependencyObject));
         host.PointerCanceled += (_, args) => CaptureLost(host, args);
         host.Unloaded += (_, _) => GuardSelection("Unloaded", Clear);
         host.BringIntoViewRequested += (_, args) => { if (_projectingRange) args.Handled = true; };
@@ -124,10 +131,9 @@ internal sealed class NativeConversationSelection
         if (!e.GetCurrentPoint(_scroll).Properties.IsLeftButtonPressed) { StopDrag(); return; }
         _lastViewportPoint = e.GetCurrentPoint(_scroll).Position;
         _manualScroll = true; _autoScrollRequested = false;
-        if (!_crossed && _anchor is { } anchor && SafeSelected(anchor).Length > 0)
+        if (!_crossed && _anchor is { } anchor && HasNativeRange(anchor)
+            && anchor.TrySelectionOffsets(out var start, out var end))
         {
-            var start = anchor.View is TextBlock text ? text.SelectionStart.Offset : ((RichTextBlock)anchor.View).SelectionStart.Offset;
-            var end = anchor.View is TextBlock textEnd ? textEnd.SelectionEnd.Offset : ((RichTextBlock)anchor.View).SelectionEnd.Offset;
             var forward = Math.Abs(_anchorOffset - start) <= Math.Abs(_anchorOffset - end);
             _anchorOffset = forward ? start : end;
             var target = forward ? end : start;
@@ -177,6 +183,7 @@ internal sealed class NativeConversationSelection
         if (e.GetCurrentPoint(_host).Properties.IsRightButtonPressed)
         {
             var node = Collect(_messages).FirstOrDefault(n => ReferenceEquals(n.View, e.OriginalSource) || IsDescendant(e.OriginalSource as DependencyObject, n.View));
+            if (node is not null) WatchNativeSelection(node);
             if (node is not null && ReadFromMenuFactory?.Invoke(node.View, e.GetCurrentPoint(node.View).Position) is { } menu)
             {
                 if (HasSelection)
@@ -247,9 +254,8 @@ internal sealed class NativeConversationSelection
         {
             // Use the native range's exact anchor when handing a live single-
             // paragraph selection to our projection across paragraph boundaries.
-            var start = _anchor.View is TextBlock text ? text.SelectionStart.Offset : ((RichTextBlock)_anchor.View).SelectionStart.Offset;
-            var end = _anchor.View is TextBlock textEnd ? textEnd.SelectionEnd.Offset : ((RichTextBlock)_anchor.View).SelectionEnd.Offset;
-            if (start != end) _anchorOffset = Math.Abs(_anchorOffset - start) <= Math.Abs(_anchorOffset - end) ? start : end;
+            if (_anchor.TrySelectionOffsets(out var start, out var end) && start != end)
+                _anchorOffset = Math.Abs(_anchorOffset - start) <= Math.Abs(_anchorOffset - end) ? start : end;
             // CapturePointer transfers ownership itself. Explicitly releasing
             // the child first can end the native gesture and lose its anchor.
             if (!CaptureSelection(e)) return;
@@ -276,6 +282,10 @@ internal sealed class NativeConversationSelection
     private void StopDrag()
     {
         var wasDragging = _dragging;
+        // WinUI may deliver SelectionChanged after PointerReleased/capture loss.
+        // Commit this one native owner before ending the gesture so the next
+        // render tick still preserves the range that the user just released.
+        if (!_crossed && _anchor is { } anchor) RefreshNativeSelection(anchor);
         _dragging = false; _capturedPointerId = null; _autoScrollRequested = false; _manualScroll = false;
         _autoScroll.Stop(); _host.ReleasePointerCaptures();
         if (wasDragging) SelectionChangedCallback?.Invoke();
@@ -288,8 +298,10 @@ internal sealed class NativeConversationSelection
         StopDrag(); ClearHighlights(); _nodes.Clear(); _anchor = null; _crossed = false; _selectedText = "";
         _lastRange = default;
         foreach (var node in Collect(_messages))
-            if (node.View != keepNativeSelection && SafeSelected(node).Length > 0)
+            if (!node.IsFormula && node.View != keepNativeSelection && HasNativeRange(node))
                 TryCleanup(() => node.Select(node.Start, node.Start));
+        foreach (var view in _nativeSelections.Keys.Where(view => view != keepNativeSelection).ToArray())
+            _nativeSelections.Remove(view);
         SelectionChangedCallback?.Invoke();
     }
 
@@ -297,8 +309,12 @@ internal sealed class NativeConversationSelection
     {
         foreach (var (node, highlight) in _highlights) TryCleanup(() => node.Highlighters.Remove(highlight));
         _highlights.Clear();
+        foreach (var (node, background) in _formulaHighlights)
+            TryCleanup(() => ((NativeFormulaView)node.View).Background = background);
+        _formulaHighlights.Clear();
         foreach (var (node, context, selection) in Enumerable.Reverse(_menus)) TryCleanup(() => { node.View.ContextFlyout = context; node.SelectionFlyout = selection; });
         _menus.Clear();
+        _rangeNodes.Clear();
     }
 
     private void Extend(Point point)
@@ -335,15 +351,29 @@ internal sealed class NativeConversationSelection
         for (var i = a; i <= b; i++)
         {
             var node = nodes[i];
+            if (node.View is NativeFormulaView formula)
+            {
+                if ((i == a ? anchorOffset : 0) >= (i == b ? targetOffset : 1)) continue;
+                selected.Add(formula.Source);
+                _rangeNodes.Add(node);
+                _formulaHighlights.Add((node, formula.Background));
+                formula.Background = NativeThemeBrushes.Resource("MissumAccentBrush", Microsoft.UI.Colors.MediumPurple);
+                continue;
+            }
             var start = i == a ? node.At(anchorOffset) : node.Start;
             var end = i == b ? node.At(targetOffset) : node.End;
             node.Select(node.Start, start);
             var prefixLength = node.Selected.Length;
             node.Select(start, end);
             var text = node.Selected;
+            var copyText = node.CopySelected;
             node.Select(node.Start, node.Start);
+            if (copyText.Length == 0) continue;
+            selected.Add(node.View is RichTextBlock ? copyText.TrimEnd('\r', '\n') : copyText);
+            _rangeNodes.Add(node);
+            // Clipboard LaTeX can be much longer than the one embedded glyph.
+            // Keep highlight indices in WinUI's visible-text coordinate space.
             if (text.Length == 0) continue;
-            selected.Add(node.View is RichTextBlock ? text.TrimEnd('\r', '\n') : text);
             var highlight = new TextHighlighter
             {
                 Background = Application.Current.Resources.TryGetValue("MissumAccentBrush", out var accent) && accent is Brush accentBrush
@@ -354,7 +384,7 @@ internal sealed class NativeConversationSelection
             node.Highlighters.Add(highlight); _highlights.Add((node, highlight));
         }
         _selectedText = string.Join("\n\n", selected);
-        foreach (var (node, _) in _highlights)
+        foreach (var node in _rangeNodes)
         {
             _menus.Add((node, node.View.ContextFlyout, node.SelectionFlyout));
             var menu = new MenuFlyout();
@@ -374,6 +404,7 @@ internal sealed class NativeConversationSelection
 
     private void KeyDownCore(KeyRoutedEventArgs e)
     {
+        TrackNativeSource(e.OriginalSource as DependencyObject);
         if (!HasSelection || IsInteractive(e.OriginalSource as DependencyObject)) return;
         if (e.Key == VirtualKey.Escape) { Clear(); e.Handled = true; }
         else if (e.Key == VirtualKey.C && (InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control) & CoreVirtualKeyStates.Down) != 0)
@@ -417,23 +448,85 @@ internal sealed class NativeConversationSelection
     internal bool PreserveSelectionWithin(FrameworkElement container)
     {
         if (_dragging && _anchor is not null && IsDescendant(_anchor.View, container)) return true;
-        if (_selectedText.Length > 0 && _highlights.Any(item => IsDescendant(item.Node.View, container))) return true;
-        foreach (var node in Collect(container))
+        if (_selectedText.Length > 0 && _rangeNodes.Any(node => IsDescendant(node.View, container))) return true;
+        foreach (var node in _nativeSelections.Values)
+            if (IsVisibleConversationNode(node.View) && IsDescendant(node.View, container)) return true;
+        return false;
+    }
+
+    /// <summary>Register newly projected blocks once, outside the frequent selection-preservation checks.</summary>
+    internal void TrackSelectionWithin(FrameworkElement container)
+    {
+        foreach (var node in Collect(container)) WatchNativeSelection(node);
+    }
+
+    private bool HasVisibleNativeSelection()
+    {
+        // Usually zero or one node. Inspect only selected owners, never every
+        // historical paragraph; no TextPointers or clipboard text are read.
+        foreach (var node in _nativeSelections.Values)
+            if (IsVisibleConversationNode(node.View)) return true;
+        return false;
+    }
+
+    private bool IsVisibleConversationNode(DependencyObject? source)
+    {
+        while (source is not null)
         {
-            WatchNativeSelection(node);
-            if (SafeSelected(node).Length > 0) return true;
+            if (source == _messages) return true;
+            if (source is FrameworkElement { Visibility: not Visibility.Visible }) return false;
+            source = VisualTreeHelper.GetParent(source);
         }
         return false;
     }
 
     private string ResolveSelectedText()
     {
-        if (_anchor is not null && IsDescendant(_anchor.View, _messages) && SafeSelected(_anchor) is { Length: > 0 } active) return active;
-        return Collect(_messages).Select(SafeSelected).FirstOrDefault(text => text.Length > 0) ?? _selectedText;
+        if (_anchor is not null && IsVisibleConversationNode(_anchor.View) && ReadNativeSelection(_anchor) is { Length: > 0 } active) return active;
+        // Explicit reads reconcile deferred native SelectionChanged events.
+        // Snapshot only the selected owners because reconciliation can remove
+        // a range that has just been programmatically cleared.
+        foreach (var node in _nativeSelections.Values.ToArray())
+            if (IsVisibleConversationNode(node.View) && ReadNativeSelection(node) is { Length: > 0 } selected) return selected;
+        // Explicit copy also supports a programmatically selected, newly added
+        // block that has not gone through the page's projection registration yet.
+        foreach (var node in Collect(_messages))
+        {
+            WatchNativeSelection(node);
+            if (ReadNativeSelection(node) is { Length: > 0 } selected) return selected;
+        }
+        return _selectedText;
+    }
+
+    private string ReadNativeSelection(Node node)
+    {
+        // Select() can expose its new pointers synchronously while its event is
+        // still queued. A copy/read must update presence even for a text block
+        // whose handlers were already registered during initial rendering.
+        return RefreshNativeSelection(node) ? SafeSelected(node) : "";
+    }
+
+    private void TrackNativeSource(DependencyObject? source)
+    {
+        // Expanded tool details can receive keyboard focus before another model
+        // delta. Register that text owner without scanning the conversation.
+        while (source is not null && source != _host)
+        {
+            if (source is TextBlock { IsTextSelectionEnabled: true } text)
+            {
+                var node = new Node(text); WatchNativeSelection(node); RefreshNativeSelection(node); return;
+            }
+            if (source is RichTextBlock { IsTextSelectionEnabled: true } rich)
+            {
+                var node = new Node(rich); WatchNativeSelection(node); RefreshNativeSelection(node); return;
+            }
+            source = VisualTreeHelper.GetParent(source);
+        }
     }
 
     private void WatchNativeSelection(Node node)
     {
+        if (node.IsFormula) return; // Formula buttons already expose their own source-copy menu.
         if (_nativeMenus.TryGetValue(node.View, out _)) return;
         var menu = new MenuFlyout();
         var copy = new MenuFlyoutItem { Text = "Auswahl kopieren" };
@@ -441,17 +534,32 @@ internal sealed class NativeConversationSelection
         node.SelectionFlyout = menu;
         if (node.View is TextBlock text) text.SelectionChanged += (_, _) => OnNativeSelectionChanged(node);
         else ((RichTextBlock)node.View).SelectionChanged += (_, _) => OnNativeSelectionChanged(node);
+        node.View.Loaded += (_, _) => GuardSelection("Text.Loaded", () => RefreshNativeSelection(node));
+        node.View.Unloaded += (_, _) => GuardSelection("Text.Unloaded", () =>
+        {
+            if (_nativeSelections.Remove(node.View)) SelectionChangedCallback?.Invoke();
+        });
         _nativeMenus.Add(node.View, menu);
+        RefreshNativeSelection(node);
     }
 
     private void OnNativeSelectionChanged(Node node) => GuardSelection("SelectionChanged", () =>
     {
-        if (!_projectingRange && _selectedText.Length > 0 && SafeSelected(node).Length > 0)
+        var hasRange = RefreshNativeSelection(node);
+        if (!_projectingRange && _selectedText.Length > 0 && hasRange)
         {
             ClearHighlights(); _selectedText = ""; _crossed = false; _anchor = node;
         }
         SelectionChangedCallback?.Invoke();
     });
+
+    private bool RefreshNativeSelection(Node node)
+    {
+        var hasRange = HasNativeRange(node);
+        if (hasRange) _nativeSelections[node.View] = node;
+        else _nativeSelections.Remove(node.View);
+        return hasRange;
+    }
 
     private void GuardSelection(string phase, Action action)
     {
@@ -467,10 +575,80 @@ internal sealed class NativeConversationSelection
     private static bool IsSelectionException(Exception exception) => exception is System.Runtime.InteropServices.COMException
         or InvalidOperationException or ArgumentException && exception.HResult != unchecked((int)0x8007000E);
     private static void TryCleanup(Action action) { try { action(); } catch (Exception exception) when (IsSelectionException(exception)) { } }
-    private static string SafeSelected(Node node) { try { return node.Selected; } catch (Exception exception) when (IsSelectionException(exception)) { return ""; } }
+    private static bool HasNativeRange(Node node)
+    {
+        try { return node.TrySelectionOffsets(out var start, out var end) && start != end; }
+        catch (Exception exception) when (IsSelectionException(exception)) { return false; }
+    }
+    private static string SafeSelected(Node node) { try { return node.CopySelected; } catch (Exception exception) when (IsSelectionException(exception)) { return ""; } }
+
+    internal readonly record struct ClipboardSpan(int Start, int End, string Text, bool Atomic = false);
+
+    /// <summary>Maps native insertion positions to the original formula source without changing the selection.</summary>
+    internal static string CopySourceRange(IEnumerable<ClipboardSpan> spans, int start, int end)
+    {
+        if (end < start) (start, end) = (end, start);
+        if (start == end) return "";
+        var result = new StringBuilder();
+        foreach (var span in spans)
+        {
+            if (span.End <= start || span.Start >= end || span.End <= span.Start) continue;
+            if (span.Atomic) { result.Append(span.Text); continue; }
+            var from = Math.Clamp(start - span.Start, 0, span.Text.Length);
+            var to = Math.Clamp(end - span.Start, from, span.Text.Length);
+            result.Append(span.Text.AsSpan(from, to - from));
+        }
+        return result.ToString();
+    }
+
+    internal static string CopyNativeRange(FrameworkElement view, int start, int end)
+    {
+        var spans = new List<ClipboardSpan>();
+        static void Append(List<ClipboardSpan> spans, IEnumerable<Inline> inlines)
+        {
+            foreach (var inline in inlines)
+                switch (inline)
+                {
+                    case Run run:
+                        spans.Add(new(run.ContentStart.Offset, run.ContentEnd.Offset, run.Text));
+                        break;
+                    case LineBreak line:
+                        spans.Add(new(line.ElementStart.Offset, line.ElementEnd.Offset, "\n", true));
+                        break;
+                    case Span span:
+                        Append(spans, span.Inlines);
+                        break;
+                    case InlineUIContainer { Child: NativeFormulaView formula } container:
+                        // An embedded UI object has no text content: ContentStart and
+                        // ContentEnd can be equal. Its element insertion positions
+                        // enclose the selectable glyph, including the original TeX.
+                        spans.Add(new(container.ElementStart.Offset, container.ElementEnd.Offset, formula.Source, true));
+                        break;
+                }
+        }
+        if (view is TextBlock text)
+        {
+            if (text.Inlines.Count == 0)
+                spans.Add(new(text.ContentStart.Offset, text.ContentEnd.Offset, text.Text));
+            else Append(spans, text.Inlines);
+        }
+        else if (view is RichTextBlock rich)
+        {
+            Paragraph? previous = null;
+            foreach (var paragraph in rich.Blocks.OfType<Paragraph>())
+            {
+                if (previous is not null)
+                    spans.Add(new(previous.ContentEnd.Offset, paragraph.ContentStart.Offset, "\n", true));
+                Append(spans, paragraph.Inlines);
+                previous = paragraph;
+            }
+        }
+        return CopySourceRange(spans, start, end);
+    }
 
     private static string ReadNodeText(FrameworkElement view)
     {
+        if (view is NativeFormulaView blockFormula) return blockFormula.Source;
         var builder = new StringBuilder();
         static void Append(StringBuilder builder, IEnumerable<Inline> inlines)
         {
@@ -524,6 +702,7 @@ internal sealed class NativeConversationSelection
     private static IEnumerable<Node> Collect(DependencyObject parent)
     {
         if (parent is FrameworkElement element && element.Visibility != Visibility.Visible) yield break;
+        if (parent is NativeFormulaView formula) { yield return new Node(formula); yield break; }
         if (parent is ButtonBase) yield break;
         if (parent is TextBlock { IsTextSelectionEnabled: true } text) { yield return new Node(text); yield break; }
         if (parent is RichTextBlock { IsTextSelectionEnabled: true } rich) { yield return new Node(rich); yield break; }
@@ -534,20 +713,42 @@ internal sealed class NativeConversationSelection
     private sealed class Node(FrameworkElement view)
     {
         public FrameworkElement View => view;
+        public bool IsFormula => view is NativeFormulaView;
         public TextPointer Start => view is TextBlock t ? t.ContentStart : ((RichTextBlock)view).ContentStart;
         public TextPointer End => view is TextBlock t ? t.ContentEnd : ((RichTextBlock)view).ContentEnd;
         public FlyoutBase? SelectionFlyout
         {
-            get => view is TextBlock text ? text.SelectionFlyout : ((RichTextBlock)view).SelectionFlyout;
-            set { if (view is TextBlock text) text.SelectionFlyout = value; else ((RichTextBlock)view).SelectionFlyout = value; }
+            get => view is TextBlock text ? text.SelectionFlyout : view is RichTextBlock rich ? rich.SelectionFlyout : null;
+            set { if (view is TextBlock text) text.SelectionFlyout = value; else if (view is RichTextBlock rich) rich.SelectionFlyout = value; }
         }
-        public string Selected => view is TextBlock t ? t.SelectedText : ((RichTextBlock)view).SelectedText;
+        public string Selected => view is TextBlock t ? t.SelectedText : view is RichTextBlock rich ? rich.SelectedText : "";
+        public bool TrySelectionOffsets(out int startOffset, out int endOffset)
+        {
+            startOffset = endOffset = 0;
+            if (IsFormula) return false;
+            var start = view is TextBlock text ? text.SelectionStart : ((RichTextBlock)view).SelectionStart;
+            var end = view is TextBlock textEnd ? textEnd.SelectionEnd : ((RichTextBlock)view).SelectionEnd;
+            if (start is null || end is null) return false;
+            startOffset = start.Offset; endOffset = end.Offset;
+            return true;
+        }
+        public string CopySelected
+        {
+            get
+            {
+                // WinUI does not create selection pointers until the text is attached.
+                // Tracking/copy can also visit newly created streaming blocks.
+                if (!TrySelectionOffsets(out var start, out var end) || start == end) return "";
+                return CopyNativeRange(view, start, end);
+            }
+        }
         public IList<TextHighlighter> Highlighters => view is TextBlock t ? t.TextHighlighters : ((RichTextBlock)view).TextHighlighters;
         public TextPointer At(int offset) => Start.GetPositionAtOffset(Math.Clamp(offset - Start.Offset, 0, End.Offset - Start.Offset), LogicalDirection.Forward) ?? End;
         public void Select(TextPointer start, TextPointer end) { if (view is TextBlock t) t.Select(start, end); else ((RichTextBlock)view).Select(start, end); }
         public int OffsetAt(UIElement host, Point point)
         {
             var local = host.TransformToVisual(view).TransformPoint(point);
+            if (IsFormula) return local.X <= view.ActualWidth / 2 ? 0 : 1;
             if (view is RichTextBlock rich) return rich.GetPositionFromPoint(local)?.Offset ?? End.Offset;
             // TextBlock has no GetPositionFromPoint; use its native character rectangles.
             var lo = Start.Offset; var hi = End.Offset;

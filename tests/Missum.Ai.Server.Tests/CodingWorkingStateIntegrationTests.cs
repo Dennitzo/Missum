@@ -15,6 +15,8 @@ namespace Missum.Ai.Server.Tests;
 
 public sealed class CodingWorkingStateIntegrationTests
 {
+    private static readonly string[] PlanItemRequiredFields = ["id", "title", "status"];
+
     private static readonly string[] Capabilities = ["coding", "coding.evidence"];
     private static readonly string[] ForbiddenArguments = ["delete"];
     private static readonly string[] WebTools = ["web.search", "web.fetch"];
@@ -170,8 +172,9 @@ public sealed class CodingWorkingStateIntegrationTests
         Assert.Equal(16, fields.GetProperty("acceptanceCriteria").GetProperty("maxItems").GetInt32());
         Assert.Equal(12, fields.GetProperty("facts").GetProperty("maxItems").GetInt32());
         Assert.True(fields.TryGetProperty("rejectedHypotheses", out _));
-        Assert.Equal("id", Assert.Single(fields.GetProperty("steps").GetProperty("items").GetProperty("required").EnumerateArray()).GetString());
-        Assert.Equal("id", Assert.Single(fields.GetProperty("acceptanceCriteria").GetProperty("items").GetProperty("required").EnumerateArray()).GetString());
+        foreach (var section in new[] { "steps", "acceptanceCriteria" })
+            Assert.Equal(PlanItemRequiredFields,
+                fields.GetProperty(section).GetProperty("items").GetProperty("required").EnumerateArray().Select(field => field.GetString()));
         var call = new LmToolCall("read-a", "coding.read", JsonSerializer.SerializeToElement(new { path = "target.cs" }));
         var state = CodingWorkingStateReducer.ObserveToolResult(CodingWorkingState.Create("Keep the source correct"), call,
             "{\"success\":true,\"content\":\"verified target\"}");
@@ -190,7 +193,7 @@ public sealed class CodingWorkingStateIntegrationTests
     }
 
     [Fact]
-    public void IncrementalPlanSchemaAcceptsStatusOnlyButReducerStillRequiresNewItemFieldsAndCompletionEvidence()
+    public void PlanCompatibilityValidatorAcceptsLegacyDeltasButNewItemsAndCompletionStillRequireTheirFieldsAndEvidence()
     {
         var catalog = new AgentToolCatalog();
         var tool = catalog.Resolve(CodingWorkingStateTools.PlanTool, catalog.GetAvailableTools(Request()));
@@ -296,6 +299,114 @@ public sealed class CodingWorkingStateIntegrationTests
         Assert.Contains(saved.Messages, message => message.Role == "tool" && message.Content!.Contains("agent.repeated_tool_failure", StringComparison.Ordinal));
         Assert.Equal(RunState.WaitingForClient, (await harness.Repository.GetAsync(run))!.State);
 
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RepeatedPlanStateFailuresSurviveCheckpointReloadAndAllowACorrectedCombinedCall(bool science)
+    {
+        using var harness = new Harness();
+        var request = Request() with
+        {
+            ClientCapabilities = science ? ["coding", "coding.evidence", "research.deliverables"] : Capabilities,
+            ResearchOptions = science ? new(ProjectId: "plan-recovery", ProtocolVersion: 2) : null,
+        };
+        var run = (await harness.Repository.CreateAsync(request, null)).Snapshot.RunId;
+        var invalid = JsonSerializer.Deserialize<JsonElement>("""
+            {"steps":[{"id":"s1","title":"Inspect the work","status":"in_progress"}],
+             "acceptanceCriteria":[{"id":"a1","title":"The required behavior is verified"}]}
+            """);
+        var corrected = JsonSerializer.Deserialize<JsonElement>("""
+            {"steps":[{"id":"s1","title":"Inspect the work","status":"in_progress"}],
+             "acceptanceCriteria":[{"id":"a1","title":"The required behavior is verified","status":"pending"}]}
+            """);
+        var read = JsonSerializer.SerializeToElement(new { path = "source.cs" });
+        LmToolCall[] firstCalls = [new("bad-a", CodingWorkingStateTools.PlanTool, invalid),
+            new("bad-b", CodingWorkingStateTools.PlanTool, invalid), new("pause-for-read", "coding.read", read)];
+        await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Task"), new("assistant", ToolCalls: firstCalls)],
+            1, 3, 1, 1, ActiveToolCalls: firstCalls, WorkingState: CodingWorkingState.Create("Task")));
+        await harness.TickAsync(run);
+        var first = (await harness.Repository.GetCheckpointAsync(run))!;
+        Assert.Equal(2, Assert.Single(first.WorkingState!.Failures).Count);
+        Assert.Empty(first.WorkingState.Plan);
+        Assert.Empty(first.WorkingState.AcceptanceCriteria);
+        Assert.DoesNotContain(first.WorkingState.Evidence, item => item.Tool == CodingWorkingStateTools.PlanTool && item.Success);
+        await harness.Repository.SaveClientToolResultAsync(run, new(first.PendingProposalId!, "completed",
+            JsonSerializer.SerializeToElement(new { success = true, content = "Actual source content" })));
+        harness.Handler.CompletionOverride = (_, _) => Task.FromResult(harness.Handler.ToolBatchResponse([
+            new("bad-c", CodingWorkingStateTools.PlanTool, invalid),
+            new("corrected", CodingWorkingStateTools.PlanTool, corrected),
+            new("next-work", "coding.read", JsonSerializer.SerializeToElement(new { path = "next.cs" })),
+        ]));
+
+        await harness.TickAsync(run);
+
+        var saved = (await harness.Repository.GetCheckpointAsync(run))!;
+        var events = await harness.Repository.GetEventsAfterAsync(run, 0);
+        var planReceipts = events.Where(item => item.Type == RunEventTypes.ServerToolCompleted
+            && item.Data.GetProperty("tool").GetString() == CodingWorkingStateTools.PlanTool).ToArray();
+        Assert.Equal(3, planReceipts.Length); // The third identical failure is rejected before dispatch.
+        Assert.Equal(2, planReceipts.Count(item => item.Data.TryGetProperty("errorCode", out var code) && code.GetString() == "agent.invalid_state_action"));
+        Assert.True(planReceipts[^1].Data.GetProperty("success").GetBoolean());
+        var blocked = Assert.Single(saved.Messages, message => message.Role == "tool" && message.ToolCallId == "bad-c").Content!;
+        Assert.Contains("agent.repeated_tool_failure", blocked, StringComparison.Ordinal);
+        Assert.Contains("steps und acceptanceCriteria", blocked, StringComparison.Ordinal);
+        Assert.Single(saved.WorkingState!.Plan);
+        Assert.Single(saved.WorkingState.AcceptanceCriteria);
+        Assert.DoesNotContain(saved.WorkingState.Failures, item => item.Tool == CodingWorkingStateTools.PlanTool);
+        Assert.DoesNotContain(saved.WorkingState.Evidence, item => item.Tool == CodingWorkingStateTools.PlanTool && item.Success);
+        Assert.Equal(RunState.WaitingForClient, (await harness.Repository.GetAsync(run))!.State);
+    }
+
+    [Fact]
+    public async Task ARealPlanChangeAllowsAPreviouslyRejectedDeltaWithoutClearingUnrelatedFailures()
+    {
+        using var harness = new Harness();
+        var run = await harness.CreateAsync();
+        var delta = JsonSerializer.Deserialize<JsonElement>("""{"steps":[{"id":"s1","status":"in_progress"}]}""");
+        var initial = CodingWorkingStateReducer.ObserveToolResult(CodingWorkingState.Create("Task"),
+            new("unrelated", "coding.read", JsonSerializer.SerializeToElement(new { path = "missing.cs" })),
+            """{"success":false,"errorCode":"file.not_found"}""");
+        LmToolCall[] calls = [new("bad-a", CodingWorkingStateTools.PlanTool, delta),
+            new("bad-b", CodingWorkingStateTools.PlanTool, delta),
+            new("create", CodingWorkingStateTools.PlanTool, JsonSerializer.Deserialize<JsonElement>("""{"steps":[{"id":"s1","title":"Inspect source","status":"pending"}]}""")),
+            new("valid-delta", CodingWorkingStateTools.PlanTool, delta),
+            new("next-work", "coding.read", JsonSerializer.SerializeToElement(new { path = "source.cs" }))];
+        await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Task"), new("assistant", ToolCalls: calls)],
+            1, 5, 1, 1, ActiveToolCalls: calls, WorkingState: initial));
+
+        await harness.TickAsync(run);
+
+        var saved = (await harness.Repository.GetCheckpointAsync(run))!;
+        Assert.Equal("in_progress", Assert.Single(saved.WorkingState!.Plan).Status);
+        Assert.Equal("coding.read", Assert.Single(saved.WorkingState.Failures).Tool);
+        var receipt = Assert.Single(saved.Messages, message => message.Role == "tool" && message.ToolCallId == "valid-delta").Content!;
+        Assert.True(JsonSerializer.Deserialize<JsonElement>(receipt).GetProperty("success").GetBoolean());
+        Assert.DoesNotContain(saved.WorkingState.Evidence, item => item.Tool == CodingWorkingStateTools.PlanTool && item.Success);
+    }
+
+    [Fact]
+    public async Task UnchangedPlanDoesNotResetRepeatedStateFailures()
+    {
+        using var harness = new Harness();
+        var run = await harness.CreateAsync();
+        var invalid = JsonSerializer.Deserialize<JsonElement>("""{"steps":[{"id":"s1","status":"in_progress"}]}""");
+        LmToolCall[] calls = [new("bad-a", CodingWorkingStateTools.PlanTool, invalid),
+            new("bad-b", CodingWorkingStateTools.PlanTool, invalid),
+            new("unchanged", CodingWorkingStateTools.PlanTool, JsonSerializer.Deserialize<JsonElement>("""{"phase":"error_recovery"}""")),
+            new("bad-c", CodingWorkingStateTools.PlanTool, invalid),
+            new("next-work", "coding.read", JsonSerializer.SerializeToElement(new { path = "source.cs" }))];
+        await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Task"), new("assistant", ToolCalls: calls)],
+            1, 5, 1, 1, ActiveToolCalls: calls, WorkingState: CodingWorkingState.Create("Task")));
+
+        await harness.TickAsync(run);
+
+        var saved = (await harness.Repository.GetCheckpointAsync(run))!;
+        Assert.Contains(saved.Messages, message => message.ToolCallId == "bad-c"
+            && message.Content!.Contains("agent.repeated_tool_failure", StringComparison.Ordinal));
+        Assert.Contains(saved.WorkingState!.Failures, item => item.Error == "agent.invalid_state_action" && item.Count == 2);
+        Assert.Empty(saved.WorkingState.Plan);
     }
 
     [Theory]

@@ -9,6 +9,22 @@ namespace Missum.Tests;
 public sealed class SciencePresentationProgressTests
 {
     [Fact]
+    public void NativeSciencePromptUsesPatchForReviewsAndPlacesStatusBesideReview()
+    {
+        var prompt = MissumAiAssistantService.BuildSciencePresentationPrompt("Prüfe den vorhandenen Abschnitt.", Guid.NewGuid());
+
+        Assert.Contains("genau eines von data oder patch", prompt, StringComparison.Ordinal);
+        Assert.Contains("patch mit ausschließlich geänderten Feldern", prompt, StringComparison.Ordinal);
+        Assert.Contains("changes[].patch.status neben changes[].patch.review", prompt, StringComparison.Ordinal);
+        Assert.Contains("changes[].data.status neben changes[].data.review", prompt, StringComparison.Ordinal);
+        Assert.Contains("Nie review.status; review enthält keinen status", prompt, StringComparison.Ordinal);
+        Assert.Contains("Wähle den Status fachlich, nicht automatisch supported/verified", prompt, StringComparison.Ordinal);
+        Assert.Contains("keine erfundenen Prüfbelege", prompt, StringComparison.Ordinal);
+        Assert.DoesNotContain("Jede Änderung hat id, kind, expectedRevision und data.", prompt, StringComparison.Ordinal);
+        Assert.DoesNotContain("Dokumentiere im jeweiligen Objekt review:", prompt, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void PublicationContractSeparatesArticleFromOperationsAndRequiresExecutedScientificEvidence()
     {
         var sessionId = Guid.NewGuid();

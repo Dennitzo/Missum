@@ -149,6 +149,7 @@ public static class CodingWorkingStateReducer
         var allowed = new HashSet<string>(StringComparer.Ordinal) { "steps", "acceptanceCriteria", "facts", "rejectedHypotheses", "nextStep", "phase", "explanation" };
         if (arguments.EnumerateObject().Any(property => !allowed.Contains(property.Name))) throw new ArgumentException("Unbekanntes updatePlan-Feld.");
         CodingWorkingStateTools.Validate(arguments);
+        ValidateNewPlanItems(state, arguments);
         var plan = arguments.TryGetProperty("steps", out var steps) ? ReadPlan(state, steps, state.Plan, "steps") : state.Plan;
         var criteria = arguments.TryGetProperty("acceptanceCriteria", out var acceptance) ? ReadPlan(state, acceptance, state.AcceptanceCriteria, "acceptanceCriteria") : state.AcceptanceCriteria;
         if (state.AcceptanceCriteria.Any(previous => !criteria.Any(item => item.Id == previous.Id && item.Title == previous.Title)))
@@ -166,6 +167,39 @@ public static class CodingWorkingStateReducer
             : state with { ConsecutivePlanNoOps = Math.Clamp(state.ConsecutivePlanNoOps, 0, CodingPlanProgressGuard.MaximumNoOps - 1) + 1 };
     }
 
+    private static void ValidateNewPlanItems(CodingWorkingState state, JsonElement arguments)
+    {
+        var missing = new List<string>();
+        Check("steps", state.Plan);
+        Check("acceptanceCriteria", state.AcceptanceCriteria);
+        if (missing.Count == 0) return;
+        throw new ArgumentException("Fehlende Pflichtfelder für neue Planeinträge: " + string.Join(", ", missing) + ". "
+            + "Diese IDs sind in der jeweiligen Liste dieses Laufs noch nicht gespeichert. "
+            + "title benötigt 1–400 Zeichen; status ist pending, in_progress oder completed (nur mit echten erfolgreichen evidenceIds). "
+            + "steps und acceptanceCriteria können gemeinsam in einem Aufruf angelegt oder geändert werden. "
+            + "Ergänze die genannten Felder und sende den korrigierten gemeinsamen Aufruf erneut; Aufteilen ist nicht erforderlich. "
+            + $"Gespeicherte IDs in steps: {JsonSerializer.Serialize(state.Plan.Select(static entry => entry.Id))}; "
+            + $"acceptanceCriteria: {JsonSerializer.Serialize(state.AcceptanceCriteria.Select(static entry => entry.Id))}. "
+            + "IDs aus früheren Läufen oder der anderen Liste gelten hier nicht als vorhanden. "
+            + "Das gesamte Update wurde abgelehnt; kein Feld wurde geändert.");
+
+        void Check(string section, IReadOnlyList<CodingPlanItem> existing)
+        {
+            if (!arguments.TryGetProperty(section, out var items)) return;
+            var index = 0;
+            foreach (var item in items.EnumerateArray())
+            {
+                var id = item.GetProperty("id").GetString();
+                if (!existing.Any(previous => previous.Id == id))
+                {
+                    if (!item.TryGetProperty("title", out _)) missing.Add($"{section}[{index}].title (ID {JsonSerializer.Serialize(id)})");
+                    if (!item.TryGetProperty("status", out _)) missing.Add($"{section}[{index}].status (ID {JsonSerializer.Serialize(id)})");
+                }
+                index++;
+            }
+        }
+    }
+
     private static List<CodingPlanItem> ReadPlan(CodingWorkingState state, JsonElement value, IReadOnlyList<CodingPlanItem> existing, string section)
     {
         if (value.ValueKind != JsonValueKind.Array || value.GetArrayLength() is < 1 or > 16) throw new ArgumentException("Ein Plan benötigt 1 bis 16 Schritte.");
@@ -176,12 +210,6 @@ public static class CodingWorkingStateReducer
             var id = RequireText(item, "id", 80);
             var previousIndex = items.FindIndex(previous => previous.Id == id);
             var previous = previousIndex >= 0 ? items[previousIndex] : null;
-            if (previous is null && (!item.TryGetProperty("title", out _) || !item.TryGetProperty("status", out _)))
-                throw new ArgumentException($"{section}: Die ID {JsonSerializer.Serialize(id)} ist im aktuellen Arbeitsstand nicht gespeichert. "
-                    + "Lege sie mit id, title (1–400 Zeichen) und status (pending, in_progress oder completed) an. "
-                    + "IDs aus früheren Läufen oder der anderen Liste gelten hier nicht als vorhanden. "
-                    + $"Gespeicherte IDs in {section}: {JsonSerializer.Serialize(existing.Select(static entry => entry.Id))}. "
-                    + "Das gesamte Update wurde abgelehnt; kein Feld wurde geändert.");
             var title = item.TryGetProperty("title", out _) || previous is null ? RequireText(item, "title", 400) : previous.Title;
             var status = item.TryGetProperty("status", out _) || previous is null ? RequireText(item, "status", 20) : previous.Status;
             if (status is not ("pending" or "in_progress" or "completed") || !updatedIds.Add(id))

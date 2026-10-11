@@ -12,6 +12,28 @@ public sealed partial class NativeAssistantPage
     private async Task<int> VerifyMessageNavigationSmokeAsync()
     {
         var original = _snapshot.Clone();
+        if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_RESPONSIVENESS") == "focused")
+        {
+            // Explicit dispatcher/clipboard regression scope. It never starts
+            // the physical pointer driver or claims the full navigation smoke.
+            var priorFixtureActive = _selectionInputSmokeActive;
+            _selectionInputSmokeActive = true;
+            try
+            {
+                await VerifySelectionClipboardSmokeAsync(original);
+                await VerifyStreamingMessageFooterSmokeAsync(original);
+                await VerifyThinkingIndicatorSmokeAsync(original);
+                await VerifySourcesSmokeAsync(original);
+                await VerifyResponsivenessSmokeAsync(original);
+            }
+            finally
+            {
+                ApplyEvent("state.snapshot", original);
+                RenderMessagesNow();
+                _selectionInputSmokeActive = priorFixtureActive;
+            }
+            return 0;
+        }
         var sessionA = Guid.NewGuid();
         var sessionB = Guid.NewGuid();
         var messageA = Guid.NewGuid();
@@ -180,6 +202,7 @@ public sealed partial class NativeAssistantPage
             JsonSerializer.Serialize(simulationLifecycle, JsonOptions));
         await VerifySubagentSmokeAsync(original);
         await VerifyPlanetPaletteSmokeAsync();
+        await VerifyResponsivenessSmokeAsync(original);
         ApplyEvent("state.snapshot", original);
         RenderMessagesNow();
         return visits;
@@ -286,7 +309,12 @@ public sealed partial class NativeAssistantPage
                 || sourceBody.Children.Count != _sessionSources[owner].Length + 1
                 || !sourceBody.Children.OfType<StackPanel>().Select(group => group.Children.OfType<TextBlock>().Single().Text)
                     .SequenceEqual(_sessionSources[owner].Select(action => action.Title)))
-                throw new InvalidOperationException("The sources tab must open the complete ordered source history, independently of the single overlay entry.");
+                throw new InvalidOperationException("The sources tab must open the complete ordered source history, independently of the single overlay entry: "
+                    + JsonSerializer.Serialize(new { iteration, owner, currentSession = _session, activeSourcesSession = _activeSourcesSession,
+                        visibility = _sourcesHost.Visibility.ToString(), contentType = _sourcesHost.Content?.GetType().Name,
+                        expected = _sessionSources[owner].Select(action => action.Title),
+                        actual = (_sourcesHost.Content as ScrollViewer)?.Content is StackPanel diagnosticBody
+                            ? diagnosticBody.Children.OfType<StackPanel>().Select(group => group.Children.OfType<TextBlock>().FirstOrDefault()?.Text).ToArray() : [] }));
             ShowChatView(); UpdateLayout(); await Task.Delay(30);
             AssertChatCursorAbsent(ConversationContent);
             if (_messages.Values.All(message => S(message, "status") != "streaming")
@@ -787,7 +815,7 @@ public sealed partial class NativeAssistantPage
             foreach (var content in new[] { "Die Antwort beginnt bereits", "Die Antwort beginnt bereits während des Laufs.",
                 "Die Antwort beginnt bereits während des Laufs. Weitere Textteile erscheinen fortlaufend." })
             {
-                ApplyEvent("chat.delta", JsonSerializer.SerializeToElement(new { sessionId = session, messageId = id, content }));
+                ApplyEvent("chat.delta", JsonSerializer.SerializeToElement(new { sessionId = session, messageId = id, content, updatedAt = DateTimeOffset.UtcNow }));
                 // Do not force a render: verify the production render timer.
                 await Task.Delay(180);
                 if (!_messageBlocks.TryGetValue(id, out var blocks) || !blocks.TryGetValue("text:0", out var view)
@@ -797,6 +825,17 @@ public sealed partial class NativeAssistantPage
                     throw new InvalidOperationException("Answer text was not visibly rendered before run completion.");
                 AssertChatCursorAbsent(MessageBody(_messageViews[id].View));
             }
+            var newestContent = S(_messages[id], "content");
+            ApplyEvent("conversation.snapshot", JsonSerializer.SerializeToElement(new { sessionId = session, messages = snapshot["messages"] }));
+            if (S(_messages[id], "content") != newestContent)
+                throw new InvalidOperationException("Ein verzögerter Snapshot hat bereits sichtbaren Streamingtext zurückgesetzt.");
+            ApplyEvent("state.snapshot", JsonSerializer.SerializeToElement(snapshot));
+            if (S(_messages[id], "content") != newestContent)
+                throw new InvalidOperationException("Eine verzögerte Zustandsantwort hat neueren Streamingtext zurückgesetzt.");
+            ApplyEvent("conversation.messageCommitted", JsonSerializer.SerializeToElement(new { sessionId = session,
+                message = snapshot["messages"][0] }));
+            if (S(_messages[id], "content") != newestContent)
+                throw new InvalidOperationException("Eine ältere Commitmeldung hat neueren Streamingtext zurückgesetzt.");
             await File.WriteAllTextAsync(Path.Combine(App.Current.DataDirectory, "native-chat-streaming-validation.json"),
                 JsonSerializer.Serialize(new { renderer = "WinUI3", passed = true, visibleDeltasBeforeCompletion = 3,
                     tableColumns = 3, tableRows = 4, sharedMathFontSize = 16, reasoningDisclosureDefaultCollapsed = true,

@@ -1908,6 +1908,7 @@ public sealed partial class AssistantCoordinator(
             {
                 messageId = update.Message.Id, sessionId = update.Message.SessionId,
                 content = update.Message.Content, toolSteps = update.Message.ToolSteps ?? [],
+                updatedAt = update.Message.UpdatedAt,
             }, requestId).ConfigureAwait(false);
             return;
         }
@@ -1939,8 +1940,6 @@ public sealed partial class AssistantCoordinator(
                 }, requestId),
                 playback => emit("speech.progress", SpeechPlaybackProgressBridge.ToPayload(playback), requestId));
         }
-        var artifactsForMessage = update.Artifacts
-            ?? await artifacts.ListForMessageAsync(update.Message.Id, CancellationToken.None).ConfigureAwait(false);
         _displayStates.TryGetValue(update.Message.SessionId, out var generationDisplay);
         switch (update.Kind)
         {
@@ -1972,7 +1971,8 @@ public sealed partial class AssistantCoordinator(
                     userMessage = precedingUserMessage is null
                         ? null
                         : ToMessageDto(precedingUserMessage, precedingUserArtifacts),
-                    message = ToMessageDto(update.Message, artifactsForMessage),
+                    message = ToMessageDto(update.Message, update.Artifacts
+                        ?? await artifacts.ListForMessageAsync(update.Message.Id, CancellationToken.None).ConfigureAwait(false)),
                     runId = missumAi?.ActiveRunId,
                     changesRunId = update.LocalRunId,
                     contextUsed = update.ContextUsed,
@@ -1993,13 +1993,16 @@ public sealed partial class AssistantCoordinator(
                 }, requestId).ConfigureAwait(false);
                 break;
             case MissumAiAssistantUpdateKind.Delta:
-                await EmitCommittedMessageAsync(update.Message.Id, emit, requestId).ConfigureAwait(false);
+                // The service already persisted this update. Both clients accept the
+                // live projection; rereading the entire conversation per fragment
+                // duplicates delivery and makes streaming cost grow with history.
                 await emit("chat.delta", new
                 {
                     messageId = update.Message.Id,
                     sessionId = update.Message.SessionId,
                     content = update.Message.Content,
                     toolSteps = update.Message.ToolSteps ?? [],
+                    updatedAt = update.Message.UpdatedAt,
                 }, requestId).ConfigureAwait(false);
                 break;
             case MissumAiAssistantUpdateKind.Status:
@@ -2037,7 +2040,8 @@ public sealed partial class AssistantCoordinator(
                 await emit("chat.completed", new
                 {
                     sessionId = update.Message.SessionId,
-                    message = ToMessageDto(update.Message, artifactsForMessage),
+                    message = ToMessageDto(update.Message, update.Artifacts
+                        ?? await artifacts.ListForMessageAsync(update.Message.Id, CancellationToken.None).ConfigureAwait(false)),
                     session = update.Session is null ? null : ToSessionDto(update.Session),
                     runStatus = update.Status,
                     runDetail = update.Detail,
@@ -2048,7 +2052,8 @@ public sealed partial class AssistantCoordinator(
                 await emit("chat.cancelled", new
                 {
                     sessionId = update.Message.SessionId,
-                    message = ToMessageDto(update.Message, artifactsForMessage),
+                    message = ToMessageDto(update.Message, update.Artifacts
+                        ?? await artifacts.ListForMessageAsync(update.Message.Id, CancellationToken.None).ConfigureAwait(false)),
                     runStatus = update.Status,
                 }, requestId).ConfigureAwait(false);
                 break;
@@ -2057,7 +2062,8 @@ public sealed partial class AssistantCoordinator(
                 await emit("chat.failed", new
                 {
                     sessionId = update.Message.SessionId,
-                    message = ToMessageDto(update.Message, artifactsForMessage),
+                    message = ToMessageDto(update.Message, update.Artifacts
+                        ?? await artifacts.ListForMessageAsync(update.Message.Id, CancellationToken.None).ConfigureAwait(false)),
                     error = update.Error,
                     runStatus = update.Status,
                 }, requestId).ConfigureAwait(false);

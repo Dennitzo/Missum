@@ -89,7 +89,7 @@ public sealed class ScientificInteractiveCompletionTests
             status = "completed", result = new
             {
                 success = true, projectId = "research-state",
-                research = new { protocol = "section-delta-v1", revision = 2, publicationRevision = 1, ready = true },
+                research = new { protocol = "section-delta-v1", revision = 2, publicationRevision = 1, ready = true, goalStatus = "satisfied" },
                 publication = new { ready = true, revision = 1, pdfPath = "Publikation.pdf", sourceSha256 = new string('a', 64) },
                 scientificReview = review,
                 simulation,

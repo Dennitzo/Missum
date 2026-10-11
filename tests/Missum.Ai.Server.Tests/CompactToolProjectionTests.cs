@@ -9,6 +9,43 @@ namespace Missum.Ai.Server.Tests;
 
 public sealed class CompactToolProjectionTests
 {
+    private static readonly string[] PlanItemRequiredFields = ["id", "title", "status"];
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void PlanTransportRequiresCompleteItemHeadersAndAllowsBothListsInOneCall(bool compactProfile)
+    {
+        var spec = CodingWorkingStateTools.CreateTools().Single();
+        var definition = spec.ToLmDefinition() with
+        {
+            ContextProfileVersion = compactProfile ? ToolContextProfiles.Current : null,
+        };
+        var function = ModelRuntimeClient.PrepareTransportTools("coding/DeepSeek", [definition])[0].GetProperty("function");
+        var schema = function.GetProperty("parameters");
+        Assert.Empty(schema.GetProperty("required").EnumerateArray());
+        Assert.False(schema.TryGetProperty("oneOf", out _));
+        foreach (var list in new[] { "steps", "acceptanceCriteria" })
+        {
+            var items = schema.GetProperty("properties").GetProperty(list).GetProperty("items");
+            Assert.Equal(PlanItemRequiredFields,
+                items.GetProperty("required").EnumerateArray().Select(static field => field.GetString()));
+            Assert.Equal(spec.Schema.GetProperty("properties").GetProperty(list).GetProperty("items")
+                .GetProperty("required").GetRawText(), items.GetProperty("required").GetRawText());
+            Assert.Equal(400, items.GetProperty("properties").GetProperty("title").GetProperty("maxLength").GetInt32());
+            Assert.Contains("Originaltitel exakt unverändert",
+                items.GetProperty("properties").GetProperty("title").GetProperty("description").GetString(), StringComparison.Ordinal);
+            Assert.Contains("Immer erforderlich",
+                items.GetProperty("properties").GetProperty("status").GetProperty("description").GetString(), StringComparison.Ordinal);
+        }
+        var description = function.GetProperty("description").GetString()!;
+        Assert.Contains("steps und acceptanceCriteria", description, StringComparison.Ordinal);
+        Assert.Contains("im selben Aufruf", description, StringComparison.Ordinal);
+        Assert.Contains("atomar", description, StringComparison.Ordinal);
+        Assert.Contains("Originaltitel exakt unverändert", description, StringComparison.Ordinal);
+        Assert.DoesNotContain("Nur bei neuer ID", description, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void CompactTransportKeepsBatchEditBoundsAndTheExistingNativeCompatibilityRule()
     {
@@ -104,12 +141,15 @@ public sealed class CompactToolProjectionTests
             if (fields.TryGetProperty("patch", out var patch))
             {
                 Assert.Equal(1, fields.GetProperty("expectedRevision").GetProperty("minimum").GetInt32());
-                Assert.True(patch.GetProperty("properties").TryGetProperty("status", out _));
+                foreach (var payload in patch.GetProperty("anyOf").EnumerateArray())
+                    Assert.True(payload.GetProperty("properties").TryGetProperty("status", out _));
                 continue;
             }
-            var data = fields.GetProperty("data");
-            Assert.Equal(64000, data.GetProperty("properties").GetProperty("contentMarkdown").GetProperty("maxLength").GetInt32());
-            Assert.True(data.GetProperty("properties").TryGetProperty("description", out _));
+            foreach (var data in fields.GetProperty("data").GetProperty("anyOf").EnumerateArray())
+            {
+                Assert.Equal(64000, data.GetProperty("properties").GetProperty("contentMarkdown").GetProperty("maxLength").GetInt32());
+                Assert.True(data.GetProperty("properties").TryGetProperty("description", out _));
+            }
             Assert.Equal(0, fields.GetProperty("expectedRevision").GetProperty("minimum").GetInt32());
         }
         Assert.False(update.GetProperty("additionalProperties").GetBoolean());

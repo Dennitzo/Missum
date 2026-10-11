@@ -23,11 +23,14 @@ public sealed partial class NativeAssistantPage
     private IEnumerable<JsonElement> OwnerSourceMessages() => _messages.Values.Concat(_subagents.Values
         .Where(child => child.SessionId == _session).SelectMany(child => child.Messages.Values));
 
+    private static bool IsSourceToolStep(JsonElement step) => S(step, "tool").StartsWith("web.", StringComparison.Ordinal)
+        || S(step, "tool").StartsWith("research.", StringComparison.Ordinal);
+
     private void RefreshSubagentSources()
     {
         var signature = _session + "|" + string.Join("|", _subagents.Values.Where(child => child.SessionId == _session)
             .SelectMany(child => child.Messages.Values).SelectMany(message => Items(message, "toolSteps"))
-            .Where(step => S(step, "tool").StartsWith("web.", StringComparison.Ordinal) || S(step, "tool").StartsWith("research.", StringComparison.Ordinal))
+            .Where(IsSourceToolStep)
             .Select(step => S(step, "id") + S(step, "updatedAt") + S(step, "inputJson").GetHashCode(StringComparison.Ordinal)
                 + S(step, "outputJson").GetHashCode(StringComparison.Ordinal)));
         if (_childSourcesSignature == signature) return;
@@ -43,7 +46,7 @@ public sealed partial class NativeAssistantPage
         foreach (var step in Items(message, "toolSteps"))
         {
             var tool = S(step, "tool");
-            if (!(tool.StartsWith("web.", StringComparison.Ordinal) || tool.StartsWith("research.", StringComparison.Ordinal))) continue;
+            if (!IsSourceToolStep(step)) continue;
             var urls = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var pageTitles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             CollectSourceUrls(S(step, "outputJson"), urls, pageTitles);

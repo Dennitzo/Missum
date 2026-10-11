@@ -15,6 +15,7 @@ public sealed partial class NativeAssistantPage
     private bool _dictationTransition;
     private string? _dictationFinalText;
     private Task? _dictationStopTask;
+    private bool? _voiceVisualActive;
 
     private async Task StartNativeDictationAsync()
     {
@@ -112,17 +113,28 @@ public sealed partial class NativeAssistantPage
     {
         var active = _dictationCapture is not null;
         if (DictationBars.Children.Count == 0)
-            for (var i = 0; i < 5; i++) DictationBars.Children.Add(new Border { Width = 3, Height = 3, CornerRadius = new(2), VerticalAlignment = VerticalAlignment.Center });
-        DictationIcon.Visibility = active ? Visibility.Collapsed : Visibility.Visible;
-        DictationBars.Visibility = active ? Visibility.Visible : Visibility.Collapsed;
-        DictationButton.Background = active ? ThemeBrush("MissumAccentSubtleBrush", 50) : new SolidColorBrush(Microsoft.UI.Colors.Transparent);
-        ToolTipService.SetToolTip(DictationButton, active ? "Diktieren beenden" : "Diktieren");
+            for (var i = 0; i < 5; i++) DictationBars.Children.Add(new Border
+            {
+                Width = 3, Height = 3, CornerRadius = new(2), VerticalAlignment = VerticalAlignment.Center,
+                Background = ThemeBrush("MissumAccentBrush", 180),
+            });
+        if (_voiceVisualActive != active)
+        {
+            _voiceVisualActive = active;
+            DictationIcon.Visibility = active ? Visibility.Collapsed : Visibility.Visible;
+            DictationBars.Visibility = active ? Visibility.Visible : Visibility.Collapsed;
+            DictationButton.Background = active ? ThemeBrush("MissumAccentSubtleBrush", 50) : new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+            ToolTipService.SetToolTip(DictationButton, active ? "Diktieren beenden" : "Diktieren");
+            if (!active)
+                foreach (var bar in DictationBars.Children.OfType<Border>()) bar.Height = 3;
+        }
+        if (!active) return;
         for (var i = 0; i < 5; i++)
         {
             var bar = (Border)DictationBars.Children[i];
             var target = 3 + 19 * Volatile.Read(ref _voiceBands[i]);
-            bar.Height += (target - bar.Height) * .45;
-            bar.Background = ThemeBrush("MissumAccentBrush", 180);
+            var height = bar.Height + (target - bar.Height) * .45;
+            if (Math.Abs(height - bar.Height) >= .05) bar.Height = height;
         }
     }
 }

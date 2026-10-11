@@ -109,6 +109,8 @@ public sealed partial class NativeAssistantPage
             OnComposerGotFocus(Composer, new Microsoft.UI.Xaml.RoutedEventArgs());
             if (selection.HasSelection) throw new InvalidOperationException("Eine alte Chatauswahl bleibt beim Wechsel in das Eingabefeld aktiv.");
 
+            await VerifyFormulaClipboardRangesSmokeAsync(selection);
+
             await File.WriteAllTextAsync(Path.Combine(App.Current.DataDirectory, "native-selection-clipboard-validation.json"), JsonSerializer.Serialize(new
             {
                 passed = true, processId = Environment.ProcessId, partialWordSelection = true,
@@ -118,12 +120,103 @@ public sealed partial class NativeAssistantPage
                 permanentLockHandled = true, selectionPreservedAfterCopyFailure = true,
                 latestSnapshotRenderedAfterClear = true, newSelectionCopiesCurrentRange = true,
                 pasteTextPreserved = true, composerClearsChatSelection = true, clipboardModified = false,
+                inlineLatexPreserved = true, formulaOnlySelection = true, blockLatexPreserved = true,
+                reverseLatexSelection = true, unloadedSelectionPointersSafe = true,
             }, JsonOptions), _lifetime.Token);
         }
         finally
         {
             selection.CopySmokeAdapter = previousCopy; selection.CopyFailed = previousFailure;
             selection.Clear(); ApplyEvent("state.snapshot", original); RenderMessagesNow(); UpdateLayout();
+        }
+    }
+
+    private async Task VerifyFormulaClipboardRangesSmokeAsync(NativeConversationSelection selection)
+    {
+        const string inlineSource = @"Davor $\frac{x}{y}=z^2$ danach.";
+        const string blockSource = @"$$\int_0^1 x^2\,dx=\frac{1}{3}$$";
+        var detached = new RichTextBlock { IsTextSelectionEnabled = true };
+        detached.Blocks.Add(new Paragraph { Inlines = { new Run { Text = "Noch nicht geladen" } } });
+        if (selection.PreserveSelectionWithin(detached))
+            throw new InvalidOperationException("Ein ungeladener Textblock besitzt keine Textauswahl.");
+
+        var fixture = new StackPanel { Spacing = 12 };
+        var beforeRun = new Run { Text = "Anfang" };
+        var before = new TextBlock { IsTextSelectionEnabled = true, Inlines = { beforeRun } };
+        var paragraph = new NativeMathParagraph();
+        paragraph.UpdateText(inlineSource);
+        var block = new NativeFormulaView(blockSource, true);
+        var afterRun = new Run { Text = "Ende" };
+        var after = new TextBlock { IsTextSelectionEnabled = true, Inlines = { afterRun } };
+        var boldRun = new Run { Text = "Alpha" };
+        var linkRun = new Run { Text = "Omega" };
+        var formatted = new RichTextBlock { IsTextSelectionEnabled = true };
+        formatted.Blocks.Add(new Paragraph { Inlines =
+        {
+            new Bold { Inlines = { boldRun } }, new Run { Text = " " },
+            new InlineUIContainer { Child = new NativeFormulaView("$x$", false) }, new Run { Text = " " },
+            new Hyperlink { NavigateUri = new Uri("https://example.org/"), Inlines = { linkRun } },
+        } });
+        fixture.Children.Add(before); fixture.Children.Add(paragraph); fixture.Children.Add(block); fixture.Children.Add(after);
+        fixture.Children.Add(formatted);
+        MessagesPanel.Children.Add(fixture);
+        fixture.UpdateLayout();
+        var previousCopy = selection.CopySmokeAdapter;
+        try
+        {
+            var rich = Descendants(paragraph).OfType<RichTextBlock>().Single();
+            var container = paragraph.TrailingInlines.OfType<InlineUIContainer>().Single();
+            var formula = (NativeFormulaView)container.Child;
+            rich.Select(rich.ContentStart, rich.ContentEnd);
+            var start = rich.SelectionStart.Offset;
+            var end = rich.SelectionEnd.Offset;
+            await File.WriteAllTextAsync(Path.Combine(App.Current.DataDirectory, "native-formula-selection-offsets.json"), JsonSerializer.Serialize(new
+            {
+                processId = Environment.ProcessId, start, end, nativeText = rich.SelectedText, copyText = selection.SelectedText,
+                formulaElementStart = container.ElementStart.Offset, formulaContentStart = container.ContentStart.Offset,
+                formulaContentEnd = container.ContentEnd.Offset, formulaElementEnd = container.ElementEnd.Offset,
+            }, JsonOptions), _lifetime.Token);
+            if (selection.SelectedText != inlineSource || rich.SelectionStart.Offset != start || rich.SelectionEnd.Offset != end)
+                throw new InvalidOperationException("Inline-LaTeX fehlt beim Kopieren oder die Auswahl wurde verschoben: " + selection.SelectedText);
+            rich.Select(container.ElementStart, container.ElementEnd);
+            if (selection.SelectedText != formula.Source)
+                throw new InvalidOperationException("Eine ausschließlich markierte Formel muss ihren LaTeX-Quelltext liefern: " + selection.SelectedText);
+            var trailing = paragraph.TrailingInlines.OfType<Run>().Last();
+            rich.Select(trailing.ContentStart.GetPositionAtOffset(2, LogicalDirection.Forward),
+                trailing.ContentStart.GetPositionAtOffset(5, LogicalDirection.Forward));
+            if (selection.SelectedText != "ana")
+                throw new InvalidOperationException("Eine Teilmarkierung nach der Formel benutzt falsche Zeichenabstände: " + selection.SelectedText);
+            selection.Clear();
+
+            formatted.Select(formatted.ContentStart, formatted.ContentEnd);
+            if (selection.SelectedText != "Alpha $x$ Omega")
+                throw new InvalidOperationException("Formatierte Textläufe oder Links verlieren Text beim Formelauswahl-Kopieren: " + selection.SelectedText);
+            formatted.Select(linkRun.ContentStart.GetPositionAtOffset(1, LogicalDirection.Forward),
+                linkRun.ContentStart.GetPositionAtOffset(4, LogicalDirection.Forward));
+            if (selection.SelectedText != "meg")
+                throw new InvalidOperationException("Teilmarkierung innerhalb eines Links verschiebt Zeichen: " + selection.SelectedText);
+            formatted.Select(boldRun.ContentStart.GetPositionAtOffset(1, LogicalDirection.Forward),
+                boldRun.ContentStart.GetPositionAtOffset(4, LogicalDirection.Forward));
+            if (selection.SelectedText != "lph")
+                throw new InvalidOperationException("Teilmarkierung innerhalb eines Fettdruck-Laufs verschiebt Zeichen: " + selection.SelectedText);
+            selection.Clear();
+
+            var expected = "fang\n\n" + inlineSource + "\n\n" + blockSource + "\n\nEn";
+            selection.SelectForSmoke(before, beforeRun.ContentStart.Offset + 2, after, afterRun.ContentStart.Offset + 2);
+            if (selection.SelectedText != expected)
+                throw new InvalidOperationException("Absatzübergreifende Auswahl verliert eine Inline- oder Blockformel: " + selection.SelectedText);
+            string? clipboardText = null;
+            selection.CopySmokeAdapter = value => { clipboardText = value; return Task.FromResult(true); };
+            if (!await selection.CopySelectionAsync() || clipboardText != expected)
+                throw new InvalidOperationException("Der gemeinsame Kopierpfad verliert LaTeX aus der Auswahl.");
+            selection.SelectForSmoke(after, afterRun.ContentStart.Offset + 2, before, beforeRun.ContentStart.Offset + 2);
+            if (selection.SelectedText != expected)
+                throw new InvalidOperationException("Rückwärtsauswahl verliert LaTeX oder verändert die Reihenfolge.");
+        }
+        finally
+        {
+            selection.Clear(); selection.CopySmokeAdapter = previousCopy;
+            MessagesPanel.Children.Remove(fixture);
         }
     }
 }

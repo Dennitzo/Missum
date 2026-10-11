@@ -1,4 +1,5 @@
 using Missum.Ai.Contracts;
+using Missum.Ai.Server.Core.Coding;
 using Missum.Ai.Server.Core.Models;
 using System.Globalization;
 using System.Security.Cryptography;
@@ -82,7 +83,8 @@ internal static class ScientificStateCompletionPolicy
             && Number(scientificReview, "revision") == Number(research, "revision")
             && Number(scientificReview, "publicationRevision") == Number(research, "publicationRevision")
             && Text(scientificReview, "stateSha256") is { Length: 64 } reviewedHash && reviewedHash.All(Uri.IsHexDigit);
-        var ready = current && !verificationFailed && verification is { } verified && Boolean(verified, "success")
+        var goalsSatisfied = Text(research, "goalStatus") == "satisfied";
+        var ready = goalsSatisfied && current && !verificationFailed && verification is { } verified && Boolean(verified, "success")
             && Text(research, "protocol") == Protocol && Boolean(research, "ready")
             && validPublication && simulationReady && reviewed;
         if (!ready)
@@ -96,6 +98,9 @@ internal static class ScientificStateCompletionPolicy
                         if (target.ValueKind == JsonValueKind.String && target.GetString() is { Length: > 0 } diagnosis)
                             missing.Add(diagnosis[..Math.Min(diagnosis.Length, 2000)]);
                 if (Text(research, "protocol") != Protocol) missing.Add("Der Client hat keinen gültigen section-delta-v1-Prüfbeleg zurückgegeben.");
+                if (!goalsSatisfied) missing.Add(Text(research, "goalStatus").Length == 0
+                    ? "Der Prüfbeleg enthält noch keine Prüfung der fachlichen Zielerfüllung (research.goalStatus). Missum-Client und Server müssen den aktuellen Prüfvertrag verwenden; die PDF allein erlaubt keinen Abschluss."
+                    : "Die erforderlichen Forschungsziele sind noch ungelöst. Bearbeite die gemeldeten Messabweichungen und offenen Ziele; openLimit und qualitative Übereinstimmung erfüllen keine quantitative Anforderung.");
                 if (!validPublication) missing.Add("Die aktuelle Publikationsrevision enthält noch keinen bestätigten gerenderten PDF-Beleg. Bearbeite nur die fehlenden kanonischen Abschnitte.");
                 if (!simulationReady) missing.Add("Eine ausdrücklich erforderliche Auswertung oder interaktive Simulation besitzt noch keine gültigen aktuellen, zum jeweiligen Ergebnistyp passenden Belege.");
                 if (!reviewed) missing.Add("Der aktuelle Forschungsstand besitzt noch keinen revisionsgebundenen fachlichen Prüfbericht. Prüfe Quellen, Rechnungen und Widersprüche jedes betroffenen Abschnitts und seiner Claims/Hypothesen, dokumentiere data.review und den Geltungsbereich; danach research.deliverables.verify ausführen. Technische PDF-Erzeugung und status=verified allein genügen nicht.");
@@ -109,6 +114,19 @@ internal static class ScientificStateCompletionPolicy
             ? VerificationRepairCount(messages, VerificationRepairCause(projectId, failed)) : 0;
         return new(ready && missing.Count == 0, available && projectId.Length > 0 && !current && (verification is null || validStateReceipt),
             projectId, fingerprint, missing, repeated);
+    }
+
+    internal static ScientificCompletionAssessment ApplyPlanRequirements(ScientificCompletionAssessment assessment,
+        CodingWorkingState? workingState)
+    {
+        var outstanding = workingState?.AcceptanceCriteria.Where(item => item.Status != "completed").ToArray() ?? [];
+        if (outstanding.Length == 0) return assessment;
+        var diagnoses = outstanding.Select(item => $"Annahmekriterium {item.Id} ist noch {item.Status}: {item.Title}. "
+            + "Das ursprüngliche Ziel mit echten Belegen erfüllen; nicht allein zum Abschluss als completed deklarieren.").ToArray();
+        var fingerprint = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
+            assessment.Fingerprint + JsonSerializer.Serialize(outstanding, RepairJsonOptions))));
+        return assessment with { Complete = false, NeedsVerification = false, Fingerprint = fingerprint,
+            Missing = diagnoses.Concat(assessment.Missing).ToArray() };
     }
 
     internal static bool UpsertRecoveryPrompt(List<LmChatMessage> messages, ScientificCompletionAssessment assessment)

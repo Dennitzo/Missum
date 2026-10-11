@@ -337,6 +337,7 @@ public sealed record CodingTurnMetricsEvent(
 
 public sealed record ContextChangedEvent(
     int EstimatedInputTokens,
+    // The effective model window, not the workflow's smaller input/compaction budget.
     int ContextLimit,
     int LoadedFiles,
     bool WasCompacted,
@@ -346,7 +347,8 @@ public sealed record ContextChangedEvent(
     int DocumentPages = 0,
     bool PreparationCompleted = true,
     int HistoryTokens = 0,
-    bool HistoryWasCompacted = false);
+    bool HistoryWasCompacted = false,
+    int? InputTokenBudget = null);
 
 public sealed record QueueChangedEvent(int Position, int Waiting, string Lane = "gpu");
 

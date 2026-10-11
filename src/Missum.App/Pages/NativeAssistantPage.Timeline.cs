@@ -16,15 +16,16 @@ public sealed partial class NativeAssistantPage
     private readonly Dictionary<string, PromptTimelineMarker> _promptTimelineMarkers = new(StringComparer.Ordinal);
     private string? _activePromptTimelineId;
 
-    private void OnPromptTimelineSizeChanged(object sender, SizeChangedEventArgs e) => RunUiCallback("PromptTimeline.SizeChanged", RenderPromptTimeline);
+    private void OnPromptTimelineSizeChanged(object sender, SizeChangedEventArgs e) => RunUiCallback("PromptTimeline.SizeChanged", () => RenderPromptTimeline());
 
-    private void RenderPromptTimeline()
+    private void RenderPromptTimeline(bool layoutCurrent = false)
     {
         if (PromptTimeline is null || ConversationContent is null || _disposed) return;
         var messages = DisplayMessages.Values.OrderBy(MessageCreatedAt).ToArray();
         var prompts = messages.Where(message => S(message, "role") == "user"
             && !string.IsNullOrWhiteSpace(S(message, "content"))).ToArray();
-        PromptTimeline.Visibility = prompts.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        var visibility = prompts.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        if (PromptTimeline.Visibility != visibility) PromptTimeline.Visibility = visibility;
         if (prompts.Length == 0)
         {
             DismissPromptTimelinePreviews();
@@ -43,7 +44,7 @@ public sealed partial class NativeAssistantPage
             _promptTimelineMarkers.Remove(stale);
         }
 
-        ConversationContent.UpdateLayout();
+        if (!layoutCurrent) ConversationContent.UpdateLayout();
         var available = Math.Max(0, PromptTimeline.ActualHeight - 14);
         for (var index = 0; index < prompts.Length; index++)
         {
@@ -103,14 +104,21 @@ public sealed partial class NativeAssistantPage
                 marker = new PromptTimelineMarker(hitTarget, line, scale);
                 _promptTimelineMarkers[id] = marker;
                 PromptTimeline.Children.Add(hitTarget);
+                ToolTipService.SetPlacement(hitTarget, PlacementMode.Right);
             }
             marker.TargetOffset = targetOffset;
             var stride = Math.Min(14, available / Math.Max(1, prompts.Length - 1));
-            Canvas.SetTop(marker.HitTarget, (available - stride * (prompts.Length - 1)) / 2 + index * stride);
-            ToolTipService.SetPlacement(marker.HitTarget, PlacementMode.Right);
+            var top = (available - stride * (prompts.Length - 1)) / 2 + index * stride;
+            if (marker.Top != top)
+            {
+                marker.Top = top;
+                Canvas.SetTop(marker.HitTarget, top);
+            }
             if (!marker.IsHovered)
             {
-                var preview = new ToolTip { Content = CreatePromptPreview(messages, prompt), Placement = PlacementMode.Right };
+                var content = PromptPreviewContent(messages, prompt);
+                if (marker.PreviewContent == content) continue;
+                var preview = new ToolTip { Content = CreatePromptPreview(content), Placement = PlacementMode.Right };
                 preview.Opened += (_, _) =>
                 {
                     // ToolTipService may also react to the coerced focus state.
@@ -120,31 +128,39 @@ public sealed partial class NativeAssistantPage
                         preview.IsOpen = false;
                 };
                 ToolTipService.SetToolTip(marker.HitTarget, preview);
+                marker.PreviewContent = content;
             }
         }
         UpdatePromptTimelineSelection();
     }
 
-    private static Border CreatePromptPreview(JsonElement[] messages, JsonElement prompt)
+    private static PromptTimelinePreviewContent PromptPreviewContent(JsonElement[] messages, JsonElement prompt)
     {
         var promptId = S(prompt, "id");
         var absoluteIndex = Array.FindIndex(messages, message => S(message, "id") == promptId);
         var answer = absoluteIndex >= 0
             ? messages.Skip(absoluteIndex + 1).FirstOrDefault(message => S(message, "role") == "assistant")
             : default;
+        return new PromptTimelinePreviewContent(
+            $"{messages.Take(absoluteIndex + 1).Count(message => S(message, "role") == "user")}) " + NativePromptTimelineState.PreviewText(S(prompt, "content"), 118),
+            NativePromptTimelineState.PreviewText(S(answer, "content"), 190));
+    }
+
+    private static Border CreatePromptPreview(PromptTimelinePreviewContent content)
+    {
         var grid = new Grid { Width = 300, ColumnSpacing = 10 };
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         var text = new StackPanel { Spacing = 5 };
         text.Children.Add(new TextBlock
         {
-            Text = $"{messages.Take(absoluteIndex + 1).Count(message => S(message, "role") == "user")}) " + NativePromptTimelineState.PreviewText(S(prompt, "content"), 118),
+            Text = content.Prompt,
             FontSize = 14,
             FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
             TextWrapping = TextWrapping.Wrap,
             MaxLines = 2,
         });
-        var answerText = NativePromptTimelineState.PreviewText(S(answer, "content"), 190);
+        var answerText = content.Answer;
         if (answerText.Length > 0)
         {
             text.Children.Add(new TextBlock
@@ -209,8 +225,12 @@ public sealed partial class NativeAssistantPage
         foreach (var (id, marker) in _promptTimelineMarkers)
         {
             var selected = string.Equals(id, active, StringComparison.Ordinal);
-            marker.Line.Background = selected ? ThemeBrush("MissumAccentBrush", 0xB0)
-                : ThemeBrush("MissumMutedTextBrush", 0x82);
+            if (marker.IsSelected != selected)
+            {
+                marker.IsSelected = selected;
+                marker.Line.Background = selected ? ThemeBrush("MissumAccentBrush", 0xB0)
+                    : ThemeBrush("MissumMutedTextBrush", 0x82);
+            }
             SetTimelineMarkerWidth(id, marker.IsHovered ? 22 : selected ? 20 : 7, marker.IsHovered);
         }
     }
@@ -273,7 +293,7 @@ public sealed partial class NativeAssistantPage
     {
         var hovered = marker.IsPointerOver || marker.IsKeyboardFocused;
         marker.IsHovered = hovered;
-        if (ToolTipService.GetToolTip(marker.HitTarget) is ToolTip preview) preview.IsOpen = hovered;
+        if (ToolTipService.GetToolTip(marker.HitTarget) is ToolTip preview && preview.IsOpen != hovered) preview.IsOpen = hovered;
         if (hovered)
         {
             SetTimelineMarkerWidth(id, 22, true);
@@ -302,12 +322,17 @@ public sealed partial class NativeAssistantPage
         storyboard.Begin();
     }
 
+    private readonly record struct PromptTimelinePreviewContent(string Prompt, string Answer);
+
     private sealed class PromptTimelineMarker(Button hitTarget, Border line, ScaleTransform scale)
     {
         public Button HitTarget { get; } = hitTarget;
         public Border Line { get; } = line;
         public ScaleTransform Scale { get; } = scale;
         public double TargetOffset { get; set; }
+        public double? Top { get; set; }
+        public bool? IsSelected { get; set; }
+        public PromptTimelinePreviewContent? PreviewContent { get; set; }
         public double TargetScale { get; set; } = scale.ScaleX;
         public bool IsPointerOver { get; set; }
         public FocusState RequestedFocusState { get; set; } = FocusState.Unfocused;
