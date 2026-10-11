@@ -39,7 +39,7 @@ public sealed class NativeChatPdfExportService(
         {
             var source = Path.Combine(workingDirectory, "chat.md");
             await File.WriteAllTextAsync(source, FormatSnapshot(snapshot), new UTF8Encoding(false), cancellationToken).ConfigureAwait(false);
-            var rendered = await renderer.EnsureCurrentAsync(source, sourceChanged: true, cancellationToken).ConfigureAwait(false)
+            var rendered = await renderer.EnsureChatTranscriptAsync(source, sourceChanged: true, cancellationToken).ConfigureAwait(false)
                 ?? throw new InvalidOperationException("Der Chat-PDF-Renderer hat keine Datei erzeugt.");
             await using var pdf = new FileStream(rendered, FileMode.Open, FileAccess.Read, FileShare.Read,
                 bufferSize: 81920, useAsync: true);

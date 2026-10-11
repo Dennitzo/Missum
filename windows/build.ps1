@@ -4,40 +4,17 @@ param(
     [ValidateSet('Debug', 'Release')]
     [string] $Configuration = 'Release',
 
-    [switch] $RunTests,
-
-    [switch] $RunSmoke,
-
-    # Retained for callers that explicitly skipped validation before it became opt-in.
-    [switch] $SkipTests,
-
-    [switch] $SkipSmoke,
-
     [switch] $SkipPublish,
 
     [ValidateSet('win-x64')]
     [string] $RuntimeIdentifier = 'win-x64',
 
-    [string] $PortableOutputDirectory,
-
-    [switch] $RunLiveToolAcceptance,
-
-    [string] $AiServerUrl = 'http://127.0.0.1:8080',
-
-    [string] $DeepSeekModelId,
-
-    [string] $DeepSeekVisionModelId,
-
-    [string] $ToolAcceptanceEvidenceDirectory
+    [string] $PortableOutputDirectory
 )
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
-
-if ($RunLiveToolAcceptance -and $SkipPublish) {
-    throw '-RunLiveToolAcceptance requires a freshly verified portable publish; remove -SkipPublish.'
-}
 
 $appProject = Resolve-MissumRepositoryPath -RelativePath 'src\Missum.App\Missum.App.csproj'
 if ([string]::IsNullOrWhiteSpace($PortableOutputDirectory)) {
@@ -62,19 +39,13 @@ Invoke-MissumDotNet -CommandArguments @(
     ("-p:RuntimeIdentifier={0}" -f $RuntimeIdentifier),
     '--nologo'
 )
-if ($RunTests -and -not $SkipTests) {
-    & (Join-Path $PSScriptRoot 'test.ps1') -Configuration $Configuration
-    # Includes DeepSeek integrated-vision routing and native projector/preset tests.
-    & (Join-Path $PSScriptRoot 'test-agent-context.ps1') -Configuration $Configuration -SkipClientTests
-}
 if (-not $SkipPublish) {
-    # The normal portable build never launches test suites or a QA window.
-    # Native smoke is available only when explicitly requested with -RunSmoke.
+    # Build and publish only. Validation belongs to the separate test scripts.
     & (Join-Path $PSScriptRoot 'publish.ps1') `
         -Mode SingleFile `
         -RuntimeIdentifier $RuntimeIdentifier `
         -OutputDirectory $PortableOutputDirectory `
-        -SkipSmoke:($SkipSmoke -or -not $RunSmoke)
+        -SkipSmoke
 
     $portableExecutable = Join-Path $PortableOutputDirectory 'Missum.exe'
     $portableManifest = Assert-MissumArtifactPath -Path ($PortableOutputDirectory + '.manifest.json')
@@ -91,23 +62,6 @@ if (-not $SkipPublish) {
     Write-Host ("Portable Missum: {0}" -f $portableExecutable) -ForegroundColor Green
     Write-Host ("SHA-256: {0}" -f $actualExecutableHash) -ForegroundColor Green
 
-    if ($RunLiveToolAcceptance) {
-        $acceptanceArguments = @{
-            Configuration = $Configuration
-            ServerUrl = $AiServerUrl
-            PortableExecutable = $portableExecutable
-        }
-        if (-not [string]::IsNullOrWhiteSpace($DeepSeekModelId)) {
-            $acceptanceArguments['DeepSeekModelId'] = $DeepSeekModelId
-        }
-        if (-not [string]::IsNullOrWhiteSpace($DeepSeekVisionModelId)) {
-            $acceptanceArguments['DeepSeekVisionModelId'] = $DeepSeekVisionModelId
-        }
-        if (-not [string]::IsNullOrWhiteSpace($ToolAcceptanceEvidenceDirectory)) {
-            $acceptanceArguments['EvidenceDirectory'] = $ToolAcceptanceEvidenceDirectory
-        }
-        & (Join-Path $PSScriptRoot 'test-portable-tools.ps1') @acceptanceArguments
-    }
 }
 Write-Host 'Missum build completed.' -ForegroundColor Green
 

@@ -59,7 +59,6 @@ function harness(extra = {}) {
   const options = { menu, content, trigger, composer, descriptors: builtins(), mode: "general", sessionId: "general-1", isLan: true,
     invoke: item => calls.push(["invoke", item.actionId]),
     openFiles: () => calls.push(["files"]), openWorkspace: () => calls.push(["workspace"]),
-    openPublication: () => calls.push(["publication"]),
     isActive: item => active.has(item.actionId), disabledReason: item => reasons.get(item.actionId) || null, ...extra };
   api.render(options);
   const rows = () => content.querySelectorAll(".native-tools-row");
@@ -88,17 +87,18 @@ test("General uses the native flat order and inline document description without
     && row.children[2].classList.contains("native-tools-description")), true);
 });
 
-test("Codex adds Planmodus and Science adds the real publication route without a separate Deep Research tool", async () => {
+test("Codex adds Planmodus while Science keeps publication navigation out of the tool menu", async () => {
   const coding = harness({ mode: "coding" });
   assert.deepEqual(coding.labels().slice(0, 3), ["Dateien und Ordner", "Planmodus", "Dokumente erstellen"]);
   await coding.find("Planmodus").click();
   assert.deepEqual(coding.calls, [["invoke", "builtin.coding/plan-mode"]]);
   const science = harness({ mode: "claudescience" });
-  assert.deepEqual(science.labels().slice(0, 3), ["Dateien und Ordner", "Publikation öffnen", "Dokumente erstellen"]);
+  assert.deepEqual(science.labels().slice(0, 3), ["Dateien und Ordner", "Dokumente erstellen", "Websuche"]);
+  assert.equal(science.labels().includes("Publikation öffnen"), false);
   assert.equal(science.labels().includes("Planmodus"), false);
   assert.equal(science.labels().includes("Deep Research"), false);
-  science.open(); await science.find("Publikation öffnen").click();
-  assert.deepEqual(science.calls, [["publication"]]);
+  science.open(); await science.find("Chat als PDF exportieren").click();
+  assert.deepEqual(science.calls, [["invoke", "builtin.documents/export-chat-pdf"]]);
   assert.equal(science.menu.hidden, true);
 });
 

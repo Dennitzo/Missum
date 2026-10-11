@@ -42,6 +42,74 @@ public sealed class NativeChatPdfExportTests(ITestOutputHelper output)
 
     [Fact]
     [Trait("Category", "Live")]
+    public async Task ChatMathFallbackPreservesInvalidSourceWhileDocumentsRemainStrict()
+    {
+        if (Environment.GetEnvironmentVariable("MISSUM_NATIVE_PDF_EXPORT_LIVE") != "1") return;
+        await using var environment = await TestEnvironment.CreateAsync();
+        var source = Path.Combine(environment.Directory, "chat-math.md");
+        var markdown = """
+            # CHATMATHARCHIVE
+
+            Gültige Formel im Satz: $x^2 + y^2 = z^2$ und danach weiterer Text.
+
+            $$\boxed{\text{Metrik (Krümmung)} \quad \longleftrightarrow \quad \text{Energie-Impuls-Dichte}}$$
+
+            $$\begin{pmatrix}a & b\\c & d\end{pmatrix}$$
+
+            Formeln in einer Aufzählung:
+
+            - $\ell_P = 1.616255\times10^{-35}\,\mathrm{m}$
+            - $m_P = 2.176435\times10^{-8}\,\mathrm{kg}$
+
+            Breite Formel:
+
+            $$a_1+a_2+a_3+a_4+a_5+a_6+a_7+a_8+a_9+a_{10}+a_{11}+a_{12}+a_{13}+a_{14}+a_{15}+a_{16}=42$$
+
+            Fehlerhafte alte Notation: $F_1_P = 1.3351\times10^{43}\,\mathrm{N}$.
+
+            $$\nfür lokale Rindler-Horizonte: $\\delta Q/\\delta\\tau$\n$$
+
+            $$\MissumUnknownCommand{1}$$
+
+            CHATENDMARKER
+            """ + "\n\n~~~~\nRAWBEGINMARKER " + string.Concat(Enumerable.Repeat("raw-value012345 ", 700))
+            + " RAWENDMARKER\n~~~~\n\nBARETEXBEGIN "
+            + string.Concat(Enumerable.Repeat(@"G_{\\mu\\nu}\\Lambda\\frac{8\\piG}{c^4}", 40)) + " BARETEXEND\n";
+        await File.WriteAllTextAsync(source, markdown);
+        using var renderer = new DocumentPdfExporter(NullLogger<DocumentPdfExporter>.Instance);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+
+        var target = await renderer.EnsureChatTranscriptAsync(source, sourceChanged: true, deadline.Token);
+        Assert.NotNull(target);
+        var published = await File.ReadAllBytesAsync(target, deadline.Token);
+        using var pdf = PdfDocument.Open(published);
+        var text = string.Join('\n', pdf.GetPages().Select(page => page.Text));
+        foreach (var marker in new[] { "CHATMATHARCHIVE", "CHATENDMARKER", "F_1_P", "Rindler", "MissumUnknownCommand", "unverändert übernommen", "RAWBEGINMARKER", "RAWENDMARKER", "BARETEXBEGIN", "BARETEXEND" })
+            Assert.Contains(marker, text, StringComparison.Ordinal);
+        Assert.DoesNotContain("\\boxed", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("\\begin", text, StringComparison.Ordinal);
+        foreach (var page in pdf.GetPages())
+        {
+            Assert.All(page.Letters, letter => Assert.True(letter.BoundingBox.Right <= page.Width - 18,
+                $"Printed glyph beyond A4 right margin: {letter.Value}, x={letter.BoundingBox.Right}."));
+            Assert.All(page.Letters.Where(letter => !string.IsNullOrWhiteSpace(letter.Value)
+                && letter.FontName?.Contains("KaTeX", StringComparison.OrdinalIgnoreCase) == true),
+                letter => Assert.True(letter.FontSize >= 4, $"Formula glyph shrunk below readable size: {letter.Value}, font={letter.FontSize}."));
+        }
+        Assert.Equal(markdown, await File.ReadAllTextAsync(source, deadline.Token));
+
+        foreach (var scientificPublication in new[] { false, true })
+        {
+            var invalid = await Assert.ThrowsAsync<InvalidOperationException>(() => renderer.EnsureCurrentAsync(
+                source, sourceChanged: true, scientificPublication, deadline.Token));
+            Assert.Contains("KaTeX", invalid.Message, StringComparison.Ordinal);
+            Assert.Equal(published, await File.ReadAllBytesAsync(target, deadline.Token));
+        }
+        output.WriteLine($"Chat math PDF: {pdf.NumberOfPages} pages; invalid historic math preserved, valid math typeset, document/publication checks unchanged.");
+    }
+
+    [Fact]
+    [Trait("Category", "Live")]
     public async Task GeomagneticMatrixPublicationRendersWithoutRewritingItsTeXSource()
     {
         if (Environment.GetEnvironmentVariable("MISSUM_NATIVE_PDF_EXPORT_LIVE") != "1") return;

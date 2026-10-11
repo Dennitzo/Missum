@@ -127,9 +127,6 @@ public sealed partial class NativeAssistantPage
         var plan = actions.FirstOrDefault(a => S(a, "iconKey") == "plan");
         Heading("Hinzufügen");
         Row("\uE723", "Dateien und Ordner", "", () => ShowFileChoices(), color: ToolGlyphColor("attachment", ""));
-        var workspace = S(_snapshot, "workspacePath");
-        if (_mode == "claudescience")
-            Row("\uE9CE", "Publikation öffnen", "Vorhaben, Quellen und Ergebnisse", () => OpenResearchView(), color: ToolGlyphColor("research", ""));
         if (plan.ValueKind == JsonValueKind.Object)
             Row("\uEA80", "Planmodus", "Planmodus einschalten", () => SelectComposerTool(S(plan, "actionId"), "Planmodus"), S(plan, "disabledReason").Length == 0, ToolGlyphColor("plan", S(plan, "actionId")));
         if (document.ValueKind == JsonValueKind.Object)

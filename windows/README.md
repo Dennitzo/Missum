@@ -9,19 +9,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\build.ps1
 ```
 
 Tests bleiben separat über `windows/test.ps1`, `windows/test-agent-context.ps1` und `windows/smoke.ps1` verfügbar.
-Mit `-RunTests` beziehungsweise `-RunSmoke` können sie ausdrücklich zum Build zugeschaltet werden.
-Die bisherigen Schalter `-SkipTests` und `-SkipSmoke` bleiben kompatibel und haben Vorrang vor diesen Optionen.
+Das Buildskript enthält keine Testaufrufe oder Testoptionen. Prüfungen werden separat gestartet.
 Die Veröffentlichung erstellt weiterhin das Manifest und prüft die SHA-256 der erzeugten `Missum.exe`.
 
-Die vollständige Portable-Werkzeugabnahme wird ausdrücklich zugeschaltet. Sie veröffentlicht zuerst eine
-frische, manifest- und SHA-256-geprüfte `Missum.exe` und führt danach die nativen Vertragsprüfungen sowie die
+Die vollständige Portable-Werkzeugabnahme verwendet eine zuvor veröffentlichte,
+manifest- und SHA-256-geprüfte `Missum.exe` und führt die nativen Vertragsprüfungen sowie die
 realen Gateway-, Medien-, Sprach-, Dokument-, Coding- und Claude-Science-Suiten seriell aus. Die Medienabnahme
 enumeriert dabei echte Windows-Fenster, erstellt einen Desktop-Screenshot und zeichnet einen kurzen Bildschirmclip auf:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\build.ps1 `
+powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\test-portable-tools.ps1 `
   -Configuration Release `
-  -RunLiveToolAcceptance
+  -PortableExecutable .\artifacts\portable\win-x64\Missum.exe
 ```
 
 Voraussetzungen sind ein laufender und gesunder Missum-AI-Stack unter `http://127.0.0.1:8080`, eine erreichbare
@@ -35,16 +34,16 @@ Ohne explizite Modellparameter wählt das Skript die installierten DeepSeek-Prof
 Installation und ein abweichender Gateway lassen sich festlegen:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\build.ps1 `
+powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\test-portable-tools.ps1 `
   -Configuration Release `
-  -RunLiveToolAcceptance `
-  -AiServerUrl 'http://127.0.0.1:8080' `
+  -PortableExecutable .\artifacts\portable\win-x64\Missum.exe `
+  -ServerUrl 'http://127.0.0.1:8080' `
   -DeepSeekModelId 'coding/DeepSeek-...~revision' `
   -DeepSeekVisionModelId 'vision/DeepSeek-...~revision'
 ```
 
-`-RunLiveToolAcceptance` ist nicht mit `-SkipPublish` kombinierbar. Für ein ausdrücklich angefordertes vollständiges Release-Gate
-werden zusätzlich `-RunTests -RunSmoke` gesetzt. Die Live-Abnahme kann wegen lokaler Modellinferenz, Bild-/Spracherzeugung und
+Für eine vollständige Abnahme werden die separaten Test- und Smoke-Skripte nacheinander gestartet.
+Die Live-Abnahme kann wegen lokaler Modellinferenz, Bild-/Spracherzeugung und
 Deep Research längere Zeit benötigen und darf nicht parallel zu einem zweiten Modell- oder Buildlauf gestartet
 werden.
 
@@ -53,7 +52,7 @@ Jeder Lauf schreibt seine Belege standardmäßig nach
 DeepSeek-Modell-IDs, `reasoningEffort: none`, die Coverage-Matrix aller integrierten Aktionen und den Status jeder
 Suite. Daneben liegen je Suite Konsolenlog und TRX; erzeugte Toolbelege werden im selben Laufverzeichnis abgelegt.
 Auch ein fehlgeschlagener Preflight schreibt dort eine `summary.json`. Ein eigener Belegordner kann mit
-`-ToolAcceptanceEvidenceDirectory` gewählt werden, muss aber unterhalb von `artifacts` liegen.
+`-EvidenceDirectory` gewählt werden, muss aber unterhalb von `artifacts` liegen.
 
 
 ## Native Modelle und Docker-Gateway

@@ -62,9 +62,6 @@
     });
     const tools = available.filter(selectable);
     const entries = [{ kind: "files", label: "Dateien und Ordner", description: "", icon: "attachment" }];
-    if (currentMode === "claudescience") entries.push({
-      kind: "publication", label: "Publikation öffnen", description: "Vorhaben, Quellen und Ergebnisse", icon: "research"
-    });
     const plan = tools.find(item => iconKey(item) === "plan");
     if (plan) entries.push({ kind: "action", descriptor: plan, label: "Planmodus", description: "Planmodus einschalten", icon: "plan" });
     const document = tools.find(item => iconKey(item) === "document");
@@ -215,7 +212,6 @@
         close(controller);
         if (entry.kind === "upload") options.openFiles?.();
         else if (entry.kind === "workspace") options.openWorkspace?.();
-        else if (entry.kind === "publication") options.openPublication?.();
         else options.invoke?.(entry.descriptor);
       });
       controller.buttons.push(button);

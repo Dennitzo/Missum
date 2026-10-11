@@ -39,9 +39,8 @@ nicht zu einem bestandenen Test umgedeutet.
 ## Wiederholbare Pflichtprüfung und historische Prüfmatrix
 
 `windows/test-agent-context.ps1` ist das gemeinsame Pflichtgate für Client, Gateway,
-Webdarstellung und native Cache-Verwaltung. Es wird separat oder mit
-`windows/build.ps1 -RunTests` ausdrücklich aufgerufen. Der normale Portable-Build
-führt keine Tests aus. Bei zugeschalteten Tests bricht ein Fehler den Build ab. Logs, TRX und `summary.json` liegen unter
+Webdarstellung und native Cache-Verwaltung. Es wird separat aufgerufen.
+`windows/build.ps1` enthält keine Testaufrufe. Logs, TRX und `summary.json` liegen unter
 `artifacts/validation/agent-context`.
 
 ```powershell

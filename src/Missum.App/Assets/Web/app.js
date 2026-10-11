@@ -3089,7 +3089,7 @@
       descriptors: availableActionDescriptors(), mode: state.chatMode, sessionId: state.activeSessionId,
       invoke: invokeActionDescriptor, isActive: isActionDescriptorActive, disabledReason: resolvedActionDisabledReason,
       openFiles: () => post("document.pick", { sessionId: state.activeSessionId }),
-      openWorkspace: createWorkspaceProject, openPublication: () => globalThis.missumPanels?.setView("publication"),
+      openWorkspace: createWorkspaceProject,
       isLan: globalThis.missumBridge?.isLanBrowser })) return;
     elements.toolsMenuContent.replaceChildren();
     const groups = new Map();

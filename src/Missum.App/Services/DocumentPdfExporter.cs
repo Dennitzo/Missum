@@ -22,11 +22,20 @@ public sealed partial class DocumentPdfExporter(ILogger<DocumentPdfExporter> log
         CancellationToken cancellationToken = default) =>
         EnsureCurrentAsync(sourcePath, sourceChanged, scientificPublication: false, cancellationToken);
 
-    public async Task<string?> EnsureCurrentAsync(
+    public Task<string?> EnsureCurrentAsync(
         string sourcePath,
         bool sourceChanged,
         bool scientificPublication,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        RenderAsync(sourcePath, sourceChanged, scientificPublication, chatTranscript: false, cancellationToken);
+
+    /// <summary>Archives a conversation without rejecting its historic invalid model output.</summary>
+    public Task<string?> EnsureChatTranscriptAsync(string sourcePath, bool sourceChanged,
+        CancellationToken cancellationToken = default) =>
+        RenderAsync(sourcePath, sourceChanged, scientificPublication: false, chatTranscript: true, cancellationToken);
+
+    private async Task<string?> RenderAsync(string sourcePath, bool sourceChanged,
+        bool scientificPublication, bool chatTranscript, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
         var source = Path.GetFullPath(sourcePath);
@@ -79,6 +88,7 @@ public sealed partial class DocumentPdfExporter(ILogger<DocumentPdfExporter> log
                 startInfo.ArgumentList.Add(argument);
             }
             if (scientificPublication) startInfo.ArgumentList.Add("-ScientificPublication");
+            if (chatTranscript) startInfo.ArgumentList.Add("-ChatTranscript");
 
             using var process = new Process { StartInfo = startInfo };
             if (!process.Start())
@@ -91,7 +101,11 @@ public sealed partial class DocumentPdfExporter(ILogger<DocumentPdfExporter> log
             var standardError = process.StandardError.ReadToEndAsync(CancellationToken.None);
             try
             {
-                await WaitForExportExitAsync(process, TimeSpan.FromMinutes(3), cancellationToken).ConfigureAwait(false);
+                // A complete historic chat can contain megabytes of tool output
+                // and thousands of printed pages. Cancellation still stops its tree.
+                var maximumDuration = chatTranscript && new FileInfo(source).Length > 1024 * 1024
+                    ? TimeSpan.FromMinutes(10) : TimeSpan.FromMinutes(3);
+                await WaitForExportExitAsync(process, maximumDuration, cancellationToken).ConfigureAwait(false);
             }
             catch
             {

@@ -9,11 +9,16 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$OutputPath,
 
-    [switch]$ScientificPublication
+    [switch]$ScientificPublication,
+
+    [switch]$ChatTranscript
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+if ($ScientificPublication -and $ChatTranscript) {
+    throw 'Publikationsprüfung und Chatarchiv sind unterschiedliche PDF-Exportarten.'
+}
 # The native process reads redirected diagnostics as UTF-8. Windows PowerShell
 # otherwise uses the console code page and corrupts German text and TeX symbols.
 $OutputEncoding = [Text.UTF8Encoding]::new($false)
@@ -157,6 +162,16 @@ $stagedPdf = Convert-ToExtendedFilePath (Join-Path $outputDirectory ('.' + [IO.P
 $backupPdf = Convert-ToExtendedFilePath (Join-Path $outputDirectory ('.' + [IO.Path]::GetFileNameWithoutExtension($output) + '.' + [Guid]::NewGuid().ToString('N') + '.bak.pdf'))
 
 $bodyClass = 'pdf-exporting'
+if ($ChatTranscript) { $bodyClass += ' chat-transcript' }
+$chatPrintStyles = ''
+if ($ChatTranscript) {
+    # Measure with the production print rules already applied. Screen list/table
+    # widths differ from A4 and can otherwise shrink perfectly valid formulas.
+    $styleSource = [IO.File]::ReadAllText((Join-Path $webAssets 'styles.css'), [Text.Encoding]::UTF8)
+    $printBlocks = [regex]::Matches($styleSource, '(?ms)^@media print[ \t]*\{(?<rules>.*?)^\}')
+    if ($printBlocks.Count -eq 0) { throw 'Die lokalen PDF-Druckstile fehlen.' }
+    $chatPrintStyles = ($printBlocks | ForEach-Object { $_.Groups['rules'].Value }) -join "`n"
+}
 $publicationStyles = ''
 if ($ScientificPublication) {
     $bodyClass += ' scientific-publication'
@@ -300,6 +315,32 @@ $html = @"
     @page { size: A4 portrait; margin: 20mm 20mm 24mm 24mm; }
     html, body { margin: 0 !important; padding: 0 !important; background: #fff !important; color: #171717 !important; }
     .pdf-book { position: static !important; display: block !important; width: 100% !important; visibility: visible !important; }
+    $chatPrintStyles
+    /* Measure chat formulas at the same A4 width and font used when printing. */
+    .chat-transcript .pdf-book { width: 166mm !important; }
+    /* Validation needs the rendered DOM, not a second layout of megabytes of logs. */
+    .chat-transcript.pdf-validation .pdf-book { display: none !important; }
+    .chat-transcript .math-render { font-size: 10pt; }
+    .chat-transcript .pdf-book .message-content p,
+    .chat-transcript .pdf-book .message-content li { overflow-wrap: anywhere !important; }
+    .chat-transcript .pdf-book .message-content p { text-align: left !important; }
+    .chat-transcript .pdf-book .math-selectable:not(.display):not(.invalid) {
+      width: auto !important; margin: 0 !important; padding: 0 !important;
+    }
+    .chat-transcript .math-selectable.invalid {
+      display: block !important; max-width: 100% !important;
+      break-inside: auto !important; white-space: normal !important;
+    }
+    .chat-transcript .pdf-book .math-selectable.invalid .math-source-text.fallback {
+      display: inline !important; position: static !important; color: #171717 !important;
+      white-space: pre-wrap !important; overflow-wrap: anywhere !important; word-break: normal !important;
+      font: 9pt/1.4 Consolas, "Courier New", monospace !important;
+    }
+    .chat-transcript .math-export-note {
+      display: block; color: #555 !important; font: 8pt/1.4 "Segoe UI", Arial, sans-serif;
+      white-space: normal; margin-top: 1mm;
+    }
+    .chat-transcript .pdf-book .code-block.print-code-part { margin: 0 !important; border-radius: 0; }
     $publicationStyles
   </style>
   <script src="$katexScriptUri"></script>
@@ -323,9 +364,48 @@ $html = @"
   </article>
   <script>
     const decodeUtf8 = value => new TextDecoder().decode(Uint8Array.from(atob(value), character => character.charCodeAt(0)));
+    if (new URLSearchParams(location.search).has('missum-validation')) document.body.classList.add('pdf-validation');
     document.getElementById('document-title').textContent = decodeUtf8('$titleBase64');
     const documentContent = document.getElementById('document-content');
     documentContent.append(globalThis.missumMarkdown.render(decodeUtf8('$sourceBase64')));
+    if (document.body.classList.contains('chat-transcript')) {
+      // Large raw tool results can be several hundred kilobytes in one line.
+      // Chromium pagination of one giant pre consumes gigabytes and stalls.
+      // Bound its layout units while preserving every original character.
+      for (const pre of documentContent.querySelectorAll('.code-block pre')) {
+        const original = pre.querySelector('code')?.textContent;
+        if (!original || original.length <= 6000) continue;
+        const chunks = document.createDocumentFragment();
+        for (let offset = 0; offset < original.length;) {
+          let end = Math.min(offset + 6000, original.length);
+          if (end < original.length) {
+            const newline = original.slice(offset + 3000, end).lastIndexOf('\n');
+            if (newline >= 0) end = offset + 3000 + newline + 1;
+            const unit = original.charCodeAt(end - 1);
+            if (unit >= 0xd800 && unit <= 0xdbff) end -= 1;
+          }
+          const block = document.createElement('div');
+          block.className = 'code-block print-code-part';
+          if (offset === 0) {
+            const header = pre.parentElement.querySelector('.code-header');
+            if (header) block.append(header);
+          }
+          const part = document.createElement('pre');
+          const code = document.createElement('code');
+          code.textContent = original.slice(offset, end);
+          part.append(code); block.append(part); chunks.append(block);
+          offset = end;
+        }
+        pre.parentElement.replaceWith(chunks);
+      }
+      for (const formula of documentContent.querySelectorAll('.math-selectable.invalid')) {
+        // Keep the exact escaped source as text; never guess mathematical meaning.
+        const note = document.createElement('span');
+        note.className = 'math-export-note';
+        note.textContent = 'LaTeX nicht darstellbar; Ausdruck unverändert übernommen.';
+        formula.append(note);
+      }
+    }
     if (document.body.classList.contains('scientific-publication')) {
       const title = documentContent.querySelector(':scope > h1');
       const headingText = title ? title.textContent.trim() : 'Wissenschaftliche Untersuchung';
@@ -467,6 +547,20 @@ $html = @"
       }
     }
     const finishDocument = () => {
+      if (document.body.classList.contains('chat-transcript')) {
+        const pageWidth = 166 * 96 / 25.4;
+        for (const formula of documentContent.querySelectorAll('.math-selectable:not(.invalid)')) {
+          const math = formula.querySelector('.math-render');
+          if (!math) continue;
+          const available = Math.min(pageWidth, formula.parentElement.clientWidth || pageWidth) - 2;
+          const bounds = math.getBoundingClientRect();
+          const width = Math.max(math.scrollWidth, ...Array.from(math.querySelectorAll('.base')).map(item => item.getBoundingClientRect().right - bounds.left));
+          if (available > 0 && width > available) {
+            formula.classList.add('display');
+            math.style.fontSize = ((available / width) * parseFloat(getComputedStyle(math).fontSize) * .99) + 'px';
+          }
+        }
+      }
       if (document.body.classList.contains('scientific-publication')) {
         for (const formula of documentContent.querySelectorAll('.math-selectable.display')) {
           const math = formula.querySelector('.math-render');
@@ -529,7 +623,7 @@ $html = @"
       const images = Array.from(documentContent.querySelectorAll('img')).map(image => image.decode ? image.decode().catch(() => {}) : image.complete ? Promise.resolve() :
         new Promise(resolve => { image.addEventListener('load', resolve, { once: true }); image.addEventListener('error', resolve, { once: true }); }));
       Promise.all([document.fonts.ready, ...images]).then(finishDocument);
-    } else finishDocument();
+    } else document.fonts.ready.then(finishDocument);
   </script>
 </body>
 </html>
@@ -551,7 +645,7 @@ try {
     $dumpArguments = $commonArguments + @(
         ('--user-data-dir=' + $validationProfilePath),
         '--dump-dom',
-        ([Uri]$htmlPath).AbsoluteUri
+        (([Uri]$htmlPath).AbsoluteUri + '?missum-validation=1')
     )
 
     $validationResult = Invoke-EdgeProcess -Executable $edge -CommandArguments $dumpArguments
@@ -562,7 +656,7 @@ try {
     if ($renderedDom -notmatch 'data-missum-pdf-ready="true"') {
         throw 'Der Missum-Markdown-/KaTeX-Renderer wurde vor der PDF-Erzeugung nicht vollständig initialisiert.'
     }
-    if ($renderedDom -match 'data-missum-katex-invalid="([1-9][0-9]*)"') {
+    if (-not $ChatTranscript -and $renderedDom -match 'data-missum-katex-invalid="([1-9][0-9]*)"') {
         $invalidCount = $Matches[1]
         $formulaDetails = ''
         if ($renderedDom -match 'data-missum-katex-errors="([^"]*)"') {

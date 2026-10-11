@@ -26,7 +26,7 @@ under `artifacts/windows/app-win-x64-folder` instead.
 
 The normal build restores, compiles and publishes without tests or a startup smoke.
 It still creates the publish manifest and verifies the executable hash.
-Add `-RunTests` or `-RunSmoke` to request those checks explicitly.
+Build and validation are separate; run the test or smoke scripts explicitly when needed.
 
 Invoking `windows/publish.ps1` directly runs a native startup smoke check by default. It verifies all
 manifest hashes, launches a fresh isolated profile, confirms the native page has
