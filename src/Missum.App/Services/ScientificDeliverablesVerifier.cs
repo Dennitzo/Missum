@@ -18,6 +18,11 @@ internal static partial class ScientificDeliverablesVerifier
     internal static async Task<JsonElement> VerifyAsync(string projectId, ScientificPresentationSnapshot? snapshot,
         ResearchWorkingState? state, ResearchResultSnapshot? receipts, IReadOnlyList<ResearchLiteratureEntry> sources,
         IReadOnlyList<ResearchEvidenceRecord> evidence, CancellationToken cancellationToken = default)
+        => await VerifyWithVisualInspectionAsync(projectId, snapshot, state, receipts, sources, evidence, false, cancellationToken).ConfigureAwait(false);
+
+    internal static async Task<JsonElement> VerifyWithVisualInspectionAsync(string projectId, ScientificPresentationSnapshot? snapshot,
+        ResearchWorkingState? state, ResearchResultSnapshot? receipts, IReadOnlyList<ResearchLiteratureEntry> sources,
+        IReadOnlyList<ResearchEvidenceRecord> evidence, bool requireVisualInspection, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var publication = snapshot?.Publication;
@@ -37,6 +42,7 @@ internal static partial class ScientificDeliverablesVerifier
         var files = new List<object>();
         var interactiveFiles = new List<object>();
         var verifiedFigureExperiments = new HashSet<string>(StringComparer.Ordinal);
+        var visualMissing = new List<string>();
         var rejected = new HashSet<string>(StringComparer.Ordinal);
         var simulation = snapshot?.Simulation;
         if (snapshot?.SimulationError is null && simulation?.ProjectId == projectId && simulation.Status == "ready")
@@ -61,6 +67,22 @@ internal static partial class ScientificDeliverablesVerifier
                 var hash = await HashAsync(image.ImagePath, cancellationToken).ConfigureAwait(false);
                 if (!string.Equals(hash, image.Sha256, StringComparison.OrdinalIgnoreCase))
                 { rejected.Add("Die Abbildung wurde seit dem gespeicherten Experiment verändert (SHA-256 stimmt nicht überein)."); continue; }
+                if (requireVisualInspection)
+                {
+                    // Older image manifests omitted ProjectRoot even when a
+                    // trustworthy execution already bound the project. Missing
+                    // scope must never silently skip the required vision check.
+                    if (!TryVisualArtifactPath(image, out var artifactPath))
+                        visualMissing.Add("Die Simulationsabbildung '" + image.ImagePath
+                            + "' besitzt keine eindeutige Projektzuordnung für die Vision-Prüfung. "
+                            + "Die aktuelle Darstellung aus den gespeicherten Projekt- und Ausführungsbelegen neu laden; "
+                            + "keine erfolgte Bildprüfung behaupten.");
+                    else if (!ScientificVisualInspection.HasCurrentReview(projectId, artifactPath, hash, receipts?.Verifications ?? []))
+                        visualMissing.Add("Die aktuelle Simulationsabbildung '" + artifactPath + "' wurde noch nicht mit Vision geprüft. "
+                            + "Genau dieses Bild mit image.input operation=file path=" + image.ImagePath
+                            + " laden und media.analyze für Achsen, Einheiten, Randartefakte und Kurvenfehler verwenden; "
+                            + "Befunde mit Messdaten vergleichen und erst danach erneut prüfen. Vision ersetzt keine quantitative Validierung.");
+                }
                 var experimentRecordId = image.Provenance.Split(" · ", StringSplitOptions.None).ElementAtOrDefault(1);
                 if (image.Execution is { } execution)
                 {
@@ -93,13 +115,15 @@ internal static partial class ScientificDeliverablesVerifier
         var interactiveRequired = activeRequirements.Any(item => IsInteractiveRequirement(item.Data));
         var simulationRequired = executionRequired || interactiveRequired;
         var simulationReady = (!executionRequired || executed) && (!interactiveRequired || interactiveReady)
-            && (executed || interactiveReady || !simulationRequired);
-        var simulationError = snapshot?.SimulationError ?? (simulationReady ? null : rejected.Count > 0
+            && (executed || interactiveReady || !simulationRequired) && visualMissing.Count == 0;
+        var simulationError = snapshot?.SimulationError ?? (simulationReady ? null : visualMissing.Count > 0
+            ? string.Join(" ", visualMissing.Take(3)) : rejected.Count > 0
             ? string.Join(" ", rejected.Take(3)) : interactiveRequired && !interactiveReady
                 ? "Noch keine gültige projektgebundene HTML-/JavaScript-Simulation vorhanden."
                 : "Noch keine darstellbare Abbildung aus einem erfolgreichen Python-Experiment vorhanden.");
         var missing = state is null ? new List<string>()
             : await ResearchMissingAsync(state, receipts, publication, verifiedFigureExperiments, interactiveReady, cancellationToken).ConfigureAwait(false);
+        missing.AddRange(visualMissing);
         var goalMissing = missing.ToArray();
         var scientificReview = state is null ? null : ScientificResearchReview.Assess(state, sources, evidence,
             receipts?.Experiments ?? [], receipts?.Verifications ?? []);
@@ -121,9 +145,30 @@ internal static partial class ScientificDeliverablesVerifier
                 sourceSha256 = sourceHash, revision = publication?.Revision ?? 0, error = publicationError },
             simulation = new { required = simulationRequired, ready = simulationReady, executed, executionRequired,
                 interactiveRequired, interactiveReady, artifacts = files, interactiveArtifacts = interactiveFiles,
-                error = simulationRequired ? simulationError : null },
+                visualReview = new { required = requireVisualInspection && (files.Count > 0 || visualMissing.Count > 0),
+                    ready = visualMissing.Count == 0, missing = visualMissing },
+                error = simulationRequired || visualMissing.Count > 0 ? simulationError : null },
             retryable = true,
         }, VerificationJsonOptions);
+    }
+
+    private static bool TryVisualArtifactPath(ScientificSimulationArtifact image, out string artifactPath)
+    {
+        artifactPath = "";
+        var root = image.Execution?.ProjectRoot ?? image.ProjectRoot;
+        if (string.IsNullOrWhiteSpace(root)) return false;
+        try
+        {
+            var relative = Path.GetRelativePath(Path.GetFullPath(root), Path.GetFullPath(image.ImagePath));
+            _ = ScientificSimulationService.SafePath(root, relative);
+            relative = relative.Replace('\\', '/');
+            if (!(relative.StartsWith("work/", StringComparison.Ordinal) || relative.StartsWith("artifacts/", StringComparison.Ordinal)))
+                return false;
+            artifactPath = relative;
+            return true;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException)
+        { return false; }
     }
 
     private static async Task<List<string>> ResearchMissingAsync(ResearchWorkingState state, ResearchResultSnapshot? receipts,
@@ -229,7 +274,8 @@ internal static partial class ScientificDeliverablesVerifier
 
     private static async Task<bool> VerifyExperimentFilesAsync(ResearchExperiment experiment, string pdfPath, CancellationToken token)
     {
-        // The publication lives below <project>/publications/<project hash>/<revision>/Publikation.pdf.
+        // Both the legacy revision folder and the single current publication
+        // live below <project>/publications/<project hash>/<name>/Publikation.pdf.
         var root = new DirectoryInfo(Path.GetDirectoryName(pdfPath)!).Parent?.Parent?.Parent?.FullName;
         if (root is null) return false;
         try
@@ -241,7 +287,8 @@ internal static partial class ScientificDeliverablesVerifier
                 if (!run.TryGetProperty("exitCode", out var code) || !code.TryGetInt32(out var exit) || exit != 0
                     || run.TryGetProperty("timedOut", out var timeout) && timeout.ValueKind == JsonValueKind.True) return false;
                 var runId = Text(run, "runId");
-                if (runId.Length == 0 || Text(run, "snapshotId") != "execution-" + runId) return false;
+                var currentTree = Text(run, "snapshotId") == "current-" + runId;
+                if (runId.Length == 0 || !currentTree && Text(run, "snapshotId") != "execution-" + runId) return false;
                 var script = Text(run, "executedScriptPath");
                 var scriptHash = Text(run, "scriptSha256");
                 var inputs = run.GetProperty("inputHashes");
@@ -255,7 +302,8 @@ internal static partial class ScientificDeliverablesVerifier
                     if (!CanonicalPath(input.Name, input: true) || !Sha256(hash)) return false;
                     var frozen = ScientificSimulationService.SafePath(root, "snapshots/execution-" + runId + "/frozen/" + input.Name);
                     var current = ScientificSimulationService.SafePath(root, input.Name);
-                    if (!File.Exists(frozen) || await HashAsync(frozen, token).ConfigureAwait(false) != hash || !File.Exists(current)) return false;
+                    if (!currentTree && (!File.Exists(frozen) || await HashAsync(frozen, token).ConfigureAwait(false) != hash)) return false;
+                    if (!File.Exists(current)) return false;
                     var expected = outputs.TryGetProperty(input.Name, out var changed) && changed.ValueKind == JsonValueKind.String
                         ? changed.GetString() : hash;
                     if (await HashAsync(current, token).ConfigureAwait(false) != expected) return false;
@@ -325,9 +373,10 @@ internal static partial class ScientificDeliverablesVerifier
     private static async Task<string?> VerifyExecutionAsync(ScientificExecutionEvidence execution,
         ScientificSimulationArtifact image, string? recordId, CancellationToken token)
     {
-        const string invalid = "Der gemessene Python-Ausführungsbeleg oder sein eingefrorener Eingabestand ist ungültig.";
+        const string invalid = "Der gemessene Python-Ausführungsbeleg oder sein zugeordneter Eingabestand ist ungültig.";
+        var currentTree = execution.SnapshotId == "current-" + execution.RunId;
         if (execution.ExperimentRecordId != recordId || string.IsNullOrWhiteSpace(execution.RunId)
-            || execution.SnapshotId != "execution-" + execution.RunId || execution.StartedAt > execution.CompletedAt
+            || !currentTree && execution.SnapshotId != "execution-" + execution.RunId || execution.StartedAt > execution.CompletedAt
             || execution.InputHashes is null || execution.OutputHashes is null
             || execution.InputHashes.Count is < 1 or > 4096 || execution.OutputHashes.Count is < 1 or > 4096
             || !execution.InputHashes.TryGetValue(execution.ExecutedScriptPath, out var scriptHash)
@@ -340,7 +389,7 @@ internal static partial class ScientificDeliverablesVerifier
             {
                 if (!CanonicalPath(pair.Key, input: true) || !Sha256(pair.Value)) return invalid;
                 var frozen = ScientificSimulationService.SafePath(execution.ProjectRoot, "snapshots/" + execution.SnapshotId + "/frozen/" + pair.Key);
-                if (!File.Exists(frozen) || await HashAsync(frozen, token).ConfigureAwait(false) != pair.Value) return invalid;
+                if (!currentTree && (!File.Exists(frozen) || await HashAsync(frozen, token).ConfigureAwait(false) != pair.Value)) return invalid;
                 var current = ScientificSimulationService.SafePath(execution.ProjectRoot, pair.Key);
                 var expectedCurrent = execution.OutputHashes.TryGetValue(pair.Key, out var after) ? after : pair.Value;
                 if (!File.Exists(current) || await HashAsync(current, token).ConfigureAwait(false) != expectedCurrent)
@@ -368,7 +417,8 @@ internal static partial class ScientificDeliverablesVerifier
         if (path.Contains('\\') || path.Contains(':') || path.Any(char.IsControl)) return false;
         var parts = path.Split('/');
         return parts.Length > 1 && parts.All(part => part.Length > 0 && part is not ("." or ".."))
-            && (input ? parts[0] is "work" or "inputs" or "env" : parts[0] is "work" or "artifacts" or "notebooks");
+            && (input ? parts[0] is "work" or "inputs" or "env" or "artifacts" or "notebooks" or "manuscripts"
+                : parts[0] is "work" or "artifacts" or "notebooks");
     }
 
     private static bool Sha256(string? hash) => hash is { Length: 64 } && hash.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');

@@ -462,7 +462,7 @@ public sealed partial class AssistantCoordinator(
             model = display?.Model ?? (isCodingSession ? selectedModel ?? "Lokaler AI-Server" : "Lokaler AI-Server"),
             provider = CurrentSettings.AiProvider.ToString(),
             contextUsed = display?.ContextUsed ?? context.EstimatedTokens,
-            contextLimit = display?.ContextLimit ?? contextLimit,
+            contextLimit = ModelContextProfiles.Limit(display?.ContextLimit ?? contextLimit),
             contextWasTruncated = display?.ContextUsed is not null ? display.ContextWasCompacted : context.WasTruncated,
             contextNotice = display?.ContextUsed is not null ? null : context.TruncationNotice,
             contextSource = display?.ContextUsed is not null ? display.ContextSource ?? "estimated" : "estimated",
@@ -613,7 +613,9 @@ public sealed partial class AssistantCoordinator(
                 var isFirstReady = Interlocked.CompareExchange(ref _startupRunsHandled, 1, 0) == 0;
                 if (isFirstReady && missumAi is not null)
                 {
-                    await missumAi.StopPersistedRunsAtStartupAsync(cancellationToken).ConfigureAwait(false);
+                    // Local history must be visible even while the gateway starts
+                    // or an old cancellation/cache-cleanup request is pending.
+                    await missumAi.PreparePersistedRunsAtStartupAsync(cancellationToken).ConfigureAwait(false);
                 }
                 await emit("state.snapshot", await BuildSnapshotAsync(cancellationToken), envelope.RequestId);
                 if (CurrentSettings.AiProvider == AiProviderKind.MissumAiServer
@@ -1172,6 +1174,7 @@ public sealed partial class AssistantCoordinator(
         PromptTriggerAction.Translation => "translation",
         PromptTriggerAction.WebSearch => "webSearch",
         PromptTriggerAction.PlanMode => "planMode",
+        PromptTriggerAction.Lean => "lean",
         _ => throw new ArgumentOutOfRangeException(nameof(action), action, "Die Promptaktion ist nicht über das Werkzeugmenü auswählbar."),
     };
 
@@ -1206,6 +1209,7 @@ public sealed partial class AssistantCoordinator(
         "translation" => BuiltInActionIds.Translate,
         "videoAnalysis" => BuiltInActionIds.VideoAnalysis,
         "webSearch" => BuiltInActionIds.WebSearch,
+        "lean" => BuiltInActionIds.Lean,
         _ => throw new ArgumentException("Die ausgewählte Tool-Aktion ist nicht bekannt.", nameof(toolAction)),
     };
 
@@ -1711,6 +1715,7 @@ public sealed partial class AssistantCoordinator(
         try
         {
             if (previous is not null) await previous.WaitAsync(cancellationToken).ConfigureAwait(false);
+            await missumAi!.StopPersistedRunsAtStartupAsync(cancellationToken).ConfigureAwait(false);
             await missumAi!.ResumePendingAsync(update => EmitMissumAiUpdateAsync(update, emit, requestId), cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }

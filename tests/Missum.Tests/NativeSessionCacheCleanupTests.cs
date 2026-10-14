@@ -10,6 +10,47 @@ namespace Missum.Tests;
 public sealed class NativeSessionCacheCleanupTests
 {
     [Fact]
+    public async Task RealControlRequestHasContentLengthAndClearsTheDurableQueue()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        using var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        listener.Start();
+        var profile = Profile(environment.Directory) with
+        { NativeControlPort = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port };
+        var target = Session(ChatMode.General);
+        var service = new NativeSessionCacheCleanupService(profile, null, () => true);
+        await service.DeleteSessionsAsync([target]);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var received = Task.Run(async () =>
+        {
+            using var peer = await listener.AcceptTcpClientAsync(timeout.Token);
+            await using var stream = peer.GetStream();
+            using var reader = new StreamReader(stream, leaveOpen: true);
+            var length = 0;
+            var chunked = false;
+            string? line;
+            while (!string.IsNullOrEmpty(line = await reader.ReadLineAsync(timeout.Token)))
+            {
+                if (line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase))
+                    length = int.Parse(line.AsSpan("Content-Length:".Length), System.Globalization.CultureInfo.InvariantCulture);
+                chunked |= line.Contains("chunked", StringComparison.OrdinalIgnoreCase);
+            }
+            var body = new char[length];
+            Assert.Equal(length, await reader.ReadBlockAsync(body.AsMemory(), timeout.Token));
+            var response = System.Text.Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nContent-Length: 20\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"status\":\"deleted\"}");
+            await stream.WriteAsync(response, timeout.Token);
+            return (length, chunked, body: new string(body));
+        }, timeout.Token);
+        Assert.True(await service.FlushAsync(timeout.Token));
+        var request = await received;
+        Assert.True(request.length > 0);
+        Assert.False(request.chunked);
+        Assert.Contains(target.Id.ToString("D"), request.body, StringComparison.Ordinal);
+        using var queue = JsonDocument.Parse(await File.ReadAllTextAsync(service.QueuePath, timeout.Token));
+        Assert.Empty(queue.RootElement.EnumerateObject());
+    }
+
+    [Fact]
     public async Task OfflineDeletionRemovesOnlyOwnedSnapshotsIncludingDelegatedSessionsAndKeepsDurableQueue()
     {
         await using var environment = await TestEnvironment.CreateAsync();

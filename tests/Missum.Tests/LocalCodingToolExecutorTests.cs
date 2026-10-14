@@ -8,6 +8,16 @@ namespace Missum.Tests;
 
 public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
 {
+    [Fact]
+    public async Task HugeSingleLineScientificResultIsRejectedBeforeJsonReceiptAllocation()
+    {
+        var path = Path.Combine(_root, "huge-result.json");
+        await using (var stream = File.Create(path)) stream.SetLength(9 * 1024 * 1024);
+        var error = await Assert.ThrowsAsync<InvalidDataException>(() => Execute("coding.read", new { path = "huge-result.json" }));
+        Assert.Contains("8 MiB", error.Message);
+        Assert.Contains("Auswertungsskript", error.Message);
+        Assert.Equal(9 * 1024 * 1024, new FileInfo(path).Length);
+    }
     [Theory]
     [InlineData("\n")]
     [InlineData("\r\n")]

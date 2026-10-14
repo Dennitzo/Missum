@@ -66,21 +66,42 @@ public sealed class ResearchSandboxServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task ChangeSetRestoresAiEditsAndKeepsExternalEditsForManualRecovery()
+    public async Task EditsUseOneProjectTreeAndRetainOnlyHashMetadata()
     {
         var layout = await _service.EnsureProjectAsync("research-project-2");
         var first = await _service.WriteTextAsync("research-project-2", "analysis.py", "print('before')");
         var second = await _service.WriteTextAsync("research-project-2", "analysis.py", "print('after')", first.AfterSha256);
 
-        await _service.RestoreChangeSetAsync("research-project-2", second.ChangeSetId);
-        Assert.Equal("print('before')", await File.ReadAllTextAsync(Path.Combine(layout.WorkPath, "analysis.py")));
+        Assert.Equal("print('after')", await File.ReadAllTextAsync(Path.Combine(layout.WorkPath, "analysis.py")));
+        Assert.Empty(Directory.EnumerateFileSystemEntries(layout.SnapshotsPath));
+        Assert.True(File.Exists(Path.Combine(layout.RunsPath, "edit-" + second.ChangeSetId + ".json")));
+        var unavailable = await Assert.ThrowsAsync<InvalidOperationException>(() => _service.RestoreChangeSetAsync("research-project-2", second.ChangeSetId));
+        Assert.Contains("ohne Dateirevisionen", unavailable.Message, StringComparison.Ordinal);
 
-        var third = await _service.WriteTextAsync("research-project-2", "analysis.py", "print('model')");
         await File.WriteAllTextAsync(Path.Combine(layout.WorkPath, "analysis.py"), "print('manual')");
-        var exception = await Assert.ThrowsAsync<IOException>(() => _service.RestoreChangeSetAsync("research-project-2", third.ChangeSetId));
-        Assert.Contains("Recovery-Bundle", exception.Message);
+        var exception = await Assert.ThrowsAsync<IOException>(() => _service.WriteTextAsync("research-project-2", "analysis.py", "print('model')", second.AfterSha256));
+        Assert.Contains("nichts überschrieben", exception.Message);
         Assert.Equal("print('manual')", await File.ReadAllTextAsync(Path.Combine(layout.WorkPath, "analysis.py")));
-        Assert.Contains(Directory.GetDirectories(layout.SnapshotsPath), path => Path.GetFileName(path).StartsWith("recovery-", StringComparison.Ordinal));
+        Assert.Empty(Directory.EnumerateFileSystemEntries(layout.SnapshotsPath));
+    }
+
+    [Fact]
+    public async Task PreexistingLegacyRevisionCanStillBeRestored()
+    {
+        var layout = await _service.EnsureProjectAsync("legacy-edit");
+        var change = await _service.WriteTextAsync(layout.ProjectId, "analysis.py", "print('after')");
+        var legacy = Path.Combine(layout.SnapshotsPath, change.ChangeSetId);
+        Directory.CreateDirectory(legacy);
+        await File.WriteAllTextAsync(Path.Combine(legacy, "before.bin"), "print('before')");
+        await File.WriteAllTextAsync(Path.Combine(legacy, "manifest.json"), System.Text.Json.JsonSerializer.Serialize(new
+        {
+            projectId = layout.ProjectId, changeSetId = change.ChangeSetId, relativePath = change.RelativePath,
+            afterSha256 = change.AfterSha256, isNewFile = false,
+        }));
+
+        await _service.RestoreChangeSetAsync(layout.ProjectId, change.ChangeSetId);
+
+        Assert.Equal("print('before')", await File.ReadAllTextAsync(Path.Combine(layout.WorkPath, "analysis.py")));
     }
 
     [Fact]
@@ -105,10 +126,12 @@ public sealed class ResearchSandboxServiceTests : IDisposable
         var runtime = await _service.PrepareRuntimeAsync(timeout.Token);
         Assert.True(runtime.IsReady, runtime.Detail);
         var layout = await _service.EnsureProjectAsync("live-science", timeout.Token);
+        await _service.WriteTextAsync("live-science", "measured_dependency.py", "VALUE = 'isolated sibling import works'", cancellationToken: timeout.Token);
         await _service.WriteTextAsync("live-science", "verify.py", """
             import json, socket
             import numpy as np
             import sympy as sp
+            from measured_dependency import VALUE
             x = sp.Symbol("x")
             value = sp.expand((x + 1) ** 2)
             network_blocked = False
@@ -122,7 +145,8 @@ public sealed class ResearchSandboxServiceTests : IDisposable
             except OSError:
                 root_read_only = True
             print(json.dumps({"symbolic": str(value), "numeric": float(np.sqrt(2)),
-                              "networkBlocked": network_blocked, "rootReadOnly": root_read_only}))
+                              "networkBlocked": network_blocked, "rootReadOnly": root_read_only,
+                              "dependency": VALUE}))
             """, cancellationToken: timeout.Token);
 
         var result = await _service.RunPythonAsync("live-science", "verify.py", timeoutSeconds: 120,
@@ -134,6 +158,8 @@ public sealed class ResearchSandboxServiceTests : IDisposable
         Assert.Contains("1.4142135623730951", result.StandardOutput, StringComparison.Ordinal);
         Assert.Contains("\"networkBlocked\": true", result.StandardOutput, StringComparison.Ordinal);
         Assert.Contains("\"rootReadOnly\": true", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("isolated sibling import works", result.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("work/measured_dependency.py", result.InputHashes!.Keys);
         var manifest = await File.ReadAllTextAsync(Path.Combine(layout.RunsPath, result.RunId + ".json"), timeout.Token);
         Assert.Contains("docker --network none", manifest, StringComparison.Ordinal);
         Assert.Contains("scriptSha256", manifest, StringComparison.Ordinal);

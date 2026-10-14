@@ -13,6 +13,18 @@ spec.loader.exec_module(catalog)
 
 
 class GpuPlacementTests(unittest.TestCase):
+    def test_unknown_future_model_is_capped_in_every_loading_policy(self):
+        model = dict(context=2_000_000, role="general")
+        for placement in (None, "CUDA0"):
+            policy = catalog.model_runtime_policy(model, placement)
+            self.assertEqual(policy["context"], 258_000)
+            self.assertEqual(policy["contextMaximum"], 258_000)
+        with patch.dict(catalog.os.environ, {"MISSUM_NATIVE_MULTI_GPU_CONTEXT_LIMIT": "1048576"}):
+            self.assertEqual(catalog.model_runtime_policy(model, split_mode="tensor")["context"], 258_000)
+        measured = catalog.measured_model_policy(model, dict(split="layer", id="test-profile"), "2048")
+        self.assertEqual(measured["context"], 258_000)
+        self.assertEqual(catalog.model_runtime_policy(dict(model, context=8192))["context"], 8192)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -63,7 +75,7 @@ class GpuPlacementTests(unittest.TestCase):
         self.assertEqual(attempts, ["CUDA0", None])
         block = manager.preset.read_text().split("[" + self.model["id"] + "]")[1].split("\n[")[0]
         self.assertNotIn("device =", block)
-        self.assertNotIn("ctx-size", block)
+        self.assertIn("ctx-size = 32768", block)
         self.assertIn('"outcome": "failed"', (self.root / "gpu-placement.jsonl").read_text())
 
     def test_non_memory_failure_does_not_repeat(self):
@@ -276,9 +288,9 @@ class MeasuredModelProfileTests(unittest.TestCase):
         self.assertNotIn("GGML_CUDA_DISABLE_GRAPHS", child)
         policy, = attempts
         self.assertEqual((policy["split"], policy["context"], policy["fit"], policy["gpuLayers"]),
-                         ("tensor", 1048576, "off", "999"))
+                         ("tensor", 258000, "off", "999"))
         block = manager.preset.read_text().split("[" + self.model["id"] + "]", 1)[1].split("\n[")[0]
-        for parameter in ("mmproj-device = CUDA1", "batch-size = 256", "ubatch-size = 256", "ctx-size = 1048576",
+        for parameter in ("mmproj-device = CUDA1", "batch-size = 256", "ubatch-size = 256", "ctx-size = 258000",
                           "device = CUDA0,CUDA1", "tensor-split = 1,1"):
             self.assertIn(parameter, block)
         fingerprint = manager.session_fingerprint(self.model["id"])
@@ -405,7 +417,7 @@ class MeasuredModelProfileTests(unittest.TestCase):
                 result, _ = self.load(manager)
                 self.assertTrue(result["fallback"])
                 self.assertEqual([policy["split"] for policy in attempts], ["tensor", "layer"])
-                self.assertTrue(all(policy["context"] == 1048576 and policy["fit"] == "off" for policy in attempts))
+                self.assertTrue(all(policy["context"] == 258000 and policy["fit"] == "off" for policy in attempts))
                 self.assertEqual(attempts[1]["mmprojDevice"], "CUDA1")
 
     def test_unrelated_model_error_has_no_tensor_fallback(self):
@@ -421,7 +433,7 @@ class MeasuredModelProfileTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.load(manager)
         self.assertEqual([policy["split"] for policy in attempts], ["tensor", "layer"])
-        self.assertTrue(all(policy["context"] == 1048576 for policy in attempts))
+        self.assertTrue(all(policy["context"] == 258000 for policy in attempts))
 
     def layer_profile(self):
         profile = dict(self.profile, split="layer", batchSize=512, ubatchSize=128)
@@ -438,7 +450,7 @@ class MeasuredModelProfileTests(unittest.TestCase):
         self.assertEqual(child["GGML_CUDA_DISABLE_GRAPHS"], "1")
         policy, = attempts
         self.assertEqual((policy["split"], policy["context"], policy["fit"], policy["gpuLayers"]),
-                         ("layer", 1048576, "off", "999"))
+                         ("layer", 258000, "off", "999"))
         self.assertNotIn("allReduce", policy)
         fingerprint = manager.session_fingerprint(self.model["id"])
         self.assertEqual(fingerprint["runtimePolicy"]["batchSize"], 128)
@@ -551,7 +563,7 @@ class MeasuredModelProfileTests(unittest.TestCase):
         policy, = attempts
         self.assertEqual((policy["batchSize"], policy["ubatchSize"]), (256, 256))
         self.assertEqual((policy["context"], policy["contextMaximum"], policy["contextPolicy"]),
-                         (1048576, 1048576, "model-maximum"))
+                         (258000, 258000, "application-limit"))
         self.assertEqual((policy["cacheK"], policy["cacheV"], policy["split"], policy["mmprojDevice"]),
                          ("q8_0", "q8_0", "layer", "CUDA1"))
         self.assertEqual((policy["devices"], policy["tensorSplit"]), ("CUDA0,CUDA1", "1,1"))
@@ -574,7 +586,7 @@ class MeasuredModelProfileTests(unittest.TestCase):
                 block = text.split("[" + model["id"] + "]", 1)[1].split("\n[")[0]
                 self.assertIn("batch-size = 256\nubatch-size = 256", block)
                 self.assertIn("mmproj-device = CUDA1", block)
-                self.assertIn("ctx-size = 1048576", block)
+                self.assertIn("ctx-size = 258000", block)
 
     def test_same_effective_vision_batch_has_same_cache_identity_after_actual_reload(self):
         profile = dict(self.layer_profile(), batchSize=1024, ubatchSize=256)
@@ -595,7 +607,7 @@ class MeasuredModelProfileTests(unittest.TestCase):
         policy = catalog.measured_model_policy(text_model, self.profile, "2048")
         self.assertEqual((policy["batchSize"], policy["ubatchSize"]), (1024, 256))
         self.assertEqual((policy["context"], policy["split"], policy["mmprojDevice"]),
-                         (1048576, "tensor", "CUDA1"))
+                         (258000, "tensor", "CUDA1"))
 
 
 if __name__ == "__main__":

@@ -13,6 +13,31 @@ namespace Missum.Tests;
 
 public sealed class ScientificPublicationTests(ITestOutputHelper output)
 {
+    [Fact]
+    public async Task InterruptedSourceReplacementCannotReuseAnOldPdfAsANewPublication()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var (repository, project) = await CreateProjectAsync(environment);
+        var rendered = 0;
+        using var service = new ScientificPublicationService(repository, async (source, token) =>
+        { rendered++; return await FakePdfAsync(source, token); }, Path.Combine(environment.Directory, "publications"));
+        var first = (await service.EnsureCurrentAsync(project.Id))!;
+        var result = new ResearchResultSnapshot([], [], [],
+            [new("claim-pair", project.Id, "Geänderter Inhalt $x=2$.", "calculated", "supported", 1, "{}", DateTimeOffset.UtcNow)]);
+        await repository.SaveResultSnapshotAsync(project.Id, result);
+        var updatedMarkdown = ScientificPublicationService.FormatPublication(project, result, [], [], null);
+        // Reproduce a crash between replacing source and PDF. The old receipt
+        // still binds the old pair and must prevent the optimistic reuse path.
+        await File.WriteAllTextAsync(first.MarkdownPath, updatedMarkdown);
+        var current = (await service.EnsureCurrentAsync(project.Id))!;
+        Assert.Equal(2, rendered);
+        Assert.Equal(first.PdfPath, current.PdfPath);
+        Assert.Equal(updatedMarkdown, await File.ReadAllTextAsync(current.MarkdownPath));
+        using var marker = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(Path.GetDirectoryName(current.PdfPath)!, "publication.json")));
+        Assert.Equal(current.ContentHash, marker.RootElement.GetProperty("fingerprint").GetString());
+        Assert.Equal(Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(current.PdfPath))),
+            marker.RootElement.GetProperty("pdfSha256").GetString());
+    }
     private const string UnitDerivationMarkdown = """
         ## Vollständiger Rechenweg: kinetische Energie
 
@@ -182,8 +207,10 @@ public sealed class ScientificPublicationTests(ITestOutputHelper output)
         Assert.NotNull(next);
         Assert.Equal(first.Revision, next.Revision);
         Assert.NotEqual(first.ContentHash, next.ContentHash);
-        Assert.NotEqual(first.PdfPath, next.PdfPath);
+        Assert.Equal(first.PdfPath, next.PdfPath);
         Assert.True(File.Exists(first.PdfPath));
+        Assert.Equal("current", Path.GetFileName(Path.GetDirectoryName(next.PdfPath)));
+        Assert.Single(Directory.GetDirectories(Path.GetDirectoryName(Path.GetDirectoryName(next.PdfPath)!)!));
         Assert.Contains("$x=2$", await File.ReadAllTextAsync(next.MarkdownPath));
     }
 

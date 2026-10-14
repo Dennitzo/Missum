@@ -41,8 +41,9 @@ public sealed partial class LocalToolBroker(
         Func<CodingCommandProgress, Task>? commandProgress = null,
         CodingRunEvidenceStore? evidenceStore = null,
         PromptTriggerAction? runAction = null,
+        Uri? gatewayOverride = null,
         CancellationToken cancellationToken = default) => ExecuteForAgentAsync(proposal, sessionId, assistantMessageId,
-            codingWorkspacePath, commandProgress, evidenceStore, runAction, null, cancellationToken);
+            codingWorkspacePath, commandProgress, evidenceStore, runAction, null, gatewayOverride, cancellationToken);
 
     internal async Task<ClientToolResult> ExecuteForAgentAsync(
         ToolProposal proposal,
@@ -53,6 +54,7 @@ public sealed partial class LocalToolBroker(
         CodingRunEvidenceStore? evidenceStore = null,
         PromptTriggerAction? runAction = null,
         string? researchActorAgentId = null,
+        Uri? gatewayOverride = null,
         CancellationToken cancellationToken = default)
     {
         try
@@ -87,9 +89,9 @@ public sealed partial class LocalToolBroker(
                     ? await reviewRepository.LoadExecutionVerificationsAsync(projectId, cancellationToken).ConfigureAwait(false) : [];
                 if (receipts is not null) receipts = receipts with { Verifications = protectedChecks };
                 var checkedPresentation = sciencePresentation.GetSnapshot(projectId);
-                var verified = await ScientificDeliverablesVerifier.VerifyAsync(projectId,
+                var verified = await ScientificDeliverablesVerifier.VerifyWithVisualInspectionAsync(projectId,
                     checkedPresentation, workingState, receipts, archive.Works ?? [], archive.Evidence ?? [],
-                    cancellationToken).ConfigureAwait(false);
+                    true, cancellationToken).ConfigureAwait(false);
                 if (workingState is not null && scientificResearch is Missum.Core.Research.IScientificResearchStateRepository reviewStore)
                 {
                     var currentState = await reviewStore.LoadWorkingStateAsync(projectId, cancellationToken).ConfigureAwait(false);
@@ -103,8 +105,8 @@ public sealed partial class LocalToolBroker(
                         sciencePresentation.Queue(projectId);
                         await sciencePresentation.WaitForIdleAsync(projectId, cancellationToken).ConfigureAwait(false);
                         checkedPresentation = sciencePresentation.GetSnapshot(projectId);
-                        verified = await ScientificDeliverablesVerifier.VerifyAsync(projectId, checkedPresentation, workingState,
-                            receipts, archive.Works ?? [], archive.Evidence ?? [], cancellationToken).ConfigureAwait(false);
+                        verified = await ScientificDeliverablesVerifier.VerifyWithVisualInspectionAsync(projectId, checkedPresentation, workingState,
+                            receipts, archive.Works ?? [], archive.Evidence ?? [], true, cancellationToken).ConfigureAwait(false);
                         currentState = await reviewStore.LoadWorkingStateAsync(projectId, cancellationToken).ConfigureAwait(false);
                         if (!ScientificResearchReviewPersistence.IsCurrent(workingState, checkedPresentation,
                             currentState, sciencePresentation.GetSnapshot(projectId)))
@@ -158,6 +160,7 @@ public sealed partial class LocalToolBroker(
                     proposal,
                     codingWorkspacePath,
                     commandProgress,
+                    gatewayOverride,
                     cancellationToken).ConfigureAwait(false);
                 var workspaceJson = JsonSerializer.SerializeToElement(workspaceResult, JsonOptions);
                 var failed = workspaceJson.TryGetProperty("success", out var ok) && ok.ValueKind == JsonValueKind.False;
@@ -167,14 +170,15 @@ public sealed partial class LocalToolBroker(
             var coding = proposal.Name.StartsWith("coding.", StringComparison.Ordinal);
             var scientific = proposal.Name.StartsWith("math.", StringComparison.Ordinal)
                 || proposal.Name.StartsWith("research.code.", StringComparison.Ordinal);
-            if (scientific && await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false) is { ChatMode: ChatMode.ClaudeScience } scienceSession)
+            if (scientific && await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false) is { } scienceSession
+                && (scienceSession.ChatMode == ChatMode.ClaudeScience || proposal.Name == ClientToolNames.MathFormalProof))
             {
                 var scienceResult = await ExecuteScienceSandboxToolAsync(proposal, scienceSession, cancellationToken).ConfigureAwait(false);
                 var scienceJson = JsonSerializer.SerializeToElement(scienceResult, JsonOptions);
                 var failed = scienceJson.TryGetProperty("success", out var success) && success.ValueKind == JsonValueKind.False;
                 return Result(proposal, failed ? "failed" : "completed", scienceResult,
                     failed ? "client.scientific_tool_failed" : null,
-                    failed ? "Das wissenschaftliche Werkzeug meldete eine fehlgeschlagene Ausführung oder Prüfung." : null);
+                    failed ? ScientificFailureMessage(scienceJson) : null);
             }
             if ((coding || scientific) && string.IsNullOrWhiteSpace(codingWorkspacePath))
             {
@@ -225,6 +229,11 @@ public sealed partial class LocalToolBroker(
                 }
                 if (proposal.Name == "coding.renderHtml")
                     return Result(proposal, "completed", CodingSessionTools.RenderReceipt(proposal.Arguments));
+                using var projectLease = proposal.Name is "coding.write" or "coding.edit" or "coding.undo" or "coding.command"
+                    && researchSandbox is not null && (await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false))?.ChatMode == ChatMode.ClaudeScience
+                    ? await ResearchSandboxService.AcquireProjectExecutionAsync(
+                        await researchSandbox.EnsureProjectAsync("research-" + sessionId.ToString("N"), cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false)
+                    : null;
                 using var evidence = evidenceStore?.BeginStep(proposal.ProposalId, proposal.Name, proposal.Arguments);
                 var codingResult = await new LocalCodingToolExecutor(codingWorkspacePath!, commandProgress, evidence)
                     .ExecuteAsync(proposal.Name, proposal.Arguments, cancellationToken).ConfigureAwait(false);
@@ -291,6 +300,21 @@ public sealed partial class LocalToolBroker(
         }
     }
 
+    private static string ScientificFailureMessage(JsonElement result)
+    {
+        if (result.TryGetProperty("lean", out var lean) && lean.ValueKind == JsonValueKind.Object)
+        {
+            var details = lean.TryGetProperty("message", out var message) && message.ValueKind == JsonValueKind.String
+                ? message.GetString() : null;
+            if (string.IsNullOrWhiteSpace(details) && lean.TryGetProperty("diagnostics", out var diagnostics)
+                && diagnostics.ValueKind == JsonValueKind.Array)
+                details = string.Join("\n", diagnostics.EnumerateArray().Where(static line => line.ValueKind == JsonValueKind.String)
+                    .Select(static line => line.GetString()).Where(static line => !string.IsNullOrWhiteSpace(line)).Take(6));
+            if (!string.IsNullOrWhiteSpace(details)) return "Lean-Prüfung fehlgeschlagen: " + details[..Math.Min(details.Length, 1200)];
+        }
+        return "Das wissenschaftliche Werkzeug meldete eine fehlgeschlagene Ausführung oder Prüfung.";
+    }
+
     private async Task<object> ExecuteScienceSandboxToolAsync(ToolProposal proposal, ChatSession session, CancellationToken cancellationToken)
     {
         var sandbox = researchSandbox ?? throw new InvalidOperationException("Die isolierte Claude-Science-Sandbox ist nicht verfügbar. Das Tool fällt nicht auf Windows-Prozessausführung zurück.");
@@ -333,27 +357,9 @@ public sealed partial class LocalToolBroker(
         string scriptPath;
         if (proposal.Name == ClientToolNames.MathFormalProof)
         {
-            var source = proposal.Arguments.GetProperty("source").GetString()!;
-            LeanProofSourceContract.Validate(source);
             var stem = "generated/proof-" + Guid.NewGuid().ToString("N");
-            await sandbox.WriteTextAsync(projectId, stem + ".lean", source, cancellationToken: cancellationToken).ConfigureAwait(false);
             scriptPath = stem + ".py";
-            script = """
-                import hashlib, json, pathlib, shutil, subprocess, sys
-                source = pathlib.Path(__file__).with_suffix(".lean")
-                compiler = shutil.which("lean")
-                if compiler is None:
-                    print(json.dumps({"success": False, "formalVerification": "NotEstablished", "error": "Lean is not installed in this research-runner image."}))
-                    sys.exit(127)
-                version = subprocess.run([compiler, "--version"], capture_output=True, text=True, check=False)
-                result = subprocess.run([compiler, "-DwarningAsError=true", str(source)], capture_output=True, text=True, check=False)
-                verified = version.returncode == 0 and result.returncode == 0
-                print(json.dumps({"success": verified, "formalVerification": "KernelAccepted" if verified else "NotEstablished",
-                                  "compiler": compiler, "version": version.stdout.strip(), "exitCode": result.returncode,
-                                  "sourceSha256": hashlib.sha256(source.read_bytes()).hexdigest(),
-                                  "stdout": result.stdout, "stderr": result.stderr, "sourceContract": "declarative-lean-no-admissions-or-metaprogramming"}))
-                sys.exit(0 if verified else (result.returncode or 1))
-                """;
+            script = LeanProofHarness.CreateScript(proposal.Arguments);
         }
         else if (proposal.Name == ClientToolNames.MathSymbolic)
         {
@@ -416,11 +422,45 @@ public sealed partial class LocalToolBroker(
                 throw new ArgumentException("Ein Benchmark benötigt zwischen 2 und 20 Wiederholungen.");
         }
         var results = new List<Missum.Core.Research.ResearchSandboxRunResult>(repetitions);
-        for (var index = 0; index < repetitions; index++)
+        Missum.Core.Research.ResearchSandboxRunResult? leanPreparation = null;
+        var preparationFailed = false;
+        var executionBudget = System.Diagnostics.Stopwatch.StartNew();
+        if (proposal.Name == ClientToolNames.MathFormalProof
+            && (!proposal.Arguments.TryGetProperty("operation", out var leanOperation) || leanOperation.GetString() != "initialize"))
         {
-            results.Add(await sandbox.RunPythonAsync(projectId, scriptPath, arguments, timeout, workingDirectory, cancellationToken).ConfigureAwait(false));
+            // Generated Lean sources must exist before the measured compiler run.
+            // Keep the same provenance boundary used by Python experiments.
+            leanPreparation = await sandbox.RunPythonAsync(projectId, scriptPath, ["--missum-prepare-only"], timeout,
+                workingDirectory, cancellationToken).ConfigureAwait(false);
+            preparationFailed = leanPreparation.ExitCode != 0 || leanPreparation.TimedOut;
+            try
+            {
+                var prepared = JsonSerializer.Deserialize<JsonElement>(leanPreparation.StandardOutput);
+                preparationFailed |= !prepared.TryGetProperty("success", out var preparedSuccess) || preparedSuccess.ValueKind != JsonValueKind.True
+                    || !prepared.TryGetProperty("prepared", out var preparedFlag) || preparedFlag.ValueKind != JsonValueKind.True;
+            }
+            catch (JsonException) { preparationFailed = true; }
+            if (preparationFailed) results.Add(leanPreparation);
         }
-        var succeeded = results.All(static run => run.ExitCode == 0 && !run.TimedOut);
+        for (var index = 0; index < repetitions && !preparationFailed; index++)
+        {
+            var remaining = Math.Max(1, timeout - (int)executionBudget.Elapsed.TotalSeconds);
+            results.Add(await sandbox.RunPythonAsync(projectId, scriptPath, arguments, remaining, workingDirectory, cancellationToken).ConfigureAwait(false));
+        }
+        var succeeded = !preparationFailed && results.All(static run => run.ExitCode == 0 && !run.TimedOut);
+        JsonElement? leanReceipt = null;
+        var formalAccepted = false;
+        if (proposal.Name == ClientToolNames.MathFormalProof)
+        {
+            try { leanReceipt = JsonSerializer.Deserialize<JsonElement>(results[0].StandardOutput); }
+            catch (JsonException) { succeeded = false; }
+            succeeded = succeeded && leanReceipt is { ValueKind: JsonValueKind.Object } lean
+                && lean.TryGetProperty("success", out var leanSuccess) && leanSuccess.ValueKind == JsonValueKind.True;
+            formalAccepted = succeeded && leanReceipt is { } checkedLean
+                && checkedLean.TryGetProperty("formalVerification", out var verification) && verification.GetString() == "KernelAccepted"
+                && checkedLean.TryGetProperty("axiomAudit", out var audit) && audit.GetString() == "passed"
+                && checkedLean.TryGetProperty("proofs", out var proofs) && proofs.ValueKind == JsonValueKind.Array && proofs.GetArrayLength() > 0;
+        }
         var experimentId = proposal.Arguments.TryGetProperty("experimentId", out var experiment) ? experiment.GetString()
             : "math-" + proposal.ProposalId;
         var project = scientificResearch is null ? null
@@ -438,7 +478,11 @@ public sealed partial class LocalToolBroker(
             processIsolation = "Docker cgroup and read-only container filesystem", networkIsolation = "Docker network none",
             resourceLimits = new { cpuCores = 16, memory = "48g", projectStorage = "100g", maximumStageSeconds = 7200 },
             verificationStatus = succeeded ? "ProcessSucceeded" : "ProcessFailed",
-            formalVerification = proposal.Name == ClientToolNames.MathFormalProof ? (succeeded ? "KernelAccepted" : "NotEstablished") : null,
+            formalVerification = proposal.Name == ClientToolNames.MathFormalProof ? (formalAccepted ? "KernelAccepted" : "NotEstablished") : null,
+            lean = leanReceipt,
+            preparation = leanPreparation is null ? null : new { leanPreparation.RunId, leanPreparation.ExitCode, leanPreparation.TimedOut,
+                leanPreparation.StandardOutput, leanPreparation.StandardError, leanPreparation.SnapshotId,
+                leanPreparation.InputHashes, leanPreparation.OutputHashes },
             runs = results.Select(static run => new { run.RunId, run.ExitCode, run.TimedOut, run.StandardOutput, run.StandardError,
                 run.StartedAt, run.CompletedAt, run.Command, run.ExecutedScriptPath, run.ScriptSha256, run.SnapshotId, run.InputHashes, run.OutputHashes }) };
         if (JsonSerializer.SerializeToUtf8Bytes(receipt, JsonOptions).Length >= AssistantToolStep.MaximumStructuredJsonCharacters - 1024)

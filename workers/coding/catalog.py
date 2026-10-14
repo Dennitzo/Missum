@@ -385,6 +385,18 @@ def vision_batch_policy(model, policy):
     return safe
 
 
+# Keep in sync with ModelContextProfiles.ApplicationMaximum. This is a ceiling,
+# never an instruction to expand a model with a smaller training window.
+APPLICATION_CONTEXT_MAXIMUM = 258_000
+
+
+def limit_context_policy(model, policy):
+    maximum = min(model["context"], APPLICATION_CONTEXT_MAXIMUM)
+    context = min(policy.get("context") or maximum, maximum)
+    return dict(policy, context=context, contextMaximum=maximum,
+                contextPolicy="application-limit" if model["context"] > maximum else policy["contextPolicy"])
+
+
 def model_runtime_policy(model, placement=None, *, split_mode="layer", fit_target="2048", gpu_layers="auto"):
     """Resolve once before a load; active KV must not follow later environment changes."""
     embedding = model["role"] == "embedding"
@@ -405,7 +417,7 @@ def model_runtime_policy(model, placement=None, *, split_mode="layer", fit_targe
                              "Choose a measured VRAM-safe limit, or use split mode layer for automatic fitting.")
         policy.update(fit="off", gpuLayers="999", context=min(model["context"], int(value)),
                       contextPolicy="explicit-limit")
-    return vision_batch_policy(model, policy)
+    return vision_batch_policy(model, limit_context_policy(model, policy))
 
 
 def write_presets(root, target, placements=None, managed_gpu=False, fit_target="2048", gpu_layers="auto",
@@ -456,7 +468,7 @@ def write_presets(root, target, placements=None, managed_gpu=False, fit_target="
             # override is validated/applied only at the next actual load.
             policy = model_runtime_policy(model, placement, split_mode="layer" if managed_gpu else multi_gpu_split_mode(),
                                           fit_target=fit_target, gpu_layers=gpu_layers)
-        policy = vision_batch_policy(model, policy)
+        policy = vision_batch_policy(model, limit_context_policy(model, policy))
         if placement:
             lines += [f"device = {placement}", "main-gpu = 0"]
             if model.get("projector"):
@@ -477,10 +489,9 @@ def write_presets(root, target, placements=None, managed_gpu=False, fit_target="
             lines += ["embedding = true", f"pooling = {model['pooling']}", f"batch-size = {model['context']}",
                       f"ubatch-size = {model['context']}", "cache-type-k = f16", "cache-type-v = f16", "flash-attn = off"]
         else:
-            # Automatic layer fitting omits ctx-size: llama starts at the GGUF
-            # maximum and reduces it only when required by device memory.
-            # Manual tensor mode instead has an explicit, validated limit.
-            # Explicit ctx-size=0 disables that reduction in llama/common/arg.cpp.
+            # An explicit product ceiling applies to every current/future model,
+            # including supplied measured policies and delegated model instances.
+            # Training metadata stays unchanged; it cannot expand the usable window.
             lines += ["cache-type-k = q8_0", "cache-type-v = q8_0", "flash-attn = on", "predict = -1",
                       "reasoning-budget = -1", "reasoning = on" if model["reasoning"]["enabled"] else "reasoning = auto"]
             if model["reasoning"]["effort"]:
@@ -663,7 +674,7 @@ def matching_model_load_profile(profiles, model, binary, gpus):
 
 
 def measured_model_policy(model, profile, fit_target):
-    # A measured local profile always retains the native training maximum.
+    # Reuse measured GPU placement, subject to the product-wide context ceiling.
     policy = model_runtime_policy(model, fit_target=fit_target)
     policy.update(split=profile["split"], fit="off", gpuLayers="999", context=model["context"],
                   contextPolicy="model-maximum", profileId=profile["id"],
@@ -673,7 +684,7 @@ def measured_model_policy(model, profile, fit_target):
     for key in ("mmprojDevice", "batchSize", "ubatchSize"):
         if key in profile:
             policy[key] = profile[key]
-    return vision_batch_policy(model, policy)
+    return vision_batch_policy(model, limit_context_policy(model, policy))
 
 
 def choose_single_gpu(model, devices, reserve_mib=2048):
@@ -799,10 +810,10 @@ class GpuLoadManager:
         metadata = model_metadata(path, allow_metadata_only=True) or {}
         policy = self.policies.get(model_id) or model_runtime_policy(
             model, self.placements.get(model_id), fit_target=self.fit_target, gpu_layers=self.gpu_layers)
-        policy = vision_batch_policy(model, policy)
+        policy = vision_batch_policy(model, limit_context_policy(model, policy))
         # Preserve the existing default layer/single-GPU snapshot identity:
         # the same loaded configuration must not force a large prefix re-eval.
-        fingerprint = dict(version=1, files=identity, context=model["context"], cache="q8_0", slots=1,
+        fingerprint = dict(version=1, files=identity, context=min(model["context"], APPLICATION_CONTEXT_MAXIMUM), cache="q8_0", slots=1,
                            template=german_reasoning_template(metadata.get("tokenizer.chat_template", "")),
                            placement=self.placements.get(model_id), fit=self.fit_target, gpuLayers=self.gpu_layers,
                            split="layer" if policy["split"] == "none" else policy["split"])

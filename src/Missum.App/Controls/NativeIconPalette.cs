@@ -11,7 +11,7 @@ public static class NativeIconPalette
     {
         "attachment" or "navigation" or "link" => Color.FromArgb(255, 91, 156, 246),
         "web" => Color.FromArgb(255, 76, 148, 242),
-        "research" or "subagent" => Color.FromArgb(255, 160, 124, 246),
+        "research" or "subagent" or "lean" => Color.FromArgb(255, 160, 124, 246),
         "image" or "video" => Color.FromArgb(255, 231, 104, 171),
         "audio" or "add" or "success" => Color.FromArgb(255, 70, 188, 133),
         "speech" or "captions" or "translate" => Color.FromArgb(255, 51, 184, 207),

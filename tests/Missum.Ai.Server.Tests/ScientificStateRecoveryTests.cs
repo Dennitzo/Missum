@@ -10,6 +10,25 @@ public sealed class ScientificStateRecoveryTests
     private static readonly string[] Capabilities = ["research.deliverables"];
     private static readonly string[] FirstMissing = ["Herleitung fehlt."];
     private static readonly string[] ChangedMissing = ["Die neue Formel ist ungültig."];
+
+    [Fact]
+    public void HundredsOfSameReviewFailuresKeepOnlyInitialAndEscalatedGuidance()
+    {
+        var messages = new List<LmChatMessage> { new("system", "Stable policy"), new("user", "Original task") };
+        string? fingerprint = null;
+        for (var attempt = 0; attempt < 100; attempt++)
+        {
+            var (call, content) = AddStatusVerification(messages, "check-" + attempt, attempt + 1);
+            Assert.Equal(attempt < 2, ScientificStateCompletionPolicy.AppendVerificationRepairPrompt(messages, Request(), call, content));
+            var assessment = Assess(messages);
+            fingerprint ??= assessment.Fingerprint;
+            Assert.Equal(fingerprint, assessment.Fingerprint);
+            messages = ModelRuntimeClient.NormalizeMessageOrderForNativeRuntime(messages).ToList();
+        }
+        Assert.Equal(100, messages.Count(message => message.Role == "tool"));
+        Assert.Equal(2, messages.Count(message => message.Content?.Contains(ScientificStateCompletionPolicy.VerificationRepairMarker, StringComparison.Ordinal) == true));
+        Assert.False(Assess(messages).Complete);
+    }
     private static RunRequest Request() => new(MissumAiProtocol.Version, RunMode.General,
         [new("user", [new("text", Text: "Untersuche den theoretischen Zusammenhang.")])],
         ClientCapabilities: Capabilities, ResearchOptions: new(ProtocolVersion: 2, ProjectId: "research-state"));

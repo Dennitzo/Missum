@@ -148,6 +148,10 @@ public sealed partial class MissumAiAssistantService
                     }, JsonOptions), ContentOffset: retainedContent.Length, StartedAt: DateTimeOffset.UtcNow, UpdatedAt: DateTimeOffset.UtcNow);
                 await chats.SaveToolStepAsync(assistant.Id, preparedReceipt, token).ConfigureAwait(false);
                 await chats.UpdateMessageAsync(assistant.Id, prefix, MessageStatus.Streaming, cancellationToken: token).ConfigureAwait(false);
+                // A new continuation attempt owns a new baseline, captured before
+                // the gateway can execute any work. Only uncertain create recovery
+                // and reconnect retain the exact existing attempt's baseline.
+                await StartFileChangesAsync(localRun, assistant, resume: reusePendingKey, update, token).ConfigureAwait(false);
                 // The frozen request and preserved prefix are durable before creation.
                 // An acceptance lost during shutdown can be recovered with the same key.
                 var accepted = await client.CreateRunAsync(request, key, token).ConfigureAwait(false);
@@ -175,7 +179,6 @@ public sealed partial class MissumAiAssistantService
                 await update(new(MissumAiAssistantUpdateKind.Started, assistant, Session: session,
                     Status: "Lauf wird fortgesetzt", Detail: "Neuer Serverversuch mit ursprünglichem Auftrag und gespeichertem Stand.",
                     ToolStep: receipt, Model: submittedModel, LocalRunId: localRun.Id)).ConfigureAwait(false);
-                await StartFileChangesAsync(localRun, assistant, resume: true, update, token).ConfigureAwait(false);
                 await FlushLiveModelSelectionAsync(token).ConfigureAwait(false);
                 var completed = await StreamRunWithReconnectAsync(localRun, assistant, update, token, client).ConfigureAwait(false);
                 if (session.ChatMode == ChatMode.ClaudeScience && sciencePresentation is not null)

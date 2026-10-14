@@ -12,6 +12,7 @@ public sealed class MissumAiDatabase : IDisposable
     private readonly MissumAiServerOptions _options;
     private readonly JsonSerializerOptions _jsonOptions = MissumAiProtocol.CreateJsonOptions();
     private readonly SemaphoreSlim _initializeGate = new(1, 1);
+    private readonly SemaphoreSlim _maintenanceGate = new(1, 1);
     private volatile bool _initialized;
 
     public MissumAiDatabase(IOptions<MissumAiServerOptions> options)
@@ -42,7 +43,9 @@ public sealed class MissumAiDatabase : IDisposable
 
             await using var connection = await OpenConnectionCoreAsync(cancellationToken).ConfigureAwait(false);
             await using var command = connection.CreateCommand();
-            command.CommandText = Schema;
+            // WAL belongs to the database, not an individual connection. Do
+            // not ask every concurrent status reader to change journal mode.
+            command.CommandText = "PRAGMA journal_mode=WAL;\n" + Schema;
             _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             await ValidateDatabaseAsync(connection, cancellationToken).ConfigureAwait(false);
             _initialized = true;
@@ -61,6 +64,13 @@ public sealed class MissumAiDatabase : IDisposable
 
     public JsonSerializerOptions JsonOptions => _jsonOptions;
 
+    /// <summary>Serialize the two potentially long startup maintenance transactions without blocking a SQLite worker.</summary>
+    internal async Task<IDisposable> EnterMaintenanceAsync(CancellationToken cancellationToken)
+    {
+        await _maintenanceGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        return new MaintenanceLease(_maintenanceGate);
+    }
+
     public static string FormatTimestamp(DateTimeOffset value) =>
         value.UtcDateTime.ToString("O", CultureInfo.InvariantCulture);
 
@@ -70,6 +80,7 @@ public sealed class MissumAiDatabase : IDisposable
     public void Dispose()
     {
         _initializeGate.Dispose();
+        _maintenanceGate.Dispose();
     }
 
     private async Task<SqliteConnection> OpenConnectionCoreAsync(CancellationToken cancellationToken)
@@ -78,15 +89,33 @@ public sealed class MissumAiDatabase : IDisposable
         {
             DataSource = _options.DatabasePath,
             Mode = SqliteOpenMode.ReadWriteCreate,
-            Cache = SqliteCacheMode.Shared,
+            // Shared cache adds table locks on top of WAL. A held status reader
+            // or startup cleanup can then fail recovery with SQLITE_LOCKED and
+            // stop the entire gateway. Private caches retain WAL snapshots and
+            // ordinary SQLite writer arbitration without shared table locks.
+            Cache = SqliteCacheMode.Private,
             Pooling = true,
         };
         var connection = new SqliteConnection(builder.ToString());
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using var command = connection.CreateCommand();
-        command.CommandText = "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;";
-        _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        return connection;
+        try
+        {
+            await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+            await using var command = connection.CreateCommand();
+            command.CommandText = "PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;";
+            _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            return connection;
+        }
+        catch
+        {
+            await connection.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    private sealed class MaintenanceLease(SemaphoreSlim gate) : IDisposable
+    {
+        private SemaphoreSlim? _gate = gate;
+        public void Dispose() => Interlocked.Exchange(ref _gate, null)?.Release();
     }
 
     private static async Task ValidateDatabaseAsync(

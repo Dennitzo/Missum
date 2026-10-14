@@ -33,7 +33,7 @@ public sealed class MaximumGenerationDefaultsTests
 
         var body = Assert.Single(handler.ChatBodies);
         var countBody = Assert.Single(handler.CountBodies);
-        Assert.Equal(context - 7_123 - 1, body.GetProperty("max_tokens").GetInt32());
+        Assert.Equal(Math.Min(context, 258_000) - 7_123 - 1, body.GetProperty("max_tokens").GetInt32());
         Assert.Equal(countBody.GetProperty("messages").GetRawText(), body.GetProperty("messages").GetRawText());
         Assert.Equal(countBody.GetProperty("tools").GetRawText(), body.GetProperty("tools").GetRawText());
         Assert.False(countBody.TryGetProperty("max_tokens", out _));
@@ -49,7 +49,7 @@ public sealed class MaximumGenerationDefaultsTests
             Assert.False(body.TryGetProperty("reasoning_effort", out _));
             Assert.False(body.TryGetProperty("chat_template_kwargs", out _));
         }
-        if (expectedEffort is "high" or "xhigh") Assert.Equal(context - 7_124, body.GetProperty("reasoning_budget_tokens").GetInt32());
+        if (expectedEffort is "high" or "xhigh") Assert.Equal(Math.Min(context, 258_000) - 7_124, body.GetProperty("reasoning_budget_tokens").GetInt32());
         var status = await client.GetStatusAsync();
         Assert.All(status.Models, model => Assert.Equal(expectedEffort, model.DefaultReasoningEffort));
     }
@@ -141,7 +141,7 @@ public sealed class MaximumGenerationDefaultsTests
         {
             Assert.Equal("OK", await client.AnalyzeImagesAsync(modelId, "Describe the image", [imagePath]));
             var body = Assert.Single(handler.ChatBodies);
-            Assert.Equal(7_491, body.GetProperty("max_tokens").GetInt32());
+            Assert.Equal(2_048, body.GetProperty("max_tokens").GetInt32());
             Assert.Equal(Assert.Single(handler.CountBodies).GetProperty("messages").GetRawText(), body.GetProperty("messages").GetRawText());
             var content = body.GetProperty("messages")[1].GetProperty("content");
             Assert.StartsWith("data:image/png;base64,", content[1].GetProperty("image_url").GetProperty("url").GetString(), StringComparison.Ordinal);
@@ -169,7 +169,7 @@ public sealed class MaximumGenerationDefaultsTests
             Assert.Equal(effort != "none", kwargs.GetProperty("enable_thinking").GetBoolean());
             if (effort != "none") Assert.Equal(effort, kwargs.GetProperty("reasoning_effort").GetString());
             Assert.True(body.GetProperty("stream").GetBoolean());
-            Assert.Equal(32_067, body.GetProperty("max_tokens").GetInt32());
+            Assert.Equal(2_048, body.GetProperty("max_tokens").GetInt32());
         }
         finally { File.Delete(imagePath); }
     }
@@ -190,7 +190,7 @@ public sealed class MaximumGenerationDefaultsTests
     }
 
     [Theory]
-    [InlineData(262_144, 1_000, null, 261_143)]
+    [InlineData(262_144, 1_000, null, 256_999)]
     [InlineData(131_072, 100, 512, 512)]
     [InlineData(32_768, 100, int.MaxValue, 32_667)]
     public void OutputBudgetHasNoGlobalSixtyFourKCeiling(int context, int input, int? limit, int expected) =>

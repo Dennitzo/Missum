@@ -289,6 +289,61 @@ public sealed class ScientificSimulationTests
     }
 
     [Fact]
+    public async Task GeneratedAndRediscoveredFiguresRequireVisionForTheirExactCurrentHash()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var (repository, project) = await CreateProjectAsync(environment, "vision-discovery");
+        var sandbox = new RecordingSandbox(Path.Combine(environment.Directory, "simulation"));
+        var layout = await sandbox.EnsureProjectAsync(project.Id);
+        using var service = new ScientificSimulationService(repository, sandbox);
+        var generated = await service.RunAsync(project.Id, "print('plot')", "Prüfplot");
+        var createdImage = Assert.Single(generated.Artifacts);
+        Assert.Equal(layout.RootPath, createdImage.ProjectRoot);
+        var rediscovered = await service.RefreshAsync(project.Id);
+        var image = Assert.Single(rediscovered.Artifacts);
+        Assert.Equal(layout.RootPath, image.ProjectRoot);
+        var relative = Path.GetRelativePath(layout.RootPath, image.ImagePath).Replace('\\', '/');
+        Assert.StartsWith("artifacts/", relative, StringComparison.Ordinal);
+        var publication = await WritePublicationFixtureAsync(environment.Directory, project, "vision-paper", "# Ergebnis");
+        await File.WriteAllTextAsync(publication.PdfPath, "%PDF-1.7\n" + new string(' ', 1200));
+        var snapshot = new ScientificPresentationSnapshot(1, publication, rediscovered, null, null);
+        var missing = await ScientificDeliverablesVerifier.VerifyWithVisualInspectionAsync(project.Id,
+            snapshot, null, null, [], [], true);
+        Assert.False(missing.GetProperty("success").GetBoolean());
+        Assert.False(missing.GetProperty("simulation").GetProperty("ready").GetBoolean());
+        Assert.Contains(relative, missing.GetProperty("message").GetString());
+
+        var binding = ScientificVisualInspection.UploadBinding(project.Id, layout.RootPath, JsonSerializer.SerializeToElement(new
+        { uploadId = "current-plot", sha256 = image.Sha256, sourcePath = image.ImagePath, fromWorkspace = true }), DateTimeOffset.UtcNow)!;
+        var uploadedOnly = new ResearchResultSnapshot([], [], [binding], []);
+        var uploaded = await ScientificDeliverablesVerifier.VerifyWithVisualInspectionAsync(project.Id,
+            snapshot, null, uploadedOnly, [], [], true);
+        Assert.False(uploaded.GetProperty("success").GetBoolean());
+        const string analysis = "Achsen und Randverhalten wurden am aktuellen Bild geprüft; quantitative Abnahme bleibt getrennt.";
+        var review = ScientificVisualInspection.Review(project.Id, [binding], JsonSerializer.SerializeToElement(new
+        {
+            visualReview = new { protocol = "missum-visual-review-v1", kind = "image", status = "analyzed", exactIdentity = true,
+                sourceUploadId = "current-plot", sourceSha256 = image.Sha256, modelId = "fixture-vision", analysis,
+                analysisSha256 = ScientificVisualInspection.Digest(analysis), completedAt = DateTimeOffset.UtcNow },
+        }), DateTimeOffset.UtcNow)!;
+        var receipts = new ResearchResultSnapshot([], [], [binding, review], []);
+        var inspected = await ScientificDeliverablesVerifier.VerifyWithVisualInspectionAsync(project.Id,
+            snapshot, null, receipts, [], [], true);
+        Assert.True(inspected.GetProperty("success").GetBoolean());
+
+        // A refreshed plot is a new image, even if its path and old upload ID
+        // remain unchanged. The previous visual analysis cannot cover it.
+        await File.AppendAllTextAsync(image.ImagePath, "new image data");
+        var refreshed = await service.RefreshAsync(project.Id);
+        Assert.NotEqual(image.Sha256, Assert.Single(refreshed.Artifacts).Sha256);
+        var stale = await ScientificDeliverablesVerifier.VerifyWithVisualInspectionAsync(project.Id,
+            snapshot with { Simulation = refreshed }, null, receipts, [], [], true);
+        Assert.False(stale.GetProperty("success").GetBoolean());
+        Assert.Contains("Vision", stale.GetProperty("message").GetString());
+        Assert.Equal(1, sandbox.Executions);
+    }
+
+    [Fact]
     public async Task PublicationRevisionAndNumericContentNeverTriggerASimulation()
     {
         await using var environment = await TestEnvironment.CreateAsync();

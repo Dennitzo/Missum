@@ -10,6 +10,12 @@ namespace Missum.Ai.Server.Core.Runs;
 internal static class ScientificRunContextPlanner
 {
     internal const int CanonicalWorkingInputTokens = 128 * 1024;
+    private static readonly string[] TransientScienceGuidanceMarkers =
+    [
+        ScientificStateCompletionPolicy.RecoveryMarker, ScientificStateCompletionPolicy.VerificationRepairMarker,
+        "[MISSUM_SCIENCE_PROGRESS_HINT:", "[MISSUM_SCIENCE_TOOL_DIAGNOSIS:", "[MISSUM_SCIENCE_RESEARCH_DIAGNOSIS:",
+        "[MISSUM_SCIENCE_COMPLETION_STAGNATION]",
+    ];
 
     internal static ContextPlan Prepare(IReadOnlyList<LmChatMessage> source, int contextLength, int? maximumOutputTokens,
         bool preserveConversationPrefix = false, int? maximumInputTokens = null)
@@ -40,18 +46,22 @@ internal static class ScientificRunContextPlanner
         var lastPlainAssistant = -1;
         var lastRuntimeContext = -1;
         var lastNativeInstructions = new Dictionary<string, int>(StringComparer.Ordinal);
+        var lastScienceGuidance = new Dictionary<string, int>(StringComparer.Ordinal);
         for (var index = 0; index < messages.Length; index++)
         {
             if (IsNativeRuntimeInstruction(messages[index])) lastNativeInstructions[messages[index].Content!] = index;
             if (IsRuntimeContext(messages[index])) lastRuntimeContext = index;
+            if (TransientScienceGuidanceKey(messages[index]) is { } guidance) lastScienceGuidance[guidance] = index;
         }
 
         for (var index = 0; index < messages.Length; index++)
         {
             var message = messages[index];
-            if (message.Role == "system") protect.Add(index);
+            var obsoleteGuidance = TransientScienceGuidanceKey(message) is { } guidance
+                && lastScienceGuidance[guidance] != index;
+            if (message.Role == "system" && !obsoleteGuidance) protect.Add(index);
             if (ModelRuntimeClient.IsLanguageReminder(message)) lastLanguageReminder = index;
-            else if (message.Role == "user" && !IsEvidenceDossier(message.Content)
+            else if (message.Role == "user" && !obsoleteGuidance && !IsEvidenceDossier(message.Content)
                 && (!IsRuntimeContext(message) || index == lastRuntimeContext)
                 && (!IsNativeRuntimeInstruction(message) || lastNativeInstructions[message.Content!] == index)) protect.Add(index);
             if (message.Role == "assistant" && message.ToolCalls is not { Count: > 0 }) lastPlainAssistant = index;
@@ -97,6 +107,7 @@ internal static class ScientificRunContextPlanner
         }
         for (var index = 0; index < messages.Length; index++)
         {
+            if (TransientScienceGuidanceKey(messages[index]) is { } guidance && lastScienceGuidance[guidance] != index) Remove(index);
             if (ModelRuntimeClient.IsLanguageReminder(messages[index]) && index != lastLanguageReminder) Remove(index);
             if (IsNativeRuntimeInstruction(messages[index]) && lastNativeInstructions[messages[index].Content!] != index) Remove(index);
             if (keep[index] && !protect.Contains(index) && messages[index].ReasoningContent is not null)
@@ -117,33 +128,41 @@ internal static class ScientificRunContextPlanner
         // Retain citations and original dossiers until ordinary narration and
         // obsolete execution logs have been removed. No replacement claim or
         // invented semantic summary is inserted into the model's conversation.
+        // Compact in batches: trimming only to the hard limit caused the next
+        // tool receipt to evict another early pair and invalidate the KV prefix
+        // again. Leave growth room without dropping protected evidence or
+        // changing the advertised model window / hard input budget.
+        var target = preserveConversationPrefix && originalTokens > budget
+            ? Math.Min(budget, Math.Max(budget - budget / 4,
+                ContextPlanner.EstimateTokens(messages.Where((_, index) => protect.Contains(index)).ToArray())))
+            : budget;
         for (var index = 0; index < lastRuntimeContext; index++)
             if (IsRuntimeContext(messages[index]))
             {
-                if (Tokens() <= budget) break;
+                if (Tokens() <= target) break;
                 Remove(index);
             }
         foreach (var index in Enumerable.Range(0, messages.Length).Where(index =>
             messages[index].Role == "assistant" && !pairedIndices.Contains(index) && !HasCitation(messages[index].Content)))
         {
-            if (Tokens() <= budget) break;
+            if (Tokens() <= target) break;
             Remove(index);
         }
         foreach (var group in groups)
         {
-            if (Tokens() <= budget) break;
+            if (Tokens() <= target) break;
             RemoveGroup(group);
         }
         foreach (var index in Enumerable.Range(0, messages.Length).Where(index =>
             messages[index].Role == "assistant" && !pairedIndices.Contains(index)))
         {
-            if (Tokens() <= budget) break;
+            if (Tokens() <= target) break;
             Remove(index);
         }
         foreach (var index in Enumerable.Range(0, messages.Length).Where(index =>
             messages[index].Role == "user" && IsEvidenceDossier(messages[index].Content)))
         {
-            if (Tokens() <= budget) break;
+            if (Tokens() <= target) break;
             Remove(index);
         }
         var result = Remaining();
@@ -151,6 +170,21 @@ internal static class ScientificRunContextPlanner
         if (estimated > budget) throw new ContextBudgetException(estimated, budget);
         return new(result, estimated, budget, changed, changed
             ? $"Der Forschungs-Arbeitskontext wurde gezielt auf {estimated:N0} von {budget:N0} Eingabetoken verdichtet. Der aktuelle Forschungsauftrag, die aktuelle Publikation und ihre Werkzeugbelege bleiben vollständig erhalten. {removed} ältere Kontextnachrichten wurden aus dem Arbeitskontext entfernt; das vollständige Laufjournal bleibt erhalten. Forschungsdetails können mit research.read erneut geladen werden." : null);
+    }
+
+    private static string? TransientScienceGuidanceKey(LmChatMessage message)
+    {
+        var content = message.Content;
+        const string nativePrefix = "Missum-Laufanweisung:\n";
+        if (message.Role == "user" && content?.StartsWith(nativePrefix, StringComparison.Ordinal) == true)
+            content = content[nativePrefix.Length..];
+        else if (message.Role != "system") return null;
+        if (content is null) return null;
+        // These are host-generated transient diagnostics, never the actual user
+        // task, scientific policy, structured tool evidence or persisted results.
+        foreach (var marker in TransientScienceGuidanceMarkers)
+            if (content.StartsWith(marker, StringComparison.Ordinal)) return marker;
+        return null;
     }
 
     private static void ProtectCurrentToolEvidence(LmChatMessage[] messages, IReadOnlyList<ToolGroup> groups, HashSet<int> protect)

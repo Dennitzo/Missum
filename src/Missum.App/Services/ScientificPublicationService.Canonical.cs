@@ -327,7 +327,7 @@ public sealed partial class ScientificPublicationService
         try
         {
             var cached = _current.Values.Where(item => item.ProjectId == projectId).OrderByDescending(item => item.UpdatedAt).FirstOrDefault();
-            if (cached is not null && File.Exists(cached.MarkdownPath) && await IsValidPdfAsync(cached.PdfPath, token).ConfigureAwait(false)) return cached;
+            if (cached is not null && await IsPublicationPairAsync(Path.GetDirectoryName(cached.PdfPath)!, cached.ContentHash, token).ConfigureAwait(false)) return cached;
             var project = await _repository.GetProjectAsync(projectId, token).ConfigureAwait(false);
             if (project is null) return null;
             var workspace = _sandbox is null ? project.WorkspacePath
@@ -335,6 +335,17 @@ public sealed partial class ScientificPublicationService
             var output = string.IsNullOrWhiteSpace(workspace) ? _defaultDirectory : Path.Combine(workspace, "publications");
             var root = Path.Combine(output, Fingerprint(projectId)[..24]);
             if (!Directory.Exists(root)) return null;
+            var currentDirectory = Path.Combine(root, "current");
+            var currentPdf = Path.Combine(currentDirectory, "Publikation.pdf");
+            var currentMarkdown = Path.Combine(currentDirectory, "Publikation.md");
+            if (await IsPublicationPairAsync(currentDirectory, null, token).ConfigureAwait(false))
+            {
+                var currentState = _repository is IScientificResearchStateRepository stateRepository
+                    ? await stateRepository.LoadWorkingStateAsync(projectId, token).ConfigureAwait(false) : null;
+                return new(projectId, currentState?.PublicationRevision ?? project.Revision, currentMarkdown, currentPdf,
+                    true, new DateTimeOffset(File.GetLastWriteTimeUtc(currentPdf)),
+                    Fingerprint(await File.ReadAllTextAsync(currentMarkdown, token).ConfigureAwait(false)), SectionDelta: currentState is not null);
+            }
             foreach (var directory in Directory.EnumerateDirectories(root, "r*", SearchOption.TopDirectoryOnly)
                 .OrderByDescending(Directory.GetLastWriteTimeUtc))
             {

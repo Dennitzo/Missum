@@ -68,7 +68,11 @@ public sealed partial class ScientificSimulationService(
             await RestoreLastVisualizationAsync(project, layout, restored, cancellationToken).ConfigureAwait(false);
             artifacts = artifacts.Concat(restored).DistinctBy(item => item.ImagePath, StringComparer.OrdinalIgnoreCase)
                 .OrderByDescending(item => item.Kind == "interactive")
-                .ThenByDescending(item => File.GetLastWriteTimeUtc(item.ImagePath)).Take(MaximumImages).ToList();
+                .ThenByDescending(item => File.GetLastWriteTimeUtc(item.ImagePath)).Take(MaximumImages)
+                // A discovery scan may start at artifacts/, whereas vision
+                // receipts use paths relative to the whole research project.
+                .Select(item => ResolveCandidate(layout.RootPath, item.ImagePath) is not null
+                    ? item with { ProjectRoot = layout.RootPath } : item).ToList();
             var snapshot = Snapshot(project, artifacts, artifacts.Count > 0 ? "ready" : "empty", "");
             if (artifacts.Count > 0)
             {
@@ -112,10 +116,14 @@ public sealed partial class ScientificSimulationService(
             var inputFingerprint = ResearchFingerprint(project, archive);
             var layout = await sandbox.EnsureProjectAsync(projectId, cancellationToken).ConfigureAwait(false);
             var id = Guid.NewGuid().ToString("N");
-            var relative = "simulations/" + id;
+            var relative = "simulations/current";
+            var currentSource = Path.Combine(layout.WorkPath, "simulations", "current", "simulation.py");
+            var currentHarness = Path.Combine(layout.WorkPath, "simulations", "current", "run.py");
             var sourceChange = await sandbox.WriteTextAsync(projectId, relative + "/simulation.py", pythonSource,
+                File.Exists(currentSource) ? Hash(await File.ReadAllBytesAsync(currentSource, cancellationToken).ConfigureAwait(false)) : null,
                 cancellationToken: cancellationToken).ConfigureAwait(false);
             await sandbox.WriteTextAsync(projectId, relative + "/run.py", SimulationHarness,
+                File.Exists(currentHarness) ? Hash(await File.ReadAllBytesAsync(currentHarness, cancellationToken).ConfigureAwait(false)) : null,
                 cancellationToken: cancellationToken).ConfigureAwait(false);
             var run = await sandbox.RunPythonAsync(projectId, relative + "/run.py",
                 ["/sandbox/work/" + relative + "/simulation.py", "/sandbox/artifacts/simulations/" + id],
@@ -135,6 +143,7 @@ public sealed partial class ScientificSimulationService(
             {
                 Provenance = "Forschungsexperiment · simulation-" + run.RunId + " · ProcessSucceeded",
                 Execution = ExecutionFromRun(layout, "simulation-" + run.RunId, run),
+                ProjectRoot = layout.RootPath,
             }).ToList();
             return await IsCurrentResearchAsync(projectId, inputFingerprint, cancellationToken).ConfigureAwait(false)
                 ? Snapshot(project, images, status, detail) : Superseded(projectId);
@@ -427,7 +436,7 @@ public sealed partial class ScientificSimulationService(
         stream.Position = 0;
         var hash = Convert.ToHexStringLower(await SHA256.HashDataAsync(stream, token).ConfigureAwait(false));
         images.Add(new(hash[..24], title, path, scriptPath, dataPath, provenance, researchData, hash,
-            ContentType: png ? "image/png" : "image/jpeg"));
+            ContentType: png ? "image/png" : "image/jpeg", ProjectRoot: root));
     }
 
     private static async Task RestoreLastVisualizationAsync(ScientificResearchProject project, ResearchSandboxLayout layout,

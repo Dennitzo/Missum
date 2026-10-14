@@ -13,7 +13,77 @@ public sealed class ScientificPresentationFeedbackTests
 {
     private const string BadFormula = "$$x=\\notACommand{1}$$";
     private static readonly string[] MissingExperimentIds = ["missing-experiment"];
+    private static readonly string[] AbsentReviewAndValidationFields = ["review", "quantitativeValidation"];
     private const string ParserError = "KaTeX parse error: Undefined control sequence: \\notACommand. Abschnitt \"Modell\", Ausdruck: $$x=\\notACommand{1}$$, Ursache: Undefined control sequence: \\notACommand";
+
+    [Fact]
+    public async Task RepeatedNullRemovalReportsCurrentStateWithoutSavingOrRefreshingPresentation()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var fixture = await Fixture.CreateAsync(environment);
+        var renders = 0;
+        using var publications = fixture.Publications(async (path, token) =>
+        {
+            Interlocked.Increment(ref renders);
+            return await PdfAsync(path, token);
+        });
+        using var simulations = fixture.Simulations();
+        using var coordinator = new ScientificPresentationCoordinator(publications, simulations, static (_, _) => Task.CompletedTask);
+        var broker = fixture.Broker(publications, coordinator);
+        var initial = await broker.ExecuteAsync(fixture.Update("initial", 0, "Die Rechnung ist noch offen."), fixture.SessionId, null);
+        Assert.Equal("completed", initial.Status);
+        await coordinator.WaitForIdleAsync(fixture.ProjectId);
+        var snapshot = coordinator.GetSnapshot(fixture.ProjectId);
+        for (var index = 0; index < 3; index++)
+        {
+            var result = await broker.ExecuteAsync(Proposal("null-removal-" + index, ClientToolNames.ResearchUpdate, new
+            {
+                projectId = fixture.ProjectId, changes = new[] { new { id = "model", kind = "section", expectedRevision = 1,
+                    patch = JsonSerializer.Deserialize<JsonElement>("""{"review":null,"quantitativeValidation":null}""") } },
+            }), fixture.SessionId, null);
+            Assert.True(result.Status == "completed", result.Message ?? result.Result.GetRawText()); // Idempotent removal remains legal.
+            Assert.True(result.Result.GetProperty("success").GetBoolean());
+            Assert.True(result.Result.GetProperty("noChange").GetBoolean());
+            Assert.False(result.Result.GetProperty("stored").GetBoolean());
+            Assert.False(result.Result.GetProperty("changed").GetBoolean());
+            Assert.Equal(initial.Result.GetProperty("revision").GetInt64(), result.Result.GetProperty("revision").GetInt64());
+            Assert.False(result.Result.TryGetProperty("presentation", out _));
+            var diagnostic = Assert.Single(result.Result.GetProperty("diagnostics").EnumerateArray());
+            Assert.Equal("research.null_removal_no_change", diagnostic.GetProperty("code").GetString());
+            Assert.Equal(1, diagnostic.GetProperty("currentRevision").GetInt64());
+            Assert.Equal(AbsentReviewAndValidationFields, diagnostic.GetProperty("removedNothing").EnumerateArray().Select(field => field.GetString()));
+            Assert.False(diagnostic.GetProperty("reviewPresent").GetBoolean());
+            Assert.False(diagnostic.GetProperty("quantitativeValidationPresent").GetBoolean());
+            Assert.Contains("itemRevision=2", diagnostic.GetProperty("nextAction").GetString(), StringComparison.Ordinal);
+            var current = Assert.Single(result.Result.GetProperty("items").EnumerateArray());
+            Assert.Equal("model", current.GetProperty("id").GetString());
+            Assert.Equal("unresolved", current.GetProperty("data").GetProperty("status").GetString());
+            Assert.Same(snapshot, coordinator.GetSnapshot(fixture.ProjectId));
+        }
+        Assert.Equal(1, renders);
+        var corrected = await broker.ExecuteAsync(Proposal("real-review", ClientToolNames.ResearchUpdate, new
+        {
+            projectId = fixture.ProjectId, changes = new[] { new { id = "model", kind = "section", expectedRevision = 1,
+                patch = new { review = new { itemRevision = 2, sourceAssessment = "Keine Originalquelle geprüft.",
+                    calculationAssessment = "Die quantitative Rechnung ist noch offen.", contradictionAssessment = "Widersprüche noch nicht geprüft.",
+                    scope = "Ungeprüfter Zwischenstand." }, status = "unresolved" } } },
+        }), fixture.SessionId, null);
+        Assert.True(corrected.Result.GetProperty("changed").GetBoolean());
+        Assert.False(corrected.Result.GetProperty("noChange").GetBoolean());
+        Assert.True(corrected.Result.GetProperty("stored").GetBoolean());
+        Assert.Empty(corrected.Result.GetProperty("diagnostics").EnumerateArray());
+        var state = await fixture.States.LoadWorkingStateAsync(fixture.ProjectId);
+        Assert.Equal("unresolved", state.Items.Single().Data.GetProperty("status").GetString());
+        Assert.Equal(2, state.Items.Single().Data.GetProperty("review").GetProperty("itemRevision").GetInt64());
+        var title = await broker.ExecuteAsync(Proposal("title-only", ClientToolNames.ResearchUpdate, new
+        {
+            projectId = fixture.ProjectId, title = "Geänderter fachlicher Titel", changes = Array.Empty<object>(),
+        }), fixture.SessionId, null);
+        Assert.True(title.Result.GetProperty("changed").GetBoolean());
+        Assert.True(title.Result.GetProperty("stored").GetBoolean());
+        Assert.False(title.Result.GetProperty("noChange").GetBoolean());
+        Assert.Equal("$title", title.Result.GetProperty("changedIds")[0].GetString());
+    }
 
     [Fact]
     public async Task StoredUpdateReturnsParserErrorToModelAndItsTargetedRepairPublishesCurrentPdf()
@@ -339,7 +409,7 @@ public sealed class ScientificPresentationFeedbackTests
         Assert.False(result.Result.GetProperty("publicationChanged").GetBoolean());
         await coordinator.WaitForIdleAsync(fixture.ProjectId);
         Assert.True(coordinator.GetSnapshot(fixture.ProjectId)!.Publication!.IsDraft);
-        Assert.NotEqual(originalPath, coordinator.GetSnapshot(fixture.ProjectId)!.Publication!.PdfPath);
+        Assert.Equal(originalPath, coordinator.GetSnapshot(fixture.ProjectId)!.Publication!.PdfPath);
         Assert.Equal(2, renders);
     }
 

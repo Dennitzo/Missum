@@ -63,7 +63,7 @@ public sealed class ScientificPresentationCoordinatorTests
             Assert.Null(final.PublicationError);
             var current = Assert.IsType<ScientificPublicationArtifact>(final.Publication);
             Assert.Equal(3, current.Revision);
-            Assert.NotEqual(previous.PdfPath, current.PdfPath);
+            Assert.Equal(previous.PdfPath, current.PdfPath);
             Assert.True(File.Exists(current.PdfPath));
             Assert.Equal(3, Volatile.Read(ref renderCalls));
         }
@@ -144,7 +144,7 @@ public sealed class ScientificPresentationCoordinatorTests
             var recovered = Assert.IsType<ScientificPresentationSnapshot>(coordinator.GetSnapshot(project.Id));
             var currentPdf = Assert.IsType<ScientificPublicationArtifact>(recovered.Publication);
             Assert.Equal(2, currentPdf.Revision);
-            Assert.NotEqual(firstPdf.PdfPath, currentPdf.PdfPath);
+            Assert.Equal(firstPdf.PdfPath, currentPdf.PdfPath);
             Assert.True(File.Exists(currentPdf.PdfPath));
             Assert.Null(recovered.PublicationError);
             Assert.Null(recovered.SimulationError);
@@ -192,7 +192,8 @@ public sealed class ScientificPresentationCoordinatorTests
             await WaitForIdleAsync(coordinator, project.Id);
             var recovered = Assert.IsType<ScientificPresentationSnapshot>(coordinator.GetSnapshot(project.Id));
             Assert.Equal(2, recovered.Publication?.Revision);
-            Assert.NotEqual(old.PdfPath, recovered.Publication?.PdfPath);
+            Assert.Equal(old.PdfPath, recovered.Publication?.PdfPath);
+            Assert.NotEqual(old.ContentHash, recovered.Publication?.ContentHash);
             Assert.Null(recovered.PublicationError);
             Assert.Equal(3, Volatile.Read(ref renderCalls));
             Assert.Equal(new[] { TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(1) }, delays.ToArray());

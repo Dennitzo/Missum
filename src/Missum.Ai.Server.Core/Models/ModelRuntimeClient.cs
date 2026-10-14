@@ -532,7 +532,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
         CancellationToken cancellationToken = default)
     {
         var result = await AnalyzeImagesResultAsync(modelId, prompt, imagePaths, reasoningEffort,
-            responseSchema: null, maximumOutputTokens: int.MaxValue, cancellationToken: cancellationToken,
+            responseSchema: null, maximumOutputTokens: VisionDiagnosticOutputTokens, cancellationToken: cancellationToken,
             runtimeInstanceId: runtimeInstanceId).ConfigureAwait(false);
         if (string.Equals(result.FinishReason, "length", StringComparison.OrdinalIgnoreCase))
             throw new ModelGenerationTerminatedException("vision_output_limit");
@@ -604,7 +604,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
             ["stream_options"] = new { include_usage = true },
             ["messages"] = new object[]
             {
-                new { role = "system", content = CodingAgentPolicy.ReasoningLanguagePrompt + "\n\n" + Policies.GeneralAgentPolicies.VisionAnalysisSystemPrompt },
+                new { role = "system", content = VisionSystemInstructions(prompt) },
                 new { role = "user", content = content.ToArray() },
             },
         };

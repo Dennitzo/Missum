@@ -263,7 +263,7 @@ public sealed class ModelRuntimeClientTests
             model.Id == NativeQwenId
             && model.Role == "general"
             && model.Downloaded
-            && model.ContextTokens == 262_144);
+            && model.ContextTokens == 258_000);
         Assert.Contains(status.Models, model =>
             model.Id == NativeGeneralId
             && model.Role == "general"
@@ -443,6 +443,21 @@ public sealed class ModelRuntimeClientTests
         Assert.True(model.SupportsVision);
         Assert.Empty(model.ReasoningEfforts);
         Assert.Null(model.DefaultReasoningEffort);
+    }
+
+    [Theory]
+    [InlineData(1_048_576, 258_000)]
+    [InlineData(2_000_000, 258_000)]
+    [InlineData(32_768, 32_768)]
+    public void FutureModelCatalogAndLoadedBudgetRespectProductCeiling(int advertised, int expected)
+    {
+        using var document = JsonDocument.Parse($$$"""
+            {"data":[{"id":"coding/future-test-model","meta":{"n_ctx_train":{{{advertised}}}},"status":{"value":"loaded"}}]}
+            """);
+        Assert.Equal(expected, Assert.Single(ModelRuntimeClient.ReadRuntimeModels(document.RootElement)).MaximumContextLength);
+        using var props = JsonDocument.Parse($$$"""{"default_generation_settings":{"n_ctx":{{{advertised}}}}}""");
+        Assert.Equal(expected, ModelRuntimeClient.ReadLoadedContextLength(props.RootElement));
+        Assert.Equal(expected - 101, ModelRuntimeClient.ResolveMaximumOutputTokens(advertised, 100, null));
     }
 
     [Fact]

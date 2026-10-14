@@ -11,6 +11,20 @@ public sealed class ScientificQuantitativeContractTests
     private readonly AgentToolCatalog _catalog = new();
     private static readonly string[] DefinitionFields = ["observable", "reference", "artifactPath", "sampling", "checks"];
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(0.001)]
+    [InlineData(0.05)]
+    [InlineData(0.2)]
+    [InlineData(5)]
+    [InlineData(1000000)]
+    public void ProjectSpecificErrorBoundsAreNotCappedByAGeneralPercentage(double maximum)
+    {
+        var definition = JsonNode.Parse(Definition().GetRawText())!;
+        definition["checks"]![0]!["maximum"] = maximum;
+        _catalog.Validate(Tool(), Arguments(JsonSerializer.SerializeToElement(definition)));
+    }
+
     [Fact]
     public void CreationAndTargetedPatchAcceptTheSameCompleteContract()
     {
@@ -47,6 +61,9 @@ public sealed class ScientificQuantitativeContractTests
                 Assert.Equal(2, check.GetProperty("minItems").GetInt32());
                 Assert.False(check.GetProperty("items").GetProperty("additionalProperties").GetBoolean());
                 Assert.Equal(0, check.GetProperty("items").GetProperty("properties").GetProperty("maximum").GetProperty("minimum").GetInt32());
+                var maximum = check.GetProperty("items").GetProperty("properties").GetProperty("maximum");
+                Assert.False(maximum.TryGetProperty("default", out _));
+                Assert.Equal(double.MaxValue, maximum.GetProperty("maximum").GetDouble());
                 // Compact transport deliberately strips prose descriptions. The
                 // allowed semantic categories must remain in the grammar itself.
                 var kinds = check.GetProperty("items").GetProperty("properties").GetProperty("kind").GetProperty("enum")

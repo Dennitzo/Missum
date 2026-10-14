@@ -265,6 +265,7 @@
   }
   function changeCounts(summary) {
     const files = summary?.files || [], textFiles = files.filter(file => !file.isBinary);
+    if (summary?.isPartial && !files.length) return { added: null, removed: null, partial: true };
     return { added: textFiles.every(file => Number.isSafeInteger(file.addedLines) && file.addedLines >= 0) ? textFiles.reduce((sum, file) => sum + file.addedLines, 0) : null,
       removed: textFiles.every(file => Number.isSafeInteger(file.removedLines) && file.removedLines >= 0) ? textFiles.reduce((sum, file) => sum + file.removedLines, 0) : null, partial: summary?.isPartial === true };
   }
@@ -291,7 +292,7 @@
     const changes = button("", () => setView("review"), "inspector-changes"); changes.append(node("span", "inspector-icon inspector-icon--changes"), node("span", "", "Änderungen"));
     const counts = changeCounts(current.changesSummary), totals = node("span", "inspector-change-counts");
     if (counts.added !== null && counts.removed !== null) totals.append(node("span", "review-added", `+${formattedCount(counts.added)}`), node("span", "review-removed", `−${formattedCount(counts.removed)}`)); else totals.append(node("span", "browser-muted", "Nicht verfügbar"));
-    if (counts.partial) totals.append(node("span", "browser-muted", "teilweise")); changes.append(totals); changes.title = current.changesSummary?.notice || "Git-Diff anzeigen"; changes.setAttribute("aria-label", `Änderungen anzeigen${counts.partial ? " · Übersicht unvollständig" : ""}`); inspector.append(changes);
+    if (counts.partial) totals.append(node("span", "browser-muted", "teilweise")); changes.append(totals); changes.title = current.changesSummary?.notice || "Änderungen des aktuellen AI-Laufs"; changes.setAttribute("aria-label", `Änderungen anzeigen${counts.partial ? " · Übersicht unvollständig" : ""}`); inspector.append(changes);
     if (localChildren.length) {
       const ordered = sessionChildren(), working = ordered.filter(childRunning), inactive = ordered.length-working.length;
       const caption = working.length ? `${working.length} ${working.length===1?"arbeitet":"arbeiten"}` : `${inactive} fertig`;
@@ -483,7 +484,7 @@
     if (!(child.messages || []).length) panel.append(node("p", "browser-empty-state", child.isRunning ? "Subagent arbeitet …" : "Noch keine Nachrichten vorhanden."));
   }
   function renderReview() {
-    const summary = state().changesSummary; const card = section("Änderungen auf dem PC", summary?.notice);
+    const summary = state().changesSummary; const card = section("Änderungen des aktuellen AI-Laufs", summary?.notice);
     if (summary?.isPartial) card.append(node("p", "browser-panel-error", "Die Änderungsübersicht ist unvollständig."));
     for (const file of summary?.files || []) {
       const counts = changeCounts({ files: [file] }), label = file.isBinary ? "Binärdatei" : counts.added === null || counts.removed === null ? "Zeilenzahlen nicht verfügbar" : `+${formattedCount(counts.added)} −${formattedCount(counts.removed)}`;

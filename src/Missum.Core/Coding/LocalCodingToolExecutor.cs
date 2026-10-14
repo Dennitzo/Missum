@@ -12,6 +12,7 @@ public sealed class LocalCodingToolExecutor
     public const int MaximumOutputCharacters = 12_000;
     public const int MaximumWriteContentCharacters = 64_000;
     private const int MaximumFileBytes = 2 * 1024 * 1024;
+    private const int MaximumReadFileBytes = 8 * 1024 * 1024;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
     private static readonly HashSet<string> IgnoredDirectories = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -145,9 +146,15 @@ public sealed class LocalCodingToolExecutor
     private async Task<JsonElement> ReadAsync(JsonElement args, CancellationToken cancellationToken)
     {
         var path = ResolveReadPath(RequiredString(args, "path", 1, 1_024));
+        if (new FileInfo(path).Length > MaximumReadFileBytes)
+            throw new InvalidDataException("Die Textdatei überschreitet das direkte Leselimit von 8 MiB. "
+                + "Große JSON-/Array-Ergebnisse mit einem gezielten Auswertungsskript lesen und nur Schema, Status, Parameter und benötigte Messwerte ausgeben; "
+                + "nicht den vollständigen Datensatz in den Modellkontext übertragen.");
         // Direct reads are complete; only an explicit line range limits the returned content.
         // Search and mutation retain their independent safety limits.
         var bytes = await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
+        if (bytes.Length > MaximumReadFileBytes)
+            throw new InvalidDataException("Die Datei ist während des Lesens über das direkte Leselimit von 8 MiB gewachsen.");
         if (IsBinary(bytes)) throw new InvalidDataException("Die Datei ist binär und kann nicht als Text gelesen werden.");
         var text = Decode(bytes);
         var lines = text.Split('\n');

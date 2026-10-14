@@ -1,4 +1,4 @@
-FROM python:3.12.10-slim-bookworm@sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db
+FROM python:3.12.10-slim-bookworm@sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db AS runtime
 
 # Official leanprover/lean4 v4.30.0 Linux x64 release asset; digest from the
 # GitHub release API. Installation is build-time only; runtime has no network.
@@ -42,6 +42,24 @@ RUN set -eux; \
     rm -f /tmp/requirements.lock; \
     mkdir -p /sandbox; \
     chown research:research /sandbox
+
+# Pin the library and its manifest dependencies at build time. Proof execution
+# remains offline; no project can substitute its own compiler or Lake program.
+FROM runtime AS mathlib-build
+ARG MATHLIB_REVISION=c5ea00351c28e24afc9f0f84379aa41082b1188f
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/* \
+    && git clone --depth 1 --branch v4.30.0 https://github.com/leanprover-community/mathlib4.git /opt/mathlib \
+    && test "$(git -C /opt/mathlib rev-parse HEAD)" = "${MATHLIB_REVISION}" \
+    && cd /opt/mathlib && lake exe cache get \
+    && printf '%s\n' "${MATHLIB_REVISION}" > /opt/mathlib/missum-revision
+
+FROM runtime
+# Cache archives use owner-only modes. Copy directly into the final image with
+# readable permissions instead of modifying every cached file through overlayfs.
+COPY --from=mathlib-build --chmod=0755 /opt/mathlib /opt/mathlib
+ENV MISSUM_LEAN_MATHLIB_ROOT=/opt/mathlib
+LABEL missum.lean.version="4.30.0" missum.mathlib.revision="c5ea00351c28e24afc9f0f84379aa41082b1188f"
 
 USER 10001:10001
 WORKDIR /sandbox/work

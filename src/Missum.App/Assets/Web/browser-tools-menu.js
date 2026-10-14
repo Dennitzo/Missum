@@ -11,7 +11,7 @@
     captions: "builtin.speech/live-captions"
   });
   const colors = Object.freeze({
-    attachment: "#5b9cf6", web: "#4c94f2", research: "#a07cf6",
+    attachment: "#5b9cf6", web: "#4c94f2", research: "#a07cf6", lean: "#a07cf6",
     image: "#e768ab", video: "#e768ab", audio: "#46bc85",
     speech: "#33b8cf", captions: "#33b8cf", translate: "#33b8cf",
     document: "#378fea", pdf: "#da5052", plan: "#f19d38",
@@ -23,6 +23,7 @@
     folder: ["M3 6h6l2 2h10v11H3Z", "M3 6V4h6l2 2"],
     web: ["M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20", "M2 12h20", "M12 2c6 5 6 15 0 20-6-5-6-15 0-20"],
     research: ["M10.5 3a7.5 7.5 0 1 0 0 15 7.5 7.5 0 0 0 0-15", "m16 16 5 5"],
+    lean: ["M3 4l6 13 6-13M6 11h6", "m15 18 3 3 4-6"],
     image: ["M3 3h18v18H3Z", "m3 17 6-6 4 4 3-3 5 5", "M16 6h.01"],
     video: ["M3 5h13v14H3Z", "m16 10 5-3v10l-5-3"],
     audio: ["M12 3v11", "M12 3h8v4h-8", "M8 14a4 4 0 1 0 4 4v-4Z"],

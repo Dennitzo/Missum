@@ -22,7 +22,11 @@ public sealed class ScientificResearchConsistencyPolicyTests
             Assert.Contains(concept, policy, StringComparison.OrdinalIgnoreCase);
 
         Assert.Contains(compact ? "keine allgemeine Python-/Bildpflicht" : "keine allgemeine Pflicht", policy, StringComparison.Ordinal);
-        Assert.Contains(compact ? "keine manuelle Child-Nachprüfung" : "prüfe deren Arbeit nicht erneut", policy, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Konventionen", policy, StringComparison.Ordinal);
+        Assert.Contains("Observable", policy, StringComparison.Ordinal);
+        Assert.Contains("Beleg", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("Keine manuelle Child-Nachprüfung", policy, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("prüfe deren Arbeit nicht erneut", policy, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

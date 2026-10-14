@@ -14,7 +14,7 @@ using System.Text.RegularExpressions;
 
 namespace Missum.Ai.Server.Core.Runs;
 
-public sealed class AgentToolExecutor
+public sealed partial class AgentToolExecutor
 {
     private const int DefaultTargetedFetchCharacters = 8_000;
     private const int MaximumTargetedFetchCharacters = 12_000;
@@ -654,6 +654,10 @@ public sealed class AgentToolExecutor
             transcriptionWarning,
             visionAnalysis = hasVideoTranscript ? visionAnalysis : null,
             analysis,
+            primaryUpload = new { uploadId, upload.Sha256, upload.FileName, upload.MediaType, upload.Length,
+                exactRequestedUpload = string.Equals(requestedUploadId, uploadId, StringComparison.Ordinal) },
+            visualReview = CreateVisualReviewReceipt(upload, requestedUploadId,
+                context.ModelId ?? visionModel, analysis),
             referenceImages = referenceCount,
             visionModelId = visionModel,
             visionReasoningEffort = _modelRuntime.ResolveMediaReasoningEffort(visionModel, "vision", reasoningEffort),

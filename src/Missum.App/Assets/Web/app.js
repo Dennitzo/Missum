@@ -136,6 +136,7 @@
     textToSpeech: ["Vorlesen", "M5 9v6h4l5 4V5L9 9zM17 9c1 1 1 5 0 6M19 6c3 3 3 9 0 12"],
     webSearch: ["Websuche", "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM16 16l5 5M4 11h14M11 4c3 3 3 11 0 14M11 4c-3 3-3 11 0 14"],
     planMode: ["Planmodus", "M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"],
+    lean: ["Lean", "M3 4l6 13 6-13M6 11h6M15 18l3 3 4-6"],
     "screen.capture": ["Bild aufnehmen", "M4 7h4l2-2h4l2 2h4v12H4zM12 10a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"],
     "screenClip.toggle": ["Video aufnehmen", "M3 6h13v12H3zM16 10l5-3v10l-5-3z"],
     "liveCaption.start": ["Live-Untertitel", "M4 8h2M4 12h4M4 16h2M10 7v10M14 9v6M18 6v12M22 9v6"]
@@ -156,6 +157,7 @@
     speech: toolVisuals.textToSpeech[1],
     captions: toolVisuals["liveCaption.start"][1],
     plan: toolVisuals.planMode[1],
+    lean: toolVisuals.lean[1],
     extension: "M8 3v4M16 3v4M5 7h14v6a7 7 0 0 1-14 0zM9 20h6"
   });
 
@@ -172,7 +174,8 @@
     videoAnalysis: "builtin.media/video-analysis",
     webSearch: "builtin.web/web-search",
     deepResearch: "builtin.web/deep-research",
-    planMode: "builtin.coding/plan-mode"
+    planMode: "builtin.coding/plan-mode",
+    lean: "builtin.math/lean"
   });
 
   function normalizeToolAction(action) {
@@ -335,8 +338,6 @@
   const chatScroll = globalThis.createMissumChatScroll({
     scroller: elements.messageScroll, content: elements.messageList, button: byId("scroll-to-latest")
   });
-  const sessionScrollStoragePrefix = "assistant.ui.session-scroll.v1:";
-  const legacySessionScrollStoragePrefix = "go.assistant.session-scroll.v1:";
   const ungroupedSessionStorageKey = "assistant.ui.ungrouped-sessions-collapsed";
   const legacyUngroupedSessionStorageKey = "go-session-ungrouped-collapsed";
   let draftTimer = 0;
@@ -528,79 +529,13 @@
     catch { setSessionsCollapsed(false, false); }
   }
 
-  function sessionScrollStorageKey(sessionId) {
-    return `${sessionScrollStoragePrefix}${String(sessionId || "")}`;
-  }
-
-  function legacySessionScrollStorageKey(sessionId) {
-    return `${legacySessionScrollStoragePrefix}${String(sessionId || "")}`;
-  }
-
-  function readSessionScrollPosition(sessionId) {
-    if (!sessionId) return null;
-    try {
-      const value = JSON.parse(readMigratedStorage(
-        sessionScrollStorageKey(sessionId),
-        legacySessionScrollStorageKey(sessionId)) || "null");
-      if (!value || !Number.isFinite(value.top) || !Number.isFinite(value.left)) return null;
-      return value;
-    } catch {
-      return null;
-    }
-  }
-
-  function persistSessionScrollPosition(sessionId = state.activeSessionId) {
-    if (!sessionId || !elements.messageScroll) return;
-    const scroller = elements.messageScroll;
-    const maximumTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
-    const scrollerBounds = scroller.getBoundingClientRect();
-    const anchor = [...elements.messageList.querySelectorAll(":scope > .message[data-message-id]")]
-      .find(message => message.getBoundingClientRect().bottom > scrollerBounds.top + 1);
-    const anchorBounds = anchor?.getBoundingClientRect();
-    const value = {
-      top: Math.max(0, scroller.scrollTop),
-      left: Math.max(0, scroller.scrollLeft),
-      progress: maximumTop > 0 ? Math.max(0, Math.min(1, scroller.scrollTop / maximumTop)) : 0,
-      atEnd: maximumTop - scroller.scrollTop <= 4,
-      anchorMessageId: anchor?.dataset.messageId || null,
-      anchorOffset: anchorBounds ? anchorBounds.top - scrollerBounds.top : null
-    };
-    try { globalThis.localStorage.setItem(sessionScrollStorageKey(sessionId), JSON.stringify(value)); }
-    catch { /* WebView storage is optional. */ }
-  }
-
   function restoreSessionScrollPosition(sessionId) {
-    const saved = readSessionScrollPosition(sessionId);
-    chatScroll.restore(!saved || saved.atEnd);
+    // Session entry always starts at the latest message. Ignore legacy offsets.
+    chatScroll.jump(false);
     requestAnimationFrame(() => {
       if (String(sessionId || "") !== String(state.activeSessionId || "")) return;
-      const scroller = elements.messageScroll;
-      const maximumTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
-      if (!saved) {
-        scroller.scrollTop = maximumTop;
-        scroller.scrollLeft = 0;
-        chatScroll.refresh();
-        return;
-      }
-      if (saved.atEnd) {
-        scroller.scrollTop = maximumTop;
-      } else {
-        const anchor = saved.anchorMessageId
-          ? [...elements.messageList.querySelectorAll(":scope > .message[data-message-id]")]
-            .find(message => message.dataset.messageId === String(saved.anchorMessageId))
-          : null;
-        if (anchor && Number.isFinite(saved.anchorOffset)) {
-          const scrollerBounds = scroller.getBoundingClientRect();
-          const currentOffset = anchor.getBoundingClientRect().top - scrollerBounds.top;
-          scroller.scrollTop = Math.max(0, Math.min(maximumTop,
-            scroller.scrollTop + currentOffset - saved.anchorOffset));
-        } else {
-          const proportionalTop = Number.isFinite(saved.progress) ? maximumTop * saved.progress : saved.top;
-          scroller.scrollTop = Math.max(0, Math.min(maximumTop, proportionalTop));
-        }
-      }
-      scroller.scrollLeft = Math.max(0, saved.left);
-      chatScroll.refresh();
+      elements.messageScroll.scrollLeft = 0;
+      chatScroll.jump(false);
     });
   }
 
@@ -3672,7 +3607,6 @@
     const nextMessages = mergeStreamingSnapshotMessages(payload.messages, nextSessionId);
     const currentSessionMessagesChanged = !sessionChanged
       && conversationMessagesDiffer(state.messages, nextMessages);
-    if (sessionChanged && previousSessionId) persistSessionScrollPosition(previousSessionId);
     state.sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
     state.sessionGroups = Array.isArray(payload.sessionGroups) ? payload.sessionGroups : [];
     state.messages = nextMessages;

@@ -76,6 +76,20 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         ConfigureSidebarHoverActions(ProjectsHeader, AddProjectButton);
         Composer.AddHandler(UIElement.PreviewKeyDownEvent, new Microsoft.UI.Xaml.Input.KeyEventHandler(OnComposerKeyDown), true);
         NavigationCacheMode = NavigationCacheMode.Required;
+        // Math/images and incremental message blocks can finish layout after the
+        // first render. Keep session entry pinned until an explicit reading gesture.
+        ConversationContent.SizeChanged += (_, _) =>
+        {
+            if (_scrollNewSessionToLatest) QueueSessionScrollToLatest();
+        };
+        ConversationScroll.AddHandler(UIElement.PointerWheelChangedEvent,
+            new PointerEventHandler((_, _) => _scrollNewSessionToLatest = false), true);
+        ConversationScroll.AddHandler(UIElement.PointerPressedEvent,
+            new PointerEventHandler((_, _) => _scrollNewSessionToLatest = false), true);
+        ConversationScroll.AddHandler(UIElement.PreviewKeyDownEvent,
+            new Microsoft.UI.Xaml.Input.KeyEventHandler((_, _) => _scrollNewSessionToLatest = false), true);
+        OuterChatScrollBar.AddHandler(UIElement.PointerPressedEvent,
+            new PointerEventHandler((_, _) => _scrollNewSessionToLatest = false), true);
         _coordinator = App.Current.GetService<AssistantCoordinator>();
         _assistantHost = App.Current.GetService<AssistantHost>();
         _hostSubscription = _assistantHost.Subscribe("desktop", (type, payload, id) => EmitAsync(type, payload, id));
@@ -261,7 +275,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                 var changed = next != _session;
                 _snapshot = data;
                 _session = next;
-                if (changed) { ResetConversationViews(); _expandedSteps.Clear(); ClearToolSelection(); _contextUsed = 0; _contextLimit = 0; ResetChangesSummary(); }
+                if (changed) { ResetConversationViews(); _scrollNewSessionToLatest = true; _expandedSteps.Clear(); ClearToolSelection(); _contextUsed = 0; _contextLimit = 0; ResetChangesSummary(); }
                 var newMode = S(data, "chatMode", "general");
                 if (_mode != newMode) ClearToolSelection();
                 _mode = newMode;
@@ -441,6 +455,22 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         _messageActionViews.Clear();
     }
 
+    private bool _scrollNewSessionToLatest;
+    private bool _sessionScrollQueued;
+
+    private void QueueSessionScrollToLatest()
+    {
+        if (_sessionScrollQueued || !_scrollNewSessionToLatest || _disposed) return;
+        _sessionScrollQueued = true;
+        var session = _session;
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => RunUiCallback("Session.ScrollLatest", () =>
+        {
+            _sessionScrollQueued = false;
+            if (_disposed || session != _session || !_scrollNewSessionToLatest) return;
+            OnScrollToBottom(this, new RoutedEventArgs());
+        }));
+    }
+
     private void RenderMessagesNow()
     {
         ReconcilePendingMessages();
@@ -453,7 +483,8 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             return;
         }
         RenderSources(_snapshot);
-        var follow = _conversationSelection?.IsSelecting != true && ConversationScroll.ScrollableHeight - ConversationScroll.VerticalOffset < 90;
+        var follow = _scrollNewSessionToLatest
+            || _conversationSelection?.IsSelecting != true && ConversationScroll.ScrollableHeight - ConversationScroll.VerticalOffset < 90;
         var index = 0;
         foreach (var stale in _messageViews.Keys.Where(id => !IsKnownConversationMessage(id)).ToArray())
         { MessagesPanel.Children.Remove(_messageViews[stale].View); _messageViews.Remove(stale); _messageBlocks.Remove(stale); _messageActionViews.Remove(stale); _thinkingIndicators.Remove(stale); _thinkingStates.Remove(stale); }
@@ -510,6 +541,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         ConversationContent.UpdateLayout();
         RenderPromptTimeline(layoutCurrent: true);
         if (follow) ConversationScroll.ChangeView(null, ConversationScroll.ScrollableHeight, null, true);
+        QueueSessionScrollToLatest();
         SyncOuterScroll();
     }
     private void RenderSources(JsonElement data)
@@ -634,7 +666,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         finally { _syncingScroll = false; }
     }
     private void OnOuterScrollChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
-    { if (!_syncingScroll) ConversationScroll.ChangeView(null, e.NewValue, null, true); }
+    { if (!_syncingScroll) { _scrollNewSessionToLatest = false; ConversationScroll.ChangeView(null, e.NewValue, null, true); } }
     private void OnScrollToBottom(object sender, RoutedEventArgs e)
     {
         ConversationContent.UpdateLayout();
@@ -649,6 +681,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         // consume their own scrolling; blank inspector/header surfaces scroll chat.
         var point = e.GetCurrentPoint(AssistantFrame);
         if (point.Properties.IsHorizontalMouseWheel || point.Properties.MouseWheelDelta == 0) return;
+        _scrollNewSessionToLatest = false;
         var modifiers = e.KeyModifiers;
         if (modifiers.HasFlag(VirtualKeyModifiers.Control) || modifiers.HasFlag(VirtualKeyModifiers.Shift)) return;
         var scroll = ReviewScroll.Visibility == Visibility.Visible ? ReviewScroll : ConversationScroll;

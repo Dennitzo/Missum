@@ -12,14 +12,14 @@ namespace Missum.App.Services;
 /// in a constrained Docker container. A missing or unbuildable runner is a hard
 /// failure; this service never falls back to host PowerShell or host Python.
 /// </summary>
-public sealed class ResearchSandboxService(AssistantRuntimeProfile profile, Missum.Core.Contracts.IChatRepository? chats = null) : IResearchSandboxService, IDisposable
+public sealed partial class ResearchSandboxService(AssistantRuntimeProfile profile, Missum.Core.Contracts.IChatRepository? chats = null) : IResearchSandboxService, IDisposable
 {
-    public const string RunnerImage = "missum-ai/research-runner:1";
+    public const string RunnerImage = "missum-ai/research-runner:2";
     private const long MaximumProjectBytes = 100L * 1024 * 1024 * 1024;
     private const int MaximumOutputCharacters = 2 * 1024 * 1024;
     private static readonly Regex SafeId = new("^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$", RegexOptions.CultureInvariant | RegexOptions.Compiled);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
-    private static readonly string[] ExecutionInputRoots = ["work", "inputs", "env"];
+    private static readonly string[] ExecutionInputRoots = ["work", "inputs", "env", "manuscripts"];
     private static readonly string[] ExecutionOutputRoots = ["artifacts", "notebooks"];
     private readonly SemaphoreSlim _gate = new(1, 1);
     private string Root => Path.Combine(profile.DataDirectory, "ResearchSandbox");
@@ -93,12 +93,14 @@ public sealed class ResearchSandboxService(AssistantRuntimeProfile profile, Miss
             {
                 var bytes = JsonSerializer.SerializeToUtf8Bytes(new
                 {
-                    schemaVersion = 1,
+                    schemaVersion = 2,
                     projectId,
                     createdAt = DateTimeOffset.UtcNow,
                     runtime = "docker-linux-isolated",
                     network = "disabled",
-                    limits = new { cpuCores = 16, memoryBytes = 48L * 1024 * 1024 * 1024, maximumProjectBytes = MaximumProjectBytes, maximumStageSeconds = 7200 },
+                    limits = new { cpuCores = 16, memoryBytes = 48L * 1024 * 1024 * 1024,
+                        maximumActiveProjectBytes = MaximumProjectBytes,
+                        minimumFreeBytes = MinimumFreeBytes, maximumStageSeconds = 7200 },
                 }, JsonOptions);
                 await File.WriteAllBytesAsync(manifest, bytes, cancellationToken).ConfigureAwait(false);
             }
@@ -137,6 +139,7 @@ public sealed class ResearchSandboxService(AssistantRuntimeProfile profile, Miss
     {
         ArgumentNullException.ThrowIfNull(content);
         var layout = await EnsureProjectAsync(projectId, cancellationToken).ConfigureAwait(false);
+        using var projectMutation = await AcquireProjectExecutionAsync(layout, cancellationToken).ConfigureAwait(false);
         var parentRelative = Path.GetDirectoryName(relativePath.Replace('\\', Path.DirectorySeparatorChar));
         if (!string.IsNullOrWhiteSpace(parentRelative)) CreateSafeWorkDirectory(layout.WorkPath, parentRelative);
         var destination = ResolveWorkFile(layout.WorkPath, relativePath);
@@ -145,24 +148,19 @@ public sealed class ResearchSandboxService(AssistantRuntimeProfile profile, Miss
         {
             Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
             var exists = File.Exists(destination);
-            var beforeBytes = exists ? await File.ReadAllBytesAsync(destination, cancellationToken).ConfigureAwait(false) : null;
-            var beforeHash = beforeBytes is null ? null : Hash(beforeBytes);
+            var beforeHash = exists ? await FileHashAsync(destination, cancellationToken).ConfigureAwait(false) : null;
             if (expectedSha256 is not null && !string.Equals(expectedSha256, beforeHash, StringComparison.OrdinalIgnoreCase))
                 throw new IOException("Die Sandboxdatei wurde seit dem erwarteten Stand geändert; es wurde nichts überschrieben.");
             var changeSetId = Guid.NewGuid().ToString("N");
-            var snapshotDirectory = Path.Combine(layout.SnapshotsPath, changeSetId);
-            Directory.CreateDirectory(snapshotDirectory);
-            if (beforeBytes is not null)
-                await File.WriteAllBytesAsync(Path.Combine(snapshotDirectory, "before.bin"), beforeBytes, cancellationToken).ConfigureAwait(false);
             var contentBytes = System.Text.Encoding.UTF8.GetBytes(content);
             var temp = destination + "." + changeSetId + ".tmp";
             await File.WriteAllBytesAsync(temp, contentBytes, cancellationToken).ConfigureAwait(false);
             File.Move(temp, destination, overwrite: true);
             var afterHash = Hash(contentBytes);
             var change = new ResearchSandboxFileChange(changeSetId, relativePath.Replace('\\', '/'), beforeHash, afterHash, !exists);
-            await File.WriteAllTextAsync(Path.Combine(snapshotDirectory, "manifest.json"), JsonSerializer.Serialize(new
+            await File.WriteAllTextAsync(Path.Combine(layout.RunsPath, "edit-" + changeSetId + ".json"), JsonSerializer.Serialize(new
             {
-                schemaVersion = 1, projectId, change.ChangeSetId, change.RelativePath,
+                schemaVersion = 2, storage = "current-project-tree", projectId, change.ChangeSetId, change.RelativePath,
                 change.BeforeSha256, change.AfterSha256, change.IsNewFile, createdAt = DateTimeOffset.UtcNow,
             }, JsonOptions), cancellationToken).ConfigureAwait(false);
             return change;
@@ -177,7 +175,13 @@ public sealed class ResearchSandboxService(AssistantRuntimeProfile profile, Miss
         var layout = await EnsureProjectAsync(projectId, cancellationToken).ConfigureAwait(false);
         var snapshotDirectory = Path.Combine(layout.SnapshotsPath, changeSetId);
         var manifestPath = Path.Combine(snapshotDirectory, "manifest.json");
-        if (!File.Exists(manifestPath)) throw new FileNotFoundException("Das Änderungspaket wurde nicht gefunden.", manifestPath);
+        if (!File.Exists(manifestPath))
+        {
+            if (File.Exists(Path.Combine(layout.RunsPath, "edit-" + changeSetId + ".json")))
+                throw new InvalidOperationException("Das Projekt verwendet einen aktuellen Arbeitsbaum ohne Dateirevisionen. Dieser Änderungsbeleg enthält nur Hashes und keine rücksetzbare Dateikopie.");
+            throw new FileNotFoundException("Das Änderungspaket wurde nicht gefunden.", manifestPath);
+        }
+        using var projectMutation = await AcquireProjectExecutionAsync(layout, cancellationToken).ConfigureAwait(false);
         using var manifest = JsonDocument.Parse(await File.ReadAllTextAsync(manifestPath, cancellationToken).ConfigureAwait(false));
         var root = manifest.RootElement;
         if (!string.Equals(root.GetProperty("projectId").GetString(), projectId, StringComparison.Ordinal)
@@ -224,18 +228,14 @@ public sealed class ResearchSandboxService(AssistantRuntimeProfile profile, Miss
         var script = ResolveWorkFile(layout.WorkPath, relativeScriptPath);
         if (!File.Exists(script)) throw new FileNotFoundException("Das Python-Skript liegt nicht im Forschungsbereich work.", script);
         var workingDirectory = ResolveWorkDirectory(layout.WorkPath, relativeWorkingDirectory);
-        if (await DirectoryBytesAsync(layout.RootPath, cancellationToken).ConfigureAwait(false) > MaximumProjectBytes)
-            throw new IOException("Das 100-GiB-Sandboxkontingent ist ausgeschöpft.");
+        await ValidateExecutionCapacityAsync(layout, MaximumProjectBytes, cancellationToken).ConfigureAwait(false);
         await EnsureRunnerImageAsync(cancellationToken).ConfigureAwait(false);
 
         var runId = Guid.NewGuid().ToString("N");
         var containerName = "missum-research-" + runId;
         ResearchExecutionSnapshot snapshot;
-        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try { snapshot = await CaptureExecutionSnapshotAsync(layout, runId, script, cancellationToken).ConfigureAwait(false); }
-        finally { _gate.Release(); }
-        if (await DirectoryBytesAsync(layout.RootPath, cancellationToken).ConfigureAwait(false) > MaximumProjectBytes)
-            throw new IOException("Der reproduzierbare Ausführungsstand überschreitet das 100-GiB-Sandboxkontingent.");
+        using var projectExecution = await AcquireProjectExecutionAsync(layout, cancellationToken).ConfigureAwait(false);
+        snapshot = await CaptureExecutionSnapshotAsync(layout, runId, script, token: cancellationToken).ConfigureAwait(false);
         var scriptContainerPath = "/sandbox/work/" + Path.GetRelativePath(layout.WorkPath, script).Replace('\\', '/');
         var startInfo = new ProcessStartInfo("docker") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
         Add(startInfo, "run"); Add(startInfo, "--rm"); Add(startInfo, "--init"); Add(startInfo, "--name"); Add(startInfo, containerName);
@@ -245,35 +245,58 @@ public sealed class ResearchSandboxService(AssistantRuntimeProfile profile, Miss
         Add(startInfo, "--security-opt"); Add(startInfo, "no-new-privileges:true"); Add(startInfo, "--pids-limit"); Add(startInfo, "256");
         Add(startInfo, "--cpus"); Add(startInfo, "16"); Add(startInfo, "--memory"); Add(startInfo, "48g"); Add(startInfo, "--memory-swap"); Add(startInfo, "48g");
         Add(startInfo, "--user"); Add(startInfo, "10001:10001"); Add(startInfo, "--tmpfs"); Add(startInfo, "/tmp:rw,noexec,nosuid,nodev,size=536870912");
-        // Python reads the measured frozen inputs and its private copy of work.
-        // Concurrent parent writes cannot alter this child's source or data.
-        AddMount(startInfo, Path.Combine(snapshot.FrozenPath, "inputs"), "/sandbox/inputs", readOnly: true);
+        // There is one authoritative project tree. Its source/data hashes are
+        // measured before and after execution; application writes are serialized.
+        AddMount(startInfo, layout.InputsPath, "/sandbox/inputs", readOnly: true);
         AddMount(startInfo, snapshot.ExecutionWorkPath, "/sandbox/work", readOnly: false);
         AddMount(startInfo, layout.ArtifactsPath, "/sandbox/artifacts", readOnly: false);
         AddMount(startInfo, layout.NotebooksPath, "/sandbox/notebooks", readOnly: false);
-        AddMount(startInfo, layout.ManuscriptsPath, "/sandbox/manuscripts", readOnly: false);
-        AddMount(startInfo, Path.Combine(snapshot.FrozenPath, "env"), "/sandbox/env", readOnly: true);
-        AddMount(startInfo, layout.RunsPath, "/sandbox/runs", readOnly: false);
-        AddMount(startInfo, layout.SnapshotsPath, "/sandbox/snapshots", readOnly: true);
+        AddMount(startInfo, layout.ManuscriptsPath, "/sandbox/manuscripts", readOnly: true);
+        AddMount(startInfo, layout.EnvironmentPath, "/sandbox/env", readOnly: true);
         Add(startInfo, "--workdir");
         var relativeContainerWorkingDirectory = Path.GetRelativePath(layout.WorkPath, workingDirectory).Replace('\\', '/');
         Add(startInfo, "/sandbox/work" + (relativeContainerWorkingDirectory == "." ? string.Empty : "/" + relativeContainerWorkingDirectory));
-        Add(startInfo, RunnerImage); Add(startInfo, "python3"); Add(startInfo, "-I"); Add(startInfo, scriptContainerPath);
+        Add(startInfo, RunnerImage);
+        foreach (var argument in CreatePythonInvocation(scriptContainerPath)) Add(startInfo, argument);
         foreach (var argument in arguments ?? [])
         {
             if (argument.Length > 4000 || argument.Any(char.IsControl)) throw new ArgumentException("Ein Python-Argument ist ungültig.", nameof(arguments));
             Add(startInfo, argument);
         }
+        snapshot = snapshot with { Arguments = (arguments ?? []).ToArray(), WorkingDirectory = relativeContainerWorkingDirectory };
 
         using var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
         var started = DateTimeOffset.UtcNow;
-        if (!process.Start()) throw new InvalidOperationException("Docker konnte den isolierten Forschungscontainer nicht starten.");
-        var stdoutTask = ReadBoundedAsync(process.StandardOutput, MaximumOutputCharacters);
+        await WriteExecutionStatusAsync(layout, runId, snapshot, "prepared", started, null, null, null).ConfigureAwait(false);
+        try
+        {
+            if (!process.Start()) throw new InvalidOperationException("Docker konnte den isolierten Forschungscontainer nicht starten.");
+        }
+        catch (Exception exception)
+        {
+            await WriteExecutionStatusAsync(layout, runId, snapshot, "failed_to_start", started, DateTimeOffset.UtcNow, null, exception.Message).ConfigureAwait(false);
+            throw;
+        }
+        var stdoutTask = ReadBoundedAsync(process.StandardOutput, MaximumOutputCharacters, preserveTail: true);
         var stderrTask = ReadBoundedAsync(process.StandardError, MaximumOutputCharacters);
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
+        using var capacityMonitoring = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token);
+        var capacityViolation = WaitForCapacityViolationAsync(layout, token: capacityMonitoring.Token);
         var timedOut = false;
-        try { await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false); }
+        string? resourceFailure = null;
+        try
+        {
+            var exited = process.WaitForExitAsync(timeout.Token);
+            if (await Task.WhenAny(exited, capacityViolation).ConfigureAwait(false) == capacityViolation)
+            {
+                resourceFailure = await capacityViolation.ConfigureAwait(false);
+                await KillContainerAsync(containerName).ConfigureAwait(false);
+                try { await process.WaitForExitAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(15), CancellationToken.None).ConfigureAwait(false); }
+                catch (TimeoutException) { try { process.Kill(entireProcessTree: true); } catch (InvalidOperationException) { } }
+            }
+            else await exited.ConfigureAwait(false);
+        }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             timedOut = true;
@@ -285,25 +308,49 @@ public sealed class ResearchSandboxService(AssistantRuntimeProfile profile, Miss
         {
             await KillContainerAsync(containerName).ConfigureAwait(false);
             try { process.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
+            await WriteExecutionStatusAsync(layout, runId, snapshot, "cancelled", started, DateTimeOffset.UtcNow, null, "Die Ausführung wurde abgebrochen; kein erfolgreicher Ausführungsbeleg.").ConfigureAwait(false);
             throw;
+        }
+        finally
+        {
+            await capacityMonitoring.CancelAsync().ConfigureAwait(false);
+            try { await capacityViolation.ConfigureAwait(false); }
+            catch (OperationCanceledException) { }
         }
 
         var stdout = await stdoutTask.ConfigureAwait(false);
         var stderr = await stderrTask.ConfigureAwait(false);
+        if (resourceFailure is not null) stderr += "\n" + resourceFailure;
         var completed = DateTimeOffset.UtcNow;
-        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         IReadOnlyDictionary<string, string> outputHashes;
-        try { outputHashes = await CompleteExecutionSnapshotAsync(layout, snapshot, cancellationToken).ConfigureAwait(false); }
-        finally { _gate.Release(); }
-        var result = new ResearchSandboxRunResult(runId, timedOut ? 124 : process.ExitCode, timedOut, stdout, stderr, started, completed,
-            $"docker run {RunnerImage} python3 -I {scriptContainerPath}", snapshot.ExecutedScriptPath,
+        try
+        {
+            var parsed = ParseExecutionReadTrace(stdout);
+            stdout = parsed.StandardOutput;
+            if (parsed.Trace is not null) snapshot = BindExecutionReadTrace(snapshot, parsed.Trace);
+            outputHashes = await CompleteExecutionSnapshotAsync(layout, snapshot, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or OperationCanceledException)
+        {
+            await WriteExecutionStatusAsync(layout, runId, snapshot, "invalid_provenance", started, completed,
+                resourceFailure is not null ? 137 : timedOut ? 124 : process.ExitCode, exception.Message, stdout, stderr).ConfigureAwait(false);
+            throw;
+        }
+        var result = new ResearchSandboxRunResult(runId, resourceFailure is not null ? 137 : timedOut ? 124 : process.ExitCode, timedOut, stdout, stderr, started, completed,
+            $"docker run --workdir /sandbox/work{(snapshot.WorkingDirectory == "." ? string.Empty : "/" + snapshot.WorkingDirectory)} {RunnerImage} python3 -I -B -X pycache_prefix=/tmp/missum-bytecode -c [missum-sandbox-launcher-v1] {JsonSerializer.Serialize(new[] { scriptContainerPath }.Concat(snapshot.Arguments ?? []), JsonOptions)}", snapshot.ExecutedScriptPath,
             snapshot.ScriptSha256, snapshot.SnapshotId, snapshot.InputHashes, outputHashes);
         var runRecord = JsonSerializer.SerializeToUtf8Bytes(new
         {
-            schemaVersion = 2, projectId, runId, script = snapshot.ExecutedScriptPath,
+            schemaVersion = 3, projectId, runId, script = snapshot.ExecutedScriptPath,
+            phase = resourceFailure is not null ? "resource_failed" : timedOut ? "timed_out" : process.ExitCode == 0 ? "completed" : "failed",
             result.ExecutedScriptPath, result.ScriptSha256, result.SnapshotId, result.InputHashes, result.OutputHashes,
             startedAt = started, completedAt = completed, result.ExitCode, result.TimedOut,
             result.Command, environment = RunnerImage, networkIsolation = "docker --network none",
+            arguments = snapshot.Arguments, workingDirectory = snapshot.WorkingDirectory,
+            provenance = new { version = 1, mode = "current-project-tree", sourceHashes = snapshot.SourceHashes,
+                inputsSha256Before = snapshot.InputHashes, outputsSha256After = outputHashes },
+            launcher = new { version = 1, sha256 = Hash(System.Text.Encoding.UTF8.GetBytes(PythonLauncher)),
+                projectImportRoots = new[] { "/sandbox/work", Path.GetDirectoryName(scriptContainerPath)?.Replace('\\', '/') } },
             resourceLimits = new { cpuCores = 16, memory = "48g", pids = 256, timeoutSeconds }, result.StandardOutput, result.StandardError,
         }, JsonOptions);
         await File.WriteAllBytesAsync(Path.Combine(layout.RunsPath, runId + ".json"), runRecord, CancellationToken.None).ConfigureAwait(false);
@@ -314,6 +361,7 @@ public sealed class ResearchSandboxService(AssistantRuntimeProfile profile, Miss
     {
         ValidateProjectId(projectId);
         var storage = Path.GetFullPath(await ResolveStorageRootAsync(projectId, cancellationToken).ConfigureAwait(false));
+        using var projectMutation = await AcquireProjectExecutionAsync(Path.Combine(storage, projectId), cancellationToken).ConfigureAwait(false);
         var trash = Path.Combine(storage, "Trash");
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -336,6 +384,7 @@ public sealed class ResearchSandboxService(AssistantRuntimeProfile profile, Miss
     {
         ValidateProjectId(projectId);
         var storage = Path.GetFullPath(await ResolveStorageRootAsync(projectId, cancellationToken).ConfigureAwait(false));
+        using var projectMutation = await AcquireProjectExecutionAsync(Path.Combine(storage, projectId), cancellationToken).ConfigureAwait(false);
         var trash = Path.Combine(storage, "Trash");
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -394,8 +443,9 @@ public sealed class ResearchSandboxService(AssistantRuntimeProfile profile, Miss
 
     private static async Task KillContainerAsync(string containerName)
     {
-        try { _ = await RunDockerCaptureAsync(["kill", containerName], CancellationToken.None).ConfigureAwait(false); }
-        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception or IOException) { }
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        try { _ = await RunDockerCaptureAsync(["rm", "--force", containerName], timeout.Token).ConfigureAwait(false); }
+        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception or IOException or OperationCanceledException) { }
     }
 
     private static async Task<(int ExitCode, string StandardOutput, string StandardError)> RunDockerCaptureAsync(IReadOnlyList<string> arguments, CancellationToken cancellationToken)
@@ -406,24 +456,48 @@ public sealed class ResearchSandboxService(AssistantRuntimeProfile profile, Miss
         if (!process.Start()) throw new InvalidOperationException("Docker CLI konnte nicht gestartet werden.");
         var stdout = ReadBoundedAsync(process.StandardOutput, MaximumOutputCharacters);
         var stderr = ReadBoundedAsync(process.StandardError, MaximumOutputCharacters);
-        await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+        try { await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false); }
+        catch (OperationCanceledException)
+        {
+            try { process.Kill(entireProcessTree: true); }
+            catch (InvalidOperationException) { }
+            try { await process.WaitForExitAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None).ConfigureAwait(false); }
+            catch (TimeoutException) { }
+            throw;
+        }
         return (process.ExitCode, await stdout.ConfigureAwait(false), await stderr.ConfigureAwait(false));
     }
 
-    private static async Task<string> ReadBoundedAsync(StreamReader reader, int maximumCharacters)
+    private static async Task<string> ReadBoundedAsync(StreamReader reader, int maximumCharacters, bool preserveTail = false)
     {
         var buffer = new char[8192];
         var builder = new System.Text.StringBuilder(Math.Min(maximumCharacters, 8192));
+        var tail = new System.Text.StringBuilder();
+        var tailBudget = preserveTail ? maximumCharacters / 4 : 0;
+        var prefixBudget = maximumCharacters - tailBudget;
         var truncated = false;
         while (true)
         {
             var count = await reader.ReadAsync(buffer.AsMemory()).ConfigureAwait(false);
             if (count == 0) break;
-            var append = Math.Min(count, maximumCharacters - builder.Length);
+            var append = Math.Min(count, prefixBudget - builder.Length);
             if (append > 0) builder.Append(buffer, 0, append);
-            if (append < count) truncated = true;
+            if (append < count)
+            {
+                if (preserveTail)
+                {
+                    tail.Append(buffer, append, count - append);
+                    if (tail.Length > tailBudget)
+                    {
+                        tail.Remove(0, tail.Length - tailBudget);
+                        truncated = true;
+                    }
+                }
+                else truncated = true;
+            }
         }
         if (truncated) builder.Append("\n[Ausgabe gekürzt]");
+        if (tail.Length > 0) builder.Append(tail);
         return builder.ToString();
     }
 
@@ -454,97 +528,95 @@ public sealed class ResearchSandboxService(AssistantRuntimeProfile profile, Miss
         return total;
     }
 
-    internal sealed record ResearchExecutionSnapshot(string SnapshotId, string FrozenPath, string ExecutionWorkPath,
+    internal sealed record ResearchExecutionSnapshot(string SnapshotId, string ExecutionWorkPath,
         string ExecutedScriptPath, string ScriptSha256, IReadOnlyDictionary<string, string> InputHashes,
-        IReadOnlyDictionary<string, string> BeforeOutputHashes, IReadOnlyDictionary<string, DateTime> BeforeOutputTimes);
+        IReadOnlyDictionary<string, string> SourceHashes, IReadOnlyDictionary<string, string> BeforeOutputHashes,
+        IReadOnlyDictionary<string, DateTime> BeforeOutputTimes, bool ReadsMeasured = false,
+        IReadOnlyList<string>? Arguments = null, string? WorkingDirectory = null,
+        IReadOnlyDictionary<string, string>? BaselineInputHashes = null);
 
     internal static async Task<ResearchExecutionSnapshot> CaptureExecutionSnapshotAsync(ResearchSandboxLayout layout,
-        string runId, string script, CancellationToken token = default)
+        string runId, string script, long maximumBytes = MaximumProjectBytes, CancellationToken token = default)
     {
         ValidateProjectId(runId);
         EnsureBelowRoot(script, layout.WorkPath);
-        var requiredBytes = checked(await DirectoryBytesAsync(layout.RootPath, token).ConfigureAwait(false)
-            + 2 * await DirectoryBytesAsync(layout.WorkPath, token).ConfigureAwait(false)
-            + await DirectoryBytesAsync(layout.InputsPath, token).ConfigureAwait(false)
-            + await DirectoryBytesAsync(layout.EnvironmentPath, token).ConfigureAwait(false));
-        if (requiredBytes > MaximumProjectBytes)
-            throw new IOException("Der eingefrorene Ausführungsstand überschreitet das 100-GiB-Sandboxkontingent; es wurden keine Eingaben kopiert.");
-        var snapshotId = "execution-" + runId;
-        var root = Path.Combine(layout.SnapshotsPath, snapshotId);
-        if (Directory.Exists(root)) throw new IOException("Der Ausführungsstand existiert bereits.");
-        var frozen = Path.Combine(root, "frozen");
-        var executionWork = Path.Combine(root, "execution-work");
-        Directory.CreateDirectory(frozen);
+        await ValidateExecutionCapacityAsync(layout, maximumBytes, token).ConfigureAwait(false);
+        EnsureFreeSpace(layout.RootPath);
         var inputs = new SortedDictionary<string, string>(StringComparer.Ordinal);
+        var sourceHashes = new SortedDictionary<string, string>(StringComparer.Ordinal);
+        var beforeTimes = new Dictionary<string, DateTime>(StringComparer.Ordinal);
         foreach (var name in ExecutionInputRoots)
         {
-            var hashes = await HashTreeAsync(Path.Combine(layout.RootPath, name), name, Path.Combine(frozen, name), token).ConfigureAwait(false);
-            foreach (var pair in hashes) inputs.Add(pair.Key, pair.Value);
-            if (inputs.Count > 4096) throw new IOException("Der vollständige Ausführungsstand besitzt mehr als 4096 Eingabedateien.");
+            foreach (var pair in await HashTreeAsync(Path.Combine(layout.RootPath, name), name, token).ConfigureAwait(false))
+            {
+                inputs.Add(pair.Key, pair.Value);
+                if (IsExecutionSource(pair.Key)) sourceHashes.Add(pair.Key, pair.Value);
+                if (pair.Key.StartsWith("work/", StringComparison.Ordinal))
+                    beforeTimes.Add(pair.Key, File.GetLastWriteTimeUtc(Path.Combine(layout.RootPath, pair.Key)));
+            }
+            if (inputs.Count > 4096) throw new IOException("Der vollständige Ausführungsbeleg besitzt mehr als 4096 Eingabedateien.");
         }
         ValidateHashBudget(inputs);
-        _ = await HashTreeAsync(Path.Combine(frozen, "work"), "work", executionWork, token).ConfigureAwait(false);
         var before = new SortedDictionary<string, string>(StringComparer.Ordinal);
-        var beforeTimes = new Dictionary<string, DateTime>(StringComparer.Ordinal);
         foreach (var name in ExecutionOutputRoots)
-            foreach (var pair in await HashTreeAsync(Path.Combine(layout.RootPath, name), name, null, token).ConfigureAwait(false))
+            foreach (var pair in await HashTreeAsync(Path.Combine(layout.RootPath, name), name, token).ConfigureAwait(false))
             {
                 before.Add(pair.Key, pair.Value);
                 beforeTimes.Add(pair.Key, File.GetLastWriteTimeUtc(Path.Combine(layout.RootPath, pair.Key)));
             }
         var scriptPath = "work/" + Path.GetRelativePath(layout.WorkPath, script).Replace('\\', '/');
-        var snapshot = new ResearchExecutionSnapshot(snapshotId, frozen, executionWork, scriptPath, inputs[scriptPath], inputs, before, beforeTimes);
-        await File.WriteAllTextAsync(Path.Combine(root, "manifest.json"), JsonSerializer.Serialize(new
-        {
-            schemaVersion = 1, layout.ProjectId, runId, snapshot.SnapshotId, snapshot.ExecutedScriptPath,
-            snapshot.ScriptSha256, snapshot.InputHashes, createdAt = DateTimeOffset.UtcNow,
-        }, JsonOptions), token).ConfigureAwait(false);
-        return snapshot;
+        sourceHashes[scriptPath] = inputs[scriptPath];
+        return new("current-" + runId, layout.WorkPath, scriptPath, inputs[scriptPath], inputs, sourceHashes, before, beforeTimes);
     }
 
     internal static async Task<IReadOnlyDictionary<string, string>> CompleteExecutionSnapshotAsync(ResearchSandboxLayout layout,
         ResearchExecutionSnapshot snapshot, CancellationToken token = default)
     {
-        var afterWork = await HashTreeAsync(snapshot.ExecutionWorkPath, "work", null, token).ConfigureAwait(false);
-        var changed = new SortedDictionary<string, string>(StringComparer.Ordinal);
-        foreach (var pair in afterWork)
+        var after = new SortedDictionary<string, string>(StringComparer.Ordinal);
+        foreach (var name in ExecutionInputRoots)
+            foreach (var pair in await HashTreeAsync(Path.Combine(layout.RootPath, name), name, token).ConfigureAwait(false))
+                after.Add(pair.Key, pair.Value);
+        foreach (var pair in snapshot.SourceHashes)
         {
-            snapshot.InputHashes.TryGetValue(pair.Key, out var before);
-            if (pair.Value == before) continue;
-            var relative = pair.Key[5..];
-            var destination = ResolveWorkFile(layout.WorkPath, relative);
-            var current = File.Exists(destination) ? await FileHashAsync(destination, token).ConfigureAwait(false) : null;
-            if (current != before)
-                throw new IOException("Eine Workspace-Datei wurde während der Python-Ausführung geändert; der unabhängige Ausführungsstand bleibt erhalten und überschreibt sie nicht: " + pair.Key);
-            var parent = Path.GetDirectoryName(relative);
-            if (!string.IsNullOrEmpty(parent)) CreateSafeWorkDirectory(layout.WorkPath, parent);
-            File.Copy(Path.Combine(snapshot.ExecutionWorkPath, relative), destination, overwrite: true);
+            if (!after.TryGetValue(pair.Key, out var hash) && File.Exists(Path.Combine(layout.RootPath, pair.Key)))
+                hash = await FileHashAsync(Path.Combine(layout.RootPath, pair.Key), token).ConfigureAwait(false);
+            if (hash != pair.Value)
+                throw new IOException("Eine ausgeführte Quelldatei wurde während der Python-Ausführung geändert. "
+                    + "Es wurde kein erfolgreicher Ausführungsbeleg erstellt: " + pair.Key);
+        }
+        foreach (var pair in after)
+            if (!snapshot.ReadsMeasured && IsExecutionSource(pair.Key) && !snapshot.SourceHashes.ContainsKey(pair.Key))
+                throw new IOException("Während der Python-Ausführung wurde eine neue ausführbare Quelldatei angelegt. "
+                    + "Ihr Ausgangsstand ist nicht belegt; es wurde kein erfolgreicher Ausführungsbeleg erstellt: " + pair.Key);
+        foreach (var pair in snapshot.InputHashes.Where(pair => IsReadOnlyInput(pair.Key)))
+            if (!after.TryGetValue(pair.Key, out var hash) || hash != pair.Value)
+                throw new IOException("Eine schreibgeschützte Eingabedatei wurde während der Python-Ausführung geändert: " + pair.Key);
+        foreach (var pair in after.Where(pair => IsReadOnlyInput(pair.Key)))
+            if (!snapshot.ReadsMeasured && !snapshot.InputHashes.ContainsKey(pair.Key))
+                throw new IOException("Während der Python-Ausführung wurde eine neue schreibgeschützte Eingabedatei angelegt: " + pair.Key);
+        var changed = new SortedDictionary<string, string>(StringComparer.Ordinal);
+        foreach (var pair in after.Where(pair => pair.Key.StartsWith("work/", StringComparison.Ordinal)))
+        {
+            (snapshot.BaselineInputHashes ?? snapshot.InputHashes).TryGetValue(pair.Key, out var before);
+            if (pair.Value == before && snapshot.BeforeOutputTimes.TryGetValue(pair.Key, out var beforeTime)
+                && File.GetLastWriteTimeUtc(Path.Combine(layout.RootPath, pair.Key)) == beforeTime) continue;
             changed.Add(pair.Key, pair.Value);
         }
-        foreach (var pair in snapshot.InputHashes.Where(pair => pair.Key.StartsWith("work/", StringComparison.Ordinal) && !afterWork.ContainsKey(pair.Key)))
-        {
-            var destination = ResolveWorkFile(layout.WorkPath, pair.Key[5..]);
-            if (!File.Exists(destination)) continue;
-            if (await FileHashAsync(destination, token).ConfigureAwait(false) != pair.Value)
-                throw new IOException("Eine während der Python-Ausführung geänderte Datei wird nicht gelöscht: " + pair.Key);
-            File.Delete(destination);
-        }
         foreach (var name in ExecutionOutputRoots)
-            foreach (var pair in await HashTreeAsync(Path.Combine(layout.RootPath, name), name, null, token).ConfigureAwait(false))
+            foreach (var pair in await HashTreeAsync(Path.Combine(layout.RootPath, name), name, token).ConfigureAwait(false))
                 if (!snapshot.BeforeOutputHashes.TryGetValue(pair.Key, out var before) || pair.Value != before
                     || !snapshot.BeforeOutputTimes.TryGetValue(pair.Key, out var previousTime)
                     || File.GetLastWriteTimeUtc(Path.Combine(layout.RootPath, pair.Key)) != previousTime)
                     changed.Add(pair.Key, pair.Value);
         if (changed.Count > 4096) throw new IOException("Der vollständige Ausführungsbeleg besitzt mehr als 4096 Ergebnisdateien.");
         ValidateHashBudget(changed);
+        await ValidateExecutionCapacityAsync(layout, MaximumProjectBytes, token).ConfigureAwait(false);
         return changed;
     }
 
-    private static async Task<SortedDictionary<string, string>> HashTreeAsync(string root, string prefix,
-        string? copyTo, CancellationToken token)
+    private static async Task<SortedDictionary<string, string>> HashTreeAsync(string root, string prefix, CancellationToken token)
     {
         var hashes = new SortedDictionary<string, string>(StringComparer.Ordinal);
-        if (copyTo is not null) Directory.CreateDirectory(copyTo);
         var pending = new Stack<string>(); pending.Push(root);
         while (pending.TryPop(out var directory))
         {
@@ -557,17 +629,9 @@ public sealed class ResearchSandboxService(AssistantRuntimeProfile profile, Miss
                 var relative = Path.GetRelativePath(root, path);
                 if (Directory.Exists(path))
                 {
-                    if (copyTo is not null) Directory.CreateDirectory(Path.Combine(copyTo, relative));
                     pending.Push(path); continue;
                 }
-                var measured = path;
-                if (copyTo is not null)
-                {
-                    measured = Path.Combine(copyTo, relative);
-                    Directory.CreateDirectory(Path.GetDirectoryName(measured)!);
-                    File.Copy(path, measured, overwrite: false);
-                }
-                hashes.Add(prefix + "/" + relative.Replace('\\', '/'), await FileHashAsync(measured, token).ConfigureAwait(false));
+                hashes.Add(prefix + "/" + relative.Replace('\\', '/'), await FileHashAsync(path, token).ConfigureAwait(false));
                 if (hashes.Count > 4096) throw new IOException("Ein vollständiger Ausführungsstand darf höchstens 4096 Dateien enthalten.");
             }
         }

@@ -11,7 +11,7 @@ public sealed partial class AgentToolCatalog
         Client(ClientToolNames.ResearchRead, "Lies view=overview für den kompakten Forschungsstand; knownStateStamp spart unveränderte Inhalte. view=task liefert den vollständigen ursprünglichen Auftrag in Textseiten. objects/sources/experiments/checks laden ihren eigenen Bereich; ids liefern gezielte Details (sources auch Evidenz-IDs). Folge nextCursor nur innerhalb derselben Ansicht/ids; bei research.cursor_stale ohne Cursor neu beginnen. Ohne view bleiben frühere offset-Aufrufe kompatibel.", ToolRiskClass.ReadOnly, NormalizeResearchStateSchema(Parse("""
             {"type":"object","properties":{"projectId":{"type":"string","pattern":"^[A-Za-z0-9._-]{1,128}$"},"view":{"type":"string","enum":["overview","task","objects","sources","experiments","checks"]},"cursor":{"type":"string","minLength":1,"maxLength":2048},"knownStateStamp":{"type":"string","pattern":"^[a-fA-F0-9]{64}$"},"ids":{"type":"array","maxItems":32,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":256}},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["projectId"],"additionalProperties":false}
             """))),
-        Client(ClientToolNames.ResearchUpdate, "Speichere nur neue oder fachlich geänderte Forschungsobjekte dauerhaft. Stabile id, kind und expectedRevision aus research.read verwenden; neue Objekte erwarten Revision 0. Bei kind section/contribution muss data.title UND data.contentMarkdown enthalten; description/method/limit ersetzen den wissenschaftlichen Markdowntext nicht. Bei hypothesis/claim/requirement muss data.statement enthalten. data ersetzt genau ein vollständiges Objekt. Für vorhandene Objekte nutze stattdessen patch mit ausschließlich geänderten Feldern: insbesondere status, review und Beleg-IDs; unveränderter Manuskripttext und nicht angegebene Felder bleiben erhalten. Genau eines von data oder patch angeben; patch benötigt expectedRevision>0. Arrays werden vollständig ersetzt; null entfernt optionale Felder, aber keine erforderlichen Inhalte oder verbindlichen Ziele. Bei review ist data.status bzw. patch.status ein Pflichtfeld auf derselben Ebene wie review; review.status ist unzulässig. review.itemRevision=expectedRevision+1. Wähle nur den tatsächlich erreichten fachlichen Status. Der Hauptagent schreibt Publikationsabschnitte, Subagenten eigene Beiträge mit ihrer Agent-ID als Präfix. Quellen und Prüfnachweise über echte IDs referenzieren. verified erfordert passende gespeicherte Prüfnachweise; ein erfolgreicher Prozess allein belegt keine Aussage. Konflikte gezielt beheben, nicht die Publikation wiederholen.", ToolRiskClass.LocalMutation, NormalizeResearchStateSchema(Parse("""
+        Client(ClientToolNames.ResearchUpdate, "Speichere nur neue oder fachlich geänderte Forschungsobjekte dauerhaft. Stabile id, kind und expectedRevision aus research.read verwenden; neue Objekte erwarten Revision 0. Bei kind section/contribution muss data.title UND data.contentMarkdown enthalten; description/method/limit ersetzen den wissenschaftlichen Markdowntext nicht. Bei hypothesis/claim/requirement muss data.statement enthalten. data ersetzt genau ein vollständiges Objekt. Für vorhandene Objekte nutze stattdessen patch mit ausschließlich geänderten Feldern: insbesondere status, review und Beleg-IDs; unveränderter Manuskripttext und nicht angegebene Felder bleiben erhalten. Genau eines von data oder patch angeben; patch benötigt expectedRevision>0. Arrays werden vollständig ersetzt; nicht geänderte oder unbekannte Felder weglassen. null entfernt nur vorhandene optionale Felder, erzeugt keine Prüfung und keinen Prüfvertrag. noChange=true bedeutet kein Fortschritt: denselben Aufruf nicht wiederholen. Erforderliche Inhalte und verbindliche Ziele bleiben erhalten. Bei review ist data.status bzw. patch.status ein Pflichtfeld auf derselben Ebene wie review; review.status ist unzulässig. review.itemRevision=expectedRevision+1. Wähle nur den tatsächlich erreichten fachlichen Status. Der Hauptagent schreibt Publikationsabschnitte, Subagenten eigene Beiträge mit ihrer Agent-ID als Präfix. Quellen und Prüfnachweise über echte IDs referenzieren. verified erfordert passende gespeicherte Prüfnachweise; ein erfolgreicher Prozess allein belegt keine Aussage. Konflikte gezielt beheben, nicht die Publikation wiederholen.", ToolRiskClass.LocalMutation, NormalizeResearchStateSchema(Parse("""
             {"type":"object","properties":{"projectId":{"type":"string","pattern":"^[A-Za-z0-9._-]{1,128}$"},"title":{"type":"string","minLength":1,"maxLength":1000},"changes":{"type":"array","minItems":1,"maxItems":64,"items":{"type":"object","properties":{"id":{"type":"string","minLength":1,"maxLength":256},"kind":{"type":"string","enum":["hypothesis","claim","requirement","section","contribution"]},"expectedRevision":{"type":"integer","minimum":0},"data":{"type":"object","minProperties":1,"properties":{"title":{"type":"string","maxLength":1000},"contentMarkdown":{"type":"string","maxLength":64000},"statement":{"type":"string","maxLength":16000},"status":{"type":"string","enum":["planned","active","supported","provisionallySupported","verified","refuted","blocked","unresolved","superseded","withdrawn","completed","openLimit","draft"]},"assumptions":{"anyOf":[{"type":"string","maxLength":16000},{"type":"array","maxItems":64,"items":{"type":"string","maxLength":2000}}]},"prediction":{"type":"string","maxLength":16000},"nextCheck":{"type":"string","maxLength":4000},"reason":{"type":"string","maxLength":16000},"required":{"type":"boolean"},"order":{"type":"integer"},"sourceIds":{"type":"array","maxItems":128,"items":{"type":"string","minLength":1,"maxLength":256}},"claimIds":{"type":"array","maxItems":128,"items":{"type":"string","minLength":1,"maxLength":256}},"experimentIds":{"type":"array","maxItems":128,"items":{"type":"string","minLength":1,"maxLength":256}},"checkIds":{"type":"array","maxItems":128,"items":{"type":"string","minLength":1,"maxLength":256}}},"additionalProperties":false}},"required":["id","kind","expectedRevision","data"],"additionalProperties":false}}},"required":["projectId","changes"],"additionalProperties":false}
             """))),
     ];
@@ -81,11 +81,11 @@ public sealed partial class AgentToolCatalog
     {
         // Encode the validator's cross-field requirement in the actual generation
         // schema. if/then/dependentRequired are not supported by native llama grammars.
-        // Keep the alternatives disjoint, including review:null for an explicit removal.
+        // Null deletion gets a separate review-first branch. Otherwise selecting
+        // metadata before review silently commits native generation to null.
         var withoutReview = payload.DeepClone().AsObject();
         var withoutFields = withoutReview["properties"]!.AsObject();
-        if (isPatch) withoutFields["review"] = new JsonObject { ["type"] = "null" };
-        else withoutFields.Remove("review");
+        withoutFields.Remove("review");
         var withReview = payload.DeepClone().AsObject();
         var reviewedFields = withReview["properties"]!.AsObject();
         reviewedFields["status"] = fields["status"]!.DeepClone();
@@ -94,7 +94,37 @@ public sealed partial class AgentToolCatalog
         required.Add("status");
         required.Add("review");
         withReview["required"] = required;
-        return new JsonObject { ["anyOf"] = new JsonArray(withoutReview, withReview) };
+        var alternatives = new JsonArray(withoutReview, withReview);
+        if (isPatch)
+        {
+            // llama's GBNF emits required properties before optional properties,
+            // in declaration order. With only the two branches above, starting
+            // a patch with "review" irrevocably chooses the null-only branch:
+            // the real review branch must start with "status". Preserve both
+            // useful orders without relaxing the status/review contract.
+            var reviewFirst = withReview.DeepClone().AsObject();
+            var ordered = new JsonObject
+            {
+                ["review"] = reviewedFields["review"]!.DeepClone(),
+                ["status"] = reviewedFields["status"]!.DeepClone(),
+            };
+            foreach (var field in reviewedFields)
+                if (field.Key is not ("review" or "status")) ordered[field.Key] = field.Value!.DeepClone();
+            reviewFirst["properties"] = ordered;
+            alternatives.Add(reviewFirst);
+            var removal = payload.DeepClone().AsObject();
+            var removalFields = new JsonObject
+            {
+                ["review"] = new JsonObject { ["type"] = "null",
+                    ["description"] = "Entfernt nur eine vorhandene Prüfung; erstellt keine Prüfung. Für eine Prüfung review als Objekt und status senden." },
+            };
+            foreach (var field in payload["properties"]!.AsObject())
+                if (field.Key != "review") removalFields[field.Key] = field.Value!.DeepClone();
+            removal["properties"] = removalFields;
+            removal["required"] = new JsonArray("review");
+            alternatives.Add(removal);
+        }
+        return new JsonObject { ["anyOf"] = alternatives };
     }
 
     private static readonly string[] ResearchStateExtraReferenceFields =

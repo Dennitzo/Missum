@@ -3,6 +3,7 @@ using Missum.Ai.Server.Core.Coding;
 using Missum.Ai.Server.Core.Models;
 using Missum.Ai.Server.Core.Research;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 
 namespace Missum.Ai.Server.Core.Runs;
@@ -58,6 +59,7 @@ public sealed partial class AgentToolCatalog
                 && (request.Mode == RunMode.Coding || !IsScientificExecutionTool(tool.Name))).Select(static tool => tool.Name));
         if (HasCapability(capabilities, "research.sandbox"))
             names.UnionWith(CodingToolCatalog.CreateTools().Where(tool => IsScientificExecutionTool(tool.Name)).Select(static tool => tool.Name));
+        if (HasCapability(capabilities, "math.lean")) names.Add(ClientToolNames.MathFormalProof);
         if (HasCapability(capabilities, "research.deliverables")) names.Add(ClientToolNames.ResearchDeliverablesVerify);
         if (ScientificStateCompletionPolicy.Enabled(request))
             names.UnionWith([ClientToolNames.ResearchRead, ClientToolNames.ResearchUpdate]);
@@ -83,6 +85,17 @@ public sealed partial class AgentToolCatalog
                 || result.Any(tool => string.Equals(tool.Name, descriptor.Name, StringComparison.Ordinal)))
                 throw new ArgumentException($"Dynamic client tool collides with a reserved tool: {descriptor.Name}");
             result.Add(CreateDynamicClientTool(descriptor));
+        }
+        if (Guid.TryParse(request.SessionId, out var sessionId))
+        {
+            var index = result.FindIndex(static tool => tool.Name == ClientToolNames.MathFormalProof);
+            if (index >= 0)
+            {
+                var tool = result[index];
+                var schema = JsonNode.Parse(tool.Schema.GetRawText())!.AsObject();
+                schema["properties"]!["projectId"]!["enum"] = new JsonArray("research-" + sessionId.ToString("N"));
+                result[index] = tool with { Schema = JsonSerializer.SerializeToElement(schema) };
+            }
         }
         return result.OrderBy(static tool => tool.Name, StringComparer.Ordinal).ToArray();
     }

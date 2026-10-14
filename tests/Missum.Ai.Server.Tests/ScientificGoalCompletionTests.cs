@@ -9,6 +9,17 @@ namespace Missum.Ai.Server.Tests;
 
 public sealed class ScientificGoalCompletionTests
 {
+    [Fact]
+    public void PendingPlanCriteriaStillPermitCurrentNumericalVerification()
+    {
+        var pendingCheck = new ScientificCompletionAssessment(false, true, "science", "awaiting-check", [], 0);
+        var state = CodingWorkingState.Create("Quantitative Lösung") with
+        { AcceptanceCriteria = [new("a1", "Quantitative Abweichung prüfen", "in_progress", [])] };
+        var assessment = ScientificStateCompletionPolicy.ApplyPlanRequirements(pendingCheck, state);
+        Assert.False(assessment.Complete);
+        Assert.True(assessment.NeedsVerification);
+        Assert.Contains("a1", Assert.Single(assessment.Missing), StringComparison.Ordinal);
+    }
     [Theory]
     [InlineData(null, false)]
     [InlineData("unresolved", false)]

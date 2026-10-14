@@ -107,8 +107,12 @@ internal static class ScientificStateCompletionPolicy
                 if (missing.Count == 0) missing.Add("Bearbeite die offenen Anforderungen und Prüfdiagnosen im kanonischen Forschungszustand; ein Prozesslauf oder Modellstatus allein belegt keine wissenschaftliche Aussage.");
             }
         }
-        var signature = epoch.ToString(CultureInfo.InvariantCulture) + ":" + revision.ToString(CultureInfo.InvariantCulture)
-            + ":" + publicationRevision.ToString(CultureInfo.InvariantCulture) + ":" + (verification?.GetRawText() ?? "unverified");
+        // Rendering paths, receipt timestamps and revision-only edits do not
+        // constitute a new scientific diagnosis. Keep completion feedback stable
+        // while still independently requiring a current verification above.
+        var signature = projectId + "\n" + string.Join("\n", missing.Select(NormalizeDiagnosisRevision)
+            .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal))
+            + "\n" + (verification is { } checkedDiagnosis ? VerificationRepairCause(projectId, checkedDiagnosis) : "unverified");
         var fingerprint = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(signature)));
         var repeated = verification is { } failed && !ready
             ? VerificationRepairCount(messages, VerificationRepairCause(projectId, failed)) : 0;
@@ -125,7 +129,9 @@ internal static class ScientificStateCompletionPolicy
             + "Das ursprüngliche Ziel mit echten Belegen erfüllen; nicht allein zum Abschluss als completed deklarieren.").ToArray();
         var fingerprint = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
             assessment.Fingerprint + JsonSerializer.Serialize(outstanding, RepairJsonOptions))));
-        return assessment with { Complete = false, NeedsVerification = false, Fingerprint = fingerprint,
+        // Open plan criteria prohibit completion, but must not suppress the
+        // current verifier's concrete numerical diagnostics.
+        return assessment with { Complete = false, Fingerprint = fingerprint,
             Missing = diagnoses.Concat(assessment.Missing).ToArray() };
     }
 
@@ -157,6 +163,9 @@ internal static class ScientificStateCompletionPolicy
         var prefix = VerificationRepairMarker + "\n" + cause + "\nOperation: " + operation + "\n";
         if (messages.Any(message => RepairContent(message)?.StartsWith(prefix, StringComparison.Ordinal) == true)) return false;
         var attempt = VerificationRepairCount(messages, cause) + 1;
+        // One actionable diagnosis and one escalation are enough for an
+        // unchanged cause. Each actual receipt remains in the durable journal.
+        if (attempt > 2) return false;
         var issues = VerificationIssues(result);
         var diagnoses = issues.Length > 0 ? JsonSerializer.Serialize(issues, RepairJsonOptions)
             : JsonSerializer.Serialize(VerificationDiagnoses(result), RepairJsonOptions);

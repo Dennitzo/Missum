@@ -113,6 +113,32 @@ test("extension descriptors remain mode filtered and selectable tools precede bu
   assert.equal(h.labels().filter(value => value === "Erweiterung analysieren").length, 1);
 });
 
+test("Lean is a selectable host tool in General, Codex and Science without requiring a Science project", async () => {
+  const lean = descriptor("builtin.math/lean", "Lean", "lean", true, {
+    toolAction: "lean", description: "Mathematische Beweise im Projekt mit Lean prüfen",
+    supportedChatModes: ["general", "coding", "claudescience"]
+  });
+  for (const mode of ["general", "coding", "claudescience"]) {
+    const h = harness({ mode, descriptors: [...builtins(), lean] });
+    const row = h.find("Lean");
+    assert.ok(row, mode);
+    assert.equal(row.disabled, false);
+    assert.equal(row.getAttribute("role"), "menuitemcheckbox");
+    assert.equal(row.dataset.actionId, "builtin.math/lean");
+    assert.equal(row.dataset.toolAction, "lean");
+    assert.equal(row.querySelector("svg").style.color, "#a07cf6");
+    assert.equal(row.querySelector("svg").querySelectorAll("path").length, 2);
+    h.open(); await row.click();
+    assert.deepEqual(h.calls, [["invoke", "builtin.math/lean"]]);
+    h.active.add(lean.actionId); h.api.update(h.menu);
+    assert.equal(row.getAttribute("aria-checked"), "true");
+    assert.equal(row.querySelector(".native-tools-status").hidden, false);
+    h.reasons.set(lean.actionId, "Lean ist nicht erreichbar"); h.api.update(h.menu);
+    assert.equal(row.disabled, true);
+    await row.click(); assert.equal(h.calls.length, 1);
+  }
+});
+
 test("the popup spans the actual composer, clamps to the viewport and uses the native 320px scrolling limit", () => {
   const h = harness(); h.open();
   assert.equal(h.menu.style.width, "936px");

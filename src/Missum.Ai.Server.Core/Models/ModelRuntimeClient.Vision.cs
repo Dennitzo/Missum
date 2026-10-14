@@ -1,9 +1,27 @@
 using Missum.Ai.Contracts;
+using Missum.Ai.Server.Core.Coding;
 
 namespace Missum.Ai.Server.Core.Models;
 
 public sealed partial class ModelRuntimeClient
 {
+    internal const int VisionDiagnosticOutputTokens = 2048;
+    private static readonly string[] ScientificPlotKeywords =
+    [
+        "MISSUM_SCIENCE_PLOT_REVIEW", "plot", "diagramm", "chart", "achsen", "axis", "axes",
+        "trajektor", "trajectory", "trajectories", "histogram", "streudiagramm",
+    ];
+
+    internal static string VisionSystemInstructions(string prompt)
+    {
+        var instructions = CodingAgentPolicy.ReasoningLanguagePrompt + "\n\n" + Policies.GeneralAgentPolicies.VisionAnalysisSystemPrompt;
+        if (IsScientificPlotRequest(prompt)) instructions += "\n\n" + Policies.GeneralAgentPolicies.ScientificPlotVisionInstructions;
+        return instructions;
+    }
+
+    internal static bool IsScientificPlotRequest(string prompt) =>
+        ScientificPlotKeywords.Any(term => prompt.Contains(term, StringComparison.OrdinalIgnoreCase));
+
     internal async Task<string?> ResolveIntegratedVisionAsync(string? selectedModel, CancellationToken token)
     {
         if (string.IsNullOrWhiteSpace(selectedModel)) return null;

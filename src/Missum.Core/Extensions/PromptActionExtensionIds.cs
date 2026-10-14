@@ -42,6 +42,7 @@ public static class PromptActionExtensionIds
         PromptTriggerAction.Coding => CodingRun,
         PromptTriggerAction.DocumentCreate => BuiltInActionIds.CreateDocument,
         PromptTriggerAction.PlanMode => BuiltInActionIds.PlanMode,
+        PromptTriggerAction.Lean => BuiltInActionIds.Lean,
         _ => throw new ArgumentOutOfRangeException(nameof(action), action, "Die Promptaktion besitzt keine persistierbare Extension-ID."),
     };
 
@@ -64,6 +65,7 @@ public static class PromptActionExtensionIds
             CodingRun => PromptTriggerAction.Coding,
             BuiltInActionIds.CreateDocument => PromptTriggerAction.DocumentCreate,
             BuiltInActionIds.PlanMode => PromptTriggerAction.PlanMode,
+            BuiltInActionIds.Lean => PromptTriggerAction.Lean,
             _ => default,
         };
         return extensionActionId is BuiltInActionIds.GenerateImage
@@ -80,7 +82,8 @@ public static class PromptActionExtensionIds
             or BuiltInActionIds.CreateAudiobook
             or CodingRun
             or BuiltInActionIds.CreateDocument
-            or BuiltInActionIds.PlanMode;
+            or BuiltInActionIds.PlanMode
+            or BuiltInActionIds.Lean;
     }
 
     public static string EnsureValid(string extensionActionId)

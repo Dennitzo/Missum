@@ -109,7 +109,7 @@ public sealed partial class LocalToolBroker
                 && !ScientificResearchReview.HasCurrentReview(receipt.State, protectedReviews);
         }
         JsonElement? feedback = null;
-        if (receipt.Success && sciencePresentation is not null)
+        if (receipt.Success && sciencePresentation is not null && receipt.ChangedIds.Count != 0)
         {
             var feedbackState = receipt.Replayed
                 ? await stateRepository.LoadWorkingStateAsync(projectId, token).ConfigureAwait(false) : receipt.State;
@@ -117,34 +117,69 @@ public sealed partial class LocalToolBroker
                 refresh: publicationChanged || reviewBadgeChanged || receipt.Replayed && feedbackState.PublicationRevision > 0,
                 TimeSpan.FromSeconds(8), token).ConfigureAwait(false);
         }
-        return ResearchUpdateReceipt(proposal.ProposalId, receipt, publicationChanged, feedback);
+        return ResearchUpdateReceipt(proposal.ProposalId, receipt, publicationChanged, feedback, changes);
     }
 
     internal static ClientToolResult ResearchUpdateReceipt(string proposalId, ResearchWorkingUpdateResult receipt,
-        bool publicationChanged, JsonElement? presentation = null)
+        bool publicationChanged, JsonElement? presentation = null, IReadOnlyList<ResearchWorkingChange>? submittedChanges = null)
     {
         var conflictIds = receipt.Conflicts.Select(conflict => conflict.Id).ToHashSet(StringComparer.Ordinal);
+        var noChange = receipt.Success && receipt.ChangedIds.Count == 0;
+        var unchangedIds = noChange && submittedChanges is not null
+            ? submittedChanges.Select(change => change.Id).ToHashSet(StringComparer.Ordinal) : [];
+        var diagnostics = ResearchNoChangeDiagnostics(receipt, submittedChanges);
         var presentationStatus = presentation is { } feedback ? StateText(feedback, "status") : null;
         var message = !receipt.Success
             ? "Keine Änderungen übernommen. Korrigiere ausschließlich die gemeldeten Einträge und ihre Revisionen."
+            : noChange
+                ? "Keine Änderung gespeichert; Objekt- und Publikationsrevision bleiben unverändert. Derselbe Aufruf kann nichts ergänzen. "
+                    + "null löscht nur vorhandene optionale Felder; es erstellt weder review noch quantitativeValidation. "
+                    + "Für eine fachliche Prüfung tatsächlichen review-Inhalt und status senden; für numerische Ziele einen vollständigen Prüfvertrag am requirement anlegen."
             : presentationStatus == "failed"
                 ? "Forschungsstand gespeichert; PDF oder Simulation konnte nicht dargestellt werden. Beachte die konkrete Diagnose und Abschnittsrevisionen in presentation. Korrigiere nur gemeldete Inhaltsfehler, nicht unveränderte Abschnitte."
             : presentationStatus == "pending"
                 ? "Forschungsstand gespeichert; PDF/Darstellung ist noch ausstehend. Speicherung ist kein PDF-Erfolgsbeleg. Vor Abschluss mit research.deliverables.verify prüfen; kein unverändertes research.update wiederholen."
             : presentationStatus == "empty"
                 ? "Forschungsstand gespeichert; noch kein ausgearbeiteter Publikationsabschnitt vorhanden."
-            : receipt.ChangedIds.Count == 0 ? "Forschungsstand unverändert."
-                : "Forschungsstand gespeichert; geänderte Publikationsabschnitte werden von Missum gesetzt.";
+            : "Forschungsstand gespeichert; geänderte Publikationsabschnitte werden von Missum gesetzt.";
         return new(proposalId, receipt.Success ? "completed" : "failed", JsonSerializer.SerializeToElement(new
         {
             success = receipt.Success, projectId = receipt.State.ProjectId, protocol = "section-delta-v1", receipt.State.Revision,
             receipt.State.PublicationRevision, receipt.State.Title, receipt.ChangedIds, receipt.Conflicts, receipt.Replayed,
-            stored = receipt.Success, publicationChanged, presentation,
-            items = receipt.State.Items.Where(item => receipt.ChangedIds.Contains(item.Id) || conflictIds.Contains(item.Id))
+            stored = receipt.Success && !noChange, changed = receipt.Success && !receipt.Replayed && !noChange,
+            noChange, diagnostics, publicationChanged, presentation,
+            items = receipt.State.Items.Where(item => receipt.ChangedIds.Contains(item.Id) || conflictIds.Contains(item.Id) || unchangedIds.Contains(item.Id))
                 .Select(item => ResearchItemReceipt(item, conflictIds.Contains(item.Id))),
             message,
         }, JsonOptions), receipt.Success ? null : "research.update_conflict",
-            receipt.Success ? presentationStatus is "failed" or "pending" ? message : null : "Forschungsänderung nicht übernommen.");
+            receipt.Success ? noChange || presentationStatus is "failed" or "pending" ? message : null : "Forschungsänderung nicht übernommen.");
+    }
+
+    private static object[] ResearchNoChangeDiagnostics(ResearchWorkingUpdateResult receipt,
+        IReadOnlyList<ResearchWorkingChange>? submittedChanges)
+    {
+        if (!receipt.Success || receipt.Replayed || submittedChanges is null) return [];
+        var current = receipt.State.Items.ToDictionary(item => item.Id, StringComparer.Ordinal);
+        return submittedChanges.Where(change => !receipt.ChangedIds.Contains(change.Id) && current.ContainsKey(change.Id))
+            .Select(change =>
+            {
+                var item = current[change.Id];
+                var missingRemovals = change.Patch is { ValueKind: JsonValueKind.Object } patch
+                    ? patch.EnumerateObject().Where(field => field.Value.ValueKind == JsonValueKind.Null
+                        && !item.Data.TryGetProperty(field.Name, out _)).Select(field => field.Name).ToArray() : [];
+                return (object)new
+                {
+                    code = missingRemovals.Length > 0 ? "research.null_removal_no_change" : "research.update_no_change",
+                    id = item.Id, currentRevision = item.Revision, removedNothing = missingRemovals,
+                    reviewPresent = item.Data.TryGetProperty("review", out _),
+                    quantitativeValidationPresent = item.Data.TryGetProperty("quantitativeValidation", out _),
+                    nextAction = missingRemovals.Contains("review", StringComparer.Ordinal)
+                        ? $"review fehlt weiterhin. Falls die fachliche Prüfung durchgeführt wurde: patch.review mit itemRevision={item.Revision + 1}, "
+                            + "sourceAssessment, calculationAssessment, contradictionAssessment und scope als konkreten Text sowie patch.status senden. "
+                            + "Keine Prüfung oder Messwerte erfinden. Nicht erneut null senden."
+                        : "Nicht erneut unverändert senden. Nur fachlich neue oder geänderte Felder als patch senden; unbekannte Werte weglassen.",
+                };
+            }).ToArray();
     }
 
     internal static object ResearchItemReceipt(ResearchWorkingItem item, bool full) => new

@@ -1,6 +1,5 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -107,8 +106,12 @@ public sealed class NativeSessionCacheCleanupService
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(15));
         using var http = new HttpClient(new HttpClientHandler { UseProxy = false, AllowAutoRedirect = false });
-        using var response = await http.PostAsJsonAsync($"http://127.0.0.1:{_profile.NativeControlPort}/sessions/delete",
-            deletion, JsonOptions, timeout.Token).ConfigureAwait(false);
+        // The local Python control server reads Content-Length, not chunked
+        // transfer encoding. JsonContent/PostAsJsonAsync streams chunked data
+        // and was therefore rejected before deletion could even be processed.
+        using var content = new StringContent(JsonSerializer.Serialize(deletion, JsonOptions), Encoding.UTF8, "application/json");
+        using var response = await http.PostAsync($"http://127.0.0.1:{_profile.NativeControlPort}/sessions/delete",
+            content, timeout.Token).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode) return false;
         using var result = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(false),
             cancellationToken: timeout.Token).ConfigureAwait(false);

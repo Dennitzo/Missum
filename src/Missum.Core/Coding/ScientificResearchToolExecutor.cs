@@ -27,7 +27,8 @@ public sealed class ScientificResearchToolExecutor(
         {
             ClientToolNames.MathSymbolic => new[] { "projectId", "expression", "operation", "symbol", "timeoutSeconds" },
             ClientToolNames.MathNumeric => new[] { "projectId", "expression", "precision", "timeoutSeconds" },
-            ClientToolNames.MathSmt or ClientToolNames.MathFormalProof => new[] { "projectId", "source", "timeoutSeconds" },
+            ClientToolNames.MathSmt => new[] { "projectId", "source", "timeoutSeconds" },
+            ClientToolNames.MathFormalProof => new[] { "projectId", "operation", "source", "path", "useMathlib", "timeoutSeconds" },
             ClientToolNames.ResearchCodeWrite => new[] { "projectId", "path", "content", "expectedSha256" },
             ClientToolNames.ResearchCodeExecute => new[] { "projectId", "experimentId", "executable", "arguments", "workingDirectory", "randomSeed", "timeoutSeconds" },
             ClientToolNames.ResearchCodeTest => new[] { "projectId", "experimentId", "executable", "arguments", "workingDirectory", "timeoutSeconds" },
@@ -45,11 +46,33 @@ public sealed class ScientificResearchToolExecutor(
                 throw new ArgumentException("operation ist ungültig.");
         }
         else if (toolName == ClientToolNames.MathNumeric) _ = RequiredString(arguments, "expression", 16_000);
-        else if (toolName is ClientToolNames.MathSmt or ClientToolNames.MathFormalProof)
+        else if (toolName == ClientToolNames.MathFormalProof)
         {
-            var source = RequiredString(arguments, "source", 64_000);
-            if (toolName == ClientToolNames.MathFormalProof) LeanProofSourceContract.Validate(source);
+            var operation = OptionalString(arguments, "operation") ?? "check";
+            if (operation is not ("initialize" or "check")) throw new ArgumentException("operation muss initialize oder check sein.");
+            if (arguments.TryGetProperty("useMathlib", out var mathlib) && mathlib.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                throw new ArgumentException("useMathlib muss ein Wahrheitswert sein.");
+            _ = Integer(arguments, "timeoutSeconds", 300, 1, 7200);
+            var hasSource = arguments.TryGetProperty("source", out _);
+            var hasPath = arguments.TryGetProperty("path", out _);
+            if (operation == "initialize")
+            {
+                if (hasSource || hasPath) throw new ArgumentException("initialize akzeptiert weder source noch path; zum Beweisen check verwenden.");
+            }
+            else
+            {
+                if (hasSource == hasPath) throw new ArgumentException("check benötigt genau source oder path.");
+                if (hasSource) LeanProofSourceContract.Validate(RequiredString(arguments, "source", 64_000));
+                else
+                {
+                    var path = RequiredString(arguments, "path", 1_024);
+                    if (Path.IsPathRooted(path) || path.Contains(':') || path.Contains('\\') || path.Any(char.IsControl)
+                        || path.Split('/').Any(static segment => segment is ".." or ".git") || !path.EndsWith(".lean", StringComparison.Ordinal))
+                        throw new UnauthorizedAccessException("path muss ein relativer .lean-Projektpfad mit / sein.");
+                }
+            }
         }
+        else if (toolName == ClientToolNames.MathSmt) _ = RequiredString(arguments, "source", 64_000);
         else if (toolName == ClientToolNames.ResearchCodeWrite)
         {
             _ = RequiredString(arguments, "path", 1_024); _ = RequiredString(arguments, "content", 64_000, allowEmpty: true);
@@ -86,10 +109,92 @@ public sealed class ScientificResearchToolExecutor(
                 arguments, NumericHarness(arguments), ".py", "python", cancellationToken).ConfigureAwait(false),
             ClientToolNames.MathSmt => await RunGeneratedMathAsync(toolName, projectId, projectRelative, projectRoot,
                 arguments, RequiredString(arguments, "source", 64_000), ".py", "python", cancellationToken).ConfigureAwait(false),
-            ClientToolNames.MathFormalProof => await RunGeneratedMathAsync(toolName, projectId, projectRelative, projectRoot,
-                arguments, RequiredString(arguments, "source", 64_000), ".lean", "lean", cancellationToken).ConfigureAwait(false),
+            ClientToolNames.MathFormalProof => await RunLeanAsync(projectId, projectRelative, projectRoot,
+                arguments, cancellationToken).ConfigureAwait(false),
             _ => throw new ArgumentException($"Unbekanntes wissenschaftliches Werkzeug: {toolName}.")
         };
+    }
+
+    private async Task<JsonElement> RunLeanAsync(string projectId, string projectRelative, string projectRoot,
+        JsonElement arguments, CancellationToken cancellationToken)
+    {
+        if (arguments.TryGetProperty("path", out var path))
+        {
+            var sourcePath = WorkspaceFilePath.Resolve(projectRoot, path.GetString()!);
+            var source = await File.ReadAllTextAsync(sourcePath, cancellationToken).ConfigureAwait(false);
+            if (source.Length > 64_000) throw new InvalidDataException("Die Lean-Quelle überschreitet 64.000 Zeichen.");
+            LeanProofSourceContract.Validate(source);
+        }
+        var generatedDirectory = Path.Combine(projectRoot, "generated");
+        Directory.CreateDirectory(generatedDirectory);
+        var experimentId = "lean-" + Guid.NewGuid().ToString("N");
+        var scriptPath = Path.Combine(generatedDirectory, experimentId + ".py");
+        await AtomicWriteAsync(scriptPath, Encoding.UTF8.GetBytes(LeanProofHarness.CreateScript(arguments)), cancellationToken).ConfigureAwait(false);
+        JsonElement? preparationReceipt = null;
+        if ((OptionalString(arguments, "operation") ?? "check") == "check")
+        {
+            var preparationCommand = JsonSerializer.SerializeToElement(new
+            {
+                projectId, experimentId = experimentId + "-prepare", executable = ResolvePython(projectRoot),
+                arguments = new[] { Path.GetRelativePath(projectRoot, scriptPath), "--missum-prepare-only" }, workingDirectory = ".",
+                timeoutSeconds = Integer(arguments, "timeoutSeconds", 300, 1, 7200),
+            });
+            var prepared = await RunExperimentAsync(ClientToolNames.MathFormalProof, projectId, projectRelative,
+                projectRoot, preparationCommand, 1, cancellationToken).ConfigureAwait(false);
+            var valid = false;
+            try
+            {
+                var output = prepared.GetProperty("runs")[0].GetProperty("stdout").GetString() ?? "";
+                preparationReceipt = JsonSerializer.Deserialize<JsonElement>(output);
+                valid = prepared.GetProperty("success").GetBoolean()
+                    && preparationReceipt.Value.TryGetProperty("success", out var ok) && ok.ValueKind == JsonValueKind.True
+                    && preparationReceipt.Value.TryGetProperty("prepared", out var ready) && ready.ValueKind == JsonValueKind.True
+                    && preparationReceipt.Value.TryGetProperty("formalVerification", out var status) && status.GetString() == "NotEstablished";
+            }
+            catch (Exception exception) when (exception is JsonException or KeyNotFoundException or InvalidOperationException) { }
+            if (!valid)
+            {
+                var failed = JsonNode.Parse(prepared.GetRawText())!.AsObject();
+                failed["success"] = false;
+                failed["formalVerification"] = "NotEstablished";
+                failed["preparation"] = preparationReceipt is { } receipt ? JsonNode.Parse(receipt.GetRawText()) : null;
+                failed["message"] = "Die Lean-Quellen konnten nicht vollständig für die Prüfung vorbereitet werden.";
+                return JsonSerializer.SerializeToElement(failed, JsonOptions);
+            }
+        }
+        var command = JsonSerializer.SerializeToElement(new
+        {
+            projectId, experimentId, executable = ResolvePython(projectRoot),
+            arguments = new[] { Path.GetRelativePath(projectRoot, scriptPath) }, workingDirectory = ".",
+            timeoutSeconds = Integer(arguments, "timeoutSeconds", 300, 1, 7200),
+        });
+        var process = await RunExperimentAsync(ClientToolNames.MathFormalProof, projectId, projectRelative,
+            projectRoot, command, 1, cancellationToken).ConfigureAwait(false);
+        var result = JsonNode.Parse(process.GetRawText())!.AsObject();
+        if (preparationReceipt is { } preparation) result["preparation"] = JsonNode.Parse(preparation.GetRawText());
+        var run = process.GetProperty("runs")[0];
+        result["formalVerification"] = "NotEstablished";
+        result["operation"] = OptionalString(arguments, "operation") ?? "check";
+        if (run.TryGetProperty("stdout", out var stdout))
+        {
+            try
+            {
+                using var receipt = JsonDocument.Parse(stdout.GetString() ?? "");
+                foreach (var property in receipt.RootElement.EnumerateObject())
+                    result[property.Name] = JsonNode.Parse(property.Value.GetRawText());
+                // A receipt is accepted only with an actual successful process and a full axiom audit.
+                var kernelAccepted = process.GetProperty("success").GetBoolean()
+                    && receipt.RootElement.TryGetProperty("success", out var success) && success.ValueKind == JsonValueKind.True
+                    && receipt.RootElement.TryGetProperty("formalVerification", out var verification) && verification.GetString() == "KernelAccepted"
+                    && receipt.RootElement.TryGetProperty("axiomAudit", out var audit) && audit.GetString() == "passed"
+                    && receipt.RootElement.TryGetProperty("proofs", out var proofs) && proofs.GetArrayLength() > 0;
+                result["success"] = process.GetProperty("success").GetBoolean()
+                    && receipt.RootElement.TryGetProperty("success", out var receiptSuccess) && receiptSuccess.ValueKind == JsonValueKind.True;
+                result["formalVerification"] = kernelAccepted ? "KernelAccepted" : "NotEstablished";
+            }
+            catch (JsonException) { result["success"] = false; result["message"] = "Der Lean-Runner hat keinen vollständigen Prüfbeleg geliefert."; }
+        }
+        return JsonSerializer.SerializeToElement(result, JsonOptions);
     }
 
     private static async Task<JsonElement> WriteAsync(string projectId, string projectRoot, JsonElement args, CancellationToken cancellationToken)
@@ -169,18 +274,15 @@ public sealed class ScientificResearchToolExecutor(
             projectId,
             experimentId,
             executable = actualExecutable,
-            arguments = executable == "lean"
-                ? new[] { "-DwarningAsError=true", Path.Combine("generated", fileName) }
-                : new[] { Path.Combine("generated", fileName) },
+            arguments = new[] { Path.Combine("generated", fileName) },
             workingDirectory = ".",
-            timeoutSeconds = Integer(args, "timeoutSeconds", executable == "lean" ? 300 : 120, 1, 3600),
+            timeoutSeconds = Integer(args, "timeoutSeconds", 120, 1, 3600),
         });
         var result = await RunExperimentAsync(toolName, projectId, projectRelative, projectRoot, commandArgs, 1, cancellationToken).ConfigureAwait(false);
         var node = JsonNode.Parse(result.GetRawText())!.AsObject();
         node["generatedSource"] = Path.GetRelativePath(_workspace, filePath);
         node["toolchain"] = actualExecutable;
-        node["formalVerification"] = toolName == ClientToolNames.MathFormalProof
-            && node["success"]?.GetValue<bool>() == true ? "KernelAccepted" : "NotEstablished";
+        node["formalVerification"] = "NotEstablished";
         return JsonSerializer.SerializeToElement(node, JsonOptions);
     }
 
@@ -306,6 +408,7 @@ public sealed class ScientificResearchToolExecutor(
                 {
                     var name = Path.GetFileName(entry);
                     if (!name.Equals(".state", StringComparison.OrdinalIgnoreCase)
+                        && !name.Equals(".lake", StringComparison.OrdinalIgnoreCase)
                         && !name.Equals(".venv", StringComparison.OrdinalIgnoreCase)) pending.Push(entry);
                 }
                 else result[Path.GetRelativePath(root, entry)] = Hash(File.ReadAllBytes(entry));

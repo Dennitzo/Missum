@@ -20,6 +20,7 @@ public static class RunRequestValidator
         "coding.process",
         "workspace.open",
         "research.sandbox",
+        "math.lean",
         "research.deliverables",
         "subagents",
     };

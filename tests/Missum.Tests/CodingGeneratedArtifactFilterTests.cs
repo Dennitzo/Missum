@@ -85,6 +85,20 @@ public sealed class CodingGeneratedArtifactFilterTests
         Assert.DoesNotContain(snapshot.Files, file => file.Path.StartsWith(PublicationPrefix, StringComparison.Ordinal));
         Assert.Contains("-original", Assert.Single(snapshot.Files, file => file.Path.EndsWith("check.py", StringComparison.Ordinal)).Diff, StringComparison.Ordinal);
         Assert.Equal(manifest, await File.ReadAllBytesAsync(Path.Combine(storage, "git-baseline.json")));
+        var start = new System.Diagnostics.ProcessStartInfo("git")
+        {
+            WorkingDirectory = workspace, UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true,
+        };
+        start.Environment["GIT_INDEX_FILE"] = Path.Combine(storage, "capture.index");
+        start.ArgumentList.Add("--git-dir=" + Path.Combine(storage, "git-comparison"));
+        start.ArgumentList.Add("--work-tree=" + workspace);
+        start.ArgumentList.Add("ls-files"); start.ArgumentList.Add("-z");
+        using var process = System.Diagnostics.Process.Start(start)!;
+        var captured = await process.StandardOutput.ReadToEndAsync();
+        await process.WaitForExitAsync();
+        Assert.Equal(0, process.ExitCode);
+        Assert.DoesNotContain(PublicationPrefix, captured, StringComparison.Ordinal);
+        Assert.Contains(ProjectPrefix + "/work/check.py", captured, StringComparison.Ordinal);
     }
 
     private static async Task<string> CreateWorkspaceAsync(string parent)

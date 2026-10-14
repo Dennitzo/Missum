@@ -35,7 +35,7 @@ internal sealed class TestServerContext : IDisposable
         {
             DataSource = Options.DatabasePath,
             Mode = SqliteOpenMode.ReadWriteCreate,
-            Cache = SqliteCacheMode.Shared,
+            Cache = SqliteCacheMode.Private,
             Pooling = true,
         }.ToString());
         SqliteConnection.ClearPool(pool);

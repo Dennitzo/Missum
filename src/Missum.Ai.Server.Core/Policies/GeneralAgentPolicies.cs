@@ -63,20 +63,30 @@ public static class GeneralAgentPolicies
     public const string DefaultTranscriptAnalysis = "Analysiere das Transkript anhand seines Inhalts. Fasse die wichtigsten Aussagen zusammen, erkläre relevante Zusammenhänge und benenne Unklarheiten.";
     public const string DefaultMediaAnalysis = "Analysiere den tatsächlichen Inhalt dieses Mediums. Beschreibe relevante Beobachtungen, trenne sie von Schlussfolgerungen und benenne Unsicherheiten.";
 
-    /// <summary>System rules for every Vision request: long, precise, geometry-oriented findings with improvements.</summary>
+    /// <summary>Task-specific observations, distinct from interpretation and numerical proof.</summary>
     public const string VisionAnalysisSystemPrompt = """
         Analysiere ausschließlich die bereitgestellten Medien fachlich. Erfinde keine sichtbaren Details.
 
-        Antwortform: Verfasse eine ausführliche, strukturierte Analyse auf Deutsch. Kurze Pauschalurteile sind unzulässig.
-        Beschreibe Geometrie genau: Für jedes sichtbare Bauteil Form (Kugel, Ellipsoid, Kegel, Quader, flache Platte,
-        Zickzack, Rohr), Lage im Bild (links/rechts/oben/unten, Drittel), Ausrichtung und Neigung (Achse, ungefährer
-        Winkel), Größenverhältnisse als Verhältnis zu einem sichtbaren Bezugsmaß (etwa Kopfbreite, Gesamthöhe),
-        Kontur (rund, kantig, gerade, gezackt), Verbindungen und Übergänge (verschmolzen, überlappend, Lücke, schwebend,
-        Durchdringung, versetzt), Farbe und Kontrast, Oberfläche und Schatten. Nenne konkrete Bildbefunde als Beleg.
+        Antworte auf Deutsch mit einer knappen, strukturierten Diagnose zur konkreten Prüffrage.
+        Nenne relevante sichtbare Befunde, mögliche Fehler mit ihrer Bildgrundlage und einen gezielten nächsten
+        Prüfschritt. Beschreibe Geometrie, Farben, Beschriftungen oder Verhältnisse nur soweit sie zur Aufgabe gehören.
         Unterscheide klar zwischen Beobachtung (sichtbar), Schlussfolgerung (abgeleitet) und Unsicherheit (verdeckt,
-        unscharf, nicht beurteilbar). Behaupte keine exakten Maße aus perspektivischen Bildern; Verhältnisse sind erlaubt.
+        unscharf, nicht beurteilbar). Behaupte keine exakten Maße oder statistischen Kennwerte allein aus Bildern.
         Stelle wegen abgeschnittener, verdeckter oder nicht sichtbarer Bereiche keine Rückfrage. Markiere sie als nicht
         beurteilbar und liefere aus den vorhandenen Bilddaten einen direkt nutzbaren Befund für den nächsten Arbeitsschritt.
+        """;
+
+    public const string ScientificPlotVisionInstructions = """
+        Wissenschaftliche Plotprüfung: Gliedere die Diagnose in sichtbare Befunde, begründeten Fehlerverdacht
+        und nächste Datenprüfung. Prüfe erkennbare Achsen, Skalen, Einheiten, Legenden, Messzeiten, Kurvenform,
+        Verteilungsunterschiede, abgeschnittene Bereiche, Randartefakte und Trajektorien. Nenne nur lesbare Werte.
+        Lies Achsenoffset und Skalierungsfaktor zusammen mit Tickwerten (z.B. 1e-12 + 1: Tick 0 bedeutet 1,
+        nicht 0). Eine Kurve am Bildrand liegt nicht zwingend am Simulationsrand. Norm-/Randfehler erst nach
+        Abgleich mit Rohdaten und tatsächlicher Domäne behaupten; unlesbare Skalen als unklar markieren.
+        Ein Screenshot des Chatfensters belegt keinen Plot; ein statisches Bild belegt keine HTML-Animation.
+        Verbinde auffällige Stellen mit einer konkreten Rohdaten-/Codeprüfung. Liefere keinen mathematischen
+        Beweis, keine erfundenen Fehlernormen oder p-Werte und keine quantitative Abnahme aus dem Bild.
+        Eine gute sichtbare Übereinstimmung ersetzt keine unabhängige Konvergenz-, Rand- und Unsicherheitsprüfung.
         """;
 
     /// <summary>Prepended to media.analyze prompts when reference images precede the inspected image.</summary>

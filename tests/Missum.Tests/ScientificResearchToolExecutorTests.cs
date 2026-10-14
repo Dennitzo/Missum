@@ -125,11 +125,103 @@ public sealed class ScientificResearchToolExecutorTests : IAsyncLifetime
     public async Task LeanAdapterOnlyMarksSuccessfulKernelRunAsFormalVerification()
     {
         var result = await Execute(ClientToolNames.MathFormalProof,
-            new { projectId = "formal", source = "example : True := by\n  trivial\n", timeoutSeconds = 30 });
+            new { projectId = "formal", source = "example : True := by\n  trivial\n", useMathlib = false, timeoutSeconds = 30 });
 
         Assert.True(result.GetProperty("success").GetBoolean());
         Assert.Equal("KernelAccepted", result.GetProperty("formalVerification").GetString());
+        Assert.Equal("passed", result.GetProperty("axiomAudit").GetString());
+        Assert.NotEmpty(result.GetProperty("proofs").EnumerateArray());
+        var preparation = result.GetProperty("preparation");
+        Assert.True(preparation.GetProperty("prepared").GetBoolean());
+        Assert.Equal("NotEstablished", preparation.GetProperty("formalVerification").GetString());
+        Assert.Equal(preparation.GetProperty("checkedSource").GetString(), result.GetProperty("checkedSource").GetString());
+        Assert.Equal(preparation.GetProperty("checkedSourceSha256").GetString(), result.GetProperty("checkedSourceSha256").GetString());
     }
+
+    [Fact]
+    public async Task LeanInitializationDoesNotClaimAProofAndExistingSourcesCanBeChecked()
+    {
+        var initialized = await Execute(ClientToolNames.MathFormalProof,
+            new { projectId = "existing-proof", operation = "initialize", useMathlib = false, timeoutSeconds = 30 });
+        Assert.True(initialized.GetProperty("success").GetBoolean());
+        Assert.Equal("NotEstablished", initialized.GetProperty("formalVerification").GetString());
+        var written = await Execute(ClientToolNames.ResearchCodeWrite,
+            new { projectId = "existing-proof", path = "lean/Identity.lean", content = "theorem identity (n : Nat) : n = n := by rfl\n" });
+        Assert.True(written.GetProperty("success").GetBoolean());
+        var checkedProof = await Execute(ClientToolNames.MathFormalProof,
+            new { projectId = "existing-proof", path = "lean/Identity.lean", useMathlib = false, timeoutSeconds = 30 });
+        Assert.True(checkedProof.GetProperty("success").GetBoolean());
+        Assert.Equal("KernelAccepted", checkedProof.GetProperty("formalVerification").GetString());
+        Assert.Equal("lean/Identity.lean", checkedProof.GetProperty("source").GetString());
+    }
+
+    [Fact]
+    public async Task LeanDefinitionsAloneDoNotEstablishAMathematicalProof()
+    {
+        var result = await Execute(ClientToolNames.MathFormalProof,
+            new { projectId = "no-theorem", source = "def value : Nat := 42\n", useMathlib = false, timeoutSeconds = 30 });
+        Assert.False(result.GetProperty("success").GetBoolean());
+        Assert.Equal("NotEstablished", result.GetProperty("formalVerification").GetString());
+    }
+
+    [Fact]
+    public async Task LeanUnicodeCompilerFailuresKeepAReadableStructuredReceipt()
+    {
+        var result = await Execute(ClientToolNames.MathFormalProof,
+            new { projectId = "unicode-failure", source = "theorem unmöglich (δ : Nat) : δ = δ + 1 := by rfl\n", useMathlib = false, timeoutSeconds = 30 });
+        Assert.False(result.GetProperty("success").GetBoolean());
+        Assert.Equal("NotEstablished", result.GetProperty("formalVerification").GetString());
+        Assert.NotEmpty(result.GetProperty("diagnostics").EnumerateArray());
+        Assert.Contains(result.GetProperty("diagnostics").EnumerateArray(), line => line.GetString()!.Contains('δ'));
+        Assert.True(result.GetProperty("exitCode").GetInt32() != 0);
+        Assert.True(File.Exists(Path.Combine(_root, ".assistant", "research", "unicode-failure", result.GetProperty("receipt").GetString()!)));
+    }
+
+    [Fact]
+    public async Task LeanExistingCrLfAndBomSourceIsBoundToItsExactOriginalBytes()
+    {
+        const string projectId = "crlf-bom-proof";
+        var initialized = await Execute(ClientToolNames.MathFormalProof,
+            new { projectId, operation = "initialize", useMathlib = false, timeoutSeconds = 30 });
+        Assert.True(initialized.GetProperty("success").GetBoolean());
+        const string source = "import Std\r\ntheorem identity (δ : Nat) : δ = δ := by rfl\r\n";
+        var originalBytes = new UTF8Encoding(encoderShouldEmitUTF8Identifier: true).GetPreamble()
+            .Concat(Encoding.UTF8.GetBytes(source)).ToArray();
+        var path = Path.Combine(_root, ".assistant", "research", projectId, "lean", "Identity.lean");
+        await File.WriteAllBytesAsync(path, originalBytes);
+
+        var result = await Execute(ClientToolNames.MathFormalProof,
+            new { projectId, path = "lean/Identity.lean", useMathlib = false, timeoutSeconds = 30 });
+
+        Assert.True(result.GetProperty("success").GetBoolean());
+        Assert.Equal("KernelAccepted", result.GetProperty("formalVerification").GetString());
+        Assert.Equal(Convert.ToHexStringLower(SHA256.HashData(originalBytes)), result.GetProperty("sourceFileSha256").GetString());
+        Assert.Equal(Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(source))), result.GetProperty("sourceSha256").GetString());
+        Assert.Equal(originalBytes, await File.ReadAllBytesAsync(path));
+    }
+
+    [Theory]
+    [InlineData("../escape.lean")]
+    [InlineData("C:/proof.lean")]
+    [InlineData(".git/unsafe.lean")]
+    [InlineData("proof.txt")]
+    public void LeanExistingSourceMustStayInTheProject(string path) => Assert.Throws<UnauthorizedAccessException>(() =>
+        ScientificResearchToolExecutor.ValidateArguments(ClientToolNames.MathFormalProof,
+            JsonSerializer.SerializeToElement(new { projectId = "source-bound", path })));
+
+    [Theory]
+    [InlineData("import Mathlib\nexample (x : ℝ) : x + 0 = x := by simp")]
+    [InlineData("import Std\ntheorem identity (n : Nat) : n = n := by rfl")]
+    [InlineData("import Mathlib\r\nexample (x : ℝ) : x + 0 = x := by simp\r\n")]
+    public void LeanAllowsOnlyInstalledTrustedImports(string source) => LeanProofSourceContract.Validate(source);
+
+    [Theory]
+    [InlineData("import LocalUnchecked\nexample : True := by trivial")]
+    [InlineData("import Lean\nexample : True := by trivial")]
+    [InlineData("theorem forged : False := by native_decide")]
+    [InlineData("axiom assumed : False\ntheorem forged : False := assumed")]
+    public void LeanRejectsUntrustedImportsAndProofTrustBypasses(string source) =>
+        Assert.Throws<InvalidDataException>(() => LeanProofSourceContract.Validate(source));
 
     private Task<JsonElement> Execute(string name, object arguments) =>
         _executor.ExecuteAsync(name, JsonSerializer.SerializeToElement(arguments));

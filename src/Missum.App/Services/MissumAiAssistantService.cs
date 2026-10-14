@@ -495,7 +495,11 @@ public sealed partial class MissumAiAssistantService(
         timeout.CancelAfter(TimeSpan.FromSeconds(10));
         try
         {
-            using var client = await connection.CreateClientAsync(timeout.Token).ConfigureAwait(false);
+            // Cancelling an old server job must not wait for model startup or
+            // pending KV deletions. The lifecycle monitor starts the gateway;
+            // an unavailable gateway leaves this durable cancellation queued.
+            using var client = await connection.CreateClientAsync(baseAddressOverride: null,
+                ensureProfileNativeRuntime: false, timeout.Token).ConfigureAwait(false);
             await Task.WhenAll(serverRunIds.Select(async serverRunId =>
             {
                 try
@@ -1790,7 +1794,9 @@ public sealed partial class MissumAiAssistantService(
         }
 
         var acknowledgedEventId = localRun.LastEventId;
-        var evidenceStore = UsesCodingAgent(localRun.Action)
+        // Science exposes the same read/search evidence tools and must persist
+        // their receipts too; its General run mode is not a reason to omit them.
+        var evidenceStore = UsesCodingAgent(localRun.Action) || isScienceRun
             ? new CodingRunEvidenceStore(settings.DataDirectory, localRun.SessionId, localRun.ServerRunId!) : null;
         await using var pump = new AssistantRunEventPump(
             (cursor, token) => client.StreamRunEventsAsync(localRun.ServerRunId!, cursor, token),
@@ -1931,6 +1937,10 @@ public sealed partial class MissumAiAssistantService(
                             || !subagentStates.TryGetValue(childEvent.AgentId, out var childState) || childState.RunId != childEvent.RunId)
                             throw new InvalidDataException("Das Subagent-Ereignis gehört nicht zum delegierten Lauf.");
                         var childItem = childEvent.Event;
+                        if (childItem.Type == RunEventTypes.ServerToolCompleted && StringProperty(childItem.Data, "tool") == "media.analyze"
+                            && childItem.Data.TryGetProperty("result", out var childVisualResult)
+                            && (!childItem.Data.TryGetProperty("success", out var childVisualSuccess) || childVisualSuccess.ValueKind != JsonValueKind.False))
+                            await PersistScientificVisionReviewAsync(localRun.SessionId, childVisualResult, cancellationToken).ConfigureAwait(false);
                         if (childItem.Type == RunEventTypes.ServerToolCompleted && StringProperty(childItem.Data, "tool") == "web.fetch")
                         {
                             await PersistSubagentResearchProgressAsync(localRun, item, childState, cancellationToken).ConfigureAwait(false);
@@ -2146,6 +2156,9 @@ public sealed partial class MissumAiAssistantService(
                         break;
                     case RunEventTypes.ServerToolCompleted:
                         var serverToolName = StringProperty(item.Data, "tool") ?? "web.search";
+                        if (serverToolName == "media.analyze" && item.Data.TryGetProperty("result", out var visualResult)
+                            && (!item.Data.TryGetProperty("success", out var visualSuccess) || visualSuccess.ValueKind != JsonValueKind.False))
+                            await PersistScientificVisionReviewAsync(localRun.SessionId, visualResult, cancellationToken).ConfigureAwait(false);
                         var serverStepId = StringProperty(item.Data, "callId") ?? StringProperty(item.Data, "toolCallId")
                             ?? assistant.ToolSteps?.LastOrDefault(step => step.Tool == serverToolName && step.Status == "running")?.Id
                             ?? ContinuationFallbackToolStepId(item.RunId, item.Id);
@@ -2676,9 +2689,12 @@ public sealed partial class MissumAiAssistantService(
                     commandProgress: commandProgress,
                     evidenceStore: evidenceStore,
                     runAction: localRun.Action,
+                    gatewayOverride: client.BaseAddress,
                     cancellationToken: cancellationToken,
                     researchActorAgentId: researchActorAgentId).ConfigureAwait(false);
             }
+            if (proposal.Name == "image.input" && result.Status == "completed")
+                await PersistScientificImageUploadAsync(localRun.SessionId, result.Result, cancellationToken).ConfigureAwait(false);
             if (evidenceStore is not null && proposal.Name is not (ClientToolNames.CodingReadOutput or ClientToolNames.CodingSearchRunEvidence))
             {
                 try
@@ -2995,6 +3011,12 @@ public sealed partial class MissumAiAssistantService(
         _ = sessionAttachments;
         var codingSession = await GetExecutionSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Die AI-Sitzung wurde nicht gefunden.");
+        if (string.IsNullOrWhiteSpace(codingSession.CodingWorkspacePath) && codingSession.SessionGroupId is { } groupId)
+        {
+            var projectWorkspace = (await chats.ListSessionGroupsAsync(codingSession.ChatMode, cancellationToken).ConfigureAwait(false))
+                .FirstOrDefault(group => group.Id == groupId)?.WorkspacePath;
+            if (!string.IsNullOrWhiteSpace(projectWorkspace)) codingSession = codingSession with { CodingWorkspacePath = projectWorkspace };
+        }
         var serverCapabilities = await client.GetCapabilitiesAsync(cancellationToken).ConfigureAwait(false);
         var compactContext = serverCapabilities.ContextProfiles?.Contains("compact-v1", StringComparer.Ordinal) == true;
         var projectMemoryContext = await BuildProjectMemoryContextAsync(
@@ -3081,6 +3103,9 @@ public sealed partial class MissumAiAssistantService(
         }
 
         var isScienceSession = codingSession.ChatMode == ChatMode.ClaudeScience;
+        if (action == PromptTriggerAction.Lean && (string.IsNullOrWhiteSpace(codingSession.CodingWorkspacePath)
+            || !Directory.Exists(codingSession.CodingWorkspacePath)))
+            throw new InvalidOperationException("Wähle für Lean einen vorhandenen Projektordner in der Sidebar.");
         var generalResearchOptions = CreateDeepResearchOptions(trigger, coding: false, sessionId,
             force: isScienceSession, sandboxResearch: isScienceSession);
         if (isScienceSession && scientificResearch is IScientificResearchStateRepository && generalResearchOptions is not null)
@@ -3192,6 +3217,8 @@ public sealed partial class MissumAiAssistantService(
             capabilities.Add("subagents");
         if (!string.IsNullOrWhiteSpace(codingSession.CodingWorkspacePath) && Directory.Exists(codingSession.CodingWorkspacePath))
             capabilities.UnionWith(["coding", "coding.evidence", "coding.process", "workspace", "workspace.open"]);
+        if (!audiobook && researchSandbox is not null && !string.IsNullOrWhiteSpace(codingSession.CodingWorkspacePath)
+            && Directory.Exists(codingSession.CodingWorkspacePath)) capabilities.Add("math.lean");
         if (documentContext?.Descriptor.DocumentCount > 0)
         {
             capabilities.Add("documents");
@@ -3818,6 +3845,8 @@ public sealed partial class MissumAiAssistantService(
                 && ok.ValueKind == JsonValueKind.True && processRuns.Length > 0
                 && processRuns.All(run => run.TryGetProperty("exitCode", out var code) && code.TryGetInt32(out var value) && value == 0
                     && !(run.TryGetProperty("timedOut", out var timedOut) && timedOut.ValueKind == JsonValueKind.True));
+            if (proposal.Name == ClientToolNames.MathFormalProof)
+                succeeded = succeeded && StringProperty(result.Result, "formalVerification") == "KernelAccepted";
             await stateRepository.SaveExecutionVerificationAsync(new(
                 ResearchRecordId(projectId, "verification", proposal.ProposalId), projectId,
                 "experiment", experimentRecordId,
@@ -4120,6 +4149,12 @@ public sealed partial class MissumAiAssistantService(
                 + " Nenne relevante Befunde, Unsicherheiten und erforderliche fachliche Prüfungen.\n\nAnalyseauftrag:\n"
                 + AnalysisRequest(trigger, original),
             PromptTriggerAction.Audiobook => BuildAudiobookPrompt(trigger, original, hasAudiobookHistory),
+            PromptTriggerAction.Lean => "Formalisiere den folgenden Auftrag mit dem Werkzeug math.formalProof in Lean 4. "
+                + "Lege bei Bedarf die projektlokale Lean-Umgebung an. Verwende Mathlib und überprüfe jeden Beweis mit operation=check; "
+                + "Compilerfehler lesen, gezielt korrigieren und erneut prüfen. Kein sorry, admit oder erfundenes Axiom. "
+                + "Halte mathematische Voraussetzungen ausdrücklich fest. Ein Kernelbeweis bestätigt nur die formalisierte Aussage unter ihren Annahmen; "
+                + "er bestätigt keine unbelegten physikalischen Modellannahmen oder experimentellen Daten. Melde Erfolg erst nach KernelAccepted.\n\n"
+                + AnalysisRequest(trigger, original),
             _ => original,
         };
     }

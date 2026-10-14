@@ -51,6 +51,7 @@ public sealed partial class ModelRuntimeClient
 
     internal static int ResolveMaximumOutputTokens(int contextLength, int inputTokens, int? requestedMaximum)
     {
+        contextLength = ModelContextProfiles.Limit(contextLength);
         ArgumentOutOfRangeException.ThrowIfLessThan(contextLength, 2);
         ArgumentOutOfRangeException.ThrowIfNegative(inputTokens);
         if (requestedMaximum is { } explicitMaximum) ArgumentOutOfRangeException.ThrowIfLessThan(explicitMaximum, 1);
@@ -67,7 +68,7 @@ public sealed partial class ModelRuntimeClient
         if (properties.TryGetProperty("default_generation_settings", out var settings)
             && settings.TryGetProperty("n_ctx", out var context)
             && context.TryGetInt32(out var length) && length >= 2_048)
-            return length;
+            return ModelContextProfiles.Limit(length);
         throw new JsonException("Der native Modellprozess meldet keinen gültigen geladenen Kontext (props.n_ctx).");
     }
 
@@ -82,14 +83,14 @@ public sealed partial class ModelRuntimeClient
                 if (value?.StartsWith(tagPrefix, StringComparison.Ordinal) == true
                     && int.TryParse(value.AsSpan(tagPrefix.Length), NumberStyles.None, CultureInfo.InvariantCulture, out var maximum)
                     && maximum >= 2_048)
-                    return maximum;
+                    return ModelContextProfiles.Limit(maximum);
             }
         }
         if (item.TryGetProperty("meta", out var meta) && meta.ValueKind == JsonValueKind.Object
             && meta.TryGetProperty("n_ctx_train", out var context) && context.TryGetInt32(out var trainingMaximum)
             && trainingMaximum >= 2_048)
-            return trainingMaximum;
+            return ModelContextProfiles.Limit(trainingMaximum);
         var familyMaximum = ModelContextProfiles.ResolveMaximum(modelId, null);
-        return familyMaximum == ModelContextProfiles.NativeRuntimeDefault ? fallback : familyMaximum;
+        return ModelContextProfiles.Limit(familyMaximum == ModelContextProfiles.NativeRuntimeDefault ? fallback : familyMaximum);
     }
 }

@@ -7,9 +7,66 @@ namespace Missum.Ai.Server.Tests;
 
 public sealed class ScientificRunContextPlannerTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ObsoleteHostDiagnosesCanBeCompactedWithoutLosingTheUserTaskOrCurrentCause(bool native)
+    {
+        var messages = InitialInstructions();
+        var userTask = messages[1];
+        for (var i = 0; i < 80; i++)
+        {
+            var diagnosis = ScientificStateCompletionPolicy.VerificationRepairMarker + "\ncause-" + i + "\n" + new string('x', 2000);
+            messages.Add(new(native ? "user" : "system", native ? "Missum-Laufanweisung:\n" + diagnosis : diagnosis));
+        }
+        var latest = messages[^1];
+        var evaluated = messages.ToArray();
+        var below = ScientificRunContextPlanner.Prepare(messages, 258_000, null, true, 100_000);
+        Assert.Equal(evaluated, below.Messages);
+        Assert.False(below.WasCompacted);
+        var compact = ScientificRunContextPlanner.Prepare(messages, 258_000, null, true, 8000);
+        Assert.True(compact.WasCompacted);
+        Assert.Contains(userTask, compact.Messages);
+        Assert.Contains(latest, compact.Messages);
+        Assert.Single(compact.Messages, message => message.Content?.Contains(ScientificStateCompletionPolicy.VerificationRepairMarker, StringComparison.Ordinal) == true);
+        Assert.Equal(evaluated, messages);
+    }
     private static readonly string[] ModelArguments = ["work/model.py"];
     private static readonly string[] OtherArguments = ["work/other.py"];
     private static readonly string[] OldArguments = ["old-log.py"];
+
+    [Fact]
+    public void CompactionLeavesRoomForSubsequentToolTurnsWithoutRewritingTheEvaluatedPrefix()
+    {
+        var messages = InitialInstructions();
+        AddOldLogs(messages, 200);
+        const int budget = ScientificRunContextPlanner.CanonicalWorkingInputTokens;
+        var plan = ScientificRunContextPlanner.Prepare(messages, 1_048_576, null, true, budget);
+        Assert.True(plan.WasCompacted);
+        Assert.True(plan.EstimatedInputTokens <= budget * 3 / 4);
+        for (var turn = 0; turn < 10; turn++)
+        {
+            var next = plan.Messages.ToList();
+            AddReceipt(next, "coding.read", new { path = "result.json", turn }, new { text = new string('x', 1500) });
+            var evaluated = next.ToArray();
+            plan = ScientificRunContextPlanner.Prepare(next, 1_048_576, null, true, budget);
+            Assert.False(plan.WasCompacted);
+            Assert.Equal(evaluated, plan.Messages);
+            AssertValidToolPairs(plan.Messages);
+        }
+    }
+
+    [Fact]
+    public void CompactionHeadroomNeverRemovesProtectedTaskAboveTheSoftTarget()
+    {
+        var messages = InitialInstructions();
+        messages.Add(new("user", new string('q', 310_000)));
+        AddOldLogs(messages, 200);
+        var plan = ScientificRunContextPlanner.Prepare(messages, 1_048_576, null, true,
+            ScientificRunContextPlanner.CanonicalWorkingInputTokens);
+        Assert.Contains(messages[2], plan.Messages);
+        Assert.InRange(plan.EstimatedInputTokens, 1, plan.InputTokenBudget);
+    }
     private static IReadOnlyList<AgentToolSpec> Tools() => new AgentToolCatalog().GetAvailableTools(ScientificRunCompletionPolicyTests.Request());
 
     [Fact]

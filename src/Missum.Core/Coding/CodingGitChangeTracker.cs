@@ -8,6 +8,11 @@ namespace Missum.Core.Coding;
 /// <summary>Persistent per-run Git trees, using an isolated repository/index outside the workspace.</summary>
 public sealed class CodingGitChangeTracker : IDisposable
 {
+    public const int MaximumFileDiffCharacters = 64 * 1024;
+    public const int MaximumTotalDiffCharacters = 240 * 1024;
+    public const int MaximumDiffLineCharacters = 4096;
+    private const int MaximumCommandOutputCharacters = 16 * 1024 * 1024;
+    private const int MaximumErrorCharacters = 64 * 1024;
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> RepositoryGates = new(
         OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
     private readonly string _workspace;
@@ -100,9 +105,30 @@ public sealed class CodingGitChangeTracker : IDisposable
         // Each capture owns its complete index transaction. An index.lock left
         // by an old process in the bare repository is neither reused nor deleted.
         var index = Path.Combine(_storage, $".git-index-{Guid.NewGuid():N}");
+        var cachedIndex = Path.Combine(_storage, "capture.index");
         try
         {
             _generated = CodingGeneratedArtifactFilter.Discover(_workspace, cancellationToken);
+            if (File.Exists(cachedIndex))
+            {
+                // Keep Git's file stat cache between refreshes. Rebuilding an empty
+                // index every two seconds rehashed all unchanged simulation data.
+                // Every operation still uses its own disposable private index.
+                File.Copy(cachedIndex, index, overwrite: false);
+                try
+                {
+                    _ = await GitAsync(["ls-files", "-z", "--cached"], cancellationToken, index: index).ConfigureAwait(false);
+                }
+                catch (IOException)
+                {
+                    // The cache is only an optimization, never the immutable
+                    // baseline. A corrupt index is reconstructed from the workspace.
+                    File.Delete(index);
+                }
+            }
+            if (File.Exists(index) && _generated.ExcludedPaths.Count > 0)
+                await GitAsync(["rm", "--cached", "--force", "-r", "--ignore-unmatch", "--pathspec-from-file=-", "--pathspec-file-nul"],
+                    cancellationToken, input: string.Join('\0', _generated.ExcludedPaths) + "\0", index: index).ConfigureAwait(false);
             // Git applies .gitignore; unlike a normal git diff, this also captures new files.
             var capture = new List<string> { "." };
             capture.AddRange(_generated.ExcludedPaths.Select(path => ":(top,exclude,literal)" + path));
@@ -112,10 +138,24 @@ public sealed class CodingGitChangeTracker : IDisposable
             var tracked = await GitAsync(["ls-files", "-z", "--cached", "--", "."], cancellationToken, isolated: false).ConfigureAwait(false);
             var existing = tracked.Split('\0', StringSplitOptions.RemoveEmptyEntries)
                 .Where(path => !_generated.IsExcluded(path) && File.Exists(Path.Combine(_workspace, path))).ToArray();
+            // A private cached index must not make previously untracked data
+            // permanently tracked when the user's ignore rules change later.
+            var userTracked = existing.ToHashSet(StringComparer.Ordinal);
+            var ignored = (await GitAsync(["ls-files", "-z", "--cached", "--ignored", "--exclude-standard"], cancellationToken,
+                index: index).ConfigureAwait(false)).Split('\0', StringSplitOptions.RemoveEmptyEntries)
+                .Where(path => !userTracked.Contains(path)).ToArray();
+            if (ignored.Length > 0)
+                await GitAsync(["rm", "--cached", "--force", "--ignore-unmatch", "--pathspec-from-file=-", "--pathspec-file-nul"], cancellationToken,
+                    input: string.Join('\0', ignored) + "\0", index: index).ConfigureAwait(false);
             if (existing.Length > 0)
                 await GitAsync(["add", "--force", "--pathspec-from-file=-", "--pathspec-file-nul"], cancellationToken,
                     input: string.Join('\0', existing) + "\0", index: index).ConfigureAwait(false);
-            return (await GitAsync(["write-tree"], cancellationToken, index: index).ConfigureAwait(false)).Trim();
+            var tree = (await GitAsync(["write-tree"], cancellationToken, index: index).ConfigureAwait(false)).Trim();
+            cancellationToken.ThrowIfCancellationRequested();
+            // Promote only complete captures while holding the repository gate.
+            // Cancellation or errors leave the last good stat cache intact.
+            File.Move(index, cachedIndex, overwrite: true);
+            return tree;
         }
         finally
         {
@@ -138,8 +178,13 @@ public sealed class CodingGitChangeTracker : IDisposable
         for (var index = 0; index + 1 < tokens.Length; index += 2)
             kinds[tokens[index + 1]] = tokens[index] switch { "A" => "added", "D" => "deleted", _ => "modified" };
         var files = new List<CodingWorkspaceFileChange>();
+        var remainingDiffCharacters = MaximumTotalDiffCharacters;
+        var pathCharacters = 0;
+        var partial = false;
+        var notices = new HashSet<string>(StringComparer.Ordinal);
         foreach (var stat in stats.Split('\0', StringSplitOptions.RemoveEmptyEntries))
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var columns = stat.Split('\t', 3);
             if (columns.Length != 3) throw new IOException("Git hat eine ungültige Änderungsstatistik geliefert.");
             var binary = columns[0] == "-";
@@ -149,15 +194,38 @@ public sealed class CodingGitChangeTracker : IDisposable
             // Old baselines may contain generated revisions. Omit both sides of that
             // comparison rather than reporting their exclusion as authored deletions.
             if (_generated.IsExcluded(path)) continue;
-            var diff = await GitAsync(["diff", "--no-renames", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=3", _baseline, tree, "--", path], cancellationToken).ConfigureAwait(false);
-            files.Add(new(path, added, removed, diff, false, kinds.GetValueOrDefault(path, "modified"), binary));
+            if (files.Count >= CodingWorkspaceChangeTracker.MaximumFiles
+                || path.Length > CodingWorkspaceChangeTracker.MaximumRelativePathCharacters
+                || pathCharacters + path.Length > CodingWorkspaceChangeTracker.MaximumPathCharacters)
+            {
+                partial = true;
+                notices.Add("Die Änderungsliste erreicht ihr Datei- oder Pfadlimit; weitere Dateien werden nicht vollständig angezeigt.");
+                continue;
+            }
+            pathCharacters += path.Length;
+            var diff = remainingDiffCharacters == 0
+                ? new CapturedOutput(string.Empty, true)
+                : await GitCaptureAsync(["diff", "--no-renames", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=3", _baseline, tree, "--", path],
+                    cancellationToken, maximumOutputCharacters: Math.Min(MaximumFileDiffCharacters, remainingDiffCharacters),
+                    maximumLineCharacters: MaximumDiffLineCharacters, allowTruncated: true).ConfigureAwait(false);
+            remainingDiffCharacters -= diff.Text.Length;
+            if (diff.Truncated)
+            {
+                partial = true;
+                notices.Add("Große Textdiffs oder überlange Datenzeilen werden nur begrenzt angezeigt. Die erfassten Dateien und ihre Git-Zeilenzahlen bleiben vollständig; Originaldateien und Vergleichsstände bleiben erhalten.");
+            }
+            files.Add(new(path, added, removed, diff.Text, diff.Truncated, kinds.GetValueOrDefault(path, "modified"), binary));
         }
         _lastTree = tree;
-        return _last = new(files, false, null, files.Count, DateTimeOffset.UtcNow);
+        return _last = new(files, partial, notices.Count == 0 ? null : string.Join(" ", notices), files.Count, DateTimeOffset.UtcNow);
     }
 
     private async Task<string> GitAsync(string[] arguments, CancellationToken cancellationToken, bool isolated = true, string? input = null, string? index = null,
-        bool literalPathspecs = true)
+        bool literalPathspecs = true) => (await GitCaptureAsync(arguments, cancellationToken, isolated, input, index, literalPathspecs).ConfigureAwait(false)).Text;
+
+    private async Task<CapturedOutput> GitCaptureAsync(string[] arguments, CancellationToken cancellationToken, bool isolated = true,
+        string? input = null, string? index = null, bool literalPathspecs = true,
+        int maximumOutputCharacters = MaximumCommandOutputCharacters, int? maximumLineCharacters = null, bool allowTruncated = false)
     {
         var installed = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Git", "cmd", "git.exe");
         var start = new ProcessStartInfo(OperatingSystem.IsWindows() && File.Exists(installed) ? installed : "git")
@@ -175,7 +243,7 @@ public sealed class CodingGitChangeTracker : IDisposable
             start.ArgumentList.Add("--git-dir=" + _repository);
             start.ArgumentList.Add("--work-tree=" + _workspace);
         }
-        foreach (var setting in new[] { "core.autocrlf=false", "core.quotePath=false", "core.fsmonitor=false", "core.attributesFile=", "core.splitIndex=false", "gc.auto=0" })
+        foreach (var setting in new[] { "core.longpaths=true", "core.autocrlf=false", "core.quotePath=false", "core.fsmonitor=false", "core.attributesFile=", "core.splitIndex=false", "gc.auto=0" })
         { start.ArgumentList.Add("-c"); start.ArgumentList.Add(setting); }
         foreach (var argument in arguments) start.ArgumentList.Add(argument);
         using var processJob = OperatingSystem.IsWindows() ? WindowsProcessJob.Create() : null;
@@ -193,23 +261,42 @@ public sealed class CodingGitChangeTracker : IDisposable
             }
             throw;
         }
-        // Cancellation belongs to the process lifetime. Keep draining its pipes
-        // until exit so a cancelled reader cannot outlive private-index cleanup.
-        var stdout = process.StandardOutput.ReadToEndAsync(CancellationToken.None);
-        var stderr = process.StandardError.ReadToEndAsync(CancellationToken.None);
+        // Stop our Git process as soon as a preview limit is reached. Draining a
+        // multi-gigabyte JSON patch just to discard it still wastes CPU and I/O.
+        // The process/job is reaped before private-index cleanup, also on Stop.
+        using var outputLimit = new CancellationTokenSource();
+        using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, outputLimit.Token);
+        var stdout = ReadBoundedAsync(process.StandardOutput, maximumOutputCharacters, maximumLineCharacters, outputLimit);
+        var stderr = ReadBoundedAsync(process.StandardError, MaximumErrorCharacters, null, outputLimit);
+        var stoppedForLimit = false;
         try
         {
-            if (input is not null) { await process.StandardInput.WriteAsync(input.AsMemory(), cancellationToken).ConfigureAwait(false); process.StandardInput.Close(); }
-            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            if (input is not null) { await process.StandardInput.WriteAsync(input.AsMemory(), lifetime.Token).ConfigureAwait(false); process.StandardInput.Close(); }
+            await process.WaitForExitAsync(lifetime.Token).ConfigureAwait(false);
             // A filter can spawn after a process-tree snapshot. Job membership
             // tracks those descendants and closes any remaining inherited pipes.
             processJob?.Dispose();
-            var error = await stderr.ConfigureAwait(false);
-            var result = await stdout.ConfigureAwait(false);
-            if (process.ExitCode != 0) throw new IOException("Git-Dateivergleich fehlgeschlagen: " + error.Trim());
-            return result;
         }
+        catch (Exception exception) when ((exception is OperationCanceledException or IOException)
+            && outputLimit.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        { stoppedForLimit = !process.HasExited; await StopProcessAsync().ConfigureAwait(false); }
         catch
+        {
+            await StopProcessAsync().ConfigureAwait(false);
+            await Task.WhenAll(stdout, stderr).ConfigureAwait(false);
+            throw;
+        }
+        var error = await stderr.ConfigureAwait(false);
+        var result = await stdout.ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (error.Truncated) throw new IOException("Git-Dateivergleich lieferte eine zu große Fehlerausgabe: " + error.Text.Trim());
+        if (process.ExitCode != 0 && !stoppedForLimit) throw new IOException("Git-Dateivergleich fehlgeschlagen: " + error.Text.Trim());
+        if (result.Truncated && allowTruncated) return result;
+        if (result.Truncated) throw new IOException("Die Git-Ausgabe überschreitet das sichere Verarbeitungslimit; die Änderungsübersicht ist unvollständig.");
+        if (process.ExitCode != 0) throw new IOException("Git-Dateivergleich fehlgeschlagen: " + error.Text.Trim());
+        return result;
+
+        async Task StopProcessAsync()
         {
             processJob?.Dispose();
             if (!process.HasExited)
@@ -221,8 +308,36 @@ public sealed class CodingGitChangeTracker : IDisposable
                 }
                 await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
             }
-            await Task.WhenAll(stdout, stderr).ConfigureAwait(false);
-            throw;
+        }
+    }
+
+    private sealed record CapturedOutput(string Text, bool Truncated);
+
+    private static async Task<CapturedOutput> ReadBoundedAsync(StreamReader reader, int maximumCharacters,
+        int? maximumLineCharacters, CancellationTokenSource outputLimit)
+    {
+        var text = new StringBuilder(Math.Min(maximumCharacters, 8192));
+        var buffer = new char[8192];
+        var lineStart = 0;
+        while (true)
+        {
+            var count = await reader.ReadAsync(buffer.AsMemory()).ConfigureAwait(false);
+            if (count == 0) return new(text.ToString(), false);
+            for (var index = 0; index < count; index++)
+            {
+                if (text.Length == maximumCharacters
+                    || maximumLineCharacters is { } lineLimit && text.Length - lineStart >= lineLimit && buffer[index] != '\n')
+                {
+                    // A partial megabyte-long JSON line is not a useful preview.
+                    // Keep complete diff lines only, without splitting UTF-16 pairs.
+                    if (maximumLineCharacters.HasValue) text.Length = lineStart;
+                    else if (text.Length > 0 && char.IsHighSurrogate(text[^1])) text.Length--;
+                    outputLimit.Cancel();
+                    return new(text.ToString(), true);
+                }
+                text.Append(buffer[index]);
+                if (buffer[index] == '\n') lineStart = text.Length;
+            }
         }
     }
 

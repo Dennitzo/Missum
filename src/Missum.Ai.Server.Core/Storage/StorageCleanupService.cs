@@ -11,7 +11,15 @@ public sealed class StorageCleanupService : BackgroundService
     private const string ProtectedRunCondition = """
         (run.state IN ('Queued', 'Running', 'WaitingForClient')
          OR (run.state = 'Interrupted' AND COALESCE(run.error_code, '') IN ('run.gateway_stopped', 'run.gateway_restarted')
-             AND (run.mode = 'Coding' OR (run.mode IN ('General', 'Auto') AND COALESCE(json_extract(run.request_json, '$.deepResearch'), 0) = 1))))
+             AND (run.mode = 'Coding'
+                 OR (run.mode IN ('General', 'Auto') AND COALESCE(json_extract(run.request_json, '$.deepResearch'), 0) = 1)
+                 OR (COALESCE(json_extract(run.request_json, '$.researchOptions.protocolVersion'), 0) >= 2
+                     AND EXISTS (SELECT 1 FROM json_each(json_extract(run.request_json, '$.clientCapabilities'))
+                         WHERE value = 'research.deliverables' COLLATE NOCASE))
+                 OR json_extract(run.request_json, '$.subagent.parentRunId') IS NOT NULL
+                 OR EXISTS (SELECT 1 FROM runs child WHERE json_extract(child.request_json, '$.subagent.parentRunId') = run.run_id
+                     AND child.state IN ('Queued', 'Running', 'WaitingForClient', 'Interrupted'))
+                 OR EXISTS (SELECT 1 FROM run_steering_inputs steering WHERE steering.run_id = run.run_id))))
         """;
     private const string ArtifactIsUnreferenced = $"""
         NOT EXISTS (
@@ -47,6 +55,7 @@ public sealed class StorageCleanupService : BackgroundService
 
     public async Task CleanupExpiredAsync(CancellationToken cancellationToken = default)
     {
+        using var maintenance = await _database.EnterMaintenanceAsync(cancellationToken).ConfigureAwait(false);
         var current = DateTimeOffset.UtcNow;
         var now = MissumAiDatabase.FormatTimestamp(current);
         var historyCutoff = MissumAiDatabase.FormatTimestamp(current.AddHours(-24));

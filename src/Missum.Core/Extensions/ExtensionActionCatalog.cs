@@ -178,6 +178,7 @@ public static class BuiltInExtensionCatalog
         SelectableCoding(BuiltInActionIds.PlanMode, "Planmodus", "Projekt schreibgeschützt analysieren und vor Änderungen einen umsetzbaren Plan abstimmen", "plan", "planning", 15, 10),
         Selectable(BuiltInActionIds.WebSearch, "Websuche", "Aktuelle Quellen im Web durchsuchen", "web", "research", 20, 10),
         Selectable(BuiltInActionIds.DeepResearch, "Deep Research", "Eine mehrstufige, quellenbasierte Recherche starten", "research", "research", 20, 20),
+        Selectable(BuiltInActionIds.Lean, "Lean", "Mathematische Aussagen mit Lean 4 und Mathlib formalisieren und Beweise prüfen", "lean", "research", 20, 25),
         Selectable(BuiltInActionIds.ImageAnalysis, "Bild analysieren", "Bilder inhaltlich untersuchen", "image", "research", 20, 30),
         Selectable(BuiltInActionIds.AudioAnalysis, "Audio analysieren", "Audiodateien inhaltlich untersuchen", "audio", "research", 20, 40),
         Selectable(BuiltInActionIds.VideoAnalysis, "Video analysieren", "Videodateien inhaltlich untersuchen", "video", "research", 20, 50),

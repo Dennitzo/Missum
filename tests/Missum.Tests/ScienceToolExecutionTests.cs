@@ -95,13 +95,14 @@ public sealed class ScienceToolExecutionTests(ITestOutputHelper output)
         await using var environment = await TestEnvironment.CreateAsync();
         var executor = new ScientificResearchToolExecutor(environment.Directory);
         var result = await executor.ExecuteAsync(ClientToolNames.MathFormalProof,
-            JsonSerializer.SerializeToElement(new { projectId = "lean-check", source = valid ? LeanProof : LeanFailure, timeoutSeconds = 60 }));
+            JsonSerializer.SerializeToElement(new { projectId = "lean-check", source = valid ? LeanProof : LeanFailure, useMathlib = false, timeoutSeconds = 60 }));
         Assert.Equal(valid, result.GetProperty("success").GetBoolean());
         Assert.Equal(valid ? "KernelAccepted" : "NotEstablished", result.GetProperty("formalVerification").GetString());
         var run = Assert.Single(result.GetProperty("runs").EnumerateArray());
         Assert.Equal(valid, run.GetProperty("exitCode").GetInt32() == 0);
         using var manifest = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(environment.Directory, result.GetProperty("manifestPath").GetString()!)));
-        Assert.Contains(manifest.RootElement.GetProperty("arguments").EnumerateArray(), argument => argument.GetString() == "-DwarningAsError=true");
+        Assert.Contains(manifest.RootElement.GetProperty("arguments").EnumerateArray(), argument => argument.GetString()!.EndsWith(".py", StringComparison.Ordinal));
+        if (valid) Assert.Equal("passed", result.GetProperty("axiomAudit").GetString());
     }
 
     [Theory]

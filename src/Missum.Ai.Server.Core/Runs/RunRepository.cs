@@ -337,6 +337,10 @@ public sealed partial class RunRepository
 
     public async Task<IReadOnlyList<string>> RecoverAsync(CancellationToken cancellationToken = default)
     {
+        // Expired-history cleanup also starts as a background service. Waiting
+        // asynchronously here lets that transaction finish instead of timing
+        // out BEGIN and restarting the host before cleanup can ever commit.
+        using var maintenance = await _database.EnterMaintenanceAsync(cancellationToken).ConfigureAwait(false);
         await using var connection = await _database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         await using (var interrupt = connection.CreateCommand())

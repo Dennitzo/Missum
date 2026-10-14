@@ -10,8 +10,8 @@ using Missum.Core.Research;
 namespace Missum.App.Services;
 
 /// <summary>
-/// Produces immutable, typeset publication snapshots from durable research data.
-/// A new revision never replaces the PDF currently open in the native viewer.
+/// Publishes the current typeset manuscript at one stable project location.
+/// A failed render preserves the last usable PDF; successful renders replace it.
 /// </summary>
 public sealed partial class ScientificPublicationService : IDisposable, IScientificPublicationProvider
 {
@@ -109,7 +109,7 @@ public sealed partial class ScientificPublicationService : IDisposable, IScienti
                 if (_current.TryGetValue(cacheKey, out var cached) && cached.SectionDelta
                     && cached.Revision == state.PublicationRevision && File.Exists(cached.MarkdownPath)
                     && _currentDependencies.GetValueOrDefault(cacheKey) == dependencyHash
-                    && await IsValidPdfAsync(cached.PdfPath, cancellationToken).ConfigureAwait(false))
+                    && await IsPublicationPairAsync(Path.GetDirectoryName(cached.PdfPath)!, cached.ContentHash, cancellationToken).ConfigureAwait(false))
                 {
                     await RecordFirstPublicationAsync(snapshot.Project, cached, cancellationToken).ConfigureAwait(false);
                     return cached;
@@ -133,11 +133,10 @@ public sealed partial class ScientificPublicationService : IDisposable, IScienti
             var fingerprint = PublicationFingerprint(markdown + (dependencyHash.Length == 0 ? "" : "\n" + dependencyHash));
             // Project ids originate in storage but are never accepted as filesystem paths.
             var root = Path.Combine(Path.GetFullPath(outputDirectory), Fingerprint(projectId)[..24]);
-            var version = $"r{(snapshot.WorkingState?.PublicationRevision ?? snapshot.Project.Revision).ToString(CultureInfo.InvariantCulture)}-{fingerprint[..24]}";
-            var directory = Path.Combine(root, version);
+            var directory = Path.Combine(root, "current");
             var pdf = Path.Combine(directory, "Publikation.pdf");
             var source = Path.Combine(directory, "Publikation.md");
-            if (await IsValidPdfAsync(pdf, cancellationToken).ConfigureAwait(false)
+            if (await IsPublicationPairAsync(directory, fingerprint, cancellationToken).ConfigureAwait(false)
                 && File.Exists(source) && string.Equals(await File.ReadAllTextAsync(source, cancellationToken).ConfigureAwait(false), markdown, StringComparison.Ordinal))
             {
                 _currentDependencies[cacheKey] = dependencyHash;
@@ -173,12 +172,25 @@ public sealed partial class ScientificPublicationService : IDisposable, IScienti
                 var pendingPdf = Path.Combine(staging, "Publikation.pdf");
                 if (!string.Equals(Path.GetFullPath(rendered), pendingPdf, StringComparison.OrdinalIgnoreCase))
                     File.Copy(rendered, pendingPdf, overwrite: false);
-                Directory.CreateDirectory(directory);
-                if (images is not null) await images.WriteImagesAsync(directory, cancellationToken).ConfigureAwait(false);
-                // The PDF is published last; a cancelled or failed render cannot replace
-                // a usable previous revision, or leave a PDF paired with partial source.
-                File.Move(pendingSource, source, overwrite: true);
-                File.Move(pendingPdf, pdf, overwrite: true);
+                var pair = new
+                {
+                    fingerprint,
+                    markdownSha256 = Fingerprint(await File.ReadAllTextAsync(pendingSource, cancellationToken).ConfigureAwait(false)),
+                    pdfSha256 = await PublicationFileHashAsync(pendingPdf, cancellationToken).ConfigureAwait(false),
+                };
+                await File.WriteAllTextAsync(Path.Combine(staging, "publication.json"), JsonSerializer.Serialize(pair), cancellationToken).ConfigureAwait(false);
+                // Swap the entire current directory. A sharing violation or a
+                // failed second rename restores the previous source/PDF pair.
+                var previous = Path.Combine(root, ".publishing-old-" + Guid.NewGuid().ToString("N"));
+                var hadPrevious = Directory.Exists(directory);
+                if (hadPrevious) Directory.Move(directory, previous);
+                try { Directory.Move(staging, directory); }
+                catch
+                {
+                    if (hadPrevious && !Directory.Exists(directory)) Directory.Move(previous, directory);
+                    throw;
+                }
+                if (hadPrevious) Directory.Delete(previous, recursive: true);
                 _currentDependencies[cacheKey] = dependencyHash;
                 var artifact = Artifact(snapshot, source, pdf, fingerprint);
                 await RecordFirstPublicationAsync(snapshot.Project, artifact, cancellationToken).ConfigureAwait(false);
@@ -551,9 +563,32 @@ public sealed partial class ScientificPublicationService : IDisposable, IScienti
             snapshot.WorkingState is not null);
 
     private static string Fingerprint(string text) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
-    // Renderer-only changes receive an immutable new edition without changing
+    // Renderer-only changes refresh the current edition without changing
     // the scientific manuscript, object revisions or publication revision.
     private static string PublicationFingerprint(string text) => Fingerprint("scientific-publication-v9-linked-table-of-contents\n" + text);
+
+    private static async Task<string> PublicationFileHashAsync(string path, CancellationToken token)
+    {
+        await using var stream = File.OpenRead(path);
+        return Convert.ToHexStringLower(await SHA256.HashDataAsync(stream, token).ConfigureAwait(false));
+    }
+
+    private static async Task<bool> IsPublicationPairAsync(string directory, string? fingerprint, CancellationToken token)
+    {
+        var pdf = Path.Combine(directory, "Publikation.pdf");
+        var source = Path.Combine(directory, "Publikation.md");
+        var receipt = Path.Combine(directory, "publication.json");
+        try
+        {
+            if (!File.Exists(source) || !File.Exists(receipt) || !await IsValidPdfAsync(pdf, token).ConfigureAwait(false)) return false;
+            using var document = JsonDocument.Parse(await File.ReadAllTextAsync(receipt, token).ConfigureAwait(false));
+            var pair = document.RootElement;
+            return (fingerprint is null || Text(pair, "fingerprint") == fingerprint)
+                && Text(pair, "markdownSha256") == Fingerprint(await File.ReadAllTextAsync(source, token).ConfigureAwait(false))
+                && Text(pair, "pdfSha256") == await PublicationFileHashAsync(pdf, token).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is IOException or JsonException or UnauthorizedAccessException) { return false; }
+    }
     private static string OneLine(string text) => text.Replace('\r', ' ').Replace('\n', ' ').Trim();
     private static string EscapeLabel(string text) => OneLine(text).Replace("*", "\\*", StringComparison.Ordinal)
         .Replace("[", "\\[", StringComparison.Ordinal).Replace("]", "\\]", StringComparison.Ordinal);

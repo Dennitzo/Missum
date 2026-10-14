@@ -29,7 +29,7 @@ public sealed partial class MissumAiAssistantService
         if (run.WorkspacePath is not { } workspace) return;
         if (!UsesCodingAgent(run.Action)
             && (await chats.GetSessionAsync(run.SessionId, cancellationToken).ConfigureAwait(false))?.ChatMode != ChatMode.ClaudeScience) return;
-        var directory = CodingChangesMonitor.StorageDirectory(settings.DataDirectory, run.SessionId, run.AssistantMessageId);
+        var directory = CodingChangesMonitor.RunStorageDirectory(settings.DataDirectory, run.SessionId, run.AssistantMessageId, run.Id);
         var monitor = new CodingChangesMonitor(workspace, directory, run.SessionId, run.AssistantMessageId, run.Id,
             summary => update(new(MissumAiAssistantUpdateKind.FileChangesChanged, message, ChangesSummary: summary)),
             exception => RunDiagnostic(logger, run.Id.ToString("D"), "file change overview unavailable", exception));
@@ -48,20 +48,25 @@ public sealed partial class MissumAiAssistantService
     {
         var message = messages.LastOrDefault(static message => message.Role == ChatRole.Assistant);
         if (message is null) return null;
+        var run = await runs.GetByAssistantMessageIdAsync(message.Id, cancellationToken).ConfigureAwait(false);
+        if (run is null || run.SessionId != sessionId || string.IsNullOrWhiteSpace(run.WorkspacePath)) return null;
         var summary = await CodingChangesMonitor.ReadLatestAsync(
-            CodingChangesMonitor.StorageDirectory(settings.DataDirectory, sessionId, message.Id),
+            CodingChangesMonitor.RunStorageDirectory(settings.DataDirectory, sessionId, message.Id, run.Id),
             cancellationToken).ConfigureAwait(false);
-        if (summary is null || summary.ComparisonKind != "git-v1" || summary.SessionId != sessionId || summary.MessageId != message.Id) return null;
-        if (_activeFileChanges?.Owns(sessionId, message.Id) != true)
-            summary = await CodingChangesMonitor.RecoverIndexLockAsync(
-                CodingChangesMonitor.StorageDirectory(settings.DataDirectory, sessionId, message.Id), summary, cancellationToken).ConfigureAwait(false);
-        return summary.ComparisonKind == "git-v1" && summary.SessionId == sessionId && summary.MessageId == message.Id ? summary : null;
+        // Never recapture a finished run against today's workspace. Legacy
+        // message-wide baselines cannot separate repeated continuation attempts.
+        if (summary is null)
+            return new(sessionId, message.Id, run.Id, run.WorkspacePath, 0, run.UpdatedAt, [], true,
+                "Für diesen älteren Lauf fehlt ein eindeutig laufbezogener Ausgangsstand. Ab dem nächsten AI-Lauf werden ausschließlich dessen Änderungen erfasst.", "git-v1");
+        return summary.ComparisonKind == "git-v1" && summary.SessionId == sessionId
+            && summary.MessageId == message.Id && summary.RunId == run.Id ? summary : null;
     }
 }
 
 /// <summary>A single run's persistent baseline and independently cancellable UI refresh loop.</summary>
 internal sealed class CodingChangesMonitor : IAsyncDisposable
 {
+    internal const int MaximumSnapshotBytes = 2 * 1024 * 1024;
     private const string LatestFileName = "latest.json";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> PublicationGates = new(
@@ -81,6 +86,8 @@ internal sealed class CodingChangesMonitor : IAsyncDisposable
     private Task _loop = Task.CompletedTask;
     private CodingChangesSummary? _latest;
     private bool _canRefresh;
+    private FileSystemWatcher? _watcher;
+    private long _workspaceRevision;
     private int _disposed;
 
     internal CodingChangesMonitor(string workspace, string directory, Guid sessionId, Guid messageId, Guid runId,
@@ -100,6 +107,9 @@ internal sealed class CodingChangesMonitor : IAsyncDisposable
 
     internal static string StorageDirectory(string dataDirectory, Guid sessionId, Guid messageId) =>
         Path.Combine(dataDirectory, "Cache", "CodingChanges", sessionId.ToString("N"), messageId.ToString("N"));
+
+    internal static string RunStorageDirectory(string dataDirectory, Guid sessionId, Guid messageId, Guid runId) =>
+        Path.Combine(StorageDirectory(dataDirectory, sessionId, messageId), "runs", runId.ToString("N"));
 
     internal bool Owns(Guid sessionId, Guid messageId) => _sessionId == sessionId && _messageId == messageId && Volatile.Read(ref _disposed) == 0;
 
@@ -127,6 +137,7 @@ internal sealed class CodingChangesMonitor : IAsyncDisposable
                 UpdatedAt = snapshot.UpdatedAt,
                 Revision = Math.Max(current.Revision + 1, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()),
             };
+            repaired = LimitSnapshot(repaired);
             await WriteLatestAsync(directory, repaired, cancellationToken).ConfigureAwait(false);
             return repaired;
         }
@@ -173,7 +184,7 @@ internal sealed class CodingChangesMonitor : IAsyncDisposable
     internal async Task StartAsync(bool resume, CancellationToken cancellationToken)
     {
         _latest = await ReadLatestAsync(_directory, cancellationToken).ConfigureAwait(false);
-        if (_latest is not null && (_latest.ComparisonKind != "git-v1" || _latest.SessionId != _sessionId || _latest.MessageId != _messageId)) _latest = null;
+        if (_latest is not null && (_latest.ComparisonKind != "git-v1" || _latest.SessionId != _sessionId || _latest.MessageId != _messageId || _latest.RunId != _runId)) _latest = null;
         // Complete the durable initial baseline before the caller creates the server
         // run or replays pending tool proposals. Resume must never invent a baseline.
         try
@@ -192,8 +203,29 @@ internal sealed class CodingChangesMonitor : IAsyncDisposable
                 cancellationToken).ConfigureAwait(false);
             return; // No periodic retries against an uninitialized tracker.
         }
+        try
+        {
+            _watcher = new FileSystemWatcher(_workspace) { IncludeSubdirectories = true,
+                NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite | NotifyFilters.Size };
+            _watcher.Changed += WorkspaceChanged;
+            _watcher.Created += WorkspaceChanged;
+            _watcher.Deleted += WorkspaceChanged;
+            _watcher.Renamed += WorkspaceChanged;
+            _watcher.Error += (_, _) => Interlocked.Increment(ref _workspaceRevision);
+            _watcher.EnableRaisingEvents = true;
+        }
+        catch (Exception exception) when (IsStorageError(exception))
+        { _watcher?.Dispose(); _watcher = null; _diagnostic(exception); }
         _runCancellation = cancellationToken.Register(static state => ((CodingChangesMonitor)state!).Cancel(), this);
         _loop = PollAsync(_stop.Token);
+    }
+
+    private void WorkspaceChanged(object sender, FileSystemEventArgs args)
+    {
+        var relative = Path.GetRelativePath(_workspace, args.FullPath);
+        if (relative.Equals(".git", StringComparison.OrdinalIgnoreCase)
+            || relative.StartsWith(".git" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) return;
+        Interlocked.Increment(ref _workspaceRevision);
     }
 
     internal void Cancel()
@@ -206,9 +238,19 @@ internal sealed class CodingChangesMonitor : IAsyncDisposable
     {
         try
         {
-            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
+            // Coalesce writes during a tool operation. Idle runs do not rehash
+            // the project; a periodic safety scan covers missed watcher events.
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(10));
+            long observedRevision = -1;
+            var lastScan = Stopwatch.StartNew();
             while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
+            {
+                var revision = Interlocked.Read(ref _workspaceRevision);
+                if (_watcher is not null && revision == observedRevision && lastScan.Elapsed < TimeSpan.FromMinutes(1)) continue;
                 await RefreshAsync(cancellationToken).ConfigureAwait(false);
+                observedRevision = revision;
+                lastScan.Restart();
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
         catch (Exception exception) when (exception is not OutOfMemoryException) { _diagnostic(exception); }
@@ -251,6 +293,7 @@ internal sealed class CodingChangesMonitor : IAsyncDisposable
 
     private async Task StoreAndPublishAsync(CodingChangesSummary summary, CancellationToken cancellationToken)
     {
+        summary = LimitSnapshot(summary);
         var gate = PublicationGates.GetOrAdd(Path.GetFullPath(_directory), static _ => new SemaphoreSlim(1, 1));
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -276,7 +319,9 @@ internal sealed class CodingChangesMonitor : IAsyncDisposable
         try
         {
             Directory.CreateDirectory(directory);
-            await File.WriteAllTextAsync(temporary, JsonSerializer.Serialize(summary, JsonOptions), cancellationToken).ConfigureAwait(false);
+            var bytes = JsonSerializer.SerializeToUtf8Bytes(summary, JsonOptions);
+            if (bytes.Length > MaximumSnapshotBytes) throw new IOException("Die Änderungsübersicht überschreitet das sichere Speicherlimit.");
+            await File.WriteAllBytesAsync(temporary, bytes, cancellationToken).ConfigureAwait(false);
             var replacement = Stopwatch.StartNew();
             while (true)
             {
@@ -308,6 +353,9 @@ internal sealed class CodingChangesMonitor : IAsyncDisposable
             if (!File.Exists(path)) return null;
             await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete,
                 bufferSize: 4096, FileOptions.Asynchronous | FileOptions.SequentialScan);
+            // Older releases persisted full patches for arbitrarily large datasets.
+            // Never materialize that cache on app.ready/session changes or Stop.
+            if (stream.Length > MaximumSnapshotBytes) return null;
             var summary = await JsonSerializer.DeserializeAsync<CodingChangesSummary>(stream, JsonOptions, cancellationToken).ConfigureAwait(false);
             if (summary is null || summary.Files is null || !Path.IsPathFullyQualified(summary.WorkspacePath)
                 || !summary.Files.All(static file => file is not null && file.Path is not null && file.Diff is not null)) return null;
@@ -329,6 +377,32 @@ internal sealed class CodingChangesMonitor : IAsyncDisposable
         return files.Length == summary.Files.Count ? summary : summary with { Files = files };
     }
 
+    internal static CodingChangesSummary LimitSnapshot(CodingChangesSummary summary)
+    {
+        const string notice = "Die Vorschau erreicht ihr Speicherlimit. Große Diffs oder weitere Dateieinträge werden ausgelassen; die Originaldateien und Vergleichsstände bleiben erhalten.";
+        var limited = summary with { Files = [], IsPartial = true,
+            Notice = string.IsNullOrEmpty(summary.Notice) ? notice : summary.Notice + " " + notice };
+        var remaining = MaximumSnapshotBytes - JsonSerializer.SerializeToUtf8Bytes(limited, JsonOptions).Length;
+        if (remaining < 0) throw new IOException("Die Metadaten der Änderungsübersicht überschreiten das sichere Speicherlimit.");
+        var files = new List<CodingWorkspaceFileChange>();
+        var changed = false;
+        foreach (var original in summary.Files)
+        {
+            var file = original;
+            var length = JsonSerializer.SerializeToUtf8Bytes(file, JsonOptions).Length + 1;
+            if (length > remaining)
+            {
+                changed = true;
+                file = file with { Diff = string.Empty, DiffTruncated = true };
+                length = JsonSerializer.SerializeToUtf8Bytes(file, JsonOptions).Length + 1;
+            }
+            if (length > remaining) { changed = true; continue; }
+            files.Add(file);
+            remaining -= length;
+        }
+        return changed ? limited with { Files = files } : summary;
+    }
+
     private static bool IsStorageError(Exception exception) =>
         exception is IOException or UnauthorizedAccessException or JsonException or ArgumentException;
 
@@ -336,6 +410,7 @@ internal sealed class CodingChangesMonitor : IAsyncDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         Cancel();
+        _watcher?.Dispose();
         await _runCancellation.DisposeAsync().ConfigureAwait(false);
         try
         {

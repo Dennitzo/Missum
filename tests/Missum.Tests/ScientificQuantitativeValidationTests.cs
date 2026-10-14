@@ -8,6 +8,32 @@ namespace Missum.Tests;
 
 public sealed class ScientificQuantitativeValidationTests
 {
+    [Theory]
+    [InlineData(0)]
+    [InlineData(0.001)]
+    [InlineData(0.05)]
+    [InlineData(0.2)]
+    [InlineData(5)]
+    [InlineData(1000000)]
+    public void AcceptanceUsesTheExplicitProjectLimitWithoutAGeneralPercentageThreshold(double maximum)
+    {
+        var definition = MutableDefinition();
+        definition["checks"]![0]!["maximum"] = maximum;
+        var contract = Json(definition);
+        Assert.Null(ScientificQuantitativeValidation.ValidateDefinition(contract));
+        Assert.Empty(ScientificQuantitativeValidation.Assess(contract, Artifact(JsonSerializer.Serialize(new
+        {
+            metrics = new { distribution_error = maximum, refinement_error = 0.01, sampling_error = 0.1 },
+        }))));
+        var aboveLimit = maximum + Math.Max(maximum * 0.01, 0.001);
+        var errors = ScientificQuantitativeValidation.Assess(contract, Artifact(JsonSerializer.Serialize(new
+        {
+            metrics = new { distribution_error = aboveLimit, refinement_error = 0.01, sampling_error = 0.1 },
+        })));
+        Assert.Single(errors);
+        Assert.Contains("distribution_error", errors[0], StringComparison.Ordinal);
+    }
+
     [Fact]
     public void HostChecksEveryMetricInsteadOfTrustingASuccessDeclarationOrCorrelation()
     {

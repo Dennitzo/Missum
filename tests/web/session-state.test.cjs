@@ -731,3 +731,14 @@ test("a background completion refreshes its sidebar title and reenables project 
   assert.equal(elements.sessionList.querySelector(".session-group__add").disabled, false);
   assert.ok(elements.sessionList.textContent.includes("Fertige Hintergrundaufgabe"));
 });
+
+test("startup and session changes request latest position, same-session refresh preserves manual reading", () => {
+  const h = harness();
+  const jumps = [];
+  h.context.restoreSessionScrollPosition = id => jumps.push(id);
+  h.context.applySnapshot(snapshot());
+  h.context.applySnapshot(snapshot({ contextUsed: 800 }));
+  h.context.applySnapshot(snapshot({ activeSessionId: "session-b", messages: [] }));
+  h.context.applySnapshot(snapshot());
+  assert.deepEqual(jumps, ["session-a", "session-b", "session-a"]);
+});

@@ -23,6 +23,7 @@ public enum PromptTriggerAction
     DocumentCreate,
     Extension,
     PlanMode,
+    Lean,
 }
 
 public enum PromptTriggerMatchMode

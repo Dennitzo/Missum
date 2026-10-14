@@ -668,7 +668,11 @@ public sealed partial class SqliteScientificResearchRepository
         command.Parameters.AddWithValue("$project", projectId); command.Parameters.AddWithValue("$id", id);
         command.Parameters.AddWithValue("$revision", revision); command.Parameters.AddWithValue("$operation", operationId);
         command.Parameters.AddWithValue("$actor", (object?)actorAgentId ?? DBNull.Value); command.Parameters.AddWithValue("$kind", kind);
-        command.Parameters.AddWithValue("$json", json); command.Parameters.AddWithValue("$now", Format(now));
+        // The current item is authoritative. Retain only an operation/hash
+        // receipt instead of another full historical manuscript/data copy.
+        command.Parameters.AddWithValue("$json", JsonSerializer.Serialize(new
+        { contentSha256 = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(json))) }, WorkingJsonOptions));
+        command.Parameters.AddWithValue("$now", Format(now));
         await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
     }
 

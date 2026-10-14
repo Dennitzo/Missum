@@ -64,7 +64,7 @@ public sealed partial class NativeAssistantPage
         long added = 0;
         long removed = 0;
         var textFiles = 0;
-        var countsAvailable = true;
+        var countsAvailable = !partial || files.Length > 0;
         foreach (var file in files)
         {
             if (file.TryGetProperty("isBinary", out var binary) && binary.ValueKind == JsonValueKind.True) continue;
@@ -103,7 +103,7 @@ public sealed partial class NativeAssistantPage
             row.Children.Add(Label(removals, NativeThemeBrushes.Resource("MissumDangerBrush", Microsoft.UI.Colors.Firebrick)));
             description += $", {added:N0} Zeilen hinzugefügt, {removed:N0} Zeilen entfernt";
         }
-        else if (textFiles > 0)
+        else if (textFiles > 0 || partial)
         {
             row.Children.Add(Label("Zeilenzahlen nicht verfügbar", NativeThemeBrushes.MutedText));
             description += ", Zeilenzahlen nicht verfügbar";
@@ -118,7 +118,7 @@ public sealed partial class NativeAssistantPage
         ChangesSummaryButton.IsEnabled = true;
         ChangesSummaryButton.Visibility = Visibility.Visible;
         AutomationProperties.SetName(ChangesSummaryButton, description);
-        ToolTipService.SetToolTip(ChangesSummaryButton, notice.Length > 0 ? description + "\n" + notice : description + "\nGit-Diff anzeigen");
+        ToolTipService.SetToolTip(ChangesSummaryButton, description + "\nÄnderungen des aktuellen AI-Laufs" + (notice.Length > 0 ? "\n" + notice : ""));
 
         static bool ReadCount(JsonElement file, string property, out long count)
         {

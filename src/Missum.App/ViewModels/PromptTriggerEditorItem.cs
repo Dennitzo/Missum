@@ -143,6 +143,7 @@ public sealed partial class PromptTriggerEditorItem : ObservableObject
         PromptTriggerAction.ImageGeneration => "Bild generieren",
         PromptTriggerAction.Translation => "Übersetzen",
         PromptTriggerAction.TextToSpeech => "Vorlesen",
+        PromptTriggerAction.Lean => "Lean",
         PromptTriggerAction.Transcription => "Audio transkribieren",
         PromptTriggerAction.AudioAnalysis => "Audio analysieren",
         PromptTriggerAction.VideoAnalysis => "Video analysieren",

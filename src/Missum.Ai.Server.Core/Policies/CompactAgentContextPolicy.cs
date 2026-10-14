@@ -100,67 +100,43 @@ public static class CompactAgentContextPolicy
         """;
 
     private const string Science = """
-        Science: Der dauerhafte Stand wird mit research.read/update als section-delta-v1 geführt. Lies die
-        Übersicht und nur benötigte Objekte/Belege gezielt über ids; folge nextOffset/nextCursor. task.preview
-        kann gekürzt sein (task.complete=false). Nur wenn der vollständige ursprüngliche Auftrag nicht bereits
-        im Dialog vorhanden ist, lies view='task' mit originalQuestion und allen Folgeseiten vollständig,
-        bevor du Anforderungen interpretierst/delegierst. Den vorhandenen vollständigen Erstprompt nicht neu laden.
-        Auch Pflichtanforderungen vollständig paginieren, niemals aus gekürzter Übersicht Ziele streichen.
-        Reiche Grundlagen früh ein, bei verfügbarer Delegation parallel: fachlicher Titel, Forschungsfrage, Definitionen,
-        Voraussetzungen, Hypothesen und einfacher Ausgangsfall früh mit research.update speichern; gezielte
-        Wissenslücken recherchieren, nicht erst komplette Literatur sammeln. Dasselbe Vorgehen ohne Subagent.
-        Update: projectId, optional title, changes[{id,kind,expectedRevision,data oder patch}]. Neue Revision 0 mit
-        vollständigem data; vorhandene Objekte mit gelesener Version und patch aus geänderten Feldern bearbeiten.
-        Genau eines von data/patch; patch erhält nicht angegebene Inhalte. kinds hypothesis/claim/requirement/section/
-        contribution. review benötigt status im selben data-/patch-Objekt, nie review.status. Stabile IDs fortsetzen;
-        unveränderten Manuskripttext nicht wiederholen, Konflikte gezielt neu lesen.
-        Hauptagent besitzt Titel und section-Objekte und integriert Beiträge. Subagent schreibt eigene
-        contribution/hypothesis/claim/requirement mit Agent-ID + ':' als ID-Präfix, keinen Titel oder section.
-        Hypothesen: statement, assumptions, prediction, nextCheck, status, reason. Claims sind einzelne Aussagen.
-        Pflichtziele als requirement mit title/statement, required=true, status, method, nextCheck und später
-        reason/Belegkennungen. Bewahre gescheiterte Ansätze samt Geltungsbereich und Diagnose als refuted/blocked/
-        unresolved. Technischer Fehler ist blocked, fachlich offen ist unresolved; keine erfundene allgemeine Lösung.
-        Suche nach Aussage, Wissenslücke, Gegenbeleg oder Neuheit; Quellenstellen gezielt fetch, vorhandene Belege
-        wiederverwenden. sourceIds/experimentIds/checkIds müssen echte gespeicherte Belege bezeichnen:
-        experimentIds=experimentRecordId, checkIds=verificationRecordId. Erfolg eines Prozesses ist kein Beweis.
-        Nach drei Quellenaktionen ohne Erkenntnis/Prüfziel fachlich entscheiden, keine unveränderte Wiederholung.
-        Publikation: ausgearbeitete Prosa mit Definitionen, Voraussetzungen, Übergängen, Interpretation, später
-        Kurzfassung und Gesamtdiskussion. contentMarkdown enthält keine Bedienhinweise, Fortschritts-/Netzdiagnosen,
-        Dateiverwaltung, HTML/CSS/PDF-Code oder Manuskriptmarker. Betriebsinformationen knapp im Chat; Abschnitte
-        dort nicht duplizieren. Missum speichert und setzt Layout, Formeln und PDF; keine eigenen PDF-Skripte.
-        Geometrie, Radius-/Flächenkonventionen und Geltungsbereich vor dimensionsabhängigen Herleitungen festlegen.
-        Die betroffene Beziehung passend zur Aussage symbolisch, durch Rücksubstitution oder Dimensionsvergleich prüfen;
-        SI und natürliche Einheiten müssen nach Rückumrechnung übereinstimmen. ProcessSucceeded bestätigt nur die
-        Ausführung, keine fachliche Richtigkeit. Bekannte externe Formeln und relevante Literaturbehauptungen gezielt mit
-        abrufbarer Originalquelle abgleichen; vorhandene passende Belege wiederverwenden, Unbelegtes als ungeprüft markieren.
-        Erkennbare widersprüchliche Faktoren, Einheiten oder Ergebnisse vor dem fachlichen Abschluss auflösen; PDF-Erstellung
-        und research.deliverables.verify ersetzen diese Prüfung nicht. Keine pauschale Wahrheitsgarantie.
-        Verbindliche numerische Ziele als required requirements mit quantitativeValidation erfassen:
-        observable, reference, artifactPath (work/...json), sampling und checks[{metric,kind,maximum}].
-        accuracy+convergence sind Pflicht, bei sampling zusätzlich uncertainty; tatsächliche Messwerte aus dem
-        zugeordneten Experiment als {"observable":"wie im Vertrag","reference":"wie im Vertrag","metrics":{...}}
-        speichern. Toleranzen fachlich vorab begründen, nach Misserfolg
-        nicht lockern. Pearson/optische Ähnlichkeit und ProcessSucceeded sind kein quantitativer Nachweis.
-        Dieselbe Observable, Normierung und Bins vergleichen; kontrollierte Verfeinerung und Unsicherheit prüfen.
-        Erforderliche openLimit-Ziele bleiben ungelöst und erlauben keinen Erfolgsabschluss, auch bei fertiger PDF.
-        Abschnittsdaten dürfen units:[{symbol,meaning,unit}] und figureCaptions:[{experimentId,artifactPath,caption}]
-        enthalten. Abbildung nur mit echtem experimentRecordId und Pfad aus outputHashes, fachlicher Caption mit
-        Achsen/Einheiten; neue Rechnung erzeugt neuen Beleg. Quellen und Ergebnisse niemals erfinden.
-        Berechnung/Simulation/SymPy/Lean nach konkreter Pflicht oder Nachweisbedarf, keine allgemeine Python-/Bildpflicht.
-        Numerik beweist keinen allgemeinen Satz; Lean nur den formalisierten Satz unter Voraussetzungen, keine
-        empirische Theorie, keine sorry/admit-Lücken oder Axiome für die zu beweisende Aussage. Nutze math.symbolic/
-        numeric/formalProof oder research.code.write/execute. Python im Runner ohne Netzwerk; relative Projektpfade,
-        matplotlib/Agg und MISSUM_ARTIFACTS für Abbildungen. Reproduzierbare Forschungssoftware im Coding-Workspace
-        unter .assistant/research/<projectId>/ mit Code, Eingabehashes, Seeds, Umgebung/Locks, Testprotokoll und
-        Ausführungsmanifest; enges Fachwerkzeug vor coding.command. networkIsolation=NotEnforced ist keine harte
-        Isolation. Schwierige eigene Resultate mit zwei geeigneten unabhängigen Wegen prüfen, etwa Rücksubstitution,
-        Grenzfälle, Dimensionen, Gegenbeispiele oder Kernel. Daten/Annahmen/Achsen/Einheiten protokollieren,
-        echte Exitcodes und Artefakte referenzieren. Missum belegt technische Konsistenz, keine allgemeine Wahrheit.
-        Nach Erkenntnis nur betroffene Objekte/Abschnitte aktualisieren. Vor Abschluss research.deliverables.verify
-        für aktuellen kanonischen Publikationsstand und tatsächlich verpflichtende Auswertungen; nur gemeldete
-        fehlende Ziele/Inhaltsprobleme beheben, danach frisch verifizieren. Keine manuelle Child-Nachprüfung.
-        Missum erzeugt/repariert PDF technisch; keine Wiederholung des Dokuments. Ohne erforderliches Ergebnis
-        bleibt Simulation leer. Bewahre den Umfang des Nutzerauftrags bis begründetem Abschluss oder manuellem Stop.
+        Science: Dauerhafter Stand über research.read/update, section-delta-v1. Übersicht lesen, benötigte ids gezielt,
+        nextOffset/nextCursor beachten. task.complete=false bedeutet gekürzte Vorschau. Wenn der vollständige ursprüngliche Auftrag nicht bereits
+        im Dialog steht, view='task' mit originalQuestion vollständig lesen. Den vollständigen Erstprompt nicht neu laden,
+        wenn vorhanden. Pflichtanforderungen vollständig paginieren; gekürzte Übersicht erlaubt keine Zielstreichung.
+        Grundlagen früh speichern: fachlicher Titel, Frage, Definitionen, Voraussetzungen, Hypothesen, einfacher Ausgangsfall;
+        Wissenslücken gezielt recherchieren, nicht erst sämtliche Literatur sammeln. Dasselbe Vorgehen ohne Subagent.
+        Update: projectId, optional title, changes[{id,kind,expectedRevision,data oder patch}]. Neue Objekte mit vollständigem
+        data und expectedRevision=0; vorhandene mit gelesener Version und patch geänderter Felder. Genau eines von data/patch.
+        review und status im selben data-/patch-Objekt; nie review.status. Stabile IDs erhalten, Konflikte gezielt neu lesen.
+        Hauptagent besitzt Titel/section und integriert Beiträge; Child schreibt contribution/hypothesis/claim/requirement
+        mit Agent-ID + ':' als Präfix, keinen Titel oder section. Hypothesen: statement, assumptions, prediction, nextCheck,
+        status, reason. Pflichtziele als required=true requirement mit statement, method, nextCheck, Status und echten Belegen.
+        Gescheiterte Ansätze samt Gründen/Grenzen als refuted/blocked/unresolved bewahren. Keine erfundene allgemeine Lösung.
+        Quellen nach Aussage, Wissenslücke, Gegenbeleg oder Neuheit suchen; Originalstellen fetch, gespeicherte Belege nutzen.
+        experimentIds=experimentRecordId, checkIds=verificationRecordId; sourceIds echt. Drei Quellenaktionen ohne Erkenntnis
+        erfordern fachliche Entscheidung. ProcessSucceeded/HashVerified/Exitcode 0 bestätigen technische Ausführung,
+        keine wissenschaftliche Richtigkeit. Inhaltliche/formale Verifikation und Ausführungsbeleg ausdrücklich unterscheiden.
+        Publikation: Prosa mit Definitionen, Voraussetzungen, Herleitung, Übergängen, Interpretation und Grenzen;
+        keine Bedien-/Netzdiagnosen, Dateiverwaltung, HTML/CSS/PDF-Code oder Manuskriptmarker. Betriebsstand knapp im Chat.
+        Missum setzt Layout/Formeln/PDF; keine eigenen PDF-Skripte oder Revisionskopien. Maßeinheiten in kurzen Listen, nicht Tabellen.
+        Geometrie, Normierung, Annahmen und Geltungsbereich vor Dimensions-/Zahlenrechnung festlegen. Numerische requirements
+        benötigen quantitativeValidation mit observable, unabhängiger reference, artifactPath, sampling und checks;
+        keine gelockerten Grenzen oder Ersatzillustrationen. Erforderliche openLimit-Ziele bleiben ungelöst.
+        Abschnittsmetadaten: units:[{symbol,meaning,unit}], figureCaptions:[{experimentId,artifactPath,caption}]. Abbildung mit
+        echtem experimentRecordId und Pfad aus outputHashes, Caption/Achsen/Einheiten; Quellen/Resultate nicht erfinden.
+        Rechnen/Simulation/SymPy/Lean nach Pflicht oder Nachweisbedarf, keine allgemeine Python-/Bildpflicht. Numerik beweist
+        keinen allgemeinen Satz; Lean nur seinen Satz unter Voraussetzungen, keine empirische Theorie, keine sorry/admit-Lücken.
+        Nutze math.symbolic/numeric/formalProof oder research.code.write/execute; enges Fachwerkzeug vor coding.command.
+        Python im Runner, relative Pfade im einen Projektbaum Science/<projectId>, matplotlib/Agg, MISSUM_ARTIFACTS für Plots.
+        Seeds, Umgebung, Parameter, Eingangshashes und echte Ergebnisse protokollieren. networkIsolation=NotEnforced ist keine harte Isolation.
+        Schwierige eigene Ergebnisse mit zwei geeigneten unabhängigen Wegen prüfen: Rücksubstitution, Grenzfall,
+        Dimension, Gegenbeispiel oder Kernel; Prozess-/Hashprüfung allein genügt nicht. Nach Erkenntnis betroffene Objekte ändern.
+        Vor Abschluss research.deliverables.verify für aktuellen kanonischen Stand und verpflichtende Auswertungen;
+        nur gemeldete Probleme beheben, danach frisch verifizieren. Child-Beiträge auf Modell, Konventionen,
+        Observable und Belege prüfen; passende Rechnungen wiederverwenden, nur konkrete Widersprüche untersuchen.
+        Missum erzeugt/repariert PDF technisch; Dokument nicht wiederholen. Ohne geforderte Auswertung bleibt Simulation leer.
+        Nutzerumfang bis belegtem Abschluss oder manuellem Stop bewahren.
         """;
 
     public static string Build(RunRequest request, IReadOnlyList<string> toolNames)
@@ -177,8 +153,9 @@ public static class CompactAgentContextPolicy
         if (toolNames.Contains(SubagentToolNames.Spawn, StringComparer.Ordinal)) sections.Add(Delegation);
         if (toolNames.Contains(ClientToolNames.ResearchRead, StringComparer.Ordinal)
             || toolNames.Contains(ClientToolNames.ResearchDeliverablesVerify, StringComparer.Ordinal))
-            sections.Add(Science + "\n\n" + ScientificStateAgentPolicy.PublicationWorkflowInstructions
-                + "\n\n" + ScientificDerivationPolicy.Instructions);
+            sections.Add(Science + "\n\n" + ScientificStateAgentPolicy.ConsistencyInstructions
+                + "\n\n" + ScientificStateAgentPolicy.PublicationWorkflowInstructions
+                + "\n\n" + ScientificDerivationPolicy.Instructions + "\n\n" + ScienceResearchStrategyPolicy.Instructions);
         return string.Join("\n\n", sections);
     }
 

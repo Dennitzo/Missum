@@ -93,7 +93,8 @@ public sealed class CompactAgentContextPolicyTests
         Assert.Contains("starten keine weiteren Subagenten", policy, StringComparison.Ordinal);
         Assert.Contains("Ohne Admission selbst weiterarbeiten", policy, StringComparison.Ordinal);
         Assert.Contains("ohne erneute Ausführung", policy, StringComparison.Ordinal);
-        Assert.Contains("keine manuelle Child-Nachprüfung", policy, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Child-Beiträge auf Modell, Konventionen", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("keine manuelle Child-Nachprüfung", policy, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("Arbeitsteilung:", CompactAgentContextPolicy.Build(Request(RunMode.General), []), StringComparison.Ordinal);
     }
 
@@ -148,7 +149,8 @@ public sealed class CompactAgentContextPolicyTests
         Assert.True(ScientificDerivationPolicy.Instructions.Length < 3000);
         Assert.True(ScientificStateAgentPolicy.PublicationWorkflowInstructions.Length < 3000);
         Assert.Equal(2, policy.Split(ScientificStateAgentPolicy.PublicationWorkflowInstructions, StringSplitOptions.None).Length);
-        Assert.True(policy.Length - ScientificDerivationPolicy.Instructions.Length
+        Assert.True(ScienceResearchStrategyPolicy.Instructions.Length < 2200);
+        Assert.True(policy.Length - ScientificDerivationPolicy.Instructions.Length - ScienceResearchStrategyPolicy.Instructions.Length
             - ScientificStateAgentPolicy.PublicationWorkflowInstructions.Length < 13000 + AgentNarrationPolicy.Instructions.Length,
             $"Science policy contains {policy.Length} characters.");
     }

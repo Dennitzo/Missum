@@ -155,7 +155,7 @@ html:root[data-theme=high-contrast] {
 #active-tool-chips .active-tool-chip svg { width: 13px; height: 13px; flex: none; color: var(--icon-code, #9774e1); }
 #active-tool-chips .active-tool-chip[data-icon=folder] svg, #active-tool-chips .active-tool-chip[data-icon=plan] svg, #active-tool-chips .active-tool-chip[data-icon=audiobook] svg { color: var(--icon-folder, #f19d38); }
 #active-tool-chips .active-tool-chip[data-icon=web] svg { color: var(--icon-web, #4c94f2); }
-#active-tool-chips .active-tool-chip[data-icon=research] svg { color: var(--icon-research, #a07cf6); }
+#active-tool-chips .active-tool-chip[data-icon=research] svg, #active-tool-chips .active-tool-chip[data-icon=lean] svg { color: var(--icon-research, #a07cf6); }
 #active-tool-chips .active-tool-chip[data-icon=document] svg { color: var(--icon-document, #378fea); }
 #active-tool-chips .active-tool-chip[data-icon=image] svg, #active-tool-chips .active-tool-chip[data-icon=video] svg { color: var(--icon-image, #e768ab); }
 #active-tool-chips .active-tool-chip[data-icon=audio] svg { color: var(--icon-audio, #46bc85); }

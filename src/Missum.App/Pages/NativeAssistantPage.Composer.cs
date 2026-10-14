@@ -82,6 +82,7 @@ public sealed partial class NativeAssistantPage
         var glyph = S(action, "iconKey") switch
         {
             "plan" => "\uEA80", "web" => "\uE774", "research" => "\uE721", "document" => "\uE8A5",
+            "lean" => ToolIconGlyph("lean"),
             "image" => "\uEB9F", "speech" or "audio" => "\uE767", _ => "\uEA86",
         };
         SelectedToolChip.SetTool(_selectedAction == BuiltInActionIds.PlanMode ? "Planen" : label, glyph, ToolGlyphColor(S(action, "iconKey"), _selectedAction ?? ""));

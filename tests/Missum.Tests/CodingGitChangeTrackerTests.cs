@@ -90,6 +90,80 @@ public sealed class CodingGitChangeTrackerTests
     }
 
     [Fact]
+    public async Task CorruptReusableIndexIsRebuiltWithoutChangingBaselineOrMissingEdits()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var workspace = Directory.CreateDirectory(Path.Combine(environment.Directory, "workspace")).FullName;
+        var storage = Path.Combine(environment.Directory, "run");
+        var source = Path.Combine(workspace, "source.txt");
+        await File.WriteAllTextAsync(source, "original\n");
+        using (var tracker = new CodingGitChangeTracker(workspace, storage))
+        {
+            await tracker.InitializeAsync();
+            Assert.Empty((await tracker.RefreshAsync()).Files);
+            Assert.True(File.Exists(Path.Combine(storage, "capture.index")));
+        }
+        var baseline = await File.ReadAllBytesAsync(Path.Combine(storage, "git-baseline.json"));
+        await File.WriteAllTextAsync(Path.Combine(storage, "capture.index"), "corrupt cache");
+        await File.WriteAllTextAsync(source, "changed\n");
+        using var resumed = new CodingGitChangeTracker(workspace, storage);
+        var snapshot = await resumed.LoadExistingAsync();
+        Assert.Contains("-original", Assert.Single(snapshot.Files).Diff);
+        Assert.Contains("+changed", snapshot.Files[0].Diff);
+        Assert.Equal(baseline, await File.ReadAllBytesAsync(Path.Combine(storage, "git-baseline.json")));
+        Assert.Equal("DIRC", System.Text.Encoding.ASCII.GetString((await File.ReadAllBytesAsync(Path.Combine(storage, "capture.index")))[..4]));
+        Assert.Empty(Directory.EnumerateFiles(storage, ".git-index-*"));
+    }
+
+    [Fact]
+    public async Task LargeGeneratedJsonKeepsExactCountsWithoutMaterializingAnUnboundedDiff()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var workspace = Directory.CreateDirectory(Path.Combine(environment.Directory, "workspace")).FullName;
+        using var tracker = new CodingGitChangeTracker(workspace, Path.Combine(environment.Directory, "run"));
+        await tracker.InitializeAsync();
+        var data = "{\"samples\":\"" + new string('1', 2 * 1024 * 1024) + "\"}\n";
+        await File.WriteAllTextAsync(Path.Combine(workspace, "large.json"), data);
+        await File.WriteAllTextAsync(Path.Combine(workspace, "source.py"), "print('control')\n");
+        var snapshot = await tracker.RefreshAsync().WaitAsync(TimeSpan.FromSeconds(30));
+        Assert.True(snapshot.IsPartial);
+        var large = Assert.Single(snapshot.Files, file => file.Path == "large.json");
+        Assert.True(large.DiffTruncated);
+        Assert.Equal(1, large.AddedLines);
+        Assert.Equal(0, large.RemovedLines);
+        Assert.True(large.Diff.Length <= CodingGitChangeTracker.MaximumFileDiffCharacters);
+        Assert.DoesNotContain(new string('1', CodingGitChangeTracker.MaximumDiffLineCharacters), large.Diff);
+        Assert.Contains("+print('control')", Assert.Single(snapshot.Files, file => file.Path == "source.py").Diff);
+        Assert.Equal(data, await File.ReadAllTextAsync(Path.Combine(workspace, "large.json")));
+        Assert.NotNull(snapshot.Notice);
+    }
+
+    [Fact]
+    public async Task AggregatePreviewBudgetRetainsAllFileAndLineCounts()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var workspace = Directory.CreateDirectory(Path.Combine(environment.Directory, "workspace")).FullName;
+        using var tracker = new CodingGitChangeTracker(workspace, Path.Combine(environment.Directory, "run"));
+        await tracker.InitializeAsync();
+        var content = string.Concat(Enumerable.Repeat("scientific sample value\n", 4000));
+        for (var index = 0; index < 8; index++)
+            await File.WriteAllTextAsync(Path.Combine(workspace, $"samples-{index}.txt"), content);
+        var snapshot = await tracker.RefreshAsync();
+        Assert.True(snapshot.IsPartial);
+        Assert.Equal(8, snapshot.Files.Count);
+        Assert.All(snapshot.Files, file =>
+        {
+            Assert.Equal(4000, file.AddedLines);
+            Assert.True(file.Diff.Length <= CodingGitChangeTracker.MaximumFileDiffCharacters);
+        });
+        Assert.True(snapshot.Files.Sum(file => file.Diff.Length) <= CodingGitChangeTracker.MaximumTotalDiffCharacters);
+        Assert.Contains(snapshot.Files, file => file.DiffTruncated);
+        using var cancellation = new CancellationTokenSource();
+        await cancellation.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => tracker.RefreshAsync(cancellation.Token));
+    }
+
+    [Fact]
     public async Task ConcurrentTrackerInstancesKeepOneBaselineAndUsePrivateIndicesWithoutDeletingAnExistingLock()
     {
         await using var environment = await TestEnvironment.CreateAsync();
@@ -154,6 +228,7 @@ public sealed class CodingGitChangeTrackerTests
         using var tracker = new CodingGitChangeTracker(workspace, storage);
         await tracker.InitializeAsync();
         var manifest = await File.ReadAllBytesAsync(Path.Combine(storage, "git-baseline.json"));
+        var retainedIndex = await File.ReadAllBytesAsync(Path.Combine(storage, "capture.index"));
         var filterReady = Path.Combine(storage, "filter-ready");
         // Signal only after the slow filter child has been spawned. An index
         // lock alone precedes the filter and can race a later process fork.
@@ -185,6 +260,7 @@ public sealed class CodingGitChangeTrackerTests
         }
         Assert.Empty(Directory.EnumerateFiles(storage, ".git-index-*"));
         Assert.Equal(manifest, await File.ReadAllBytesAsync(Path.Combine(storage, "git-baseline.json")));
+        Assert.Equal(retainedIndex, await File.ReadAllBytesAsync(Path.Combine(storage, "capture.index")));
         File.Delete(filterReady);
         File.Delete(attributes);
         var recovered = await tracker.RefreshAsync();

@@ -14,6 +14,19 @@ public sealed class ScientificStateToolDiagnosisTests
     private static readonly string[] SecondExecutionArguments = ["second.py"];
 
     [Fact]
+    public void VerifiedStatusConflictsAreDiagnosedDespiteChangedUpdateArguments()
+    {
+        var messages = new List<LmChatMessage>();
+        const string reason = "verified benötigt einen fachlichen Prüfnachweis. Numerische Ergebnisse mit supported/completed einordnen.";
+        var receipt = JsonSerializer.Serialize(new { status = "failed", errorCode = "research.update_conflict",
+            result = new { success = false, conflicts = new[] { new { id = "goal", code = "verification_required", message = reason } } } });
+        var progress = Observe(new(), Update("first", "Messung"), receipt, messages);
+        progress = Observe(progress, Update("second", "Mit anderem Review"), receipt, messages);
+        Assert.Contains("supported/completed", Assert.Single(messages).Content!, StringComparison.Ordinal);
+        Assert.Equal(2, Assert.Single(progress.Failures!).Count);
+    }
+
+    [Fact]
     public void RepeatingTheSameMissingFieldWithChangedMetadataProducesOneActionableHint()
     {
         var messages = new List<LmChatMessage>();

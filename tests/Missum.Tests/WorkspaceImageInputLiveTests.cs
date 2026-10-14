@@ -59,7 +59,7 @@ public sealed class WorkspaceImageInputLiveTests(ITestOutputHelper output)
         var downloads = new List<(ArtifactDescriptor Artifact, byte[] Bytes)>();
         try
         {
-            var result = JsonSerializer.SerializeToElement(await tool.ExecuteAsync(proposal, workspace, null, token, gateway), Json);
+            var result = JsonSerializer.SerializeToElement(await tool.ExecuteAsync(proposal, workspace, null, gateway, token), Json);
             uploadId = result.GetProperty("uploadId").GetString();
             Assert.False(string.IsNullOrWhiteSpace(uploadId));
             Assert.Equal("file", result.GetProperty("source").GetString());
@@ -117,7 +117,9 @@ public sealed class WorkspaceImageInputLiveTests(ITestOutputHelper output)
             Assert.Contains(events, item => item.Type == RunEventTypes.RunCompleted);
             // Decoded media frames are internal; the public analysis is the persisted tool result.
             var completed = Assert.Single(events, item => item.Type == RunEventTypes.ServerToolCompleted
-                && item.Data.TryGetProperty("tool", out var toolName) && toolName.GetString() == "media.analyze");
+                && item.Data.TryGetProperty("tool", out var toolName) && toolName.GetString() == "media.analyze"
+                && item.Data.TryGetProperty("result", out var analyzed) && analyzed.ValueKind == JsonValueKind.Object
+                && analyzed.TryGetProperty("visualReview", out var visual) && visual.ValueKind == JsonValueKind.Object);
             var mediaResult = completed.Data.GetProperty("result");
             Assert.Equal("image", mediaResult.GetProperty("kind").GetString());
             Assert.Equal("frames + vision", mediaResult.GetProperty("metadata").GetProperty("pipeline").GetString());
@@ -127,6 +129,10 @@ public sealed class WorkspaceImageInputLiveTests(ITestOutputHelper output)
             var analysis = mediaResult.GetProperty("analysis").GetString();
             Assert.False(string.IsNullOrWhiteSpace(analysis));
             Assert.Contains("rot", analysis, StringComparison.OrdinalIgnoreCase);
+            var boundReview = mediaResult.GetProperty("visualReview");
+            Assert.Equal(uploadId, boundReview.GetProperty("sourceUploadId").GetString());
+            Assert.Equal(originalSha256, boundReview.GetProperty("sourceSha256").GetString());
+            Assert.True(boundReview.GetProperty("exactIdentity").GetBoolean());
             var replay = new List<RunEvent>();
             await foreach (var item in client.StreamRunEventsAsync(runId, 0, token))
             {

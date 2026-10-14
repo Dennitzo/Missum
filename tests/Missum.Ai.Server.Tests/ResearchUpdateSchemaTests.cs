@@ -13,6 +13,9 @@ public sealed class ResearchUpdateSchemaTests
     private static readonly string[] ManuscriptFields = ["title", "contentMarkdown"];
     private static readonly string[] AssertionFields = ["statement"];
     private static readonly string[] ScientificKinds = ["claim", "contribution", "hypothesis", "requirement", "section"];
+    private static readonly string[] ReviewFirstFields = ["review", "status"];
+    private static readonly string[] StatusFirstFields = ["status", "review"];
+    private static readonly string[] ReviewRemovalFields = ["review"];
     private readonly AgentToolCatalog _catalog = new();
 
     [Theory]
@@ -225,7 +228,7 @@ public sealed class ResearchUpdateSchemaTests
         // Verify the transported schema, not merely the catalog's after-the-fact validator.
         Assert.False(payload.TryGetProperty("properties", out _));
         var alternatives = payload.GetProperty("anyOf");
-        Assert.Equal(2, alternatives.GetArrayLength());
+        Assert.Equal(isPatch ? 4 : 2, alternatives.GetArrayLength());
         var withoutReview = alternatives[0];
         var reviewed = alternatives[1];
         foreach (var alternative in alternatives.EnumerateArray())
@@ -235,8 +238,23 @@ public sealed class ResearchUpdateSchemaTests
         }
         if (isPatch)
         {
-            Assert.Equal("null", withoutReview.GetProperty("properties").GetProperty("review").GetProperty("type").GetString());
+            Assert.False(withoutReview.GetProperty("properties").TryGetProperty("review", out _));
             Assert.False(withoutReview.TryGetProperty("required", out _));
+            // llama generates required fields first in declaration order.
+            // Both first tokens must retain a branch with a real review;
+            // otherwise starting with review constrains its value to null.
+            var reviewFirst = alternatives[2];
+            Assert.Equal(ReviewFirstFields, reviewFirst.GetProperty("properties").EnumerateObject()
+                .Where(field => Strings(reviewFirst.GetProperty("required")).Contains(field.Name)).Select(field => field.Name));
+            Assert.Equal(StatusFirstFields, reviewed.GetProperty("properties").EnumerateObject()
+                .Where(field => Strings(reviewed.GetProperty("required")).Contains(field.Name)).Select(field => field.Name));
+            Assert.Equal("object", reviewFirst.GetProperty("properties").GetProperty("review").GetProperty("type").GetString());
+            Assert.Equal("string", reviewFirst.GetProperty("properties").GetProperty("status").GetProperty("type").GetString());
+            Assert.Equal(StatusFirstFields, Strings(reviewFirst.GetProperty("required")));
+            var removal = alternatives[3];
+            Assert.Equal(ReviewRemovalFields, Strings(removal.GetProperty("required")));
+            Assert.Equal("review", removal.GetProperty("properties").EnumerateObject().First().Name);
+            Assert.Equal("null", removal.GetProperty("properties").GetProperty("review").GetProperty("type").GetString());
         }
         else
         {

@@ -42,8 +42,8 @@ public static class CodingToolCatalog
             """{"projectId":{"type":"string","pattern":"^[A-Za-z0-9._-]{1,128}$"},"expression":{"type":"string","minLength":1,"maxLength":16000},"precision":{"type":"integer","minimum":15,"maximum":1000,"default":80},"timeoutSeconds":{"type":"integer","minimum":1,"maximum":3600,"default":120}}""", ["projectId","expression"]),
         Create(ClientToolNames.MathSmt, "Prüfe ein workspace-lokales Z3-Python-Skript. Das Skript muss ein JSON-Ergebnis ausgeben; Toolchain und Belege werden protokolliert.", ToolRiskClass.Process,
             """{"projectId":{"type":"string","pattern":"^[A-Za-z0-9._-]{1,128}$"},"source":{"type":"string","minLength":1,"maxLength":64000},"timeoutSeconds":{"type":"integer","minimum":1,"maximum":3600,"default":120}}""", ["projectId","source"]),
-        Create(ClientToolNames.MathFormalProof, "Kompiliere eine Lean-4-Quelldatei in der workspace-lokalen Forschungsumgebung. Nur ein erfolgreicher Kernel-Lauf gilt als formale Verifikation.", ToolRiskClass.Process,
-            """{"projectId":{"type":"string","pattern":"^[A-Za-z0-9._-]{1,128}$"},"source":{"type":"string","minLength":1,"maxLength":64000},"timeoutSeconds":{"type":"integer","minimum":1,"maximum":3600,"default":300}}""", ["projectId","source"]),
+        Create(ClientToolNames.MathFormalProof, "Lean 4 mit Mathlib: initialisiere die projektlokale Umgebung (operation=initialize) oder prüfe einen vollständigen Beweis (operation=check, Standard). Gib source oder den relativen path einer bestehenden .lean-Datei an. Annahmen als Theoremparameter ausdrücken. Compilerdiagnosen gezielt beheben; nur KernelAccepted mit geprüften Axiomen belegt die formalisierte Aussage, keine physikalischen Annahmen oder Messdaten.", ToolRiskClass.Process,
+            """{"projectId":{"type":"string","pattern":"^[A-Za-z0-9._-]{1,128}$"},"operation":{"type":"string","enum":["initialize","check"],"default":"check"},"source":{"type":"string","minLength":1,"maxLength":64000},"path":{"type":"string","minLength":1,"maxLength":1024},"useMathlib":{"type":"boolean","default":true},"timeoutSeconds":{"type":"integer","minimum":1,"maximum":7200,"default":300}}""", ["projectId"]),
         Create(ClientToolNames.ResearchCodeWrite, "Schreibe eine Forschungsdatei unter .assistant/research/<projectId> und erstelle davor ein hashbasiertes Change-Set.", ToolRiskClass.LocalMutation,
             """{"projectId":{"type":"string","pattern":"^[A-Za-z0-9._-]{1,128}$"},"path":{"type":"string","minLength":1,"maxLength":1024},"content":{"type":"string","maxLength":64000},"expectedSha256":{"type":"string","pattern":"^[a-fA-F0-9]{64}$"}}""", ["projectId","path","content"]),
         Create(ClientToolNames.ResearchCodeExecute, "Führe ein Programm für ein reproduzierbares Forschungsexperiment aus. Programm und Argumente sind getrennt; Prozessbaum, Zeitlimit, Hashes und Ausgaben werden protokolliert.", ToolRiskClass.Process,
@@ -91,12 +91,17 @@ public static class CodingToolCatalog
                 case "maximumEntries": Integer(property.Value, property.Name, 1, 200); break;
                 case "maximumResults": Integer(property.Value, property.Name, 1,
                     name is ClientToolNames.CodingSearchHistory or ClientToolNames.CodingSearchKnowledge ? 8 : name == "coding.searchRunEvidence" ? 20 : 50); break;
-                case "timeoutSeconds": Integer(property.Value, property.Name, 0, int.MaxValue); break;
+                case "timeoutSeconds": Integer(property.Value, property.Name, name == ClientToolNames.MathFormalProof ? 1 : 0,
+                    name == ClientToolNames.MathFormalProof ? 7200 : int.MaxValue); break;
                 case "projectId": case "experimentId": case "changeSetId": Identifier(property.Value, property.Name); break;
                 case "operation": Text(property.Value, property.Name, 1, 32); break;
                 case "expression": case "source": Text(property.Value, property.Name, 1, MaximumWriteContentCharacters); break;
                 case "symbol": Text(property.Value, property.Name, 0, 128); break;
                 case "precision": Integer(property.Value, property.Name, 15, 1000); break;
+                case "useMathlib":
+                    if (property.Value.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                        throw new ArgumentException("useMathlib must be a boolean.");
+                    break;
                 case "randomSeed": Integer(property.Value, property.Name, int.MinValue, int.MaxValue); break;
                 case "repetitions": Integer(property.Value, property.Name, 2, 20); break;
                 case "arguments":
@@ -106,6 +111,15 @@ public static class CodingToolCatalog
                     break;
                 default: throw new ArgumentException($"Unknown argument for {name}: {property.Name}.");
             }
+        }
+        if (name == ClientToolNames.MathFormalProof)
+        {
+            var operation = arguments.TryGetProperty("operation", out var op) ? op.GetString() : "check";
+            var source = arguments.TryGetProperty("source", out _);
+            var path = arguments.TryGetProperty("path", out _);
+            if (operation is not ("initialize" or "check")) throw new ArgumentException("operation must be initialize or check.");
+            if (operation == "initialize" ? source || path : source == path)
+                throw new ArgumentException("initialize accepts no source/path; check requires exactly source or path.");
         }
         if (name == ClientToolNames.CodingEdit)
         {

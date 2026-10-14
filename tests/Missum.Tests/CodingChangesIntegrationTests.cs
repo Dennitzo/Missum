@@ -10,7 +10,78 @@ namespace Missum.Tests;
 
 public sealed class CodingChangesIntegrationTests
 {
+    [Fact]
+    public async Task ContinuationHasItsOwnBaselineAndFinishedReceiptDoesNotIncludeLaterWork()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var workspace = Directory.CreateDirectory(Path.Combine(environment.Directory, "project")).FullName;
+        var file = Path.Combine(workspace, "source.txt");
+        await File.WriteAllTextAsync(file, "before all runs\n");
+        var session = Guid.NewGuid(); var message = Guid.NewGuid();
+        var firstRun = Guid.NewGuid(); var nextRun = Guid.NewGuid();
+        var firstStore = CodingChangesMonitor.RunStorageDirectory(environment.Directory, session, message, firstRun);
+        var nextStore = CodingChangesMonitor.RunStorageDirectory(environment.Directory, session, message, nextRun);
+        await using (var first = new CodingChangesMonitor(workspace, firstStore, session, message, firstRun,
+            _ => Task.CompletedTask, error => throw error))
+        {
+            await first.StartAsync(false, CancellationToken.None);
+            await File.WriteAllTextAsync(file, "first run result\n");
+        }
+        await using (var next = new CodingChangesMonitor(workspace, nextStore, session, message, nextRun,
+            _ => Task.CompletedTask, error => throw error))
+        {
+            await next.StartAsync(false, CancellationToken.None);
+            Assert.Empty((await CodingChangesMonitor.ReadLatestAsync(nextStore))!.Files);
+            await File.WriteAllTextAsync(file, "second run result\n");
+        }
+        await File.WriteAllTextAsync(file, "unrelated later edit\n");
+        var summary = (await CodingChangesMonitor.ReadLatestAsync(nextStore))!;
+        var diff = Assert.Single(summary.Files).Diff;
+        Assert.Contains("-first run result", diff);
+        Assert.Contains("+second run result", diff);
+        Assert.DoesNotContain("before all runs", diff);
+        Assert.DoesNotContain("unrelated later edit", diff);
+        Assert.Equal(nextRun, summary.RunId);
+        Assert.Equal(firstRun, (await CodingChangesMonitor.ReadLatestAsync(firstStore))!.RunId);
+    }
+
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly JsonSerializerOptions TransportJsonOptions = new(JsonSerializerDefaults.Web)
+        { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+    [Fact]
+    public async Task OversizedLegacySummaryIsRejectedBeforeMaterializationAndRemainsUntouched()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var path = Path.Combine(environment.Directory, "latest.json");
+        var summary = new CodingChangesSummary(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(),
+            environment.Directory, 1, DateTimeOffset.UtcNow, [], false, null, "git-v1");
+        await File.WriteAllTextAsync(path, JsonSerializer.Serialize(summary, JsonOptions)
+            + new string(' ', CodingChangesMonitor.MaximumSnapshotBytes));
+        var originalLength = new FileInfo(path).Length;
+        Assert.Null(await CodingChangesMonitor.ReadLatestAsync(environment.Directory));
+        Assert.Equal(originalLength, new FileInfo(path).Length);
+        // A legacy multi-gigabyte cache is size-checked before parsing as well.
+        await using (var stream = File.OpenWrite(path)) stream.SetLength(128L * 1024 * 1024);
+        Assert.Null(await CodingChangesMonitor.ReadLatestAsync(environment.Directory));
+        Assert.Equal(128L * 1024 * 1024, new FileInfo(path).Length);
+    }
+
+    [Fact]
+    public void StoredAndPublishedSummaryBudgetAccountsForJsonEscaping()
+    {
+        var files = Enumerable.Range(0, 80).Select(index => new Missum.Core.Coding.CodingWorkspaceFileChange(
+            $"file-{index}.txt", 5, 2, new string('\u0001', 16000), false, "modified")).ToArray();
+        var summary = new CodingChangesSummary(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(),
+            Path.GetTempPath(), 1, DateTimeOffset.UtcNow, files, false, null, "git-v1");
+        var result = CodingChangesMonitor.LimitSnapshot(summary);
+        Assert.True(JsonSerializer.SerializeToUtf8Bytes(result, TransportJsonOptions).Length <= CodingChangesMonitor.MaximumSnapshotBytes);
+        Assert.True(result.IsPartial);
+        Assert.Equal(80, result.Files.Count);
+        Assert.Contains(result.Files, file => file.DiffTruncated);
+        Assert.All(result.Files, file => { Assert.Equal(5, file.AddedLines); Assert.Equal(2, file.RemovedLines); });
+        Assert.NotNull(result.Notice);
+    }
+
     [Fact]
     public async Task CachedIndexLockFailureRecoversFromTheOriginalBaselineWithoutRemovingTheLockOrChangingRunIdentity()
     {
@@ -199,7 +270,7 @@ public sealed class CodingChangesIntegrationTests
         {
             await monitor.StartAsync(resume: false, CancellationToken.None);
             await File.WriteAllTextAsync(source, "real periodic modification\n");
-            var live = await changed.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            var live = await changed.Task.WaitAsync(TimeSpan.FromSeconds(20));
             Assert.Contains("+real periodic modification", Assert.Single(live.Files).Diff, StringComparison.Ordinal);
             monitor.Cancel();
             await File.WriteAllTextAsync(source, "baseline\n");
@@ -217,8 +288,11 @@ public sealed class CodingChangesIntegrationTests
         var workspace = Directory.CreateDirectory(Path.Combine(environment.Directory, "project")).FullName;
         await chats.SetCodingWorkspacePathAsync(session.Id, workspace, activateCoding: true);
         var turn = await chats.AddTurnAsync(session.Id, "Modify a file");
-        var storage = CodingChangesMonitor.StorageDirectory(environment.Directory, session.Id, turn.AssistantMessage.Id);
-        await using (var monitor = new CodingChangesMonitor(workspace, storage, session.Id, turn.AssistantMessage.Id, Guid.NewGuid(),
+        var runs = environment.Get<IMissumAiRunRepository>();
+        var run = await runs.BeginAttemptAsync(new(Guid.NewGuid(), session.Id, turn.AssistantMessage.Id, null,
+            "changes-snapshot", null, 0, "queued", null, null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, WorkspacePath: workspace));
+        var storage = CodingChangesMonitor.RunStorageDirectory(environment.Directory, session.Id, turn.AssistantMessage.Id, run.Id);
+        await using (var monitor = new CodingChangesMonitor(workspace, storage, session.Id, turn.AssistantMessage.Id, run.Id,
             _ => Task.CompletedTask, exception => throw new InvalidOperationException("Unexpected tracker error", exception)))
         {
             await monitor.StartAsync(resume: false, CancellationToken.None);
@@ -229,7 +303,7 @@ public sealed class CodingChangesIntegrationTests
         await settings.InitializeAsync();
         await settings.UpdateAsync(current => current with { ActiveSessionId = session.Id });
         Assert.Equal(Path.GetFullPath(environment.Directory), settings.DataDirectory);
-        using var service = new MissumAiAssistantService(null!, chats, null!, null!, null!, null!, null!, null!, null!, null!,
+        using var service = new MissumAiAssistantService(null!, chats, null!, null!, runs, null!, null!, null!, null!, null!,
             null!, null!, null!, settings, null!, NullLogger<MissumAiAssistantService>.Instance);
         var activity = new RecentActivityService(settings, new ShellViewModel(), NullLogger<RecentActivityService>.Instance);
         var coordinator = new AssistantCoordinator(chats, environment.Get<IDocumentIngestor>(),

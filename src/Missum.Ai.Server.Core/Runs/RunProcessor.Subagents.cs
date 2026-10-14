@@ -81,7 +81,7 @@ public sealed partial class RunProcessor
 
     /// <summary>Preserves every evaluated parent message and closes outstanding parent-only tool calls.</summary>
     internal static IReadOnlyList<LmChatMessage> ForkSubagentMessages(IReadOnlyList<LmChatMessage> parentMessages, string task,
-        string? agentId = null)
+        string? agentId = null, bool scientificResearch = false)
     {
         var messages = parentMessages.ToList();
         var pendingCalls = new Dictionary<string, LmToolCall>(StringComparer.Ordinal);
@@ -105,7 +105,12 @@ public sealed partial class RunProcessor
             + "Dateien im übernommenen Workspace erstellen oder bearbeiten. Halte dich an die zugewiesenen Schreibpfade, "
             + "damit du und der Hauptagent parallel arbeiten können. Starte keine weiteren Subagenten. "
             + "Berichte dein tatsächlich abgeschlossenes Ergebnis, erzeugte Dateien, Werkzeugbelege und gegebenenfalls offene Punkte. "
-            + "Der Hauptagent verwendet dein Ergebnis direkt ohne Wiederholung deiner abgeschlossenen Aufgabe.\n"
+            + (scientificResearch
+                ? "Prüfe auch die vorgegebenen Formeln, Einheiten, Näherungen und Abnahmekriterien auf innere Konsistenz. "
+                    + "Melde einen Widerspruch im Auftrag ausdrücklich, statt ihn in eine vermeintlich unabhängige Referenz zu übernehmen. "
+                    + "Trenne abgeschlossene Ausführung von erfüllten fachlichen Kriterien und benenne unerfüllte Kriterien. "
+                    + "Der Hauptagent verwendet deine vorhandenen Artefakte weiter und prüft ihre fachliche Anschlussfähigkeit.\n"
+                : "Der Hauptagent verwendet dein Ergebnis direkt ohne Wiederholung deiner abgeschlossenen Aufgabe.\n")
             + (agentId is null ? "" : "Deine vom Gateway vergebene Agent-ID (JSON-Daten): " + JsonSerializer.Serialize(agentId)
                 + ". Für eigene kanonische Forschungsobjekte verwende diese ID und ':' als Präfix.\n") + "\n" + task));
         return messages;
@@ -189,7 +194,8 @@ public sealed partial class RunProcessor
             var childContextProfile = parentCheckpoint?.ContextProfileVersion;
             childRequest = childRequest with { ContextProfileVersion = childContextProfile };
             var childWorkingState = childRequest.Mode == RunMode.Coding ? CodingWorkingState.Create(task) : null;
-            var childContext = WithWorkingState(ForkSubagentMessages(parentMessages, task, agentId), childWorkingState).ToList();
+            var childContext = WithWorkingState(ForkSubagentMessages(parentMessages, task, agentId,
+                ScientificStateCompletionPolicy.Enabled(childRequest)), childWorkingState).ToList();
             if (childContextProfile == ToolContextProfiles.Current)
                 AppendRuntimeContext(childContext, childRequest, subagentAvailable: false);
             var childMessages = ModelRuntimeClient.PrepareLanguageBoundMessages(childContext);
@@ -247,6 +253,11 @@ public sealed partial class RunProcessor
             task = request.Subagent.AssignedTask, sessionId = request.SessionId,
             instruction = child.State is RunState.Cancelled or RunState.Interrupted or RunState.Failed
                 ? "Dieser Subagent arbeitet nicht mehr. Setze die noch benötigte eigene Teilaufgabe gezielt mit subagent.spawn und resumeRunId fort; warte nicht auf den abgebrochenen Lauf."
+                : ScientificStateCompletionPolicy.Enabled(request)
+                ? "Arbeite parallel an deiner eigenen Aufgabe. Hole das Ergebnis mit subagent.wait ab und verwende vorhandene Artefakte weiter. "
+                    + "Prüfe vor fachlicher Übernahme Formeln, Einheiten, Konventionen, Geltungsbereich, Observable und offene Abnahmekriterien "
+                    + "an den tatsächlichen Ergebnisbelegen. Ein beendeter Subagent ist kein Nachweis erfüllter Forschungsziele. "
+                    + "Keine bereits abgeschlossenen Berechnungen ohne konkreten Fehler oder neue Prüffrage erneut ausführen."
                 : "Arbeite parallel an deiner eigenen Aufgabe. Hole dieses Ergebnis mit subagent.wait ab und verwende es direkt, ohne die abgeschlossene Teilaufgabe erneut auszuführen oder zu prüfen.",
         }, MissumAiProtocol.CreateJsonOptions()), [],
             Succeeded: child.State is not (RunState.Cancelled or RunState.Interrupted or RunState.Failed),
@@ -397,8 +408,11 @@ public sealed partial class RunProcessor
             result = text, artifactIds, completionEvidence, errorCode = child.ErrorCode,
             state = child.State.ToString().ToLowerInvariant(),
             isRunning = false,
+            scientificReviewRequired = ScientificStateCompletionPolicy.Enabled(request),
             instruction = child.State == RunState.Completed
-                ? "Übernimm das abgeschlossene Ergebnis und die bereits ausgeführten Dateiänderungen direkt. Wiederhole oder überprüfe die zugewiesene abgeschlossene Teilaufgabe nicht. Verarbeite nur ausdrücklich offene Punkte weiter."
+                ? ScientificStateCompletionPolicy.Enabled(request)
+                    ? ScientificSubagentAcceptanceInstruction
+                    : "Übernimm das abgeschlossene Ergebnis und die bereits ausgeführten Dateiänderungen direkt. Wiederhole oder überprüfe die zugewiesene abgeschlossene Teilaufgabe nicht. Verarbeite nur ausdrücklich offene Punkte weiter."
                 : "Die Teilaufgabe ist abgebrochen und arbeitet nicht mehr. Bewahre belegte Teilergebnisse und setze nur offene Arbeit mit subagent.spawn/resumeRunId fort.",
         }, MissumAiProtocol.CreateJsonOptions()), [], Succeeded: child.State == RunState.Completed,
             ErrorCode: child.State == RunState.Completed ? null : child.ErrorCode ?? "subagent.failed");
@@ -486,14 +500,31 @@ public sealed partial class RunProcessor
                 _ = await _repository.TryConsumeSubagentResultAsync(parentRunId, childRunId, cancellationToken).ConfigureAwait(false);
     }
 
-    internal static bool AppendSubagentResultAcceptanceInstruction(List<LmChatMessage> messages, JsonElement result)
+    internal const string ScientificSubagentAcceptanceInstruction = "Wissenschaftliche Übernahme delegierter Ergebnisse: "
+        + "Der Status completed bestätigt das Ende der Teilaufgabe, nicht ihre fachliche Richtigkeit oder quantitative Validierung. "
+        + "Verwende vorhandene Dateien und Messbelege weiter; führe abgeschlossene Berechnungen nicht pauschal erneut aus. "
+        + "Prüfe vor der Übernahme als numerischen Beleg gezielt die tatsächlich gespeicherten Ergebnisartefakte und Werkzeugbelege, "
+        + "Formeln, Einheiten, Fourier-/Phasenkonventionen, Randbedingungen, Geltungsbereich der Näherung, dieselbe Observable "
+        + "und die ursprünglichen Genauigkeitskriterien. Eine Referenz aus derselben Formel oder Implementierung ist keine "
+        + "unabhängige physikalische Validierung; reine Normerhaltung genügt nicht. "
+        + "Unerfüllte Kriterien und Widersprüche offen lassen, Hypothesen von belegten Ursachen unterscheiden und nur die "
+        + "betroffene offene Teilfrage weiterbearbeiten. image.input bestätigt nur das Laden eines Bildes; für aktuelle oder "
+        + "veränderte relevante Plots media.analyze mit konkreter Diagnosefrage und passender Bildidentität verwenden. "
+        + "Eine Bildbeurteilung ersetzt keine quantitative Prüfung. research.deliverables.verify prüft abschließend den aktuellen "
+        + "belegten Forschungsstand. Diese fachliche Übernahmeprüfung ist auch bei bereits beendeter Subagentenarbeit erforderlich.";
+
+    internal static bool AppendSubagentResultAcceptanceInstruction(List<LmChatMessage> messages, JsonElement result,
+        RunRequest? request = null)
     {
         if (result.ValueKind != JsonValueKind.Object
             || !result.TryGetProperty("status", out var status) || status.ValueKind != JsonValueKind.String
             || status.GetString() != "completed"
             || !result.TryGetProperty("runId", out var id) || id.ValueKind != JsonValueKind.String
             || string.IsNullOrWhiteSpace(id.GetString())) return false;
-        var marker = "[MISSUM_SUBAGENT_RESULT_ACCEPTED:" + id.GetString() + "]\n";
+        var scientific = request is not null && ScientificStateCompletionPolicy.Enabled(request)
+            || ScientificStateCompletionPolicy.Boolean(result, "scientificReviewRequired");
+        var marker = scientific ? "[MISSUM_SCIENCE_SUBAGENT_REVIEW:" + id.GetString() + "]\n"
+            : "[MISSUM_SUBAGENT_RESULT_ACCEPTED:" + id.GetString() + "]\n";
         // Append after the authentic receipt, never rewrite the evaluated
         // system prefix. Persisted identity prevents reinjection on restart
         // or a repeated wait without marking its result consumed a second time.
@@ -501,7 +532,8 @@ public sealed partial class RunProcessor
             && message.Content?.StartsWith(marker, StringComparison.Ordinal) == true)) return false;
         var compact = messages.FirstOrDefault()?.Role == "system"
             && messages[0].Content?.StartsWith(CompactAgentContextPolicy.Marker, StringComparison.Ordinal) == true;
-        messages.Add(new LmChatMessage("system", marker + (compact
+        messages.Add(new LmChatMessage("system", marker + (scientific
+            ? ScientificSubagentAcceptanceInstruction : compact
             ? "Übernimm das quittierte Ergebnis für deine weitere Arbeit; abgeschlossene Teilaufgaben nicht erneut ausführen."
             : SubagentAgentPolicy.CompletedWork)));
         return true;

@@ -93,6 +93,45 @@ test("project chats keep only selected tools and captions in the native composer
   assert.equal(state.workspacePath, workspacePath, "workspace selection remains available to sidebar, tools and outputs");
 });
 
+test("Lean selection survives descriptor and legacy mapping and uses the native prompt footer", async () => {
+  const descriptor = { actionId: "builtin.math/lean", displayName: "Lean", iconKey: "lean", toolAction: "lean" };
+  const state = { actionDescriptors: [descriptor], activeSessionId: "session-lean", selectedExtensionActionId: null,
+    selectedToolAction: null, persistentExtensionActionId: null, persistentToolAction: null, messages: [{}],
+    documents: [], attachments: [], pendingDocumentImports: [] };
+  const activeTools = new TestNode("div"), posts = [], invoked = [];
+  const context = vm.createContext({ state, elements: { activeTools, documents: new TestNode("div"), toolsButton: new TestNode("button") },
+    document: { createElement: tag => new TestNode(tag), querySelectorAll: () => [] },
+    persistentToolActions: new Set(), persistentExtensionActionIds: new Set(),
+    availableActionDescriptors: () => state.actionDescriptors, ensureEditableContext: () => true,
+    renderCodingWorkspace() {}, renderDeepResearch() {}, renderScienceWorkbench() {},
+    isAudioCaptureActive: () => false, updateContextStripVisibility() {},
+    createToolIcon: path => { const result = new TestNode("svg"); result.dataset.path = path; return result; },
+    invokeActionDescriptor: item => invoked.push(item.actionId), post: (type, payload) => posts.push({ type, payload }) });
+  const visualStart = appSource.indexOf("  const toolVisuals = Object.freeze({");
+  const visualEnd = appSource.indexOf("  function normalizeToolAction(", visualStart);
+  vm.runInContext(appSource.slice(visualStart, visualEnd), context);
+  for (const name of ["normalizeToolAction", "normalizeExtensionActionId", "extensionActionIdForToolAction",
+    "toolActionForExtensionActionId", "selectToolAction", "renderContext"]) vm.runInContext(functionSource(name), context);
+
+  assert.equal(context.normalizeToolAction("lean"), "lean");
+  assert.equal(context.extensionActionIdForToolAction("lean"), descriptor.actionId);
+  assert.equal(context.toolActionForExtensionActionId(descriptor.actionId), "lean");
+  context.selectToolAction("lean");
+  assert.equal(posts[0].type, "action.invoke");
+  assert.equal(posts[0].payload.actionId, descriptor.actionId);
+  assert.equal(posts[0].payload.sessionId, "session-lean");
+  context.selectToolAction("lean", false);
+  assert.equal(state.selectedExtensionActionId, descriptor.actionId);
+  assert.equal(activeTools.children.length, 1);
+  const chip = activeTools.children[0];
+  assert.equal(chip.getAttribute("aria-label"), "Lean abwählen");
+  assert.equal(chip.dataset.icon, "lean");
+  assert.match(chip.querySelector("svg").dataset.path, /M3 4l6 13/);
+  await chip.dispatch("click"); assert.deepEqual(invoked, [descriptor.actionId]);
+  state.actionDescriptors = [];
+  assert.equal(context.toolActionForExtensionActionId(descriptor.actionId), "lean", "older snapshots preserve the Lean alias");
+});
+
 test("the grouped action menu is populated only by the current snapshot descriptors", () => {
   assert.match(html, /id="tools-button"[^>]*aria-label="Hinzufügen"/);
   assert.match(html, /id="tools-menu-content" class="action-menu__content"/);

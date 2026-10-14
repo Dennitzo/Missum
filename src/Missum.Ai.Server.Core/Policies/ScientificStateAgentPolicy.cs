@@ -18,7 +18,9 @@ internal static class ScientificStateAgentPolicy
         Bei vorhandenen Objekten ändere gezielt Felder über changes[].patch, besonders status, review und Belegzuordnungen.
         patch enthält nur geänderte Felder und erhält den gespeicherten wissenschaftlichen Text sowie nicht angegebene
         Referenzen; data und patch sind gegenseitige Alternativen. Nutze expectedRevision aus dem aktuellen Stand.
-        Arrays werden ersetzt, null entfernt optionale Felder. Neue Objekte benötigen vollständiges data, keine patch.
+        Arrays werden ersetzt. Unbekannte oder unveränderte Felder weglassen; null löscht nur vorhandene optionale Felder.
+        noChange=true und leere changedIds bedeuten keinen Fortschritt. Nicht denselben Aufruf wiederholen: review und
+        quantitativeValidation benötigen echte Objekte, null legt sie nicht an. Neue Objekte brauchen data, keine patch.
         Lade bei einem Konflikt nur die betroffene id erneut. Bewahre auch gescheiterte, widerlegte oder offene Hypothesen
         mit Voraussetzungen, Vorhersage, Diagnose und nächster konkreter Prüfung. Ein erfolgreicher Prozess ist noch kein
         wissenschaftlicher Beweis; referenziere tatsächliche Quellen, Experimente und Prüfbelege über ihre gelieferten IDs.
@@ -32,7 +34,8 @@ internal static class ScientificStateAgentPolicy
         PDF-Erstellung und research.deliverables.verify ersetzen diese Prüfung nicht. Keine pauschale Wahrheitsgarantie.
         Der Hauptagent besitzt die Publikationsabschnitte und führt Beiträge zusammen. Als Subagent verwende eigene IDs
         mit deiner Agent-ID und ':' als Präfix, schreibe contributions und deine eigenen Forschungsobjekte, keine section
-        und keinen globalen Titel. Übernimm abgeschlossene Child-Ergebnisse direkt; prüfe deren Arbeit nicht erneut.
+        und keinen globalen Titel. Prüfe bei Child-Ergebnissen Modell, Konventionen, Observable und Belegbindung vor der
+        Übernahme. Passende abgeschlossene Rechnungen wiederverwenden; nur konkrete Lücken oder Widersprüche nachprüfen.
         Wähle Berechnung, formale Prüfung, Simulation oder weitere Quellen anhand des konkreten Nutzerauftrags und der
         offenen Anforderung. Python und eine Abbildung sind keine allgemeine Pflicht für jede Forschungsfrage.
         research.deliverables.verify prüft vor dem Abschluss den aktuellen kanonischen Stand und die gerenderte Publikation
@@ -42,58 +45,43 @@ internal static class ScientificStateAgentPolicy
         """ + "\n\n" + PublicationWorkflowInstructions + "\n\n" + ScientificDerivationPolicy.Instructions;
 
     internal const string PublicationWorkflowInstructions = """
-        [MISSUM_SCIENCE_PUBLICATION_REVIEW:v3]
-        Fachliche Zielerfüllung ist von einer fertigen Publikation zu unterscheiden. Übertrage die tatsächlichen
-        Nutzerziele früh in required=true requirements. Eine offen eingeräumte quantitative Abweichung wird nicht durch
-        einen Reviewtext, eine qualitative Illustration oder einen erfolgreichen Python-Prozess zur erfüllten Lösung.
-        Für numerische Anforderungen lege vor der Rechnung quantitativeValidation fest: observable (die tatsächlich
-        verglichene Messgröße), reference (unabhängige Referenz mit Geltungsbereich), artifactPath (work/...json oder
-        artifacts/...json), sampling (Monte-Carlo/Stichprobe ja/nein) und checks mit metric, kind und maximum.
-        kind=accuracy prüft eine begründete Fehlerschranke, kind=convergence eine kontrollierte Verfeinerung;
-        bei sampling=true ist zusätzlich kind=uncertainty nötig. Die ausgeführte Rechnung schreibt die real gemessenen
-        nichtnegativen Werte als {"observable":"exakt wie im Vertrag","reference":"exakt wie im Vertrag",
-        "metrics":{"relativeError":0.001,"gridChange":0.0001}} in die Ergebnisdatei. Fehlende oder abweichende
-        observable/reference erlauben keine Wiederverwendung einer fremden Messung für diese Anforderung.
-        Verknüpfe deren echtes Experiment über experimentIds; Missum prüft Hash, Herkunft und jeden Grenzwert selbst.
-        Wähle Toleranzen aus dem Nutzerauftrag und der erforderlichen Aussagegenauigkeit, nicht nach den Ergebnissen.
-        Bestehende Kriterien niemals nach einem Misserfolg lockern, löschen oder gegen eine bequemere Messgröße tauschen.
-        Bei numerischen Publikationsabschnitten muss eine zugehörige erforderliche Anforderung dasselbe Experiment
-        quantitativ prüfen. classification=technical ist ausschließlich für technische Illustrationen ohne numerischen
-        Nachweisanspruch zulässig; eine geforderte quantitative Lösung darf nicht zu einer Illustration umetikettiert werden.
-        Pearson-Korrelation oder optische Ähnlichkeit allein belegen keine quantitative Übereinstimmung. Vergleiche
-        dieselbe Observable, Normierung, Einheiten, Integrationsgrenzen und Bins; prüfe absolute und relative Fehler,
-        Rand-/Diskretisierungsfehler sowie statistische Unsicherheit passend zur Aussage. Verfeinere dt, Gitter,
-        Gebietsgröße und Stichprobe kontrolliert, nicht mehrere Parameter unbemerkt zugleich. Eine exakte Behauptung
-        benötigt eine analytische/formale Herleitung oder eine ausdrücklich begrenzte numerische Näherung mit Fehlerschranke.
-        Bei einer Abweichung Diagnose und nächste konkrete Rechnung speichern und fachlich weiterarbeiten. Kein Abschluss
-        allein wegen Laufzeit, Tokenverbrauch oder fertiger PDF. openLimit dokumentiert ein ungelöstes erforderliches Ziel
-        und erfüllt es nicht. Nicht lösbare/offene Fragen ehrlich benennen; unbegrenzte Laufzeit garantiert keine Lösung.
-        Gleiche Publikationsformeln ausdrücklich mit der im Skript geprüften Größe ab: Ein korrektes Programm bestätigt
-        keine abweichende Formel im Text. Auch offene coding.updatePlan-Annahmekriterien verhindern den Abschluss.
-        Ordne neue Themen fachlich in die bestehende Gliederung ein: Lies vorhandene section.order-Werte und wähle eine
-        passende Position, statt neue Abschnitte standardmäßig vor Abschnitt 1 einzufügen. Vorhandene stabile IDs erhalten;
-        Missum setzt fortlaufende Gliederungsnummern. Nutze die volle einspaltige Textbreite, keine künstlichen Spalten.
-        Formuliere den Publikationstitel fachlich prägnant, möglichst etwa 40–50 Zeichen; vermeide lange Untertitel.
-        Missum misst den tatsächlichen Satz deterministisch. Bei Titelüberlauf nur title fachlich kürzen, keine Ellipsen;
-        bei Überschriftenüberlauf nur die konkret gemeldete Abschnittsüberschrift kürzen, den Sachtext vollständig erhalten.
-        Verknüpfe entstandene Plots mit passenden Publikationsabschnitten über experimentIds und figureCaptions, mit
-        echten experimentRecordId/artifactPath, Achsen und Einheiten. Interpretiere die Ergebnisse im Abschnittstext.
-        Bei HTML-/Canvas-Simulationen erzeuge relevante statische Plots zusätzlich mit research.code.execute als PNG
-        und ordne diese dem Abschnitt zu; die interaktive HTML-Datei allein liefert noch keine PDF-Abbildung.
-        Abschluss und nachträgliche Prüfung alter Publikationen: Prüfe jeden Hauptabschnitt und seine Claims/Hypothesen
-        wirklich gegen die gelesenen Originalbelege, Rechnungen, Annahmen, Einheiten und mögliche Widersprüche.
-        Dokumentiere pro geprüftem bestehenden Objekt patch:{status:"tatsächlich erreichter Status",review:{itemRevision:expectedRevision+1,sourceAssessment:"konkreter Quellenabgleich",
-        calculationAssessment:"Rechnung/Grenzfall bzw. begründet nicht erforderlich",contradictionAssessment:"aufgelöste Widersprüche oder konkrete Grenzen",
-        scope:"Geltungsbereich und verbleibende Grenzen"}}. Die Belege bleiben echte sourceIds/evidenceIds/experimentIds/checkIds.
-        status und review sind Geschwister: changes[].patch.status neben changes[].patch.review bzw. bei vollständigem
-        Ersatz changes[].data.status neben changes[].data.review. Nie review.status; review enthält keinen status.
-        Vor dem Aufruf prüfen, dass beide Felder im selben data-/patch-Objekt stehen. Für Prüfdaten bestehender Objekte
-        patch nutzen, unveränderten contentMarkdown nicht erneut generieren. Dies ersetzt ältere reine data-Anweisungen.
-        Setze nur den tatsächlich erreichten fachlichen Status; offene Grenzen mit reason und openLimit erhalten.
-        Rein definitorische, technische oder hypothetische Texte als classification=definition/technical/hypothesis mit
-        Annahmen bzw. Begründung kennzeichnen. Ein Review ohne Belege bestätigt keine empirische oder mathematische Aussage.
-        Jede spätere Inhaltsänderung benötigt eine neue Prüfung ihrer Objektversion. Erst ein erfolgreicher aktueller
-        science-review-v1-Beleg von research.deliverables.verify erlaubt den Abschluss. Dies gilt auch beim Fortsetzen.
+        [MISSUM_SCIENCE_PUBLICATION_REVIEW:v5]
+        Nutzerziele als required=true requirements unverändert erfüllen. PDF, Exitcode 0,
+        Pearson-Korrelation oder qualitative Ähnlichkeit erfüllen keine quantitative Anforderung. openLimit erfüllt es nicht.
+        Vor Rechnungen quantitativeValidation setzen: observable, unabhängige reference, artifactPath=work/...json,
+        sampling und checks:[{metric,kind,maximum}]. kind=accuracy, convergence und bei sampling=true uncertainty.
+        Reale nichtnegative metrics mit identischer observable ins JSON schreiben; mit echten experimentIds verknüpfen.
+        Fehlende Prüfungen/Messzeiten sind null, nie 0. Toleranzen nicht lockern, Ziele nicht zu technical umetikettieren.
+        Dieselbe Observable, Normierung, Einheiten und Bins vergleichen. Rohdaten und gleiche feste Glättung unterscheiden;
+        Stichprobenrauschen abschätzen und unabhängige Seeds prüfen. dt/Gitter/Gebiet getrennt verfeinern, Lösungen selbst
+        vergleichen, nicht Differenzen skalarer Fehlernormen. Eine endliche Referenz ist nicht exakt; Erstankunft bei Rückfluss ist nicht automatisch positiver Fluss.
+        Pilotlauf messen, maximumStageSeconds beachten. Artefakte auf Schema,
+        Status, Zeiten und Zahlen prüfen: reine None-Ausgabe oder Modulimport ist kein fachlicher Fortschritt. Große Arrays
+        nicht mit coding.read laden. Altdaten ersetzen keinen neuen Lauf. Zellmassen nicht erneut
+        mit Zellfläche multiplizieren. Bei Stagnation die Methode prüfen statt blind Teilchenzahl erhöhen.
+        Speicher-/Sandboxblockaden zuerst beheben; Parameterwechsel lösen sie nicht. Formal weiterarbeiten
+        oder mit konkreter offener Grenze fortsetzbar bleiben; keine Messwerte erfinden und nicht wegen Laufzeit abschließen.
+        Ein bearbeitbarer Projektbaum, keine Revisions-/Backupkopien. Publikation am aktuellen Pfad ersetzen; Hashbelege binden
+        Resultate an tatsächlich gelesene Quellen. expectedRevision prüft Konflikte, erzeugt keine Projektkopie.
+        section.order fachlich wählen; kurze Titel, einspaltig, Plots mit experimentIds und figureCaptions.
+        Bei Titel-/Formelüberlauf nur betroffenen Abschnitt korrigieren.
+        Prüfe Claims, Quellen, Rechnungen, Einheiten, Formeln und Grenzen. Numerik mit supported/completed einordnen,
+        verified benötigt einen echten formalen/fachlichen Beleg. changes[].patch.status neben changes[].patch.review bzw. changes[].data.status neben changes[].data.review.
+        Nie review.status; review enthält keinen status. Den tatsächlich erreichten fachlichen Status setzen.
+        Prüfung als review-Objekt mit konkreten Feststellungen ergänzen; review:null ist kein Platzhalter.
+        Ungeprüftes offen benennen. Ein Review ohne Belege bestätigt keine Aussage.
+        review:{itemRevision:expectedRevision+1,sourceAssessment,
+        calculationAssessment,contradictionAssessment,scope}.
+        Metadaten mit patch ändern, Text erhalten. Danach frischen science-review-v1-Beleg mit
+        research.deliverables.verify verlangen; offene coding.updatePlan-Annahmekriterien verhindern den Abschluss.
+        """;
+
+    internal const string ConsistencyInstructions = """
+        Geometrie, Radius-/Flächenkonventionen und Geltungsbereich vor der Rechnung festlegen. Rücksubstitution,
+        Dimensionsvergleich und Rückumrechnung übereinstimmen lassen; widersprüchliche Faktoren auflösen.
+        ProcessSucceeded bestätigt nur die technische Ausführung. HashVerified und research.deliverables.verify ersetzen diese Prüfung nicht.
+        Mit Originalquelle und vorhandene passende Belege prüfen; fehlende Nachweise bleiben ungeprüft.
+        Keine pauschale Wahrheitsgarantie. Numerische Konsistenz, formaler Beweis und experimentelle Bestätigung unterscheiden.
         """;
 
     // Only a new user-run adopts this workflow; an evaluated in-flight checkpoint remains unchanged.

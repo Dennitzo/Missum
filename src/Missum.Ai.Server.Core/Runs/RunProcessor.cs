@@ -310,7 +310,11 @@ public sealed partial class RunProcessor : BackgroundService
                 if (request.ClientCapabilities?.Contains("research.deliverables", StringComparer.OrdinalIgnoreCase) == true)
                 {
                     if (!compactContext && canonicalStateEnabled) EnsureScientificStateInstructions(initialNarration);
-                    if (canonicalStateEnabled) ScientificStateAgentPolicy.EnsurePublicationWorkflowAtNewRunBoundary(initialNarration);
+                    if (canonicalStateEnabled)
+                    {
+                        ScientificStateAgentPolicy.EnsurePublicationWorkflowAtNewRunBoundary(initialNarration);
+                        ScienceResearchStrategyPolicy.EnsureAtNewRunBoundary(initialNarration);
+                    }
                     ScientificDerivationPolicy.EnsureAtNewRunBoundary(initialNarration);
                 }
                 checkpoint = checkpoint with { Messages = initialNarration };
@@ -591,6 +595,26 @@ public sealed partial class RunProcessor : BackgroundService
                         ? CodingPlanProgressGuard.RestoreHiddenPlanCall(activeCalls[nextToolIndex], workingState)
                         : activeCalls[nextToolIndex];
                     activeCalls[nextToolIndex] = call;
+                    if (string.IsNullOrWhiteSpace(pendingProposalId)
+                        && ScientificResearchProgressGuard.TryBlock(request, call, scientificStateProgress, out var blocked))
+                    {
+                        var blockedReceipt = JsonSerializer.Serialize(new
+                        {
+                            status = "not_executed", errorCode = ScientificResearchProgressGuard.RejectionCode,
+                            scienceFailureFingerprint = blocked!.Fingerprint, message = blocked.Message,
+                        }, MissumAiProtocol.CreateJsonOptions());
+                        messages.Add(new LmChatMessage("tool", blockedReceipt, ToolCallId: call.Id));
+                        scientificStateProgress = await ObserveScientificStateReceiptAsync(runId, request, call,
+                            blockedReceipt, false, scientificStateProgress, messages, inputTokens, outputTokens,
+                            cancellationToken).ConfigureAwait(false);
+                        await _repository.AppendEventAsync(runId, RunEventTypes.ModelGeneration,
+                            new ModelGenerationEvent("toolRejected", ToolName: call.Name,
+                                FailureKind: ScientificResearchProgressGuard.RejectionCode, Message: blocked.Message), cancellationToken).ConfigureAwait(false);
+                        nextToolIndex++;
+                        await SaveCheckpointAsync().ConfigureAwait(false);
+                        ScientificResearchProgressGuard.ThrowIfStalled(scientificStateProgress);
+                        continue;
+                    }
                     AgentToolSpec tool;
                     try
                     {
@@ -677,6 +701,7 @@ public sealed partial class RunProcessor : BackgroundService
                             selection.ModelId,
                             cancellationToken: cancellationToken).ConfigureAwait(false);
                         await SaveCheckpointAsync().ConfigureAwait(false);
+                        ScientificResearchProgressGuard.ThrowIfStalled(scientificStateProgress);
                         continue;
                     }
 
@@ -772,7 +797,7 @@ public sealed partial class RunProcessor : BackgroundService
                         if (tool.Name == SubagentToolNames.Wait && result.Succeeded
                             && !await _repository.HasConsumedSubagentResultAsync(runId,
                                 call.Arguments.GetProperty("runId").GetString()!, cancellationToken).ConfigureAwait(false))
-                            _ = AppendSubagentResultAcceptanceInstruction(messages, result.Result);
+                            _ = AppendSubagentResultAcceptanceInstruction(messages, result.Result, request);
                         if (canonicalStateEnabled && tool.Name == SubagentToolNames.Wait && result.Succeeded)
                             canonicalStateReadRequired = true;
                         scientificStateProgress = await ObserveScientificStateReceiptAsync(runId, request, call,
@@ -856,8 +881,14 @@ public sealed partial class RunProcessor : BackgroundService
             // Its index then exits the inner loop without rechecking its guard.
             cancellationToken.ThrowIfCancellationRequested();
             if (await _repository.IsTerminalStateAsync(runId, cancellationToken).ConfigureAwait(false)) return;
-            if (isCoding && !canonicalStateEnabled && invalidToolTurnCount >= CodingToolBatchRecovery.MaximumInvalidTurns)
+            if ((isCoding || canonicalStateEnabled) && invalidToolTurnCount >= CodingToolBatchRecovery.MaximumInvalidTurns)
+            {
+                if (canonicalStateEnabled) throw new ScientificResearchStalledException("invalid-tool-turns", false,
+                    "Die Forschung bleibt offen: Mehrere aufeinanderfolgende Modellturns enthielten ausschließlich ungültige Werkzeugaufrufe. "
+                    + "Die konkreten Schemafehler stehen im Laufjournal. Vor der Fortsetzung die Argumentstruktur korrigieren; "
+                    + "ungültige Aufrufe sind kein wissenschaftlicher Fortschritt.");
                 throw new CodingInvalidToolLoopException();
+            }
             if (isCoding && !canonicalStateEnabled) CodingPlanProgressGuard.ThrowIfStalled(workingState);
 
             // A tool call already emitted by the last allowed model turn is still a
@@ -1459,7 +1490,7 @@ public sealed partial class RunProcessor : BackgroundService
                     + "wiederhole oder überprüfe die abgeschlossenen Teilaufgaben nicht:\n"
                     + JsonSerializer.Serialize(delegatedResults, MissumAiProtocol.CreateJsonOptions())));
                 foreach (var delegated in delegatedResults)
-                    _ = AppendSubagentResultAcceptanceInstruction(messages, delegated);
+                    _ = AppendSubagentResultAcceptanceInstruction(messages, delegated, request);
                 if (canonicalStateEnabled) canonicalStateReadRequired = true;
                 streamingTurnStartEventId = null;
                 await SaveCheckpointAsync().ConfigureAwait(false);
@@ -1610,7 +1641,7 @@ public sealed partial class RunProcessor : BackgroundService
                 // valid operations, and denied calls keep their original order.
                 var deniedCalls = originalCalls.Skip(acceptedCalls.Count).ToArray();
                 toolCallCount += acceptedCalls.Count;
-                if (isCoding)
+                if (isCoding || canonicalStateEnabled)
                 {
                     var batch = CodingToolBatchRecovery.Prepare(acceptedCalls, _toolCatalog, availableTools);
                     invalidToolTurnCount = batch.AllInvalid ? invalidToolTurnCount + 1 : 0;
@@ -1743,7 +1774,7 @@ public sealed partial class RunProcessor : BackgroundService
                         + "Vor dem Modellwechsel abgeschlossene delegierte Ergebnisse direkt übernehmen:\n"
                         + JsonSerializer.Serialize(delegatedForModelSwitch, MissumAiProtocol.CreateJsonOptions())));
                     foreach (var delegated in delegatedForModelSwitch)
-                        _ = AppendSubagentResultAcceptanceInstruction(messages, delegated);
+                        _ = AppendSubagentResultAcceptanceInstruction(messages, delegated, request);
                     if (canonicalStateEnabled) canonicalStateReadRequired = true;
                 }
             }
@@ -1840,6 +1871,8 @@ public sealed partial class RunProcessor : BackgroundService
                 }
                 var assessment = await AssessScientificCompletionAsync(runId, request, messages, availableTools, cancellationToken).ConfigureAwait(false);
                 if (canonicalStateEnabled) assessment = ScientificStateCompletionPolicy.ApplyPlanRequirements(assessment, workingState);
+                if (canonicalStateEnabled)
+                    scientificStateProgress = ScientificCompletionStagnationGuard.Observe(scientificStateProgress, assessment, messages);
                 if (!assessment.Complete)
                 {
                     scientificCompletionPending = true;
@@ -1859,6 +1892,7 @@ public sealed partial class RunProcessor : BackgroundService
                         await PublishVisibleDeltaAsync(new TextDeltaEvent("\n\n" + diagnosis + "\n\n"), cancellationToken).ConfigureAwait(false);
                     }
                     await SaveCheckpointAsync().ConfigureAwait(false);
+                    if (canonicalStateEnabled) ScientificCompletionStagnationGuard.ThrowIfStalled(scientificStateProgress);
                     var delay = canonicalStateEnabled ? TimeSpan.Zero : ScientificRunCompletionPolicy.RetryDelay(assessment);
                     if (delay > TimeSpan.Zero) await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
                     cancellationToken.ThrowIfCancellationRequested();
@@ -2395,6 +2429,8 @@ public sealed partial class RunProcessor : BackgroundService
                 + (effectiveTools.Contains(SubagentToolNames.Spawn, StringComparer.Ordinal)
                     ? "\n\n" + SubagentAgentPolicy.Manager : "")),
         };
+        if (effectiveTools.Contains(ClientToolNames.MathFormalProof, StringComparer.Ordinal))
+            messages[0] = messages[0] with { Content = messages[0].Content + "\n\n" + LeanAgentPolicy.Instructions };
         foreach (var message in request.Messages)
         {
             var parts = new List<string>();
@@ -2669,6 +2705,10 @@ public sealed partial class RunProcessor : BackgroundService
                 Code: "agent.run_limit",
                 Message: limit.Message,
                 Retryable: false),
+            ScientificResearchStalledException stalled => (
+                Code: stalled.PrerequisiteBlocked ? ScientificResearchProgressGuard.BlockedCode : "science.unproductive_loop",
+                Message: stalled.Message,
+                Retryable: true),
             ModelGenerationTerminatedException { ProviderCode: "model_stall_timeout" } => (
                 Code: "provider.generation_stalled",
                 Message: "Das native Modell hat 20 Minuten lang keinen neuen Prompt- oder Tokenfortschritt geliefert. Der gespeicherte Arbeitsstand bleibt erhalten; eine stille, blockierte Inferenz wird nicht endlos wiederholt.",
