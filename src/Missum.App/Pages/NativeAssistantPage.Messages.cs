@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -24,7 +24,8 @@ public sealed partial class NativeAssistantPage
         if (_conversationSelection?.IsSelecting == true) return;
         _lastHeaderSecond = second;
         foreach (var (id, blocks) in _messageBlocks)
-            if (blocks.TryGetValue("header", out var header) && DisplayMessages.TryGetValue(id, out var message))
+            if (blocks.TryGetValue("header", out var header) && DisplayMessages.TryGetValue(id, out var message)
+                && S(message, "status") is "streaming" or "pending")
                 UpdateMessageHeader(header, message);
         RefreshContextDisplay();
         RefreshThinkingIndicators(refreshTokens: true);
@@ -129,7 +130,22 @@ public sealed partial class NativeAssistantPage
         FrameworkElement? latestReasoningView = null;
         var subagentReceipts = messageSteps.Where(step => S(step, "tool") == "subagent").ToArray();
         var positionedSteps = stepArtifacts.Count > 0 ? OrderNativeArtifactSteps(messageSteps) : messageSteps;
-        foreach (var step in positionedSteps)
+        var firstStep = MessageStepStart(messageId, positionedSteps);
+        if (firstStep > 0)
+        {
+            if (!blocks.TryGetValue("earlierBlocks", out var earlier))
+            {
+                var button = new Button { HorizontalAlignment = HorizontalAlignment.Left };
+                button.Click += (_, _) => QueueEarlierMessageBlocks(messageId);
+                blocks["earlierBlocks"] = earlier = button;
+            }
+            var label = $"Frühere Abschnitte laden · {firstStep:N0} Werkzeugschritte";
+            if (!Equals(((Button)earlier).Content, label)) ((Button)earlier).Content = label;
+            desired.Add(earlier);
+            if (firstStep < positionedSteps.Length && TryNativeStepOffset(positionedSteps[firstStep], out var startOffset))
+                offset = Math.Clamp(startOffset, 0, content.Length);
+        }
+        foreach (var step in positionedSteps.Skip(firstStep))
         {
             var next = TryNativeStepOffset(step, out var n) ? Math.Clamp(n, offset, content.Length) : offset;
             Text("text:" + offset, content[offset..next]); offset = next;
@@ -185,6 +201,7 @@ public sealed partial class NativeAssistantPage
             if (!blocks.TryGetValue(key, out var element))
             {
                 var view = new ToolStepView(tool != "assistant.reasoning" && _settings.Current.CodingToolStepsExpanded);
+                view.LoadDetails = () => LoadToolStepDetailsAsync(messageId, id);
                 view.SubagentRequested += async agentId =>
                 {
                     if (_subagents.TryGetValue(agentId, out var child)) await ActivateSubagentTabAsync(child);
@@ -241,13 +258,14 @@ public sealed partial class NativeAssistantPage
         }
         else { _thinkingIndicators.Remove(messageId); _thinkingStates.Remove(messageId); _modelPhases.Remove(messageId); }
         if (MessageActionsFor(messageId, message) is { } messageActions) desired.Add(messageActions);
-        foreach (var old in panel.Children.OfType<FrameworkElement>().Where(child => !desired.Contains(child)).ToArray()) panel.Children.Remove(old);
+        var desiredSet = desired.ToHashSet();
+        foreach (var old in panel.Children.OfType<FrameworkElement>().Where(child => !desiredSet.Contains(child)).ToArray()) panel.Children.Remove(old);
         for (var i = 0; i < desired.Count; i++)
         {
             if (i < panel.Children.Count && ReferenceEquals(panel.Children[i], desired[i])) continue;
             panel.Children.Remove(desired[i]); panel.Children.Insert(i, desired[i]);
         }
-        foreach (var stale in blocks.Where(pair => !desired.Contains(pair.Value)).Select(pair => pair.Key).ToArray()) blocks.Remove(stale);
+        foreach (var stale in blocks.Where(pair => !desiredSet.Contains(pair.Value)).Select(pair => pair.Key).ToArray()) blocks.Remove(stale);
         RefreshThinkingIndicators();
     }
 
@@ -289,6 +307,9 @@ public sealed partial class NativeAssistantPage
 
     private sealed class ToolStepView : Grid
     {
+        internal Func<Task<bool>>? LoadDetails { get; set; }
+        private bool _loadingDetails;
+        private bool _detailsInViewport;
         internal event Action<string>? SubagentRequested;
         private readonly TextBlock _title = new() { FontSize = 14, Foreground = ThemeBrush("MissumMutedTextBrush", 160), TextTrimming = TextTrimming.CharacterEllipsis };
         private readonly TextBlock _added = new() { FontSize = 13, Foreground = ThemeBrush("MissumSuccessBrush", 160) };
@@ -333,12 +354,20 @@ public sealed partial class NativeAssistantPage
             _details.Margin = new(24, 0, 0, 4);
             content.Children.Add(_toggle); content.Children.Add(_details);
             Children.Add(content);
+            EffectiveViewportChanged += (sender, args) =>
+            {
+                var viewport = args.EffectiveViewport;
+                _detailsInViewport = viewport.Width > 0 && viewport.Height > 0
+                    && viewport.Right > 0 && viewport.Bottom > 0 && viewport.X < ActualWidth && viewport.Y < ActualHeight;
+                if (_detailsInViewport && IsExpanded && IsTrue(_step, "detailsDeferred")) _ = LoadDetailsAsync();
+            };
         }
 
         internal void SetExpanded(bool expanded)
         {
             _details.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
-            if (expanded) RenderDetails();
+            if (expanded && IsTrue(_step, "detailsDeferred")) _ = LoadDetailsAsync(force: true);
+            else if (expanded) RenderDetails();
             else { _details.Children.Clear(); _detailsDirty = true; }
             UpdateHeader();
         }
@@ -376,6 +405,15 @@ public sealed partial class NativeAssistantPage
             _reasoning = tool == "assistant.reasoning";
             _status.Text = S(step, "status") switch { "completed" => "Abgeschlossen", "failed" => "Fehlgeschlagen", "denied" => "Abgelehnt", "cancelled" => "Abgebrochen", "interrupted" => "Unterbrochen", "steered" => "Umgelenkt", "pending" => "Wartet", _ => "In Bearbeitung" };
             if (firstUpdate) _details.Visibility = _initiallyExpanded ? Visibility.Visible : Visibility.Collapsed;
+            if (IsTrue(step, "detailsDeferred"))
+            {
+                _filePath = _diff = "";
+                _hasCounts = false;
+                _summary = "";
+                if (IsExpanded) _ = LoadDetailsAsync();
+                UpdateHeader();
+                return;
+            }
             var detail = S(step, "detail", S(step, "explanation"));
             var diffs = Regex.Matches(detail, @"```diff\s*\n(?<diff>[\s\S]*?)(?:```|\z)", RegexOptions.CultureInvariant);
             var output = ReadMetadata(S(step, "outputJson"));
@@ -404,6 +442,30 @@ public sealed partial class NativeAssistantPage
             UpdateHeader();
         }
 
+        private async Task LoadDetailsAsync(bool force = false)
+        {
+            if (_loadingDetails || LoadDetails is null || !IsExpanded || !force && !_detailsInViewport) return;
+            _loadingDetails = true;
+            if (S(_step, "tool") == "math.formalProof" && !_running) _leanSourceRequested = true;
+            _details.Children.Clear();
+            _details.Children.Add(new TextBlock { Text = "Werkzeugschritt wird geladen …", FontSize = 14,
+                Foreground = ThemeBrush("MissumMutedTextBrush", 160), TextWrapping = TextWrapping.Wrap });
+            try
+            {
+                if (!await LoadDetails() && IsExpanded)
+                {
+                    _details.Children.Clear();
+                    _details.Children.Add(new TextBlock { Text = "Details konnten nicht geladen werden. Zum Wiederholen erneut aufklappen.", TextWrapping = TextWrapping.Wrap });
+                }
+            }
+            finally
+            {
+                _loadingDetails = false;
+                if (_leanSourceRequested && !IsTrue(_step, "detailsDeferred") && IsExpanded)
+                { _detailsDirty = true; RenderDetails(); }
+            }
+        }
+
         private void UpdateHeader()
         {
             var expanded = _details.Visibility == Visibility.Visible;
@@ -421,8 +483,11 @@ public sealed partial class NativeAssistantPage
                 + (expanded ? ", ausgeklappt" : ", eingeklappt"));
         }
 
+        private bool _leanSourceRequested;
+
         private void RenderDetails()
         {
+            if (IsTrue(_step, "detailsDeferred")) { _ = LoadDetailsAsync(); return; }
             if (!_detailsDirty) return;
             _detailsDirty = false;
             if (_reasoning || S(_step, "tool") == "assistant.continuation")
@@ -433,16 +498,20 @@ public sealed partial class NativeAssistantPage
                 return;
             }
             _details.Children.Clear();
-            var copy = NativeToolResultView.CopyButton("Daten kopieren", _step.GetRawText());
-            copy.HorizontalAlignment = HorizontalAlignment.Right;
             var input = ReadMetadata(S(_step, "inputJson"));
             var output = ReadMetadata(S(_step, "outputJson"));
-            if (S(_step, "tool") is "subagent" or "subagent.spawn" or "subagent.wait")
+            var tool = S(_step, "tool");
+            if (tool == "math.formalProof" && !_leanSourceRequested && LoadDetails is not null
+                && !_running && S(input, "source").Length == 0)
             {
-                var task = S(input, "task", S(output, "title"));
-                if (task.Length > 0) _details.Children.Add(new NativeStreamingMarkdown(task));
-                var result = S(output, "result");
-                if (result.Length > 0) _details.Children.Add(new NativeStreamingMarkdown(result));
+                _leanSourceRequested = true;
+                _ = LoadDetailsAsync(force: true);
+                return;
+            }
+            _details.Children.Add(new NativeToolResultView(NativeToolResultFormatter.Receipt(
+                tool, input, output, S(_step, "status"), _filePath, _diff, S(_step, "detail"))));
+            if (tool is "subagent" or "subagent.spawn" or "subagent.wait")
+            {
                 var agentId = S(output, "agentId", S(input, "agentId", S(_step, "agentId")));
                 if (agentId.Length > 0 && SubagentRequested is not null)
                 {
@@ -450,37 +519,7 @@ public sealed partial class NativeAssistantPage
                     open.Click += (_, _) => SubagentRequested?.Invoke(agentId);
                     _details.Children.Add(open);
                 }
-                _details.Children.Add(copy);
-                return;
             }
-            var explanation = S(_step, "explanation");
-            if (explanation.Length == 0 && _filePath.Length > 0)
-                explanation = S(_step, "tool") == "coding.read" ? $"Ich lese „{_filePath}“." : _fileMutation ? $"Dateiänderungen für „{_filePath}“." : "";
-            if (explanation.Length > 0) _details.Children.Add(new NativeStreamingMarkdown(explanation));
-            if (S(_step, "tool") == "research.update" && input.ValueKind == JsonValueKind.Object
-                && input.TryGetProperty("changes", out var changes) && changes.ValueKind == JsonValueKind.Array)
-            {
-                foreach (var change in changes.EnumerateArray())
-                {
-                    if (!change.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Object) continue;
-                    var heading = S(data, "title", S(change, "id"));
-                    var text = S(data, "contentMarkdown", S(data, "statement"));
-                    if (text.Length > 0) _details.Children.Add(new NativeStreamingMarkdown("### " + heading + "\n\n" + text));
-                }
-            }
-            else if (input.ValueKind == JsonValueKind.Object)
-                _details.Children.Add(new NativeToolResultView(input, _filePath, true, _diff.Length > 0,
-                    S(_step, "tool") switch { "math.formalProof" => "lean", "research.code.write" => "python", _ => null }));
-            if (_diff.Length > 0)
-            {
-                var caption = S(_step, "tool") == "coding.gitDiff" ? "Git-Diff" : S(_step, "status") == "completed" ? "Angewendete Änderung" : "Vorbereitete Änderung";
-                _details.Children.Add(NativeToolResultView.CodeCard(caption, _diff, "diff", _filePath));
-            }
-            if (output.ValueKind == JsonValueKind.Object)
-                _details.Children.Add(new NativeToolResultView(output, _filePath, false, _diff.Length > 0));
-            else if (_diff.Length == 0 && S(_step, "detail") is { Length: > 0 } detail)
-                _details.Children.Add(new NativeStreamingMarkdown(detail));
-            _details.Children.Add(copy);
         }
 
         internal static string ToolSummary(string tool, JsonElement input, JsonElement output)

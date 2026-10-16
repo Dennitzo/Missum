@@ -142,6 +142,7 @@ public sealed partial class NativeAssistantPage
             TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center,
         };
         internal Button ContinueButton { get; }
+        private (bool Enabled, bool Pending)? _renderState;
 
         public ContinuationToolStepView()
         {
@@ -168,6 +169,8 @@ public sealed partial class NativeAssistantPage
 
         internal void SetState(bool enabled, bool pending)
         {
+            if (_renderState == (enabled, pending)) return;
+            _renderState = (enabled, pending);
             ContinueButton.IsEnabled = enabled;
             _title.Text = pending ? "Wird fortgesetzt …" : "Fortsetzen";
             ToolTipService.SetToolTip(ContinueButton, pending ? "Fortsetzung wird vorbereitet"

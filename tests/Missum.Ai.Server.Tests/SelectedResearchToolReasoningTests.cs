@@ -1,4 +1,4 @@
-using Missum.Ai.Contracts;
+﻿using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Gateway;
 using Missum.Ai.Server.Core.Models;
 using Missum.Ai.Server.Core.Runs;
@@ -34,7 +34,7 @@ public sealed class SelectedResearchToolReasoningTests
         var requestedEffort = supportsNone ? "on" : "high";
         var request = new RunRequest(MissumAiProtocol.Version, RunMode.General,
             [new("user", [new("text", "Leite das Ergebnis her, erstelle die Forschungsdatei und erläutere danach das Ergebnis.")])],
-            SessionId: "science-reasoning-fixture", ClientCapabilities: ["research.sandbox"], AllowedServerTools: [],
+            SessionId: "science-reasoning-fixture", ClientCapabilities: ["coding", "workspace"], AllowedServerTools: [],
             PreferredGeneralModelId: NativeHandler.ModelId, ReasoningEffort: requestedEffort,
             WorkspacePath: context.Root, Limits: new(TimeoutSeconds: 0));
         var runId = (await repository.CreateAsync(request, null)).Snapshot.RunId;
@@ -42,7 +42,7 @@ public sealed class SelectedResearchToolReasoningTests
         await Assert.ThrowsAsync<RunWaitingForClientException>(() => processor.ProcessAsync(runId, CancellationToken.None));
         var checkpoint = (await repository.GetCheckpointAsync(runId))!;
         var proposal = (await repository.GetToolProposalAsync(checkpoint.PendingProposalId!, runId))!;
-        Assert.Equal(ClientToolNames.ResearchCodeWrite, proposal.Name);
+        Assert.Equal(ClientToolNames.CodingWrite, proposal.Name);
         Assert.Equal("work/calculation.py", proposal.Arguments.GetProperty("path").GetString());
         Assert.Equal("print(42)\n", proposal.Arguments.GetProperty("content").GetString());
         Assert.Null(checkpoint.SelectedToolName);
@@ -58,7 +58,7 @@ public sealed class SelectedResearchToolReasoningTests
         var answer = handler.ChatBodies[2];
         Assert.Equal(ModelRuntimeClient.ToTransportToolName(AgentToolCatalog.SelectorToolName), analysis.GetProperty("tools")[0].GetProperty("function").GetProperty("name").GetString());
         Assert.Equal("required", selected.GetProperty("tool_choice").GetString());
-        Assert.Equal(ModelRuntimeClient.ToTransportToolName(ClientToolNames.ResearchCodeWrite), selected.GetProperty("tools")[0].GetProperty("function").GetProperty("name").GetString());
+        Assert.Equal(ModelRuntimeClient.ToTransportToolName(ClientToolNames.CodingWrite), selected.GetProperty("tools")[0].GetProperty("function").GetProperty("name").GetString());
         Assert.Equal("auto", answer.GetProperty("tool_choice").GetString());
         if (supportsNone)
         {
@@ -103,9 +103,9 @@ public sealed class SelectedResearchToolReasoningTests
             if (path != "/v1/chat/completions") throw new InvalidOperationException("Unexpected endpoint " + path);
             using var document = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken));
             ChatBodies.Add(document.RootElement.Clone());
-            if (ChatBodies.Count == 1) return ToolResponse("select", ModelRuntimeClient.ToTransportToolName(AgentToolCatalog.SelectorToolName), new { name = ClientToolNames.ResearchCodeWrite });
-            if (ChatBodies.Count == 2) return ToolResponse("write", ModelRuntimeClient.ToTransportToolName(ClientToolNames.ResearchCodeWrite),
-                new { projectId = "reasoning-fixture", path = "work/calculation.py", content = "print(42)\n" });
+            if (ChatBodies.Count == 1) return ToolResponse("select", ModelRuntimeClient.ToTransportToolName(AgentToolCatalog.SelectorToolName), new { name = ClientToolNames.CodingWrite });
+            if (ChatBodies.Count == 2) return ToolResponse("write", ModelRuntimeClient.ToTransportToolName(ClientToolNames.CodingWrite),
+                new { path = "work/calculation.py", content = "print(42)\n" });
             return Json(new { choices = new[] { new { message = new { content = "Die Forschungsdatei wurde gespeichert. Das Ergebnis ist 42." }, finish_reason = "stop" } },
                 usage = new { prompt_tokens = 512, completion_tokens = 16 } });
         }

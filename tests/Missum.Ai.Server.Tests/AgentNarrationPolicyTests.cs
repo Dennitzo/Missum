@@ -1,4 +1,4 @@
-using Missum.Ai.Contracts;
+﻿using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Coding;
 using Missum.Ai.Server.Core.Models;
 using Missum.Ai.Server.Core.Policies;
@@ -69,7 +69,6 @@ public sealed class AgentNarrationPolicyTests
             ResearchOptions: new(ProjectId: "research-citations", ProtocolVersion: 2));
         var messages = RunProcessor.CreateInitialMessages(request, "general",
             [ClientToolNames.ResearchRead, ClientToolNames.ResearchUpdate, "web.search", "web.fetch"], contextProfile);
-        if (contextProfile is null) RunProcessor.EnsureScientificStateInstructions(messages);
         var policy = messages[0].Content!;
 
         Assert.Contains("Sichtbare AI-Nachrichten im Chat enthalten keine Quellenlisten", policy, StringComparison.Ordinal);
@@ -77,7 +76,7 @@ public sealed class AgentNarrationPolicyTests
         Assert.Contains("Quellenbereich und im Claude-Science-Modus in die Publikation", policy, StringComparison.Ordinal);
         Assert.Contains("erhalte ihre vollständigen Kennungen und Zuordnungen", policy, StringComparison.Ordinal);
         Assert.Contains("Annahmen und Unsicherheiten", policy, StringComparison.Ordinal);
-        Assert.Contains("science-review-v1", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("science-review-v1", policy, StringComparison.Ordinal);
         Assert.DoesNotContain("nenne Titel sowie URL", policy, StringComparison.Ordinal);
         Assert.DoesNotContain("zitiere [Dateiname, S. 12]", policy, StringComparison.Ordinal);
     }
@@ -145,37 +144,4 @@ public sealed class AgentNarrationPolicyTests
         Assert.DoesNotContain(AgentNarrationPolicy.Instructions, messages[0].Content, StringComparison.Ordinal);
     }
 
-    [Theory]
-    [InlineData(null)]
-    [InlineData("compact-v1")]
-    public void NewScientificRunAdoptsPublicationWorkflowBeforeEvaluationInBothContextProfiles(string? contextProfile)
-    {
-        var request = new RunRequest(MissumAiProtocol.Version, RunMode.General, [new("user", [new("text", "Prüfe die bestehende Publikation.")])],
-            DeepResearch: true, ClientCapabilities: ["research.deliverables"],
-            ResearchOptions: new(ProjectId: "research-existing", ProtocolVersion: 2));
-        var messages = RunProcessor.CreateInitialMessages(request, "general", [ClientToolNames.ResearchRead, ClientToolNames.ResearchUpdate], contextProfile);
-        // Legacy construction installs canonical guidance at the new-run hook;
-        // compact construction already includes the shared workflow. Both happen before evaluation.
-        if (contextProfile is null) RunProcessor.EnsureScientificStateInstructions(messages);
-        ScientificStateAgentPolicy.EnsurePublicationWorkflowAtNewRunBoundary(messages);
-        Assert.Contains(ScientificStateAgentPolicy.PublicationWorkflowInstructions, messages[0].Content, StringComparison.Ordinal);
-        Assert.Contains("itemRevision:expectedRevision+1", messages[0].Content, StringComparison.Ordinal);
-        Assert.Equal(2, messages[0].Content!.Split(ScientificStateAgentPolicy.PublicationWorkflowInstructions, StringSplitOptions.None).Length);
-    }
-
-    [Fact]
-    public void ContinuedCompactSessionAdoptsWorkflowAtNewBoundaryWithoutRewritingItsEvaluatedPrefix()
-    {
-        List<LmChatMessage> messages = [new("system", "Bereits evaluierter kompakter Sitzungspräfix"),
-            new("user", "Frühere Frage"), new("assistant", "Bisherige Arbeit"), new("user", "Prüfe den Forschungsstand nachträglich.")];
-        var prefix = messages.Take(3).ToArray();
-        ScientificStateAgentPolicy.EnsurePublicationWorkflowAtNewRunBoundary(messages);
-        Assert.Equal(prefix, messages.Take(3));
-        Assert.Equal(ScientificStateAgentPolicy.PublicationWorkflowInstructions, messages[3].Content);
-        Assert.Equal("Prüfe den Forschungsstand nachträglich.", messages[4].Content);
-        var normalized = ModelRuntimeClient.NormalizeMessageOrderForNativeRuntime(messages).ToList();
-        var before = normalized.ToArray();
-        ScientificStateAgentPolicy.EnsurePublicationWorkflowAtNewRunBoundary(normalized);
-        Assert.Equal(before, normalized);
-    }
 }

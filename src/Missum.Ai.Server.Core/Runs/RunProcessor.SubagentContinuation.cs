@@ -1,4 +1,4 @@
-using Missum.Ai.Contracts;
+﻿using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Models;
 using Missum.Ai.Server.Core.Policies;
 using System.Text.Json;
@@ -72,8 +72,6 @@ public sealed partial class RunProcessor
             + "Übernimm abgeschlossene Schritte und echte Werkzeugbelege. Prüfe unbekannte Werkzeugausgänge vor einer erneuten Mutation; "
             + "eine Unterbrechung ist kein erfolgreicher Abschluss. Wiederhole keine erledigten Aufgaben oder vollständigen Texte. "
             + "Nutze die aktuell angebotenen Werkzeuge und Rechte. Liefere die noch offenen Ergebnisse an den aktuellen Hauptagenten."));
-        if (parentRequest.ClientCapabilities?.Contains("research.deliverables", StringComparer.OrdinalIgnoreCase) == true)
-            ScientificDerivationPolicy.EnsureAtNewRunBoundary(childMessages);
 
         var childRequest = parentRequest with
         {
@@ -82,9 +80,7 @@ public sealed partial class RunProcessor
             PreferredCodingModelId = selection.ModelId,
             Workload = null,
             DeepResearch = false,
-            ResearchOptions = ScientificStateCompletionPolicy.Enabled(parentRequest)
-                ? parentRequest.ResearchOptions! with { ProjectId = ScientificStateCompletionPolicy.ProjectId(parentRequest) }
-                : parentRequest.ResearchOptions,
+            ResearchOptions = null,
             Subagent = sourceRelation with
             {
                 ParentRunId = parentRunId, ParentSessionId = parentRequest.SessionId,
@@ -94,7 +90,11 @@ public sealed partial class RunProcessor
             Messages = source.Request.Messages,
             ContextProfileVersion = sourceCheckpoint.ContextProfileVersion,
         };
-        var childTools = CreateModelToolDefinitions(_toolCatalog.GetAvailableTools(childRequest, subagentAvailable: true),
+        sourceCheckpoint = OpenProjectWorkflow.UpgradeLegacyCheckpoint(sourceCheckpoint with { Messages = childMessages },
+            childRequest, selection.Role, selection.ModelId, _toolCatalog.GetAvailableTools(childRequest, subagentAvailable: true));
+        childMessages = sourceCheckpoint.Messages.ToList();
+        var childTools = sourceCheckpoint.ContextTools?.ToArray()
+            ?? CreateModelToolDefinitions(_toolCatalog.GetAvailableTools(childRequest, subagentAvailable: true),
             selectedToolName: null, directTools: true, sourceCheckpoint.ContextProfileVersion);
         var childCacheKey = BuildRunSessionCacheKey(childRequest, sourceRelation.AgentId, selection.Role);
         childMessages = ModelRuntimeClient.PrepareLanguageBoundMessages(childMessages).ToList();
@@ -109,9 +109,9 @@ public sealed partial class RunProcessor
                 cancellationToken: token, childSessionId: childRequest.SessionId,
                 parentSessionId: parentRequest.SessionId ?? parentRunId).ConfigureAwait(false);
         }
-        catch (Exception exception) when (exception is HttpRequestException or InvalidOperationException)
+        catch (Exception exception) when (IsSubagentPreparationFailure(exception, token))
         {
-            return SubagentFailure("subagent.preparation_failed", exception.Message);
+            return SubagentPreparationFailure(parentRunId, exception);
         }
         childRequest = childRequest with { Subagent = childRequest.Subagent! with { RuntimeInstanceId = prepared.InstanceId } };
         var checkpoint = sourceCheckpoint with
@@ -128,7 +128,7 @@ public sealed partial class RunProcessor
             EarlySubagentDelegationPending = false, EarlySubagentDelegationRetryCount = 0,
             SelectedModelId = selection.ModelId, SelectedReasoningEffort = childRequest.ReasoningEffort,
             PreserveSessionPromptPrefix = true, UseStableSubagentToolCatalog = true,
-            CanonicalStateReadRequired = ScientificStateCompletionPolicy.Enabled(childRequest),
+            CanonicalStateReadRequired = false,
             ContextTools = childTools,
             ToolCatalogSignature = sourceCheckpoint.ContextProfileVersion is null ? null
                 : ToolContextProfiles.Signature(childTools, selection.ModelId),
@@ -169,8 +169,8 @@ public sealed partial class RunProcessor
                 index, call.Id);
             var receipt = completed.LastOrDefault(item => item.RunId == sourceRunId
                 && item.Data.ValueKind == JsonValueKind.Object
-                && ScientificStateCompletionPolicy.Text(item.Data, "toolCallId") == identity
-                && ScientificStateCompletionPolicy.Text(item.Data, "tool") == call.Name
+                && LegacyResearchContext.Text(item.Data, "toolCallId") == identity
+                && LegacyResearchContext.Text(item.Data, "tool") == call.Name
                 && item.Data.TryGetProperty("result", out _));
             if (receipt is not null) recovered[call.Id] = receipt.Data.GetProperty("result").GetRawText();
         }

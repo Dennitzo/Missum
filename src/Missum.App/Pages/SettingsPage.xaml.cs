@@ -71,8 +71,6 @@ public sealed partial class SettingsPage : Page
             await ViewModel.InitializeAsync();
             SynchronizeControls();
             UpdatePromptTriggerSortIndicators();
-            var host = App.Current.GetService<AssistantHost>();
-            LanAddressText.Text = string.Join("\n", host.AccessUrls.Count > 0 ? host.AccessUrls : [host.LocalUrl]);
             if (!_sharedSettingsSubscribed)
             {
                 App.Current.GetService<AssistantSettingsService>().Changed += OnSharedSettingsChanged;

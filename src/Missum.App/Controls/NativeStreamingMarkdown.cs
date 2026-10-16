@@ -13,6 +13,7 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
     internal const double BodyFontSize = 16;
     private readonly List<SectionView> _sections = [];
     private string _text = string.Empty;
+    internal long RenderRevision { get; private set; }
     internal IReadOnlyList<Grid> RenderedTables => _sections.Where(section => section.Specification.Kind == SectionKind.Table)
         .Select(section => section.Table!.Grid).ToArray();
 
@@ -28,6 +29,7 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
         ArgumentNullException.ThrowIfNull(text);
         if (string.Equals(_text, text, StringComparison.Ordinal)) return;
         _text = text;
+        RenderRevision++;
         var specifications = ParseSections(text);
         var next = new SectionView?[specifications.Count];
         var used = new HashSet<SectionView>();

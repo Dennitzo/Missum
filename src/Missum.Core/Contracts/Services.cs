@@ -71,6 +71,11 @@ public interface IChatRepository
 public interface IConversationSnapshotRepository
 {
     Task<ConversationSnapshot?> GetAsync(Guid sessionId, CancellationToken cancellationToken = default);
+    Task<ConversationPage?> GetPageAsync(Guid sessionId, int pageSize = 24, ConversationCursor? before = null,
+        CancellationToken cancellationToken = default);
+    Task<AssistantToolStep?> GetToolStepAsync(Guid sessionId, Guid messageId, string stepId,
+        CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<ConversationSource>> GetSourcesAsync(Guid sessionId, CancellationToken cancellationToken = default);
 }
 
 public interface IPromptTriggerRepository

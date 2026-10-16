@@ -1,0 +1,372 @@
+/* Standalone document/PDF rendering. No assistant application layout. */
+:root { color-scheme: light; --text: #171717; --muted: #555; --accent: #008fbd; --border: #bbb; --surface-raised: #f6f6f6; --bg: #fff; --background-accent: #666; --radius-sm: 4px; --radius-md: 6px; }
+html, body { margin: 0; color: #171717; background: #fff; }
+.message-content { line-height: 1.58; overflow-wrap: anywhere; }
+.message-content p { margin: .65em 0; }
+.message-content h1, .message-content h2, .message-content h3 { break-after: avoid; }
+.message-content img { max-width: 100%; height: auto; }
+.pdf-book { width: 166mm; }
+@page { size: A4 portrait; background: #fff; }
+.code-block { margin: 13px 0; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-md); background: color-mix(in srgb, var(--background-accent) 6%, #111); color: #eee; }
+.code-header { display: flex; align-items: center; justify-content: space-between; padding: 7px 11px; background: color-mix(in srgb, var(--background-accent) 18%, #201d24); color: #e3dde8; font-size: 12px; }
+.code-header button { border: 0; background: transparent; color: inherit; }
+.code-block pre { margin: 0; padding: 15px; overflow: visible; white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.75 "Cascadia Mono", Consolas, monospace; tab-size: 4; }
+.code-block pre code { display: block; padding: 0; background: transparent; color: inherit; white-space: pre-wrap; overflow-wrap: anywhere; word-break: normal; font: inherit; }
+.code-block .hljs-keyword, .code-block .hljs-selector-tag { color: #ff9bba; }
+.code-block .hljs-string, .code-block .hljs-regexp { color: #b5e4ae; }
+.code-block .hljs-number, .code-block .hljs-literal { color: #f2bd85; }
+.code-block .hljs-built_in, .code-block .hljs-type, .code-block .hljs-title { color: #8ed8fa; }
+.code-block .hljs-comment, .code-block .hljs-quote { color: #a9a3b4; font-style: italic; }
+.code-block .hljs-attr, .code-block .hljs-attribute, .code-block .hljs-property { color: #d2baff; }
+.code-block .hljs-variable, .code-block .hljs-template-variable, .code-block .hljs-params { color: #eee; }
+.code-block .hljs-meta, .code-block .hljs-symbol, .code-block .hljs-tag, .code-block .hljs-name { color: #a8c5ff; }
+.code-block .hljs-addition { color: #b8f1cd; }
+.code-block .hljs-deletion { color: #ffd0d5; }
+@media (forced-colors: active) {
+  .code-block pre code span { color: CanvasText; }
+  .code-block .hljs-keyword { font-weight: bold; }
+}
+
+
+.table-wrap { width: fit-content; max-width: 100%; margin: 12px 0; overflow: auto; border: 1px solid var(--accent); border-radius: var(--radius-sm); }
+table { width: 100%; border-collapse: collapse; }
+.table-wrap table { width: max-content; max-width: none; }
+th, td { padding: 9px 11px; border-bottom: 1px solid var(--accent); text-align: left; }
+th:not(:last-child), td:not(:last-child) { border-right: 1px solid var(--accent); }
+th { background: var(--accent); color: #000; font-weight: 700; }
+th a { color: #000; }
+tbody tr:nth-child(odd) td { background: var(--surface-raised); }
+tbody tr:nth-child(even) td { background: var(--bg); }
+tbody td:first-child { font-weight: 650; }
+tr:last-child td { border-bottom: 0; }
+.math-selectable { position: relative; display: inline-block; max-width: 100%; vertical-align: baseline; border-radius: 6px; cursor: pointer; }
+.math-selectable.display { display: block; width: fit-content; max-width: 100%; margin: 12px auto; padding: 6px 10px; overflow-x: auto; overflow-y: hidden; text-align: center; }
+.math-selectable.display .math-render { font-size: 1.14em; }
+.table-wrap .math-render { font-size: 1.08em; }
+.table-wrap .math-selectable.display .math-render { font-size: 1.18em; }
+.math-render, .math-render * { pointer-events: none; }
+.math-source-text { position: absolute; inset: 0; z-index: 2; overflow: hidden; color: transparent; white-space: pre; cursor: text; user-select: text !important; -webkit-user-select: text !important; }
+.math-source-text.fallback { position: relative; inset: auto; z-index: auto; overflow: visible; color: inherit; white-space: pre-wrap; cursor: text; }
+.math-source-text::selection { color: transparent; background: color-mix(in srgb, var(--success) 30%, transparent); }
+.math-source-text.fallback::selection { color: inherit; background: color-mix(in srgb, var(--success) 30%, transparent); }
+.math-selectable.copied { outline: 1px solid var(--success); background: color-mix(in srgb, var(--success) 15%, transparent); }
+
+.composer-region { position: relative; z-index: 5; align-self: end; width: 100%; padding: 0 20px 16px; background: var(--bg); }
+.scroll-to-latest { position: absolute; left: 50%; bottom: calc(100% + 10px); transform: translateX(-50%); display: grid; place-items: center; width: 34px; height: 34px; padding: 7px; border: 1px solid var(--border); border-radius: 50%; color: var(--text); background: var(--bg); box-shadow: 0 2px 8px #0002; cursor: pointer; }
+.scroll-to-latest[hidden] { display: none; }
+.scroll-to-latest:hover { background: var(--composer); border-color: var(--muted); }
+.scroll-to-latest:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.scroll-to-latest svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.message-error { margin: 16px 0 8px; padding: 11px 14px; border-left: 2px solid var(--danger); border-radius: 4px; background: color-mix(in srgb, var(--danger) 6%, transparent); color: var(--text); font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.message-error strong { color: var(--danger); font-weight: 600; }
+.message-error p { margin: 3px 0 0; white-space: pre-wrap; }
+.context-strip { display: flex; flex-wrap: wrap; gap: 7px; width: min(820px, 100%); margin: 0 auto 7px; }
+.document-chips, .active-tool-chips { display: contents; }
+
+@media print {
+  :root,
+  html[data-theme="light"],
+  html[data-theme="dark"],
+  html[data-theme="high-contrast"] {
+    color-scheme: only light !important;
+    background: #fff !important;
+    forced-color-adjust: none;
+  }
+  html, body {
+    width: 100% !important;
+    height: auto !important;
+    min-height: 0 !important;
+    margin: 0 !important;
+    overflow: visible !important;
+    background: #fff !important;
+    color: #171717 !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  body > :not(.pdf-book) { display: none !important; }
+  .pdf-book {
+    position: static !important;
+    display: block !important;
+    width: 100% !important;
+    margin: 0 !important;
+    visibility: visible !important;
+    background: #fff !important;
+    color: #171717 !important;
+    font: 10.75pt/1.58 Georgia, "Times New Roman", "Noto Serif", serif !important;
+    font-feature-settings: "kern" 1, "liga" 1;
+    hyphens: auto;
+    overflow-wrap: break-word;
+    pointer-events: auto;
+    text-rendering: optimizeLegibility;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .pdf-book *, .pdf-book *::before, .pdf-book *::after {
+    visibility: visible !important;
+    max-width: 100%;
+    box-shadow: none !important;
+  }
+  .pdf-book__header {
+    margin: 0 0 11mm;
+    padding: 0 0 5mm;
+    border-bottom: .6pt solid #a9a9a9;
+    break-after: avoid-page;
+  }
+  .pdf-book__eyebrow {
+    margin-bottom: 3mm;
+    color: #555 !important;
+    font: 700 8pt/1.2 "Segoe UI Variable Text", "Segoe UI", Arial, sans-serif !important;
+    letter-spacing: .13em;
+  }
+  .pdf-book__header h1 {
+    margin: 0;
+    color: #111 !important;
+    font: 700 22pt/1.18 Georgia, "Times New Roman", serif !important;
+    hyphens: auto;
+    overflow-wrap: anywhere;
+  }
+  .pdf-book__header p {
+    margin: 3mm 0 0;
+    color: #5b5b5b !important;
+    font: 9pt/1.35 "Segoe UI Variable Text", "Segoe UI", Arial, sans-serif !important;
+    text-align: left;
+  }
+  .pdf-book__content { width: 100%; }
+  .pdf-book .message {
+    display: block !important;
+    width: 100% !important;
+    margin: 0 0 7mm !important;
+    color: #171717 !important;
+    font: inherit !important;
+    break-inside: auto;
+  }
+  .pdf-book .message-body,
+  .pdf-book .message.assistant .message-body,
+  .pdf-book .message.user .message-body {
+    display: block !important;
+    width: 100% !important;
+    max-width: none !important;
+    margin: 0 !important;
+  }
+  .pdf-book__message-heading {
+    margin: 0 0 2.6mm;
+    color: #555 !important;
+    font: 700 8.5pt/1.25 "Segoe UI Variable Text", "Segoe UI", Arial, sans-serif !important;
+    letter-spacing: .035em;
+    break-after: avoid-page;
+  }
+  .pdf-book .message-content,
+  .pdf-book .message.assistant .message-content,
+  .pdf-book .message.user .message-content {
+    display: block !important;
+    width: 100% !important;
+    max-width: none !important;
+    padding: 0 !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+    color: #171717 !important;
+    font: inherit !important;
+    line-height: inherit !important;
+    overflow: visible !important;
+    overflow-wrap: break-word;
+    word-break: normal;
+  }
+  .pdf-book .message.user .message-content {
+    padding: 3mm 4mm !important;
+    border-left: 2pt solid #777 !important;
+    background: #f3f3f3 !important;
+  }
+  .pdf-book .message-content p,
+  .pdf-book .message-content li,
+  .pdf-book .message-content blockquote {
+    orphans: 3;
+    widows: 3;
+  }
+  .pdf-book .message-content p {
+    margin: 0 0 3.4mm;
+    text-align: justify;
+    text-wrap: pretty;
+  }
+  .pdf-book .message-content p:last-child { margin-bottom: 0; }
+  .pdf-book .message-content h1,
+  .pdf-book .message-content h2,
+  .pdf-book .message-content h3,
+  .pdf-book .message-content h4 {
+    margin: 6mm 0 2.5mm;
+    color: #111 !important;
+    font-family: Georgia, "Times New Roman", serif !important;
+    font-weight: 700 !important;
+    line-height: 1.25 !important;
+    break-after: avoid-page;
+    page-break-after: avoid;
+  }
+  .pdf-book .message-content h1 { font-size: 17pt !important; }
+  .pdf-book .message-content h2 { font-size: 14.5pt !important; }
+  .pdf-book .message-content h3 { font-size: 12.5pt !important; }
+  .pdf-book .message-content h4 { font-size: 11.25pt !important; }
+  .pdf-book .message-content > :first-child { margin-top: 0; }
+  .pdf-book .message-content ul,
+  .pdf-book .message-content ol {
+    margin: 0 0 3.4mm;
+    padding-left: 7mm;
+  }
+  .pdf-book .message-content li { margin: 0 0 1.2mm; padding-left: 1mm; }
+  .pdf-book .message-content blockquote {
+    margin: 4mm 0;
+    padding: 1mm 0 1mm 5mm;
+    border-left: 2pt solid #777;
+    color: #333 !important;
+    font-style: italic;
+  }
+  .pdf-book .message-content a {
+    color: #171717 !important;
+    text-decoration: underline;
+    text-decoration-thickness: .5pt;
+    text-underline-offset: 1.5pt;
+  }
+  .pdf-book .message-content code {
+    padding: .2mm 1mm;
+    border: .5pt solid #d5d5d5;
+    border-radius: 1mm;
+    background: #f4f4f4 !important;
+    color: #111 !important;
+    font: 8.5pt/1.45 "Cascadia Mono", Consolas, monospace !important;
+    overflow-wrap: anywhere;
+  }
+  .pdf-book .code-block {
+    margin: 4mm 0;
+    overflow: visible !important;
+    border: .6pt solid #bcbcbc !important;
+    border-radius: 1.5mm;
+    background: #f7f7f7 !important;
+    color: #111 !important;
+    break-inside: auto;
+  }
+  .pdf-book .code-header {
+    padding: 2mm 3mm;
+    border-bottom: .5pt solid #c8c8c8;
+    background: #ececec !important;
+    color: #333 !important;
+    font: 7.75pt/1.3 "Segoe UI Variable Text", "Segoe UI", Arial, sans-serif !important;
+    break-after: avoid-page;
+  }
+  .pdf-book .code-block pre {
+    margin: 0;
+    padding: 3mm;
+    overflow: visible !important;
+    white-space: pre-wrap !important;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+  .pdf-book .code-block pre code {
+    padding: 0;
+    border: 0;
+    background: transparent !important;
+  }
+  .pdf-book .code-block pre code span { color: #111 !important; }
+  .pdf-book .table-wrap {
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 4mm 0 !important;
+    overflow: visible !important;
+    border: .6pt solid #999 !important;
+    border-radius: 0 !important;
+    break-inside: auto;
+  }
+  .pdf-book table,
+  .pdf-book .table-wrap table {
+    width: 100% !important;
+    max-width: 100% !important;
+    border-collapse: collapse !important;
+    table-layout: fixed;
+    font: 8.5pt/1.4 "Segoe UI Variable Text", "Segoe UI", Arial, sans-serif !important;
+  }
+  .pdf-book thead { display: table-header-group; }
+  .pdf-book tr { break-inside: avoid-page; page-break-inside: avoid; }
+  .pdf-book th,
+  .pdf-book td {
+    padding: 2.2mm 2.5mm !important;
+    border: .5pt solid #aaa !important;
+    background: #fff !important;
+    color: #171717 !important;
+    text-align: left;
+    vertical-align: top;
+    overflow-wrap: anywhere;
+    word-break: normal;
+  }
+  .pdf-book th {
+    background: #e7e7e7 !important;
+    color: #111 !important;
+    font-weight: 700 !important;
+  }
+  .pdf-book tbody tr:nth-child(even) td { background: #f6f6f6 !important; }
+  .pdf-book .math-selectable,
+  .pdf-book .math-selectable.display {
+    width: auto !important;
+    max-width: 100% !important;
+    margin: 3mm auto !important;
+    padding: 1.5mm 0 !important;
+    overflow: visible !important;
+    color: #111 !important;
+    font-size: .9em !important;
+    break-inside: avoid-page;
+  }
+  .pdf-book .math-source-text { display: none !important; }
+  .pdf-book .math-render { display: inline-block !important; color: #111 !important; }
+  .pdf-book .message-artifacts {
+    display: block !important;
+    width: 100% !important;
+    margin: 4mm 0 0;
+  }
+  .pdf-book .artifact-card {
+    width: 100% !important;
+    margin: 0 0 4mm;
+    overflow: visible !important;
+    border: .6pt solid #b5b5b5 !important;
+    border-radius: 1.5mm;
+    background: #fff !important;
+    break-inside: avoid-page;
+  }
+  .pdf-book .artifact-card img,
+  .pdf-book__video-poster {
+    display: block;
+    width: auto !important;
+    max-width: 100% !important;
+    max-height: 190mm !important;
+    margin: 0 auto;
+    object-fit: contain;
+    background: #fff !important;
+  }
+  .pdf-book .artifact-card__footer {
+    padding: 2mm 3mm;
+    border-top: .5pt solid #d0d0d0;
+    color: #444 !important;
+    font: 8pt/1.35 "Segoe UI Variable Text", "Segoe UI", Arial, sans-serif !important;
+  }
+  .pdf-book__media-placeholder {
+    min-height: 18mm;
+    padding: 6mm;
+    background: #f3f3f3 !important;
+    color: #444 !important;
+    font: 9pt/1.35 "Segoe UI Variable Text", "Segoe UI", Arial, sans-serif !important;
+    text-align: center;
+  }
+  .pdf-book .message-tool-box {
+    margin: 3mm 0 0;
+    padding: 2.5mm 3mm;
+    border: .6pt solid #aaa !important;
+    border-radius: 1.5mm;
+    background: #f3f3f3 !important;
+    color: #333 !important;
+    font: 8.5pt/1.4 "Segoe UI Variable Text", "Segoe UI", Arial, sans-serif !important;
+    break-inside: avoid-page;
+  }
+  .pdf-book__end-mark {
+    margin-top: 11mm;
+    color: #777 !important;
+    font-size: 8pt;
+    text-align: center;
+    break-before: avoid-page;
+  }
+}

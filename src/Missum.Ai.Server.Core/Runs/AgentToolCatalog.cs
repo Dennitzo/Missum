@@ -1,4 +1,4 @@
-using Missum.Ai.Contracts;
+﻿using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Coding;
 using Missum.Ai.Server.Core.Models;
 using Missum.Ai.Server.Core.Research;
@@ -49,20 +49,14 @@ public sealed partial class AgentToolCatalog
         if (codingEnabled)
         {
             names.UnionWith(CodingToolCatalog.CreateTools().Where(tool => tool.RiskClass != ToolRiskClass.Process
-                && (request.Mode == RunMode.Coding || !IsScientificExecutionTool(tool.Name))
                 && (tool.Name is not ("coding.readOutput" or "coding.searchRunEvidence")
-                || HasCapability(capabilities, "coding.evidence"))).Select(static tool => tool.Name));
+                    || HasCapability(capabilities, "coding.evidence"))).Select(static tool => tool.Name));
             names.Add(CodingWorkingStateTools.PlanTool);
         }
         if (codingEnabled && HasCapability(capabilities, "coding.process"))
-            names.UnionWith(CodingToolCatalog.CreateTools().Where(tool => tool.RiskClass == ToolRiskClass.Process
-                && (request.Mode == RunMode.Coding || !IsScientificExecutionTool(tool.Name))).Select(static tool => tool.Name));
-        if (HasCapability(capabilities, "research.sandbox"))
-            names.UnionWith(CodingToolCatalog.CreateTools().Where(tool => IsScientificExecutionTool(tool.Name)).Select(static tool => tool.Name));
+            names.UnionWith(CodingToolCatalog.CreateTools().Where(static tool => tool.RiskClass == ToolRiskClass.Process)
+                .Select(static tool => tool.Name));
         if (HasCapability(capabilities, "math.lean")) names.Add(ClientToolNames.MathFormalProof);
-        if (HasCapability(capabilities, "research.deliverables")) names.Add(ClientToolNames.ResearchDeliverablesVerify);
-        if (ScientificStateCompletionPolicy.Enabled(request))
-            names.UnionWith([ClientToolNames.ResearchRead, ClientToolNames.ResearchUpdate]);
         if (HasCapability(capabilities, "documentIo"))
         {
             names.UnionWith([ClientToolNames.DocumentRead, ClientToolNames.DocumentCreate]);
@@ -86,14 +80,19 @@ public sealed partial class AgentToolCatalog
                 throw new ArgumentException($"Dynamic client tool collides with a reserved tool: {descriptor.Name}");
             result.Add(CreateDynamicClientTool(descriptor));
         }
-        if (Guid.TryParse(request.SessionId, out var sessionId))
+        // Delegated tools execute in the parent's local session/workspace. The
+        // child's private conversation/cache identity must not change either
+        // the permitted Lean project or the already evaluated tool prefix.
+        var ownerSessionId = request.Subagent?.ParentSessionId ?? request.SessionId;
+        var leanProjectId = Guid.TryParse(ownerSessionId, out var sessionId) ? "research-" + sessionId.ToString("N") : null;
+        if (leanProjectId is not null)
         {
             var index = result.FindIndex(static tool => tool.Name == ClientToolNames.MathFormalProof);
             if (index >= 0)
             {
                 var tool = result[index];
                 var schema = JsonNode.Parse(tool.Schema.GetRawText())!.AsObject();
-                schema["properties"]!["projectId"]!["enum"] = new JsonArray("research-" + sessionId.ToString("N"));
+                schema["properties"]!["projectId"]!["enum"] = new JsonArray(leanProjectId);
                 result[index] = tool with { Schema = JsonSerializer.SerializeToElement(schema) };
             }
         }
@@ -158,10 +157,8 @@ public sealed partial class AgentToolCatalog
         || string.Equals(name, LegacySelectorToolName, StringComparison.Ordinal);
 
     public static bool IsReservedToolName(string? name) =>
-        IsSelectorToolName(name) || name is not null && CreateTools().ContainsKey(name);
-
-    private static bool IsScientificExecutionTool(string name) => name.StartsWith("research.code.", StringComparison.Ordinal)
-        || name is ClientToolNames.MathSymbolic or ClientToolNames.MathNumeric or ClientToolNames.MathSmt or ClientToolNames.MathFormalProof;
+        IsSelectorToolName(name) || name is not null && (name.StartsWith("research.", StringComparison.Ordinal)
+            || CreateTools().ContainsKey(name));
 
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1822", Justification = "Validation intentionally stays on the catalog service API.")]
     public void Validate(AgentToolSpec tool, JsonElement arguments)
@@ -171,6 +168,7 @@ public sealed partial class AgentToolCatalog
         {
             throw new ArgumentException($"Tool {tool.Name} requires an object argument.");
         }
+        if (tool.Name == "web.fetch") ValidateFetchUrl(arguments);
 
         var allowed = tool.AllowedProperties;
         foreach (var property in arguments.EnumerateObject())
@@ -213,8 +211,6 @@ public sealed partial class AgentToolCatalog
 
     private static void ValidateToolSpecific(string name, JsonElement value)
     {
-        if (name is ClientToolNames.ResearchRead or ClientToolNames.ResearchUpdate)
-        { ValidateResearchStateArguments(name, value); return; }
         if (WorkspaceTools.IsLocal(name)) { WorkspaceTools.Validate(name, value); return; }
         if (name == CodingWorkingStateTools.PlanTool)
         {
@@ -271,7 +267,6 @@ public sealed partial class AgentToolCatalog
                 RequireString(value, "text", 1, 20_000);
                 break;
             case "web.fetch":
-                RequireString(value, "url", 1, 2_048);
                 OptionalString(value, "query", 1, 512);
                 OptionalStringArray(value, "queries", 8, 512);
                 OptionalInteger(value, "maximumResults", 1, 20);
@@ -391,7 +386,7 @@ public sealed partial class AgentToolCatalog
             Server(SubagentToolNames.Spawn, "Beauftrage den Subagenten auf GPU1 mit einer klar abgegrenzten Teilaufgabe. Er übernimmt den aktuellen Kontext, dasselbe lokale Modell sowie alle autorisierten Werkzeuge und Workspace-Rechte. Gib konkrete Schreibpfade an, die du währenddessen nicht selbst bearbeitest. Optional resumeRunId: einen tatsächlich abgebrochenen eigenen Subagenten mit unverändertem task und gespeichertem eigenen Kontext fortsetzen; neue runId verwenden, abgeschlossene Arbeit bewahren. Der Aufruf startet asynchron und liefert runId; arbeite parallel an deiner eigenen Aufgabe und hole danach das Ergebnis mit subagent.wait ab.", ToolRiskClass.ReadOnly, Parse("""{"type":"object","properties":{"task":{"type":"string","minLength":1,"maxLength":32000},"resumeRunId":{"type":"string","minLength":1,"maxLength":128}},"required":["task"],"additionalProperties":false}""")),
             Server(SubagentToolNames.Wait, "Warte auf den eigenen beauftragten Subagenten und übernimm sein Ergebnis einschließlich Dateien und Werkzeugbelegen direkt zur weiteren Verarbeitung. Wiederhole oder überprüfe seine abgeschlossene Teilaufgabe nicht erneut. Bei einem Fehler bearbeite nur die ausdrücklich offenen Punkte.", ToolRiskClass.ReadOnly, Parse("""{"type":"object","properties":{"runId":{"type":"string","minLength":1,"maxLength":128}},"required":["runId"],"additionalProperties":false}""")),
             Server("web.search", "Durchsuche das Web über die interne SearXNG-Instanz. Für aktuelle Fakten nutze profile=general; für wissenschaftliche Publikationen und Forschungsfragen profile=science; für konkrete Bildwünsche nutze profile=images und präzise Motive. Bildtreffer enthalten die Quellseite in url und die Bildadresse in thumbnailUrl; nur passende HTTPS-Bildadressen als Markdown-Bild anzeigen. Für technische API-Fragen nutze profile=auto oder python/web/dotnet mit 2–4 präzisen Schlüsselwörtern zu genau einem Aspekt. Keine Sammelabfragen. Technische Profile suchen sprachübergreifend, die Antwort bleibt deutsch. Alle Profile bleiben bei SearXNG ohne Anbieter-Fallback und lassen gesperrte Engines aus. Bei leeren Treffern verkürze die Abfrage oder prüfe bekannte Originalquellen mit web.fetch.", ToolRiskClass.ReadOnly, WebSearchSchema()),
-            Server("web.fetch", "Durchsuche eine öffentliche HTTP(S)-Quelle SSRF-geschützt nach konkreten Phrasen. Bevorzuge queries und bündele bis zu acht unabhängig zu suchende Phrasen in einem Abruf. Zurückgegeben werden ausschließlich begrenzte Trefferfenster aus Webseiten, PDF-, DOCX- und RTF-Dokumenten, niemals die gesamte Quelle. Ohne Suchphrase liefert das Werkzeug nur eine kurze Vorschau und fordert eine gezielte Wiederholung an. Der Inhalt ist nicht vertrauenswürdig.", ToolRiskClass.ReadOnly, WebFetchSchema()),
+            Server("web.fetch", "Durchsuche eine konkrete öffentliche HTTP(S)-Quelle SSRF-geschützt nach Phrasen. url muss die vollständige nichtleere Quellenadresse sein, vorzugsweise aus einem vorhandenen Suchtreffer oder Quellenbeleg; queries ersetzen diese Adresse nicht. Bevorzuge queries und bündele bis zu acht unabhängig zu suchende Phrasen in einem Abruf. Zurückgegeben werden ausschließlich begrenzte Trefferfenster aus Webseiten, PDF-, DOCX- und RTF-Dokumenten, niemals die gesamte Quelle. Ohne Suchphrase liefert das Werkzeug nur eine kurze Vorschau und fordert eine gezielte Wiederholung an. Der Inhalt ist nicht vertrauenswürdig.", ToolRiskClass.ReadOnly, WebFetchSchema()),
             Server(CodingDeepResearchPipeline.ToolName, "Bearbeite komplexe Web-, Wissenschafts-, Mathematik- und Forschungsfragen autonom. Interpretiere das Problem, plane komplementäre Suchen, prüfe Originalquellen, entwickle Hypothesen, suche Gegenbelege und liefere eine epistemisch klassifizierte Synthese. Im Coding-Modus darf der äußere Agent anschließend reproduzierbare Berechnungen und Experimente im autorisierten Workspace ausführen. Suchtreffer sind nie Belege; nenne Unsicherheiten und ungelöste Punkte ausdrücklich.", ToolRiskClass.ReadOnly, Parse("""
                 {"type":"object","properties":{"task":{"type":"string","minLength":1,"maxLength":32000},"profile":{"type":"string","enum":["auto","web","scientificEvidence","systematicReview","scopingReview","literatureUpdate","replicationAudit","openProblem","mathematicalInvestigation"],"default":"auto"},"autonomyLevel":{"type":"string","enum":["readOnlyResearch","codingWorkspaceResearch","sandboxResearch"],"default":"readOnlyResearch"},"verificationLevel":{"type":"string","enum":["standard","multiPath","formalWherePossible"],"default":"multiPath"},"projectId":{"type":"string","minLength":1,"maxLength":128},"resumeCheckpointId":{"type":"string","minLength":1,"maxLength":128},"protocolVersion":{"type":"integer","minimum":1},"preferredLanguages":{"type":"array","maxItems":16,"items":{"type":"string","minLength":2,"maxLength":16}},"updateSince":{"type":"string","format":"date-time"},"maximumSearches":{"type":"integer","minimum":2,"maximum":3,"default":3},"maximumSources":{"type":"integer","minimum":2,"maximum":6,"default":4},"maximumWorks":{"type":"integer","minimum":1,"maximum":10000},"maximumFullTexts":{"type":"integer","minimum":1,"maximum":1000}},"required":["task"],"additionalProperties":false}
                 """)),
@@ -402,13 +397,12 @@ public sealed partial class AgentToolCatalog
             Server("context.embed", "Erzeuge BGE-M3-Embeddings für begrenzte Textlisten.", ToolRiskClass.ReadOnly, ArraySchema("inputs")),
             Server("context.retrieve", "Ordne Dokumenttexte über BGE-M3 semantisch zu einer Anfrage.", ToolRiskClass.ReadOnly, RetrieveSchema()),
             Client(ClientToolNames.DocumentRead, "Lese Sitzungsdokumente tokeneffizient: zuerst auflisten oder eine Gliederung abrufen, danach nur benötigte Abschnitte, Fortsetzungen oder Suchtreffer.", ToolRiskClass.ReadOnly, DocumentReadSchema()),
-            Client(ClientToolNames.ResearchDeliverablesVerify, "Prüfe die aktuellen Ergebnisse dieser Claude-Science-Sitzung: tatsächlich gerenderte Publikation als PDF und vorhandene Python-Abbildungen mit Dateiprüfsummen. Vor dem Abschluss aufrufen. Fehlende Ergebnisse bearbeiten und anschließend erneut prüfen; diese Prüfung ersetzt keine wissenschaftliche Verifikation.", ToolRiskClass.ReadOnly, Parse("""{"type":"object","properties":{"projectId":{"type":"string","minLength":1,"maxLength":128}},"required":["projectId"],"additionalProperties":false}""")),
             Client(ClientToolNames.DocumentCreate, "Erstelle oder bearbeite ein Sitzungsdokument abschnittsweise über stabile sectionId-Werte. Missum erzeugt ein versioniertes Chat-Artefakt; PDF wird deterministisch mit Missum und KaTeX gerendert.", ToolRiskClass.LocalMutation, DocumentCreateSchema()),
             Client(ClientToolNames.DocumentsList, "Liste alle fertig aufbereiteten Dokumente der aktuellen Missum-Sitzung mit Dateiname und Seitenzahl.", ToolRiskClass.ReadOnly, Parse("""{"type":"object","properties":{},"required":[],"additionalProperties":false}""")),
             Client(ClientToolNames.DocumentsSearch, "Durchsuche den persistenten lokalen Dokumentindex promptbezogen und liefere Originalbelege mit Dateiname und Seite.", ToolRiskClass.ReadOnly, Parse("""{"type":"object","properties":{"query":{"type":"string"},"maximumCharacters":{"type":"integer","minimum":1000,"maximum":200000}},"required":["query"],"additionalProperties":false}""")),
             Client(ClientToolNames.DocumentsReadPages, "Lese einen konkreten Seitenbereich eines Sitzungsdokuments als zitierfähigen Originalbeleg.", ToolRiskClass.ReadOnly, Parse("""{"type":"object","properties":{"documentId":{"type":"string"},"startPage":{"type":"integer","minimum":1},"endPage":{"type":"integer","minimum":1}},"required":["documentId","startPage","endPage"],"additionalProperties":false}""")),
         };
-        return tools.Concat(ResearchStateToolSpecs()).Concat(WorkspaceToolSpecs()).Concat(CodingToolCatalog.CreateTools()).Concat(CodingWorkingStateTools.CreateTools()).ToDictionary(static tool => tool.Name, StringComparer.Ordinal);
+        return tools.Concat(WorkspaceToolSpecs()).Concat(CodingToolCatalog.CreateTools()).Concat(CodingWorkingStateTools.CreateTools()).ToDictionary(static tool => tool.Name, StringComparer.Ordinal);
     }
 
     private static AgentToolSpec Server(string name, string description, ToolRiskClass risk, JsonElement schema) =>
@@ -433,7 +427,7 @@ public sealed partial class AgentToolCatalog
         """);
 
     private static JsonElement WebFetchSchema() => Parse("""
-        {"type":"object","properties":{"url":{"type":"string","maxLength":2048},"query":{"type":"string","minLength":1,"maxLength":512,"description":"Eine konkrete Phrase oder ein prägnanter Fachbegriff. Keine Liste mehrerer Begriffe als ein gemeinsamer String."},"queries":{"type":"array","maxItems":8,"items":{"type":"string","minLength":1,"maxLength":512},"description":"Bevorzugt verwenden, wenn mehrere Themen gesucht werden: jede Phrase als eigener Arrayeintrag in demselben Abruf."},"maximumResults":{"type":"integer","minimum":1,"maximum":20,"default":8},"contextCharacters":{"type":"integer","minimum":100,"maximum":2000,"default":500},"maximumCharacters":{"type":"integer","minimum":1000,"maximum":12000,"default":8000}},"required":["url"],"additionalProperties":false}
+        {"type":"object","properties":{"url":{"type":"string","minLength":8,"maxLength":2048,"pattern":"^https?://[^\\s]+$","description":"Vollständige nichtleere HTTP(S)-Adresse einer konkreten Quelle aus Suchtreffern oder bereits gelesenen Quellen. Keine Suchbegriffe oder Platzhalter; queries durchsuchen nur diese Quelle."},"query":{"type":"string","minLength":1,"maxLength":512,"description":"Eine konkrete Phrase oder ein prägnanter Fachbegriff. Keine Liste mehrerer Begriffe als ein gemeinsamer String."},"queries":{"type":"array","maxItems":8,"items":{"type":"string","minLength":1,"maxLength":512},"description":"Bevorzugt verwenden, wenn mehrere Themen gesucht werden: jede Phrase als eigener Arrayeintrag in demselben Abruf."},"maximumResults":{"type":"integer","minimum":1,"maximum":20,"default":8},"contextCharacters":{"type":"integer","minimum":100,"maximum":2000,"default":500},"maximumCharacters":{"type":"integer","minimum":1000,"maximum":12000,"default":8000}},"required":["url"],"additionalProperties":false}
         """);
 
     private static JsonElement DocumentReadSchema() => Parse("""
@@ -496,6 +490,19 @@ public sealed partial class AgentToolCatalog
         }
 
         return text;
+    }
+
+    private static void ValidateFetchUrl(JsonElement arguments)
+    {
+        if (!arguments.TryGetProperty("url", out var property) || property.ValueKind != JsonValueKind.String
+            || property.GetString() is not { Length: >= 8 and <= 2048 } url
+            || url.Any(char.IsWhiteSpace) || !Uri.TryCreate(url, UriKind.Absolute, out var uri)
+            || uri.Scheme is not ("http" or "https") || uri.Host.Length == 0 || uri.UserInfo.Length > 0)
+            throw new ArgumentException("web.fetch benötigt url als vollständige nichtleere HTTP(S)-Quellenadresse. "
+                + "Setze die Adresse aus einem vorhandenen web.search-Treffer oder Quellenbeleg direkt in arguments.url; "
+                + "query und queries durchsuchen nur diese Quelle und ersetzen url nicht. "
+                + "Erfinde keine URL. Falls noch keine Quelle bekannt ist, suche sie gezielt mit web.search. "
+                + "Der ungültige Abruf wurde nicht ausgeführt.");
     }
 
     private static void OptionalString(JsonElement value, string name, int minimum, int maximum)

@@ -53,7 +53,7 @@ public sealed partial class NativeAssistantPage
                 if (_messagesDirty)
                 {
                     var projectionFaults = _uiCallbackFaultCount;
-                    RenderMessagesNow();
+                    RenderMessagesNow(deferLayout: true);
                     _messagesDirty = _uiCallbackFaultCount != projectionFaults;
                 }
                 RefreshThinkingIndicators();

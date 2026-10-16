@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using Missum.App.Controls;
 using Missum.App.Services;
 using Microsoft.UI.Xaml;
@@ -12,6 +12,7 @@ public sealed partial class NativeAssistantPage
 {
     private readonly Dictionary<string, NativeSubagentState> _subagents = new(StringComparer.Ordinal);
     private long _subagentObservationOrder;
+    private long _subagentActivationGeneration;
     private readonly Dictionary<string, double> _conversationOffsets = new(StringComparer.Ordinal);
     private string? _activeSubagentId;
     private string? _parentComposerDraft;
@@ -32,6 +33,11 @@ public sealed partial class NativeAssistantPage
     private NativeSubagentState? ActiveSubagent => _activeSubagentId is { } id
         && _subagents.TryGetValue(id, out var child) && child.SessionId == _session ? child : null;
     private IReadOnlyDictionary<string, JsonElement> DisplayMessages => ActiveSubagent?.Messages ?? _messages;
+    // A delegation creates the assignment and answer at the same timestamp.
+    // Preserve request-before-answer order instead of ordering random message IDs.
+    private IOrderedEnumerable<JsonElement> OrderedDisplayMessages() => DisplayMessages.Values
+        .OrderBy(MessageCreatedAt).ThenBy(message => S(message, "role") == "user" ? 0 : 1);
+
     private bool DisplayRunning => ActiveSubagent is { } child ? child.IsRunning : _running;
     private double DisplayContextUsed => ActiveSubagent is { } child ? child.ContextUsed : _contextUsed;
     private double DisplayContextLimit => ActiveSubagent is { } child ? child.ContextLimit : _contextLimit;
@@ -79,6 +85,7 @@ public sealed partial class NativeAssistantPage
     {
         if (sessionChanged)
         {
+            _subagentActivationGeneration++;
             _activeSubagentId = null;
             _parentComposerDraft = _parentComposerPlaceholder = null;
         }
@@ -89,10 +96,18 @@ public sealed partial class NativeAssistantPage
         if (sessionChanged)
             foreach (var historical in _subagents.Values.Where(child => child.SessionId == _session && !child.IsRunning))
                 historical.TabOpen = false;
-        if (snapshot.TryGetProperty("subagents", out var children) && children.ValueKind == JsonValueKind.Array)
+        // The initial UI snapshot contains only the newest message page. Missing
+        // children may belong to older messages already loaded in this session.
+        // Only an exhaustive snapshot can remove terminal child projections;
+        // an active child can arrive after that snapshot's database read.
+        var partialHistory = snapshot.TryGetProperty("historyPage", out var historyPage)
+            && historyPage.ValueKind == JsonValueKind.Object
+            && historyPage.TryGetProperty("hasMore", out var hasMore) && hasMore.ValueKind == JsonValueKind.True;
+        if (!partialHistory && snapshot.TryGetProperty("subagents", out var children) && children.ValueKind == JsonValueKind.Array)
         {
             var knownIds = children.EnumerateArray().Select(child => S(child, "agentId", S(child, "runId"))).ToHashSet(StringComparer.Ordinal);
-            foreach (var stale in _subagents.Values.Where(child => child.SessionId == _session && !knownIds.Contains(child.AgentId)).ToArray())
+            foreach (var stale in _subagents.Values.Where(child => child.SessionId == _session && !child.IsRunning
+                && !knownIds.Contains(child.AgentId)).ToArray())
             {
                 if (_activeSubagentId == stale.AgentId) ShowParentConversation();
                 SessionTabsPanel.Children.Remove(stale.Container); _subagents.Remove(stale.AgentId);
@@ -113,8 +128,10 @@ public sealed partial class NativeAssistantPage
         var status = S(snapshot, "status", S(snapshot, "isRunning") == "True" ? "running" : "unknown");
         var isRunning = SubagentChatState.HasActiveRun(status, S(snapshot, "isRunning") == "True");
         var runId = S(snapshot, "runId");
+        var deferred = S(snapshot, "transcriptDeferred") == "True";
         var created = SubagentCreatedAt(snapshot);
         _ = long.TryParse(S(snapshot, "projectionRevision"), out var projectionRevision);
+        var retainHydratedTranscript = false;
         if (!_subagents.TryGetValue(agentId, out var child))
         {
             _subagents[agentId] = child = CreateSubagentTab(agentId, owner);
@@ -130,8 +147,11 @@ public sealed partial class NativeAssistantPage
             var previousRunId = S(child.Snapshot, "runId");
             if (!SubagentChatState.AcceptSnapshot(previousRunId, child.CreatedAt, child.ProjectionRevision,
                 child.PreviousRunIds, runId, created, projectionRevision)) return;
+            retainHydratedTranscript = deferred && !child.TranscriptDeferred && previousRunId == runId
+                && child.ProjectionRevision == projectionRevision;
             if (previousRunId.Length > 0 && previousRunId != runId)
             {
+                if (deferred) child.Messages.Clear();
                 child.PreviousRunIds.Add(previousRunId);
                 child.ObservationOrder = ++_subagentObservationOrder;
                 child.ContextUsed = child.ContextLimit = 0;
@@ -142,15 +162,19 @@ public sealed partial class NativeAssistantPage
             if (previousRun.ValueKind == JsonValueKind.String && previousRun.GetString() is { Length: > 0 } previousRunId)
                 child.PreviousRunIds.Add(previousRunId);
         child.ProjectionRevision = projectionRevision;
-        child.Snapshot = snapshot.Clone();
+        if (!retainHydratedTranscript) child.Snapshot = snapshot.Clone();
         child.SessionId = owner;
         child.Title = SubagentChatState.TaskTitle(S(snapshot, "title", "Subagent"));
         child.Status = status;
         child.IsRunning = isRunning;
         if (double.TryParse(S(snapshot, "contextUsed"), out var used)) child.ContextUsed = used;
         if (double.TryParse(S(snapshot, "contextLimit"), out var limit)) child.ContextLimit = limit;
-        child.Messages.Clear();
-        foreach (var message in Items(snapshot, "messages")) child.Messages[S(message, "id")] = message.Clone();
+        child.TranscriptDeferred = deferred && !retainHydratedTranscript;
+        if (!deferred)
+        {
+            child.Messages.Clear();
+            foreach (var message in Items(snapshot, "messages")) child.Messages[S(message, "id")] = message.Clone();
+        }
         // DTOs without a top-level creation time retain the assigned user
         // message's timestamp. Token and completion updates never change recency.
         if (created is not null) child.CreatedAt = created;
@@ -159,6 +183,7 @@ public sealed partial class NativeAssistantPage
         RefreshSubagentSources();
         if (ReferenceEquals(ActiveSubagent, child))
         {
+            if (child.TranscriptDeferred) _ = EnsureSubagentTranscriptAsync(child);
             RenderMessages();
             RefreshContextDisplay();
             RefreshChatNotices();
@@ -457,6 +482,9 @@ public sealed partial class NativeAssistantPage
         if (_disposed || child.SessionId != _session || _sessionTabNavigationBusy
             || !_subagents.TryGetValue(child.AgentId, out var current) || !ReferenceEquals(current, child)) return;
         var owner = _session;
+        var activation = ++_subagentActivationGeneration;
+        if (!await EnsureSubagentTranscriptAsync(child)) return;
+        if (_disposed || child.SessionId != _session || owner != _session || activation != _subagentActivationGeneration) return;
         if (_dictationSession == owner)
             await FinishDictationForNavigationAsync(owner, Composer.Text);
         if (_disposed || child.SessionId != _session || owner != _session) return;
@@ -467,6 +495,26 @@ public sealed partial class NativeAssistantPage
         child.TabOpen = true; SubagentTabStates.Open(child.SessionId, child.AgentId); _activeSubagentId = child.AgentId;
         _rendering = true; Composer.Text = ""; Composer.PlaceholderText = "Aufgabe vom Hauptagenten"; _rendering = false;
         RefreshConversationTab();
+    }
+
+    private Task<bool> EnsureSubagentTranscriptAsync(NativeSubagentState child)
+    {
+        if (!child.TranscriptDeferred) return Task.FromResult(true);
+        return child.HydrationTask ??= LoadSubagentTranscriptAsync(child);
+    }
+
+    private async Task<bool> LoadSubagentTranscriptAsync(NativeSubagentState child)
+    {
+        try
+        {
+            return await CommandAsync("subagent.load", new
+            {
+                sessionId = child.SessionId, child.AgentId,
+                parentMessageId = S(child.Snapshot, "parentMessageId"),
+                runId = S(child.Snapshot, "runId"),
+            }) && !child.TranscriptDeferred;
+        }
+        finally { child.HydrationTask = null; }
     }
 
     private void ShowParentConversation()
@@ -484,9 +532,17 @@ public sealed partial class NativeAssistantPage
     private void RefreshConversationTab()
     {
         _conversationSelection?.Clear();
-        // Cached native bubbles keep markdown cursors, disclosures and footer
-        // owners; detach only their outer parent while changing the projection.
+        // Keep the stable message/footer owners while changing the projection.
+        // Disclosure choices are transient and reset to the current global
+        // default only for the conversation being shown, without rereading KV.
         MessagesPanel.Children.Clear();
+        foreach (var (messageId, message) in DisplayMessages)
+        {
+            if (!_messageBlocks.TryGetValue(messageId, out var blocks)) continue;
+            foreach (var step in Items(message, "toolSteps"))
+                if (blocks.TryGetValue("tool:" + S(step, "id"), out var view) && view is ToolStepView tool)
+                    tool.SetExpanded(S(step, "tool") != "assistant.reasoning" && _settings.Current.CodingToolStepsExpanded);
+        }
         _sourcesSignature = null;
         UpdateComposerNavigationState();
         RefreshComposerModelDisplay();
@@ -514,6 +570,8 @@ public sealed partial class NativeAssistantPage
         internal HashSet<string> PreviousRunIds { get; } = new(StringComparer.Ordinal);
         internal bool IsRunning { get; set; } = true;
         internal bool TabOpen { get; set; }
+        internal bool TranscriptDeferred { get; set; }
+        internal Task<bool>? HydrationTask { get; set; }
         internal double ContextUsed { get; set; }
         internal double ContextLimit { get; set; }
         internal JsonElement Snapshot { get; set; }

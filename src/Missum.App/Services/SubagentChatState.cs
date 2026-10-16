@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Missum.Ai.Contracts;
 using Missum.Core.Models;
 
@@ -20,7 +21,9 @@ public sealed record SubagentChatState(
     long LifecycleEventId = 0, long ProjectionRevision = 0, string? StoredReceiptId = null,
     IReadOnlyDictionary<string, IReadOnlyList<ChatArtifact>>? PreviousMessageArtifacts = null,
     IReadOnlyList<string>? AuthorizedConsumerRunIds = null,
-    int? ProcessedPromptTokens = null, int? TotalPromptTokens = null, double? PromptProgress = null)
+    int? ProcessedPromptTokens = null, int? TotalPromptTokens = null, double? PromptProgress = null,
+    [property: JsonIgnore] bool TranscriptDeferred = false,
+    [property: JsonIgnore] Guid? ParentMessageId = null)
 {
     internal const string ReceiptTool = "subagent";
     internal const string CompletionTool = "subagent.completed";
@@ -179,6 +182,104 @@ public sealed record SubagentChatState(
             ? state with { StoredReceiptId = step.Id } : null).OfType<SubagentChatState>()
         .GroupBy(state => state.AgentId, StringComparer.Ordinal).Select(group => group.Last()).ToArray();
 
+    // UI overview only: never touch external transcript files or deserialize a
+    // nested child conversation just to draw a tab, avatar or lifecycle row.
+    internal static IReadOnlyList<SubagentChatState> ReadSummaries(IEnumerable<ChatMessage> messages) => messages
+        .SelectMany(message => (message.ToolSteps ?? []).Where(step => step.Tool == ReceiptTool && step.OutputJson is not null)
+            .Select(step => ReadSummary(message, step))).OfType<SubagentChatState>()
+        .GroupBy(state => state.AgentId, StringComparer.Ordinal).Select(group => group.Last()).ToArray();
+
+    private static SubagentChatState? ReadSummary(ChatMessage parent, AssistantToolStep receipt)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(receipt.OutputJson!);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object || Text(root, "agentId") is not { Length: > 0 } agentId
+                || Text(root, "runId") is not { Length: > 0 } runId) return null;
+            if (Guid.TryParse(Text(root, "sessionId"), out var session) && session != parent.SessionId) return null;
+            var status = Text(root, "status") ?? receipt.Status;
+            var title = TaskTitle(Text(root, "title"));
+            var at = parent.CreatedAt;
+            if (DateTimeOffset.TryParse(Text(root, "attemptStartedAt"), out var started)) at = started;
+            else if (root.TryGetProperty("assistantMessage", out var assistant) && assistant.ValueKind == JsonValueKind.Object
+                && DateTimeOffset.TryParse(Text(assistant, "createdAt"), out started)) at = started;
+            var messageStatus = status.ToLowerInvariant() switch
+            {
+                "completed" => MessageStatus.Completed, "cancelled" => MessageStatus.Cancelled,
+                "interrupted" => MessageStatus.Interrupted, "failed" or "denied" => MessageStatus.Failed,
+                _ => HasActiveRun(status) ? MessageStatus.Streaming : MessageStatus.Completed,
+            };
+            bool? delivered = root.TryGetProperty("resultDelivered", out var delivery)
+                && delivery.ValueKind is JsonValueKind.True or JsonValueKind.False ? delivery.GetBoolean() : null;
+            if (delivery.ValueKind == JsonValueKind.Number && delivery.TryGetInt32(out var deliveryNumber) && deliveryNumber is 0 or 1)
+                delivered = deliveryNumber == 1;
+            var revision = root.TryGetProperty("projectionRevision", out var projection)
+                && projection.ValueKind == JsonValueKind.Number && projection.TryGetInt64(out var parsed) ? parsed : 0;
+            return new(agentId, runId, Text(root, "parentRunId") ?? "", parent.SessionId, title, status,
+                new(StableId(runId + ":user"), parent.SessionId, ChatRole.User, "", MessageStatus.Completed, at, at),
+                new(StableId(runId + ":assistant"), parent.SessionId, ChatRole.Assistant, "", messageStatus, at, at),
+                ResultDelivered: delivered, ProjectionRevision: revision, StoredReceiptId: receipt.Id,
+                TranscriptDeferred: true, ParentMessageId: parent.Id);
+        }
+        catch (JsonException) { return null; }
+    }
+
+    internal static async Task<SubagentChatState?> ReadAsync(ChatMessage parentMessage, string agentId,
+        string? dataDirectory = null, CancellationToken cancellationToken = default)
+    {
+        foreach (var receipt in (parentMessage.ToolSteps ?? []).Reverse())
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (receipt.Tool != ReceiptTool || receipt.OutputJson is null
+                || ReadSummary(parentMessage, receipt)?.AgentId != agentId) continue;
+            var state = await DeserializeStoredAsync(receipt.OutputJson, dataDirectory, cancellationToken).ConfigureAwait(false);
+            if (state is not null && state.AgentId == agentId && state.SessionId == parentMessage.SessionId)
+                return state with { StoredReceiptId = receipt.Id, ParentMessageId = parentMessage.Id };
+        }
+        return null;
+    }
+
+    internal AssistantToolStep? FindToolStep(Guid messageId, string stepId) =>
+        (PreviousMessages ?? []).Concat([UserMessage, AssistantMessage]).FirstOrDefault(message => message.Id == messageId)
+            ?.ToolSteps?.FirstOrDefault(step => step.Id == stepId);
+
+    internal SubagentChatState ForDisplay() => this with
+    {
+        PreviousMessages = PreviousMessages?.Select(ProjectMessage).ToArray(),
+        UserMessage = ProjectMessage(UserMessage), AssistantMessage = ProjectMessage(AssistantMessage),
+    };
+
+    private static ChatMessage ProjectMessage(ChatMessage message) => message with
+    {
+        ToolExecution = null, ContextSummary = null,
+        ToolSteps = message.ToolSteps?.Select(step => step.Tool is "assistant.narration" or "assistant.progress"
+            ? step : step with
+            {
+                Detail = null, InputJson = null, OutputJson = null, PreviewHtml = null,
+                Explanation = step.Explanation is { Length: > 400 } explanation ? explanation[..400] : step.Explanation,
+                DetailsDeferred = true,
+            }).ToArray(),
+    };
+
+    private static async Task<SubagentChatState?> DeserializeStoredAsync(string json, string? dataDirectory,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            if (document.RootElement.ValueKind != JsonValueKind.Object) return null;
+            if (!document.RootElement.TryGetProperty("subagentStorageKey", out var keyValue)) return Deserialize(json);
+            if (dataDirectory is null || keyValue.ValueKind != JsonValueKind.String) return null;
+            var key = keyValue.GetString();
+            if (key is not { Length: 64 } || key.Any(character => !char.IsAsciiHexDigit(character))) return null;
+            var text = await File.ReadAllTextAsync(Path.Combine(dataDirectory, "Subagents", key + ".json"), cancellationToken).ConfigureAwait(false);
+            var state = Deserialize(text);
+            return state?.StorageKey == key ? state : null;
+        }
+        catch (Exception exception) when (exception is JsonException or IOException or UnauthorizedAccessException) { return null; }
+    }
+
     internal async Task<string> PersistAsync(string dataDirectory)
     {
         var json = JsonSerializer.Serialize(this, JsonOptions);
@@ -195,7 +296,9 @@ public sealed record SubagentChatState(
             File.Move(temporary, path, overwrite: true);
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
-        return JsonSerializer.Serialize(new { subagentStorageKey = key, agentId = AgentId, runId = RunId, title = Title, status = Status, resultDelivered = ResultDelivered }, JsonOptions);
+        return JsonSerializer.Serialize(new { subagentStorageKey = key, agentId = AgentId, runId = RunId,
+            ParentRunId, SessionId, title = Title, status = Status, resultDelivered = ResultDelivered,
+            ProjectionRevision, attemptStartedAt = AssistantMessage.CreatedAt }, JsonOptions);
     }
 
     private string StorageKey => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(SessionId + ":" + RunId + ":" + AgentId))).ToLowerInvariant();

@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
@@ -102,42 +102,13 @@ if (Test-Path -LiteralPath $smokeRoot) { throw "Smoke directory already exists: 
 New-Item -ItemType Directory -Path $smokeRoot | Out-Null
 $smokeData = Join-Path $smokeRoot 'Data'
 $smokeInstance = [Guid]::NewGuid().ToString('N')
-# The smoke must not bind the original application's LAN port. The OS chooses
-# an available loopback port; skip configured gateway/native/control ports.
-$reservedPorts = [Collections.Generic.HashSet[int]]::new()
-foreach ($reserved in @(8080, 8081, 8082, 8090, 8180, 8181, 8182)) { $null = $reservedPorts.Add($reserved) }
-foreach ($portName in @('ASSISTANT_GATEWAY_PORT', 'ASSISTANT_NATIVE_PORT', 'ASSISTANT_NATIVE_CONTROL_PORT', 'ASSISTANT_LAN_WEB_PORT')) {
-    $configuredPort = 0
-    if ([int]::TryParse([Environment]::GetEnvironmentVariable($portName, 'Process'), [ref]$configuredPort) -and
-        $configuredPort -ge 1024 -and $configuredPort -le 65535) {
-        $null = $reservedPorts.Add($configuredPort)
-        if ($portName -eq 'ASSISTANT_NATIVE_PORT' -and $configuredPort -lt 65535) { $null = $reservedPorts.Add($configuredPort + 1) }
-    }
-}
-$configuredGatewayText = [Environment]::GetEnvironmentVariable('ASSISTANT_GATEWAY_URL', 'Process')
-[Uri]$configuredGateway = $null
-if (-not [string]::IsNullOrWhiteSpace($configuredGatewayText) -and
-    [Uri]::TryCreate([string]$configuredGatewayText, [UriKind]::Absolute, [ref]$configuredGateway)) {
-    $null = $reservedPorts.Add($configuredGateway.Port)
-}
-$smokeLanPort = 0
-for ($attempt = 0; $attempt -lt 32 -and $smokeLanPort -eq 0; $attempt++) {
-    $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
-    try {
-        $listener.Start()
-        $candidatePort = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
-        if ($candidatePort -ge 1024 -and -not $reservedPorts.Contains($candidatePort)) { $smokeLanPort = $candidatePort }
-    }
-    finally { $listener.Stop() }
-}
-if ($smokeLanPort -eq 0) { throw 'No isolated LAN port could be allocated for the smoke.' }
+# Keep the smoke isolated from the user's database and model runtime.
 $smokeEnvironment = @{
     ASSISTANT_PROFILE = 'stable'
     ASSISTANT_DATA_ROOT = $smokeData
     ASSISTANT_INSTANCE_KEY = $smokeInstance
     ASSISTANT_NATIVE_STATE_ROOT = (Join-Path $smokeRoot 'NativeRuntime')
     ASSISTANT_DISABLE_RUNTIME_AUTOSTART = '1'
-    ASSISTANT_LAN_WEB_PORT = [string]$smokeLanPort
     MISSUM_DATA_DIRECTORY = $smokeData
     MISSUM_SMOKE_INSTANCE_KEY = $smokeInstance
     DOTNET_BUNDLE_EXTRACT_BASE_DIR = (Join-Path $smokeRoot 'Bundle')
@@ -157,7 +128,7 @@ try {
     )
     $nativeReady = Join-Path $smokeData 'native-ui-ready.json'
     $nativeState = $null
-    $deadline = [DateTime]::UtcNow.AddSeconds(60)
+    $deadline = [DateTime]::UtcNow.AddSeconds(120)
     while ([DateTime]::UtcNow -lt $deadline -and -not $process.HasExited) {
         if (Test-Path -LiteralPath $nativeReady -PathType Leaf) {
             # The writer may still be flushing its first JSON document.
@@ -171,7 +142,7 @@ try {
         $startupFailurePath = Join-Path $smokeData 'native-ui-failure.json'
         if (Test-Path -LiteralPath $startupFailurePath -PathType Leaf) {
             Copy-Item -LiteralPath $startupFailurePath -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-ui-failure.json')) -Force
-            foreach ($diagnosticName in @('native-simulation-errors.jsonl', 'simulation-view.jsonl', 'native-publication-errors.jsonl', 'publication-view.jsonl', 'native-ui-render-errors.jsonl', 'crash.log')) {
+            foreach ($diagnosticName in @('native-publication-errors.jsonl', 'publication-view.jsonl', 'native-ui-render-errors.jsonl', 'crash.log')) {
                 $diagnosticPath = Join-Path (Join-Path $smokeData 'Diagnostics') $diagnosticName
                 if (Test-Path -LiteralPath $diagnosticPath -PathType Leaf) {
                     Copy-Item -LiteralPath $diagnosticPath -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.' + $diagnosticName)) -Force
@@ -205,8 +176,8 @@ try {
     }
     $webViewProfileRoot = Join-Path $smokeData 'WebView2'
     if (Test-Path -LiteralPath $webViewProfileRoot) {
-        $unexpectedWebProfiles = @(Get-ChildItem -LiteralPath $webViewProfileRoot | Where-Object { -not $_.PSIsContainer -or $_.Name -notin @('Simulations', 'Publications') })
-        if ($unexpectedWebProfiles.Count -gt 0) { throw 'Desktop unexpectedly created a WebView2 profile outside the interactive Simulation view.' }
+        $unexpectedWebProfiles = @(Get-ChildItem -LiteralPath $webViewProfileRoot | Where-Object { -not $_.PSIsContainer -or $_.Name -notin @('Publications') })
+        if ($unexpectedWebProfiles.Count -gt 0) { throw 'Desktop unexpectedly created a WebView2 profile outside the publication PDF view.' }
     }
     $mathPreview = Join-Path $smokeData 'native-math-preview.png'
     if (-not (Test-Path -LiteralPath $mathPreview -PathType Leaf) -or (Get-Item -LiteralPath $mathPreview).Length -lt 100) {
@@ -513,25 +484,6 @@ try {
     Copy-Item -LiteralPath $scrollSelectionPath -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-selection-scroll-validation.json')) -Force
     Copy-Item -LiteralPath (Join-Path $smokeData 'native-selection-scroll-preview.png') -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-selection-scroll-preview.png')) -Force
     Write-Host 'Real mouse/wheel input, scrollbar dragging, cross-block autoscroll and capture-loss recovery verified.'
-    $simulationLifecyclePath = Join-Path $smokeData 'native-simulation-lifecycle-validation.json'
-    if (-not (Test-Path -LiteralPath $simulationLifecyclePath -PathType Leaf) -or
-        (Get-Item -LiteralPath $simulationLifecyclePath).LastWriteTimeUtc -lt $startedAt.AddSeconds(-1)) {
-        throw 'Native simulation lifecycle smoke did not produce fresh evidence.'
-    }
-    $simulationLifecycle = Get-Content -LiteralPath $simulationLifecyclePath -Raw | ConvertFrom-Json
-    if ($simulationLifecycle.passed -ne $true -or $simulationLifecycle.processId -ne $process.Id -or
-        $simulationLifecycle.tabCycles -lt 40 -or $simulationLifecycle.suspendResumeCycles -lt 4 -or $simulationLifecycle.navigationCount -ne 3 -or
-        -not $simulationLifecycle.controls.passed -or $simulationLifecycle.explicitReloadNavigations -ne 1 -or
-        $simulationLifecycle.browserFaults -ne 0 -or $simulationLifecycle.uiFaults -ne 0) {
-        throw 'Native interactive simulation failed the real-process tab lifecycle checks.'
-    }
-    foreach ($simulationCheck in @('stableRoot', 'stableBrowserParent', 'realCanvasAnimation', 'animationResumed')) {
-        if ($simulationLifecycle.PSObject.Properties.Name -notcontains $simulationCheck -or $simulationLifecycle.$simulationCheck -ne $true) {
-            throw "Native interactive simulation lifecycle failed: $simulationCheck"
-        }
-    }
-    Copy-Item -LiteralPath $simulationLifecyclePath -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-simulation-lifecycle-validation.json')) -Force
-    Write-Host 'Native interactive simulation: 40 tab cycles and snapshot updates verified.'
     if (-not [string]::IsNullOrWhiteSpace($env:MISSUM_SCIENCE_PDF_SMOKE_PATH)) {
         $publicationLayoutPath = Join-Path $smokeData 'native-publication-layout-validation.json'
         if (-not (Test-Path -LiteralPath $publicationLayoutPath -PathType Leaf) -or
@@ -540,8 +492,7 @@ try {
         }
         $publicationLayout = Get-Content -LiteralPath $publicationLayoutPath -Raw | ConvertFrom-Json
         if ($publicationLayout.processId -ne $process.Id -or $publicationLayout.viewportWidth -le 0 -or
-            [Math]::Abs($publicationLayout.viewerWidth - $publicationLayout.viewportWidth) -gt 1 -or
-            $simulationLifecycle.publicationFixtureLoaded -ne $true) {
+            [Math]::Abs($publicationLayout.viewerWidth - $publicationLayout.viewportWidth) -gt 1) {
             throw 'The native PDF does not fit the complete available viewport.'
         }
         foreach ($publicationCheck in @('passed', 'fullWidth', 'headingsHidden', 'externalPdfButtonsRemoved', 'browserViewer')) {
@@ -550,9 +501,24 @@ try {
             }
         }
         Copy-Item -LiteralPath $publicationLayoutPath -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-publication-layout-validation.json')) -Force
+        $publicationRevisionPath = Join-Path $smokeData 'native-publication-revision-validation.json'
+        if (-not (Test-Path -LiteralPath $publicationRevisionPath -PathType Leaf)) {
+            throw 'Native publication revision smoke did not produce evidence.'
+        }
+        $publicationRevision = Get-Content -LiteralPath $publicationRevisionPath -Raw | ConvertFrom-Json
+        foreach ($publicationCheck in @('passed', 'samePathReload', 'visibleRevisionReload', 'fileRevalidatedOnTabOpen', 'unchangedPollingRetainsViewer', 'sameParent')) {
+            if ($publicationRevision.PSObject.Properties.Name -notcontains $publicationCheck -or $publicationRevision.$publicationCheck -ne $true) {
+                throw "Native publication revision failed: $publicationCheck"
+            }
+        }
+        if ($publicationRevision.navigationCount -ne 4 -or $publicationRevision.browserFaultCount -ne 0) {
+            throw 'Native publication revision navigation was not stable.'
+        }
+        Copy-Item -LiteralPath $publicationRevisionPath -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-publication-revision-validation.json')) -Force
+        Write-Host 'Native publication: current PDF revisions, tab revalidation and retained browser verified.'
         Write-Host 'Native publication: full viewport width without headings or PDF buttons verified.'
     }
-    foreach ($sciencePreview in @('native-outputs-preview', 'native-publication-preview', 'native-publication-last-page-preview', 'native-simulation-empty-preview', 'native-simulation-lifecycle-preview', 'native-python-receipt-preview', 'native-changes-preview', 'native-tool-icons-preview', 'native-colored-chrome-preview', 'native-continuation-preview', 'native-continuation-preparing-preview', 'native-continuation-loading-preview', 'native-thinking-preview')) {
+    foreach ($sciencePreview in @('native-outputs-preview', 'native-publication-preview', 'native-publication-revision-preview', 'native-publication-last-page-preview', 'native-python-receipt-preview', 'native-changes-preview', 'native-tool-icons-preview', 'native-colored-chrome-preview', 'native-continuation-preview', 'native-continuation-preparing-preview', 'native-continuation-loading-preview', 'native-thinking-preview')) {
         $scienceImage = Join-Path $smokeData ($sciencePreview + '.png')
         if (Test-Path -LiteralPath $scienceImage -PathType Leaf) {
             $scienceEvidence = Assert-MissumArtifactPath -Path ($PublishDirectory + '.' + $sciencePreview + '.png')
@@ -594,6 +560,22 @@ try {
     Write-Host "Native model runtime support verified: $runtimeContentDirectory"
 
     Write-Host "Native WinUI 3 session and isolated local state verified: $($nativeState.sessionId)"
+
+    $pagingReport = Join-Path $smokeData 'native-paging-validation.json'
+    if (-not (Test-Path -LiteralPath $pagingReport -PathType Leaf)) { throw 'Native paging evidence is missing.' }
+    $paging = Get-Content -LiteralPath $pagingReport -Raw | ConvertFrom-Json
+    if ($paging.processId -ne $process.Id -or $paging.initialMessages -ne 24 -or
+        $paging.afterFirstPage -ne 48 -or $paging.totalMessages -ne 60 -or $paging.scrollAnchorErrorPixels -gt 4) {
+        throw 'Native paging did not retain its bounded batches and visible scroll anchor.'
+    }
+    foreach ($check in @('initialDetailsDeferred','toolDetailsLoadedOnExpand','subagentTranscriptLoadedOnOpen',
+        'subagentToolDetailsLoadedOnExpand','disclosureResetOnNavigation','durableMessagesUnchanged',
+        'conversationRevisionUnchanged','contextPreparationUnchanged')) {
+        if ($paging.$check -ne $true) { throw "Native paging failed: $check" }
+    }
+    Copy-Item -LiteralPath $pagingReport -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-paging-validation.json')) -Force
+    Copy-Item -LiteralPath (Join-Path $smokeData 'native-paging-preview.png') -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-paging-preview.png')) -Force
+    Write-Host 'Native SQLite paging, scroll anchor, lazy tool/subagent details and unchanged context preparation verified.'
 
     $responsivenessReport = Join-Path $smokeData 'native-responsiveness-validation.json'
     if (Test-Path -LiteralPath $responsivenessReport -PathType Leaf) {

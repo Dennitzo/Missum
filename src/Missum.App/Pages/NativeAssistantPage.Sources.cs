@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Windows.System;
@@ -10,6 +10,8 @@ public sealed partial class NativeAssistantPage
     private sealed record SourceAction(string Id, string Title, string[] Urls, DateTimeOffset Time,
         JsonElement? Attachment = null, IReadOnlyDictionary<string, string>? PageTitles = null);
     private readonly Dictionary<Guid, SourceAction[]> _sessionSources = [];
+    private readonly Dictionary<Guid, SourceAction[]> _indexedSources = [];
+    private readonly HashSet<Guid> _sourceIndexLoading = [];
     private readonly HashSet<Guid> _sourceTabs = [];
     private Button? _sourcesTabButton;
     private Border? _sourcesTabContainer;
@@ -41,7 +43,7 @@ public sealed partial class NativeAssistantPage
 
     private SourceAction[] WebSourceActions()
     {
-        var actions = new List<SourceAction>();
+        var actions = new List<SourceAction>(_indexedSources.GetValueOrDefault(_session, []));
         foreach (var message in OwnerSourceMessages())
         foreach (var step in Items(message, "toolSteps"))
         {
@@ -58,19 +60,10 @@ public sealed partial class NativeAssistantPage
             actions.Add(new(S(step, "id"), query.Length > 0 ? title + ": " + query : title,
                 urls.ToArray(), DateTimeOffset.TryParse(S(step, "updatedAt", S(step, "startedAt")), out var time) ? time : MessageCreatedAt(message), PageTitles: pageTitles));
         }
-        var state = ResearchState(_session);
-        var actionUrls = actions.SelectMany(action => action.Urls).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        foreach (var item in Items(state.Detail, "works"))
-        {
-            var url = S(item, "url", S(item, "canonicalUrl"));
-            if (Uri.TryCreate(url, UriKind.Absolute, out var uri) && uri.Scheme is "http" or "https" && actionUrls.Add(uri.AbsoluteUri))
-                actions.Add(new("research-source:" + uri.AbsoluteUri, S(item, "title", uri.Host), [uri.AbsoluteUri], DateTimeOffset.TryParse(S(item, "updatedAt"), out var updated) ? updated : DateTimeOffset.MinValue,
-                    PageTitles: new Dictionary<string, string> { [uri.AbsoluteUri] = S(item, "title", uri.Host) }));
-        }
         foreach (var item in Items(_snapshot, "documents").Concat(Items(_snapshot, "attachments")))
             actions.Add(new("attachment:" + S(item, "id"), S(item, "fileName"), [],
                 DateTimeOffset.TryParse(S(item, "createdAt"), out var created) ? created : DateTimeOffset.MinValue, item.Clone()));
-        return ResolveSourceTitles(actions.GroupBy(item => item.Id).Select(group => group.Last()).OrderByDescending(item => item.Time).ToArray(), Items(state.Detail, "works"));
+        return ResolveSourceTitles(actions.GroupBy(item => item.Id).Select(group => group.Last()).OrderByDescending(item => item.Time).ToArray(), []);
     }
 
     private static SourceAction[] ResolveSourceTitles(SourceAction[] actions, JsonElement[] works)
@@ -171,7 +164,7 @@ public sealed partial class NativeAssistantPage
     {
         var sources = WebSourceActions(); _sessionSources[_session] = sources;
         foreach (var item in sources.Take(1)) SourcesPanel.Children.Add(SourceActionButton(item));
-        if (sources.Length > 0)
+        if (sources.Length > 0 || _messages.Count > 0)
             SourcesPanel.Children.Add(AllOutputsButton("Alle Quellen anzeigen", OpenSourcesTab));
         if (_activeSourcesSession == _session) RenderSourcesContent();
     }
@@ -200,6 +193,51 @@ public sealed partial class NativeAssistantPage
             Grid.SetRow(_sourcesHost, Grid.GetRow(ResearchHost)); Grid.SetColumn(_sourcesHost, Grid.GetColumn(ResearchHost));
         }
         _sourcesHost.Visibility = Visibility.Visible; RenderSourcesContent(); RenderSessionTabs();
+        _ = LoadSourceIndexAsync(_session);
+    }
+
+    private async Task LoadSourceIndexAsync(Guid sessionId)
+    {
+        if (!_sourceIndexLoading.Add(sessionId)) return;
+        try
+        {
+            _sourcesContentSignature = null;
+            if (_activeSourcesSession == sessionId) RenderSourcesContent();
+            await CommandAsync("sources.list", new { sessionId });
+        }
+        finally
+        {
+            _sourceIndexLoading.Remove(sessionId);
+            _sourcesContentSignature = null;
+            if (!_disposed && _activeSourcesSession == sessionId && _session == sessionId) RenderSourcesContent();
+        }
+    }
+
+    private bool ApplySourcesEvent(string type, JsonElement data)
+    {
+        if (type != "sources.snapshot") return false;
+        if (!Guid.TryParse(S(data, "sessionId"), out var sessionId)) return true;
+        _indexedSources[sessionId] = Items(data, "sources").GroupBy(item => S(item, "id"), StringComparer.Ordinal)
+            .Select(group =>
+            {
+                var urls = group.Select(item => S(item, "url")).Where(url => Uri.TryCreate(url, UriKind.Absolute, out var uri)
+                    && uri.Scheme is "http" or "https").Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+                var first = group.First();
+                var tool = S(first, "tool");
+                var title = tool == "web.search" ? "Websuche" : tool == "web.fetch" ? "Webseite"
+                    : tool == "subagent" ? "Subagent-Recherche" : "Recherche";
+                return new SourceAction(group.Key, title, urls,
+                    DateTimeOffset.TryParse(S(first, "time"), out var at) ? at : DateTimeOffset.MinValue,
+                    PageTitles: group.Where(item => S(item, "title").Length > 0)
+                        .GroupBy(item => S(item, "url"), StringComparer.OrdinalIgnoreCase)
+                        .ToDictionary(page => page.Key, page => S(page.Last(), "title"), StringComparer.OrdinalIgnoreCase));
+            }).Where(action => action.Urls.Length > 0).ToArray();
+        if (sessionId == _session)
+        {
+            _sourcesSignature = _sourcesContentSignature = null;
+            RenderSources(_snapshot);
+        }
+        return true;
     }
 
     private void RenderSourcesContent()
@@ -211,6 +249,8 @@ public sealed partial class NativeAssistantPage
         _sourcesContentSignature = signature; _sourcesContentOwner = _session;
         var body = new StackPanel { Spacing = 16, Padding = new Thickness(24) };
         body.Children.Add(new TextBlock { Text = "Quellen", FontSize = 24 });
+        if (_sourceIndexLoading.Contains(_session))
+            body.Children.Add(new TextBlock { Text = "Quellen werden geladen …", Foreground = ThemeBrush("MissumMutedTextBrush", 145) });
         foreach (var item in sources)
         {
             var group = new StackPanel { Spacing = 4 }; group.Children.Add(new TextBlock { Text = item.Title, FontSize = 16, TextWrapping = TextWrapping.Wrap });

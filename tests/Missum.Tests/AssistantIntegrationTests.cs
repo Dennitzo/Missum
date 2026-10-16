@@ -1,4 +1,4 @@
-using Missum.App.Services;
+﻿using Missum.App.Services;
 using Missum.App.Pages;
 using Missum.App.ViewModels;
 using Missum.Core.Contracts;
@@ -89,154 +89,20 @@ public sealed class AssistantIntegrationTests
     }
 
     [Fact]
-    public void PersistentExtensionActionUsesTheGenericBridgeContract()
+    public void PublicationBridgeContractIsBidirectionalAndHostAuthoritative()
     {
-        Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("action.invoke"));
-        Assert.False(AssistantWebBridge.IsIncomingTypeAllowed("session.tool"));
-        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
-        var bridge = File.ReadAllText(Path.Combine(webRoot, "bridge.js"));
-        Assert.Contains("\"action.invoke\"", bridge, StringComparison.Ordinal);
-        Assert.DoesNotContain("\"session.tool\"", bridge, StringComparison.Ordinal);
+        foreach (var action in new[] { "publication.list", "publication.open" })
+            Assert.True(AssistantProtocol.IsIncomingTypeAllowed(action));
+        foreach (var message in new[] { "publication.snapshot" })
+            Assert.True(AssistantProtocol.IsOutgoingTypeAllowed(message));
 
-        var html = File.ReadAllText(Path.Combine(webRoot, "index.html"));
-        Assert.Matches("bridge\\.js\\?v=[^\"\\s]+", html);
-
-        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
-        Assert.Contains("post(\"action.invoke\"", app, StringComparison.Ordinal);
-        Assert.Contains("builtin.audiobook/create", app, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void ScientificWorkbenchBridgeContractIsBidirectionalAndHostAuthoritative()
-    {
-        foreach (var action in new[] { "research.list", "research.open", "research.export" })
-            Assert.True(AssistantWebBridge.IsIncomingTypeAllowed(action));
-        foreach (var message in new[] { "research.snapshot", "research.exported" })
-            Assert.True(AssistantWebBridge.IsOutgoingTypeAllowed(message));
-
-        var json = JsonSerializer.Serialize(AssistantWebBridge.BuildProtocolContract());
+        var json = JsonSerializer.Serialize(AssistantProtocol.BuildProtocolContract());
         using var contract = JsonDocument.Parse(json);
-        Assert.Equal(AssistantWebBridge.ProtocolVersion, contract.RootElement.GetProperty("version").GetInt32());
+        Assert.Equal(AssistantProtocol.ProtocolVersion, contract.RootElement.GetProperty("version").GetInt32());
         Assert.Contains(contract.RootElement.GetProperty("clientActions").EnumerateArray(),
-            item => item.GetString() == "research.list");
+            item => item.GetString() == "publication.list");
         Assert.Contains(contract.RootElement.GetProperty("hostEvents").EnumerateArray(),
-            item => item.GetString() == "research.snapshot");
-    }
-
-    /*
-    [Fact]
-    public void SessionGroupingButtonTriggersManualAiGroupingRun()
-    {
-        Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("session.groupNow"));
-        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
-        var html = File.ReadAllText(Path.Combine(webRoot, "index.html"));
-        var bridge = File.ReadAllText(Path.Combine(webRoot, "bridge.js"));
-        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
-        var coordinator = File.ReadAllText(Path.Combine(
-            FindRepositoryRoot(), "src", "Missum.App", "Services", "AssistantCoordinator.cs"));
-        Assert.Contains("id=\"group-sessions\"", html, StringComparison.Ordinal);
-        Assert.Contains("Sitzungen durch die KI gruppieren lassen", html, StringComparison.Ordinal);
-        Assert.Contains("\"session.groupNow\"", bridge, StringComparison.Ordinal);
-        Assert.Contains("post(\"session.groupNow\", {});", app, StringComparison.Ordinal);
-        Assert.Contains("case \"session.groupNow\":", coordinator, StringComparison.Ordinal);
-        Assert.Contains("MaybeGroupSessionsAsync(emit, envelope.RequestId)", coordinator, StringComparison.Ordinal);
-        Assert.DoesNotContain("_ = MaybeGroupSessions", coordinator, StringComparison.Ordinal);
-    }
-    */
-
-    [Fact]
-    public void SessionPinAndHeaderActionsAreAbsentAcrossTheWebViewContract()
-    {
-        Assert.False(AssistantWebBridge.IsIncomingTypeAllowed("session.pin"));
-        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
-        var bridge = File.ReadAllText(Path.Combine(webRoot, "bridge.js"));
-        Assert.DoesNotContain("\"session.pin\"", bridge, StringComparison.Ordinal);
-        Assert.DoesNotContain("\"chat.exportPdf\"", bridge, StringComparison.Ordinal);
-        var html = File.ReadAllText(Path.Combine(webRoot, "index.html"));
-        Assert.DoesNotContain("chat-header", html, StringComparison.Ordinal);
-        Assert.DoesNotContain("id=\"chat-heading\"", html, StringComparison.Ordinal);
-        Assert.DoesNotContain("header-actions", html, StringComparison.Ordinal);
-        Assert.DoesNotContain("Sitzung anpinnen", html, StringComparison.Ordinal);
-        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
-        Assert.DoesNotContain("post(\"session.pin\"", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("session.isPinned", app, StringComparison.Ordinal);
-        Assert.Contains("builtin.documents/export-chat-pdf", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("builtin.workflows/open-library", app, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void SessionProjectCreateButtonTriggersProjectSessionCreation()
-    {
-        Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("session.projectCreate"));
-        Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("session.workspaceCreate"));
-        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
-        var bridge = File.ReadAllText(Path.Combine(webRoot, "bridge.js"));
-        Assert.Contains("\"session.projectCreate\"", bridge, StringComparison.Ordinal);
-        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
-        Assert.Contains("session.projectCreate", app, StringComparison.Ordinal);
-        Assert.Contains("Neue Sitzung im Projekt", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("Allgemeine Sitzungen", app, StringComparison.Ordinal);
-        Assert.Contains("Array.isArray(state.sessionGroups)", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("post(\"session.create\"", app, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void ComposerPasteRoutesFilesAndImagesThroughTheNativeAttachmentImport()
-    {
-        Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("document.paste"));
-        Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("document.upload"));
-        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
-        var bridge = File.ReadAllText(Path.Combine(webRoot, "bridge.js"));
-        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
-        var page = File.ReadAllText(Path.Combine(
-            FindRepositoryRoot(), "src", "Missum.App", "Pages", "AssistantPage.xaml.cs"));
-
-        Assert.Contains("\"document.paste\"", bridge, StringComparison.Ordinal);
-        Assert.Contains("\"document.upload\"", bridge, StringComparison.Ordinal);
-        Assert.Contains("uploadFiles(files, state.activeSessionId)", app, StringComparison.Ordinal);
-        Assert.Contains("elements.prompt.addEventListener(\"paste\"", app, StringComparison.Ordinal);
-        Assert.Contains("clipboard.files.length > 0", app, StringComparison.Ordinal);
-        Assert.Contains("item.kind === \"file\"", app, StringComparison.Ordinal);
-        Assert.Contains("post(\"document.paste\", { sessionId: state.activeSessionId })", app, StringComparison.Ordinal);
-        Assert.Contains("case \"document.paste\":", page, StringComparison.Ordinal);
-        Assert.Contains("case \"document.upload\":", page, StringComparison.Ordinal);
-        Assert.Contains("StandardDataFormats.StorageItems", page, StringComparison.Ordinal);
-        Assert.Contains("StandardDataFormats.Bitmap", page, StringComparison.Ordinal);
-        Assert.Contains("ImportStorageFilesAsync(sessionId, files", page, StringComparison.Ordinal);
-        Assert.Contains("_coordinator.ImportAttachmentAsync(", page, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void ChatAndMessagePdfExportsUseTheSharedDinA4BookLayout()
-    {
-        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
-        var html = File.ReadAllText(Path.Combine(webRoot, "index.html"));
-        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
-        var styles = File.ReadAllText(Path.Combine(webRoot, "styles.css"));
-
-        Assert.InRange(AssistantPage.PdfA4WidthInches, 8.267, 8.268);
-        Assert.InRange(AssistantPage.PdfA4HeightInches, 11.692, 11.693);
-        Assert.InRange(AssistantPage.PdfBookMarginLeftInches, .944, .946);
-        Assert.InRange(AssistantPage.PdfBookMarginBottomInches, .944, .946);
-        Assert.Matches("""<link\b[^>]*\brel="stylesheet"[^>]*\bhref="styles\.css(?:\?[^\"]*)?"[^>]*>""", html);
-        Assert.Matches("""<script\b[^>]*\bsrc="markdown\.js(?:\?[^\"]*)?"[^>]*>""", html);
-        Assert.Matches("""<script\b[^>]*\bsrc="voice\.js(?:\?[^\"]*)?"[^>]*>""", html);
-        Assert.Matches("""<script\b[^>]*\bsrc="app\.js(?:\?[^\"]*)?"[^>]*>""", html);
-        Assert.Contains("globalThis.missumPrepareBookPdf = messageId =>", app, StringComparison.Ordinal);
-        Assert.Contains("globalThis.missumPdfBookReady = () =>", app, StringComparison.Ordinal);
-        Assert.Contains("globalThis.missumPrepareMessagePdf = globalThis.missumPrepareBookPdf", app, StringComparison.Ordinal);
-        Assert.Contains("pdf-book--message", app, StringComparison.Ordinal);
-        Assert.Contains("pdf-book--chat", app, StringComparison.Ordinal);
-        Assert.Contains("size: A4 portrait", styles, StringComparison.Ordinal);
-        Assert.Contains("background: #fff", styles, StringComparison.Ordinal);
-        Assert.Contains("color-scheme: only light !important", styles, StringComparison.Ordinal);
-        Assert.Contains("font: 10.75pt/1.58 Georgia", styles, StringComparison.Ordinal);
-        Assert.Contains("hyphens: auto", styles, StringComparison.Ordinal);
-        Assert.Contains("orphans: 3", styles, StringComparison.Ordinal);
-        Assert.Contains("widows: 3", styles, StringComparison.Ordinal);
-        Assert.Contains(".pdf-book thead { display: table-header-group; }", styles, StringComparison.Ordinal);
-        Assert.Contains("white-space: pre-wrap !important", styles, StringComparison.Ordinal);
-        Assert.DoesNotContain("pdf-exporting-message", styles, StringComparison.Ordinal);
+            item => item.GetString() == "publication.snapshot");
     }
 
     [Theory]
@@ -247,109 +113,9 @@ public sealed class AssistantIntegrationTests
     [InlineData("microphone.toggleSpeechPause")]
     [InlineData("microphone.stop")]
     [InlineData("microphone.cancel")]
-    public void MicrophoneMessagesAreAcceptedByTheWebBridge(string messageType)
+    public void MicrophoneMessagesAreAcceptedByTheNativeProtocol(string messageType)
     {
-        Assert.True(AssistantWebBridge.IsIncomingTypeAllowed(messageType));
-    }
-
-    [Fact]
-    public void WebAssetsExposeTheSameMicrophoneContractBesideSendWithoutAStatusChip()
-    {
-        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
-        var bridge = File.ReadAllText(Path.Combine(webRoot, "bridge.js"));
-        Assert.Contains("\"microphone.start\"", bridge, StringComparison.Ordinal);
-        Assert.Contains("\"microphone.audio\"", bridge, StringComparison.Ordinal);
-        Assert.Contains("\"microphone.speak\"", bridge, StringComparison.Ordinal);
-        Assert.Contains("\"microphone.stopSpeech\"", bridge, StringComparison.Ordinal);
-        Assert.Contains("\"microphone.toggleSpeechPause\"", bridge, StringComparison.Ordinal);
-        Assert.DoesNotContain("microphone.previousSpeechParagraph", bridge, StringComparison.Ordinal);
-        Assert.DoesNotContain("microphone.skipSpeechParagraph", bridge, StringComparison.Ordinal);
-        Assert.Contains("\"microphone.stop\"", bridge, StringComparison.Ordinal);
-        Assert.Contains("\"microphone.cancel\"", bridge, StringComparison.Ordinal);
-        Assert.Contains("\"microphone.changed\"", bridge, StringComparison.Ordinal);
-        Assert.Contains("\"microphone.transcript\"", bridge, StringComparison.Ordinal);
-        Assert.Contains("\"attachment.remove\"", bridge, StringComparison.Ordinal);
-
-        var html = File.ReadAllText(Path.Combine(webRoot, "index.html"));
-        var submit = html.IndexOf("class=\"toolbar-group composer-submit\"", StringComparison.Ordinal);
-        var microphone = html.IndexOf("id=\"microphone\"", submit, StringComparison.Ordinal);
-        var send = html.IndexOf("id=\"send\"", submit, StringComparison.Ordinal);
-        Assert.True(submit >= 0 && microphone > submit && send > microphone);
-
-        var styles = File.ReadAllText(Path.Combine(webRoot, "styles.css"));
-        Assert.Contains(".composer-submit {", styles, StringComparison.Ordinal);
-        Assert.Contains(".send-button, .microphone-button", styles, StringComparison.Ordinal);
-
-        var voice = File.ReadAllText(Path.Combine(webRoot, "voice.js"));
-        Assert.Contains("navigator.mediaDevices.getUserMedia", voice, StringComparison.Ordinal);
-        Assert.Contains("microphone.audio", voice, StringComparison.Ordinal);
-        Assert.Contains("missum:voice-level", voice, StringComparison.Ordinal);
-        Assert.Contains("createAnalyser", voice, StringComparison.Ordinal);
-        Assert.Contains("createMediaStreamDestination", voice, StringComparison.Ordinal);
-        Assert.Contains("getUserMedia({ audio: true, video: false })", voice, StringComparison.Ordinal);
-        Assert.Contains("beginTurn(values)", voice, StringComparison.Ordinal);
-        Assert.Contains("const bridgeFrameSamples = 1600;", voice, StringComparison.Ordinal);
-        Assert.Contains("if (turn.speechSamples >= minimumTurnSamples) emitAvailableFrames(turn);", voice, StringComparison.Ordinal);
-        Assert.Contains("const preRollSamples = 4000;", voice, StringComparison.Ordinal);
-        Assert.Contains("const silenceToFinishSamples = 8000;", voice, StringComparison.Ordinal);
-        Assert.Contains("sendFrame(turn, turn.frameBuffer.splice(0), true);", voice, StringComparison.Ordinal);
-        Assert.DoesNotContain("windowSamples", voice, StringComparison.Ordinal);
-        Assert.DoesNotContain("for (const value of values) samples.push(value);", voice, StringComparison.Ordinal);
-        Assert.DoesNotContain("MediaRecorder", voice, StringComparison.Ordinal);
-
-        Assert.Contains("microphone-frequency", html, StringComparison.Ordinal);
-        Assert.DoesNotContain("voice-feedback", html, StringComparison.Ordinal);
-        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
-        Assert.DoesNotContain("voice-context-chip", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("voice-context-chip", html, StringComparison.Ordinal);
-        Assert.DoesNotContain("voice-listening-preview", app, StringComparison.Ordinal);
-        Assert.Contains("elements.microphone.classList.toggle(\"recording\", active)", app, StringComparison.Ordinal);
-        Assert.Contains("active ? \"Sprachsteuerung beenden\" : \"Sprachsteuerung starten\"", app, StringComparison.Ordinal);
-        Assert.Contains("elements.microphone.setAttribute(\"aria-label\", label)", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("id=\"live-caption\"", html, StringComparison.Ordinal);
-        Assert.Contains("isLiveCaption: true", app, StringComparison.Ordinal);
-        Assert.Contains("state.liveCaption?.isActive", app, StringComparison.Ordinal);
-        Assert.Contains("post(\"liveCaption.stop\", {})", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("Live-Untertitel beenden", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("start-live-translation", html, StringComparison.Ordinal);
-        Assert.Contains("artifact.provider === \"screen-capture\"", app, StringComparison.Ordinal);
-        Assert.Contains("message-artifacts--captures", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("renderVoiceFeedback()", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("id=\"capture-screen\"", html, StringComparison.Ordinal);
-        Assert.DoesNotContain("id=\"capture-clip\"", html, StringComparison.Ordinal);
-        Assert.Contains("builtin.web/web-search", app, StringComparison.Ordinal);
-        Assert.Contains("builtin.image/generate", app, StringComparison.Ordinal);
-        Assert.Contains("renderActionMenu()", app, StringComparison.Ordinal);
-        Assert.Contains("Vorlesen", app, StringComparison.Ordinal);
-        Assert.Contains("post(\"microphone.speak\", {", app, StringComparison.Ordinal);
-        Assert.Contains("const sessionId = footer.dataset.speechSessionId, messageId = footer.dataset.speechMessageId;", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("speechMessageId: String(message.id)", app, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void ScreenClipEventsUpdateCaptureControlsWithoutAComposerStatusChip()
-    {
-        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
-        var html = File.ReadAllText(Path.Combine(webRoot, "index.html"));
-        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
-        var styles = File.ReadAllText(Path.Combine(webRoot, "styles.css"));
-        var bridge = File.ReadAllText(Path.Combine(webRoot, "bridge.js"));
-
-        Assert.DoesNotContain("createScreenClipProgressMessage", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("data-screen-clip-progress", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("screen-clip-chip", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("screen-clip-chip", html, StringComparison.Ordinal);
-        Assert.Contains("case \"screenClip.changed\":", app, StringComparison.Ordinal);
-        Assert.Contains("state.screenClip = payload || state.screenClip", app, StringComparison.Ordinal);
-        Assert.Contains("elements.screenClip.classList.toggle(\"recording\", Boolean(clip.isRecording))", app, StringComparison.Ordinal);
-        Assert.Contains("Video aufnehmen · ${formatClipTime(seconds)}", app, StringComparison.Ordinal);
-        Assert.Contains("clip.isRecording && seconds >= maximum && !state.captureStopRequested", app, StringComparison.Ordinal);
-        Assert.Contains("post(\"screenClip.stop\"", app, StringComparison.Ordinal);
-        Assert.Contains("\"screenClip.cancel\"", bridge, StringComparison.Ordinal);
-        Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("screenClip.start"));
-        Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("screenClip.stop"));
-        Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("screenClip.cancel"));
-        Assert.DoesNotContain(".screen-clip-progress", styles, StringComparison.Ordinal);
+        Assert.True(AssistantProtocol.IsIncomingTypeAllowed(messageType));
     }
 
     [Theory]
@@ -496,58 +262,6 @@ public sealed class AssistantIntegrationTests
     }
 
     [Fact]
-    public void AnalysisToolsOwnCaptureAndSidebarDeleteRemainsInteractiveDuringRuns()
-    {
-        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
-        var html = File.ReadAllText(Path.Combine(webRoot, "index.html"));
-        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
-        var styles = File.ReadAllText(Path.Combine(webRoot, "styles.css"));
-        var voice = File.ReadAllText(Path.Combine(webRoot, "voice.js"));
-        var bridge = File.ReadAllText(Path.Combine(webRoot, "bridge.js"));
-
-        Assert.Contains("builtin.media/audio-analysis", app, StringComparison.Ordinal);
-        Assert.Contains("builtin.media/video-analysis", app, StringComparison.Ordinal);
-        Assert.Contains("builtin.media/image-analysis", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("data-tool-immediate=\"screen.capture\"", html, StringComparison.Ordinal);
-        Assert.DoesNotContain("data-tool-immediate=\"screenClip.toggle\"", html, StringComparison.Ordinal);
-        Assert.Contains("beginMediaCapture(action)", app, StringComparison.Ordinal);
-        Assert.Contains("if (state.documents.length > 0) return true", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("remove.disabled = state.isRunning", app, StringComparison.Ordinal);
-        Assert.DoesNotContain(".session-delete:disabled", styles, StringComparison.Ordinal);
-        Assert.Contains(".session-item:hover .session-delete", styles, StringComparison.Ordinal);
-        Assert.Contains("post(\"audioCapture.start\", { sessionId: state.activeSessionId })", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("audio-capture-chip", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("audio-capture-chip", html, StringComparison.Ordinal);
-        Assert.DoesNotContain("screen-clip-chip", app, StringComparison.Ordinal);
-        Assert.Contains("case \"audioCapture.changed\":", app, StringComparison.Ordinal);
-        Assert.Contains("state.audioCapture = payload || state.audioCapture", app, StringComparison.Ordinal);
-        Assert.Contains("audio.isRecording && elapsed >= maximum && !state.audioCaptureStopRequested", app, StringComparison.Ordinal);
-        Assert.Contains("post(\"audioCapture.stop\", {})", app, StringComparison.Ordinal);
-        Assert.Contains("finishActiveMediaCaptureFromVoice(text)", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("missumAnalysisAudioCapture", voice, StringComparison.Ordinal);
-        Assert.DoesNotContain("audioCapture.audio", bridge, StringComparison.Ordinal);
-        Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("audioCapture.start"));
-        Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("audioCapture.stop"));
-        Assert.False(AssistantWebBridge.IsIncomingTypeAllowed("audioCapture.audio"));
-    }
-
-    [Fact]
-    public void ToolsMenuLeavesReasoningAtTheNativeModelDefault()
-    {
-        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
-        var html = File.ReadAllText(Path.Combine(webRoot, "index.html"));
-        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
-
-        Assert.DoesNotContain("id=\"reasoning-model\"", html, StringComparison.Ordinal);
-        Assert.Contains("id=\"reasoning-options\"", html, StringComparison.Ordinal);
-        Assert.DoesNotContain("id=\"reasoning\"", html, StringComparison.Ordinal);
-        Assert.DoesNotContain("data-reasoning=", html, StringComparison.Ordinal);
-        Assert.DoesNotContain("reasoningProfiles", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("reasoningEffort:", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("settings.reasoning", app, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void SettingsUseTheGlobalPromptModelSelection()
     {
         var settingsPage = File.ReadAllText(Path.Combine(
@@ -597,212 +311,6 @@ public sealed class AssistantIntegrationTests
             null,
             null,
             "fallback-model"));
-    }
-
-    [Fact]
-    public void ToolsReasoningSelectionAndBridgeHandlerAreRemoved()
-    {
-        var root = FindRepositoryRoot();
-        var app = File.ReadAllText(Path.Combine(root, "src", "Missum.App", "Assets", "Web", "app.js"));
-        var coordinator = File.ReadAllText(Path.Combine(root, "src", "Missum.App", "Services", "AssistantCoordinator.cs"));
-
-        Assert.DoesNotContain("settings.reasoning", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("settings.reasoning", coordinator, StringComparison.Ordinal);
-        Assert.DoesNotContain("reasoning.changed", app, StringComparison.Ordinal);
-    }
-
-    [Theory]
-    [InlineData("Beenden")]
-    [InlineData("Aufnahme beenden.")]
-    [InlineData("Abschließen!")]
-    [InlineData("Aufnahme abschließen")]
-    public void VoiceCanFinishAnActiveMediaCaptureWithoutAnIntentModelRun(string command)
-    {
-        Assert.True(AssistantPage.IsMediaCaptureFinishCommand(command));
-    }
-
-    [Theory]
-    [InlineData("Senden")]
-    [InlineData("Prompt senden.")]
-    [InlineData("  PROMPT   SENDEN!  ")]
-    public void ExplicitVoiceCommandSendsTheCurrentComposerDraft(string command)
-    {
-        Assert.True(AssistantPage.IsVoicePromptSendCommand(command));
-    }
-
-    [Theory]
-    [InlineData("Bitte diesen Text senden")]
-    [InlineData("Hörbuch erstellen")]
-    [InlineData("Suche im Web")]
-    public void OrdinaryDictationNeverSendsItself(string dictation)
-    {
-        Assert.False(AssistantPage.IsVoicePromptSendCommand(dictation));
-    }
-
-    [Fact]
-    public void VoiceRecognitionUsesEditableComposerDictationWithoutWhisperHotwordsOrIntentDispatch()
-    {
-        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
-        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
-        var voice = File.ReadAllText(Path.Combine(webRoot, "voice.js"));
-        var repositoryRoot = FindRepositoryRoot();
-        var worker = File.ReadAllText(Path.Combine(repositoryRoot, "workers", "speech", "app.py"));
-        var page = File.ReadAllText(Path.Combine(repositoryRoot, "src", "Missum.App", "Pages", "AssistantPage.xaml.cs"));
-        var microphone = File.ReadAllText(Path.Combine(
-            repositoryRoot,
-            "src",
-            "Missum.App",
-            "Services",
-            "MicrophoneTranscriptionService.cs"));
-
-        Assert.Contains("function updateVoiceDictation(", app, StringComparison.Ordinal);
-        Assert.Contains("setPromptValue(turn.renderedValue)", app, StringComparison.Ordinal);
-        Assert.Contains("nextRevision <= turn.lastRevision", app, StringComparison.Ordinal);
-        Assert.Contains("turn.manuallyConfirmed = true", app, StringComparison.Ordinal);
-        Assert.Contains("payload?.isFinal && payload?.sendPrompt", app, StringComparison.Ordinal);
-        Assert.Contains("void submitPrompt();", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("submitVoicePrompt", app, StringComparison.Ordinal);
-        Assert.Contains("const bridgeFrameSamples = 1600;", voice, StringComparison.Ordinal);
-        Assert.Contains("const silenceToFinishSamples = 8000;", voice, StringComparison.Ordinal);
-        Assert.DoesNotContain("windowSamples", voice, StringComparison.Ordinal);
-        Assert.Contains("FirstDecodeMilliseconds = 480", microphone, StringComparison.Ordinal);
-        Assert.Contains("DecodeCadenceMilliseconds = 300", microphone, StringComparison.Ordinal);
-        Assert.Contains("WindowMilliseconds = 6_000", microphone, StringComparison.Ordinal);
-        Assert.Contains("LiveCaptionProfile.Dictation", microphone, StringComparison.Ordinal);
-        Assert.Contains("_pendingDictationPartial = pending", microphone, StringComparison.Ordinal);
-        Assert.Contains("_pendingDictationFinals.Enqueue(pending)", microphone, StringComparison.Ordinal);
-        Assert.DoesNotContain("WHISPER_HOTWORDS", worker, StringComparison.Ordinal);
-        Assert.DoesNotContain("hotwords=", worker, StringComparison.Ordinal);
-        Assert.Contains("condition_on_previous_text=not dictation", worker, StringComparison.Ordinal);
-        Assert.Contains("word_timestamps=dictation", worker, StringComparison.Ordinal);
-        Assert.Contains("if not dictation and temporary is not None", worker, StringComparison.Ordinal);
-        Assert.DoesNotContain("ClassifyIntentAsync", page, StringComparison.Ordinal);
-        Assert.DoesNotContain("UtteranceIntent.", page, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void VoiceDictationRemainsVisibleWhileSpeechPlaybackIsActive()
-    {
-        var repositoryRoot = FindRepositoryRoot();
-        var page = File.ReadAllText(Path.Combine(
-            repositoryRoot,
-            "src",
-            "Missum.App",
-            "Pages",
-            "AssistantPage.xaml.cs"));
-        var app = File.ReadAllText(Path.Combine(
-            AppContext.BaseDirectory,
-            "Assets",
-            "Web",
-            "app.js"));
-
-        Assert.Contains(
-            "Whisper dictation and speech playback are independent",
-            page,
-            StringComparison.Ordinal);
-        Assert.DoesNotContain(
-            "if (!_microphone.Current.IsSpeaking)",
-            page,
-            StringComparison.Ordinal);
-        Assert.DoesNotContain(
-            "if (microphoneState.IsSpeaking)\r\n            {\r\n                await bridge.PostAsync(\"microphone.transcript\"",
-            page,
-            StringComparison.Ordinal);
-        Assert.Contains(
-            "Speech playback and dictation have independent lifetimes",
-            app,
-            StringComparison.Ordinal);
-        Assert.Contains(
-            "setSuspended(!state.microphone?.isRecording)",
-            app,
-            StringComparison.Ordinal);
-        var microphone = File.ReadAllText(Path.Combine(
-            repositoryRoot,
-            "src",
-            "Missum.App",
-            "Services",
-            "MicrophoneTranscriptionService.cs"));
-        Assert.Contains("private string? _transcriptionProvider;", microphone, StringComparison.Ordinal);
-        Assert.Contains("private string? _speechProvider;", microphone, StringComparison.Ordinal);
-        Assert.Contains("_speaking ? _speechProvider : _transcriptionProvider", microphone, StringComparison.Ordinal);
-        Assert.Contains("Sprache wird erkannt · Vorlesen läuft", microphone, StringComparison.Ordinal);
-    }
-
-    [Theory]
-    [InlineData("Pausieren", false, "Pause")]
-    [InlineData("Vorlesen pausieren.", false, "Pause")]
-    [InlineData("Fortsetzen", true, "Resume")]
-    [InlineData("Weiterlesen!", true, "Resume")]
-    [InlineData("Abbrechen", false, "Cancel")]
-    public void VoicePlaybackCommandsAreHandledLocallyWhileSpeechIsActive(
-        string command,
-        bool paused,
-        string expected)
-    {
-        var state = new MicrophoneSnapshot(
-            IsRecording: true,
-            IsBusy: true,
-            IsSpeaking: true,
-            CanPauseSpeech: true,
-            IsSpeechPaused: paused,
-            Status: "AI-Antwort wird vorgelesen",
-            StartedAt: DateTimeOffset.UtcNow,
-            Error: null,
-            PartialTranscript: string.Empty,
-            Provider: "supertonic-3-F5-cuda",
-            DeviceLabel: "Test");
-
-        Assert.Equal(
-            expected,
-            AssistantPage.ResolveVoicePlaybackControl(command, state, speechOperationActive: true).ToString());
-    }
-
-    [Theory]
-    [InlineData("Sprachsteuerung abbrechen")]
-    [InlineData("Sprachsteuerung beenden.")]
-    [InlineData("  SPRACHSTEUERUNG   BEENDEN!  ")]
-    public void ExplicitVoiceCommandsStopPersistentVoiceControl(string command)
-    {
-        Assert.True(AssistantPage.IsVoiceControlStopCommand(command));
-    }
-
-    [Theory]
-    [InlineData("Abbrechen")]
-    [InlineData("Vorlesen abbrechen")]
-    [InlineData("Sprachsteuerung starten")]
-    [InlineData("Beenden")]
-    public void GenericCommandsDoNotDisablePersistentVoiceControl(string command)
-    {
-        Assert.False(AssistantPage.IsVoiceControlStopCommand(command));
-    }
-
-    [Fact]
-    public void SpeechStatusHidesHardwareAndSelectedMessageDetails()
-    {
-        var app = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Assets", "Web", "app.js"));
-        var styles = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Assets", "Web", "styles.css"));
-
-        Assert.Equal("Supertonic F5 Ultra", MissumAiAssistantService.DisplaySpeechProvider(null));
-        Assert.Equal("Supertonic F5 Ultra", MissumAiAssistantService.DisplaySpeechProvider("supertonic-3-F5-cuda"));
-        Assert.Contains("setSuspended(!state.microphone?.isRecording)", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("Boolean(state.microphone?.isSpeaking)\n      || state.voicePlaybackPending", app, StringComparison.Ordinal);
-        Assert.Contains("elements.microphone.disabled = Boolean(state.voiceStarting)", app, StringComparison.Ordinal);
-        Assert.Contains("payload?.isFinal && payload?.stopVoice", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("microphone.isBusy && !active", app, StringComparison.Ordinal);
-        Assert.Contains("const active = Boolean(browserActive || state.voiceStarting)", app, StringComparison.Ordinal);
-        Assert.Contains("function resetTransientVoiceStateForSessionChange()", app, StringComparison.Ordinal);
-        Assert.Contains("resetTransientVoiceStateForSessionChange();", app, StringComparison.Ordinal);
-        Assert.Contains("isBusy: browserCaptureActive && Boolean(state.microphone?.isBusy)", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("browserVoiceActive || state.microphone?.isBusy", app, StringComparison.Ordinal);
-        Assert.Contains("elements.microphone.classList.remove(\"speaking\")", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("classList.toggle(\"speaking\"", app, StringComparison.Ordinal);
-        Assert.DoesNotContain(".microphone-button.speaking", styles, StringComparison.Ordinal);
-        Assert.Contains("&& isVoiceControlActive()", app, StringComparison.Ordinal);
-        Assert.Contains("const captureStop = globalThis.missumVoiceCapture?.stop(false)", app, StringComparison.Ordinal);
-        Assert.Contains("if (notifyHost) post(\"microphone.stop\", {})", app, StringComparison.Ordinal);
-        Assert.True(
-            app.IndexOf("if (notifyHost) post(\"microphone.stop\", {})", StringComparison.Ordinal)
-            < app.IndexOf("await captureStop", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -1119,30 +627,6 @@ public sealed class AssistantIntegrationTests
     }
 
     [Fact]
-    public void WebSpeechProgressHighlightsSourcesWithoutAutomaticScrolling()
-    {
-        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
-        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
-        var bridge = File.ReadAllText(Path.Combine(webRoot, "bridge.js"));
-        var styles = File.ReadAllText(Path.Combine(webRoot, "styles.css"));
-
-        Assert.Contains("case \"speech.progress\":", app, StringComparison.Ordinal);
-        Assert.Contains("updateSpeechProgress(payload)", app, StringComparison.Ordinal);
-        Assert.Contains("CSS.highlights.set", app, StringComparison.Ordinal);
-        Assert.Contains("speechSourceRangeMap(content, sourceUnits)", app, StringComparison.Ordinal);
-        Assert.Contains("activeSourceUnitIds.slice(0, 1)", app, StringComparison.Ordinal);
-        Assert.Contains("incomingPlaybackId !== currentPlaybackId", app, StringComparison.Ordinal);
-        Assert.Contains("if (!payload?.isSpeaking || !wasSpeaking || payload?.error)", app, StringComparison.Ordinal);
-        Assert.Contains("previousScrollTop", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("scrollIntoView", app, StringComparison.Ordinal);
-        Assert.Contains("::highlight(missum-speech-current)", styles, StringComparison.Ordinal);
-        Assert.Contains("background-color: Highlight", styles, StringComparison.Ordinal);
-        Assert.Contains("\"speech.progress\"", bridge, StringComparison.Ordinal);
-        Assert.True(AssistantWebBridge.IsOutgoingTypeAllowed("speech.progress"));
-        Assert.False(AssistantWebBridge.IsOutgoingTypeAllowed("chat.removed"));
-    }
-
-    [Fact]
     public void ArtifactImagePreviewUsesAnEmbeddedPngDataUrl()
     {
         byte[] png = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
@@ -1152,47 +636,6 @@ public sealed class AssistantIntegrationTests
         Assert.StartsWith("data:image/png;base64,", url, StringComparison.Ordinal);
         Assert.Equal(png, Convert.FromBase64String(url[(url.IndexOf(',', StringComparison.Ordinal) + 1)..]));
     }
-
-    [Fact]
-    public async Task ArtifactImagesCanBeMaterializedAndOpenedThroughTheBridge()
-    {
-        Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("artifact.open"));
-        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
-        var bridge = File.ReadAllText(Path.Combine(webRoot, "bridge.js"));
-        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
-        Assert.Contains("\"artifact.open\"", bridge, StringComparison.Ordinal);
-        Assert.Contains("post(\"artifact.open\", { artifactId: artifact.id })", app, StringComparison.Ordinal);
-
-        await using var environment = await TestEnvironment.CreateAsync();
-        var chats = environment.Get<IChatRepository>();
-        var session = await chats.CreateSessionAsync("Bild öffnen");
-        var message = await chats.AddMessageAsync(session.Id, ChatRole.Assistant, "Bild", MessageStatus.Completed);
-        byte[] png = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
-        var sha256 = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(png)).ToLowerInvariant();
-        await using var source = new MemoryStream(png, writable: false);
-        var artifact = await environment.Get<IChatArtifactRepository>().ImportAsync(
-            message.Id,
-            "test-image",
-            "plot.png",
-            "image/png",
-            sha256,
-            png.Length,
-            "missum-ai",
-            null,
-            null,
-            source);
-        var cacheRoot = Path.Combine(environment.Directory, "preview-cache");
-        using var previews = new AssistantArtifactPreviewService(
-            environment.Get<IChatArtifactRepository>(),
-            environment.Get<IBinaryObjectStore>(),
-            cacheRoot);
-
-        var path = await previews.MaterializeOriginalAsync(artifact.Id, CancellationToken.None);
-
-        Assert.Equal(Path.Combine(cacheRoot, artifact.Id.ToString("N"), "original.png"), path);
-        Assert.Equal(png, await File.ReadAllBytesAsync(path));
-    }
-
 
     [Fact]
     public async Task ArtifactAudioPreviewIsMaterializedForTheStaticWebViewHost()
@@ -1227,20 +670,6 @@ public sealed class AssistantIntegrationTests
         var cached = Path.Combine(cacheRoot, artifact.Id.ToString("N"), "media.wav");
         Assert.True(File.Exists(cached));
         Assert.Equal(wave, await File.ReadAllBytesAsync(cached));
-    }
-
-    [Fact]
-    public void WebViewAllowsStaticAudioAndVideoPreviewResources()
-    {
-        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
-        var html = File.ReadAllText(Path.Combine(webRoot, "index.html"));
-        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
-
-        Assert.Contains("media-src 'self' https://assistant-preview.local", html, StringComparison.Ordinal);
-        Assert.Contains("mediaType.startsWith(\"audio/\") || mediaType.startsWith(\"video/\")", app, StringComparison.Ordinal);
-        Assert.Contains("audio.src = previewUrl", app, StringComparison.Ordinal);
-        Assert.Contains("video.src = previewUrl", app, StringComparison.Ordinal);
-        Assert.Contains("Audio speichern", app, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1329,168 +758,6 @@ public sealed class AssistantIntegrationTests
             static part => string.IsNullOrWhiteSpace(part.Text)
                 && string.IsNullOrWhiteSpace(part.UploadId)
                 && string.IsNullOrWhiteSpace(part.ArtifactId));
-    }
-
-    [Fact]
-    public void ComposerKeepsLiveDraftAndPersistentSessionToolsAcrossHostUpdates()
-    {
-        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
-        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
-
-        Assert.Contains(
-            "new Set([\"builtin.audiobook/create\", \"builtin.coding/plan-mode\"])",
-            app,
-            StringComparison.Ordinal);
-        Assert.Contains("!persistentExtensionActionIds.has(previousExtensionActionId)", app, StringComparison.Ordinal);
-        Assert.Contains("clearCompletedOneShotToolAction();", app, StringComparison.Ordinal);
-        Assert.Contains("case \"chat.completed\":", app, StringComparison.Ordinal);
-        Assert.Contains("case \"chat.cancelled\":", app, StringComparison.Ordinal);
-        Assert.Contains("case \"chat.failed\":", app, StringComparison.Ordinal);
-
-        // A mode or project-folder snapshot may arrive before session.draft is saved.
-        // Only opening another session may replace the live text, including a cleared draft.
-        var snapshotBlock = app[
-            app.IndexOf("function applySnapshot(payload)", StringComparison.Ordinal)..
-            app.IndexOf("function applyConversationSnapshot(payload)", StringComparison.Ordinal)];
-        var draftAssignments = System.Text.RegularExpressions.Regex.Matches(
-            snapshotBlock,
-            @"setPromptValue\(");
-        Assert.Single(draftAssignments.Cast<System.Text.RegularExpressions.Match>());
-        Assert.Matches(
-            @"if \(sessionChanged\)\s*\{\s*setPromptValue\(payload\.draft \|\| """"\);\s*\}",
-            snapshotBlock);
-    }
-
-    [Fact]
-    public void ComposerCollapsesTwoOrMoreAttachedFilesIntoAnUpwardOverlayMenu()
-    {
-        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
-        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
-        var css = File.ReadAllText(Path.Combine(webRoot, "styles.css"));
-
-        Assert.Contains("if (attachedFiles.length < 2)", app, StringComparison.Ordinal);
-        Assert.Contains("summary.className = \"active-tool-chip attachment-summary\"", app, StringComparison.Ordinal);
-        Assert.Contains("menu.className = \"attachment-menu\"", app, StringComparison.Ordinal);
-        Assert.Contains("removeAll.className = \"attachment-summary__remove active-tool-chip__remove\"", app, StringComparison.Ordinal);
-        Assert.Contains("Alle Dateianhänge entfernen", app, StringComparison.Ordinal);
-        Assert.Contains("document-preparation-status", app, StringComparison.Ordinal);
-        Assert.Contains("document.import.started", app, StringComparison.Ordinal);
-        Assert.Contains("\"document.import.started\"", File.ReadAllText(Path.Combine(webRoot, "bridge.js")), StringComparison.Ordinal);
-        Assert.True(AssistantWebBridge.IsOutgoingTypeAllowed("document.import.started"));
-        Assert.Contains("wird verarbeitet", app, StringComparison.Ordinal);
-        Assert.Contains("@keyframes document-status-spin", css, StringComparison.Ordinal);
-        Assert.Contains("bottom: calc(100% + 8px)", css, StringComparison.Ordinal);
-        Assert.Contains("position: absolute", css, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void RunningMessageShowsItsModelAndPreservesContextWhenUpdatesOmitTokenCounts()
-    {
-        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
-        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
-
-        Assert.Contains("runStatusText(liveStatus)", app, StringComparison.Ordinal);
-        Assert.Contains("uniqueStatusParts(detail)", app, StringComparison.Ordinal);
-        var startedBlock = app[
-            app.IndexOf("case \"chat.started\":", StringComparison.Ordinal)..
-            app.IndexOf("case \"chat.delta\":", StringComparison.Ordinal)];
-        Assert.Contains("if (payload.message?.id) state.messageRunStatus.set(String(payload.message.id)", startedBlock, StringComparison.Ordinal);
-        Assert.Contains("model: payload.model || state.model || null", startedBlock, StringComparison.Ordinal);
-        Assert.Contains("renderMessages(true);", startedBlock, StringComparison.Ordinal);
-        Assert.Contains("cleanStatusMetadata", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("Kontexttoken", app, StringComparison.Ordinal);
-        Assert.Contains("if (Number.isFinite(payload.contextUsed))", app, StringComparison.Ordinal);
-        Assert.Contains("function visibleModelLabel(value)", app, StringComparison.Ordinal);
-        Assert.Contains("model.replace(/\\s*·\\s*MXFP4", app, StringComparison.Ordinal);
-        Assert.Contains("state.messageRunStatus.clear();", app, StringComparison.Ordinal);
-        Assert.Contains("const acceptsRunStatus =", app, StringComparison.Ordinal);
-        Assert.Contains("!isTerminalMessageStatus(statusMessage?.status)", app, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void SpeechUsesItsSourceMessageFooterWithoutComposerChipsRetryOrChatRendering()
-    {
-        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
-        var html = File.ReadAllText(Path.Combine(webRoot, "index.html"));
-        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
-        var bridge = File.ReadAllText(Path.Combine(webRoot, "bridge.js"));
-
-        Assert.DoesNotContain("composer-speech", html, StringComparison.Ordinal);
-        Assert.DoesNotContain("composer-speech", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("Vorheriger Absatz", html, StringComparison.Ordinal);
-        Assert.DoesNotContain("Absatz überspringen", html, StringComparison.Ordinal);
-        Assert.Contains("function isMessageSpeechActive(messageId, sessionId)", app, StringComparison.Ordinal);
-        Assert.Contains("String(controlMessageId) === String(messageId)", app, StringComparison.Ordinal);
-        Assert.Contains("String(progress.sessionId) === String(sessionId)", app, StringComparison.Ordinal);
-        Assert.Contains("footer.dataset.speechMessageId = String(message.id)", app, StringComparison.Ordinal);
-        Assert.Contains("footer.dataset.speechSessionId = String(sessionId)", app, StringComparison.Ordinal);
-        Assert.Contains("active ? \"Vorlesen beenden\" : \"Nachricht vorlesen\"", app, StringComparison.Ordinal);
-        Assert.Contains("paused ? \"Vorlesen fortsetzen\" : \"Vorlesen pausieren\"", app, StringComparison.Ordinal);
-        Assert.Contains("pause.setAttribute(\"aria-pressed\", String(active && paused))", app, StringComparison.Ordinal);
-        Assert.Contains("pause.hidden = !active", app, StringComparison.Ordinal);
-        Assert.Contains("status.hidden = !active", app, StringComparison.Ordinal);
-        Assert.Contains("status.setAttribute(\"role\", \"status\")", app, StringComparison.Ordinal);
-        Assert.Contains("status.setAttribute(\"aria-live\", \"polite\")", app, StringComparison.Ordinal);
-        Assert.Contains("case \"speech.status\":", app, StringComparison.Ordinal);
-        Assert.Contains("renderSpeechStatus();", app, StringComparison.Ordinal);
-        Assert.Contains("post(\"microphone.toggleSpeechPause\"", app, StringComparison.Ordinal);
-        Assert.Contains("if (isMessageSpeechActive(messageId, sessionId))", app, StringComparison.Ordinal);
-        Assert.Contains("playbackId: progress.controlPlaybackId || progress.playbackId", app, StringComparison.Ordinal);
-        Assert.Contains("post(\"microphone.stopSpeech\", {});", app, StringComparison.Ordinal);
-        var speechRenderStart = app.IndexOf("function renderSpeechStatus()", StringComparison.Ordinal);
-        var captionRenderStart = app.IndexOf("function renderLiveCaption()", speechRenderStart, StringComparison.Ordinal);
-        Assert.True(speechRenderStart >= 0 && captionRenderStart > speechRenderStart);
-        var speechRenderer = app[speechRenderStart..captionRenderStart];
-        Assert.Contains(".message-footer[data-speech-message-id]", speechRenderer, StringComparison.Ordinal);
-        Assert.Contains("updateMessageSpeechFooter(footer)", speechRenderer, StringComparison.Ordinal);
-        Assert.DoesNotContain("replaceChildren", speechRenderer, StringComparison.Ordinal);
-        Assert.DoesNotContain("renderMessages(", speechRenderer, StringComparison.Ordinal);
-        var promptStop = app.IndexOf("async function handleComposerAction()", StringComparison.Ordinal);
-        var promptSubmit = app.IndexOf("async function submitPrompt()", promptStop, StringComparison.Ordinal);
-        Assert.True(promptStop >= 0 && promptSubmit > promptStop);
-        var composerActions = app[promptStop..promptSubmit];
-        Assert.Contains("if (elements.prompt.value.trim()) await submitPrompt();", composerActions, StringComparison.Ordinal);
-        Assert.Contains("else if (state.speechStatus?.active || state.microphone?.isSpeaking) post(\"microphone.stopSpeech\", {});", composerActions, StringComparison.Ordinal);
-        Assert.True(composerActions.IndexOf("chat.cancel", StringComparison.Ordinal)
-            < composerActions.IndexOf("microphone.stopSpeech", StringComparison.Ordinal), "AI cancellation retains priority over standalone speech.");
-        Assert.DoesNotContain("\"chat.removed\"", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("microphone.previousSpeechParagraph", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("microphone.skipSpeechParagraph", app, StringComparison.Ordinal);
-        Assert.Contains("const sessionId = footer.dataset.speechSessionId, messageId = footer.dataset.speechMessageId;", app, StringComparison.Ordinal);
-        Assert.Contains("sessionId: state.activeSessionId", app, StringComparison.Ordinal);
-        Assert.Contains("\"speech.status\"", bridge, StringComparison.Ordinal);
-        Assert.DoesNotContain("Erneut senden", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("retryMessage", app, StringComparison.Ordinal);
-        var speechStatusStart = app.IndexOf("case \"speech.status\":", StringComparison.Ordinal);
-        var speechProgressStart = app.IndexOf("case \"speech.progress\":", speechStatusStart, StringComparison.Ordinal);
-        Assert.True(speechStatusStart >= 0 && speechProgressStart > speechStatusStart);
-        var speechStatusHandler = app[speechStatusStart..speechProgressStart];
-        Assert.DoesNotContain("createMessageFooterLink", speechStatusHandler, StringComparison.Ordinal);
-        Assert.DoesNotContain("post(\"chat.resume\"", speechStatusHandler, StringComparison.Ordinal);
-        Assert.DoesNotContain("renderMessages(", speechStatusHandler, StringComparison.Ordinal);
-        Assert.DoesNotContain("function continueMessage()", app, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void ReadAloudRemainsIndependentAndScrollIsPersistedOnlyAcrossSessionChanges()
-    {
-        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
-        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
-
-        Assert.Contains("globalThis.missumRunSteering?.canSteer(state)", app, StringComparison.Ordinal);
-        Assert.Contains("if (sessionChanged && previousSessionId) persistSessionScrollPosition(previousSessionId);", app, StringComparison.Ordinal);
-        Assert.Contains("if (sessionChanged) restoreSessionScrollPosition(state.activeSessionId);", app, StringComparison.Ordinal);
-        Assert.Contains("sessionScrollStoragePrefix", app, StringComparison.Ordinal);
-        Assert.Contains("anchorMessageId", app, StringComparison.Ordinal);
-        Assert.Contains("renderMessages(currentSessionMessagesChanged);", app, StringComparison.Ordinal);
-        Assert.Contains("renderMessages(messagesChanged);", app, StringComparison.Ordinal);
-        Assert.Contains("renderMessages(true);", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("scheduleSessionScrollSave", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("elements.messageScroll.addEventListener(\"scroll\"", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("addEventListener(\"pagehide\", () => persistSessionScrollPosition", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("preserveForSpeech", app, StringComparison.Ordinal);
-        Assert.Contains("&& isVoiceControlActive()", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("payload.message?.contentProfile !== \"audiobook\"", app, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1613,28 +880,6 @@ public sealed class AssistantIntegrationTests
     }
 
     [Fact]
-    public void WebViewAnnotatesReadableBlocksForTheNativeReadFromHereMenu()
-    {
-        var target = new ReadFromContextTarget(
-            Guid.NewGuid(),
-            Guid.NewGuid(),
-            DateTimeOffset.UtcNow,
-            "tableRow",
-            2);
-        Assert.True(AssistantWebBridge.IsValidReadFromContextTarget(target));
-        Assert.False(AssistantWebBridge.IsValidReadFromContextTarget(target with { Kind = "button" }));
-        Assert.False(AssistantWebBridge.IsIncomingTypeAllowed("microphone.previousSpeechParagraph"));
-        Assert.False(AssistantWebBridge.IsIncomingTypeAllowed("microphone.skipSpeechParagraph"));
-
-        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
-        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
-        Assert.Contains("annotateReadableSpeechBlocks(message, article, content)", app, StringComparison.Ordinal);
-        Assert.Contains("globalThis.missumGetReadFromContextTarget", app, StringComparison.Ordinal);
-        Assert.Contains("data-speech-block-kind", app, StringComparison.Ordinal);
-        Assert.Contains("messageUpdatedAt", app, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void MediaTransportButtonsMapToSpeechControls()
     {
         Assert.Equal(
@@ -1662,19 +907,6 @@ public sealed class AssistantIntegrationTests
         controller.SetPlaying(paused: false);
         controller.SetPlaying(paused: true);
         controller.Deactivate();
-    }
-
-    [Fact]
-    public void AudiobookToolRemainsPersistentInTheComposer()
-    {
-        var webRoot = Path.Combine(AppContext.BaseDirectory, "Assets", "Web");
-        var html = File.ReadAllText(Path.Combine(webRoot, "index.html"));
-        var app = File.ReadAllText(Path.Combine(webRoot, "app.js"));
-
-        Assert.DoesNotContain("data-tool-action=\"audiobook\"", html, StringComparison.Ordinal);
-        Assert.Contains("builtin.audiobook/create", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("displayName: \"Hörbuch erstellen\"", app, StringComparison.Ordinal);
-        Assert.DoesNotContain("payload.message?.contentProfile !== \"audiobook\"", app, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -2079,10 +1311,9 @@ public sealed class AssistantIntegrationTests
     }
 
     [Fact]
-    public async Task ScienceSnapshotRepairsTheStoredCutTitleAndGeneratedIntroductionWithoutChangingTheResearch()
+    public async Task ScienceSnapshotDoesNotRewriteHistoricalTitlesOrNarrationWhileLoadingTheView()
     {
         const string legacy = "Erstelle eine wissenschaftliche Publikation: Einsteinsche Feldgl";
-        const string topic = "Einsteinsche Feldgleichungen, Allgemeine Relativitätstheorie und Quantenmechanik";
         const string prompt = "Erstelle eine wissenschaftliche Publikation:\nEinsteinsche Feldgleichungen, Allgemeine Relativitätstheorie und Quantenmechanik kombinieren und eine allgemeine Gleichung finden. Stelle mehrere verschiedene Hypothesen auf.";
         await using var environment = await TestEnvironment.CreateAsync();
         var chats = environment.Get<IChatRepository>();
@@ -2100,15 +1331,15 @@ public sealed class AssistantIntegrationTests
 
         var snapshot = JsonSerializer.SerializeToElement(await coordinator.BuildSnapshotAsync(), JsonSerializerOptions.Web);
 
-        Assert.Equal(topic, Assert.Single(snapshot.GetProperty("sessions").EnumerateArray()).GetProperty("title").GetString());
+        Assert.Equal(legacy, Assert.Single(snapshot.GetProperty("sessions").EnumerateArray()).GetProperty("title").GetString());
         var repaired = (await chats.GetSessionAsync(session.Id))!;
-        Assert.Equal(topic, repaired.Title);
+        Assert.Equal(legacy, repaired.Title);
         Assert.Equal("Entwurf erhalten", repaired.Draft);
         Assert.Equal(prompt, (await chats.GetMessageAsync(user.Id))!.Content);
         var preserved = (await chats.GetMessageAsync(answer.Id))!;
         Assert.Equal("Die vollständige Herleitung bleibt erhalten.", preserved.Content);
         Assert.Equal(MessageStatus.Cancelled, preserved.Status);
-        Assert.Equal("**" + topic + "**\n\nDie Quellenprüfung bleibt offen.", Assert.Single(preserved.ToolSteps!).Detail);
+        Assert.Equal("**" + legacy + "**\n\nDie Quellenprüfung bleibt offen.", Assert.Single(preserved.ToolSteps!).Detail);
         await coordinator.BuildSnapshotAsync();
         var reopened = CreateCoordinator(environment, settings, CreateRecentActivity(settings));
         await reopened.BuildSnapshotAsync();
@@ -2149,6 +1380,7 @@ public sealed class AssistantIntegrationTests
         var session = await chats.CreateSessionAsync("Neue Sitzung", ChatMode.ClaudeScience);
         using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
         await settings.InitializeAsync();
+        await environment.Get<IChatRepository>().SetCodingWorkspacePathAsync(session.Id, environment.Directory, activateCoding: false);
         var coordinator = CreateCoordinator(environment, settings, CreateRecentActivity(settings));
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => HandleAsync(coordinator, "chat.send", new
@@ -2381,7 +1613,7 @@ public sealed class AssistantIntegrationTests
     {
         using var payloadDocument = JsonDocument.Parse(JsonSerializer.Serialize(payload));
         var envelope = new WebBridgeEnvelope(
-            AssistantWebBridge.ProtocolVersion,
+            AssistantProtocol.ProtocolVersion,
             type,
             Guid.NewGuid().ToString("D"),
             payloadDocument.RootElement.Clone());
@@ -2396,7 +1628,7 @@ public sealed class AssistantIntegrationTests
     {
         using var payloadDocument = JsonDocument.Parse(JsonSerializer.Serialize(payload));
         var envelope = new WebBridgeEnvelope(
-            AssistantWebBridge.ProtocolVersion,
+            AssistantProtocol.ProtocolVersion,
             requestType,
             Guid.NewGuid().ToString("D"),
             payloadDocument.RootElement.Clone());
@@ -2420,7 +1652,7 @@ public sealed class AssistantIntegrationTests
     {
         using var payloadDocument = JsonDocument.Parse(JsonSerializer.Serialize(new { sessionId }));
         var envelope = new WebBridgeEnvelope(
-            AssistantWebBridge.ProtocolVersion,
+            AssistantProtocol.ProtocolVersion,
             "session.open",
             Guid.NewGuid().ToString("D"),
             payloadDocument.RootElement.Clone());
@@ -2467,7 +1699,7 @@ public sealed class AssistantIntegrationTests
         }
 
         var groupNowEnvelope = new WebBridgeEnvelope(
-            AssistantWebBridge.ProtocolVersion,
+            AssistantProtocol.ProtocolVersion,
             "session.groupNow",
             Guid.NewGuid().ToString("D"),
             JsonDocument.Parse("{}").RootElement.Clone());
@@ -2518,12 +1750,12 @@ public sealed class AssistantIntegrationTests
         Assert.Equal("groupingCompleted,productName,assistantTitle,productIdentity,chatMode,selectedChatMode,sessions,sessionGroups",
             string.Join(",", completion.EnumerateObject().Select(property => property.Name)));
         Assert.True(completion.GetProperty("groupingCompleted").GetBoolean());
-        Assert.True(AssistantWebBridge.IsOutgoingTypeAllowed("session.grouped"));
+        Assert.True(AssistantProtocol.IsOutgoingTypeAllowed("session.grouped"));
 
         var groupId = Assert.Single(await chats.ListSessionGroupsAsync()).Id;
         using var payload = JsonDocument.Parse(JsonSerializer.Serialize(new { groupId, collapsed = true }));
         var events = new List<(string Type, JsonElement Data)>();
-        await coordinator.HandleAsync(new(AssistantWebBridge.ProtocolVersion, "session.groupCollapse", "group-collapse", payload.RootElement.Clone()),
+        await coordinator.HandleAsync(new(AssistantProtocol.ProtocolVersion, "session.groupCollapse", "group-collapse", payload.RootElement.Clone()),
             (type, data, _) =>
             {
                 events.Add((type, JsonSerializer.SerializeToElement(data, JsonSerializerOptions.Web)));

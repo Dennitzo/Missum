@@ -1,4 +1,4 @@
-using Missum.Ai.Client;
+﻿using Missum.Ai.Client;
 using Missum.Ai.Contracts;
 using Missum.Core.Coding;
 using Missum.Core.Extensions;
@@ -115,12 +115,6 @@ public sealed partial class MissumAiAssistantService
                 };
                 var request = recoveredRequest ?? await BuildRunRequestAsync(client, sessionId, continuationInstruction, requestTrigger,
                     attachmentsForRun, history, uploaded, assistant, update, token).ConfigureAwait(false);
-                if (session.ChatMode == ChatMode.ClaudeScience)
-                {
-                    var researchOptions = request.ResearchOptions ?? CreateDeepResearchOptions(requestTrigger, coding: false,
-                        sessionId, force: true, sandboxResearch: request.ClientCapabilities?.Contains("research.sandbox") == true);
-                    request = request with { DeepResearch = true, ResearchOptions = researchOptions };
-                }
                 var workspace = persisted?.WorkspacePath ?? session.CodingWorkspacePath;
                 if (UsesCodingAgent(_activeRunAction) && (string.IsNullOrWhiteSpace(workspace) || !Directory.Exists(workspace)))
                     throw new InvalidOperationException("Der gespeicherte Projektordner ist nicht mehr vorhanden.");

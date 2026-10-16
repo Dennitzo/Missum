@@ -21,16 +21,55 @@ import uuid
 # returns; waiting here costs nothing the follow-up prompt would not wait for
 # anyway (the single slot cannot start it earlier) and keeps the snapshot exact.
 INTERRUPTED_SAVE_IDLE_SECONDS = 90.0
+PREPARATION_IDLE_SECONDS = 300.0
+PREPARATION_MAXIMUM_SECONDS = 2 * 60 * 60.0
+
+
+class PreparationCancelledError(RuntimeError):
+    pass
+
+
+class PreparationTimeoutError(TimeoutError):
+    pass
+
+
+class PreparationProgress:
+    """Only advancing native token counts extend the preparation idle budget."""
+    def __init__(self, total, cancelled=None, clock=None):
+        self.total, self.cancelled = total, cancelled
+        self.clock = clock or time.monotonic
+        self.started = self.updated = self.clock()
+        self.processed = -1
+
+    def check(self):
+        if self.cancelled and self.cancelled():
+            raise PreparationCancelledError("Subagent preparation was cancelled by its caller")
+        now = self.clock()
+        if now - self.started >= PREPARATION_MAXIMUM_SECONDS:
+            raise PreparationTimeoutError("Subagent preparation exceeded its two-hour maximum")
+        if now - self.updated >= PREPARATION_IDLE_SECONDS:
+            raise PreparationTimeoutError("Subagent preparation made no token progress for five minutes")
+
+    def observe(self, event):
+        self.check()
+        progress = event.get("prompt_progress")
+        if not isinstance(progress, dict):
+            return
+        processed = progress.get("processed")
+        if type(processed) is int and self.processed < processed <= self.total:
+            self.processed = processed
+            self.updated = self.clock()
 
 
 class NativeSessionCache:
     def __init__(self, directory, router, fingerprint, maximum_bytes=64 * 1024**3,
-                 free_reserve=4 * 1024**3, estimate_bytes=None):
+                 free_reserve=4 * 1024**3, estimate_bytes=None, prepare_completion=None):
         self.directory = Path(directory).resolve()
         self.directory.mkdir(parents=True, exist_ok=True)
         self.router, self.fingerprint = router, fingerprint
         self.maximum_bytes, self.free_reserve = maximum_bytes, free_reserve
         self.estimate_bytes = estimate_bytes
+        self.prepare_completion = prepare_completion
         self.resident = {}
         self.owners = {}
         self.deleted_keys = set()
@@ -461,7 +500,12 @@ class NativeSessionCache:
                 raise ValueError("Canonical cache preparation requires text tokens")
             return tokens
 
-    def _prefill_fork(self, source_model, target, temporary, prefill):
+    @staticmethod
+    def _check_preparation_cancelled(cancelled):
+        if cancelled and cancelled():
+            raise PreparationCancelledError("Subagent preparation was cancelled by its caller")
+
+    def _prefill_fork(self, source_model, target, temporary, prefill, cancelled=None, preparation=None):
         """Evaluate a canonical branch on the source's live rollback checkpoints.
 
         llama's slot file contains the final recurrent state, but not its earlier
@@ -471,6 +515,7 @@ class NativeSessionCache:
         sampling (current native servers still sample one token with that value).
         """
         body = dict(prefill, model=source_model, add_generation_prompt=False)
+        self._check_preparation_cancelled(cancelled)
         rendered = self.router("apply-template", body, timeout=120).get("prompt")
         if not isinstance(rendered, str) or not rendered:
             raise ValueError("Native template did not return a text prefix")
@@ -490,19 +535,26 @@ class NativeSessionCache:
         estimate = self.estimate_bytes(source_model, len(tokens)) if self.estimate_bytes else None
         estimate = estimate if type(estimate) is int and estimate > 0 else len(tokens) * 256 * 1024
         self._prune(required=max(target.stat().st_size if target.exists() else 0, estimate), protected=[target.name])
-        response = self.router("completion", dict(model=source_model, prompt=tokens,
-            n_predict=1, stream=False, cache_prompt=True, id_slot=0, temperature=0), timeout=300)
+        self._check_preparation_cancelled(cancelled)
+        completion = dict(model=source_model, prompt=tokens, n_predict=1,
+            cache_prompt=True, id_slot=0, temperature=0)
+        if preparation is not None:
+            preparation["started"] = True
+        response = (self.prepare_completion(completion, cancelled) if self.prepare_completion else
+            self.router("completion", dict(completion, stream=False), timeout=PREPARATION_MAXIMUM_SECONDS))
+        self._check_preparation_cancelled(cancelled)
         # Raw /completion's tokens_cached is the final slot length, not reuse.
         # Native timings separately count reused and newly evaluated tokens.
         processed = response.get("timings", {}).get("prompt_n")
         cached = response.get("timings", {}).get("cache_n")
         sampled = response.get("tokens_predicted")
-        if (type(cached) is not int or cached <= 0 or type(processed) is not int
+        if (type(cached) is not int or cached < 0 or type(processed) is not int
                 or processed < 0 or cached + processed != len(tokens)):
-            raise RuntimeError("Canonical branch preparation did not reuse the source KV cache")
+            raise RuntimeError("Canonical branch preparation returned inconsistent token accounting")
         if type(sampled) is not int or sampled != 1:
             raise RuntimeError("Native preparation did not honor its single sampled token limit")
         self._idle_slot(source_model)
+        self._check_preparation_cancelled(cancelled)
         saved = self.router("slots/0?action=save", dict(model=source_model, filename=temporary.name), timeout=120)
         if not temporary.is_file() or saved.get("n_saved") != len(tokens) or self._snapshot_tokens(temporary) != tokens:
             raise RuntimeError("Prepared snapshot differs from the canonical prefix or contains generated tokens")
@@ -511,10 +563,11 @@ class NativeSessionCache:
         temporary.replace(target)
         target.with_suffix(".json").write_text(json.dumps(dict(bytes=target.stat().st_size,
             tokens=len(tokens))), encoding="utf-8")
-        return dict(sourceCachedTokens=cached, preparationSampledTokens=sampled,
+        return dict(sourceCachedTokens=cached, sourceEvaluatedTokens=processed,
+                    preparationMode="reused" if cached else "replayed", preparationSampledTokens=sampled,
                     evaluatedGeneratedTokens=0, preparedPromptTokens=len(tokens), firstInferencePromptTokens=len(first_tokens))
 
-    def fork(self, source_model, source_key, model, key, prefill=None, session_id=None, parent_session_id=None):
+    def fork(self, source_model, source_key, model, key, prefill=None, session_id=None, parent_session_id=None, cancelled=None):
         """Copy a compatible prefix into an independent, atomic child snapshot.
 
         CUDA placement is not serialized model/KV geometry. Every other
@@ -523,7 +576,10 @@ class NativeSessionCache:
         The caller owns the manager lock and both instance turn leases.
         """
         temporary = None
+        preparation = {"started": False}
+        new_target = None
         try:
+            self._check_preparation_cancelled(cancelled)
             if not source_key or not key:
                 raise ValueError("Cache fork requires source and child session keys")
             if source_model.removesuffix("@subagent") != model.removesuffix("@subagent"):
@@ -545,8 +601,25 @@ class NativeSessionCache:
             # Restart/retry must restore the child's own progressed state.
             if target.is_file():
                 return self.prepare(model, key)
+            new_target = target
+            source_owner = self.resident.get(source_model)
+            if source_owner is None or source_owner["identity"] != source_identity:
+                if source_owner is not None:
+                    # prepare normally saves the previous owner, but cache
+                    # failures are best-effort there. A fork must not proceed
+                    # past a failed save and overwrite another session's slot.
+                    previous = self._save(source_model)
+                    if previous["status"] not in ("saved", "unchanged"):
+                        raise RuntimeError(previous.get("detail", "Previous source session could not be saved"))
+                prepared = self.prepare(source_model, source_key, session_id=parent_session_id)
+                source_owner = self.resident.get(source_model)
+                if (prepared["status"] not in ("restored", "resident") or source_owner is None
+                        or source_owner["identity"] != source_identity):
+                    if source_owner and source_owner["identity"] == source_identity:
+                        self.resident.pop(source_model, None)
+                    raise RuntimeError(prepared.get("detail", "Parent source session could not be prepared"))
             saved = self.save(source_model, source_key)
-            if saved["status"] == "unavailable" or not source.is_file():
+            if saved["status"] not in ("saved", "unchanged") or not source.is_file():
                 raise RuntimeError(saved.get("detail", "Parent KV snapshot is not available"))
             self._prune(required=source.stat().st_size, protected=[source.name, target.name])
             temporary = self.directory / (target_identity + "." + uuid.uuid4().hex + ".pending")
@@ -557,7 +630,7 @@ class NativeSessionCache:
                 # The source's durable snapshot stays unchanged. Keep its live
                 # checkpoints for the main agent's next turn; restoring the old
                 # file here would erase those checkpoints again.
-                metrics = self._prefill_fork(source_model, target, temporary, prefill)
+                metrics = self._prefill_fork(source_model, target, temporary, prefill, cancelled, preparation)
             else:
                 shutil.copyfile(source, temporary)
                 temporary.replace(target)
@@ -566,15 +639,50 @@ class NativeSessionCache:
                     metadata = json.loads(source_metadata.read_text(encoding="utf-8"))
                     target.with_suffix(".json").write_text(json.dumps(dict(metadata,
                         **self.owners[target_identity])), encoding="utf-8")
+            self._check_preparation_cancelled(cancelled)
             result = self.prepare(model, key)
+            if result["status"] not in ("restored", "resident"):
+                raise RuntimeError(result.get("detail", "Canonical child cache could not be restored"))
             if result["status"] == "restored":
                 result = dict(result, status="forked", sourceModel=source_model, **metrics)
             return self._record(model, "fork", result)
         except Exception as error:
-            return self._record(model, "fork", dict(status="unavailable", detail=str(error)[:500]))
+            detail = str(error)
+            if preparation["started"]:
+                # The transport has closed its SSE stream before returning an
+                # error. Retain the manager/turn lease until cancellation drains,
+                # then recover the exact durable parent, never its branch state.
+                try:
+                    self._idle_slot(source_model, timeout=INTERRUPTED_SAVE_IDLE_SECONDS)
+                    restored = self.router("slots/0?action=restore",
+                        dict(model=source_model, filename=source.name), timeout=120)
+                    if restored.get("n_restored") != len(self._snapshot_tokens(source)):
+                        raise RuntimeError("Parent snapshot was not restored completely")
+                    self.resident[source_model] = dict(identity=source_identity, key=source_key, dirty=False)
+                except Exception as restore_error:
+                    # An unowned slot cannot be saved over the parent. Its next
+                    # prepare must wait for idle and restore the durable file.
+                    self.resident.pop(source_model, None)
+                    detail += f"; parent cache recovery required: {restore_error}"
+            if new_target is not None:
+                child_owner = self.resident.get(model)
+                if child_owner and child_owner["identity"] == target_identity:
+                    self.resident.pop(model, None)
+                for failed_path in (new_target, new_target.with_suffix(".json")):
+                    try:
+                        failed_path.unlink(missing_ok=True)
+                    except OSError as cleanup_error:
+                        detail += f"; failed branch cleanup: {cleanup_error}"
+            reason = ("subagent.preparation_timeout" if isinstance(error, PreparationTimeoutError) else
+                      "subagent.preparation_cancelled" if isinstance(error, PreparationCancelledError) else
+                      "subagent.preparation_failed")
+            return self._record(model, "fork", dict(status="unavailable", reason=reason, detail=detail[:500]))
         finally:
             if temporary:
-                temporary.unlink(missing_ok=True)
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass  # A timed-out native save may briefly retain its file.
 
     def save_all(self):
         for model in list(self.resident):

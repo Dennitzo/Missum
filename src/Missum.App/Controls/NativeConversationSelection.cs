@@ -457,7 +457,32 @@ internal sealed class NativeConversationSelection
     /// <summary>Register newly projected blocks once, outside the frequent selection-preservation checks.</summary>
     internal void TrackSelectionWithin(FrameworkElement container)
     {
-        foreach (var node in Collect(container)) WatchNativeSelection(node);
+        TrackSelectionTree(container);
+    }
+
+    private readonly ConditionalWeakTable<NativeStreamingMarkdown, TrackedMarkdownRevision> _trackedMarkdown = new();
+    private sealed class TrackedMarkdownRevision { public long Value = -1; }
+
+    private void TrackSelectionTree(DependencyObject element)
+    {
+        if (element is FrameworkElement { Visibility: not Visibility.Visible } || element is ButtonBase) return;
+        TrackedMarkdownRevision? tracked = null;
+        if (element is NativeStreamingMarkdown markdown)
+        {
+            tracked = _trackedMarkdown.GetOrCreateValue(markdown);
+            if (tracked.Value == markdown.RenderRevision) return;
+        }
+        if (element is NativeFormulaView or TextBlock { IsTextSelectionEnabled: true }
+            or RichTextBlock { IsTextSelectionEnabled: true })
+        {
+            WatchNativeSelection(new Node((FrameworkElement)element));
+            return;
+        }
+        var children = VisualTreeHelper.GetChildrenCount(element);
+        for (var index = 0; index < children; index++) TrackSelectionTree(VisualTreeHelper.GetChild(element, index));
+        // An unattached new panel may not expose its children until first layout.
+        if (tracked is not null && element is NativeStreamingMarkdown rendered && children == rendered.Children.Count)
+            tracked.Value = rendered.RenderRevision;
     }
 
     private bool HasVisibleNativeSelection()

@@ -118,7 +118,7 @@ public sealed class ClientRestartRequestTests
             provider.GetRequiredService<IContextAssembler>(), provider.GetRequiredService<IPromptTriggerRepository>(),
             provider.GetRequiredService<IAssistantAttachmentRepository>(), provider.GetRequiredService<IChatArtifactRepository>(),
             provider.GetRequiredService<IConversationSnapshotRepository>(), service, settings, recent);
-        await coordinator.HandleAsync(new WebBridgeEnvelope(AssistantWebBridge.ProtocolVersion, "session.open", "reopen",
+        await coordinator.HandleAsync(new WebBridgeEnvelope(AssistantProtocol.ProtocolVersion, "session.open", "reopen",
             JsonSerializer.SerializeToElement(new { sessionId })), static (_, _, _) => Task.CompletedTask);
         Assert.Equal(sessionId, settings.Current.ActiveSessionId);
         Assert.Equal(coding ? ChatMode.Coding : ChatMode.General, (await chats.GetSessionAsync(sessionId))?.ChatMode);

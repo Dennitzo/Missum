@@ -1,4 +1,4 @@
-using System.Collections.Immutable;
+﻿using System.Collections.Immutable;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -24,7 +24,7 @@ public static partial class ScientificPublicationImages
                 throw new InvalidDataException("Die Publikationsabbildungen überschreiten die Grenze von 64 Bildern bzw. 128 MiB.");
             var root = Path.GetFullPath(stagingDirectory);
             Directory.CreateDirectory(root);
-            var directory = ScientificSimulationService.SafePath(root, "figures");
+            var directory = SafePath(root, "figures");
             Directory.CreateDirectory(directory);
             foreach (var image in Images)
             {
@@ -32,13 +32,74 @@ public static partial class ScientificPublicationImages
                 // Prepared bytes are immutable and copied from the source before fingerprinting;
                 // later sandbox edits cannot silently change the PDF under that fingerprint.
                 if (!OutputPath().IsMatch(image.RelativePath)) throw new InvalidDataException("Ungültiger Publikationsbildpfad.");
-                var destination = ScientificSimulationService.SafePath(root, image.RelativePath);
+                var destination = SafePath(root, image.RelativePath);
                 var bytes = image.Bytes.ToArray();
                 if (bytes.Length > MaximumImageBytes || Convert.ToHexStringLower(SHA256.HashData(bytes)) != image.Sha256)
                     throw new InvalidDataException("Die vorbereitete Publikationsabbildung ist ungültig.");
                 await File.WriteAllBytesAsync(destination, bytes, cancellationToken).ConfigureAwait(false);
             }
         }
+    }
+
+    /// <summary>Embeds explicitly linked project images without imposing simulation or run-receipt requirements.</summary>
+    internal static async Task<PreparedImages> PrepareDocumentAsync(string markdown, string sourceDirectory,
+        string projectDirectory, CancellationToken cancellationToken = default)
+    {
+        var root = Path.GetFullPath(projectDirectory);
+        var source = Path.GetFullPath(sourceDirectory);
+        var images = ImmutableArray.CreateBuilder<ImageArtifact>();
+        var byHash = new HashSet<string>(StringComparer.Ordinal);
+        var code = CodeRanges(markdown);
+        var output = new StringBuilder(markdown.Length);
+        var previous = 0;
+        var total = 0L;
+        foreach (Match match in ImageReference().Matches(markdown))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            output.Append(markdown, previous, match.Index - previous);
+            previous = match.Index + match.Length;
+            if (code.Any(range => match.Index >= range.Start && match.Index < range.End))
+            { output.Append(match.Value); continue; }
+            var reference = DecodeTarget(match.Groups["target"].Value);
+            if (reference is null) throw new ScientificPublicationContentException("Ein Abbildungspfad in der Publikation ist ungültig.");
+            if (Uri.TryCreate(reference, UriKind.Absolute, out var remote) && remote.Scheme is "http" or "https")
+            { output.Append(match.Value); continue; }
+            // Historical manuscripts used a virtual sandbox prefix. Resolve it only inside
+            // this same project; ordinary absolute paths still undergo the containment check.
+            var sandboxReference = reference.StartsWith("/sandbox/", StringComparison.Ordinal);
+            if (sandboxReference) reference = reference[9..];
+            var candidate = sandboxReference ? Path.GetFullPath(Path.Combine(root, reference))
+                : Path.IsPathRooted(reference) ? Path.GetFullPath(reference) : Path.GetFullPath(Path.Combine(source, reference));
+            if (!File.Exists(candidate) && !Path.IsPathRooted(reference)) candidate = Path.GetFullPath(Path.Combine(root, reference));
+            candidate = SafePath(root, Path.GetRelativePath(root, candidate));
+            var image = await ReadImageAsync(candidate, DateTimeOffset.MinValue, MaximumImageBytes, cancellationToken).ConfigureAwait(false)
+                ?? throw new ScientificPublicationContentException("Die lokale Publikationsabbildung konnte nicht geladen werden: " + reference
+                    + ". Nutze eine vorhandene PNG- oder JPEG-Datei bis 8 MiB.");
+            if (byHash.Add(image.Sha256))
+            {
+                total += image.Bytes.Length;
+                if (images.Count >= MaximumImages || total > MaximumTotalBytes)
+                    throw new ScientificPublicationContentException("Die Publikationsabbildungen überschreiten 64 Bilder oder 128 MiB.");
+                images.Add(image);
+            }
+            output.Append("![").Append(EscapeCaption(match.Groups["alt"].Value)).Append("](").Append(image.RelativePath).Append(')');
+        }
+        output.Append(markdown, previous, markdown.Length - previous);
+        return new(output.ToString(), images.ToImmutable());
+    }
+
+    internal static string SafePath(string root, string relative)
+    {
+        if (Path.IsPathRooted(relative) || relative.Contains(':') || relative.Any(char.IsControl))
+            throw new UnauthorizedAccessException("Ungültiger Projektpfad.");
+        var parent = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
+        var path = Path.GetFullPath(Path.Combine(parent, relative));
+        if (!path.StartsWith(parent + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            throw new UnauthorizedAccessException("Der Pfad verlässt das Projekt.");
+        for (var current = path; !string.IsNullOrEmpty(current); current = Path.GetDirectoryName(current))
+            if ((File.Exists(current) || Directory.Exists(current)) && (File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                throw new UnauthorizedAccessException("Verknüpfungen sind für Publikationsabbildungen nicht zulässig.");
+        return path;
     }
 
     public static Task<PreparedImages> PrepareAsync(string markdown, string projectId,
@@ -199,14 +260,14 @@ public static partial class ScientificPublicationImages
                 || expected.Length != 64 || !expected.All(char.IsAsciiHexDigit)) return null;
             var relative = reference[5..];
             if (RelativeArtifactPath(relative) != relative) return null;
-            _ = ScientificSimulationService.SafePath(layout.RootPath, Path.GetRelativePath(layout.RootPath, layout.WorkPath));
-            return (ScientificSimulationService.SafePath(layout.WorkPath, relative), expected);
+            _ = SafePath(layout.RootPath, Path.GetRelativePath(layout.RootPath, layout.WorkPath));
+            return (SafePath(layout.WorkPath, relative), expected);
         }
         if (RelativeArtifactPath(reference) is not { } artifact) return null;
-        _ = ScientificSimulationService.SafePath(layout.RootPath, Path.GetRelativePath(layout.RootPath, layout.ArtifactsPath));
+        _ = SafePath(layout.RootPath, Path.GetRelativePath(layout.RootPath, layout.ArtifactsPath));
         var artifactKey = "artifacts/" + artifact;
         var expectedHash = measuredHashes is not null && measuredHashes.TryGetValue(artifactKey, out var hash) ? hash : null;
-        return (ScientificSimulationService.SafePath(layout.ArtifactsPath, artifact), expectedHash);
+        return (SafePath(layout.ArtifactsPath, artifact), expectedHash);
     }
 
     private static string UnavailableCaption(string caption)

@@ -1,4 +1,4 @@
-using System.Buffers;
+﻿using System.Buffers;
 using System.Text.Json;
 
 namespace Missum.Ai.Server.Core.Models;
@@ -90,7 +90,6 @@ public sealed partial class ModelRuntimeClient
 
     private static string? CompactFieldDescription(string toolName, string? field) => (toolName, field) switch
     {
-        ("research.update", "quantitativeValidation") => "Verbindliche numerische Abnahme: Genauigkeit und Konvergenz, bei sampling zusätzlich Unsicherheit. Gemessene JSON-Datei enthält dieselben observable/reference und metrics; echte experimentIds zuordnen, keine Grenzwerte nachträglich lockern.",
         ("web.search", "query") => "Kurze präzise Anfrage; technische Namen unverändert.",
         ("web.search", "profile") => "general: Fakten; science: Publikationen; images: Bild-URLs; technische Profile: APIs.",
         ("web.search", "language") => "BCP-47 passend zum Nutzerprompt; Standard de-DE.",
@@ -104,10 +103,6 @@ public sealed partial class ModelRuntimeClient
         ("document.create", "expectedSha256") => "Bei Bearbeitung: zuletzt gelesener SHA-256.",
         ("coding.updatePlan", "title") => "Immer erforderlich; gespeicherten Originaltitel exakt unverändert mitsenden, Kriterien niemals umdeuten.",
         ("coding.updatePlan", "status") => "Immer erforderlich. Neu completed braucht erfolgreiche evidenceIds.",
-        ("research.update", "data") => "Vollständiger Ersatz eines Objekts; neu expectedRevision=0. Bei review zusätzlich data.status auf derselben Ebene.",
-        ("research.update", "patch") => "Vorhandenes Objekt: nur geänderte Felder; unbekannte/unveränderte weglassen. null löscht, legt nichts an. review als Objekt plus patch.status senden, Reihenfolge review/status oder status/review.",
-        ("research.update", "status") => "Tatsächlich erreichter fachlicher Status; bei review ausdrücklich im selben data-/patch-Objekt, nie in review.",
-        ("research.update", "review") => "Prüfung als Objekt: itemRevision und vier fachliche Prüffelder; status daneben. null löscht nur eine vorhandene Prüfung, bestätigt nichts. Keine Inhalte erfinden.",
         _ => null,
     };
 
@@ -145,14 +140,6 @@ public sealed partial class ModelRuntimeClient
         "math.numeric" => "Numerische Rechnung in der lokalen Forschungsumgebung mit Experimentbelegen ausführen.",
         "math.smt" => "Z3-Python-Skript lokal prüfen; Skript gibt JSON-Ergebnis aus. Tatsächlichen Solverbeleg und fehlende Toolchain unterscheiden.",
         "math.formalProof" => "Lean4/Mathlib projektlokal: operation initialize|check; source oder path prüfen. Keine sorry/admit/erfundenen Axiome. Nur KernelAccepted belegt die Aussage unter ihren expliziten Annahmen. Compilerdiagnosen korrigieren, erneut prüfen.",
-        "research.code.write" => "Forschungsdatei in work erstellen/bearbeiten; relative Pfade und aktuelle Hashes verwenden.",
-        "research.code.execute" => "Forschungscode reproduzierbar ausführen; echte Prozess-/Script-/Input-/Artefaktbelege liefern.",
-        "research.code.test" => "Forschungstests mit reproduzierbaren Prozessbelegen ausführen.",
-        "research.code.benchmark" => "Forschungsbenchmark mit reproduzierbaren Messbelegen ausführen.",
-        "research.code.restore" => "Hashbasiertes Change-Set wiederherstellen, sofern keine externe Änderung vorliegt; sonst Recovery-Bundle.",
-        "research.deliverables.verify" => "Aktuellen Forschungszustand, Publikations-PDF und erforderliche Versuchsbelege prüfen. research.goalStatus=satisfied verlangt erfüllte Ziele und numerische quantitativeValidation-Messwerte aus echten Ergebnisdateien; openLimit ist ungelöst. Vor Abschluss fehlende Punkte gezielt bearbeiten und neu prüfen.",
-        "research.read" => "view: overview/task/objects/sources/experiments/checks gezielt lesen; task enthält den ursprünglichen Auftrag. Gelieferten nextCursor für Folgeseiten verwenden; knownStateStamp für unveränderte Übersicht. ids: bis 32 volle Objekte mit Belegen. Legacy nextOffset nur bei offset-Seiten.",
-        "research.update" => "Stabile id/kind/expectedRevision; genau eines von data oder patch. Neu: Revision 0 und vollständiges data. Vorhanden: patch mit geänderten Feldern; Unbekanntes weglassen. null löscht vorhandene optionale Felder, erstellt weder Prüfung noch Prüfvertrag. noChange=true: nicht wiederholen. section/contribution: data.title UND data.contentMarkdown Pflicht; hypothesis/claim/requirement: data.statement Pflicht. review braucht daneben data.status bzw. patch.status, nie review.status; review.itemRevision=expectedRevision+1. Status fachlich wählen, verified braucht echte Prüfnachweise. Main: section; Child: eigene contributions/Agent-ID-Präfix. Konflikt gezielt lesen.",
         "document.read" => "Sitzungsdokument erst list/outline, dann relevante Abschnitte/Suche/continuation lesen.",
         "document.create" => "Dokument mit stabilen sectionIds abschnittsweise erstellen/bearbeiten; nur Abschnittsdelta plus aktuellen Hash. Missum rendert PDF deterministisch.",
         "documents.list" => "Aufbereitete Sitzungsdokumente mit Dateiname/Seitenzahl auflisten.",

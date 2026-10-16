@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -25,11 +25,8 @@ public sealed partial class ScientificPublicationService
         if (sections.All(item => HeadingNumber(Text(item.Data, "title")) is not null))
             return sections.OrderBy(item => HeadingNumber(Text(item.Data, "title")), PublicationNumberComparer.Instance)
                 .ThenBy(item => Number(item.Data, "order")).ThenBy(item => item.Id, StringComparer.Ordinal).ToArray();
-        var affected = missing.Concat(duplicateOrders).DistinctBy(item => item.Id).ToArray();
-        throw new ScientificPublicationContentException("Die fachliche Abschnittsreihenfolge ist nicht eindeutig: "
-            + string.Join(", ", affected.Select(item => item.Id))
-            + ". Ordne neue Themen fachlich in die vorhandene Gliederung ein und setze für alle betroffenen Abschnitte eindeutige numerische order-Werte mit research.update; fehlende Werte gelten nicht als erste Position.",
-            state: state, sections: affected.Select(item => new ScientificPresentationSectionFailure(item.Id, item.Revision)).ToArray());
+        // Historical state is imported without imposing a new authoring contract.
+        return sections.OrderBy(item => ExplicitSectionOrder(item) ?? double.MaxValue).ToArray();
     }
 
     private static double? ExplicitSectionOrder(ResearchWorkingItem item) => item.Data.TryGetProperty("order", out var order)
@@ -87,7 +84,7 @@ public sealed partial class ScientificPublicationService
             if (!headingWritten)
             {
                 if (includeHeading) text.AppendLine("## Simulationsabbildungen").AppendLine();
-                text.AppendLine("Die folgenden Plots stammen aus erfolgreich protokollierten Forschungsausführungen. Sie illustrieren das jeweilige Modell; sie sind für sich allein kein Beweis.").AppendLine();
+                text.AppendLine("Die folgenden Plots dokumentieren die zugehörigen Berechnungen. Ihre Aussagekraft und die geprüften Gleichungen werden beim jeweiligen Thema erläutert.").AppendLine();
                 headingWritten = true;
             }
             var label = Path.GetFileNameWithoutExtension(image.Path).Replace('_', ' ').Replace('-', ' ');
@@ -126,10 +123,9 @@ public sealed partial class ScientificPublicationService
         var latest = LatestMeasuredPlots(results.Experiments.Where(item => item.ProjectId == state.ProjectId));
         foreach (var section in sections)
         {
-            foreach (var image in SelectMeasuredPlots(latest.Where(item => Ids(section.Data, "experimentIds").Contains(item.ExperimentId)), used))
+            foreach (var image in SelectMeasuredPlots(latest.Where(item => SectionExperiments(section, state).Contains(item.ExperimentId)), used))
                 yield return image.Hash;
         }
-        foreach (var image in SelectMeasuredPlots(latest, used)) yield return image.Hash;
     }
 
     private static Dictionary<string, string> CanonicalImageHashes(PublicationSnapshot snapshot)

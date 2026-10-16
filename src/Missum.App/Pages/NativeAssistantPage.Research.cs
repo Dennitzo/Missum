@@ -1,12 +1,8 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using Missum.App.Controls;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
-using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Media;
-using Windows.System;
-using Windows.Storage;
 
 namespace Missum.App.Pages;
 
@@ -19,7 +15,7 @@ public sealed partial class NativeAssistantPage
     private DispatcherTimer? _researchRefreshTimer;
     private long _researchTabSelectionVersion;
 
-    private string ModelRole => _mode == "coding" ? "coding" : "general";
+    private string ModelRole => _mode is "coding" or "claudescience" ? "coding" : "general";
 
     private NativeResearchSession ResearchState(Guid sessionId)
     {
@@ -64,21 +60,16 @@ public sealed partial class NativeAssistantPage
         string? requestedProject = null;
         try
         {
-            if (!await CommandAsync("research.list", new { sessionId }, error => ShowResearchError(sessionId, error))) return;
+            if (!await CommandAsync("publication.list", new { sessionId }, error => ShowResearchError(sessionId, error))) return;
             var state = ResearchState(sessionId);
             if (!state.Available || state.Projects.Length == 0) return;
             var selectedId = state.SelectedProjectId;
             if (selectedId is null || !state.Projects.Any(project => S(project, "id") == selectedId))
                 selectedId = S(state.Projects[0], "id");
-            if (state.SelectedProjectId != selectedId)
-            {
-                state.Detail = default; state.Revision = 0;
-                state.ExportDirectory = null; state.ExportFiles = [];
-            }
             state.SelectedProjectId = selectedId;
             state.RequestedProjectId = selectedId;
             requestedProject = selectedId;
-            await CommandAsync("research.open", new { sessionId, projectId = selectedId }, error => ShowResearchError(sessionId, error));
+            await CommandAsync("publication.open", new { sessionId, projectId = selectedId }, error => ShowResearchError(sessionId, error));
             App.Current.GetService<Missum.App.Services.ScientificPresentationCoordinator>().Queue(selectedId!);
         }
         finally
@@ -95,47 +86,21 @@ public sealed partial class NativeAssistantPage
 
     private bool ApplyResearchEvent(string type, JsonElement data)
     {
-        if (type is not ("research.snapshot" or "research.exported")) return false;
+        if (type != "publication.snapshot") return false;
         if (!Guid.TryParse(S(data, "sessionId"), out var sessionId) || sessionId == Guid.Empty) return true;
         var state = ResearchState(sessionId);
         state.Error = "";
-        if (type == "research.exported")
+        state.Loaded = true;
+        state.Available = S(data, "available") != "False";
+        state.Projects = Items(data, "projects").Select(project => project.Clone()).ToArray();
+        var project = ResearchObject(ResearchObject(data, "detail"), "project");
+        var projectId = S(project, "id");
+        if (projectId.Length > 0 && (state.RequestedProjectId is null || projectId == state.RequestedProjectId))
         {
-            if (S(data, "projectId") == state.SelectedProjectId)
-            {
-                state.ExportDirectory = S(data, "directory");
-                state.ExportFiles = Items(data, "files").Select(item => item.ToString()).ToArray();
-            }
-            state.Exporting = false;
+            state.SelectedProjectId = projectId;
+            App.Current.GetService<Missum.App.Services.ScientificPresentationCoordinator>().Queue(projectId);
         }
-        else
-        {
-            state.Loaded = true;
-            state.Available = S(data, "available") != "False";
-            state.DisabledReason = S(data, "disabledReason");
-            state.Projects = Items(data, "projects").Select(project => project.Clone()).ToArray();
-            var detail = ResearchObject(data, "detail");
-            var project = ResearchObject(detail, "project");
-            var projectId = S(project, "id");
-            if (detail.ValueKind == JsonValueKind.Object && projectId.Length > 0
-                && (state.RequestedProjectId is null || projectId == state.RequestedProjectId))
-            {
-                var revision = ResearchRevision(project);
-                if (projectId != S(ResearchObject(state.Detail, "project"), "id") || revision >= state.Revision)
-                {
-                    state.Detail = detail.Clone();
-                    state.Revision = revision;
-                    state.SelectedProjectId = projectId;
-                    App.Current.GetService<Missum.App.Services.ScientificPresentationCoordinator>().Queue(projectId);
-                }
-            }
-            if (state.Projects.Length == 0)
-            {
-                state.SelectedProjectId = null;
-                state.Detail = default;
-                state.Revision = 0;
-            }
-        }
+        if (state.Projects.Length == 0) state.SelectedProjectId = null;
         if (_activeResearchSessionId == sessionId) RunUiCallback("Research.Snapshot", RenderResearchView);
         if (_session == sessionId) RenderSources(_snapshot);
         return true;
@@ -147,7 +112,7 @@ public sealed partial class NativeAssistantPage
             _ = RefreshNativeResearchAsync(_session);
     }
 
-    private void OpenResearchView(bool simulation = false)
+    private void OpenResearchView()
     {
         if (_disposed || _mode != "claudescience") return;
         HideSubagentOverview();
@@ -157,10 +122,12 @@ public sealed partial class NativeAssistantPage
         ReviewScroll.Visibility = Visibility.Collapsed;
         BodyGrid.Visibility = Visibility.Collapsed;
         _activeResearchSessionId = _session;
-        _simulationView = simulation;
+        // A retained PDF may have been replaced at its stable path while the
+        // tab was hidden. Revalidate it on every explicit tab selection.
+        _scienceViewSignature = null;
         ResearchHost.Visibility = Visibility.Visible;
         RunUiCallback("Research.Open", RenderResearchView);
-        UpdateInteractiveSimulationActivity();
+        UpdatePublicationActivity();
         RenderSessionTabs();
         _ = RefreshNativeResearchAsync(_session);
     }
@@ -170,7 +137,6 @@ public sealed partial class NativeAssistantPage
         _researchTabSelectionVersion++;
         _activeResearchSessionId = null;
         ResearchHost.Visibility = Visibility.Collapsed;
-        foreach (var viewer in _interactiveSimulationViews.Values) viewer.SetActive(false);
         foreach (var viewer in _publicationViews.Values) viewer.SetActive(false);
     }
 
@@ -191,11 +157,11 @@ public sealed partial class NativeAssistantPage
             _researchTabButton.Height = 32;
             _researchTabButton.Padding = new Thickness(10, 0, 10, 0);
             _researchTabButton.BorderThickness = new Thickness(1);
-            _researchTabButton.Click += (_, _) => QueueResearchTabSelection(simulation: false);
+            _researchTabButton.Click += (_, _) => QueueResearchTabSelection();
             AutomationProperties.SetName(_researchTabButton, "Publikation dieser Sitzung öffnen");
             ToolTipService.SetToolTip(_researchTabButton, "Wissenschaftliche Publikation · PDF mit mathematischen Formeln");
         }
-        var active = _activeResearchSessionId == _session && _activeReviewRunId is null && !_simulationView;
+        var active = _activeResearchSessionId == _session && _activeReviewRunId is null;
         ApplyTabAppearance(_researchTabButton, active);
         SetTabEnabled(_researchTabButton, !_sessionTabNavigationBusy);
         SetTabHelp(_researchTabButton, active ? "Aktive Publikation" : "Publikation der geöffneten Sitzung");
@@ -209,7 +175,7 @@ public sealed partial class NativeAssistantPage
         if (_activeResearchSessionId == sessionId) RunUiCallback("Research.Error", RenderResearchView);
     }
 
-    private void QueueResearchTabSelection(bool simulation)
+    private void QueueResearchTabSelection()
     {
         var owner = _session;
         var version = ++_researchTabSelectionVersion;
@@ -218,7 +184,7 @@ public sealed partial class NativeAssistantPage
         DispatcherQueue.TryEnqueue(() => RunUiCallback("Research.TabSelection", () =>
         {
             if (version != _researchTabSelectionVersion || owner != _session || _mode != "claudescience") return;
-            OpenResearchView(simulation);
+            OpenResearchView();
         }));
     }
 
@@ -226,23 +192,13 @@ public sealed partial class NativeAssistantPage
     private void UpdateResearchChrome(NativeResearchSession state) => RunUiCallback("Research.Chrome", RenderResearchView);
     private static JsonElement ResearchObject(JsonElement element, string name) =>
         element.ValueKind == JsonValueKind.Object && element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Object ? value : default;
-    private static long ResearchRevision(JsonElement element) =>
-        element.ValueKind == JsonValueKind.Object && element.TryGetProperty("revision", out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out var revision) ? revision : 0;
-    private static SolidColorBrush ResearchThemeBrush(string key, byte fallback) => ThemeBrush(key, fallback);
-
     private sealed class NativeResearchSession
     {
         public JsonElement[] Projects { get; set; } = [];
-        public JsonElement Detail { get; set; }
         public string? SelectedProjectId { get; set; }
         public string? RequestedProjectId { get; set; }
-        public long Revision { get; set; }
         public bool Loaded { get; set; }
         public bool Available { get; set; } = true;
-        public string DisabledReason { get; set; } = "";
-        public bool Exporting { get; set; }
         public string Error { get; set; } = "";
-        public string? ExportDirectory { get; set; }
-        public string[] ExportFiles { get; set; } = [];
     }
 }

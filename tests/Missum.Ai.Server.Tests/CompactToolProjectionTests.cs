@@ -1,4 +1,4 @@
-using Missum.Ai.Contracts;
+﻿using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Coding;
 using Missum.Ai.Server.Core.Models;
 using Missum.Ai.Server.Core.Policies;
@@ -76,7 +76,7 @@ public sealed class CompactToolProjectionTests
              "$defs":{"description":{"type":"number","exclusiveMinimum":0,"multipleOf":0.5}},
              "x-extension":{"description":"unknown extension data"}}
             """);
-        var definition = new LmToolDefinition("research.update", "Original text", schema, ToolContextProfiles.Current);
+        var definition = new LmToolDefinition("coding.write", "Original text", schema, ToolContextProfiles.Current);
         var compact = ModelRuntimeClient.PrepareTransportTools("coding/DeepSeek", [definition])[0]
             .GetProperty("function").GetProperty("parameters");
         Assert.False(compact.TryGetProperty("description", out _));
@@ -132,27 +132,11 @@ public sealed class CompactToolProjectionTests
         Assert.Equal(tools.Length, transport.GetArrayLength());
         Assert.Equal(tools.Select(static tool => ModelRuntimeClient.ToTransportToolName(tool.Name)),
             transport.EnumerateArray().Select(static item => item.GetProperty("function").GetProperty("name").GetString()));
-        var update = transport.EnumerateArray().Single(item => item.GetProperty("function").GetProperty("name").GetString()
-            == ModelRuntimeClient.ToTransportToolName(ClientToolNames.ResearchUpdate)).GetProperty("function").GetProperty("parameters");
-        Assert.Equal(32, update.GetProperty("properties").GetProperty("changes").GetProperty("maxItems").GetInt32());
-        foreach (var alternative in update.GetProperty("properties").GetProperty("changes").GetProperty("items").GetProperty("anyOf").EnumerateArray())
-        {
-            var fields = alternative.GetProperty("properties");
-            if (fields.TryGetProperty("patch", out var patch))
-            {
-                Assert.Equal(1, fields.GetProperty("expectedRevision").GetProperty("minimum").GetInt32());
-                foreach (var payload in patch.GetProperty("anyOf").EnumerateArray())
-                    Assert.True(payload.GetProperty("properties").TryGetProperty("status", out _));
-                continue;
-            }
-            foreach (var data in fields.GetProperty("data").GetProperty("anyOf").EnumerateArray())
-            {
-                Assert.Equal(64000, data.GetProperty("properties").GetProperty("contentMarkdown").GetProperty("maxLength").GetInt32());
-                Assert.True(data.GetProperty("properties").TryGetProperty("description", out _));
-            }
-            Assert.Equal(0, fields.GetProperty("expectedRevision").GetProperty("minimum").GetInt32());
-        }
-        Assert.False(update.GetProperty("additionalProperties").GetBoolean());
+        Assert.DoesNotContain(tools, tool => tool.Name.StartsWith("research.", StringComparison.Ordinal));
+        var edit = transport.EnumerateArray().Single(item => item.GetProperty("function").GetProperty("name").GetString()
+            == ModelRuntimeClient.ToTransportToolName(ClientToolNames.CodingEdit)).GetProperty("function").GetProperty("parameters");
+        Assert.False(edit.GetProperty("additionalProperties").GetBoolean());
+        Assert.True(edit.GetProperty("properties").TryGetProperty("expectedSha256", out _));
     }
 
     [Fact]

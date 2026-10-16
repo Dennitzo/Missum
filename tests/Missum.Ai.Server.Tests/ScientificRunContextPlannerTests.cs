@@ -1,4 +1,4 @@
-using Missum.Ai.Contracts;
+﻿using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Models;
 using Missum.Ai.Server.Core.Runs;
 using System.Text.Json;
@@ -7,372 +7,128 @@ namespace Missum.Ai.Server.Tests;
 
 public sealed class ScientificRunContextPlannerTests
 {
+    private static readonly string[] ModelArguments = ["model.py"];
+
+    [Theory]
+    [InlineData(262_144)]
+    [InlineData(1_048_576)]
+    [InlineData(2_000_000)]
+    public void EvaluatedPrefixBelowTheLoadedModelBudgetRemainsByteForByteIntact(int contextLength)
+    {
+        var messages = Initial();
+        AddOldLogs(messages, 100);
+        messages.Add(new("assistant", "Aktueller Befund.", ReasoningContent: "Bereits evaluierter Kontext."));
+        var original = JsonSerializer.Serialize(messages);
+        var plan = ScientificRunContextPlanner.Prepare(messages, contextLength, null, preserveConversationPrefix: true);
+        Assert.False(plan.WasCompacted);
+        Assert.Equal(original, JsonSerializer.Serialize(plan.Messages));
+        Assert.Equal(original, JsonSerializer.Serialize(messages));
+        Assert.Equal(ContextPlanner.ComputeInputTokenBudget(contextLength, null), plan.InputTokenBudget);
+        AssertValidPairs(plan.Messages);
+    }
+
+    [Fact]
+    public void CompactionPreservesCurrentProjectReadEditAndCommandEvidenceAsCompletePairs()
+    {
+        var messages = Initial();
+        AddOldLogs(messages, 120);
+        var currentRead = AddReceipt(messages, ClientToolNames.CodingRead, new { path = "Publikation.md" },
+            new { success = true, content = "Aktuelle Publikation\n" + new string('p', 5000) });
+        var currentEdit = AddReceipt(messages, ClientToolNames.CodingEdit, new { path = "Publikation.md", oldText = "alt", newText = "neu" },
+            new { success = true, sha256 = new string('a', 64) });
+        var currentCommand = AddReceipt(messages, ClientToolNames.CodingCommand, new { executable = "python", arguments = ModelArguments },
+            new { success = true, exitCode = 0, stdout = "Gemessene Berechnungsdaten\n" + new string('n', 5000) });
+        var original = JsonSerializer.Serialize(messages);
+        var plan = ScientificRunContextPlanner.Prepare(messages, 32_768, null, preserveConversationPrefix: true);
+        Assert.True(plan.WasCompacted);
+        Assert.True(plan.EstimatedInputTokens <= plan.InputTokenBudget);
+        foreach (var message in currentRead.Concat(currentEdit).Concat(currentCommand)) Assert.Contains(message, plan.Messages);
+        Assert.Equal(original, JsonSerializer.Serialize(messages));
+        AssertValidPairs(plan.Messages);
+        Assert.DoesNotContain("research.read", plan.Notice, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PendingCallsCannotBeSplitOrReplayedByContextCompaction()
+    {
+        var messages = Initial();
+        AddOldLogs(messages, 120);
+        var pending = new LmChatMessage("assistant", ToolCalls:
+            [new("pending", ClientToolNames.CodingWrite, JsonSerializer.SerializeToElement(new { path = "next.py", content = "print(1)" }))]);
+        messages.Add(pending);
+        var plan = ScientificRunContextPlanner.Prepare(messages, 32_768, null);
+        Assert.True(plan.WasCompacted);
+        Assert.Contains(pending, plan.Messages);
+        AssertValidPairs(plan.Messages, allowPending: true);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void ObsoleteHostDiagnosesCanBeCompactedWithoutLosingTheUserTaskOrCurrentCause(bool native)
+    public void HistoricalScienceDiagnosticsAreReadOnlyAndCanBeCompactedWithoutLosingLatestCause(bool native)
     {
-        var messages = InitialInstructions();
-        var userTask = messages[1];
-        for (var i = 0; i < 80; i++)
+        var messages = Initial();
+        for (var index = 0; index < 80; index++)
         {
-            var diagnosis = ScientificStateCompletionPolicy.VerificationRepairMarker + "\ncause-" + i + "\n" + new string('x', 2000);
-            messages.Add(new(native ? "user" : "system", native ? "Missum-Laufanweisung:\n" + diagnosis : diagnosis));
+            var text = LegacyResearchContext.VerificationRepairMarker + "\ncause-" + index + "\n" + new string('x', 2000);
+            messages.Add(new(native ? "user" : "system", native ? "Missum-Laufanweisung:\n" + text : text));
         }
         var latest = messages[^1];
-        var evaluated = messages.ToArray();
-        var below = ScientificRunContextPlanner.Prepare(messages, 258_000, null, true, 100_000);
-        Assert.Equal(evaluated, below.Messages);
-        Assert.False(below.WasCompacted);
-        var compact = ScientificRunContextPlanner.Prepare(messages, 258_000, null, true, 8000);
-        Assert.True(compact.WasCompacted);
-        Assert.Contains(userTask, compact.Messages);
-        Assert.Contains(latest, compact.Messages);
-        Assert.Single(compact.Messages, message => message.Content?.Contains(ScientificStateCompletionPolicy.VerificationRepairMarker, StringComparison.Ordinal) == true);
-        Assert.Equal(evaluated, messages);
-    }
-    private static readonly string[] ModelArguments = ["work/model.py"];
-    private static readonly string[] OtherArguments = ["work/other.py"];
-    private static readonly string[] OldArguments = ["old-log.py"];
-
-    [Fact]
-    public void CompactionLeavesRoomForSubsequentToolTurnsWithoutRewritingTheEvaluatedPrefix()
-    {
-        var messages = InitialInstructions();
-        AddOldLogs(messages, 200);
-        const int budget = ScientificRunContextPlanner.CanonicalWorkingInputTokens;
-        var plan = ScientificRunContextPlanner.Prepare(messages, 1_048_576, null, true, budget);
+        var original = JsonSerializer.Serialize(messages);
+        var plan = ScientificRunContextPlanner.Prepare(messages, 32_768, null, preserveConversationPrefix: true);
         Assert.True(plan.WasCompacted);
-        Assert.True(plan.EstimatedInputTokens <= budget * 3 / 4);
-        for (var turn = 0; turn < 10; turn++)
-        {
-            var next = plan.Messages.ToList();
-            AddReceipt(next, "coding.read", new { path = "result.json", turn }, new { text = new string('x', 1500) });
-            var evaluated = next.ToArray();
-            plan = ScientificRunContextPlanner.Prepare(next, 1_048_576, null, true, budget);
-            Assert.False(plan.WasCompacted);
-            Assert.Equal(evaluated, plan.Messages);
-            AssertValidToolPairs(plan.Messages);
-        }
+        Assert.Contains(latest, plan.Messages);
+        Assert.Contains(messages[1], plan.Messages);
+        Assert.Single(plan.Messages, message => message.Content?.Contains(LegacyResearchContext.VerificationRepairMarker, StringComparison.Ordinal) == true);
+        Assert.Equal(original, JsonSerializer.Serialize(messages));
     }
 
     [Fact]
-    public void CompactionHeadroomNeverRemovesProtectedTaskAboveTheSoftTarget()
+    public void AProtectedUserTaskIsNeverTruncatedToForceAContextFit()
     {
-        var messages = InitialInstructions();
-        messages.Add(new("user", new string('q', 310_000)));
-        AddOldLogs(messages, 200);
-        var plan = ScientificRunContextPlanner.Prepare(messages, 1_048_576, null, true,
-            ScientificRunContextPlanner.CanonicalWorkingInputTokens);
-        Assert.Contains(messages[2], plan.Messages);
-        Assert.InRange(plan.EstimatedInputTokens, 1, plan.InputTokenBudget);
-    }
-    private static IReadOnlyList<AgentToolSpec> Tools() => new AgentToolCatalog().GetAvailableTools(ScientificRunCompletionPolicyTests.Request());
-
-    [Fact]
-    public void EvaluatedScientificPrefixBelowTheWorkingLimitRetainsReasoningAndChronologicalInstructions()
-    {
-        var messages = InitialInstructions();
-        messages.Add(new("assistant", "Frühere fachliche Entscheidung.", ReasoningContent: "Die Herleitung verwendet SI-Einheiten."));
-        messages.Add(new("user", "Missum-Laufanweisung zur Sprache: Frühere Sprachbindung."));
-        messages.Add(new("user", "Missum-Laufanweisung:\nBewahre die gespeicherten Randbedingungen."));
-        messages.Add(new("user", "Missum-Laufanweisung:\nBewahre die gespeicherten Randbedingungen."));
-        AddReceipt(messages, "web.fetch", new { url = "https://example.org/source" }, new { success = true, content = "Beleg" });
-        messages.Add(new("assistant", "Aktuelle Entscheidung.", ReasoningContent: "Die Dimensionsprüfung ist konsistent."));
-        messages.Add(new("user", "Missum-Laufanweisung zur Sprache: Aktuelle Sprachbindung."));
-        var original = messages.ToArray();
-
-        var plan = ScientificRunContextPlanner.Prepare(messages, 1_048_576, null,
-            preserveConversationPrefix: true, maximumInputTokens: ScientificRunContextPlanner.CanonicalWorkingInputTokens);
-
-        Assert.False(plan.WasCompacted);
-        Assert.Null(plan.Notice);
-        Assert.Equal(original, plan.Messages);
-        Assert.Equal(original, messages);
-        Assert.Equal(ScientificRunContextPlanner.CanonicalWorkingInputTokens, plan.InputTokenBudget);
-        AssertValidToolPairs(plan.Messages);
+        LmChatMessage[] messages = [new("system", "Unveränderliche Anweisung."), new("user", new string('q', 100_000))];
+        var original = JsonSerializer.Serialize(messages);
+        Assert.Throws<ContextBudgetException>(() => ScientificRunContextPlanner.Prepare(messages, 8192, null));
+        Assert.Equal(original, JsonSerializer.Serialize(messages));
     }
 
     [Fact]
-    public void CanonicalWorkingLimitCompactsLongHistoryWithoutChangingTheNativeWindowOrCurrentEvidence()
+    public void CurrentLeanKernelReceiptRemainsAvailableWithoutBecomingACompletionGate()
     {
-        var messages = InitialInstructions();
-        AddOldLogs(messages, 200);
-        var current = ScientificRunCompletionPolicyTests.SuccessfulWork();
-        messages.AddRange(current);
-        ScientificRunCompletionPolicyTests.AddVerification(messages, success: true);
-        var journal = messages.ToArray();
-        Assert.True(ContextPlanner.EstimateTokens(messages) > ScientificRunContextPlanner.CanonicalWorkingInputTokens);
-
-        var plan = ScientificRunContextPlanner.Prepare(messages, 1_048_576, null,
-            preserveConversationPrefix: true, maximumInputTokens: ScientificRunContextPlanner.CanonicalWorkingInputTokens);
-
+        var messages = Initial();
+        AddOldLogs(messages, 120);
+        var proof = AddReceipt(messages, ClientToolNames.MathFormalProof, new { source = "theorem identity : 1 = 1 := rfl" },
+            new { success = true, formalVerification = "KernelAccepted", axiomAudit = new { passed = true } });
+        var plan = ScientificRunContextPlanner.Prepare(messages, 32_768, null);
         Assert.True(plan.WasCompacted);
-        Assert.Equal(ScientificRunContextPlanner.CanonicalWorkingInputTokens, plan.InputTokenBudget);
-        Assert.InRange(plan.EstimatedInputTokens, 1, plan.InputTokenBudget);
-        Assert.Equal(journal, messages);
-        Assert.Contains("Laufjournal bleibt erhalten", plan.Notice);
-        Assert.True(ScientificRunCompletionPolicy.Assess(ScientificRunCompletionPolicyTests.Request(), plan.Messages, Tools()).Complete);
-        foreach (var message in current) Assert.Contains(message, plan.Messages);
-        AssertValidToolPairs(plan.Messages);
+        foreach (var message in proof) Assert.Contains(message, plan.Messages);
+        AssertValidPairs(plan.Messages);
+        Assert.DoesNotContain(plan.Messages, message => message.Content?.Contains("research.deliverables.verify", StringComparison.Ordinal) == true);
     }
 
-    [Fact]
-    public void WorkingLimitNeverSilentlyTruncatesAnOversizedCurrentUserTask()
-    {
-        var messages = InitialInstructions();
-        messages.Add(new("user", new string('q', 400_000)));
-        var original = messages.ToArray();
-
-        Assert.Throws<ContextBudgetException>(() => ScientificRunContextPlanner.Prepare(messages, 1_048_576, null,
-            preserveConversationPrefix: true, maximumInputTokens: ScientificRunContextPlanner.CanonicalWorkingInputTokens));
-        Assert.Equal(original, messages);
-    }
-
-    [Fact]
-    public void MoreThanOneThousandOldManuscriptsRemindersAndLogsDoNotTruncateCurrentEvidence()
-    {
-        var messages = InitialInstructions();
-        AddObsoleteManuscripts(messages, 1001);
-        var current = ScientificRunCompletionPolicyTests.SuccessfulWork();
-        messages.AddRange(current);
-        ScientificRunCompletionPolicyTests.AddVerification(messages, success: true);
-        AddOldLogs(messages, 100);
-        var original = messages.ToArray();
-        var before = ScientificRunCompletionPolicy.Assess(ScientificRunCompletionPolicyTests.Request(), messages, Tools());
-
-        var plan = ScientificRunContextPlanner.Prepare(messages, 32768, null);
-        var after = ScientificRunCompletionPolicy.Assess(ScientificRunCompletionPolicyTests.Request(), plan.Messages, Tools());
-
-        Assert.True(plan.WasCompacted);
-        Assert.True(before.Complete);
-        Assert.Equal(before.Complete, after.Complete);
-        Assert.Equal(before.NeedsVerification, after.NeedsVerification);
-        Assert.InRange(plan.EstimatedInputTokens, 1, plan.InputTokenBudget);
-        Assert.True(plan.Messages.Count < 150);
-        Assert.Contains(current[0], plan.Messages);
-        foreach (var message in current.Where(static message => message.ToolCalls is { Count: > 0 } || message.Role == "tool"))
-            Assert.Contains(message, plan.Messages);
-        Assert.Equal(original, messages.ToArray()); // The source/checkpoint journal is untouched.
-        AssertValidToolPairs(plan.Messages);
-    }
-
-    [Theory]
-    [InlineData("verified")]
-    [InlineData("changed-manuscript")]
-    [InlineData("failed-verify")]
-    [InlineData("new-write")]
-    [InlineData("failed-python")]
-    [InlineData("malformed-python")]
-    [InlineData("document-mutation")]
-    [InlineData("foreign-project")]
-    public void CompletionAndFreshnessAreIdenticalAcrossCompactionRestoreAndNativeNormalization(string scenario)
-    {
-        var messages = InitialInstructions();
-        AddObsoleteManuscripts(messages, 30);
-        messages.AddRange(ScientificRunCompletionPolicyTests.SuccessfulWork());
-        ScientificRunCompletionPolicyTests.AddVerification(messages, success: true);
-        for (var index = 0; index < 30; index++) messages.Add(new("assistant", ScientificRunCompletionPolicyTests.Manuscript));
-        switch (scenario)
-        {
-            case "changed-manuscript":
-                messages.Add(new("assistant", ScientificRunCompletionPolicyTests.Manuscript.Replace("Referenzskalierung", "neue Referenzskalierung", StringComparison.Ordinal)));
-                break;
-            case "failed-verify":
-                ScientificRunCompletionPolicyTests.AddVerification(messages, success: false, pdfReady: false);
-                break;
-            case "new-write":
-                AddReceipt(messages, ClientToolNames.ResearchCodeWrite,
-                    new { projectId = ScientificRunCompletionPolicyTests.Project, path = "work/revised.py", content = "print(43)" }, new { success = true });
-                break;
-            case "failed-python":
-                AddReceipt(messages, ClientToolNames.ResearchCodeExecute,
-                    new { projectId = ScientificRunCompletionPolicyTests.Project, experimentId = "failed-current", executable = "python", arguments = ModelArguments },
-                    new { success = false, runs = new[] { new { exitCode = 1, timedOut = false } }, error = "Numerischer Fehler" });
-                break;
-            case "malformed-python":
-                AddReceipt(messages, ClientToolNames.ResearchCodeExecute,
-                    new { projectId = ScientificRunCompletionPolicyTests.Project, experimentId = "malformed-current", executable = "python", arguments = ModelArguments },
-                    new { success = false });
-                messages[^1] = messages[^1] with { Content = "{invalid-result" };
-                break;
-            case "document-mutation":
-                AddReceipt(messages, "document.create", new { path = "publication.docx" }, new { success = true });
-                break;
-            case "foreign-project":
-                AddReceipt(messages, ClientToolNames.ResearchCodeExecute,
-                    new { projectId = "research-other", experimentId = "other-experiment", executable = "python", arguments = OtherArguments },
-                    new { success = true, runs = new[] { new { exitCode = 0, timedOut = false } } });
-                break;
-        }
-        AddOldLogs(messages, 100);
-        var before = ScientificRunCompletionPolicy.Assess(ScientificRunCompletionPolicyTests.Request(), messages, Tools());
-        var plan = ScientificRunContextPlanner.Prepare(messages, 32768, null);
-        var restored = JsonSerializer.Deserialize<LmChatMessage[]>(JsonSerializer.Serialize(plan.Messages))!;
-        var normalized = ModelRuntimeClient.PrepareLanguageBoundMessages(restored);
-
-        foreach (var projected in new[] { plan.Messages, restored, normalized })
-        {
-            var after = ScientificRunCompletionPolicy.Assess(ScientificRunCompletionPolicyTests.Request(), projected, Tools());
-            Assert.Equal(before.Complete, after.Complete);
-            Assert.Equal(before.NeedsVerification, after.NeedsVerification);
-            Assert.Equal(before.Missing, after.Missing);
-            Assert.Equal(before.Fingerprint, after.Fingerprint);
-            AssertValidToolPairs(projected);
-        }
-    }
-
-    [Fact]
-    public void CurrentPublicationLongerThanFourThousandCharactersRemainsByteForByteIntact()
-    {
-        var messages = InitialInstructions();
-        var current = ScientificRunCompletionPolicyTests.Manuscript.Replace("## Ergebnisse", new string('x', 18000) + "\n## Ergebnisse", StringComparison.Ordinal);
-        messages.Add(new("assistant", current));
-        AddOldLogs(messages, 100);
-
-        var plan = ScientificRunContextPlanner.Prepare(messages, 32768, null);
-
-        Assert.Contains(plan.Messages, message => message.Role == "assistant" && message.Content == current);
-        Assert.DoesNotContain(plan.Messages, message => message.Content?.Contains("[Kontext verdichtet]", StringComparison.Ordinal) == true);
-    }
-
-    [Fact]
-    public void CurrentPrivateReasoningCanYieldItsBudgetWithoutChangingManuscriptOrCompletionEvidence()
-    {
-        var messages = InitialInstructions();
-        var current = ScientificRunCompletionPolicyTests.SuccessfulWork();
-        current[0] = current[0] with { ReasoningContent = new string('r', 100000) };
-        messages.AddRange(current);
-        ScientificRunCompletionPolicyTests.AddVerification(messages, success: true);
-        var before = ScientificRunCompletionPolicy.Assess(ScientificRunCompletionPolicyTests.Request(), messages, Tools());
-
-        var plan = ScientificRunContextPlanner.Prepare(messages, 32768, null);
-        var after = ScientificRunCompletionPolicy.Assess(ScientificRunCompletionPolicyTests.Request(), plan.Messages, Tools());
-
-        Assert.Contains(plan.Messages, message => message.Content == current[0].Content && message.ReasoningContent is null);
-        Assert.True(after.Complete);
-        Assert.Equal(before.Fingerprint, after.Fingerprint);
-        Assert.NotNull(current[0].ReasoningContent);
-    }
-
-    [Fact]
-    public void OnlyIdenticalNativeHostInstructionsAreDeduplicatedWhileGenuineCorrectionsStayInOrder()
-    {
-        const string host = "Missum-Laufanweisung:\nKorrigiere den Werkzeugaufruf anhand des zuletzt gespeicherten Fehlers.";
-        const string correction = "Korrektur: Verwende ausdrücklich SI-Einheiten.";
-        var messages = InitialInstructions();
-        messages.Add(new("user", correction));
-        for (var index = 0; index < 1000; index++) messages.Add(new("user", host));
-        messages.Add(new("user", correction));
-        messages.AddRange(ScientificRunCompletionPolicyTests.SuccessfulWork());
-        ScientificRunCompletionPolicyTests.AddVerification(messages, success: true);
-
-        var plan = ScientificRunContextPlanner.Prepare(messages, 32768, null);
-
-        Assert.Single(plan.Messages, message => message.Role == "user" && message.Content == host);
-        Assert.Equal(2, plan.Messages.Count(message => message.Role == "user" && message.Content == correction));
-        Assert.Equal(new[] { correction, host, correction }, plan.Messages.Where(message => message.Content == correction || message.Content == host).Select(static message => message.Content));
-        Assert.True(ScientificRunCompletionPolicy.Assess(ScientificRunCompletionPolicyTests.Request(), plan.Messages, Tools()).Complete);
-    }
-
-    [Fact]
-    public void OriginalTaskCorrectionsRecoveryAndScienceContextRemainComplete()
-    {
-        var messages = InitialInstructions();
-        messages.Add(new("user", RunProcessor.ScienceSessionContextStart + "\nVerbindlicher gespeicherter Forschungsstand"));
-        messages.Add(new("user", "Korrektur: Verwende SI-Einheiten und erkläre jede Näherung ausdrücklich."));
-        var required = messages.ToArray();
-        messages.AddRange(ScientificRunCompletionPolicyTests.SuccessfulWork());
-        ScientificRunCompletionPolicyTests.AddVerification(messages, success: false, pdfReady: false);
-        ScientificRunCompletionPolicy.UpsertRecoveryPrompt(messages,
-            ScientificRunCompletionPolicy.Assess(ScientificRunCompletionPolicyTests.Request(), messages, Tools()));
-        var recovery = messages[^1];
-        AddOldLogs(messages, 100);
-        var normalized = ModelRuntimeClient.PrepareLanguageBoundMessages(messages);
-
-        var plan = ScientificRunContextPlanner.Prepare(normalized, 32768, null);
-
-        foreach (var message in required.Where(static message => message.Role == "user")) Assert.Contains(message, plan.Messages);
-        Assert.Contains(plan.Messages, message => message.Content?.Contains(recovery.Content!, StringComparison.Ordinal) == true);
-        Assert.Equal(1, ScientificRunCompletionPolicy.Assess(ScientificRunCompletionPolicyTests.Request(), plan.Messages, Tools()).RepeatedAttempts);
-    }
-
-    [Fact]
-    public void ANewIncompletePublicationNeverRegainsAnOlderCompletedManuscript()
-    {
-        var messages = InitialInstructions();
-        messages.AddRange(ScientificRunCompletionPolicyTests.SuccessfulWork());
-        ScientificRunCompletionPolicyTests.AddVerification(messages, success: true);
-        var incomplete = ScientificRunCompletionPolicy.PublicationBegin + "\n# Neuer unvollständiger Stand\n## Kurzfassung\nNoch in Bearbeitung";
-        messages.Add(new("assistant", incomplete));
-        AddOldLogs(messages, 100);
-
-        var plan = ScientificRunContextPlanner.Prepare(messages, 32768, null);
-        var after = ScientificRunCompletionPolicy.Assess(ScientificRunCompletionPolicyTests.Request(), plan.Messages, Tools());
-
-        Assert.Contains(plan.Messages, message => message.Content == incomplete);
-        Assert.False(after.Complete);
-        Assert.False(after.NeedsVerification);
-    }
-
-    [Fact]
-    public void PendingToolCallsAndCurrentReceiptContentAreNeverSeparatedOrShortened()
-    {
-        var messages = InitialInstructions();
-        AddOldLogs(messages, 100);
-        var receipt = new { success = true, stdout = new string('p', 18000), runs = new[] { new { exitCode = 0, timedOut = false } } };
-        AddReceipt(messages, ClientToolNames.ResearchCodeExecute,
-            new { projectId = ScientificRunCompletionPolicyTests.Project, experimentId = "latest", executable = "python", arguments = ModelArguments }, receipt);
-        var completed = messages.TakeLast(2).ToArray();
-        var pending = new LmChatMessage("assistant", null, ToolCalls: [new("pending-check", ClientToolNames.ResearchDeliverablesVerify,
-            JsonSerializer.SerializeToElement(new { projectId = ScientificRunCompletionPolicyTests.Project }))]);
-        messages.Add(pending);
-
-        var plan = ScientificRunContextPlanner.Prepare(messages, 32768, null);
-
-        foreach (var message in completed) Assert.Contains(message, plan.Messages);
-        Assert.Contains(pending, plan.Messages);
-        AssertValidToolPairs(plan.Messages, allowPending: true);
-    }
-
-    [Fact]
-    public void ProtectedTaskOrManuscriptExceedingBudgetFailsHonestlyInsteadOfBeingTruncated()
-    {
-        var messages = InitialInstructions();
-        messages.Add(new("assistant", ScientificRunCompletionPolicyTests.Manuscript.Replace("## Ergebnisse", new string('x', 100000) + "\n## Ergebnisse", StringComparison.Ordinal)));
-
-        Assert.Throws<ContextBudgetException>(() => ScientificRunContextPlanner.Prepare(messages, 32768, null));
-    }
-
-    private static List<LmChatMessage> InitialInstructions() =>
-        [new("system", "Untersuche wissenschaftliche Fragen und halte Belege und Hypothesen getrennt."),
-         new("user", "Untersuche das Skalarfeld und erstelle eine vollständige Publikation mit ausgeführter Python-Abbildung.")];
-
-    private static void AddObsoleteManuscripts(List<LmChatMessage> messages, int count)
-    {
-        for (var index = 0; index < count; index++)
-        {
-            messages.Add(new("assistant", ScientificRunCompletionPolicyTests.Manuscript.Replace("Überprüfbare Skalarfeldrechnung", "Veralteter Entwurf " + index, StringComparison.Ordinal),
-                ReasoningContent: new string('r', 3000)));
-            messages.Add(new("user", "Missum-Laufanweisung zur Sprache: Veraltete Erinnerung " + index));
-        }
-    }
+    private static List<LmChatMessage> Initial() =>
+        [new("system", "Bearbeite das Projekt selbstständig."), new("user", "Prüfe die Gleichungen und bearbeite die Publikation direkt.")];
 
     private static void AddOldLogs(List<LmChatMessage> messages, int count)
     {
         for (var index = 0; index < count; index++)
-            AddReceipt(messages, "coding.command", new { executable = "python", arguments = OldArguments, iteration = index },
+            AddReceipt(messages, "coding.command", new { executable = "python", iteration = index },
                 new { success = true, stdout = new string('l', 2200) });
     }
 
-    private static void AddReceipt(List<LmChatMessage> messages, string tool, object arguments, object result)
+    private static LmChatMessage[] AddReceipt(List<LmChatMessage> messages, string name, object arguments, object result)
     {
-        var id = "context-call-" + Guid.NewGuid().ToString("N");
-        messages.Add(new("assistant", null, ToolCalls: [new(id, tool, JsonSerializer.SerializeToElement(arguments))]));
-        messages.Add(new("tool", JsonSerializer.Serialize(new { status = "completed", result }), ToolCallId: id));
+        var id = "tool-" + Guid.NewGuid().ToString("N");
+        LmChatMessage[] pair =
+        [
+            new("assistant", ToolCalls: [new(id, name, JsonSerializer.SerializeToElement(arguments))]),
+            new("tool", JsonSerializer.Serialize(new { status = "completed", result }), ToolCallId: id),
+        ];
+        messages.AddRange(pair);
+        return pair;
     }
 
-    private static void AssertValidToolPairs(IReadOnlyList<LmChatMessage> messages, bool allowPending = false)
+    private static void AssertValidPairs(IReadOnlyList<LmChatMessage> messages, bool allowPending = false)
     {
         var pending = new HashSet<string>(StringComparer.Ordinal);
         foreach (var message in messages)

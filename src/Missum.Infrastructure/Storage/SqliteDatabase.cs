@@ -8,7 +8,7 @@ namespace Missum.Infrastructure.Storage;
 
 public sealed class SqliteDatabase : IMissumDatabase, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 53;
+    public const int CurrentSchemaVersion = 55;
     private static readonly Action<ILogger, string, Exception?> DatabaseInitialized = LoggerMessage.Define<string>(
         LogLevel.Information, new EventId(1000, nameof(DatabaseInitialized)), "SQLite-Datenbank {DatabasePath} wurde initialisiert.");
     private static readonly Action<ILogger, string?, Exception?> IntegrityCheckFailed = LoggerMessage.Define<string?>(
@@ -105,6 +105,8 @@ public sealed class SqliteDatabase : IMissumDatabase, IAsyncDisposable
             await BackupBeforeWorkflowRemovalMigrationAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationFiftyTwoAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationFiftyThreeAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationFiftyFourAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationFiftyFiveAsync(connection, cancellationToken).ConfigureAwait(false);
             await VerifyIntegrityAsync(connection, cancellationToken).ConfigureAwait(false);
             Volatile.Write(ref _initialized, 1);
             DatabaseInitialized(_logger, DatabasePath, null);
@@ -2575,6 +2577,43 @@ public sealed class SqliteDatabase : IMissumDatabase, IAsyncDisposable
             command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
             await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationFiftyFourAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            CREATE TABLE IF NOT EXISTS chat_message_ui_headers(
+                message_id TEXT PRIMARY KEY REFERENCES chat_messages(id) ON DELETE CASCADE,
+                headers_json TEXT NOT NULL CHECK(json_valid(headers_json))
+            ) STRICT;
+            CREATE INDEX IF NOT EXISTS ix_chat_messages_page ON chat_messages(session_id,created_at,id);
+            CREATE TRIGGER IF NOT EXISTS invalidate_chat_ui_headers AFTER UPDATE OF tool_steps_json ON chat_messages
+            WHEN OLD.tool_steps_json <> NEW.tool_steps_json
+            BEGIN DELETE FROM chat_message_ui_headers WHERE message_id=NEW.id; END;
+            INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(54,$now);
+            """;
+        command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToDb());
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationFiftyFiveAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        // Rebuild only disposable UI projections to include continuation timing metadata.
+        // Durable transcripts and model context are deliberately untouched.
+        command.CommandText = """
+            DELETE FROM chat_message_ui_headers WHERE NOT EXISTS(SELECT 1 FROM schema_migrations WHERE version=55);
+            INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(55,$now);
+            """;
+        command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToDb());
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 

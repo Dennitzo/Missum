@@ -30,25 +30,33 @@ public static class ScientificQuantitativeValidation
             return "quantitativeValidation.checks benötigt 2–32 Kriterien, mindestens accuracy und convergence; bei sampling=true zusätzlich uncertainty.";
         var metrics = new HashSet<string>(StringComparer.Ordinal);
         var kinds = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var check in checks.EnumerateArray())
+        for (var index = 0; index < checks.GetArrayLength(); index++)
         {
+            var check = checks[index];
+            var checkPath = $"quantitativeValidation.checks[{index}]";
             if (!HasExactly(check, CheckFields))
-                return "Jedes quantitativeValidation.checks-Kriterium benötigt genau metric, kind und maximum.";
+                return $"{checkPath} benötigt genau metric, kind und maximum.";
             var metric = Text(check, "metric");
             if (metric.Any(char.IsControl) || !Regex.IsMatch(metric, MetricPattern, RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1)) || !metrics.Add(metric))
-                return "quantitativeValidation.checks[].metric benötigt eine eindeutige ASCII-Kennung (Buchstabe zuerst, danach Buchstaben, Ziffern, _, . oder -, höchstens 128 Zeichen). Für unterschiedliche Prüfarten getrennte Messwerte verwenden.";
+                return $"{checkPath}.metric benötigt eine eindeutige ASCII-Kennung (Buchstabe zuerst, danach Buchstaben, Ziffern, _, . oder -, höchstens 128 Zeichen). Für unterschiedliche Prüfarten getrennte Messwerte verwenden.";
             var kind = Text(check, "kind");
             if (kind is not ("accuracy" or "convergence" or "uncertainty"))
-                return $"Prüfkriterium {metric}: kind muss accuracy, convergence oder uncertainty sein.";
+                return $"{checkPath}.kind (metric={metric}) muss accuracy, convergence oder uncertainty sein.";
             if (kind == "accuracy" && IsCorrelation(metric))
-                return $"Prüfkriterium {metric}: Pearson/Korrelation belegt keine quantitative Genauigkeit. Unter accuracy einen tatsächlichen Fehler gegenüber der angegebenen Referenz messen, beispielsweise die Abweichung derselben normierten Verteilung.";
+                return $"{checkPath}.metric ({metric}): Pearson/Korrelation belegt keine quantitative Genauigkeit. Unter accuracy einen tatsächlichen Fehler gegenüber der angegebenen Referenz messen, beispielsweise die Abweichung derselben normierten Verteilung.";
             if (!NonnegativeFinite(check.GetProperty("maximum"), out _))
-                return $"Prüfkriterium {metric}: maximum muss eine endliche nichtnegative Fehlerschranke sein; keine Erfolgsmarkierung oder Zeichenfolge.";
+                return $"{checkPath}.maximum (metric={metric}) muss eine endliche nichtnegative Fehlerschranke sein; keine Erfolgsmarkierung oder Zeichenfolge.";
             kinds.Add(kind);
         }
-        if (!kinds.Contains("accuracy") || !kinds.Contains("convergence")
-            || definition.GetProperty("sampling").GetBoolean() && !kinds.Contains("uncertainty"))
-            return "quantitativeValidation.checks muss accuracy und convergence sowie bei sampling=true uncertainty abdecken. Genauigkeitsfehler, Verfeinerungsfehler und gegebenenfalls Stichprobenunsicherheit getrennt messen.";
+        var requiredKinds = definition.GetProperty("sampling").GetBoolean()
+            ? new[] { "accuracy", "convergence", "uncertainty" } : ["accuracy", "convergence"];
+        var missingKinds = requiredKinds.Where(kind => !kinds.Contains(kind)).ToArray();
+        if (missingKinds.Length > 0)
+            return $"quantitativeValidation.checks: Fehlende Prüfarten: {string.Join(", ", missingKinds)}. "
+                + $"Vorhandene Prüfarten: {string.Join(", ", kinds.Order(StringComparer.Ordinal))}. "
+                + "Ergänze für jede fehlende Prüfart einen eigenen Eintrag mit separater metric-Kennung und fachlich begründetem maximum. "
+                + "convergence misst den direkten Lösungsabstand unter Schritt-/Gitterverfeinerung, nicht Referenzfehler oder Seedstreuung. "
+                + "Der Vertrag legt Prüfziele fest; noch fehlende Messungen tatsächlich ausführen. Keine Werte erfinden, vorhandene Kriterien umetikettieren, entfernen oder abschwächen.";
         return null;
     }
 

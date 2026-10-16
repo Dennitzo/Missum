@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using Missum.App.Services;
 using Missum.Core.Contracts;
 using Missum.Core.Models;
@@ -129,18 +129,6 @@ public sealed class ScientificResearchReviewTests
     }
 
     [Fact]
-    public void OnlySuccessfulCurrentWholeDeliverableVerificationPersistsAReview()
-    {
-        var state = HypotheticalState();
-        var review = ScientificResearchReview.Assess(state, [], [], [], []);
-        var report = JsonSerializer.SerializeToElement(new { success = true, scientificReview = review }, JsonOptions);
-        Assert.NotNull(ScientificResearchReviewPersistence.Create(state, report));
-        Assert.Null(ScientificResearchReviewPersistence.Create(state with { Revision = 2 }, report));
-        Assert.Null(ScientificResearchReviewPersistence.Create(state,
-            JsonSerializer.SerializeToElement(new { success = false, scientificReview = review }, JsonOptions)));
-    }
-
-    [Fact]
     public void ReferencedClaimCannotHideAnUnreviewedUnderlyingHypothesis()
     {
         var state = State(new { title = "Abhängigkeit", contentMarkdown = "Die Aussage verwendet einen Modellansatz.",
@@ -156,27 +144,6 @@ public sealed class ScientificResearchReviewTests
         Assert.False(report.Ready);
         Assert.Contains("hypothesis", report.ReviewedItemIds);
         Assert.Contains(report.Missing, item => item.Contains("hypothesis", StringComparison.Ordinal) && item.Contains("data.review", StringComparison.Ordinal));
-    }
-
-    [Theory]
-    [InlineData("state")]
-    [InlineData("presentation")]
-    public void ConcurrentChangesRejectTheWholeVerificationAndNeverCreateAReceipt(string change)
-    {
-        var state = HypotheticalState();
-        var presentation = new ScientificPresentationSnapshot(2, null, null, null, null);
-        Assert.True(ScientificResearchReviewPersistence.IsCurrent(state, presentation, state, presentation));
-        var current = change == "state" ? state with { Revision = 2 } : state;
-        var latest = change == "presentation" ? presentation with { Version = 3 } : presentation;
-        Assert.False(ScientificResearchReviewPersistence.IsCurrent(state, presentation, current, latest));
-        var review = ScientificResearchReview.Assess(state, [], [], [], []);
-        var verified = JsonSerializer.SerializeToElement(new { success = true, scientificReview = review,
-            research = new { ready = true, missing = Array.Empty<string>() } }, JsonOptions);
-        var rejected = ScientificResearchReviewPersistence.RejectStale(verified, current);
-        Assert.False(rejected.GetProperty("success").GetBoolean());
-        Assert.False(rejected.GetProperty("scientificReview").GetProperty("ready").GetBoolean());
-        Assert.Contains("während der Prüfung geändert", rejected.GetProperty("research").GetProperty("missing")[0].GetString(), StringComparison.Ordinal);
-        Assert.Null(ScientificResearchReviewPersistence.Create(state, rejected));
     }
 
     private static ResearchWorkingState State(object data, string projectId = "research-review") => new(projectId, 1, 1,

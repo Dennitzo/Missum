@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -191,17 +191,19 @@ public sealed class ScientificPublicationImagesTests : IDisposable
     }
 
     [Fact]
-    public async Task PdfServiceReceivesStagedImageAndRetainsFinalAssetAfterCleanup()
+    public async Task DirectPublicationStagesImagesForRenderingAndPreservesTheOriginalPlotAfterCleanup()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var session = await environment.Get<IChatRepository>().CreateSessionAsync("Publikationsabbildung");
         var repository = environment.Get<IScientificResearchRepository>();
         var now = DateTimeOffset.UtcNow;
         var project = new ScientificResearchProject("research-image-integration", session.Id, "scientificEvidence",
-            "Ein Modell illustrieren", "Ein Modell illustrieren", "sandboxResearch", "multiPath", "active", 1, 1, now, now);
+            "Ein Modell illustrieren", "Ein Modell illustrieren", "codingWorkspaceResearch", "multiPath", "active", 1, 1, now, now, environment.Directory);
         await repository.UpsertProjectAsync(project);
-        var sandbox = CreateSandbox(project.Id);
-        await File.WriteAllBytesAsync(Path.Combine(sandbox.Layout.ArtifactsPath, "result.png"), Png);
+        var artifacts = Path.Combine(environment.Directory, "artifacts");
+        Directory.CreateDirectory(artifacts);
+        var originalPlot = Path.Combine(artifacts, "result.png");
+        await File.WriteAllBytesAsync(originalPlot, Png);
         var manifest = JsonSerializer.Serialize(new { projectId = project.Id, runId = "image-run", runStartedAt = now.AddMinutes(-1) });
         await repository.SaveArchiveSnapshotAsync(project.Id, new(1, "{}", [], [], "image-report", "scientificMarkdown", "unresolved",
             "## Ergebnisse\n\n![Abbildung 1: Modell](/sandbox/artifacts/result.png)", manifest,
@@ -219,7 +221,7 @@ public sealed class ScientificPublicationImagesTests : IDisposable
             var pdf = Path.ChangeExtension(source, ".pdf");
             await File.WriteAllBytesAsync(pdf, Encoding.ASCII.GetBytes("%PDF-1.7\n" + new string(' ', 2048) + "\n%%EOF\n"), token);
             return pdf;
-        }, Path.Combine(environment.Directory, "image-publications"), sandbox: sandbox);
+        }, Path.Combine(environment.Directory, "image-publications"));
 
         var publication = await service.EnsureCurrentAsync(project.Id);
 
@@ -227,8 +229,10 @@ public sealed class ScientificPublicationImagesTests : IDisposable
         Assert.NotNull(renderedSource);
         Assert.NotNull(relativeImage);
         Assert.False(Directory.Exists(Path.GetDirectoryName(renderedSource)));
-        Assert.Equal(Png, await File.ReadAllBytesAsync(Path.Combine(Path.GetDirectoryName(publication.MarkdownPath)!, relativeImage)));
-        Assert.Contains(relativeImage, await File.ReadAllTextAsync(publication.MarkdownPath));
+        Assert.Equal(Png, await File.ReadAllBytesAsync(originalPlot));
+        Assert.Contains("/sandbox/artifacts/result.png", await File.ReadAllTextAsync(publication.MarkdownPath));
+        Assert.DoesNotContain("figures/", await File.ReadAllTextAsync(publication.MarkdownPath));
+        Assert.Equal(Path.Combine(environment.Directory, "Publikation.md"), publication.MarkdownPath);
         Assert.True(File.Exists(publication.PdfPath));
     }
 

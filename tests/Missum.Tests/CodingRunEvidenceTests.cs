@@ -328,7 +328,7 @@ public sealed class CodingRunEvidenceTests : IAsyncLifetime
             environment.Get<IContextAssembler>(), environment.Get<IPromptTriggerRepository>(), environment.Get<IAssistantAttachmentRepository>(),
             environment.Get<IChatArtifactRepository>(), environment.Get<IConversationSnapshotRepository>(), null, settings, activity);
 
-        await coordinator.HandleAsync(new(AssistantWebBridge.ProtocolVersion, bulkDelete ? "session.clear" : "session.delete",
+        await coordinator.HandleAsync(new(AssistantProtocol.ProtocolVersion, bulkDelete ? "session.clear" : "session.delete",
             "evidence-lifecycle", JsonSerializer.SerializeToElement(new { sessionId = target.Id })), (_, _, _) => Task.CompletedTask);
 
         var cache = Path.Combine(environment.Directory, "Cache", "CodingRuns");

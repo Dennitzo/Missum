@@ -17,7 +17,8 @@ public sealed partial class SqliteScientificResearchRepository
         { "title", "contentMarkdown", "statement", "status", "assumptions", "prediction", "nextCheck", "reason",
             "required", "order", "sourceIds", "claimIds", "experimentIds", "checkIds", "evidenceIds",
             "hypothesisIds", "requirementIds", "contributionIds", "figureCaptions", "units", "description",
-            "method", "expectedResult", "classification", "conclusion", "limit", "targetIds", "review", "quantitativeValidation" };
+            "method", "expectedResult", "classification", "conclusion", "limit", "targetIds", "review", "quantitativeValidation",
+            "evidenceRequirements", "proofDescriptions", "simulationDescriptions" };
     private static readonly string[] WorkingReferenceFields =
         ["sourceIds", "claimIds", "experimentIds", "checkIds", "evidenceIds", "hypothesisIds", "requirementIds", "contributionIds", "targetIds"];
     private static readonly string[] LimitEvidenceFields = ["sourceIds", "evidenceIds", "experimentIds", "checkIds"];
@@ -368,8 +369,13 @@ public sealed partial class SqliteScientificResearchRepository
         if (change.Data.TryGetProperty("quantitativeValidation", out var quantitative)
             && ScientificQuantitativeValidation.ValidateDefinition(quantitative) is { } quantitativeError)
             conflicts.Add(new(change.Id, "invalid_quantitative_validation", quantitativeError));
+        if (change.Data.TryGetProperty("evidenceRequirements", out var evidenceRequirements)
+            && ScientificEvidenceRequirements.Validate(evidenceRequirements) is { } evidenceError)
+            conflicts.Add(new(change.Id, "invalid_evidence_requirements", evidenceError));
         ValidateWorkingMetadata(change, "units", ["symbol", "meaning", "unit"], conflicts);
         ValidateWorkingMetadata(change, "figureCaptions", ["experimentId", "artifactPath", "caption"], conflicts);
+        ValidateWorkingMetadata(change, "proofDescriptions", ["checkId", "description"], conflicts);
+        ValidateWorkingMetadata(change, "simulationDescriptions", ["experimentId", "equations", "description"], conflicts);
         foreach (var field in WorkingReferenceFields)
         {
             if (!change.Data.TryGetProperty(field, out var refs)) continue;
@@ -458,6 +464,12 @@ public sealed partial class SqliteScientificResearchRepository
         available["targetIds"] = current.Keys.Concat(changes.Select(item => item.Id)).Concat(available["experimentIds"]).ToHashSet(StringComparer.Ordinal);
         foreach (var change in changes)
         {
+            foreach (var (field, reference, key) in new[] { ("proofDescriptions", "checkIds", "checkId"),
+                ("simulationDescriptions", "experimentIds", "experimentId") })
+                if (change.Data.TryGetProperty(field, out var descriptions) && descriptions.ValueKind == JsonValueKind.Array)
+                    foreach (var description in descriptions.EnumerateArray())
+                        if (!WorkingRefs(change.Data, reference).Contains(description.GetProperty(key).GetString()!, StringComparer.Ordinal))
+                            conflicts.Add(new(change.Id, "unbound_description", $"{field}: {key} muss auch unter {reference} desselben Objekts zugeordnet sein."));
             foreach (var field in WorkingReferenceFields)
             {
                 foreach (var id in WorkingRefs(change.Data, field))
@@ -560,8 +572,10 @@ public sealed partial class SqliteScientificResearchRepository
     }
 
     private static readonly string[] SectionPublicationFields =
-        ["title", "contentMarkdown", "status", "order", "units", "figureCaptions", "sourceIds", "claimIds", "hypothesisIds", "experimentIds"];
-    private static readonly string[] AssertionPublicationFields = ["statement", "status", "sourceIds", "hypothesisIds"];
+        ["title", "contentMarkdown", "status", "order", "units", "figureCaptions", "sourceIds", "claimIds", "hypothesisIds", "experimentIds",
+         "checkIds", "proofDescriptions", "simulationDescriptions"];
+    private static readonly string[] AssertionPublicationFields = ["statement", "status", "sourceIds", "claimIds", "hypothesisIds",
+        "experimentIds", "checkIds", "proofDescriptions", "simulationDescriptions"];
     private static string PublicationFields(string kind, JsonElement data)
     {
         var fields = kind == "section" ? SectionPublicationFields : kind is "claim" or "hypothesis" ? AssertionPublicationFields : [];

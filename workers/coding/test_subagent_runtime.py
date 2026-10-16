@@ -1,11 +1,13 @@
 import importlib.util
+import io
+import json
 import struct
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from test_catalog import gguf
-from session_cache import NativeSessionCache
+from session_cache import NativeSessionCache, PreparationCancelledError, PreparationTimeoutError
 
 spec = importlib.util.spec_from_file_location("agent_catalog", Path(__file__).with_name("catalog.py"))
 catalog = importlib.util.module_from_spec(spec)
@@ -385,14 +387,16 @@ class SubagentRuntimeTests(unittest.TestCase):
         self.assertEqual("resident", cache.fork(self.base, "parent", self.child, "child", prefill)["status"])
         self.assertEqual(count, len([path for path, _ in calls if path == "completion"]))
 
-    def test_canonical_fork_rejects_cold_preparation_instead_of_claiming_cache_sharing(self):
-        cache, _, calls, _, source, prefill = self.canonical_cache(cold=True)
+    def test_canonical_fork_accepts_exact_cold_replay_and_reports_no_cache_reuse(self):
+        cache, state, calls, canonical, source, prefill = self.canonical_cache(cold=True)
         result = cache.fork(self.base, "parent", self.child, "child", prefill)
-        self.assertEqual("unavailable", result["status"])
-        self.assertIn("did not reuse", result["detail"])
-        self.assertFalse(any("action=restore" in path for path, _ in calls))
+        self.assertEqual("forked", result["status"])
+        self.assertEqual(0, result["sourceCachedTokens"])
+        self.assertEqual(len(canonical), result["sourceEvaluatedTokens"])
+        self.assertEqual("replayed", result["preparationMode"])
+        self.assertEqual(canonical, state[self.child])
+        self.assertEqual([self.child], [body["model"] for path, body in calls if "action=restore" in path])
         self.assertEqual(source, cache._snapshot_tokens(self.root / (cache._identity(self.base, "parent") + ".bin")))
-        self.assertFalse((self.root / (cache._identity(self.child, "child") + ".bin")).exists())
 
     def test_canonical_fork_rejects_template_that_rewrites_prefix_before_any_preparation_inference(self):
         cache, _, calls, _, source, prefill = self.canonical_cache(rewrite_prefix=True)
@@ -408,10 +412,209 @@ class SubagentRuntimeTests(unittest.TestCase):
                 cache, _, calls, _, source, prefill = self.canonical_cache(**options)
                 result = cache.fork(self.base, "parent", self.child, "child", prefill)
                 self.assertEqual("unavailable", result["status"])
-                self.assertFalse(any("action=restore" in path for path, _ in calls))
+                self.assertEqual([self.base], [body["model"] for path, body in calls if "action=restore" in path])
                 self.assertEqual(source, cache._snapshot_tokens(self.root / (cache._identity(self.base, "parent") + ".bin")))
                 self.assertFalse((self.root / (cache._identity(self.child, "child") + ".bin")).exists())
                 self.assertFalse(list(self.root.glob("*.pending")))
+
+    def test_failed_or_cancelled_prefill_drains_then_restores_exact_parent_and_never_saves_branch(self):
+        for failure in (PreparationCancelledError("caller stopped"), PreparationTimeoutError("no progress"),
+                        RuntimeError("native stream lost")):
+            with self.subTest(failure=type(failure).__name__):
+                cache, state, calls, canonical, source, prefill = self.canonical_cache()
+
+                def interrupted(body, cancelled):
+                    state[self.base] = canonical[:50]
+                    raise failure
+
+                cache.prepare_completion = interrupted
+                result = cache.fork(self.base, "parent", self.child, "child", prefill)
+                self.assertEqual("unavailable", result["status"])
+                self.assertEqual(source, state[self.base])
+                restore_index = next(index for index, (path, _) in enumerate(calls) if "action=restore" in path)
+                self.assertTrue(calls[restore_index - 1][0].startswith("slots?"))
+                self.assertEqual([self.base], [body["model"] for path, body in calls if "action=restore" in path])
+                cache.save_all()
+                self.assertEqual(source, cache._snapshot_tokens(self.root / (cache._identity(self.base, "parent") + ".bin")))
+                self.assertFalse((self.root / (cache._identity(self.child, "child") + ".bin")).exists())
+                self.assertFalse(list(self.root.glob("*.pending")))
+
+    def test_failed_parent_recovery_removes_resident_owner_to_prevent_branch_save(self):
+        cache, state, calls, canonical, source, prefill = self.canonical_cache()
+        original_router = cache.router
+
+        def router(path, body=None, timeout=15):
+            if "action=restore" in path:
+                raise RuntimeError("restore unavailable")
+            return original_router(path, body, timeout)
+
+        def interrupted(body, cancelled):
+            state[self.base] = canonical[:50]
+            raise PreparationCancelledError("caller stopped")
+
+        cache.router, cache.prepare_completion = router, interrupted
+        result = cache.fork(self.base, "parent", self.child, "child", prefill)
+        self.assertIn("parent cache recovery required", result["detail"])
+        self.assertNotIn(self.base, cache.resident)
+        cache.save_all()
+        self.assertEqual(source, cache._snapshot_tokens(self.root / (cache._identity(self.base, "parent") + ".bin")))
+
+    def canonical_cache_with_foreign_owner(self):
+        cache, state, calls, canonical, source, prefill = self.canonical_cache()
+        cache.save(self.base, "parent")
+        cache.prepare(self.base, "foreign-session")
+        foreign = [700, 701, 702, 703]
+        state[self.base] = foreign.copy()
+        calls.clear()
+        return cache, state, calls, canonical, source, prefill, foreign
+
+    def test_fork_saves_foreign_owner_prepares_parent_and_recovers_correct_source_identity(self):
+        cache, state, calls, canonical, source, prefill, foreign = self.canonical_cache_with_foreign_owner()
+
+        def interrupted(body, cancelled):
+            self.assertEqual(source, state[self.base])
+            state[self.base] = canonical[:50]
+            raise PreparationCancelledError("caller stopped")
+
+        cache.prepare_completion = interrupted
+        result = cache.fork(self.base, "parent", self.child, "child", prefill)
+        self.assertEqual("unavailable", result["status"])
+        self.assertEqual(source, state[self.base])
+        self.assertEqual(cache._identity(self.base, "parent"), cache.resident[self.base]["identity"])
+        self.assertEqual("parent", cache.resident[self.base]["key"])
+        self.assertFalse(cache.resident[self.base]["dirty"])
+        cache.save_all()
+        self.assertEqual(foreign, cache._snapshot_tokens(self.root / (cache._identity(self.base, "foreign-session") + ".bin")))
+        self.assertEqual(source, cache._snapshot_tokens(self.root / (cache._identity(self.base, "parent") + ".bin")))
+        first_restore = next(index for index, (path, _) in enumerate(calls) if "action=restore" in path)
+        self.assertTrue(any("action=save" in path for path, _ in calls[:first_restore]))
+
+    def test_foreign_owner_save_failure_prevents_parent_restore_and_inference(self):
+        cache, state, calls, _, source, prefill, foreign = self.canonical_cache_with_foreign_owner()
+        original_router = cache.router
+
+        def router(path, body=None, timeout=15):
+            if "action=save" in path:
+                raise OSError("foreign session cannot be saved")
+            return original_router(path, body, timeout)
+
+        cache.router = router
+        result = cache.fork(self.base, "parent", self.child, "child", prefill)
+        self.assertEqual("unavailable", result["status"])
+        self.assertIn("foreign session cannot be saved", result["detail"])
+        self.assertEqual(foreign, state[self.base])
+        self.assertEqual("foreign-session", cache.resident[self.base]["key"])
+        self.assertFalse(any("action=restore" in path or path in ("apply-template", "completion") for path, _ in calls))
+        self.assertEqual(source, cache._snapshot_tokens(self.root / (cache._identity(self.base, "parent") + ".bin")))
+
+    def test_parent_prepare_failure_keeps_foreign_snapshot_and_does_not_start_inference(self):
+        cache, state, calls, _, source, prefill, foreign = self.canonical_cache_with_foreign_owner()
+        original_router = cache.router
+
+        def router(path, body=None, timeout=15):
+            if "action=restore" in path:
+                state[self.base] = [999]
+                raise RuntimeError("parent restore failed")
+            return original_router(path, body, timeout)
+
+        cache.router = router
+        result = cache.fork(self.base, "parent", self.child, "child", prefill)
+        self.assertEqual("unavailable", result["status"])
+        self.assertIn("parent restore failed", result["detail"])
+        self.assertNotIn(self.base, cache.resident)
+        self.assertFalse(any(path in ("apply-template", "completion") for path, _ in calls))
+        cache.save_all()
+        self.assertEqual(foreign, cache._snapshot_tokens(self.root / (cache._identity(self.base, "foreign-session") + ".bin")))
+        self.assertEqual(source, cache._snapshot_tokens(self.root / (cache._identity(self.base, "parent") + ".bin")))
+
+    def test_failed_child_restore_recovers_parent_and_removes_partial_child_owner_and_files(self):
+        cache, state, _, _, source, prefill = self.canonical_cache()
+        original_router = cache.router
+
+        def router(path, body=None, timeout=15):
+            if "action=restore" in path and body["model"] == self.child:
+                state[self.child] = [999]
+                raise RuntimeError("child restore failed halfway")
+            return original_router(path, body, timeout)
+
+        cache.router = router
+        result = cache.fork(self.base, "parent", self.child, "child", prefill)
+        self.assertEqual("unavailable", result["status"])
+        self.assertIn("child restore failed", result["detail"])
+        self.assertEqual(source, state[self.base])
+        self.assertNotIn(self.child, cache.resident)
+        cache.save_all()
+        child = self.root / (cache._identity(self.child, "child") + ".bin")
+        self.assertFalse(child.exists())
+        self.assertFalse(child.with_suffix(".json").exists())
+        self.assertEqual(source, cache._snapshot_tokens(self.root / (cache._identity(self.base, "parent") + ".bin")))
+
+    def test_cancel_before_prefill_does_not_mutate_or_restore_a_slot(self):
+        cache, _, calls, _, _, prefill = self.canonical_cache()
+        result = cache.fork(self.base, "parent", self.child, "child", prefill, cancelled=lambda: True)
+        self.assertEqual("subagent.preparation_cancelled", result["reason"])
+        self.assertEqual([], calls)
+
+    def test_inconsistent_token_accounting_restores_parent_instead_of_accepting_branch(self):
+        cache, state, _, canonical, source, prefill = self.canonical_cache()
+
+        def inconsistent(body, cancelled):
+            state[self.base] = canonical.copy()
+            return dict(tokens_predicted=1, timings=dict(cache_n=0, prompt_n=len(canonical) - 1))
+
+        cache.prepare_completion = inconsistent
+        result = cache.fork(self.base, "parent", self.child, "child", prefill)
+        self.assertEqual("unavailable", result["status"])
+        self.assertIn("inconsistent token accounting", result["detail"])
+        self.assertEqual(source, state[self.base])
+        self.assertFalse((self.root / (cache._identity(self.child, "child") + ".bin")).exists())
+
+    def test_control_prepare_reports_timeout_without_claiming_child_availability(self):
+        with patch.object(self.manager, "agent_status", return_value=dict(allowed=True, modelId=self.base, instanceId=self.child)), \
+             patch.object(self.manager, "load"), patch.object(self.manager.sessions, "fork", return_value=dict(
+                 status="unavailable", reason="subagent.preparation_timeout", detail="No token progress")):
+            result = self.manager.agent_prepare(self.base, "parent", "child", {})
+        self.assertFalse(result["allowed"])
+        self.assertEqual("subagent.preparation_timeout", result["reason"])
+
+    def native_preparation_transport(self, events, cancelled=None):
+        payload = b"".join(b"data: " + json.dumps(event).encode() + b"\n\n" for event in events)
+        response = io.BytesIO(payload)
+        response.status = 200
+        connection = MagicMock()
+        connection.getresponse.return_value = response
+        with patch.object(catalog.http.client, "HTTPConnection", return_value=connection):
+            try:
+                return self.manager.prepare_completion(dict(model=self.base, prompt=[1, 2, 3], n_predict=1), cancelled)
+            finally:
+                connection.sock.shutdown.assert_called()
+                connection.close.assert_called_once()
+                self.assertTrue(response.closed)
+                sent = json.loads(connection.request.call_args.args[2])
+                self.assertTrue(sent["stream"])
+                self.assertTrue(sent["return_progress"])
+                self.assertEqual(1, sent["n_predict"])
+
+    def test_native_preparation_stream_returns_final_accounting_and_closes_transport(self):
+        final = dict(stop=True, tokens_predicted=1, timings=dict(cache_n=0, prompt_n=3))
+        result = self.native_preparation_transport([
+            dict(prompt_progress=dict(total=3, cache=0, processed=0, time_ms=0)),
+            dict(prompt_progress=dict(total=3, cache=0, processed=3, time_ms=100)), final])
+        self.assertEqual(final, result)
+
+    def test_native_preparation_stream_missing_final_accounting_is_closed_and_rejected(self):
+        with self.assertRaisesRegex(RuntimeError, "without final token accounting"):
+            self.native_preparation_transport([dict(prompt_progress=dict(processed=3))])
+
+    def test_native_preparation_stream_caller_cancel_closes_inference_connection(self):
+        calls = []
+
+        def cancelled():
+            calls.append(True)
+            return len(calls) >= 3
+
+        with self.assertRaises(PreparationCancelledError):
+            self.native_preparation_transport([dict(prompt_progress=dict(processed=0))], cancelled)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-using Missum.Ai.Contracts;
+﻿using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Models;
 using Missum.Ai.Server.Core.Policies;
 using Missum.Ai.Server.Core.Runs;
@@ -28,7 +28,8 @@ public sealed class ScientificReadCompactionTests
 
         Assert.True(plan.WasCompacted);
         Assert.Contains(full, plan.Messages);
-        Assert.Equal(FirstStamp, RunProcessor.FindResearchOverviewStamp(plan.Messages, Project));
+        using var restored = JsonDocument.Parse(full.Content!);
+        Assert.Equal(FirstStamp, restored.RootElement.GetProperty("result").GetProperty("stateStamp").GetString());
         AssertValidPairs(plan.Messages);
     }
 

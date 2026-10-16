@@ -27,6 +27,22 @@ public sealed partial class NativeAssistantPage
         snapshot["activeRunSessionId"] = JsonSerializer.SerializeToElement(owner);
         snapshot["runMessageId"] = JsonSerializer.SerializeToElement(messages[^1].id);
         snapshot["messages"] = JsonSerializer.SerializeToElement(messages);
+        // Read-only replay of a real long conversation in the isolated smoke profile.
+        // Never connect this fixture to the user's repository or start a model run.
+        if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_REPLAY") is { Length: > 0 } replayPath)
+        {
+            var replay = JsonSerializer.Deserialize<JsonElement[]>(await File.ReadAllTextAsync(replayPath, _lifetime.Token))!;
+            snapshot["messages"] = JsonSerializer.SerializeToElement(replay.Select((message, index) =>
+            {
+                var fields = message.Deserialize<Dictionary<string, JsonElement>>()!;
+                fields["sessionId"] = JsonSerializer.SerializeToElement(owner);
+                fields["status"] = JsonSerializer.SerializeToElement(index == replay.Length - 1 ? "streaming" : S(message, "status"));
+                return fields;
+            }));
+        }
+        var replayMessages = snapshot["messages"].EnumerateArray().ToArray();
+        var activeMessage = replayMessages[^1];
+        snapshot["runMessageId"] = activeMessage.GetProperty("id");
         var latencies = new List<double>();
         var ticks = _successfulUiRenderTicks;
         var faults = _uiCallbackFaultCount;
@@ -65,7 +81,8 @@ public sealed partial class NativeAssistantPage
                 var step = new { id = "reasoning-responsiveness", tool = "assistant.reasoning", status = "running",
                     outputJson = JsonSerializer.Serialize(new { text = "Kontrollrechnung " + fragment }), updatedAt = DateTimeOffset.UtcNow };
                 ApplyEvent("chat.delta", JsonSerializer.SerializeToElement(new { sessionId = owner,
-                    messageId = messages[^1].id, content = messages[^1].content + "\n\nFortschritt " + fragment, toolSteps = new[] { step } }));
+                    messageId = S(activeMessage, "id"), content = S(activeMessage, "content") + "\n\nFortschritt " + fragment,
+                    toolSteps = Items(activeMessage, "toolSteps").Append(JsonSerializer.SerializeToElement(step)).ToArray() }));
                 await Task.Delay(80, _lifetime.Token);
             }
             await inputProbes;
@@ -76,15 +93,35 @@ public sealed partial class NativeAssistantPage
                 throw new InvalidOperationException("Render-Timer oder laufende Antwort wurden im Leistungstest unterbrochen.");
             latencies.Sort();
             var p95 = latencies[(int)Math.Ceiling(latencies.Count * .95) - 1];
-            if (p95 > 250) throw new InvalidOperationException($"UI-Eingabeverzögerung im langen Streaming-Chat: {p95:F1} ms.");
+            var activeId = S(activeMessage, "id");
+            var priorStart = _messageStepStarts.GetValueOrDefault(activeId);
+            var windowVerified = false;
+            if (Items(activeMessage, "toolSteps").Length > MessageStepBatch * 2)
+            {
+                if (priorStart <= 0 || _messageBlocks[activeId].Keys.Count(key => key.StartsWith("tool:", StringComparison.Ordinal)) > MessageStepBatch + 1)
+                    throw new InvalidOperationException("Die lange Antwort erzeugt weiterhin alle historischen Werkzeugansichten.");
+                var tailKey = _messageBlocks[activeId].Keys.Last(key => key.StartsWith("text:", StringComparison.Ordinal));
+                var tailView = _messageBlocks[activeId][tailKey];
+                QueueEarlierMessageBlocks(activeId);
+                for (var wait = 0; wait < 100 && _messageWindowLoading; wait++) await Task.Delay(20, _lifetime.Token);
+                if (_messageStepStarts[activeId] != Math.Max(0, priorStart - MessageStepBatch)
+                    || !ReferenceEquals(tailView, _messageBlocks[activeId][tailKey])
+                    || !_messageActionViews[activeId].Text.StartsWith(S(activeMessage, "content"), StringComparison.Ordinal))
+                    throw new InvalidOperationException("Abschnittsweises Nachladen verändert den bestehenden Text oder den vollständigen Kopier-/Vorlesetext.");
+                windowVerified = true;
+            }
             await SaveMathPreviewAsync(LayoutRoot, "native-responsiveness-preview.png");
             await File.WriteAllTextAsync(Path.Combine(App.Current.DataDirectory, "native-responsiveness-validation.json"),
-                JsonSerializer.Serialize(new { processId = Environment.ProcessId, messageCount = messages.Length,
-                    paragraphCount = messages.Length * 10, selectionQueries = 10_000,
+                JsonSerializer.Serialize(new { processId = Environment.ProcessId, messageCount = replayMessages.Length,
+                    toolStepCount = replayMessages.Sum(message => Items(message, "toolSteps").Length),
+                    activeToolStepCount = Items(activeMessage, "toolSteps").Length,
+                    windowedHistoryAndFullCopyTextVerified = windowVerified,
+                    characterCount = replayMessages.Sum(message => S(message, "content").Length), selectionQueries = 10_000,
                     selectionQueryMilliseconds = selectionWatch.Elapsed.TotalMilliseconds,
                     dispatcherP95Milliseconds = p95, dispatcherMaxMilliseconds = latencies[^1],
                     timerTicks = _successfulUiRenderTicks - ticks, sourceControlsPreserved = true,
                     streamingRunPreserved = true, uiFaults = _uiCallbackFaultCount - faults }, JsonOptions));
+            if (p95 > 250) throw new InvalidOperationException($"UI-Eingabeverzögerung im langen Streaming-Chat: {p95:F1} ms.");
         }
         finally
         {

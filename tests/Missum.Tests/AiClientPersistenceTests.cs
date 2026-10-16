@@ -223,19 +223,6 @@ public sealed class AiClientPersistenceTests
         }
     }
 
-    [Theory]
-    [InlineData("aufnahme.wav", "application/octet-stream", "audio/wav")]
-    [InlineData("anlage.MKV", "", "video/x-matroska")]
-    [InlineData("foto.webp", null, "image/webp")]
-    [InlineData("daten.bin", null, "application/octet-stream")]
-    public void AttachmentMediaTypeFallsBackToKnownFileExtensions(
-        string fileName,
-        string? reported,
-        string expected)
-    {
-        Assert.Equal(expected, AssistantPage.ResolveAttachmentContentType(fileName, reported));
-    }
-
     [Fact]
     public void NaturalMediaQuestionsRouteTheLatestAttachedMediumWithoutAnUploadIdPrompt()
     {

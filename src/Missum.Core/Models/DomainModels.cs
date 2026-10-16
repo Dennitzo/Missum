@@ -62,7 +62,8 @@ public sealed record AssistantToolStep(
     DateTimeOffset? StartedAt = null,
     DateTimeOffset? CompletedAt = null,
     DateTimeOffset? UpdatedAt = null,
-    string? AgentId = null)
+    string? AgentId = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)] bool DetailsDeferred = false)
 {
     // Display/storage limit only. Tool collection and model-context budgets are independent.
     public const int MaximumDetailCharacters = 2_097_152;
@@ -100,6 +101,11 @@ public sealed record ConversationSnapshot(
     ChatSession Session,
     IReadOnlyList<ChatMessage> Messages,
     IReadOnlyDictionary<Guid, IReadOnlyList<ChatArtifact>> Artifacts);
+
+/// <summary>Display-only pagination; never used to assemble a model request or cache prefix.</summary>
+public sealed record ConversationCursor(DateTimeOffset CreatedAt, Guid Id);
+public sealed record ConversationPage(ConversationSnapshot Conversation, bool HasMore,
+    ConversationCursor? Before, int TotalMessages);
 
 public sealed record SessionContextPreparation(
     string CacheKey,

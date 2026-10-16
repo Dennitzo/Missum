@@ -1,4 +1,4 @@
-using System.Buffers;
+﻿using System.Buffers;
 using System.Text.Json;
 
 namespace Missum.App.Services;
@@ -7,8 +7,7 @@ public sealed record ScientificPresentationSectionFailure(string Id, long Revisi
 public sealed record ScientificPresentationIssue(string Code, string Message, bool ContentRepairRequired,
     IReadOnlyList<ScientificPresentationSectionFailure> Sections);
 public sealed record ScientificPresentationFeedback(long Generation, long PublicationRevision,
-    string PublicationStatus, ScientificPresentationIssue? PublicationIssue,
-    string SimulationStatus, ScientificPresentationIssue? SimulationIssue);
+    string PublicationStatus, ScientificPresentationIssue? PublicationIssue);
 
 /// <summary>Appends presentation diagnostics to new receipts without changing stored research or prior model turns.</summary>
 internal static class ScientificPresentationFeedbackProjection
@@ -18,29 +17,15 @@ internal static class ScientificPresentationFeedbackProjection
     internal static JsonElement Create(string projectId, long revision, long publicationRevision,
         ScientificPresentationFeedback? feedback, bool pending)
     {
-        // A render of another manuscript revision must never ask the model to repair this revision.
         var current = feedback is not null && feedback.PublicationRevision == publicationRevision;
-        var publicationStatus = current ? feedback!.PublicationStatus : "pending";
-        var simulationStatus = current ? feedback!.SimulationStatus : "pending";
-        var publicationIssue = current ? feedback!.PublicationIssue : null;
-        var simulationIssue = current ? feedback!.SimulationIssue : null;
+        var status = current ? feedback!.PublicationStatus : "pending";
+        var issue = current ? feedback!.PublicationIssue : null;
         return JsonSerializer.SerializeToElement(new
         {
-            protocol = "science-presentation-feedback-v1", projectId, revision, publicationRevision,
-            generation = current ? feedback!.Generation : 0,
-            status = publicationIssue is not null || simulationIssue is not null ? "failed"
-                : pending || publicationStatus == "pending" || simulationStatus == "pending" ? "pending"
-                : publicationStatus == "empty" ? "empty" : "ready",
-            publication = new { status = publicationStatus, error = publicationIssue },
-            simulation = new { status = simulationStatus, error = simulationIssue },
-            nextAction = publicationIssue?.ContentRepairRequired == true
-                ? "Die Forschungsdaten sind gespeichert, aber die PDF wurde nicht erzeugt. Lies nur die gemeldeten Abschnitte mit research.read ids und korrigiere sie mit research.update und ihren aktuellen expectedRevision-Werten. Wiederhole keine unveränderten Abschnitte."
-                : publicationIssue is not null || simulationIssue is not null
-                    ? "Die Forschungsdaten sind gespeichert. Dies ist ein technischer Darstellungsfehler; schreibe dafür nicht das Manuskript neu. Prüfe den aktuellen Stand mit research.deliverables.verify."
-                    : pending || publicationStatus == "pending" || simulationStatus == "pending"
-                        ? "Die Darstellung wird noch erzeugt; Speicherung ist kein PDF-Erfolgsbeleg. Vor Abschluss mit research.deliverables.verify prüfen; kein unverändertes research.update wiederholen."
-                    : publicationStatus == "empty" ? "Noch kein ausgearbeiteter Publikationsabschnitt vorhanden. Forschung mit gezielten neuen Inhalten fortsetzen; es liegt noch kein PDF-Erfolgsbeleg vor."
-                        : "Die aktuelle Darstellung wurde geprüft. Fachliche und verpflichtende Nachweise vor Abschluss weiterhin mit research.deliverables.verify prüfen.",
+            projectId,
+            status = issue is not null ? "failed" : pending ? "pending" : status,
+            publication = new { status, error = issue },
+            nextAction = issue is not null ? "Bearbeite die gemeldete Stelle direkt in der Publikation.md; die bisherige PDF bleibt erhalten." : null,
         }, JsonOptions);
     }
 
@@ -67,9 +52,6 @@ internal static class ScientificPresentationFeedbackProjection
             Bound(exception.Message), content is not null,
             content?.Sections ?? []);
     }
-
-    internal static ScientificPresentationIssue SimulationIssue(string error) =>
-        new("research.simulation_render_failed", Bound(error), false, []);
 
     private static string Bound(string text)
     {

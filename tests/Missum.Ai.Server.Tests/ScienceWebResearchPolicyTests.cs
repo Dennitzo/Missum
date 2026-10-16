@@ -1,4 +1,4 @@
-using Missum.Ai.Contracts;
+﻿using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Models;
 using Missum.Ai.Server.Core.Policies;
 using Missum.Ai.Server.Core.Runs;
@@ -24,7 +24,7 @@ public sealed class ScienceWebResearchPolicyTests
             Messages = [.. Request(canonical: true).Messages, new("user", [new("text", "Weitermachen")])],
         };
 
-        AssertDirect(GeneralAgentPolicies.ForConversation("general", request, WebTools));
+        AssertDirect(GeneralAgentPolicies.ForConversation("general", request, WebTools, researchManagedByAgent: true));
         Assert.Equal(LegacyWrappedTask, request.Messages[0].Content[0].Text);
     }
 

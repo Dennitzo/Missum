@@ -1,4 +1,4 @@
-using Missum.Ai.Contracts;
+﻿using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Coding;
 using Missum.Ai.Server.Core.Gateway;
 using Missum.Ai.Server.Core.Models;
@@ -754,12 +754,22 @@ public sealed class CodingWorkingStateIntegrationTests
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task ConsecutiveCompletedEmptyTurnsStopWithSpecificErrorAndPreserveAccounting(bool reasoning)
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task ConsecutiveCompletedEmptyTurnsStopWithSpecificErrorAndPreserveAccounting(bool reasoning, bool scienceSubagent)
     {
         using var harness = new Harness();
-        var run = await harness.CreateAsync();
+        var request = scienceSubagent ? Request() with
+        {
+            Mode = RunMode.General, PreferredGeneralModelId = NativeHandler.ModelId,
+            ResearchOptions = new(ProjectId: "research-recovery", ProtocolVersion: 2),
+            Subagent = new("parent-recovery", "child-recovery", "Prüfe den Beweis.", "parent-session"),
+        } : Request();
+        var run = (await harness.Repository.CreateAsync(request, null)).Snapshot.RunId;
+        if (scienceSubagent)
+            await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Prüfe den Beweis.")],
+                0, 0, 0, 0, CanonicalStateReadRequired: false));
         harness.Handler.CompletionOverride = (_, _) => Task.FromResult(NativeHandler.EmptyResponse(reasoning));
 
         await Assert.ThrowsAsync<ModelEmptyResponseException>(() => harness.Processor.ProcessAsync(run, CancellationToken.None));
@@ -798,6 +808,36 @@ public sealed class CodingWorkingStateIntegrationTests
         Assert.Equal(6, checkpoint.RoundCount);
         Assert.Equal(187, checkpoint.InputTokens);
         Assert.Equal(53, checkpoint.OutputTokens);
+    }
+
+    [Fact]
+    public async Task ScienceSubagentRecoversReasoningOnlyTurnAndKeepsItsEvaluatedPrefix()
+    {
+        using var harness = new Harness();
+        var request = Request() with
+        {
+            Mode = RunMode.Coding, PreferredCodingModelId = NativeHandler.ModelId,
+            ClientCapabilities = ["coding", "coding.evidence", "workspace"],
+            ResearchOptions = null,
+            Subagent = new("parent-recovery", "child-recovery", "Prüfe den Beweis.", "parent-session"),
+        };
+        var run = (await harness.Repository.CreateAsync(request, null)).Snapshot.RunId;
+        await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Prüfe den Beweis.")],
+            0, 0, 0, 0, CanonicalStateReadRequired: false));
+        harness.Handler.CompletionOverride = (attempt, _) => Task.FromResult(attempt == 1
+            ? NativeHandler.EmptyResponse(reasoning: true, streaming: true)
+            : harness.Handler.ToolResponse("recovered-read", "coding.read", new { path = "proof.lean" }));
+
+        await harness.TickAsync(run);
+
+        Assert.Equal(2, harness.Handler.Requests.Count);
+        var checkpoint = (await harness.Repository.GetCheckpointAsync(run))!;
+        Assert.Equal(0, checkpoint.EmptyResponseRetryCount);
+        Assert.Contains(checkpoint.Messages, item => item.ReasoningContent == NativeHandler.EmptyTurnReasoning);
+        Assert.Single(await harness.Repository.GetEventsAfterAsync(run, 0), item => item.Type == RunEventTypes.ClientToolProposed);
+        var first = harness.Handler.Requests[0].GetProperty("messages").EnumerateArray().Select(item => item.GetRawText()).ToArray();
+        var second = harness.Handler.Requests[1].GetProperty("messages").EnumerateArray().Select(item => item.GetRawText()).ToArray();
+        Assert.Equal(first, second.Take(first.Length));
     }
 
     [Fact]

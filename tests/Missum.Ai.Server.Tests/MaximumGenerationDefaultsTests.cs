@@ -1,4 +1,4 @@
-using Missum.Ai.Contracts;
+﻿using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Configuration;
 using Missum.Ai.Server.Core.Models;
 using Missum.Ai.Server.Core.Runs;
@@ -33,7 +33,7 @@ public sealed class MaximumGenerationDefaultsTests
 
         var body = Assert.Single(handler.ChatBodies);
         var countBody = Assert.Single(handler.CountBodies);
-        Assert.Equal(Math.Min(context, 258_000) - 7_123 - 1, body.GetProperty("max_tokens").GetInt32());
+        Assert.Equal(context - 7_123 - 1, body.GetProperty("max_tokens").GetInt32());
         Assert.Equal(countBody.GetProperty("messages").GetRawText(), body.GetProperty("messages").GetRawText());
         Assert.Equal(countBody.GetProperty("tools").GetRawText(), body.GetProperty("tools").GetRawText());
         Assert.False(countBody.TryGetProperty("max_tokens", out _));
@@ -49,7 +49,7 @@ public sealed class MaximumGenerationDefaultsTests
             Assert.False(body.TryGetProperty("reasoning_effort", out _));
             Assert.False(body.TryGetProperty("chat_template_kwargs", out _));
         }
-        if (expectedEffort is "high" or "xhigh") Assert.Equal(Math.Min(context, 258_000) - 7_124, body.GetProperty("reasoning_budget_tokens").GetInt32());
+        if (expectedEffort is "high" or "xhigh") Assert.Equal(context - 7_124, body.GetProperty("reasoning_budget_tokens").GetInt32());
         var status = await client.GetStatusAsync();
         Assert.All(status.Models, model => Assert.Equal(expectedEffort, model.DefaultReasoningEffort));
     }
@@ -82,7 +82,7 @@ public sealed class MaximumGenerationDefaultsTests
         using var handler = new BudgetHandler(modelId, 32_768, 32_767);
         using var http = new HttpClient(handler);
         using var client = CreateClient(http);
-        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => client.CompleteChatAsync(modelId, [new("user", "Full")], []));
+        var error = await Assert.ThrowsAsync<NativeContextBudgetException>(() => client.CompleteChatAsync(modelId, [new("user", "Full")], []));
         Assert.Contains("kein Platz", error.Message);
         Assert.Empty(handler.ChatBodies);
         Assert.Single(handler.CountBodies);
@@ -190,7 +190,7 @@ public sealed class MaximumGenerationDefaultsTests
     }
 
     [Theory]
-    [InlineData(262_144, 1_000, null, 256_999)]
+    [InlineData(262_144, 1_000, null, 261_143)]
     [InlineData(131_072, 100, 512, 512)]
     [InlineData(32_768, 100, int.MaxValue, 32_667)]
     public void OutputBudgetHasNoGlobalSixtyFourKCeiling(int context, int input, int? limit, int expected) =>

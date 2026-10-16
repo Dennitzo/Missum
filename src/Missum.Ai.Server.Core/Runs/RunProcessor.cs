@@ -1,4 +1,4 @@
-using Missum.Ai.Contracts;
+﻿using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Coding;
 using Missum.Ai.Server.Core.Models;
 using Missum.Ai.Server.Core.Policies;
@@ -20,7 +20,6 @@ public sealed partial class RunProcessor : BackgroundService
     internal const string InterruptedTurnEventType = "model.interruptedTurn";
     internal const int MaximumRequiredToolCallRetries = 1;
     internal const int MaximumEmptyResponseRetries = 2;
-    internal const int CanonicalDefaultOutputTokensPerTurn = 32 * 1024;
     internal const string EmptyResponseRepairPrompt = """
         Missum: Die letzte Modellantwort endete ohne Antworttext und ohne vollständigen strukturierten Werkzeugaufruf.
         Eine Überlegung oder Ankündigung im Reasoning-Kanal führt kein Werkzeug aus. Setze die bestehende Aufgabe
@@ -186,7 +185,6 @@ public sealed partial class RunProcessor : BackgroundService
     internal static int ResolveMaximumToolCalls(RunRequest request, MissumAiServerOptions options,
         IReadOnlyList<AgentToolSpec> effectiveTools)
     {
-        if (ScientificStateCompletionPolicy.Enabled(request)) return 0;
         if (request.Mode == RunMode.Coding) return CodingRunBudget.FromOptions(options).ToolCalls;
         return HasUnboundedResearchBudget(request) ? 0 : options.MaximumToolCalls;
     }
@@ -194,7 +192,6 @@ public sealed partial class RunProcessor : BackgroundService
     internal static int ResolveMaximumModelRounds(RunRequest request, MissumAiServerOptions options,
         IReadOnlyList<AgentToolSpec> effectiveTools)
     {
-        if (ScientificStateCompletionPolicy.Enabled(request)) return 0;
         if (request.Mode == RunMode.Coding) return CodingRunBudget.FromOptions(options).ModelRounds;
         if (HasUnboundedResearchBudget(request)) return 0;
         var generalRounds = request.ClientCapabilities?.Contains("workspace", StringComparer.OrdinalIgnoreCase) == true
@@ -208,14 +205,14 @@ public sealed partial class RunProcessor : BackgroundService
         // Explicit user limits remain authoritative; the runtime still clamps
         // them to its exact tokenized available window. This bounds one turn,
         // never the complete research task or its number of productive steps.
-        request.Limits?.MaximumOutputTokens
-            ?? (ScientificStateCompletionPolicy.Enabled(request) ? CanonicalDefaultOutputTokensPerTurn : null);
+        request.Limits?.MaximumOutputTokens;
 
     private async Task ProcessConversationAsync(
         string runId,
         RunRequest request,
         CancellationToken cancellationToken)
     {
+        request = OpenProjectWorkflow.NormalizeLegacyRequest(request);
         var isCoding = request.Mode == RunMode.Coding;
         var savedSelection = await _repository.GetCheckpointAsync(runId, cancellationToken).ConfigureAwait(false);
         var contextProfileVersion = savedSelection is null ? ResolveNewContextProfile(request) : savedSelection.ContextProfileVersion;
@@ -232,18 +229,6 @@ public sealed partial class RunProcessor : BackgroundService
             request.Limits?.MaximumContextTokens ?? selection.ContextLength);
         var maximumOutputTokens = ResolveMaximumOutputTokensPerTurn(request);
         var codingBudget = CodingRunBudget.FromOptions(_options);
-        var requestsEarlyDelegation = RequestsEarlyResearchDelegation(request);
-        var canonicalStateEnabled = ScientificStateCompletionPolicy.Enabled(request);
-        if (savedSelection is null && requestsEarlyDelegation)
-        {
-            try
-            {
-                contextLength = await PrepareEarlyResearchModelAsync(runId, selection, contextLength,
-                    cancellationToken).ConfigureAwait(false);
-            }
-            catch (HttpRequestException exception)
-            { throw new ModelProviderRequestException("model_loading", 1, exception); }
-        }
         var subagentAvailable = await CanOfferSubagentToolsAsync(request,
             selection with { ContextLength = contextLength }, cancellationToken).ConfigureAwait(false);
         // Native templates can place the complete tool schema before all
@@ -255,9 +240,7 @@ public sealed partial class RunProcessor : BackgroundService
         var effectiveTools = _toolCatalog.GetAvailableTools(request, useStableSubagentToolCatalog);
         var maximumModelRounds = ResolveMaximumModelRounds(request, _options, effectiveTools);
         var maximumToolCalls = ResolveMaximumToolCalls(request, _options, effectiveTools);
-        var researchManagedByAgent = savedSelection?.ResearchManagedByAgent == true
-            || request.Subagent is null && canonicalStateEnabled
-            || savedSelection is null && requestsEarlyDelegation && subagentAvailable;
+        var researchManagedByAgent = request.Subagent is not null;
         var stagedWebResearchRequested = request.Subagent is null && !isCoding && !researchManagedByAgent
             && StagedWebResearchPipeline.IsRequested(request, effectiveTools);
         var availableTools = stagedWebResearchRequested && !useStableSubagentToolCatalog && !compactContext
@@ -265,6 +248,8 @@ public sealed partial class RunProcessor : BackgroundService
             : effectiveTools;
 
         var checkpoint = await _repository.GetCheckpointAsync(runId, cancellationToken).ConfigureAwait(false);
+        if (checkpoint is not null)
+            checkpoint = OpenProjectWorkflow.UpgradeLegacyCheckpoint(checkpoint, request, selection.Role, selection.ModelId, availableTools);
         if (checkpoint is null)
         {
             checkpoint = new AgentRunCheckpoint(
@@ -279,8 +264,6 @@ public sealed partial class RunProcessor : BackgroundService
                     ? CodingWorkingState.Create(ExtractOriginalTask(request)) : null,
                 UseStableSubagentToolCatalog: useStableSubagentToolCatalog,
                 ResearchManagedByAgent: researchManagedByAgent,
-                EarlySubagentDelegationPending: researchManagedByAgent && requestsEarlyDelegation && subagentAvailable,
-                CanonicalStateReadRequired: canonicalStateEnabled,
                 ContextProfileVersion: contextProfileVersion);
             string? subagentContinuationParent = null;
             if (isCoding && await _repository.GetCodingSessionContextWithSourceAsync(runId, request, cancellationToken).ConfigureAwait(false) is { } codingPrevious)
@@ -307,16 +290,6 @@ public sealed partial class RunProcessor : BackgroundService
                 // retain an older system prefix; an active checkpoint must stay stable.
                 var initialNarration = checkpoint.Messages.ToList();
                 AgentNarrationPolicy.EnsureInstructions(initialNarration);
-                if (request.ClientCapabilities?.Contains("research.deliverables", StringComparer.OrdinalIgnoreCase) == true)
-                {
-                    if (!compactContext && canonicalStateEnabled) EnsureScientificStateInstructions(initialNarration);
-                    if (canonicalStateEnabled)
-                    {
-                        ScientificStateAgentPolicy.EnsurePublicationWorkflowAtNewRunBoundary(initialNarration);
-                        ScienceResearchStrategyPolicy.EnsureAtNewRunBoundary(initialNarration);
-                    }
-                    ScientificDerivationPolicy.EnsureAtNewRunBoundary(initialNarration);
-                }
                 checkpoint = checkpoint with { Messages = initialNarration };
             }
             if (request.Subagent is null && subagentContinuationParent is not null)
@@ -374,9 +347,6 @@ public sealed partial class RunProcessor : BackgroundService
             await _repository.SaveCheckpointAsync(runId, checkpoint, cancellationToken).ConfigureAwait(false);
         }
 
-        if (researchManagedByAgent && request.Subagent is null)
-            await EnsureEarlyResearchEnrollmentAsync(runId, request, selection, cancellationToken).ConfigureAwait(false);
-
         var messages = checkpoint.Messages.ToList();
         if (!compactContext && isCoding && request.Subagent is null) CodingAgentPolicy.EnsureCurrentInstructions(messages);
         if (!compactContext && useStableSubagentToolCatalog && request.Subagent is null)
@@ -386,12 +356,11 @@ public sealed partial class RunProcessor : BackgroundService
                 messages[systemIndex] = messages[systemIndex] with
                 { Content = messages[systemIndex].Content + "\n\n" + SubagentAgentPolicy.Manager };
         }
-        if (!compactContext && researchManagedByAgent && (!canonicalStateEnabled || checkpoint.EarlySubagentDelegationPending)) EnsureEarlyResearchInstructions(messages);
-        if (!compactContext && canonicalStateEnabled) EnsureScientificStateInstructions(messages);
-        var contextTools = compactContext ? checkpoint.ContextTools?.ToArray()
+        // Forks and resumed children must use the parent's evaluated schema,
+        // including legacy sessions that predate compact context profiles.
+        var contextTools = compactContext || useStableSubagentToolCatalog ? checkpoint.ContextTools?.ToArray()
             ?? CreateModelToolDefinitions(availableTools, null, directTools: true, contextProfileVersion) : null;
         var toolCatalogSignature = checkpoint.ToolCatalogSignature;
-        var researchStateStamp = checkpoint.ResearchStateStamp;
         var roundCount = checkpoint.RoundCount;
         var toolCallCount = checkpoint.ToolCallCount;
         var inputTokens = checkpoint.InputTokens;
@@ -401,7 +370,7 @@ public sealed partial class RunProcessor : BackgroundService
         var pendingProposalId = checkpoint.PendingProposalId;
         var pendingToolCallId = checkpoint.PendingToolCallId;
         var selectedToolName = checkpoint.SelectedToolName;
-        if (compactContext || useStableSubagentToolCatalog || canonicalStateEnabled) selectedToolName = null;
+        if (compactContext || useStableSubagentToolCatalog) selectedToolName = null;
         var requiredToolCallRetryCount = checkpoint.RequiredToolCallRetryCount;
         var emptyResponseRetryCount = checkpoint.EmptyResponseRetryCount;
         var incompleteResponseRetryCount = checkpoint.IncompleteResponseRetryCount;
@@ -422,11 +391,6 @@ public sealed partial class RunProcessor : BackgroundService
         var appliedSteeringSequence = checkpoint.AppliedSteeringSequence;
         var appliedModelSelectionEventId = checkpoint.AppliedModelSelectionEventId;
         var deepResearchCompleted = checkpoint.DeepResearchCompleted;
-        var earlySubagentDelegationPending = checkpoint.EarlySubagentDelegationPending;
-        var earlySubagentDelegationRetryCount = checkpoint.EarlySubagentDelegationRetryCount;
-        var canonicalStateReadRequired = checkpoint.CanonicalStateReadRequired;
-        var scientificStateProgress = checkpoint.ScientificStateProgress ?? new ScientificStateRunProgress();
-        var scientificCompletionPending = false;
         if (appliedSteeringSequence > 0)
         {
             stagedWebResearchRequested = false;
@@ -595,33 +559,12 @@ public sealed partial class RunProcessor : BackgroundService
                         ? CodingPlanProgressGuard.RestoreHiddenPlanCall(activeCalls[nextToolIndex], workingState)
                         : activeCalls[nextToolIndex];
                     activeCalls[nextToolIndex] = call;
-                    if (string.IsNullOrWhiteSpace(pendingProposalId)
-                        && ScientificResearchProgressGuard.TryBlock(request, call, scientificStateProgress, out var blocked))
-                    {
-                        var blockedReceipt = JsonSerializer.Serialize(new
-                        {
-                            status = "not_executed", errorCode = ScientificResearchProgressGuard.RejectionCode,
-                            scienceFailureFingerprint = blocked!.Fingerprint, message = blocked.Message,
-                        }, MissumAiProtocol.CreateJsonOptions());
-                        messages.Add(new LmChatMessage("tool", blockedReceipt, ToolCallId: call.Id));
-                        scientificStateProgress = await ObserveScientificStateReceiptAsync(runId, request, call,
-                            blockedReceipt, false, scientificStateProgress, messages, inputTokens, outputTokens,
-                            cancellationToken).ConfigureAwait(false);
-                        await _repository.AppendEventAsync(runId, RunEventTypes.ModelGeneration,
-                            new ModelGenerationEvent("toolRejected", ToolName: call.Name,
-                                FailureKind: ScientificResearchProgressGuard.RejectionCode, Message: blocked.Message), cancellationToken).ConfigureAwait(false);
-                        nextToolIndex++;
-                        await SaveCheckpointAsync().ConfigureAwait(false);
-                        ScientificResearchProgressGuard.ThrowIfStalled(scientificStateProgress);
-                        continue;
-                    }
                     AgentToolSpec tool;
                     try
                     {
                         // Return a recoverable tool receipt instead of aborting the entire run.
                         // A pending client operation must still be collected exactly once.
                         if (isCoding
-                            && (!canonicalStateEnabled || call.Name == CodingWorkingStateTools.PlanTool)
                             && string.IsNullOrWhiteSpace(pendingProposalId))
                             CodingLoopGuard.ThrowIfRepeatedFailure(messages, call, workingState);
                         tool = _toolCatalog.Resolve(call.Name, availableTools);
@@ -642,12 +585,10 @@ public sealed partial class RunProcessor : BackgroundService
                             status = "failed",
                             errorCode = rejectionCode,
                             message = exception.Message,
+                            repair = CodingToolBatchRecovery.CreateRepairHint(call, messages),
                             toolHelp = compactContext ? RejectedToolHelp(call.Name, availableTools) : null,
                         }, MissumAiProtocol.CreateJsonOptions());
                         messages.Add(new LmChatMessage("tool", invalidReceipt, ToolCallId: call.Id));
-                        scientificStateProgress = await ObserveScientificStateReceiptAsync(runId, request, call,
-                            invalidReceipt, false, scientificStateProgress, messages, inputTokens, outputTokens,
-                            cancellationToken).ConfigureAwait(false);
                         if (workingState is not null)
                             workingState = CodingWorkingStateReducer.ObserveToolResult(workingState, WithOperationIdentity(runId, "main", activeCallRound ?? roundCount, nextToolIndex, call), invalidReceipt);
                         nextToolIndex++;
@@ -675,22 +616,11 @@ public sealed partial class RunProcessor : BackgroundService
                         }
                         messages.Add(new LmChatMessage(
                             "tool",
-                            isCoding && call.Name is not (ClientToolNames.ResearchRead or ClientToolNames.ResearchUpdate)
+                            isCoding
                                 ? CodingLoopGuard.BoundToolResult(SerializeClientToolResult(clientResult), call.Name) : SerializeClientToolResult(clientResult),
                             ToolCallId: call.Id));
                         if (workingState is not null)
                             workingState = CodingWorkingStateReducer.ObserveToolResult(workingState, WithOperationIdentity(runId, "main", activeCallRound ?? roundCount, nextToolIndex, call), SerializeClientToolResult(clientResult));
-                        scientificStateProgress = await ObserveScientificStateReceiptAsync(runId, request, call,
-                            SerializeClientToolResult(clientResult), clientResult.Status == "completed", scientificStateProgress,
-                            messages, inputTokens, outputTokens, cancellationToken).ConfigureAwait(false);
-                        if (canonicalStateEnabled)
-                            ScientificStateCompletionPolicy.AppendVerificationRepairPrompt(messages, request, call,
-                                SerializeClientToolResult(clientResult));
-                        if (compactContext && call.Name == ClientToolNames.ResearchRead && clientResult.Status == "completed"
-                            && ScientificStateCompletionPolicy.Text(clientResult.Result, "stateStamp") is { Length: > 0 } readStamp)
-                            researchStateStamp = readStamp;
-                        if (canonicalStateEnabled && earlySubagentDelegationPending)
-                            EnsureEarlyResearchContextHint(messages, runId, request, call, SerializeClientToolResult(clientResult));
                         if (call.Name == ClientToolNames.CodingRenderHtml) htmlRenderUsed = true;
                         pendingProposalId = null;
                         pendingToolCallId = null;
@@ -701,7 +631,6 @@ public sealed partial class RunProcessor : BackgroundService
                             selection.ModelId,
                             cancellationToken: cancellationToken).ConfigureAwait(false);
                         await SaveCheckpointAsync().ConfigureAwait(false);
-                        ScientificResearchProgressGuard.ThrowIfStalled(scientificStateProgress);
                         continue;
                     }
 
@@ -798,14 +727,8 @@ public sealed partial class RunProcessor : BackgroundService
                             && !await _repository.HasConsumedSubagentResultAsync(runId,
                                 call.Arguments.GetProperty("runId").GetString()!, cancellationToken).ConfigureAwait(false))
                             _ = AppendSubagentResultAcceptanceInstruction(messages, result.Result, request);
-                        if (canonicalStateEnabled && tool.Name == SubagentToolNames.Wait && result.Succeeded)
-                            canonicalStateReadRequired = true;
-                        scientificStateProgress = await ObserveScientificStateReceiptAsync(runId, request, call,
-                            JsonSerializer.Serialize(new { status = result.Succeeded ? "completed" : "failed", result = result.Result },
-                                MissumAiProtocol.CreateJsonOptions()), result.Succeeded, scientificStateProgress,
-                            messages, inputTokens, outputTokens, cancellationToken).ConfigureAwait(false);
                         // Successful plan acknowledgements are not work evidence. State-validation
-                        // failures still need durable tracking, including in Claude Science.
+                        // failures still need durable tracking, including resumed project runs.
                         if (workingState is not null && (tool.Name != CodingWorkingStateTools.PlanTool
                             || result.ErrorCode == "agent.invalid_state_action"))
                             workingState = CodingWorkingStateReducer.ObserveToolResult(workingState, WithOperationIdentity(runId, "main", activeCallRound ?? roundCount, nextToolIndex, call), result.Result.GetRawText());
@@ -821,14 +744,13 @@ public sealed partial class RunProcessor : BackgroundService
                             var report = RenderExplicitDeepResearchReport(result.Result);
                             if (await CompleteRunAsync(report, textWasStreamed: false).ConfigureAwait(false)) return;
                             cancellationToken.ThrowIfCancellationRequested();
-                            if (!scientificCompletionPending
-                                && !await _repository.HasPendingSteeringAsync(runId, cancellationToken).ConfigureAwait(false)) return;
+                            if (!await _repository.HasPendingSteeringAsync(runId, cancellationToken).ConfigureAwait(false)) return;
                         }
                         await SaveCheckpointAsync().ConfigureAwait(false);
                         if (tool.Name == SubagentToolNames.Wait)
                             _ = await _repository.TryConsumeSubagentResultAsync(runId,
                                 call.Arguments.GetProperty("runId").GetString()!, cancellationToken).ConfigureAwait(false);
-                        if (isCoding && !canonicalStateEnabled) CodingPlanProgressGuard.ThrowIfStalled(workingState);
+                        if (isCoding) CodingPlanProgressGuard.ThrowIfStalled(workingState);
                         continue;
                     }
 
@@ -860,43 +782,22 @@ public sealed partial class RunProcessor : BackgroundService
                 await ApplyModelSelectionAsync().ConfigureAwait(false);
             }
 
-            if (canonicalStateEnabled && canonicalStateReadRequired && activeCalls is null && pendingProposalId is null)
-            {
-                // Canonical refresh is a durable client operation, not another
-                // inference round. Drain existing proposals/calls first.
-                var read = new LmToolCall("science-state-read-" + Guid.NewGuid().ToString("N"), ClientToolNames.ResearchRead,
-                    CreateResearchStartArguments(request, messages, compactContext));
-                messages.Add(new("assistant", ToolCalls: [read]));
-                activeCalls = [read];
-                activeCallRound = roundCount;
-                nextToolIndex = 0;
-                canonicalStateReadRequired = false;
-                selectedToolName = null;
-                toolCallCount++;
-                await SaveCheckpointAsync().ConfigureAwait(false);
-                continue;
-            }
-
             // The final awaited tool can finish after a durable cancellation.
             // Its index then exits the inner loop without rechecking its guard.
             cancellationToken.ThrowIfCancellationRequested();
             if (await _repository.IsTerminalStateAsync(runId, cancellationToken).ConfigureAwait(false)) return;
-            if ((isCoding || canonicalStateEnabled) && invalidToolTurnCount >= CodingToolBatchRecovery.MaximumInvalidTurns)
+            if (isCoding && invalidToolTurnCount >= CodingToolBatchRecovery.MaximumInvalidTurns)
             {
-                if (canonicalStateEnabled) throw new ScientificResearchStalledException("invalid-tool-turns", false,
-                    "Die Forschung bleibt offen: Mehrere aufeinanderfolgende Modellturns enthielten ausschließlich ungültige Werkzeugaufrufe. "
-                    + "Die konkreten Schemafehler stehen im Laufjournal. Vor der Fortsetzung die Argumentstruktur korrigieren; "
-                    + "ungültige Aufrufe sind kein wissenschaftlicher Fortschritt.");
-                throw new CodingInvalidToolLoopException();
+                throw new CodingInvalidToolLoopException(ScientificInvalidToolDiagnostic.LastFailure(messages));
             }
-            if (isCoding && !canonicalStateEnabled) CodingPlanProgressGuard.ThrowIfStalled(workingState);
+            if (isCoding) CodingPlanProgressGuard.ThrowIfStalled(workingState);
 
             // A tool call already emitted by the last allowed model turn is still a
             // pending operation. Drain it (including client resumes) before this guard.
             if (maximumModelRounds > 0 && roundCount >= maximumModelRounds)
                 throw new AgentRunLimitException(isCoding ? codingBudget.FailureMessage(roundCount, toolCallCount)
                     : $"Der Agent hat das Modellrundenlimit von {maximumModelRounds} erreicht.");
-            var budgetSummary = isCoding && !canonicalStateEnabled && codingBudget.MustSummarize(roundCount, toolCallCount);
+            var budgetSummary = isCoding && codingBudget.MustSummarize(roundCount, toolCallCount);
             if (isCoding)
             {
                 ApplyCodingBudgetInstruction(messages, codingBudget, roundCount, toolCallCount, preserveSessionPromptPrefix);
@@ -919,9 +820,9 @@ public sealed partial class RunProcessor : BackgroundService
                 }
             }
             var effort = _modelRuntime.ResolveReasoningEffort(selection.ModelId, selection.Role, request.ReasoningEffort);
-            var selectableTools = compactContext || useStableSubagentToolCatalog || canonicalStateEnabled ? availableTools.ToArray() : budgetSummary ? [] : isCoding
+            var selectableTools = compactContext || useStableSubagentToolCatalog ? availableTools.ToArray() : budgetSummary ? [] : isCoding
                 ? CodingPlanProgressGuard.OfferedTools(availableTools, workingState) : availableTools.ToArray();
-            var modelTools = contextTools ?? CreateModelToolDefinitions(selectableTools, selectedToolName, isCoding || useStableSubagentToolCatalog || canonicalStateEnabled);
+            var modelTools = contextTools ?? CreateModelToolDefinitions(selectableTools, selectedToolName, isCoding || useStableSubagentToolCatalog);
             // A turn following assistant.selectTool has exactly one purpose: emit the
             // selected structured call. Some local models narrate that intent
             // before (or instead of) returning JSON. Keep this protocol-only
@@ -1069,18 +970,6 @@ public sealed partial class RunProcessor : BackgroundService
                     subagentAvailable = loadedSubagentAvailable;
                     AppendRuntimeContext(messages, request, subagentAvailable);
                 }
-                if (earlySubagentDelegationPending && !loadedSubagentAvailable)
-                {
-                    // Keep the already evaluated full schema stable. Hardware
-                    // admission may change after restart/model selection; it
-                    // must release the required spawn rather than loop forever.
-                    earlySubagentDelegationPending = false;
-                    messages.Add(new LmChatMessage("system", "Die frühe GPU-Delegation ist aktuell nicht verfügbar. "
-                        + "Bearbeite den Forschungsauftrag mit den vorhandenen Werkzeugen selbst; erzwinge keinen Subagenten."));
-                    suppressRequiredToolTurn = selectedToolName is not null;
-                    liveTextGate = new IncrementalVisibleTextGate(enabled: !suppressRequiredToolTurn);
-                    await SaveCheckpointAsync().ConfigureAwait(false);
-                }
                 if (!compactContext && loadedSubagentAvailable && !useStableSubagentToolCatalog)
                 {
                     useStableSubagentToolCatalog = true;
@@ -1102,6 +991,7 @@ public sealed partial class RunProcessor : BackgroundService
                     }
                     selectableTools = availableTools.ToArray();
                     modelTools = CreateModelToolDefinitions(selectableTools, selectedToolName, directTools: true);
+                    contextTools = modelTools;
                     await SaveCheckpointAsync().ConfigureAwait(false);
                 }
                 ContextPlan contextPlan;
@@ -1159,8 +1049,8 @@ public sealed partial class RunProcessor : BackgroundService
                     compactionCount++;
                     await PublishCodingMetricsAsync(runId, roundCount, "summarization", condensed, summaryEffort, queueMilliseconds, steeringCall.Token).ConfigureAwait(false);
                     queueMilliseconds = 0; // The following model turn retains this already acquired lease.
-                    budgetSummary = !canonicalStateEnabled && codingBudget.MustSummarize(roundCount, toolCallCount);
-                    if (budgetSummary && !compactContext && !useStableSubagentToolCatalog && !canonicalStateEnabled)
+                    budgetSummary = codingBudget.MustSummarize(roundCount, toolCallCount);
+                    if (budgetSummary && !compactContext && !useStableSubagentToolCatalog)
                     {
                         modelTools = [];
 
@@ -1176,11 +1066,7 @@ public sealed partial class RunProcessor : BackgroundService
                 try
                 {
                     var planningMessages = WithWorkingState(messages, workingState, workingStatePromptIncluded);
-                    contextPlan = ScientificRunCompletionPolicy.Applies(request)
-                        ? ScientificRunContextPlanner.Prepare(planningMessages, contextLength, maximumOutputTokens,
-                            preserveConversationPrefix: preserveSessionPromptPrefix,
-                            maximumInputTokens: canonicalStateEnabled ? ScientificRunContextPlanner.CanonicalWorkingInputTokens : null)
-                        : ContextPlanner.Prepare(
+                    contextPlan = ContextPlanner.Prepare(
                         planningMessages,
                         contextLength,
                         maximumOutputTokens,
@@ -1276,23 +1162,46 @@ public sealed partial class RunProcessor : BackgroundService
                     workingStatePromptIncluded = workingState is not null;
                     await SaveCheckpointAsync().ConfigureAwait(false);
                     if (await _repository.IsTerminalStateAsync(runId, steeringCall.Token).ConfigureAwait(false)) return;
-                    response = await _modelRuntime.CompleteChatWithCacheOwnershipAsync(
-                        selection.ModelId,
-                        lastNativePrompt ?? contextPlan.Messages,
-                        modelTools,
-                        request.SessionId ?? runId,
-                        request.Subagent?.ParentSessionId,
-                        maximumOutputTokens,
-                        modelRole: selection.Role,
-                        reasoningEffort: effort,
-                        cancellationToken: steeringCall.Token,
-                        requireToolCall: selectedToolName is not null || earlySubagentDelegationPending,
-                        requiredToolName: earlySubagentDelegationPending ? SubagentToolNames.Spawn : selectedToolName,
-                        requiredContextLength: contextLength,
-                        sessionCacheKey: !isCoding && string.IsNullOrWhiteSpace(request.SessionId) ? null
-                            : BuildRunSessionCacheKey(request, runId, selection.Role),
-                        nativeProgress: nativeProgress,
-                        runtimeInstanceId: request.Subagent?.RuntimeInstanceId).ConfigureAwait(false);
+                    for (var contextRetry = 0; ; contextRetry++)
+                    {
+                        try
+                        {
+                            response = await _modelRuntime.CompleteChatWithCacheOwnershipAsync(
+                                selection.ModelId,
+                                lastNativePrompt ?? contextPlan.Messages,
+                                modelTools,
+                                request.SessionId ?? runId,
+                                request.Subagent?.ParentSessionId,
+                                maximumOutputTokens,
+                                modelRole: selection.Role,
+                                reasoningEffort: effort,
+                                cancellationToken: steeringCall.Token,
+                                requireToolCall: selectedToolName is not null,
+                                requiredToolName: selectedToolName,
+                                requiredContextLength: contextLength,
+                                sessionCacheKey: !isCoding && string.IsNullOrWhiteSpace(request.SessionId) ? null
+                                    : BuildRunSessionCacheKey(request, runId, selection.Role),
+                                nativeProgress: nativeProgress,
+                                runtimeInstanceId: request.Subagent?.RuntimeInstanceId).ConfigureAwait(false);
+                            break;
+                        }
+                        catch (NativeContextBudgetException overflow) when ((isCoding || preserveSessionPromptPrefix)
+                            && contextRetry < ScientificNativeContextRecovery.MaximumRetries)
+                        {
+                            // No generation or mutation has started. Rewrite the evaluated
+                            // prefix only at this explicit, journalled compaction boundary.
+                            contextPlan = ScientificNativeContextRecovery.Prepare(lastNativePrompt!, overflow, maximumOutputTokens);
+                            lastNativePrompt = ModelRuntimeClient.PrepareLanguageBoundMessages(contextPlan.Messages);
+                            messages = lastNativePrompt.ToList();
+                            compactionCount++;
+                            await SaveCheckpointAsync().ConfigureAwait(false);
+                            await _repository.AppendEventAsync(runId, RunEventTypes.ContextChanged,
+                                new ContextChangedEvent(contextPlan.EstimatedInputTokens, overflow.ContextLength,
+                                    0, true, $"Der native Tokenzähler meldete {overflow.InputTokens:N0} Eingabetoken bei {overflow.ContextLength:N0} Kontexttoken. "
+                                        + contextPlan.Notice, PreparationCompleted: true,
+                                    InputTokenBudget: contextPlan.InputTokenBudget), steeringCall.Token).ConfigureAwait(false);
+                        }
+                    }
                     await _repository.AppendEventAsync(runId, "model.turn.metrics", new
                     {
                         round = roundCount + 1, contextProfile = contextProfileVersion ?? "legacy",
@@ -1381,33 +1290,6 @@ public sealed partial class RunProcessor : BackgroundService
                 await SaveCheckpointAsync().ConfigureAwait(false);
                 continue;
             }
-            catch (ModelGenerationTerminatedException exception) when (
-                ScientificRunCompletionPolicy.Applies(request)
-                && exception.ProviderCode != "transport_retry_exhausted" && !cancellationToken.IsCancellationRequested)
-            {
-                // A provider turn may end without a usable response. Research is
-                // still recoverable; keep partial text, reject partial calls and
-                // let the deliverables gate drive the next bounded-backoff turn.
-                if (lastNativePrompt is not null)
-                {
-                    messages = lastNativePrompt.ToList();
-                    preserveSessionPromptPrefix = true;
-                    workingStatePromptIncluded = workingState is not null;
-                }
-                var visible = CodingTextReconciler.Project(await _repository.GetVisibleTextEventsAsync(runId, 0, cancellationToken).ConfigureAwait(false));
-                if (visible.Length > generationVisibleStart)
-                    messages.Add(new LmChatMessage("assistant", visible[generationVisibleStart..]));
-                messages.Add(new LmChatMessage("system", $"Die letzte Modellrunde wurde ohne verwertbares Ergebnis beendet ({exception.ProviderCode}). "
-                    + "Der Auftrag bleibt offen. Verwende den vorhandenen Forschungsstand, repariere den konkreten nächsten Arbeitsschritt und gib eine sichtbare fachliche Antwort oder genau den angeforderten strukturierten Werkzeugaufruf aus."));
-                visibleTextLength = visible.Length;
-                streamingTurnStartEventId = null;
-                lastNativePrompt = null;
-                roundCount++;
-                await SaveCheckpointAsync().ConfigureAwait(false);
-                if (await CompleteRunAsync("", textWasStreamed: true).ConfigureAwait(false)) return;
-                cancellationToken.ThrowIfCancellationRequested();
-                continue;
-            }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 // Historical fragments preserve append-only provider context after
@@ -1421,46 +1303,6 @@ public sealed partial class RunProcessor : BackgroundService
             }
 
             if (await _repository.IsTerminalStateAsync(runId, cancellationToken).ConfigureAwait(false)) return;
-            if (earlySubagentDelegationPending)
-            {
-                var preparingResearchContext = canonicalStateEnabled
-                    && IsEarlyResearchContextRead(response, request, availableTools, _toolCatalog, messages);
-                var submittingResearchProgress = canonicalStateEnabled
-                    && IsEarlyResearchProgressUpdate(response, request, availableTools, _toolCatalog);
-                if (!preparingResearchContext && !submittingResearchProgress
-                    && !IsValidEarlyDelegationResponse(response, availableTools, _toolCatalog))
-                {
-                    // No source/file/process action may precede the manager's
-                    // initial assignment. Close rejected calls in chronological
-                    // history and persist usage/retry state before requesting repair.
-                    roundCount++;
-                    inputTokens += response.InputTokens;
-                    outputTokens += response.OutputTokens;
-                    earlySubagentDelegationRetryCount++;
-                    messages.Add(new LmChatMessage("assistant", response.Content,
-                        ToolCalls: response.ToolCalls, ReasoningContent: response.ReasoningContent));
-                    foreach (var rejected in response.ToolCalls)
-                        messages.Add(new LmChatMessage("tool", "{\"status\":\"not_executed\",\"errorCode\":\"subagent.early_assignment_required\",\"message\":\"Zuerst die unabhängige Teilaufgabe mit subagent.spawn zuweisen; dieser Aufruf wurde nicht ausgeführt.\"}",
-                            ToolCallId: rejected.Id));
-                    messages.Add(new LmChatMessage("system", "Die frühe unabhängige Teilaufgabe ist noch nicht mit subagent.spawn zugewiesen. "
-                        + "Formuliere Ziel, erwartetes Ergebnis, eindeutige Schreibpfade und die Abgrenzung zu deiner eigenen parallelen Arbeit. "
-                        + "Notwendige neue Forschungsabrufe und gültige fachliche research.update-Einreichungen bleiben erlaubt; "
-                        + "umfangreiche weitere Werkzeugarbeit beginnt nach der Zuweisung."));
-                    streamingTurnStartEventId = null;
-                    await SaveCheckpointAsync().ConfigureAwait(false);
-                    if (earlySubagentDelegationRetryCount > MaximumEarlyDelegationRetries)
-                        throw new AgentRunLimitException("Das Hauptmodell hat die angeforderte frühe Arbeitsteilung dreimal nicht als gültigen subagent.spawn-Aufruf ausgegeben. Der Arbeitsstand bleibt gespeichert.");
-                    continue;
-                }
-                // The ensuing active-call checkpoint stores the exact model
-                // assignment and operation identity. Resume executes that call
-                // idempotently instead of asking for a second assignment.
-                if (!preparingResearchContext && !submittingResearchProgress)
-                {
-                    earlySubagentDelegationPending = false;
-                    earlySubagentDelegationRetryCount = 0;
-                }
-            }
             var remainingLiveDelta = liveTextGate.Flush();
             if (!string.IsNullOrEmpty(remainingLiveDelta))
             {
@@ -1491,7 +1333,6 @@ public sealed partial class RunProcessor : BackgroundService
                     + JsonSerializer.Serialize(delegatedResults, MissumAiProtocol.CreateJsonOptions())));
                 foreach (var delegated in delegatedResults)
                     _ = AppendSubagentResultAcceptanceInstruction(messages, delegated, request);
-                if (canonicalStateEnabled) canonicalStateReadRequired = true;
                 streamingTurnStartEventId = null;
                 await SaveCheckpointAsync().ConfigureAwait(false);
                 await MarkSubagentResultsConsumedAsync(runId, delegatedResults, cancellationToken).ConfigureAwait(false);
@@ -1501,12 +1342,6 @@ public sealed partial class RunProcessor : BackgroundService
             roundCount++;
             inputTokens += response.InputTokens;
             outputTokens += response.OutputTokens;
-            if (canonicalStateEnabled && request.Subagent is null)
-                await _repository.AppendEventAsync(runId, "research.state.tokens", new
-                {
-                    inputTokens, outputTokens, round = roundCount,
-                    cachedPromptTokensLastTurn = response.Metrics?.CachedPromptTokens,
-                }, cancellationToken).ConfigureAwait(false);
             if (isCoding)
                 await PublishCodingMetricsAsync(runId, roundCount, workingState?.Phase ?? "main", response, effort, queueMilliseconds, cancellationToken).ConfigureAwait(false);
             if (budgetSummary)
@@ -1519,7 +1354,8 @@ public sealed partial class RunProcessor : BackgroundService
                 await SaveCheckpointAsync().ConfigureAwait(false);
                 throw new AgentRunLimitException(codingBudget.FailureMessage(roundCount, toolCallCount));
             }
-            if (isCoding && response.ToolCalls.Count == 0 && string.IsNullOrWhiteSpace(response.Content))
+            if ((isCoding || request.Subagent is not null)
+                && response.ToolCalls.Count == 0 && string.IsNullOrWhiteSpace(response.Content))
             {
                 // A provider can finish normally after emitting only reasoning. It has
                 // not requested an operation and must not replay previously committed tools.
@@ -1567,7 +1403,7 @@ public sealed partial class RunProcessor : BackgroundService
             {
                 incompleteResponseRetryCount = 0;
             }
-            if (!compactContext && !isCoding && !useStableSubagentToolCatalog && !canonicalStateEnabled && selectedToolName is null && response.ToolCalls.Count > 0)
+            if (!compactContext && !isCoding && !useStableSubagentToolCatalog && selectedToolName is null && response.ToolCalls.Count > 0)
             {
                 if (response.ToolCalls.Count != 1
                     || !AgentToolCatalog.IsSelectorToolName(response.ToolCalls[0].Name))
@@ -1641,7 +1477,7 @@ public sealed partial class RunProcessor : BackgroundService
                 // valid operations, and denied calls keep their original order.
                 var deniedCalls = originalCalls.Skip(acceptedCalls.Count).ToArray();
                 toolCallCount += acceptedCalls.Count;
-                if (isCoding || canonicalStateEnabled)
+                if (isCoding)
                 {
                     var batch = CodingToolBatchRecovery.Prepare(acceptedCalls, _toolCatalog, availableTools);
                     invalidToolTurnCount = batch.AllInvalid ? invalidToolTurnCount + 1 : 0;
@@ -1690,19 +1526,12 @@ public sealed partial class RunProcessor : BackgroundService
 
             if (string.IsNullOrWhiteSpace(response.Content))
             {
-                if (ScientificRunCompletionPolicy.Applies(request))
-                {
-                    if (await CompleteRunAsync("", textWasStreamed: true).ConfigureAwait(false)) return;
-                    cancellationToken.ThrowIfCancellationRequested();
-                    if (scientificCompletionPending) continue;
-                }
                 throw new InvalidOperationException("Model returned neither text nor a structured tool call.");
             }
 
             if (await CompleteRunAsync(response.Content, liveTextGate.HasStreamed).ConfigureAwait(false)) return;
             // Acceptance won the atomic completion race. Continue this same run.
             cancellationToken.ThrowIfCancellationRequested();
-            if (scientificCompletionPending) continue;
             if (!await _repository.HasPendingSteeringAsync(runId, cancellationToken).ConfigureAwait(false)) return;
         }
 
@@ -1739,12 +1568,8 @@ public sealed partial class RunProcessor : BackgroundService
                 AppliedModelSelectionEventId: appliedModelSelectionEventId,
                 UseStableSubagentToolCatalog: useStableSubagentToolCatalog,
                 ResearchManagedByAgent: researchManagedByAgent,
-                EarlySubagentDelegationPending: earlySubagentDelegationPending,
-                EarlySubagentDelegationRetryCount: earlySubagentDelegationRetryCount,
-                CanonicalStateReadRequired: canonicalStateReadRequired,
-                ScientificStateProgress: scientificStateProgress,
                 ContextProfileVersion: contextProfileVersion, ToolCatalogSignature: toolCatalogSignature,
-                ContextTools: contextTools, ResearchStateStamp: researchStateStamp),
+                ContextTools: contextTools),
             cancellationToken);
 
         async Task ApplyModelSelectionAsync()
@@ -1775,7 +1600,6 @@ public sealed partial class RunProcessor : BackgroundService
                         + JsonSerializer.Serialize(delegatedForModelSwitch, MissumAiProtocol.CreateJsonOptions())));
                     foreach (var delegated in delegatedForModelSwitch)
                         _ = AppendSubagentResultAcceptanceInstruction(messages, delegated, request);
-                    if (canonicalStateEnabled) canonicalStateReadRequired = true;
                 }
             }
             candidate = candidate with { Limits = (candidate.Limits ?? new()) with { MaximumContextTokens = next.ContextLength } };
@@ -1785,7 +1609,7 @@ public sealed partial class RunProcessor : BackgroundService
             effectiveTools = _toolCatalog.GetAvailableTools(request, useStableSubagentToolCatalog);
             availableTools = stagedWebResearchRequested && !useStableSubagentToolCatalog && !compactContext
                 ? StagedWebResearchPipeline.RemoveFromMainAgentTools(effectiveTools) : effectiveTools;
-            if (compactContext || useStableSubagentToolCatalog || canonicalStateEnabled) selectedToolName = null;
+            if (compactContext || useStableSubagentToolCatalog) selectedToolName = null;
             if (compactContext)
             {
                 AppendRuntimeContext(messages, request, subagentAvailable);
@@ -1831,7 +1655,6 @@ public sealed partial class RunProcessor : BackgroundService
             stagedWebResearchRequested = false;
             availableTools = effectiveTools;
             preserveSessionPromptPrefix = true;
-            if (canonicalStateEnabled) canonicalStateReadRequired = true;
             foreach (var input in inputs)
             {
                 messages.Add(new LmChatMessage("user", input.Text));
@@ -1858,65 +1681,6 @@ public sealed partial class RunProcessor : BackgroundService
 
         async Task<bool> CompleteRunAsync(string content, bool textWasStreamed)
         {
-            scientificCompletionPending = false;
-            if (ScientificRunCompletionPolicy.Applies(request))
-            {
-                if (!string.IsNullOrWhiteSpace(content))
-                {
-                    if (!textWasStreamed)
-                        foreach (var delta in SplitDeltas(ParseFinalResponse(content, request).Message))
-                            await _repository.AppendEventAsync(runId, RunEventTypes.TextDelta,
-                                new TextDeltaEvent(delta), cancellationToken).ConfigureAwait(false);
-                    messages.Add(new LmChatMessage("assistant", content, ReasoningContent: lastNativeReasoning));
-                }
-                var assessment = await AssessScientificCompletionAsync(runId, request, messages, availableTools, cancellationToken).ConfigureAwait(false);
-                if (canonicalStateEnabled) assessment = ScientificStateCompletionPolicy.ApplyPlanRequirements(assessment, workingState);
-                if (canonicalStateEnabled)
-                    scientificStateProgress = ScientificCompletionStagnationGuard.Observe(scientificStateProgress, assessment, messages);
-                if (!assessment.Complete)
-                {
-                    scientificCompletionPending = true;
-                    var diagnosis = assessment.NeedsVerification
-                        ? canonicalStateEnabled ? "Ich prüfe jetzt den aktuellen kanonischen Forschungsstand und die gerenderte Publikation vor dem Abschluss."
-                            : "Ich prüfe jetzt die aktuelle PDF-Publikation und die tatsächlich ausgeführten Python-Abbildungen vor dem Abschluss."
-                        : "Der Forschungszyklus ist noch unvollständig. " + string.Join(" ", assessment.Missing.Take(3))
-                            + " Ich erhalte den Arbeitsstand und bearbeite den nächsten belegbaren Schritt.";
-                    // Persist the repair before waiting or proposing a client tool.
-                    // Recovery must retain this decision, including its backoff state.
-                    var newCanonicalDiagnosis = false;
-                    if (canonicalStateEnabled) newCanonicalDiagnosis = ScientificStateCompletionPolicy.UpsertRecoveryPrompt(messages, assessment);
-                    else ScientificRunCompletionPolicy.UpsertRecoveryPrompt(messages, assessment);
-                    if (canonicalStateEnabled ? newCanonicalDiagnosis
-                        : assessment.RepeatedAttempts == 0 || assessment.RepeatedAttempts % 3 == 0)
-                    {
-                        await PublishVisibleDeltaAsync(new TextDeltaEvent("\n\n" + diagnosis + "\n\n"), cancellationToken).ConfigureAwait(false);
-                    }
-                    await SaveCheckpointAsync().ConfigureAwait(false);
-                    if (canonicalStateEnabled) ScientificCompletionStagnationGuard.ThrowIfStalled(scientificStateProgress);
-                    var delay = canonicalStateEnabled ? TimeSpan.Zero : ScientificRunCompletionPolicy.RetryDelay(assessment);
-                    if (delay > TimeSpan.Zero) await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
-                    cancellationToken.ThrowIfCancellationRequested();
-                    if (assessment.NeedsVerification)
-                    {
-                        var call = new LmToolCall("science-verify-" + Guid.NewGuid().ToString("N"),
-                            ScientificRunCompletionPolicy.VerifyTool,
-                            JsonSerializer.SerializeToElement(new { projectId = assessment.ProjectId }));
-                        messages.Add(new LmChatMessage("assistant", null, ToolCalls: [call]));
-                        activeCalls = [call];
-                        activeCallRound = roundCount;
-                        nextToolIndex = 0;
-                        selectedToolName = null;
-                        requiredToolCallRetryCount = 0;
-                        toolCallCount++;
-                        await SaveCheckpointAsync().ConfigureAwait(false);
-                    }
-                    return false;
-                }
-                // The candidate was journaled before verification. Do not append
-                // it twice once the successful finalization becomes admissible.
-                content = "";
-                textWasStreamed = true;
-            }
             var finalResponse = ParseFinalResponse(content, request);
             if (!textWasStreamed)
             {
@@ -2705,10 +2469,6 @@ public sealed partial class RunProcessor : BackgroundService
                 Code: "agent.run_limit",
                 Message: limit.Message,
                 Retryable: false),
-            ScientificResearchStalledException stalled => (
-                Code: stalled.PrerequisiteBlocked ? ScientificResearchProgressGuard.BlockedCode : "science.unproductive_loop",
-                Message: stalled.Message,
-                Retryable: true),
             ModelGenerationTerminatedException { ProviderCode: "model_stall_timeout" } => (
                 Code: "provider.generation_stalled",
                 Message: "Das native Modell hat 20 Minuten lang keinen neuen Prompt- oder Tokenfortschritt geliefert. Der gespeicherte Arbeitsstand bleibt erhalten; eine stille, blockierte Inferenz wird nicht endlos wiederholt.",
@@ -2737,6 +2497,10 @@ public sealed partial class RunProcessor : BackgroundService
                 Code: "run.timeout",
                 Message: ResolveTimeoutFailureMessage(failedMode, timeout.Message),
                 Retryable: true),
+            NativeContextBudgetException overflow => (
+                Code: "context.native_budget_exceeded",
+                Message: overflow.Message + " Der Arbeitskontext konnte nicht ausreichend verdichtet werden; der gespeicherte Forschungsstand und das vollständige Journal bleiben erhalten.",
+                Retryable: false),
             InvalidOperationException => (
                 Code: "run.invalid_operation",
                 Message: "Der AI-Lauf konnte eine erforderliche Operation nicht ausführen.",
@@ -2758,7 +2522,15 @@ public sealed partial class RunProcessor : BackgroundService
         _runtime.WriteLog(
             "Error",
             failure.Code,
-            $"Run {runId} fehlgeschlagen ({exception.GetType().Name}): {failure.Message}");
+            $"Run {runId} fehlgeschlagen: {failure.Message}\n{FormatExceptionDiagnostic(exception)}");
+    }
+
+    private static string FormatExceptionDiagnostic(Exception exception)
+    {
+        // Keep the causal message and stack in the local journal, without
+        // replacing the concise user-facing error or allowing an unbounded log.
+        var diagnostic = exception.ToString();
+        return diagnostic[..Math.Min(diagnostic.Length, 8_192)].Replace('\0', ' ');
     }
 
     internal static string ResolveTimeoutFailureMessage(RunMode mode, string detail)
@@ -2804,7 +2576,7 @@ public sealed partial class RunProcessor : BackgroundService
             {
                 return new AgentFinalResponse(
                     messageElement.GetString()!,
-                    SanitizeTitle(ScientificRunCompletionPolicy.Applies(request) ? "" : titleElement.GetString() ?? string.Empty, GetLatestUserText(request)));
+                    SanitizeTitle(titleElement.GetString() ?? string.Empty, GetLatestUserText(request)));
             }
         }
         catch (JsonException)
@@ -2823,8 +2595,6 @@ public sealed partial class RunProcessor : BackgroundService
             .Select(static message => string.Join("\n", message.Content.Where(static part => !string.IsNullOrWhiteSpace(part.Text)).Select(static part => part.Text)))
             .Where(static text => !text.TrimStart().StartsWith("[MISSUM_", StringComparison.Ordinal)
                 && !text.TrimStart().StartsWith("Missum-Laufanweisung", StringComparison.Ordinal)).ToArray();
-        if (ScientificRunCompletionPolicy.Applies(request))
-            return prompts.FirstOrDefault() ?? "Wissenschaftliches Forschungsprojekt";
         return prompts.LastOrDefault() ?? "";
     }
 

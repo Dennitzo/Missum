@@ -8,10 +8,25 @@ public sealed record SubagentRuntimeAvailability(
 
 public sealed record SubagentRuntimePreparation(
     string InstanceId, string ModelId, int GpuIndex, string CacheStatus, int CachedTokens,
-    int? SourceCachedTokens = null, int? PreparationSampledTokens = null, int? EvaluatedGeneratedTokens = null);
+    int? SourceCachedTokens = null, int? PreparationSampledTokens = null, int? EvaluatedGeneratedTokens = null,
+    int? SourceEvaluatedTokens = null, string? PreparationMode = null);
+
+public sealed class SubagentPreparationTimeoutException(
+    string modelId, string failureKind, string detail, Exception? innerException = null)
+    : TimeoutException($"Die Subagent-Vorbereitung für '{modelId}' wurde wegen einer Zeitüberschreitung beendet. {detail}", innerException)
+{
+    public string ModelId { get; } = modelId;
+    public string FailureKind { get; } = failureKind;
+}
 
 public sealed partial class ModelRuntimeClient
 {
+    // The native supervisor watches actual prefill progress (five minutes idle,
+    // two hours absolute). Allow its model loading, cache save and slot drain to
+    // finish before this transport safety deadline releases the model leases.
+    private static readonly TimeSpan SubagentPreparationTimeout = TimeSpan.FromMinutes(130);
+    internal TimeProvider SubagentPreparationTimeProvider { get; init; } = TimeProvider.System;
+
     public async Task<SubagentRuntimeAvailability> GetSubagentAvailabilityAsync(
         string modelId, int contextLength = 0, CancellationToken cancellationToken = default)
     {
@@ -95,37 +110,57 @@ public sealed partial class ModelRuntimeClient
             await _modelGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                timeout.CancelAfter(TimeSpan.FromMinutes(5));
-                var installed = ResolveInstalledModel(await GetRuntimeModelsAsync(timeout.Token).ConfigureAwait(false), modelId)
-                    ?? throw new FileNotFoundException($"Das lokale Modell '{modelId}' ist nicht installiert.");
-                using var response = await SendJsonAsync(HttpMethod.Post, SubagentControlUri("prepare"),
-                    new { model = installed.Id, parentSessionCacheKey, childSessionCacheKey, prefill,
-                        childSessionId, parentSessionId }, timeout.Token,
-                    bufferContent: true).ConfigureAwait(false);
-                using var json = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(false),
-                    cancellationToken: timeout.Token).ConfigureAwait(false);
-                var availability = ReadSubagentAvailability(json.RootElement, installed.Id);
-                if (!availability.Allowed || availability.InstanceId is null || availability.GpuIndex != 1)
-                    throw new InvalidOperationException(availability.Reason ?? "subagent.runtime_unavailable");
-                var cacheStatus = json.RootElement.TryGetProperty("cacheStatus", out var cache) ? cache.GetString() ?? "miss" : "miss";
-                // A resumed child has its own canonical message history and no
-                // source parent cache to fork. Missing/incompatible optional KV
-                // snapshots permit a cold first inference of that saved history.
-                // New delegations still require a verified parent-prefix transfer.
-                var coldOwnContext = parentSessionCacheKey is null && (cacheStatus is "miss" or "unavailable");
-                if (prefill is not null && !coldOwnContext && cacheStatus is not ("forked" or "restored" or "resident"))
-                    throw new InvalidOperationException(json.RootElement.TryGetProperty("detail", out var detail)
-                        ? detail.GetString() : "Der kanonische KV-Kontext konnte nicht übernommen werden.");
-                await GetRuntimeModelsAsync(timeout.Token).ConfigureAwait(false);
-                InvalidateStatus();
-                return new(availability.InstanceId, availability.ModelId, availability.GpuIndex.Value,
-                    cacheStatus,
-                    json.RootElement.TryGetProperty("cachedTokens", out var tokens) && tokens.TryGetInt32(out var cached) ? cached : 0,
-                    ReadNullableCount("sourceCachedTokens"), ReadNullableCount("preparationSampledTokens"), ReadNullableCount("evaluatedGeneratedTokens"));
+                using var deadline = new CancellationTokenSource(SubagentPreparationTimeout, SubagentPreparationTimeProvider);
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, deadline.Token);
+                try
+                {
+                    var installed = ResolveInstalledModel(await GetRuntimeModelsAsync(timeout.Token).ConfigureAwait(false), modelId)
+                        ?? throw new FileNotFoundException($"Das lokale Modell '{modelId}' ist nicht installiert.");
+                    using var response = await SendJsonAsync(HttpMethod.Post, SubagentControlUri("prepare"),
+                        new { model = installed.Id, parentSessionCacheKey, childSessionCacheKey, prefill,
+                            childSessionId, parentSessionId }, timeout.Token,
+                        bufferContent: true).ConfigureAwait(false);
+                    using var json = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(false),
+                        cancellationToken: timeout.Token).ConfigureAwait(false);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var availability = ReadSubagentAvailability(json.RootElement, installed.Id);
+                    if (!availability.Allowed && availability.Reason == "subagent.preparation_timeout")
+                        throw new SubagentPreparationTimeoutException(installed.Id, "native_timeout",
+                            json.RootElement.TryGetProperty("detail", out var timeoutDetail) && timeoutDetail.ValueKind == JsonValueKind.String
+                                ? timeoutDetail.GetString() ?? "Die native Vorbereitung meldet keinen weiteren Fortschritt."
+                                : "Die native Vorbereitung meldet keinen weiteren Fortschritt.");
+                    if (!availability.Allowed || availability.InstanceId is null || availability.GpuIndex != 1)
+                        throw new InvalidOperationException(availability.Reason ?? "subagent.runtime_unavailable");
+                    var cacheStatus = json.RootElement.TryGetProperty("cacheStatus", out var cache) ? cache.GetString() ?? "miss" : "miss";
+                    // A resumed child has its own canonical message history and no
+                    // source parent cache to fork. Missing/incompatible optional KV
+                    // snapshots permit a cold first inference of that saved history.
+                    // New delegations still require a verified parent-prefix transfer.
+                    var coldOwnContext = parentSessionCacheKey is null && (cacheStatus is "miss" or "unavailable");
+                    if (prefill is not null && !coldOwnContext && cacheStatus is not ("forked" or "restored" or "resident"))
+                        throw new InvalidOperationException(json.RootElement.TryGetProperty("detail", out var detail)
+                            ? detail.GetString() : "Der kanonische KV-Kontext konnte nicht übernommen werden.");
+                    await GetRuntimeModelsAsync(timeout.Token).ConfigureAwait(false);
+                    InvalidateStatus();
+                    return new(availability.InstanceId, availability.ModelId, availability.GpuIndex.Value,
+                        cacheStatus,
+                        ReadNullableCount("cachedTokens") ?? 0,
+                        ReadNullableCount("sourceCachedTokens"), ReadNullableCount("preparationSampledTokens"), ReadNullableCount("evaluatedGeneratedTokens"),
+                        ReadNullableCount("sourceEvaluatedTokens"),
+                        json.RootElement.TryGetProperty("preparationMode", out var preparationMode) && preparationMode.ValueKind == JsonValueKind.String
+                            ? preparationMode.GetString() : null);
 
-                int? ReadNullableCount(string name) => json.RootElement.TryGetProperty(name, out var value)
-                    && value.TryGetInt32(out var count) ? count : null;
+                    int? ReadNullableCount(string name) => json.RootElement.TryGetProperty(name, out var value)
+                        && value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var count) ? count : null;
+                }
+                catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
+                {
+                    throw new SubagentPreparationTimeoutException(modelId,
+                        deadline.IsCancellationRequested ? "deadline_exceeded" : "transport_cancelled",
+                        deadline.IsCancellationRequested
+                            ? $"Die native Vorbereitung hat innerhalb von {SubagentPreparationTimeout.TotalMinutes:0} Minuten nicht geantwortet."
+                            : "Die Verbindung zur nativen Vorbereitung wurde ohne einen Benutzerabbruch unterbrochen.", exception);
+                }
             }
             finally { _modelGate.Release(); }
         }
@@ -154,11 +189,11 @@ public sealed partial class ModelRuntimeClient
             throw new JsonException("Native subagent response requires a boolean allowed field.");
         return new(allowed.GetBoolean(),
             root.TryGetProperty("reason", out var reason) && reason.ValueKind == JsonValueKind.String ? reason.GetString() : null,
-            root.TryGetProperty("modelId", out var model) ? model.GetString() ?? modelId : modelId,
+            root.TryGetProperty("modelId", out var model) && model.ValueKind == JsonValueKind.String ? model.GetString() ?? modelId : modelId,
             root.TryGetProperty("instanceId", out var instance) && instance.ValueKind == JsonValueKind.String ? instance.GetString() : null,
-            root.TryGetProperty("gpuIndex", out var gpu) && gpu.TryGetInt32(out var index) ? index : null,
-            root.TryGetProperty("contextLength", out var context) && context.TryGetInt32(out var length) ? length : 0,
-            root.TryGetProperty("requiredBytes", out var required) && required.TryGetInt64(out var bytes) ? bytes : null,
-            root.TryGetProperty("freeBytes", out var free) && free.TryGetInt64(out var freeBytes) ? freeBytes : null);
+            root.TryGetProperty("gpuIndex", out var gpu) && gpu.ValueKind == JsonValueKind.Number && gpu.TryGetInt32(out var index) ? index : null,
+            root.TryGetProperty("contextLength", out var context) && context.ValueKind == JsonValueKind.Number && context.TryGetInt32(out var length) ? length : 0,
+            root.TryGetProperty("requiredBytes", out var required) && required.ValueKind == JsonValueKind.Number && required.TryGetInt64(out var bytes) ? bytes : null,
+            root.TryGetProperty("freeBytes", out var free) && free.ValueKind == JsonValueKind.Number && free.TryGetInt64(out var freeBytes) ? freeBytes : null);
     }
 }

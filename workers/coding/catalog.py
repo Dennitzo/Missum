@@ -9,11 +9,14 @@ import argparse
 import ctypes
 import csv
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
 import re
+import select
 import signal
+import socket
 import struct
 import subprocess
 import sys
@@ -23,7 +26,7 @@ import urllib.request
 import urllib.error
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from session_cache import NativeSessionCache
+from session_cache import NativeSessionCache, PreparationProgress, PreparationTimeoutError
 
 SHARD = re.compile(r"^(.*)-([0-9]{5})-of-([0-9]{5})\.gguf$", re.IGNORECASE)
 NON_TEXT = re.compile(r"(?:^|[-_./])(?:mmproj|ggml-vocab|embedding|embed|asr|whisper|clip|vae|diffusion)(?:[-_./]|$)", re.IGNORECASE)
@@ -385,16 +388,13 @@ def vision_batch_policy(model, policy):
     return safe
 
 
-# Keep in sync with ModelContextProfiles.ApplicationMaximum. This is a ceiling,
-# never an instruction to expand a model with a smaller training window.
-APPLICATION_CONTEXT_MAXIMUM = 258_000
-
-
 def limit_context_policy(model, policy):
-    maximum = min(model["context"], APPLICATION_CONTEXT_MAXIMUM)
+    # Each model advertises its own GGUF maximum. Keep a resolved smaller
+    # policy (including a resident legacy load) unchanged; new loads may use
+    # the full model window and llama's actual fitted n_ctx is authoritative.
+    maximum = min(model["context"], policy.get("contextMaximum") or model["context"])
     context = min(policy.get("context") or maximum, maximum)
-    return dict(policy, context=context, contextMaximum=maximum,
-                contextPolicy="application-limit" if model["context"] > maximum else policy["contextPolicy"])
+    return dict(policy, context=context, contextMaximum=maximum)
 
 
 def model_runtime_policy(model, placement=None, *, split_mode="layer", fit_target="2048", gpu_layers="auto"):
@@ -674,7 +674,7 @@ def matching_model_load_profile(profiles, model, binary, gpus):
 
 
 def measured_model_policy(model, profile, fit_target):
-    # Reuse measured GPU placement, subject to the product-wide context ceiling.
+    # Reuse measured GPU placement and its full model-specific context.
     policy = model_runtime_policy(model, fit_target=fit_target)
     policy.update(split=profile["split"], fit="off", gpuLayers="999", context=model["context"],
                   contextPolicy="model-maximum", profileId=profile["id"],
@@ -782,7 +782,8 @@ class GpuLoadManager:
         self.lock = threading.RLock()
         self.binary = Path(binary) if binary else None
         self.sessions = NativeSessionCache(Path(state) / "session-cache", self.router, self.session_fingerprint,
-                                           estimate_bytes=self.session_size_estimate)
+                                           estimate_bytes=self.session_size_estimate,
+                                           prepare_completion=self.prepare_completion)
 
     def session_model(self, model_id):
         # This lookup is read-only: fingerprint checks do not rewrite/reload
@@ -813,7 +814,7 @@ class GpuLoadManager:
         policy = vision_batch_policy(model, limit_context_policy(model, policy))
         # Preserve the existing default layer/single-GPU snapshot identity:
         # the same loaded configuration must not force a large prefix re-eval.
-        fingerprint = dict(version=1, files=identity, context=min(model["context"], APPLICATION_CONTEXT_MAXIMUM), cache="q8_0", slots=1,
+        fingerprint = dict(version=1, files=identity, context=policy["context"], cache="q8_0", slots=1,
                            template=german_reasoning_template(metadata.get("tokenizer.chat_template", "")),
                            placement=self.placements.get(model_id), fit=self.fit_target, gpuLayers=self.gpu_layers,
                            split="layer" if policy["split"] == "none" else policy["split"])
@@ -860,6 +861,86 @@ class GpuLoadManager:
                   headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.load(response)
+
+    def prepare_completion(self, body, cancelled=None):
+        """Keep long prefills alive only while their native token count advances.
+
+        A watchdog also closes the actual inference socket on caller disconnect;
+        abandoning the outer control request alone does not cancel llama's task.
+        The session cache drains the slot before releasing the preparation lease.
+        """
+        progress = PreparationProgress(len(body["prompt"]), cancelled)
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=300)
+        finished, failures = threading.Event(), []
+        response = None
+
+        def disconnect():
+            active_socket = connection.sock
+            if active_socket is None and response is not None:
+                active_socket = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
+            if active_socket is not None:
+                try:
+                    active_socket.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+        def watch():
+            while not finished.wait(0.1):
+                if not failures:
+                    try:
+                        progress.check()
+                    except Exception as error:
+                        failures.append(error)
+                if failures:
+                    disconnect()
+
+        watchdog = threading.Thread(target=watch, daemon=True)
+        watchdog.start()
+        try:
+            progress.check()
+            connection.request("POST", "/completion", json.dumps(dict(body, stream=True, return_progress=True)),
+                {"Content-Type": "application/json", "Accept": "text/event-stream"})
+            progress.check()
+            response = connection.getresponse()
+            if response.status != 200:
+                raise RuntimeError(f"Native preparation returned HTTP {response.status}: " +
+                    response.read(4096).decode("utf-8", errors="replace"))
+            while True:
+                progress.check()
+                line = response.readline(16 * 1024**2 + 1)
+                if not line:
+                    break
+                if len(line) > 16 * 1024**2:
+                    raise RuntimeError("Native preparation event exceeds its size limit")
+                if not line.startswith(b"data:"):
+                    continue
+                data = line[5:].strip()
+                if data == b"[DONE]":
+                    break
+                event = json.loads(data)
+                if not isinstance(event, dict):
+                    raise RuntimeError("Native preparation returned an invalid event")
+                if "error" in event:
+                    raise RuntimeError("Native preparation failed: " + str(event["error"])[:500])
+                progress.observe(event)
+                if event.get("stop") is True:
+                    return event
+            raise RuntimeError("Native preparation ended without final token accounting")
+        except Exception as error:
+            if failures:
+                raise failures[0] from error
+            if isinstance(error, PreparationTimeoutError):
+                raise
+            if isinstance(error, TimeoutError):
+                raise PreparationTimeoutError("Native preparation made no progress before its socket deadline") from error
+            raise
+        finally:
+            finished.set()
+            disconnect()
+            if response is not None:
+                response.close()
+            connection.close()
+            watchdog.join(timeout=1)
 
     def record(self, model, device, outcome, detail=None):
         with (self.state / "gpu-placement.jsonl").open("a", encoding="utf-8") as stream:
@@ -982,18 +1063,23 @@ class GpuLoadManager:
                 return dict(result, reason="subagent.vram_insufficient")
             return dict(result, allowed=True)
 
-    def agent_prepare(self, model_id, source_key=None, key=None, prefill=None, session_id=None, parent_session_id=None):
+    def agent_prepare(self, model_id, source_key=None, key=None, prefill=None, session_id=None, parent_session_id=None, cancelled=None):
         with self.lock:
+            self.sessions._check_preparation_cancelled(cancelled)
             availability = self.agent_status(model_id)
             if not availability["allowed"]:
                 return availability
             base, replica = availability["modelId"], availability["instanceId"]
             self.load(replica)
-            cache = (self.sessions.fork(base, source_key, replica, key, prefill, session_id, parent_session_id)
+            self.sessions._check_preparation_cancelled(cancelled)
+            cache = (self.sessions.fork(base, source_key, replica, key, prefill, session_id, parent_session_id, cancelled)
                      if source_key and key else self.sessions.prepare(replica, key, session_id, parent_session_id))
-            return dict(availability, cacheStatus=cache["status"], cachedTokens=cache.get("restoredTokens", 0),
+            result = dict(availability, cacheStatus=cache["status"], cachedTokens=cache.get("restoredTokens", 0),
                 **{name: cache[name] for name in ("sourceCachedTokens", "preparationSampledTokens",
-                    "evaluatedGeneratedTokens", "preparedPromptTokens", "detail") if name in cache})
+                    "sourceEvaluatedTokens", "preparationMode", "evaluatedGeneratedTokens", "preparedPromptTokens", "detail") if name in cache})
+            if cache.get("reason") in ("subagent.preparation_timeout", "subagent.preparation_cancelled"):
+                result.update(allowed=False, reason=cache["reason"])
+            return result
 
     def _preload_subagent(self, model_id):
         """Finish an ordinary primary load with its eligible GPU1 replica.
@@ -1133,6 +1219,13 @@ class GpuLoadManager:
 
 def start_gpu_control(manager, host, port):
     class Handler(BaseHTTPRequestHandler):
+        def client_disconnected(self):
+            try:
+                readable, _, _ = select.select([self.connection], [], [], 0)
+                return bool(readable) and not self.connection.recv(1, socket.MSG_PEEK)
+            except (OSError, ValueError):
+                return True
+
         def do_POST(self):
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -1156,7 +1249,7 @@ def start_gpu_control(manager, host, port):
                 elif self.path == "/agents/prepare":
                     result = manager.agent_prepare(body["model"], body.get("parentSessionCacheKey"),
                         body.get("childSessionCacheKey"), body.get("prefill"),
-                        body.get("childSessionId"), body.get("parentSessionId"))
+                        body.get("childSessionId"), body.get("parentSessionId"), self.client_disconnected)
                 else:
                     result = manager.load(body["model"])
                 status = 200

@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using System.Text.RegularExpressions;
 using Missum.App.Services;
 using Missum.Core.Research;
@@ -42,18 +42,13 @@ public sealed class ScientificPublicationLayoutTests
     }
 
     [Fact]
-    public void MissingOrderInMixedOutlineReportsExactSectionInsteadOfInsertingAtBeginning()
+    public void HistoricalMissingSectionOrderDoesNotPreventPublicationImport()
     {
         var missing = new ResearchWorkingItem("sec-new", "section", 3, null,
             JsonSerializer.SerializeToElement(new { title = "Neues Thema", contentMarkdown = "Neue fachliche Ergänzung.", status = "completed" }),
             DateTimeOffset.UnixEpoch);
         var state = State(Section("sec-intro", "1 Einführung", order: 1), missing);
-        var error = Assert.Throws<ScientificPublicationContentException>(() => ScientificPublicationService.OrderedPublicationSections(state));
-        var target = Assert.Single(error.Sections);
-        Assert.Equal("sec-new", target.Id);
-        Assert.Equal(3, target.Revision);
-        Assert.Contains("order", error.Message);
-        Assert.Contains("fehlende Werte gelten nicht als erste Position", error.Message);
+        Assert.Equal(["sec-intro", "sec-new"], ScientificPublicationService.OrderedPublicationSections(state).Select(item => item.Id));
     }
 
     [Fact]
@@ -66,16 +61,16 @@ public sealed class ScientificPublicationLayoutTests
     }
 
     [Fact]
-    public void UnassignedMeasuredPlotEntersPublicationWithoutInventingScientificConclusion()
+    public void LegacyImportKeepsUnassignedPlotsOutOfUnrelatedPublicationTopics()
     {
         var state = State(Section("sec-model", "Modell"));
         var results = new ResearchResultSnapshot([], [Experiment("simulation-real", "artifacts/polumkehr_plot.png", "ProcessSucceeded")], [], []);
         var markdown = ScientificPublicationService.FormatCanonicalPublication(state, [], results);
-
-        Assert.Contains("## Simulationsabbildungen", markdown);
-        Assert.Contains("![polumkehr plot · Experiment simulation-real](artifacts/polumkehr_plot.png)", markdown);
-        Assert.Contains("für sich allein kein Beweis", markdown);
-        Assert.Contains("Vorläufiger Forschungsstand", markdown);
+        Assert.Contains("## Modell", markdown);
+        Assert.Contains("Das Modell und seine Annahmen", markdown);
+        Assert.DoesNotContain("artifacts/polumkehr_plot.png", markdown);
+        Assert.DoesNotContain("## Simulationsabbildungen", markdown);
+        Assert.DoesNotContain("Arbeitsfassung", markdown);
     }
 
     [Theory]
@@ -91,15 +86,15 @@ public sealed class ScientificPublicationLayoutTests
     [Fact]
     public void MoreThanTwelveMeasuredPlotsRemainPresentAndOverflowIsExplicit()
     {
-        var state = State(Section("sec-model", "Modell"));
         var experiments = Enumerable.Range(1, 20).Select(index => Experiment("simulation-" + index,
             "artifacts/plot_" + index + ".png", "ProcessSucceeded")).ToArray();
+        var state = State(SimulationSection(experiments));
         var markdown = ScientificPublicationService.FormatCanonicalPublication(state, [], new([], experiments, [], []));
         foreach (var experiment in experiments) Assert.Contains("Experiment " + experiment.Id + "]", markdown);
         var tooMany = Enumerable.Range(1, 65).Select(index => Experiment("simulation-" + index,
             "artifacts/plot_" + index + ".png", "ProcessSucceeded")).ToArray();
         var error = Assert.Throws<ScientificPublicationContentException>(() =>
-            ScientificPublicationService.FormatCanonicalPublication(state, [], new([], tooMany, [], [])));
+            ScientificPublicationService.FormatCanonicalPublication(State(SimulationSection(tooMany)), [], new([], tooMany, [], [])));
         Assert.Contains("64", error.Message);
         Assert.Contains("still ausgelassen", error.Message);
     }
@@ -118,11 +113,13 @@ public sealed class ScientificPublicationLayoutTests
             UpdatedAt = DateTimeOffset.UnixEpoch.AddMinutes(1),
             StdoutEvidence = old.StdoutEvidence.Replace(new string('a', 64), new string('c', 64), StringComparison.Ordinal),
         };
-        var markdown = ScientificPublicationService.FormatCanonicalPublication(State(oldSection, Section("sec-end", "Einordnung", order: 1)),
-            [], new([], [old, latest], [], []));
-        Assert.Contains("Experiment simulation-latest](work/fig1_time_series.png)", markdown);
-        Assert.DoesNotContain("Experiment simulation-old]", markdown);
-        Assert.Equal(1, Regex.Count(markdown, Regex.Escape("work/fig1_time_series.png")));
+        var state = State(oldSection, Section("sec-end", "Einordnung", order: 1));
+        var markdown = ScientificPublicationService.FormatCanonicalPublication(state, [], new([], [old, latest], [], []));
+        Assert.Contains("## Früheres Modell", markdown);
+        Assert.Contains("Alte Annahmen.", markdown);
+        Assert.DoesNotContain("work/fig1_time_series.png", markdown);
+        Assert.DoesNotContain("Experiment simulation-old", markdown);
+        Assert.DoesNotContain("## Simulationsabbildungen", markdown);
     }
 
     [Fact]
@@ -130,6 +127,8 @@ public sealed class ScientificPublicationLayoutTests
     {
         var data = JsonSerializer.SerializeToElement(new { title = "Ergebnisse", contentMarkdown = "Der Modellbereich ist eingeschränkt.",
             status = "completed", experimentIds = MeasuredExperimentIds,
+            simulationDescriptions = new[] { new { experimentId = "simulation-real", equations = "$x(t)=t$",
+                description = "Die Simulation zeigt die angenommene konstante Geschwindigkeit im gewählten Zeitbereich." } },
             figureCaptions = new[] { new { experimentId = "simulation-real", artifactPath = "artifacts/plot.png", caption = "Fachlich zugeordneter Plot" } } });
         var section = new ResearchWorkingItem("sec-results", "section", 1, null, data, DateTimeOffset.UnixEpoch);
         var markdown = ScientificPublicationService.FormatCanonicalPublication(State(section), [],
@@ -148,12 +147,14 @@ public sealed class ScientificPublicationLayoutTests
         Assert.Equal("sec-ten", Assert.Single(targets).Id);
         var diagnostic = ScientificPublicationService.SectionRepairDiagnostic(state,
             "Publikationstitel passt nicht vollständig in die Seitenmarke.");
-        Assert.Contains("research.update(title)", diagnostic);
+        Assert.Contains("Publikation.md", diagnostic);
+        Assert.Contains("Kürze nur den fachlichen Publikationstitel", diagnostic);
+        Assert.DoesNotContain("research.update", diagnostic);
         Assert.DoesNotContain("konnte nicht eindeutig zugeordnet", diagnostic);
     }
 
     [Fact]
-    public void OnlyProtectedReviewForExactCurrentStateRemovesPreliminaryLabel()
+    public void LegacyReviewMetadataCannotInjectOrChangeAuthoredPublicationStatus()
     {
         var state = State(Section("sec-model", "Modell"));
         var receipt = new ResearchVerification("review", state.ProjectId, "publication-review", state.ProjectId, "publication",
@@ -161,15 +162,21 @@ public sealed class ScientificPublicationLayoutTests
             {
                 protocol = ScientificResearchReview.Protocol, projectId = state.ProjectId, revision = state.Revision,
                 publicationRevision = state.PublicationRevision, stateSha256 = ScientificResearchReview.Fingerprint(state), ready = true,
+                evidencePolicy = ScientificResearchReview.EvidencePolicy,
             }), DateTimeOffset.UnixEpoch);
         var results = new ResearchResultSnapshot([], [], [receipt], []);
 
-        Assert.Contains("Vorläufiger Forschungsstand", ScientificPublicationService.FormatCanonicalPublication(state, [], results));
+        var imported = ScientificPublicationService.FormatCanonicalPublication(state, [], results);
         var trusted = ScientificPublicationService.FormatCanonicalPublication(state, [], results, [receipt]);
-        Assert.Contains("Geprüfter Forschungsstand", trusted);
+        Assert.Equal(imported, trusted);
+        Assert.Contains("Das Modell und seine Annahmen", trusted);
         Assert.DoesNotContain("Vorläufiger Forschungsstand", trusted);
-        Assert.Contains("Vorläufiger Forschungsstand", ScientificPublicationService.FormatCanonicalPublication(
-            state with { Title = "Überarbeitetes Modell" }, [], results, [receipt]));
+        Assert.DoesNotContain("Geprüfter Forschungsstand", trusted);
+        Assert.DoesNotContain("Revision", trusted);
+        var renamed = ScientificPublicationService.FormatCanonicalPublication(state with { Title = "Überarbeitetes Modell" }, [], results, [receipt]);
+        Assert.StartsWith("# Überarbeitetes Modell", renamed);
+        Assert.Contains("Das Modell und seine Annahmen", renamed);
+        Assert.DoesNotContain("Vorläufiger Forschungsstand", renamed);
     }
 
     [Fact]
@@ -292,6 +299,15 @@ public sealed class ScientificPublicationLayoutTests
 
     private static ResearchWorkingState State(params ResearchWorkingItem[] items) =>
         new("project", 1, 1, "Erdpolumkehr", items, DateTimeOffset.UnixEpoch);
+
+    private static ResearchWorkingItem SimulationSection(ResearchExperiment[] experiments) =>
+        new("sec-model", "section", 1, null, JsonSerializer.SerializeToElement(new
+        {
+            title = "Modell", contentMarkdown = "Die Versuche prüfen das beschriebene Modell.", status = "completed", order = 0,
+            experimentIds = experiments.Select(item => item.Id).ToArray(),
+            simulationDescriptions = experiments.Select(item => new { experimentId = item.Id, equations = "$x(t)=t$",
+                description = "Die gewählten Parameter und der begrenzte Zeitbereich definieren den Vergleich." }).ToArray(),
+        }), DateTimeOffset.UnixEpoch);
 
     private static ResearchWorkingItem Section(string id, string title, int order = 0) =>
         new(id, "section", 1, null, JsonSerializer.SerializeToElement(new

@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -18,7 +18,6 @@ using Missum.Core.Research;
 
 namespace Missum.Tests;
 
-[Collection("Assistant LAN host")]
 public sealed class AssistantHostTests
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
@@ -72,40 +71,20 @@ public sealed class AssistantHostTests
     }
 
     [Fact]
-    public async Task ScienceProjectListWithNullDetailDoesNotProduceAHostError()
+    public async Task PublicationListWithoutWorkspaceOrServiceRemainsReachable()
     {
-        await using var fixture = await Fixture.CreateAsync(scientificResearch: true);
+        await using var fixture = await Fixture.CreateAsync();
         var session = await fixture.Environment.Get<IChatRepository>().CreateSessionAsync("Neue Forschungssitzung");
         var owner = new Events();
         var peer = new Events();
         using var otherClient = fixture.Host.Subscribe("other-mac", peer.Emit);
-        await fixture.Host.HandleAsync("mac", Envelope("research.list", new { sessionId = session.Id }), owner.Emit);
+        await fixture.Host.HandleAsync("mac", Envelope("publication.list", new { sessionId = session.Id }), owner.Emit);
         Assert.DoesNotContain(owner.Items, item => item.Type == "host.error");
-        var snapshot = Assert.Single(owner.Items, item => item.Type == "research.snapshot").Payload;
-        Assert.True(snapshot.GetProperty("available").GetBoolean());
+        var snapshot = Assert.Single(owner.Items, item => item.Type == "publication.snapshot").Payload;
+        Assert.False(snapshot.GetProperty("available").GetBoolean());
         Assert.Equal(session.Id, snapshot.GetProperty("sessionId").GetGuid());
         Assert.Equal(JsonValueKind.Null, snapshot.GetProperty("detail").ValueKind);
         Assert.Empty(snapshot.GetProperty("projects").EnumerateArray());
-        Assert.Empty(peer.Items);
-    }
-
-    [Fact]
-    public async Task BrowserFolderSelectionListsServerDirectoriesAndKeepsNavigationPrivate()
-    {
-        await using var fixture = await Fixture.CreateAsync();
-        var selected = Directory.CreateDirectory(Path.Combine(fixture.Environment.Directory, "Projekt mit Umlauten ä")).FullName;
-        Assert.True(AssistantWebBridge.IsIncomingTypeAllowed("workspace.browse"));
-        Assert.True(AssistantWebBridge.IsOutgoingTypeAllowed("workspace.list"));
-        var owner = new Events();
-        var peer = new Events();
-        using var otherClient = fixture.Host.Subscribe("other-mac", peer.Emit);
-        await fixture.Host.HandleAsync("mac", Envelope("workspace.browse", new { path = fixture.Environment.Directory }), owner.Emit);
-        var listing = Assert.Single(owner.Items, item => item.Type == "workspace.list").Payload;
-        Assert.Equal(fixture.Environment.Directory, listing.GetProperty("path").GetString());
-        Assert.Contains(listing.GetProperty("directories").EnumerateArray(), item => item.GetProperty("path").GetString() == selected);
-        Assert.Empty(peer.Items);
-        await fixture.Host.HandleAsync("mac", Envelope("workspace.browse", new { path = "relative-path" }), owner.Emit);
-        Assert.Contains(owner.Items, item => item.Type == "host.error" && item.Payload.GetProperty("type").GetString() == "workspace.browse");
         Assert.Empty(peer.Items);
     }
 
@@ -265,41 +244,11 @@ public sealed class AssistantHostTests
     }
 
     [Fact]
-    public async Task BrowserReconnectCancelsUnacknowledgedAudioInsteadOfResumingOldPlayback()
-    {
-        await using var fixture = await Fixture.CreateAsync();
-        var events = new Events();
-        await fixture.Host.HandleAsync("mac", Envelope("microphone.speak", new
-            { text = "Erster Satz. Zweiter Satz. Dritter Satz." }), events.Emit);
-        await events.Next("speech.audio");
-        await events.Next("speech.audio");
-        await fixture.Host.HandleAsync("mac", Envelope("app.ready", new { }), events.Emit);
-        Assert.Contains(events.Items, item => item.Type == "speech.reset"
-            && item.Payload.GetProperty("playbackId").ValueKind == JsonValueKind.Null);
-        await fixture.Gateway.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(10));
-    }
-
-    [Fact]
-    public async Task ReplayedReadAloudCommandDoesNotRestartAlreadyRequestedPlayback()
-    {
-        await using var fixture = await Fixture.CreateAsync();
-        var events = new Events();
-        var request = Envelope("microphone.speak", new { text = "Ein Satz." }, "one-read-aloud-request");
-        await fixture.Host.HandleAsync("mac", request, events.Emit);
-        await events.Next("speech.audio");
-        await fixture.Host.HandleAsync("mac", request, events.Emit);
-        Assert.Single(events.Items, item => item.Type == "speech.reset"
-            && item.Payload.GetProperty("playbackId").ValueKind == JsonValueKind.String);
-        Assert.Contains(events.Items, item => item.Type == "action.completed"
-            && item.Payload.GetProperty("duplicate").GetBoolean());
-    }
-
-    [Fact]
     public async Task FailedMutationReplayReportsFailureWithoutExecutingAgain()
     {
         await using var fixture = await Fixture.CreateAsync();
         var events = new Events();
-        var request = Envelope("document.upload", new { sessionId = Guid.NewGuid(), files = Array.Empty<object>() }, "failed-upload");
+        var request = Envelope("session.rename", new { sessionId = Guid.NewGuid(), title = "Nicht vorhandene Sitzung" }, "failed-rename");
         await fixture.Host.HandleAsync("mac", request, events.Emit);
         Assert.Contains(events.Items, item => item.Type == "host.error");
         var replay = new Events();
@@ -307,60 +256,6 @@ public sealed class AssistantHostTests
         Assert.Equal("failed", Assert.Single(replay.Items, item => item.Type == "action.completed").Payload.GetProperty("receiptStatus").GetString());
         Assert.Contains(replay.Items, item => item.Type == "state.snapshot");
         Assert.DoesNotContain(replay.Items, item => item.Type == "host.error");
-    }
-
-    [Fact]
-    public async Task HttpAudioResourcesUseRegisteredGatewayArtifactsAndSupportRangeAndCache()
-    {
-        var previousPort = Environment.GetEnvironmentVariable("ASSISTANT_LAN_WEB_PORT");
-        var port = FreePort();
-        Environment.SetEnvironmentVariable("ASSISTANT_LAN_WEB_PORT", port.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        try
-        {
-            await using var fixture = await Fixture.CreateAsync();
-            await fixture.Host.StartAsync();
-            using var client = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}/") };
-            using var missing = await client.GetAsync("gateway-artifacts/not-registered");
-            Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
-            Assert.Equal(0, fixture.Gateway.Downloads);
-            var owner = new Events();
-            var observer = new Events();
-            using var observerSubscription = fixture.Host.Subscribe("desktop", observer.Emit);
-            await fixture.Host.HandleAsync("mac", Envelope("microphone.speak", new { text = "Vorlesen auf dem Mac." }), owner.Emit);
-            var audio = await owner.Next("speech.audio");
-            Assert.DoesNotContain(observer.Items, item => item.Type.StartsWith("speech.", StringComparison.Ordinal));
-            var url = audio.Payload.GetProperty("url").GetString()!;
-            // An already announced WAV belongs to the synthesizing gateway,
-            // even when preferences change before the browser downloads it.
-            await fixture.Settings.UpdateAsync(value => value with { MissumAiServerUrl = "http://changed-fixture/" });
-            using var resource = await client.GetAsync(url);
-            Assert.Equal(HttpStatusCode.OK, resource.StatusCode);
-            Assert.Equal("audio/wav", resource.Content.Headers.ContentType!.MediaType);
-            Assert.Equal(fixture.Gateway.Audio, await resource.Content.ReadAsByteArrayAsync());
-            using var rangeRequest = new HttpRequestMessage(HttpMethod.Get, url);
-            rangeRequest.Headers.Range = new RangeHeaderValue(0, 7);
-            using var range = await client.SendAsync(rangeRequest);
-            Assert.Equal(HttpStatusCode.PartialContent, range.StatusCode);
-            Assert.Equal(fixture.Gateway.Audio.Take(8), await range.Content.ReadAsByteArrayAsync());
-            Assert.Equal(1, fixture.Gateway.Downloads);
-            Assert.Equal("fixture", Assert.Single(fixture.Gateway.DownloadHosts));
-            Assert.False(resource.Headers.Contains("Set-Cookie"));
-        }
-        finally { Environment.SetEnvironmentVariable("ASSISTANT_LAN_WEB_PORT", previousPort); }
-    }
-
-    [Fact]
-    public async Task HttpCaptureCommandsReturnClientErrorWithoutInvokingServerCapture()
-    {
-        await using var fixture = await Fixture.CreateAsync();
-        foreach (var type in new[] { "microphone.start", "microphone.audio", "screen.capture", "screenClip.start", "audioCapture.start", "liveCaption.start" })
-        {
-            var events = new Events();
-            await fixture.Host.HandleAsync("mac", Envelope(type, new { }), events.Emit);
-            Assert.Contains(events.Items, item => item.Type == "host.error"
-                && item.Payload.GetProperty("message").GetString()!.Contains("HTTP", StringComparison.Ordinal));
-            Assert.DoesNotContain(events.Items, item => item.Type == "capture.required");
-        }
     }
 
     [Fact]
@@ -484,7 +379,7 @@ public sealed class AssistantHostTests
     }
 
     private static WebBridgeEnvelope Envelope(string type, object payload, string? id = null) =>
-        new(AssistantWebBridge.ProtocolVersion, type, id ?? Guid.NewGuid().ToString("N"), JsonSerializer.SerializeToElement(payload, Json));
+        new(AssistantProtocol.ProtocolVersion, type, id ?? Guid.NewGuid().ToString("N"), JsonSerializer.SerializeToElement(payload, Json));
 
     private static int FreePort()
     {
@@ -517,12 +412,11 @@ public sealed class AssistantHostTests
     private sealed class Fixture : IAsyncDisposable
     {
         private readonly MissumAiConnectionService _connection;
-        private readonly BrowserSpeechService _speech;
         private readonly AssistantSettingsService _preferences;
         private readonly ScientificPresentationCoordinator _science;
         private readonly AssistantArtifactPreviewService _previews;
         private readonly MissumAiAssistantService? _ai;
-        private Fixture(TestEnvironment environment, SettingsCoordinator settings, bool scientificResearch, bool reasoning)
+        private Fixture(TestEnvironment environment, SettingsCoordinator settings, bool reasoning)
         {
             Environment = environment;
             Settings = settings;
@@ -532,18 +426,15 @@ public sealed class AssistantHostTests
             _connection = new(settings, NullLogger<MissumAiConnectionService>.Instance, () => new GatewayHandler(Gateway));
             if (reasoning) _ai = new(_connection, null!, null!, null!, null!, null!, null!, null!, null!,
                 null!, null!, null!, null!, settings, null!, NullLogger<MissumAiAssistantService>.Instance);
-            _speech = new(_connection.CreateClientAsync, (request, _) => Task.FromResult(BrowserSpeechPlan.Create(request.SessionId,
-                request.MessageId, "Vorgegebener Text", request.Text ?? "Testtext.")));
             _preferences = new(settings, _connection, environment.Get<IPromptTriggerRepository>(), environment.Get<IBackupService>());
-            _science = new(null!, null!);
+            _science = new(null!);
             _previews = new(environment.Get<IChatArtifactRepository>(), environment.Get<IBinaryObjectStore>(), Path.Combine(environment.Directory, "Previews"));
             var recent = new RecentActivityService(settings, new ShellViewModel(), NullLogger<RecentActivityService>.Instance);
             Coordinator = new(environment.Get<IChatRepository>(), environment.Get<IDocumentIngestor>(), environment.Get<IContextAssembler>(),
                 Triggers, environment.Get<IAssistantAttachmentRepository>(), environment.Get<IChatArtifactRepository>(),
-                environment.Get<IConversationSnapshotRepository>(), _ai, settings, recent, runScheduler: Scheduler,
-                scientificResearch: scientificResearch ? environment.Get<IScientificResearchRepository>() : null);
+                environment.Get<IConversationSnapshotRepository>(), _ai, settings, recent, runScheduler: Scheduler);
             var services = new ServiceCollection().AddLogging()
-                .AddSingleton(_connection).AddSingleton(_speech).AddSingleton(_preferences).AddSingleton(_science).AddSingleton(_previews)
+                .AddSingleton(_connection).AddSingleton(_preferences).AddSingleton(_science).AddSingleton(_previews)
                 .AddSingleton(environment.Get<IChatRepository>()).AddSingleton(environment.Get<IChatArtifactRepository>())
                 .AddSingleton(environment.Get<IBinaryObjectStore>()).AddSingleton<IAssistantRunScheduler>(Scheduler);
             if (_ai is not null) services.AddSingleton(_ai);
@@ -560,18 +451,17 @@ public sealed class AssistantHostTests
         public AssistantHost Host { get; }
         public GatewayState Gateway { get; }
         public AssistantClientStateStore Views { get; }
-        public static async Task<Fixture> CreateAsync(bool scientificResearch = false, bool reasoning = false)
+        public static async Task<Fixture> CreateAsync(bool reasoning = false)
         {
             var environment = await TestEnvironment.CreateAsync();
             var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
             await settings.InitializeAsync();
             await settings.UpdateAsync(value => value with { MissumAiServerUrl = "http://fixture/", IsAutomaticSpeechEnabled = false });
-            return new(environment, settings, scientificResearch, reasoning);
+            return new(environment, settings, reasoning);
         }
         public async ValueTask DisposeAsync()
         {
             await Host.DisposeAsync();
-            await _speech.DisposeAsync();
             await Scheduler.DisposeAsync();
             _preferences.Dispose();
             _science.Dispose();

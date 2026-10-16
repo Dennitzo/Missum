@@ -1,4 +1,4 @@
-using Missum.Ai.Contracts;
+﻿using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Models;
 using Missum.Ai.Server.Core.Policies;
 using System.Text;
@@ -9,10 +9,9 @@ namespace Missum.Ai.Server.Core.Runs;
 /// <summary>Reduces research history without truncating its current scientific or execution evidence.</summary>
 internal static class ScientificRunContextPlanner
 {
-    internal const int CanonicalWorkingInputTokens = 128 * 1024;
     private static readonly string[] TransientScienceGuidanceMarkers =
     [
-        ScientificStateCompletionPolicy.RecoveryMarker, ScientificStateCompletionPolicy.VerificationRepairMarker,
+        LegacyResearchContext.RecoveryMarker, LegacyResearchContext.VerificationRepairMarker,
         "[MISSUM_SCIENCE_PROGRESS_HINT:", "[MISSUM_SCIENCE_TOOL_DIAGNOSIS:", "[MISSUM_SCIENCE_RESEARCH_DIAGNOSIS:",
         "[MISSUM_SCIENCE_COMPLETION_STAGNATION]",
     ];
@@ -169,7 +168,7 @@ internal static class ScientificRunContextPlanner
         var estimated = ContextPlanner.EstimateTokens(result);
         if (estimated > budget) throw new ContextBudgetException(estimated, budget);
         return new(result, estimated, budget, changed, changed
-            ? $"Der Forschungs-Arbeitskontext wurde gezielt auf {estimated:N0} von {budget:N0} Eingabetoken verdichtet. Der aktuelle Forschungsauftrag, die aktuelle Publikation und ihre Werkzeugbelege bleiben vollständig erhalten. {removed} ältere Kontextnachrichten wurden aus dem Arbeitskontext entfernt; das vollständige Laufjournal bleibt erhalten. Forschungsdetails können mit research.read erneut geladen werden." : null);
+            ? $"Der Arbeitskontext wurde gezielt auf {estimated:N0} von {budget:N0} Eingabetoken verdichtet. Der aktuelle Auftrag und aktuelle Werkzeugbelege bleiben vollständig erhalten. {removed} ältere Kontextnachrichten wurden aus dem Arbeitskontext entfernt; das vollständige Laufjournal bleibt erhalten. Projektdateien können bei Bedarf erneut gelesen werden." : null);
     }
 
     private static string? TransientScienceGuidanceKey(LmChatMessage message)
@@ -197,12 +196,16 @@ internal static class ScientificRunContextPlanner
         var latestVerifyReceipt = new Dictionary<string, ToolGroup>(StringComparer.Ordinal);
         var latestMutation = new Dictionary<string, ToolGroup>(StringComparer.Ordinal);
         var latestMutationReceipt = new Dictionary<string, ToolGroup>(StringComparer.Ordinal);
+        var latestProjectTool = new Dictionary<string, ToolGroup>(StringComparer.Ordinal);
         ToolGroup? latestDocumentMutation = null;
         foreach (var group in groups)
         {
             if (group.Calls.Any(call => !group.Receipts.ContainsKey(call.Id))) protect.UnionWith(group.Indices);
             foreach (var call in group.Calls)
             {
+                if (call.Name is ClientToolNames.CodingRead or ClientToolNames.CodingWrite or ClientToolNames.CodingEdit
+                    or ClientToolNames.CodingCommand or ClientToolNames.MathFormalProof)
+                    latestProjectTool[call.Name] = group;
                 var project = Text(call.Arguments, "projectId");
                 if (call.Name == "document.create") latestDocumentMutation = group;
                 if (project.Length == 0) continue;
@@ -226,6 +229,7 @@ internal static class ScientificRunContextPlanner
         foreach (var group in latestWrite.Values.Concat(latestPython.Values).Concat(latestVerify.Values)
             .Concat(latestVerifyReceipt.Values).Concat(latestMutation.Values).Concat(latestMutationReceipt.Values)
             .Concat(latestStateRead.Values).Concat(latestStateUpdate.Values)) protect.UnionWith(group.Indices);
+        foreach (var group in latestProjectTool.Values) protect.UnionWith(group.Indices);
         if (latestDocumentMutation is not null) protect.UnionWith(latestDocumentMutation.Indices);
         ProtectCanonicalReadContext(messages, groups, protect);
     }
@@ -243,9 +247,9 @@ internal static class ScientificRunContextPlanner
                 if (project.Length == 0) continue;
                 foreach (var index in receipts)
                 {
-                    if (!ScientificStateCompletionPolicy.TryReceipt(messages[index].Content, out var result, out var success)
+                    if (!LegacyResearchContext.TryReceipt(messages[index].Content, out var result, out var success)
                         || !success || Text(result, "projectId") != project
-                        || Text(result, "protocol") != ScientificStateCompletionPolicy.Protocol) continue;
+                        || Text(result, "protocol") != LegacyResearchContext.Protocol) continue;
                     var stamp = Text(result, "stateStamp");
                     if (stamp.Length != 64 || !stamp.All(Uri.IsHexDigit)) continue;
                     var view = Text(call.Arguments, "view");
@@ -254,7 +258,7 @@ internal static class ScientificRunContextPlanner
                         && (!call.Arguments.TryGetProperty("ids", out var ids) || ids.ValueKind == JsonValueKind.Array && ids.GetArrayLength() == 0)
                         && !call.Arguments.TryGetProperty("cursor", out _)
                         && (!call.Arguments.TryGetProperty("offset", out var offset) || offset.ValueKind == JsonValueKind.Number && offset.TryGetInt32(out var number) && number == 0)
-                        && !ScientificStateCompletionPolicy.Boolean(result, "unchanged")
+                        && !LegacyResearchContext.Boolean(result, "unchanged")
                         && result.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Array)
                         overviews[project] = group;
                     if (view != "task" || !TryNonnegativeInt(result, "characterOffset", out var start)
@@ -376,14 +380,14 @@ internal static class ScientificRunContextPlanner
         foreach (var line in content.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n'))
         {
             var trimmed = line.Trim();
-            if (fence == '\0' && trimmed == ScientificRunCompletionPolicy.PublicationBegin)
+            if (fence == '\0' && trimmed == LegacyResearchContext.PublicationBegin)
             {
                 found = true;
                 publication = "";
                 current = new();
                 continue;
             }
-            if (fence == '\0' && trimmed == ScientificRunCompletionPolicy.PublicationEnd && current is not null)
+            if (fence == '\0' && trimmed == LegacyResearchContext.PublicationEnd && current is not null)
             {
                 publication = current.ToString().Trim();
                 current = null;

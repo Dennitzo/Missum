@@ -105,12 +105,10 @@ public sealed partial class NativeAssistantPage
         }
         else if (textFiles > 0 || partial)
         {
-            row.Children.Add(Label("Zeilenzahlen nicht verfügbar", NativeThemeBrushes.MutedText));
             description += ", Zeilenzahlen nicht verfügbar";
         }
         if (partial && files.Length > 0)
         {
-            row.Children.Add(Label("teilweise", NativeThemeBrushes.MutedText));
             description += ", teilweise erfasst";
         }
 

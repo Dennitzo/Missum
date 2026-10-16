@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.Json;
 using System.Security.Cryptography;
 using Missum.App.Services;
@@ -70,7 +70,7 @@ public sealed class ScientificPublicationTests(ITestOutputHelper output)
         """;
 
     [Fact]
-    public async Task DraftPublicationExistsBeforeResultsAndReusesUnchangedSnapshot()
+    public async Task LegacyImportCreatesOnePublicationAndReusesUnchangedFile()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var (repository, project) = await CreateProjectAsync(environment);
@@ -87,7 +87,7 @@ public sealed class ScientificPublicationTests(ITestOutputHelper output)
         Assert.NotNull(first);
         Assert.Equal(first, again);
         Assert.Equal(1, renderCalls);
-        Assert.True(first.IsDraft);
+        Assert.False(first.IsDraft);
         Assert.Contains("Arbeitsfassung", await File.ReadAllTextAsync(first.MarkdownPath));
         Assert.Contains("Es wird noch kein Ergebnis behauptet.", await File.ReadAllTextAsync(first.MarkdownPath));
         Assert.Empty(Directory.GetDirectories(Path.GetDirectoryName(Path.GetDirectoryName(first.PdfPath)!)!, ".pending-*"));
@@ -97,121 +97,83 @@ public sealed class ScientificPublicationTests(ITestOutputHelper output)
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task RendererUpgradeRegeneratesUnchangedManuscriptAndPreservesOldPdfAndResearchRevisions(bool canonical)
+    public async Task RendererUpgradeRegeneratesTheSameEditableFileWithoutChangingDatabaseRevisions(bool canonical)
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var (repository, project) = await CreateProjectAsync(environment);
         var states = Assert.IsAssignableFrom<IScientificResearchStateRepository>(repository);
-        ResearchWorkingState? state = null;
         if (canonical)
         {
             project = project with { ProtocolVersion = 2 };
             await repository.UpsertProjectAsync(project);
-            var updated = await states.ApplyWorkingUpdateAsync(project.Id, "renderer-upgrade-fixture", null, "Oszillator",
+            await states.ApplyWorkingUpdateAsync(project.Id, "fixture", null, "Oszillator",
                 [new("section-model", "section", 0, JsonSerializer.SerializeToElement(new
-                {
-                    title = "Modell und Voraussetzungen", contentMarkdown = "Die lineare Modellgleichung lautet $m\\ddot{x}+c\\dot{x}+kx=0$.",
-                    status = "draft", order = 1,
-                }))]);
-            Assert.True(updated.Success);
-            state = updated.State;
+                { title = "Modell", contentMarkdown = "Die Gleichung lautet $x=1$.", status = "draft", order = 1 }))]);
         }
-        var manuscript = state is null
-            ? ScientificPublicationService.FormatPublication(project, new([], [], [], []), [], [], null)
-            : ScientificPublicationService.FormatCanonicalPublication(state, [], new([], [], [], []));
-        // This is the persisted v8 cache format, deliberately independent of the
-        // current renderer version. Empty canonical dependencies have no review,
-        // cited sources or executed image experiments in this fixture.
-        var dependencyHash = state is null ? "" : PublicationCacheHash("{\"reviewed\":false,\"sources\":[],\"experiments\":[]}");
-        var previousHash = PublicationCacheHash("scientific-publication-v8-single-column\n" + manuscript
-            + (dependencyHash.Length == 0 ? "" : "\n" + dependencyHash));
-        var outputDirectory = Path.Combine(environment.Directory, "publications");
-        var previousDirectory = Path.Combine(outputDirectory, PublicationCacheHash(project.Id)[..24],
-            $"r{state?.PublicationRevision ?? project.Revision}-{previousHash[..24]}");
-        Directory.CreateDirectory(previousDirectory);
-        var previousSource = Path.Combine(previousDirectory, "Publikation.md");
-        await File.WriteAllTextAsync(previousSource, manuscript, new UTF8Encoding(false));
-        var previousPdf = await FakePdfAsync(previousSource, CancellationToken.None);
-        Assert.NotNull(previousPdf);
-        var previousBytes = await File.ReadAllBytesAsync(previousPdf);
+        var directory = Path.Combine(environment.Directory, "publications", "legacy", "current");
+        Directory.CreateDirectory(directory);
+        var source = Path.Combine(directory, "Publikation.md");
+        const string authored = "# Oszillator\n\n## Modell\n\nDie Gleichung lautet $x=2$.";
+        await File.WriteAllTextAsync(source, authored);
+        var previousPdf = await FakePdfAsync(source, CancellationToken.None);
+        await File.WriteAllTextAsync(Path.Combine(directory, "publication.json"), "{}");
         var beforeState = JsonSerializer.Serialize(await states.LoadWorkingStateAsync(project.Id));
-        var renderCalls = 0;
-        using var service = new ScientificPublicationService(repository, async (source, token) =>
-        {
-            renderCalls++;
-            return await FakePdfAsync(source, token);
-        }, outputDirectory);
-
+        var renders = 0;
+        using var service = new ScientificPublicationService(repository, async (path, token) =>
+        { renders++; return await FakePdfAsync(path, token); }, Path.Combine(environment.Directory, "fallback"));
         var current = await service.EnsureCurrentAsync(project.Id);
-        var cached = await service.EnsureCurrentAsync(project.Id);
-
         Assert.NotNull(current);
-        Assert.Equal(current, cached);
-        Assert.Equal(1, renderCalls);
-        Assert.NotEqual(previousPdf, current.PdfPath);
-        Assert.Equal(state?.PublicationRevision ?? project.Revision, current.Revision);
-        Assert.Equal(manuscript, await File.ReadAllTextAsync(current.MarkdownPath));
-        Assert.Equal(previousBytes, await File.ReadAllBytesAsync(previousPdf));
+        Assert.Equal(current, await service.EnsureCurrentAsync(project.Id));
+        Assert.Equal(previousPdf, current.PdfPath);
+        Assert.Equal(0, current.Revision);
+        Assert.Equal(1, renders);
+        Assert.Equal(authored, await File.ReadAllTextAsync(source));
         Assert.Equal(project, await repository.GetProjectAsync(project.Id));
         Assert.Equal(beforeState, JsonSerializer.Serialize(await states.LoadWorkingStateAsync(project.Id)));
     }
 
     [Fact]
-    public async Task RendererUpgradeFailureRetainsOldEditionWithoutCachingItAsTheCurrentRenderer()
+    public async Task RendererFailureRetainsThePreviousPdfUntilRenderingRecovers()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var (repository, project) = await CreateProjectAsync(environment);
-        var manuscript = ScientificPublicationService.FormatPublication(project, new([], [], [], []), [], [], null);
-        var hash = PublicationCacheHash("scientific-publication-v8-single-column\n" + manuscript);
-        var outputDirectory = Path.Combine(environment.Directory, "publications");
-        var previousDirectory = Path.Combine(outputDirectory, PublicationCacheHash(project.Id)[..24], $"r{project.Revision}-{hash[..24]}");
-        Directory.CreateDirectory(previousDirectory);
-        var source = Path.Combine(previousDirectory, "Publikation.md");
-        await File.WriteAllTextAsync(source, manuscript);
+        var source = Path.Combine(environment.Directory, "Publikation.md");
+        await File.WriteAllTextAsync(source, "# Oszillator\n\n## Modell\n\n$x=1$");
         var previousPdf = await FakePdfAsync(source, CancellationToken.None);
-        var renderCalls = 0;
+        var renders = 0;
         using var service = new ScientificPublicationService(repository, async (path, token) =>
         {
-            if (++renderCalls == 1) throw new IOException("Temporary renderer failure.");
+            if (++renders == 1) throw new IOException("Temporary renderer failure.");
             return await FakePdfAsync(path, token);
-        }, outputDirectory);
-
+        }, Path.Combine(environment.Directory, "fallback"));
         var retained = await service.EnsurePublicationAsync(project.Id);
         var current = await service.EnsureCurrentAsync(project.Id);
-
         Assert.NotNull(retained);
         Assert.Equal(previousPdf, retained.PdfPath);
         Assert.NotNull(current);
-        Assert.NotEqual(previousPdf, current.PdfPath);
-        Assert.Equal(2, renderCalls);
-        Assert.Equal(project.Revision, current.Revision);
+        Assert.Equal(previousPdf, current.PdfPath);
+        Assert.Equal(2, renders);
+        Assert.Equal(0, current.Revision);
         Assert.Equal(project, await repository.GetProjectAsync(project.Id));
-        Assert.Empty(Directory.GetDirectories(outputDirectory, ".pending-*", SearchOption.AllDirectories));
+        Assert.Empty(Directory.EnumerateDirectories(environment.Directory, ".missum-publication-*"));
     }
 
-    private static string PublicationCacheHash(string text) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
-
     [Fact]
-    public async Task LaterResultChangesPublicationEvenWithoutRevisionBumpAndKeepsPreviousPdf()
+    public async Task LegacyResultChangesDoNotOverwriteTheDirectlyEditedPublication()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var (repository, project) = await CreateProjectAsync(environment);
-        using var service = new ScientificPublicationService(repository, FakePdfAsync, Path.Combine(environment.Directory, "publications"));
-        var first = await service.EnsureCurrentAsync(project.Id);
+        using var service = new ScientificPublicationService(repository, FakePdfAsync, Path.Combine(environment.Directory, "fallback"));
+        var first = (await service.EnsureCurrentAsync(project.Id))!;
         await repository.SaveResultSnapshotAsync(project.Id, new([], [], [],
             [new("publication-claim", project.Id, "Die Lösung lautet $x=2$.", "calculated", "verified", 1, "{}", DateTimeOffset.UtcNow)]));
-
-        var next = await service.EnsureCurrentAsync(project.Id);
-
-        Assert.NotNull(first);
-        Assert.NotNull(next);
-        Assert.Equal(first.Revision, next.Revision);
+        Assert.Equal(first, await service.EnsureCurrentAsync(project.Id));
+        await File.AppendAllTextAsync(first.MarkdownPath, "\n\nDie neue Lösung lautet $x=3$.");
+        var next = (await service.EnsureCurrentAsync(project.Id))!;
+        Assert.Equal(0, next.Revision);
         Assert.NotEqual(first.ContentHash, next.ContentHash);
         Assert.Equal(first.PdfPath, next.PdfPath);
-        Assert.True(File.Exists(first.PdfPath));
-        Assert.Equal("current", Path.GetFileName(Path.GetDirectoryName(next.PdfPath)));
-        Assert.Single(Directory.GetDirectories(Path.GetDirectoryName(Path.GetDirectoryName(next.PdfPath)!)!));
-        Assert.Contains("$x=2$", await File.ReadAllTextAsync(next.MarkdownPath));
+        Assert.Contains("$x=3$", await File.ReadAllTextAsync(next.MarkdownPath));
     }
 
     [Fact]
@@ -223,11 +185,11 @@ public sealed class ScientificPublicationTests(ITestOutputHelper output)
         using var stale = new ScientificPublicationService(repository, async (path, token) =>
         {
             var pdf = await FakePdfAsync(path, token);
-            await repository.UpsertProjectAsync(project with { Revision = project.Revision + 1, UpdatedAt = project.UpdatedAt.AddSeconds(1) }, token);
+            await File.AppendAllTextAsync(Path.Combine(environment.Directory, "Publikation.md"), "\n\nNeuere Formel $x=2$.", token);
             return pdf;
         }, directory);
         Assert.Null(await stale.EnsureCurrentAsync(project.Id));
-        Assert.Empty(Directory.GetFiles(directory, "*.pdf", SearchOption.AllDirectories));
+        Assert.Empty(Directory.GetFiles(environment.Directory, "*.pdf", SearchOption.AllDirectories));
 
         using var cancellation = new CancellationTokenSource();
         using var cancelled = new ScientificPublicationService(repository, async (path, token) =>
@@ -238,8 +200,8 @@ public sealed class ScientificPublicationTests(ITestOutputHelper output)
             return pdf;
         }, directory);
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cancelled.EnsureCurrentAsync(project.Id, cancellation.Token));
-        Assert.Empty(Directory.GetFiles(directory, "*.pdf", SearchOption.AllDirectories));
-        Assert.Empty(Directory.GetDirectories(directory, ".pending-*", SearchOption.AllDirectories));
+        Assert.Empty(Directory.GetFiles(environment.Directory, "*.pdf", SearchOption.AllDirectories));
+        Assert.Empty(Directory.GetDirectories(environment.Directory, ".missum-publication-*", SearchOption.AllDirectories));
     }
 
     [Fact]
@@ -252,7 +214,7 @@ public sealed class ScientificPublicationTests(ITestOutputHelper output)
         var previous = await good.EnsureCurrentAsync(project.Id);
         Assert.NotNull(previous);
         var previousBytes = await File.ReadAllBytesAsync(previous.PdfPath);
-        await repository.UpsertProjectAsync(project with { Revision = project.Revision + 1 });
+        await File.AppendAllTextAsync(previous.MarkdownPath, "\n\nGeänderter Text.");
         using var broken = new ScientificPublicationService(repository, async (path, token) =>
         {
             var target = Path.ChangeExtension(path, ".pdf");
@@ -264,7 +226,7 @@ public sealed class ScientificPublicationTests(ITestOutputHelper output)
     }
 
     [Fact]
-    public async Task ManuscriptUsesExactResearchRunAndRefreshesDuringStreamingWithoutPreviousAnswers()
+    public async Task LegacyManuscriptImportsTheExactRunOnceThenRespectsDirectFileEdits()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var (repository, project) = await CreateProjectAsync(environment);
@@ -284,7 +246,7 @@ public sealed class ScientificPublicationTests(ITestOutputHelper output)
         using var service = new ScientificPublicationService(repository, FakePdfAsync, Path.Combine(environment.Directory, "publications"), chats, runs);
         var draft = await service.EnsureCurrentAsync(project.Id);
         Assert.NotNull(draft);
-        Assert.True(draft.IsDraft);
+        Assert.False(draft.IsDraft);
         var draftText = await File.ReadAllTextAsync(draft.MarkdownPath);
         Assert.Contains("CURRENTMANUSCRIPT", draftText);
         Assert.DoesNotContain("PREVIOUSRUNANSWER", draftText);
@@ -292,21 +254,25 @@ public sealed class ScientificPublicationTests(ITestOutputHelper output)
         Assert.DoesNotContain("DOSSIERONLY", draftText);
 
         await chats.UpdateMessageAsync(manuscript.Id, manuscript.Content + "\n\nFINALSCIENTIFICRESULT", MessageStatus.Completed);
+        Assert.Equal(draft, await service.EnsureCurrentAsync(project.Id));
+        await File.AppendAllTextAsync(draft.MarkdownPath, "\n\nDIRECTSCIENTIFICRESULT");
         var final = await service.EnsureCurrentAsync(project.Id);
         Assert.NotNull(final);
         Assert.False(final.IsDraft);
         Assert.Equal(draft.Revision, final.Revision);
         Assert.NotEqual(draft.ContentHash, final.ContentHash);
-        Assert.Contains("FINALSCIENTIFICRESULT", await File.ReadAllTextAsync(final.MarkdownPath));
+        Assert.Contains("DIRECTSCIENTIFICRESULT", await File.ReadAllTextAsync(final.MarkdownPath));
+        Assert.DoesNotContain("FINALSCIENTIFICRESULT", await File.ReadAllTextAsync(final.MarkdownPath));
 
         await runs.UpdateAsync(run.Id, "retried-publication-run", 0, "running");
         var differentAttempt = await service.EnsureCurrentAsync(project.Id);
         Assert.NotNull(differentAttempt);
-        Assert.DoesNotContain("CURRENTMANUSCRIPT", await File.ReadAllTextAsync(differentAttempt.MarkdownPath));
+        Assert.Contains("CURRENTMANUSCRIPT", await File.ReadAllTextAsync(differentAttempt.MarkdownPath));
+        Assert.Equal(final, differentAttempt);
     }
 
     [Fact]
-    public async Task AppendOnlyStreamingCanPublishAnHonestDraftWithoutStarvingPdfUpdates()
+    public async Task ChatStreamingCannotOverwriteAnImportedPublication()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var (repository, project) = await CreateProjectAsync(environment);
@@ -327,7 +293,7 @@ public sealed class ScientificPublicationTests(ITestOutputHelper output)
         }, Path.Combine(environment.Directory, "publications"), chats, runs);
         var result = await service.EnsureCurrentAsync(project.Id);
         Assert.NotNull(result);
-        Assert.True(result.IsDraft);
+        Assert.False(result.IsDraft);
         Assert.Contains("INITIALPARAGRAPH", await File.ReadAllTextAsync(result.MarkdownPath));
         Assert.DoesNotContain("LATERPARAGRAPH", await File.ReadAllTextAsync(result.MarkdownPath));
     }
@@ -593,7 +559,8 @@ public sealed class ScientificPublicationTests(ITestOutputHelper output)
         Assert.Contains("### Herleitung", text);
         Assert.Contains("[Originalquelle](https://example.org/source)", text);
         Assert.Contains("Prüfstatus:** bestätigt", text);
-        Assert.Contains("kein Beweis", text);
+        Assert.Contains("Gleichungen anhand ihrer Berechnungsdaten prüfen", text);
+        Assert.Contains("bestätigt nicht automatisch physikalische Modellannahmen", text);
     }
 
     [Theory]
@@ -702,8 +669,8 @@ public sealed class ScientificPublicationTests(ITestOutputHelper output)
         using var service = new ScientificPublicationService(repository, FakePdfAsync, Path.Combine(environment.Directory, "publications"));
         var publication = await service.EnsureCurrentAsync(project.Id);
         Assert.NotNull(publication);
-        Assert.True(publication.SectionDelta);
-        Assert.Equal(persisted.PublicationRevision, publication.Revision);
+        Assert.False(publication.SectionDelta);
+        Assert.Equal(0, publication.Revision);
         Assert.Equal(formatted, (await File.ReadAllTextAsync(publication.MarkdownPath)).Replace("\r", "", StringComparison.Ordinal));
     }
 

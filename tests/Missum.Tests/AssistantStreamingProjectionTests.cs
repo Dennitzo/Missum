@@ -110,7 +110,7 @@ public sealed class AssistantStreamingProjectionTests
         Assert.Equal(2, events.Count);
         Assert.Equal("conversation.messageCommitted", events[0].Type);
         Assert.Equal(terminalEvent, events[1].Type);
-        Assert.Equal(1, snapshots.Reads);
+        Assert.Equal(0, snapshots.Reads);
         Assert.Equal(1, artifacts.MessageReads);
         Assert.True(events[0].Payload.GetProperty("conversationRevision").GetInt64() > 0);
         Assert.All(events, item =>
@@ -132,7 +132,17 @@ public sealed class AssistantStreamingProjectionTests
 
     private sealed class CountingSnapshots(IConversationSnapshotRepository inner) : IConversationSnapshotRepository
     {
+        public Task<IReadOnlyList<ConversationSource>> GetSourcesAsync(Guid sessionId, CancellationToken cancellationToken = default) =>
+            inner.GetSourcesAsync(sessionId, cancellationToken);
         public int Reads { get; private set; }
+        public Task<ConversationPage?> GetPageAsync(Guid sessionId, int pageSize = 24, ConversationCursor? before = null,
+            CancellationToken cancellationToken = default)
+        {
+            Reads++;
+            return inner.GetPageAsync(sessionId, pageSize, before, cancellationToken);
+        }
+        public Task<AssistantToolStep?> GetToolStepAsync(Guid sessionId, Guid messageId, string stepId,
+            CancellationToken cancellationToken = default) => inner.GetToolStepAsync(sessionId, messageId, stepId, cancellationToken);
         public Task<ConversationSnapshot?> GetAsync(Guid sessionId, CancellationToken cancellationToken = default)
         {
             Reads++;

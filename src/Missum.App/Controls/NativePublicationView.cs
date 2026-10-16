@@ -26,7 +26,7 @@ internal sealed class NativePublicationView : Grid, IDisposable, IAsyncDisposabl
     private readonly TaskCompletionSource _closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private TaskCompletionSource? _loadCompletion;
     private Task _loading = Task.CompletedTask;
-    private string? _requestedPath, _requestedStamp, _allowedPath, _expectedUri, _pendingError;
+    private string? _requestedPath, _requestedStamp, _requestedContentRevision, _allowedPath, _expectedUri, _pendingError;
     private string _logicalDocumentKey = "publication";
     private string? _committedDocumentKey;
     private CancellationToken _loadToken;
@@ -58,11 +58,36 @@ internal sealed class NativePublicationView : Grid, IDisposable, IAsyncDisposabl
     {
         if (_disposed || _active == active) return;
         _active = active;
-        if (active && _loadFailed && !_activationBlocked && !_loadToken.IsCancellationRequested) BeginLoad();
+        if (active && !_activationBlocked && !_loadToken.IsCancellationRequested)
+        {
+            // A retained view may have been hidden while current/Publikation.pdf
+            // was replaced. Activation must check its source even when the tab's
+            // logical project and path have not changed.
+            try
+            {
+                var stamp = _requestedPath is { } path ? SourceStamp(path) : null;
+                if (stamp is not null && (stamp != _requestedStamp || _loadFailed))
+                {
+                    _requestedStamp = stamp;
+                    BeginLoad();
+                }
+            }
+            catch (Exception exception) when (Recoverable(exception))
+            {
+                _loadFailed = true;
+                _pendingError = "Das PDF konnte nicht angezeigt werden: " + exception.Message;
+                _loadCompletion?.TrySetResult();
+                RecordFailure("activate.source", exception);
+            }
+        }
         RequestWork();
     }
 
-    internal Task LoadAsync(string path, string? logicalDocumentKey = null, CancellationToken cancellationToken = default)
+    internal Task LoadAsync(string path, string? logicalDocumentKey = null, CancellationToken cancellationToken = default) =>
+        LoadAsync(path, logicalDocumentKey, null, cancellationToken);
+
+    internal Task LoadAsync(string path, string? logicalDocumentKey, string? contentRevision,
+        CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         var fullPath = Path.GetFullPath(path);
@@ -73,9 +98,11 @@ internal sealed class NativePublicationView : Grid, IDisposable, IAsyncDisposabl
         var documentChanged = !string.Equals(_logicalDocumentKey, key, StringComparison.Ordinal);
         if (documentChanged) { _logicalDocumentKey = key; _viewState = new(1, null, null, true); }
         _loadToken = cancellationToken;
-        if (!documentChanged && _requestedPath == fullPath && _requestedStamp == stamp && (!_loadFailed || _activationBlocked)) return _loading;
+        if (!documentChanged && _requestedPath == fullPath && _requestedStamp == stamp
+            && _requestedContentRevision == contentRevision && (!_loadFailed || _activationBlocked)) return _loading;
         _requestedPath = fullPath;
         _requestedStamp = stamp;
+        _requestedContentRevision = contentRevision;
         BeginLoad();
         RequestWork();
         return _loading;
@@ -235,7 +262,8 @@ internal sealed class NativePublicationView : Grid, IDisposable, IAsyncDisposabl
         var page = Math.Clamp(_viewState.Page, 1, Math.Max(1, (int)PageCount));
         var zoom = _viewState.Zoom is { } value ? "zoom=" + value.ToString(CultureInfo.InvariantCulture) : "view=FitH";
         var mode = _viewState.SidebarOpen ? "thumbs" : "none";
-        _expectedUri = new Uri(path).AbsoluteUri + "?missum_pdf_revision=" + Uri.EscapeDataString(stamp)
+        var sourceRevision = stamp + (_requestedContentRevision is { Length: > 0 } revision ? "-" + revision : "");
+        _expectedUri = new Uri(path).AbsoluteUri + "?missum_pdf_revision=" + Uri.EscapeDataString(sourceRevision)
             + "#page=" + page.ToString(CultureInfo.InvariantCulture) + "&" + zoom + "&pagemode=" + mode;
         _navigationVersion = version;
         _navigationId = 0;
@@ -246,7 +274,7 @@ internal sealed class NativePublicationView : Grid, IDisposable, IAsyncDisposabl
         _browser!.Visibility = Visibility.Visible;
         _frame = null;
         PdfSource = _expectedUri;
-        Diagnostic("load.navigate", new { path, page, zoom, mode, PageCount });
+        Diagnostic("load.navigate", new { path, stamp, contentRevision = _requestedContentRevision, page, zoom, mode, PageCount });
         _core!.Navigate(_expectedUri);
     }
 
@@ -273,11 +301,18 @@ internal sealed class NativePublicationView : Grid, IDisposable, IAsyncDisposabl
     private void OnNavigationStarting(CoreWebView2 sender, CoreWebView2NavigationStartingEventArgs args) => GuardCallback("navigation.starting", () =>
     {
         args.Cancel = _disposed || !AllowedNavigation(args.Uri);
-        if (!args.Cancel && SameFile(args.Uri, _allowedPath) && _navigationVersion == _version) _navigationId = args.NavigationId;
+        if (!args.Cancel && SameDocument(args.Uri) && _navigationVersion == _version) _navigationId = args.NavigationId;
         Diagnostic("navigation.starting", new { args.Uri, args.Cancel, args.NavigationId });
     });
 
+    // PDF-internal chapter links can omit the cache query. They remain within
+    // this file; only completion of our versioned load binds its navigation ID.
     private bool AllowedNavigation(string value) => value is "about:blank" or "about:srcdoc" || SameFile(value, _allowedPath);
+
+    private bool SameDocument(string value) => SameFile(value, _allowedPath)
+        && Uri.TryCreate(value, UriKind.Absolute, out var uri)
+        && Uri.TryCreate(_expectedUri, UriKind.Absolute, out var expected)
+        && string.Equals(uri.Query, expected.Query, StringComparison.Ordinal);
 
     private static bool SameFile(string value, string? path)
     {

@@ -44,14 +44,6 @@
       <InfoBar x:Name="StatusBar" IsClosable="True" IsOpen="False" Severity="Informational" />
 
       <Border Style="{StaticResource MissumCardStyle}">
-        <StackPanel Spacing="8">
-          <TextBlock Style="{StaticResource MissumSectionTitleStyle}" Text="Missum im Heimnetz" />
-          <TextBlock Text="Diese Adresse am Mac in Chrome öffnen. Der Browserzugang bleibt bei minimiertem Fenster verfügbar." TextWrapping="Wrap" />
-          <TextBlock x:Name="LanAddressText" IsTextSelectionEnabled="True" TextWrapping="Wrap" />
-        </StackPanel>
-      </Border>
-
-      <Border Style="{StaticResource MissumCardStyle}">
         <StackPanel Spacing="14">
           <Grid ColumnSpacing="10">
             <Grid.ColumnDefinitions>

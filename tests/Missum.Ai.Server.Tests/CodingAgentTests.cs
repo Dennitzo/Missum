@@ -1,4 +1,4 @@
-using Missum.Ai.Contracts;
+﻿using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Coding;
 using Missum.Ai.Server.Core.Configuration;
 using Missum.Ai.Server.Core.Gateway;
@@ -34,13 +34,12 @@ public sealed class CodingAgentTests
     {
         var catalog = new AgentToolCatalog();
         var tools = catalog.GetAvailableTools(Request());
-        Assert.Equal(21, tools.Count);
+        Assert.Equal(16, tools.Count);
         Assert.All(tools, tool => Assert.True(tool.Name.StartsWith("coding.", StringComparison.Ordinal)
-            || tool.Name.StartsWith("math.", StringComparison.Ordinal)
-            || tool.Name.StartsWith("research.code.", StringComparison.Ordinal)));
+            || tool.Name.StartsWith("math.", StringComparison.Ordinal)));
         Assert.All(tools.Where(tool => tool.Name != "coding.updatePlan"), tool => Assert.False(tool.ServerSide));
         var definitions = RunProcessor.CreateModelToolDefinitions(tools, null, directTools: true);
-        Assert.Equal(21, definitions.Length);
+        Assert.Equal(16, definitions.Length);
         Assert.DoesNotContain(definitions, tool => tool.Name == AgentToolCatalog.SelectorToolName);
         var generalTools = catalog.GetAvailableTools(Request() with { Mode = RunMode.General });
         Assert.DoesNotContain(generalTools, tool => tool.Name.StartsWith("coding.", StringComparison.Ordinal));

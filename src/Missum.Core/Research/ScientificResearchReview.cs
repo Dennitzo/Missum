@@ -1,13 +1,14 @@
-using System.Security.Cryptography;
+﻿using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
 namespace Missum.Core.Research;
 
 /// <summary>A reproducible audit of declared scientific review and its actual stored evidence, not a truth certificate.</summary>
-public static class ScientificResearchReview
+public static partial class ScientificResearchReview
 {
     public const string Protocol = "science-review-v1";
+    public const int EvidencePolicy = 3;
     public const string Method = "MissumScientificReview";
     public const string Scope = "Dokumentierter Quellen-, Rechen- und Widerspruchsabgleich im angegebenen Geltungsbereich; keine allgemeine Wahrheitsgarantie.";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
@@ -70,9 +71,16 @@ public static class ScientificResearchReview
             var sourceEvidence = evidence.Any(entry => entry.ProjectId == state.ProjectId && evidenceIds.Contains(entry.Id)
                 && sourceIds.Contains(entry.WorkId) && entry.ExactExcerpt.Length > 0
                 && entry.ContentHash.Length == 64 && entry.ContentHash.All(Uri.IsHexDigit));
+            var webEvidence = evidence.Any(entry => entry.ProjectId == state.ProjectId && evidenceIds.Contains(entry.Id)
+                && sourceIds.Contains(entry.WorkId) && entry.ExactExcerpt.Length > 0
+                && entry.ContentHash.Length == 64 && entry.ContentHash.All(Uri.IsHexDigit)
+                && sources.Any(source => source.ProjectId == state.ProjectId && source.WorkId == entry.WorkId
+                    && Uri.TryCreate(source.CanonicalUrl, UriKind.Absolute, out var url) && url.Scheme is "http" or "https"));
             var experimentEvidence = experiments.Any(experiment => experiment.ProjectId == state.ProjectId
                 && experimentIds.Contains(experiment.Id) && MeasuredExecution(experiment));
-            var checkEvidence = checks.Any(check => check.ProjectId == state.ProjectId && checkIds.Contains(check.Id)
+            var leanEvidence = checks.Any(check => checkIds.Contains(check.Id)
+                && experimentIds.Contains(check.TargetId) && ScientificLeanEvidence.TryRead(check, state.ProjectId, out _));
+            var checkEvidence = leanEvidence || checks.Any(check => check.ProjectId == state.ProjectId && checkIds.Contains(check.Id)
                 && check.TargetId == item.Id && check.Method != Method
                 && check.Status is "Verified" or "KernelAccepted" or "SymbolicallyVerified");
             var linkedEvidence = item.Kind == "section" && (Ids(item.Data, "claimIds").Count > 0 || Ids(item.Data, "hypothesisIds").Count > 0);
@@ -86,7 +94,35 @@ public static class ScientificResearchReview
                 Add(item.Id, item.Revision, "source_excerpt_missing", "data.evidenceIds", "<missing>",
                     prefix + "Den Quellenabgleich mit evidenceIds der gelesenen Originaltextstellen belegen; ein Suchtreffer oder Quellentitel genügt nicht.",
                     "Nur die passende Originaltextstelle mit sourceIds/evidenceIds verknüpfen; bei nicht zugänglicher Quelle eine belegte Grenze statt fortgesetzter identischer Abrufe dokumentieren.");
+            foreach (var method in ScientificEvidenceRequirements.For(item))
+            {
+                var satisfied = method switch
+                {
+                    "web" => webEvidence,
+                    "lean" => leanEvidence,
+                    "simulation" => experiments.Any(experiment => experiment.ProjectId == state.ProjectId
+                        && experimentIds.Contains(experiment.Id) && MeasuredExecution(experiment)
+                        && checks.Any(check => checkIds.Contains(check.Id) && check.ProjectId == state.ProjectId
+                            && check.TargetType == "experiment" && check.TargetId == experiment.Id && check.Dimension == "execution"
+                            && check.Status == "passed" && check.Method is "research.code.execute" or "math.numeric"
+                            && check.EvidenceJson == experiment.StdoutEvidence)),
+                    _ => false,
+                };
+                if (satisfied) continue;
+                var instruction = method switch
+                {
+                    "web" => "Die fachliche Aussage mit einer gezielten Websuche vergleichen und eine passende Originaltextstelle tatsächlich lesen; echte sourceIds und evidenceIds verknüpfen.",
+                    "lean" => "Die mathematische Teilbehauptung mit ausdrücklichen Voraussetzungen in Lean prüfen (math.formalProof). Nur den erfolgreichen, quellgebundenen Kernel-Beleg über checkIds UND experimentIds zuordnen; Initialisierung oder Python ersetzt ihn nicht.",
+                    _ => "Die angegebenen Gleichungen mit ihren Annahmen, Einheiten und Parametern tatsächlich simulieren, mit einer unabhängigen Referenz vergleichen und den erfolgreichen Lauf über experimentIds sowie seinen geschützten Ausführungsbeleg über checkIds zuordnen. Für numerische Ziele quantitativeValidation erfüllen.",
+                };
+                Add(item.Id, item.Revision, "evidence_" + method + "_missing", "data.evidenceRequirements", method,
+                    prefix + "Der erforderliche Nachweisweg " + method + " fehlt. " + instruction,
+                    instruction + " Bei fachlicher Nichtanwendbarkeit die Aussage begrenzen und als offene Nachweisgrenze dokumentieren; keine Belege erfinden.");
+            }
         }
+        var presentationIssues = ScientificPublicationEvidence.Assess(state, experiments, checks);
+        issues.AddRange(presentationIssues);
+        missing.AddRange(presentationIssues.Select(issue => issue.Message));
         return new(Protocol, state.ProjectId, state.Revision, state.PublicationRevision, Fingerprint(state),
             missing.Count == 0, reviewed.Select(item => item.Id).ToArray(), missing.Distinct(StringComparer.Ordinal).ToArray(), Scope, issues);
 
@@ -120,6 +156,7 @@ public static class ScientificResearchReview
             using var document = JsonDocument.Parse(json);
             var report = document.RootElement;
             return Text(report, "protocol") == Protocol && Text(report, "projectId") == state.ProjectId
+                && Number(report, "evidencePolicy") == EvidencePolicy
                 && Number(report, "revision") == state.Revision && Number(report, "publicationRevision") == state.PublicationRevision
                 && Text(report, "stateSha256") == Fingerprint(state) && report.TryGetProperty("ready", out var ready)
                 && ready.ValueKind == JsonValueKind.True;
@@ -153,7 +190,7 @@ public static class ScientificResearchReview
 
 public sealed record ScientificResearchReviewReport(string Protocol, string ProjectId, long Revision, long PublicationRevision,
     string StateSha256, bool Ready, IReadOnlyList<string> ReviewedItemIds, IReadOnlyList<string> Missing, string Scope,
-    IReadOnlyList<ScientificResearchReviewIssue> Issues);
+    IReadOnlyList<ScientificResearchReviewIssue> Issues, int EvidencePolicy = ScientificResearchReview.EvidencePolicy);
 
 public sealed record ScientificResearchReviewIssue(string Id, long Revision, string Code, string Field, string CurrentValue,
     IReadOnlyList<string> AllowedValues, string Message, string NextAction);

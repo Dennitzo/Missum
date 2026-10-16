@@ -293,7 +293,7 @@ public sealed class NativeSessionCacheCleanupTests
     }
 
     private static Task HandleAsync(AssistantCoordinator coordinator, string command, object payload) =>
-        coordinator.HandleAsync(new(AssistantWebBridge.ProtocolVersion, command, "kv-lifecycle",
+        coordinator.HandleAsync(new(AssistantProtocol.ProtocolVersion, command, "kv-lifecycle",
             JsonSerializer.SerializeToElement(payload)), (_, _, _) => Task.CompletedTask);
 
     private static AssistantCoordinator Coordinator(TestEnvironment environment, SettingsCoordinator settings,

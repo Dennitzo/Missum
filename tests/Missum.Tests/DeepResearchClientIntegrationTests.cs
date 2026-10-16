@@ -1,4 +1,4 @@
-using Missum.Ai.Contracts;
+﻿using Missum.Ai.Contracts;
 using Missum.App.Services;
 using Missum.App.ViewModels;
 using Missum.Core.Contracts;
@@ -34,7 +34,7 @@ public sealed class DeepResearchClientIntegrationTests
         {
             MissumAiServerUrl = "http://127.0.0.1:65000",
             ActiveSessionId = session.Id,
-            SelectedModel = GeneralModel,
+            SelectedModel = CodingModel,
             SelectedCodingModel = CodingModel,
         });
         using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
@@ -59,7 +59,7 @@ public sealed class DeepResearchClientIntegrationTests
 
         var introductions = new List<string>();
         const string prompt = "Vergleiche Wärmepumpen und Gasheizungen wissenschaftlich.";
-        await coordinator.HandleAsync(new WebBridgeEnvelope(AssistantWebBridge.ProtocolVersion,
+        await coordinator.HandleAsync(new WebBridgeEnvelope(AssistantProtocol.ProtocolVersion,
             "chat.send", Guid.NewGuid().ToString("D"), JsonSerializer.SerializeToElement(new { sessionId = session.Id, prompt, deepResearch = true })),
             (type, data, _) =>
             {
@@ -75,21 +75,16 @@ public sealed class DeepResearchClientIntegrationTests
             }, deadline.Token);
         Assert.Empty(introductions);
         Assert.Equal(session.Title, (await chats.GetSessionAsync(session.Id))!.Title);
-        Assert.Single(requests);
+        var recorded = await chats.ListMessagesAsync(session.Id);
+        Assert.True(requests.Count == 1, string.Join(" | ", recorded.Select(message => message.Error ?? message.Content)));
         var scienceRequest = requests[0].Messages[^1].Content[0].Text!;
         Assert.Contains(prompt, scienceRequest);
-        Assert.Contains("research.update", scienceRequest);
-        Assert.Contains("vollständige fachliche Umformungen und Zwischenwerte bis zum Ergebnis", scienceRequest);
-        Assert.Contains("Führe Einheiten bei numerischen Schritten mit", scienceRequest);
-        Assert.Contains("Dimensionen symbolischer Beziehungen", scienceRequest);
-        Assert.Contains("Definiere Symbole und Einheiten in kurzen Listen, nicht als Tabelle", scienceRequest);
-        Assert.DoesNotContain("Markdown-Tabelle ist dafür geeignet", scienceRequest);
-        Assert.Contains("natürliche Einheiten", scienceRequest);
-        Assert.Contains("Rückumrechnungen", scienceRequest);
-        Assert.Contains("Fehlende Schritte werden offen benannt, nicht erfunden", scienceRequest);
-        Assert.Contains(@"$\mathrm{m/s}$", scienceRequest);
-        Assert.DoesNotContain("<!-- MISSUM_PUBLICATION_BEGIN -->", scienceRequest);
-        Assert.Contains("Missum übernimmt Speicherung, Layout, Formelsatz und PDF-Erstellung", scienceRequest);
+        Assert.Equal(RunMode.Coding, requests[0].Mode);
+        Assert.False(requests[0].DeepResearch);
+        Assert.Null(requests[0].ResearchOptions);
+        Assert.DoesNotContain("research.update", scienceRequest);
+        Assert.DoesNotContain("quantitativeValidation", scienceRequest);
+        Assert.DoesNotContain("MISSUM_SCIENCE", scienceRequest);
         var messages = await chats.ListMessagesAsync(session.Id);
         Assert.DoesNotContain(messages[^1].ToolSteps ?? [], step => step.Tool == "assistant.narration");
     }
@@ -149,7 +144,7 @@ public sealed class DeepResearchClientIntegrationTests
             if (selection.HasValue) payload["deepResearch"] = selection.Value;
             if (selection == true) payload["deepResearchProfile"] = "mathematicalInvestigation";
             var before = requests.Count;
-            await coordinator.HandleAsync(new WebBridgeEnvelope(AssistantWebBridge.ProtocolVersion,
+            await coordinator.HandleAsync(new WebBridgeEnvelope(AssistantProtocol.ProtocolVersion,
                     "chat.send", Guid.NewGuid().ToString("D"), JsonSerializer.SerializeToElement(payload)),
                 static (_, _, _) => Task.CompletedTask, deadline.Token);
 

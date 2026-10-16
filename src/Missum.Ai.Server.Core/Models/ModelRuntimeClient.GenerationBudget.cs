@@ -51,7 +51,6 @@ public sealed partial class ModelRuntimeClient
 
     internal static int ResolveMaximumOutputTokens(int contextLength, int inputTokens, int? requestedMaximum)
     {
-        contextLength = ModelContextProfiles.Limit(contextLength);
         ArgumentOutOfRangeException.ThrowIfLessThan(contextLength, 2);
         ArgumentOutOfRangeException.ThrowIfNegative(inputTokens);
         if (requestedMaximum is { } explicitMaximum) ArgumentOutOfRangeException.ThrowIfLessThan(explicitMaximum, 1);
@@ -59,7 +58,12 @@ public sealed partial class ModelRuntimeClient
         // Reasoning and the visible answer share this single output allowance.
         var available = (long)contextLength - inputTokens - 1;
         if (available < 1)
-            throw new InvalidOperationException($"Der exakt tokenisierte Prompt benötigt {inputTokens:N0} Token; im geladenen Kontext von {contextLength:N0} Token bleibt kein Platz für eine Antwort.");
+            // The planner's estimate can differ from the actual chat template,
+            // tool schema and tokenizer. Let the run deliberately compact and
+            // retry this prompt; this is neither a programming error nor a
+            // transient transport failure. No prompt evaluation or generation
+            // has taken place at this point; preserve the prepared cache slot.
+            throw new NativeContextBudgetException(inputTokens, contextLength);
         return (int)Math.Min(available, requestedMaximum ?? int.MaxValue);
     }
 
@@ -68,7 +72,7 @@ public sealed partial class ModelRuntimeClient
         if (properties.TryGetProperty("default_generation_settings", out var settings)
             && settings.TryGetProperty("n_ctx", out var context)
             && context.TryGetInt32(out var length) && length >= 2_048)
-            return ModelContextProfiles.Limit(length);
+            return length;
         throw new JsonException("Der native Modellprozess meldet keinen gültigen geladenen Kontext (props.n_ctx).");
     }
 
@@ -83,14 +87,14 @@ public sealed partial class ModelRuntimeClient
                 if (value?.StartsWith(tagPrefix, StringComparison.Ordinal) == true
                     && int.TryParse(value.AsSpan(tagPrefix.Length), NumberStyles.None, CultureInfo.InvariantCulture, out var maximum)
                     && maximum >= 2_048)
-                    return ModelContextProfiles.Limit(maximum);
+                    return maximum;
             }
         }
         if (item.TryGetProperty("meta", out var meta) && meta.ValueKind == JsonValueKind.Object
             && meta.TryGetProperty("n_ctx_train", out var context) && context.TryGetInt32(out var trainingMaximum)
             && trainingMaximum >= 2_048)
-            return ModelContextProfiles.Limit(trainingMaximum);
+            return trainingMaximum;
         var familyMaximum = ModelContextProfiles.ResolveMaximum(modelId, null);
-        return ModelContextProfiles.Limit(familyMaximum == ModelContextProfiles.NativeRuntimeDefault ? fallback : familyMaximum);
+        return familyMaximum == ModelContextProfiles.NativeRuntimeDefault ? fallback : familyMaximum;
     }
 }

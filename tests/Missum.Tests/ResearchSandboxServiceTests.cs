@@ -1,4 +1,4 @@
-using Missum.App.Services;
+﻿using Missum.App.Services;
 using Missum.Core.Contracts;
 using Missum.Core.Models;
 
@@ -18,7 +18,7 @@ public sealed class ResearchSandboxServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task ScienceUsesSelectedWorkspaceAndMigratesExistingFilesWithRestorableArchive()
+    public async Task SelectedProjectUsesItsRootAndNeverArchivesTheUserWorkspace()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var chats = environment.Get<IChatRepository>();
@@ -28,18 +28,14 @@ public sealed class ResearchSandboxServiceTests : IDisposable
         var project = "research-" + session.Id.ToString("N");
         var profile = new AssistantRuntimeProfile("test", "AI Assistent", _root,
             new Uri("http://127.0.0.1:8080"), 8081, 8082, Path.Combine(_root, "native"), Path.Combine(_root, "llama.exe"), Path.Combine(_root, "stack"), "test");
-        await _service.WriteTextAsync(project, "existing.py", "print('preserved')");
-        using var relocated = new ResearchSandboxService(profile, chats);
-        var layout = await relocated.EnsureProjectAsync(project);
-        Assert.Equal(Path.Combine(workspace, "Science", project), layout.RootPath);
-        Assert.Equal("print('preserved')", await File.ReadAllTextAsync(Path.Combine(layout.WorkPath, "existing.py")));
-        var change = await relocated.WriteTextAsync(project, "new.py", "print('workspace')");
-        Assert.True(change.IsNewFile);
-        Assert.False(File.Exists(Path.Combine(_root, "ResearchSandbox", project, "work", "new.py")));
-        var archive = await relocated.ArchiveProjectAsync(project);
-        Assert.StartsWith(Path.Combine(workspace, "Science", "Trash"), archive, StringComparison.OrdinalIgnoreCase);
-        await relocated.RestoreProjectAsync(project);
-        Assert.True(File.Exists(Path.Combine(layout.WorkPath, "new.py")));
+        using var service = new ResearchSandboxService(profile, chats);
+        var layout = await service.EnsureProjectAsync(project);
+        Assert.Equal(workspace, layout.RootPath);
+        await service.WriteTextAsync(project, "new.py", "print('workspace')");
+        Assert.True(File.Exists(Path.Combine(workspace, "work", "new.py")));
+        Assert.False(Directory.Exists(Path.Combine(workspace, "Science")));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.ArchiveProjectAsync(project));
+        Assert.True(Directory.Exists(workspace));
     }
 
     [Fact]

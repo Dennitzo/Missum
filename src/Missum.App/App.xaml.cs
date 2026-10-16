@@ -1,4 +1,4 @@
-using Missum.App.Services;
+﻿using Missum.App.Services;
 using Missum.App.Services.Extensions;
 using Missum.App.ViewModels;
 using Missum.Ai.Contracts;
@@ -107,7 +107,6 @@ public partial class App : Application
                 services.AddSingleton<AssistantSettingsService>();
                 services.AddSingleton<AssistantClientStateStore>();
                 services.AddSingleton<AssistantHost>();
-                services.AddSingleton<BrowserSpeechService>();
                 services.AddSingleton<NativeChatPdfExportService>();
                 services.AddSingleton<Missum.Core.Research.IResearchSandboxService, ResearchSandboxService>();
                 services.AddSingleton<AssistantSessionActivationService>();
@@ -146,8 +145,8 @@ public partial class App : Application
                         provider.GetRequiredService<IExtensionRuntimeService>(),
                         provider.GetRequiredService<IProjectMemoryStore>(),
                         provider.GetRequiredService<IAssistantRunScheduler>(),
-                        provider.GetRequiredService<Missum.Core.Research.IScientificResearchRepository>(),
-                        provider.GetRequiredService<Missum.Core.Research.IScientificResearchExportService>());
+                        publicationService: provider.GetRequiredService<ScientificPublicationService>(),
+                        presentation: provider.GetRequiredService<ScientificPresentationCoordinator>());
                 });
                 services.AddSingleton<LogsViewModel>();
                 services.AddSingleton<SettingsViewModel>();
@@ -157,7 +156,6 @@ public partial class App : Application
                 services.AddSingleton<DocumentPdfExporter>();
                 services.AddSingleton<ScientificPublicationService>();
                 services.AddSingleton<Missum.Core.Research.IScientificPublicationProvider>(provider => provider.GetRequiredService<ScientificPublicationService>());
-                services.AddSingleton<ScientificSimulationService>();
                 services.AddSingleton<ScientificPresentationCoordinator>();
                 services.AddSingleton<LocalDocumentToolService>();
                 services.AddSingleton<LocalToolBroker>();
@@ -828,7 +826,7 @@ public partial class App : Application
     private void CacheResolvedAppearance(bool systemAppearanceChanged = false)
     {
         // Called only alongside native palette application on the UI thread.
-        // LAN requests receive this immutable cache and never touch WinUI objects.
+        // Background requests receive this immutable cache and never touch WinUI objects.
         var highContrast = IsHighContrastEnabled();
         var saved = GetService<SettingsCoordinator>().Current;
         if (!MatchesSavedAppearance(saved, _appliedTheme, AccentColor, BackgroundColor))
@@ -934,10 +932,10 @@ public partial class App : Application
     private void PublishResolvedAppearance(AssistantResolvedAppearance snapshot)
     {
         Volatile.Write(ref _resolvedAppearance, snapshot);
-        if (Volatile.Read(ref _activationReady) != 0) _ = RefreshBrowserAppearanceAsync();
+        if (Volatile.Read(ref _activationReady) != 0) _ = RefreshNativeAppearanceAsync();
     }
 
-    private async Task RefreshBrowserAppearanceAsync()
+    private async Task RefreshNativeAppearanceAsync()
     {
         try { await GetService<AssistantHost>().RefreshAppearanceAsync(); }
         catch (Exception exception) when (exception is not OutOfMemoryException) { System.Diagnostics.Debug.WriteLine(exception); }

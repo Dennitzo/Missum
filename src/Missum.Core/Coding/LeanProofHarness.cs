@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 
 namespace Missum.Core.Coding;
 
@@ -196,7 +196,7 @@ public static class LeanProofHarness
             body = name_examples(validate(source))
             source_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()
             file_hash = hashlib.sha256(source_bytes).hexdigest()
-            RESULT.update(source=str(source_file.relative_to(ROOT)).replace("\\", "/"), sourceSha256=source_hash, sourceFileSha256=file_hash)
+            RESULT.update(source=str(source_file.relative_to(ROOT)).replace("\\", "/"), sourceSha256=source_hash, sourceFileSha256=file_hash, sourceText=source)
             audit = '''
         run_cmd do
           let env ← Lean.getEnv
@@ -278,6 +278,7 @@ public static class LeanProofHarness
         # The command bridge has a small response budget; do not let truncation erase
         # success/exit-code/audit fields or turn a compiler error into an unreadable blob.
         wire = dict(RESULT)
+        wire.pop("sourceText", None)  # UI loads the immutable proof from the receipt, not the model context.
         for field in ("stdout", "stderr"):
             value = wire.get(field, "")
             if len(value) > 1800:
@@ -293,7 +294,9 @@ public static class LeanProofHarness
             wire["proofs"] = wire["proofs"][:8]
             wire["proofsTruncated"] = True
         if "proofs" in wire:
-            wire["proofs"] = [{**proof, "declaration": proof["declaration"][:256], "statement": proof["statement"][:600]} for proof in wire["proofs"]]
+            wire["proofs"] = [{**proof, "declaration": proof["declaration"][:256], "statement": proof["statement"][:600],
+                               "declarationTruncated": len(proof["declaration"]) > 256,
+                               "statementTruncated": len(proof["statement"]) > 600} for proof in wire["proofs"]]
         if len(json.dumps(wire, ensure_ascii=True)) > 5000:
             wire.pop("stdout", None)
             wire.pop("stderr", None)

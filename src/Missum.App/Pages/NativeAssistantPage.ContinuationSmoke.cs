@@ -195,6 +195,39 @@ public sealed partial class NativeAssistantPage
                 || !_messages.ContainsKey(currentUser.ToString()))
                 throw new InvalidOperationException("Completion kept a stale continuation step or changed the user prompt history.");
 
+            // A concurrent refresh may have read the old streaming row before
+            // the final commit. Neither snapshot route may roll completion back.
+            var completed = _messages[key].Deserialize<Dictionary<string, JsonElement>>(JsonOptions)!;
+            completed["revision"] = JsonSerializer.SerializeToElement(30L);
+            _messages[key] = JsonSerializer.SerializeToElement(completed);
+            foreach (var eventType in new[] { "state.snapshot", "conversation.snapshot" })
+            {
+                ApplyEvent(eventType, JsonSerializer.SerializeToElement(acceptedSnapshot));
+                RenderMessagesNow();
+                if (S(_messages[key], "status") != "completed" || S(_messages[key], "content") != "Der Auftrag ist nun abgeschlossen."
+                    || ReadConversationRevision(_messages[key], "revision") != 30)
+                    throw new InvalidOperationException("An older streaming snapshot replaced the completed answer.");
+            }
+            var retry = new Dictionary<string, JsonElement>(completed)
+            {
+                ["status"] = JsonSerializer.SerializeToElement("streaming"),
+                ["content"] = JsonSerializer.SerializeToElement("Ein neuer Fortsetzungsversuch."),
+                ["updatedAt"] = JsonSerializer.SerializeToElement(now.AddSeconds(1)),
+                ["revision"] = JsonSerializer.SerializeToElement(31L),
+            };
+            ApplyEvent("conversation.messageCommitted", JsonSerializer.SerializeToElement(new { sessionId = session, message = retry }));
+            if (S(_messages[key], "status") != "streaming" || S(_messages[key], "content") != "Ein neuer Fortsetzungsversuch.")
+                throw new InvalidOperationException("A newer retry was blocked by the completed answer's snapshot guard.");
+            // The prior completion must not then overwrite the new attempt.
+            ApplyEvent("conversation.messageCommitted", JsonSerializer.SerializeToElement(new { sessionId = session, message = completed }));
+            if (S(_messages[key], "status") != "streaming" || ReadConversationRevision(_messages[key], "revision") != 31)
+                throw new InvalidOperationException("An older terminal event replaced a newer retry.");
+            completed["updatedAt"] = JsonSerializer.SerializeToElement(now.AddSeconds(2));
+            completed["revision"] = JsonSerializer.SerializeToElement(32L);
+            ApplyEvent("conversation.messageCommitted", JsonSerializer.SerializeToElement(new { sessionId = session, message = completed }));
+            _running = false;
+            RenderMessagesNow();
+
             var failed = JsonSerializer.SerializeToElement(new { role = "assistant", status = "failed", content = "**Fehler:** Verbindung fehlgeschlagen." });
             if (IsResumableAssistantStatus(failed))
                 throw new InvalidOperationException("An error placeholder incorrectly offers continuation.");

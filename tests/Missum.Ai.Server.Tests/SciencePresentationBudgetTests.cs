@@ -1,4 +1,4 @@
-using Missum.Ai.Contracts;
+﻿using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Coding;
 using Missum.Ai.Server.Core.Configuration;
 using Missum.Ai.Server.Core.Runs;
@@ -14,8 +14,7 @@ public sealed class SciencePresentationBudgetTests
         var request = Request(sandbox: true);
         var tools = new AgentToolCatalog().GetAvailableTools(request);
         var continuationTools = StagedWebResearchPipeline.RemoveFromMainAgentTools(tools);
-        Assert.Contains(continuationTools, tool => tool.Name == ClientToolNames.ResearchCodeWrite);
-        Assert.Contains(continuationTools, tool => tool.Name == ClientToolNames.ResearchCodeExecute);
+        Assert.DoesNotContain(continuationTools, tool => tool.Name.StartsWith("research.", StringComparison.Ordinal));
         Assert.Equal(0, RunProcessor.ResolveMaximumModelRounds(request, options, tools));
         Assert.Equal(0, RunProcessor.ResolveMaximumToolCalls(request, options, tools));
     }
@@ -59,7 +58,7 @@ public sealed class SciencePresentationBudgetTests
         var options = new MissumAiServerOptions();
         var tools = new AgentToolCatalog().GetAvailableTools(request);
 
-        Assert.Equal(32_768, RunProcessor.ResolveMaximumOutputTokensPerTurn(request));
+        Assert.Null(RunProcessor.ResolveMaximumOutputTokensPerTurn(request));
         Assert.Equal(0, RunProcessor.ResolveMaximumModelRounds(request, options, tools));
         Assert.Equal(0, RunProcessor.ResolveMaximumToolCalls(request, options, tools));
         Assert.Equal(1_048_576, request.Limits.MaximumContextTokens);

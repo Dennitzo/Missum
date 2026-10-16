@@ -114,6 +114,15 @@ Changing the environment takes effect on the next model load and changes the
 cache fingerprint; it cannot relabel an active model's KV snapshot. Placement
 events include these resolved settings without conversation text.
 
+There is no application-wide context ceiling. New loads use the individual
+GGUF training maximum, subject to actual native fitting or an explicit measured
+load policy. The gateway displays and budgets with the resident process's
+reported `n_ctx`; Science compaction uses that same window. A resident model
+keeps its already resolved context and cache identity until it is unloaded,
+so a catalog refresh or UI history paging cannot expand or invalidate its KV
+slot. Session snapshots from different physical context configurations remain
+separate and are never restored under an incompatible fingerprint.
+
 Experimental `tensor` mode requires
 `MISSUM_NATIVE_MULTI_GPU_CONTEXT_LIMIT`, an explicit integer token maximum from
 4096 to 2147483647 chosen after measuring available VRAM and output correctness.
@@ -295,6 +304,18 @@ and GPU-configuration fingerprints.
 For a subagent fork, only the physical placement may differ; every model,
 binary, template and KV geometry component must match. The atomic child copy
 has its own filename and subsequent child snapshots cannot replace the parent.
+
+Canonical subagent preparation streams native prompt progress. It may run for
+up to two hours while tokens advance; five minutes without token progress ends
+the attempt. Closing the caller connection also closes the native inference
+stream. Failed preparation drains the slot, restores the durable parent snapshot,
+and removes an incomplete child snapshot before another turn can use either
+cache. If recovery fails, the slot loses its save ownership until the next
+successful prepare. `sourceCachedTokens` and `sourceEvaluatedTokens` distinguish
+actual reuse from a correct but cold replay (`preparationMode: replayed`).
+The gateway returns preparation failures as tool results to the parent agent;
+user cancellation still cancels the run. Parent and child retain the same tool
+schema, including the shared Lean project identity.
 
 Stop and follow-up prompts: the DeepSeek chat template is rewritten so historical
 assistant turns replay by their stored `reasoning_content`, not by the current

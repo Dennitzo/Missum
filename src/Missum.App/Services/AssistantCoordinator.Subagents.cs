@@ -15,6 +15,7 @@ public sealed partial class AssistantCoordinator
     private object ToSubagentDto(SubagentChatState state) => new
     {
         state.AgentId, state.RunId, state.ParentRunId, state.SessionId, state.Title, state.Status,
+        state.TranscriptDeferred, state.ParentMessageId,
         planetIndex = _browserPlanetIdentities.Value.GetOrAssign(state.AgentId),
         messages = (state.PreviousMessages ?? []).Select(message => ToMessageDto(message,
             state.PreviousMessageArtifacts?.GetValueOrDefault(message.Id.ToString())))

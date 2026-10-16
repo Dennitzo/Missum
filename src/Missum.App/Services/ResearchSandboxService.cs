@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text.Json;
@@ -8,7 +8,7 @@ using Missum.Core.Research;
 namespace Missum.App.Services;
 
 /// <summary>
-/// Owns each Claude Science project's private data tree and executes Python only
+/// Uses the selected project tree directly and executes isolated mathematical processes only
 /// in a constrained Docker container. A missing or unbuildable runner is a hard
 /// failure; this service never falls back to host PowerShell or host Python.
 /// </summary>
@@ -25,9 +25,9 @@ public sealed partial class ResearchSandboxService(AssistantRuntimeProfile profi
     private string Root => Path.Combine(profile.DataDirectory, "ResearchSandbox");
     private string Trash => Path.Combine(Root, "Trash");
 
-    private async Task<string> ResolveStorageRootAsync(string projectId, CancellationToken cancellationToken)
+    private async Task<string> ResolveProjectRootAsync(string projectId, CancellationToken cancellationToken)
     {
-        var storageRoot = Root;
+        var projectRoot = Path.Combine(Root, projectId);
         if (chats is not null && projectId.StartsWith("research-", StringComparison.Ordinal)
             && Guid.TryParseExact(projectId[9..], "N", out var sessionId))
         {
@@ -37,49 +37,23 @@ public sealed partial class ResearchSandboxService(AssistantRuntimeProfile profi
             if (string.IsNullOrWhiteSpace(workspace) && session.SessionGroupId is { } groupId)
                 workspace = (await chats.ListSessionGroupsAsync(cancellationToken).ConfigureAwait(false)).FirstOrDefault(group => group.Id == groupId)?.WorkspacePath;
             if (string.IsNullOrWhiteSpace(workspace) || !Path.IsPathFullyQualified(workspace) || !Directory.Exists(workspace))
-                throw new InvalidOperationException("Wähle für Claude Science einen vorhandenen Projektordner in der Sidebar.");
-            storageRoot = Path.Combine(Path.GetFullPath(workspace), "Science");
+                throw new InvalidOperationException("Wähle einen vorhandenen Projektordner in der Sidebar.");
+            projectRoot = Path.GetFullPath(workspace);
         }
-        return storageRoot;
+        return projectRoot;
     }
 
     public async Task<ResearchSandboxLayout> EnsureProjectAsync(string projectId, CancellationToken cancellationToken = default)
     {
         ValidateProjectId(projectId);
-        var storageRoot = await ResolveStorageRootAsync(projectId, cancellationToken).ConfigureAwait(false);
-        var root = Path.GetFullPath(Path.Combine(storageRoot, projectId));
+        var root = Path.GetFullPath(await ResolveProjectRootAsync(projectId, cancellationToken).ConfigureAwait(false));
+        var storageRoot = Path.GetDirectoryName(root) ?? throw new InvalidOperationException("Ein Projekt benötigt einen eigenen Ordner.");
         EnsureBelowRoot(root, Path.GetFullPath(storageRoot));
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             Directory.CreateDirectory(storageRoot);
             RejectReparsePoint(Path.GetFullPath(storageRoot));
-            var legacy = Path.GetFullPath(Path.Combine(Root, projectId));
-            if (!Directory.Exists(root) && Directory.Exists(legacy) && !string.Equals(root, legacy, StringComparison.OrdinalIgnoreCase))
-            {
-                // Copy once; preserve the original research archive until the new
-                // workspace has been used successfully. Never follow junctions.
-                RejectReparsePoint(legacy);
-                var staging = Path.Combine(storageRoot, ".migration-" + Guid.NewGuid().ToString("N"));
-                EnsureBelowRoot(staging, Path.GetFullPath(storageRoot));
-                Directory.CreateDirectory(staging);
-                try
-                {
-                    var pending = new Queue<string>(); pending.Enqueue(legacy);
-                    while (pending.TryDequeue(out var sourceDirectory))
-                    {
-                        cancellationToken.ThrowIfCancellationRequested();
-                        RejectReparsePoint(sourceDirectory);
-                        var destination = Path.Combine(staging, Path.GetRelativePath(legacy, sourceDirectory));
-                        Directory.CreateDirectory(destination);
-                        foreach (var file in Directory.EnumerateFiles(sourceDirectory))
-                        { RejectReparsePoint(file); File.Copy(file, Path.Combine(destination, Path.GetFileName(file)), overwrite: false); }
-                        foreach (var child in Directory.EnumerateDirectories(sourceDirectory)) { RejectReparsePoint(child); pending.Enqueue(child); }
-                    }
-                    Directory.Move(staging, root);
-                }
-                finally { if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true); }
-            }
             Directory.CreateDirectory(root);
             RejectReparsePoint(root);
             foreach (var name in new[] { "inputs", "work", "artifacts", "notebooks", "manuscripts", "env", "runs", "snapshots" })
@@ -360,7 +334,8 @@ public sealed partial class ResearchSandboxService(AssistantRuntimeProfile profi
     public async Task<string> ArchiveProjectAsync(string projectId, CancellationToken cancellationToken = default)
     {
         ValidateProjectId(projectId);
-        var storage = Path.GetFullPath(await ResolveStorageRootAsync(projectId, cancellationToken).ConfigureAwait(false));
+        if (chats is not null) throw new InvalidOperationException("Der ausgewählte Projektordner bleibt erhalten und wird nicht als Forschungsarchiv verschoben.");
+        var storage = Path.GetDirectoryName(Path.GetFullPath(await ResolveProjectRootAsync(projectId, cancellationToken).ConfigureAwait(false)))!;
         using var projectMutation = await AcquireProjectExecutionAsync(Path.Combine(storage, projectId), cancellationToken).ConfigureAwait(false);
         var trash = Path.Combine(storage, "Trash");
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -383,7 +358,8 @@ public sealed partial class ResearchSandboxService(AssistantRuntimeProfile profi
     public async Task RestoreProjectAsync(string projectId, CancellationToken cancellationToken = default)
     {
         ValidateProjectId(projectId);
-        var storage = Path.GetFullPath(await ResolveStorageRootAsync(projectId, cancellationToken).ConfigureAwait(false));
+        if (chats is not null) throw new InvalidOperationException("Direkt bearbeitete Projektordner verwenden keine Forschungsarchiv-Wiederherstellung.");
+        var storage = Path.GetDirectoryName(Path.GetFullPath(await ResolveProjectRootAsync(projectId, cancellationToken).ConfigureAwait(false)))!;
         using var projectMutation = await AcquireProjectExecutionAsync(Path.Combine(storage, projectId), cancellationToken).ConfigureAwait(false);
         var trash = Path.Combine(storage, "Trash");
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);

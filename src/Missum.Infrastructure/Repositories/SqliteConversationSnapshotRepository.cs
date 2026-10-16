@@ -10,7 +10,7 @@ namespace Missum.Infrastructure.Repositories;
 /// This prevents the WebView from observing a message revision together with stale
 /// artifacts while a write transaction is being committed.
 /// </summary>
-public sealed class SqliteConversationSnapshotRepository(SqliteDatabase database)
+public sealed partial class SqliteConversationSnapshotRepository(SqliteDatabase database)
     : IConversationSnapshotRepository
 {
     public async Task<ConversationSnapshot?> GetAsync(

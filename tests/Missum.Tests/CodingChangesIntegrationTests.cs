@@ -322,7 +322,7 @@ public sealed class CodingChangesIntegrationTests
             {
                 // AssistantPage forwards this type directly to PostAsync. Its host
                 // allowlist must admit the live event, not only the JS bridge.
-                Assert.True(AssistantWebBridge.IsOutgoingTypeAllowed(type), "The native WebView bridge rejected the live change summary.");
+                Assert.True(AssistantProtocol.IsOutgoingTypeAllowed(type), "The native WebView bridge rejected the live change summary.");
                 emitted.Add((type, JsonSerializer.SerializeToElement(payload, JsonSerializerOptions.Web)));
                 return Task.CompletedTask;
             }, "changes-test");
@@ -330,8 +330,8 @@ public sealed class CodingChangesIntegrationTests
         Assert.Equal("coding.changes", bridgeEvent.Type);
         Assert.Equal(summary.GetProperty("revision").GetInt64(), bridgeEvent.Payload.GetProperty("revision").GetInt64());
         Assert.Equal(session.Id, bridgeEvent.Payload.GetProperty("sessionId").GetGuid());
-        Assert.False(AssistantWebBridge.IsIncomingTypeAllowed("coding.changes"));
-        Assert.False(AssistantWebBridge.IsOutgoingTypeAllowed("coding.changes.untrusted"));
+        Assert.False(AssistantProtocol.IsIncomingTypeAllowed("coding.changes"));
+        Assert.False(AssistantProtocol.IsOutgoingTypeAllowed("coding.changes.untrusted"));
         await chats.AddTurnAsync(session.Id, "A later message without a Coding run");
         var nextSnapshot = JsonSerializer.SerializeToElement(await coordinator.BuildSnapshotAsync(), JsonSerializerOptions.Web);
         Assert.Equal(JsonValueKind.Null, nextSnapshot.GetProperty("changesSummary").ValueKind);
@@ -398,7 +398,7 @@ public sealed class CodingChangesIntegrationTests
             environment.Get<IContextAssembler>(), environment.Get<IPromptTriggerRepository>(), environment.Get<IAssistantAttachmentRepository>(),
             environment.Get<IChatArtifactRepository>(), environment.Get<IConversationSnapshotRepository>(), null, settings, activity);
 
-        await coordinator.HandleAsync(new(AssistantWebBridge.ProtocolVersion, bulkDelete ? "session.clear" : "session.delete",
+        await coordinator.HandleAsync(new(AssistantProtocol.ProtocolVersion, bulkDelete ? "session.clear" : "session.delete",
             "cache-lifecycle", JsonSerializer.SerializeToElement(new { sessionId = target.Id })), (_, _, _) => Task.CompletedTask);
 
         Assert.Null(await chats.GetSessionAsync(target.Id));

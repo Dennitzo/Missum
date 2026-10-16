@@ -1,30 +1,26 @@
 namespace Missum.Ai.Contracts;
 
 /// <summary>
-/// Usable context limits of the locally installed model families, capped by
-/// Missum's product policy. Native GGUF training metadata remains unchanged.
+/// Context limits of the locally installed model families. Native GGUF
+/// metadata and the actually loaded runtime window remain authoritative.
 /// Clients use the same values when budgeting a request before the gateway is
 /// contacted; smaller loaded windows reported by the gateway remain authoritative.
 /// </summary>
 public static class ModelContextProfiles
 {
-    // Product-wide usable context ceiling, independent of model family/catalog.
-    // Smaller model/runtime limits remain authoritative.
-    public const int ApplicationMaximum = 258_000;
-    public static int Limit(int tokens) => Math.Min(tokens, ApplicationMaximum);
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> CatalogMaximums = new(StringComparer.OrdinalIgnoreCase);
 
     public static void RegisterMaximum(string modelId, int contextTokens)
     {
         if (!string.IsNullOrWhiteSpace(modelId) && contextTokens >= 2048)
-            CatalogMaximums[modelId] = Limit(contextTokens);
+            CatalogMaximums[modelId] = contextTokens;
     }
 
-    public const int DeepSeekV4Maximum = ApplicationMaximum;
+    public const int DeepSeekV4Maximum = 1_048_576;
     public const int GptOss120BMaximum = 131_072;
-    public const int Qwen38Maximum = ApplicationMaximum;
-    public const int Qwen3CoderNextMaximum = ApplicationMaximum;
-    public const int Qwen3VlMaximum = ApplicationMaximum;
+    public const int Qwen38Maximum = 262_144;
+    public const int Qwen3CoderNextMaximum = 262_144;
+    public const int Qwen3VlMaximum = 262_144;
     public const int BgeM3Maximum = 8_192;
     // Conservative fallback for an unknown family. Loaded runtime capability data is authoritative.
     public const int NativeRuntimeDefault = 32_768;

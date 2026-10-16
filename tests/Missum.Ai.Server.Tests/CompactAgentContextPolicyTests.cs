@@ -1,4 +1,4 @@
-using Missum.Ai.Contracts;
+﻿using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Policies;
 using Missum.Ai.Server.Core.Runs;
 using System.Text.Json;
@@ -87,13 +87,11 @@ public sealed class CompactAgentContextPolicyTests
     {
         var policy = CompactAgentContextPolicy.Build(Request(RunMode.General), ScienceTools);
         Assert.Contains("subagentAvailable=true und du Hauptagent bist", policy, StringComparison.Ordinal);
-        Assert.Contains("Bei DeepResearch", policy, StringComparison.Ordinal);
-        Assert.Contains("nachdem der vollständige Originalauftrag gelesen wurde", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("Bei DeepResearch", policy, StringComparison.Ordinal);
         Assert.Contains("niemals die bloße Präsenz eines Werkzeugschemas", policy, StringComparison.Ordinal);
         Assert.Contains("starten keine weiteren Subagenten", policy, StringComparison.Ordinal);
         Assert.Contains("Ohne Admission selbst weiterarbeiten", policy, StringComparison.Ordinal);
         Assert.Contains("ohne erneute Ausführung", policy, StringComparison.Ordinal);
-        Assert.Contains("Child-Beiträge auf Modell, Konventionen", policy, StringComparison.Ordinal);
         Assert.DoesNotContain("keine manuelle Child-Nachprüfung", policy, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("Arbeitsteilung:", CompactAgentContextPolicy.Build(Request(RunMode.General), []), StringComparison.Ordinal);
     }
@@ -128,31 +126,6 @@ public sealed class CompactAgentContextPolicyTests
         Assert.DoesNotContain(".assistant/research/", policy, StringComparison.Ordinal);
         Assert.DoesNotContain("--require-virtualenv", policy, StringComparison.Ordinal);
         Assert.True(policy.Length < 10000 + AgentNarrationPolicy.Instructions.Length, $"Coding policy contains {policy.Length} characters.");
-    }
-
-    [Fact]
-    public void ScienceKeepsFullTaskPaginationOwnershipUnitsEvidenceAndMissumRendering()
-    {
-        var policy = CompactAgentContextPolicy.Build(Request(RunMode.General), ScienceTools);
-        foreach (var requirement in new[] { "task.complete=false", "vollständige ursprüngliche Auftrag nicht bereits",
-            "vollständigen Erstprompt nicht neu laden", "view='task'", "originalQuestion", "nextOffset/nextCursor",
-            "Pflichtanforderungen vollständig paginieren", "Grundlagen", "expectedRevision", "Agent-ID + ':'",
-            "keinen Titel oder section", "required=true", "refuted/blocked/", "experimentIds=experimentRecordId",
-            "checkIds=verificationRecordId", "kurzen Listen, nicht Tabellen", "units:[{symbol,meaning,unit}]",
-            "figureCaptions:[{experimentId,artifactPath,caption}]", "Pfad aus outputHashes", "keine allgemeine Python-/Bildpflicht",
-            "keine sorry/admit-Lücken", "networkIsolation=NotEnforced", "zwei geeigneten unabhängigen Wegen",
-            "research.deliverables.verify", "danach frisch verifizieren", "Missum erzeugt/repariert PDF technisch" })
-            Assert.Contains(requirement, policy, StringComparison.Ordinal);
-        Assert.Equal(2, policy.Split(MathFormattingPolicy.Instructions, StringSplitOptions.None).Length);
-        // Keep the previous shared-context budget; reserve bounded, single
-        // Science-only derivation and reviewed-publication contracts, without expanding common prompts.
-        Assert.True(ScientificDerivationPolicy.Instructions.Length < 3000);
-        Assert.True(ScientificStateAgentPolicy.PublicationWorkflowInstructions.Length < 3000);
-        Assert.Equal(2, policy.Split(ScientificStateAgentPolicy.PublicationWorkflowInstructions, StringSplitOptions.None).Length);
-        Assert.True(ScienceResearchStrategyPolicy.Instructions.Length < 2200);
-        Assert.True(policy.Length - ScientificDerivationPolicy.Instructions.Length - ScienceResearchStrategyPolicy.Instructions.Length
-            - ScientificStateAgentPolicy.PublicationWorkflowInstructions.Length < 13000 + AgentNarrationPolicy.Instructions.Length,
-            $"Science policy contains {policy.Length} characters.");
     }
 
     private static RunRequest Request(RunMode mode) => new(MissumAiProtocol.Version, mode,

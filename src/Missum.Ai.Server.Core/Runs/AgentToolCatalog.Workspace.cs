@@ -1,4 +1,4 @@
-using Missum.Ai.Contracts;
+﻿using Missum.Ai.Contracts;
 
 namespace Missum.Ai.Server.Core.Runs;
 
@@ -12,7 +12,6 @@ public sealed partial class AgentToolCatalog
             """)),
         Client(WorkspaceTools.Open,
             "Öffne eine im ausgewählten Workspace erstellte Anwendung: relative HTML/PDF-Datei oder eine kompilierte EXE. "
-                + "Claude-Science-Simulationen werden ausschließlich im Simulation-Tab registriert; dies zeigt sie nicht automatisch an und startet kein eigenes Fenster. "
                 + "Prüfe im Ergebnis opened/displayed. image.input windows/capture und media.analyze belegen nur den tatsächlich sichtbaren Fensterinhalt; "
                 + "ein Missum-Chat-Screenshot ist kein Beleg für eine Simulation. Vorhandene PNG-Plots kannst du mit image.input operation=file analysieren, "
                 + "ohne daraus ungeprüfte Eigenschaften einer HTML-Animation abzuleiten.",

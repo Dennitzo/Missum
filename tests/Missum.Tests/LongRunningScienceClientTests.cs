@@ -1,4 +1,4 @@
-using Missum.Ai.Contracts;
+﻿using Missum.Ai.Contracts;
 using Missum.App.Services;
 using Missum.App.ViewModels;
 using Missum.Core.Contracts;
@@ -53,12 +53,15 @@ public sealed class LongRunningScienceClientTests
             static () => new CatalogHandler());
         var broker = new LocalToolBroker(connection, documents, null!, chats);
         var recent = new RecentActivityService(settings, new ShellViewModel(), NullLogger<RecentActivityService>.Instance);
+        using var publications = new ScientificPublicationService(environment.Get<IScientificResearchRepository>(),
+            static (_, _) => throw new InvalidOperationException("Request preparation must not render a PDF."), environment.Directory);
         using var service = new MissumAiAssistantService(connection, chats,
             environment.Get<IAssistantAttachmentRepository>(), environment.Get<IChatArtifactRepository>(),
             environment.Get<IMissumAiRunRepository>(), environment.Get<IClientToolExecutionRepository>(),
             environment.Get<IBinaryObjectStore>(), documents, new DocumentContextPreparationService(documents),
             new SessionContextPreparationService(chats), broker, null!, null!, settings, recent,
-            NullLogger<MissumAiAssistantService>.Instance, scientificResearch: environment.Get<IScientificResearchRepository>());
+            NullLogger<MissumAiAssistantService>.Instance, scientificResearch: environment.Get<IScientificResearchRepository>(),
+            sciencePublications: publications);
         using var client = await connection.CreateClientAsync();
         PromptTriggerMatch? trigger = mode switch
         {
@@ -85,11 +88,19 @@ public sealed class LongRunningScienceClientTests
         Assert.Null(request.Limits.MaximumOutputTokens);
         Assert.Equal(ContextTokens, request.Limits.MaximumContextTokens);
         Assert.Equal(session.Id.ToString("D"), request.SessionId);
-        Assert.Equal(environment.Directory, mode == ChatMode.Coding ? request.CodingOptions?.WorkspacePath : request.WorkspacePath);
+        Assert.Equal(environment.Directory, mode is ChatMode.Coding or ChatMode.ClaudeScience ? request.CodingOptions?.WorkspacePath : request.WorkspacePath);
         if (mode == ChatMode.ClaudeScience)
         {
-            Assert.True(request.DeepResearch);
-            Assert.Equal($"research-{session.Id:N}", request.ResearchOptions?.ProjectId);
+            Assert.Equal(RunMode.Coding, request.Mode);
+            Assert.False(request.DeepResearch);
+            Assert.Null(request.ResearchOptions);
+            Assert.Equal(Model, request.PreferredCodingModelId);
+            Assert.DoesNotContain(request.ClientCapabilities!, capability => capability.StartsWith("research.", StringComparison.Ordinal));
+            Assert.DoesNotContain(request.Messages, message => message.Content.Any(part => part.Text?.Contains("research.update", StringComparison.Ordinal) == true));
+            Assert.Contains(request.Messages, message => message.Content.Any(part =>
+                part.Text?.Contains("Mathematikvorlesung", StringComparison.Ordinal) == true
+                && part.Text.Contains("statt Lean-Syntax", StringComparison.Ordinal)
+                && part.Text.Contains("geprüften Aussage und ihren Voraussetzungen", StringComparison.Ordinal)));
         }
         if (continuing)
             Assert.Contains(request.Messages, message => message.Content.Any(part => part.Text?.Contains(original, StringComparison.Ordinal) == true));

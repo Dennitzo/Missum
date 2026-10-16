@@ -1,11 +1,11 @@
-const assert = require("node:assert/strict");
+﻿const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
 
-// Only the DOM primitives are substituted. Both the production sanitizer and
-// the complete production Markdown renderer execute unchanged in the VM.
+// Only DOM primitives are substituted. The standalone PDF Markdown/KaTeX
+// renderer executes unchanged in the VM.
 class DomNode {
   constructor(tagName, text = "") {
     this.tagName = tagName;
@@ -30,11 +30,7 @@ class DomNode {
 }
 
 function pipeline(source, typeset = false) {
-  const webRoot = path.resolve(__dirname, "../../src/Missum.App/Assets/Web");
-  const app = fs.readFileSync(path.join(webRoot, "app.js"), "utf8");
-  const start = app.indexOf("  function sanitizeVisibleMessageContent(value) {");
-  const end = app.indexOf("\n  function ", start + 1);
-  assert.ok(start >= 0 && end > start, "the production sanitizer must be found");
+  const webRoot = path.resolve(__dirname, "../../src/Missum.App/Assets/DocumentRendering");
   const copied = [];
   const mathCalls = [];
   const katex = typeset ? require(path.join(webRoot, "vendor/katex/0.16.10/katex.min.js")) : null;
@@ -50,11 +46,10 @@ function pipeline(source, typeset = false) {
       mathCalls.push({ tex, display: options.displayMode });
       return katex.renderToString(tex, options);
     } } } : {}),
-    missumBridge: { post: (type, payload) => copied.push({ type, payload }) }
+    navigator: { clipboard: { writeText: text => { copied.push({ type: "message.copy", payload: { text } }); return Promise.resolve(); } } }
   });
-  vm.runInContext(app.slice(start, end), context);
   vm.runInContext(fs.readFileSync(path.join(webRoot, "markdown.js"), "utf8"), context);
-  const sanitized = context.sanitizeVisibleMessageContent(source);
+  const sanitized = source;
   return { sanitized, root: context.missumMarkdown.render(sanitized), copied, mathCalls };
 }
 
@@ -248,14 +243,6 @@ test("an invalid formula keeps its exact copy source and the real KaTeX parse di
   }
 });
 
-test("legacy title metadata is removed while surrounding Markdown remains intact", () => {
-  const source = "**MISSUM_SESSION_TITLE:** Verborgener Titel\n\n**Ergebnis:** `multiply`\n\n## **Missum\\_SESSION\\_TITLE:** Auch verborgen";
-  const { root, sanitized } = pipeline(source);
-  assert.equal(sanitized, "**Ergebnis:** `multiply`");
-  assert.equal(tags(root, "strong")[0].textContent, "Ergebnis:");
-  assert.equal(tags(root, "code")[0].textContent, "multiply");
-  assert.ok(!root.textContent.includes("verborgen"));
-});
 
 test("math inside inline code stays literal", () => {
   const { root } = pipeline(String.raw`Nutze \(a+b\), aber kopiere \`$x$\``.replace(/\\`/g, "`"));
@@ -346,4 +333,16 @@ test("legacy math presentation coexists with Markdown tables emphasis and safe s
   assert.equal(tags(root, "a")[0].href, "https://example.org/result/x%C2%B2");
   assert.deepEqual(classes(root, "math-source-text").map(node => node.textContent), ["7.94e22", "A·m²", "$\\ell_P$"]);
   assert.equal(classes(root, "invalid").length, 0);
+});
+
+
+test("local proof references display their readable label without exposing an active file URL", () => {
+  const { root } = pipeline("[Beweisdatei](work/lean/Proof.lean), [Prüfprotokoll](work/lean/receipt.json).\n\n[Quelle](https://example.org/proof) [Unsicher](file:///C:/test.lean)");
+  assert.equal(root.textContent.includes("[Beweisdatei]"), false);
+  assert.equal(root.textContent.includes("work/lean/"), false);
+  assert.equal(root.textContent.includes("Beweisdatei, Prüfprotokoll."), true);
+  assert.equal(root.textContent.includes("Unsicher"), true);
+  const links = tags(root, "a");
+  assert.equal(links.length, 1);
+  assert.equal(links[0].href, "https://example.org/proof");
 });

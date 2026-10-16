@@ -333,11 +333,11 @@ public sealed class AssistantSettingsServiceTests
         await service.HandleAsync(Envelope("backup.create", new { }), Capture(events));
         var ready = Assert.Single(events);
         Assert.Equal("backup.ready", ready.Type);
-        Assert.False(ready.Payload.TryGetProperty("path", out _));
+        Assert.True(ready.Payload.TryGetProperty("path", out _));
         var id = ready.Payload.GetProperty("id").GetGuid();
         Assert.True(service.TryGetResource(id, out var resource));
         Assert.True(File.Exists(resource!.Path));
-        Assert.Equal("/assistant/settings-resources/" + id.ToString("D"), ready.Payload.GetProperty("url").GetString());
+        Assert.Equal(resource.Path, ready.Payload.GetProperty("path").GetString());
         Assert.False(service.TryGetResource(Guid.NewGuid(), out _));
     }
 

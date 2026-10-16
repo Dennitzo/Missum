@@ -1,4 +1,4 @@
-using Missum.Ai.Client;
+﻿using Missum.Ai.Client;
 using Missum.Ai.Contracts;
 using Missum.App.Services;
 using Missum.Core.Extensions;
@@ -48,8 +48,9 @@ internal static class PortableToolAcceptance
         {
             [BuiltInActionIds.AttachFilesAndFolders] = "native-tool-contracts",
             [BuiltInActionIds.PlanMode] = "translation-and-plan-mode",
+            [BuiltInActionIds.Lean] = "native-lean-tool-contracts",
             [BuiltInActionIds.WebSearch] = "gateway-server-media-speech",
-            [BuiltInActionIds.DeepResearch] = "claude-science-deep-research",
+            [BuiltInActionIds.DeepResearch] = "explicit-deep-research",
             [BuiltInActionIds.ImageAnalysis] = "gateway-server-media-speech+workspace-image-input",
             [BuiltInActionIds.AudioAnalysis] = "gateway-server-media-speech",
             [BuiltInActionIds.VideoAnalysis] = "gateway-server-media-speech",

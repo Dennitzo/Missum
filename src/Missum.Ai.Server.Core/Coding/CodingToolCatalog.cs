@@ -1,4 +1,4 @@
-using Missum.Ai.Contracts;
+﻿using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Runs;
 using System.Text.Json;
 
@@ -44,16 +44,6 @@ public static class CodingToolCatalog
             """{"projectId":{"type":"string","pattern":"^[A-Za-z0-9._-]{1,128}$"},"source":{"type":"string","minLength":1,"maxLength":64000},"timeoutSeconds":{"type":"integer","minimum":1,"maximum":3600,"default":120}}""", ["projectId","source"]),
         Create(ClientToolNames.MathFormalProof, "Lean 4 mit Mathlib: initialisiere die projektlokale Umgebung (operation=initialize) oder prüfe einen vollständigen Beweis (operation=check, Standard). Gib source oder den relativen path einer bestehenden .lean-Datei an. Annahmen als Theoremparameter ausdrücken. Compilerdiagnosen gezielt beheben; nur KernelAccepted mit geprüften Axiomen belegt die formalisierte Aussage, keine physikalischen Annahmen oder Messdaten.", ToolRiskClass.Process,
             """{"projectId":{"type":"string","pattern":"^[A-Za-z0-9._-]{1,128}$"},"operation":{"type":"string","enum":["initialize","check"],"default":"check"},"source":{"type":"string","minLength":1,"maxLength":64000},"path":{"type":"string","minLength":1,"maxLength":1024},"useMathlib":{"type":"boolean","default":true},"timeoutSeconds":{"type":"integer","minimum":1,"maximum":7200,"default":300}}""", ["projectId"]),
-        Create(ClientToolNames.ResearchCodeWrite, "Schreibe eine Forschungsdatei unter .assistant/research/<projectId> und erstelle davor ein hashbasiertes Change-Set.", ToolRiskClass.LocalMutation,
-            """{"projectId":{"type":"string","pattern":"^[A-Za-z0-9._-]{1,128}$"},"path":{"type":"string","minLength":1,"maxLength":1024},"content":{"type":"string","maxLength":64000},"expectedSha256":{"type":"string","pattern":"^[a-fA-F0-9]{64}$"}}""", ["projectId","path","content"]),
-        Create(ClientToolNames.ResearchCodeExecute, "Führe ein Programm für ein reproduzierbares Forschungsexperiment aus. Programm und Argumente sind getrennt; Prozessbaum, Zeitlimit, Hashes und Ausgaben werden protokolliert.", ToolRiskClass.Process,
-            """{"projectId":{"type":"string","pattern":"^[A-Za-z0-9._-]{1,128}$"},"experimentId":{"type":"string","pattern":"^[A-Za-z0-9._-]{1,128}$"},"executable":{"type":"string","minLength":1,"maxLength":1024},"arguments":{"type":"array","items":{"type":"string","maxLength":4000},"maxItems":64},"workingDirectory":{"type":"string","maxLength":1024},"randomSeed":{"type":"integer"},"timeoutSeconds":{"type":"integer","minimum":1,"maximum":2147483647,"default":600}}""", ["projectId","experimentId","executable","arguments"]),
-        Create(ClientToolNames.ResearchCodeTest, "Führe einen reproduzierbaren Testbefehl aus und speichere Status und Originalausgabe im Experimentmanifest.", ToolRiskClass.Process,
-            """{"projectId":{"type":"string","pattern":"^[A-Za-z0-9._-]{1,128}$"},"experimentId":{"type":"string","pattern":"^[A-Za-z0-9._-]{1,128}$"},"executable":{"type":"string","minLength":1,"maxLength":1024},"arguments":{"type":"array","items":{"type":"string","maxLength":4000},"maxItems":64},"workingDirectory":{"type":"string","maxLength":1024},"timeoutSeconds":{"type":"integer","minimum":1,"maximum":2147483647,"default":600}}""", ["projectId","experimentId","executable","arguments"]),
-        Create(ClientToolNames.ResearchCodeBenchmark, "Führe denselben Forschungsbefehl mehrfach aus und protokolliere Laufzeiten sowie alle Einzelergebnisse reproduzierbar.", ToolRiskClass.Process,
-            """{"projectId":{"type":"string","pattern":"^[A-Za-z0-9._-]{1,128}$"},"experimentId":{"type":"string","pattern":"^[A-Za-z0-9._-]{1,128}$"},"executable":{"type":"string","minLength":1,"maxLength":1024},"arguments":{"type":"array","items":{"type":"string","maxLength":4000},"maxItems":64},"workingDirectory":{"type":"string","maxLength":1024},"repetitions":{"type":"integer","minimum":2,"maximum":20,"default":3},"timeoutSeconds":{"type":"integer","minimum":1,"maximum":2147483647,"default":600}}""", ["projectId","experimentId","executable","arguments"]),
-        Create(ClientToolNames.ResearchCodeRestore, "Stelle ein Forschungs-Change-Set nur dann wieder her, wenn seit der AI-Änderung keine externe Dateiänderung vorliegt; sonst entsteht ein Recovery-Bundle.", ToolRiskClass.LocalMutation,
-            """{"projectId":{"type":"string","pattern":"^[A-Za-z0-9._-]{1,128}$"},"changeSetId":{"type":"string","pattern":"^[A-Za-z0-9._-]{1,128}$"}}""", ["projectId","changeSetId"]),
     ];
 
     public static void Validate(string name, JsonElement arguments)

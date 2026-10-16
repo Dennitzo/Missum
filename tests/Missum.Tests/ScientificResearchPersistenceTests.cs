@@ -1,4 +1,4 @@
-using Missum.Core.Contracts;
+﻿using Missum.Core.Contracts;
 using Missum.Core.Research;
 using Missum.Core.Models;
 using Missum.App.Services;
@@ -137,53 +137,41 @@ public sealed class ScientificResearchPersistenceTests
     }
 
     [Fact]
-    public async Task ResearchBridgeListsOnlySessionProjectsAndLoadsTheirPersistedGraph()
+    public async Task PublicationBridgeListsTheSessionFileAndRejectsAnotherSessionsProject()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var chats = environment.Get<IChatRepository>();
-        var session = await chats.CreateSessionAsync("Forschung", ChatMode.Coding);
-        var other = await chats.CreateSessionAsync("Andere Forschung", ChatMode.Coding);
-        var repository = environment.Get<IScientificResearchRepository>();
-        var now = DateTimeOffset.UtcNow;
-        var project = new ScientificResearchProject("research-visible", session.Id, "openProblem", "Originalfrage",
-            "Interpretierte Frage", "codingWorkspaceResearch", "multiPath", "active", 1, 2, now, now);
-        var foreign = project with { Id = "research-foreign", SessionId = other.Id };
-        await repository.UpsertProjectAsync(project);
-        await repository.UpsertProjectAsync(foreign);
-        await repository.SaveGraphAsync(project.Id,
-            [new("question-1", project.Id, "question", "Ausgangsfrage", "active", 100, .75, "{}", "{}", 1, now, now)], []);
-        await repository.SaveResultSnapshotAsync(project.Id, new(
-            [new("hypothesis-visible", project.Id, "Kandidat", "newCandidateSolution", "provisionallySupported", .35, "{}", now)],
-            [], [new("verification-visible", project.Id, "project", project.Id, "literature", "Zweite Quelle", "planned", "{}", now)],
-            [new("claim-visible", project.Id, "Fundstelle belegt", "sourceReported", "stronglySupported", .8, "{}", now)]));
-        await repository.SaveCheckpointAsync(new("checkpoint-visible", project.Id, "run-visible", 2, "verification", "{\"checked\":true}", now));
-        await environment.Get<ISettingsStore>().SaveAsync(new AppSettings { ActiveSessionId = session.Id });
+        var session = await chats.CreateSessionAsync("Forschung", ChatMode.ClaudeScience);
+        var other = await chats.CreateSessionAsync("Andere Forschung", ChatMode.ClaudeScience);
+        var workspace = Directory.CreateDirectory(Path.Combine(environment.Directory, "workspace")).FullName;
+        await chats.SetCodingWorkspacePathAsync(session.Id, workspace);
+        await File.WriteAllTextAsync(Path.Combine(workspace, "Publikation.md"), "# Aktueller Stand\n\nDirekt bearbeiteter Inhalt.");
+        using var publications = new ScientificPublicationService(environment.Get<IScientificResearchRepository>(),
+            static (_, _) => Task.FromResult<string?>(null), workspace);
         using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
         await settings.InitializeAsync();
         var recent = new RecentActivityService(settings, new ShellViewModel(), NullLogger<RecentActivityService>.Instance);
         var coordinator = new AssistantCoordinator(chats, environment.Get<IDocumentIngestor>(),
             environment.Get<IContextAssembler>(), environment.Get<IPromptTriggerRepository>(),
             environment.Get<IAssistantAttachmentRepository>(), environment.Get<IChatArtifactRepository>(),
-            environment.Get<IConversationSnapshotRepository>(), null, settings, recent, scientificResearch: repository);
+            environment.Get<IConversationSnapshotRepository>(), null, settings, recent, publicationService: publications);
         var events = new List<(string Type, JsonElement Payload)>();
         Task Emit(string type, object payload, string? _) { events.Add((type, JsonSerializer.SerializeToElement(payload, WebJson))); return Task.CompletedTask; }
-
-        await coordinator.HandleAsync(new(AssistantWebBridge.ProtocolVersion, "research.list", "request-list",
+        var projectId = "research-" + session.Id.ToString("N");
+        await coordinator.HandleAsync(new(AssistantProtocol.ProtocolVersion, "publication.list", "request-list",
             JsonSerializer.SerializeToElement(new { sessionId = session.Id })), Emit);
-        var listed = Assert.Single(events).Payload;
-        Assert.Equal("research-visible", Assert.Single(listed.GetProperty("projects").EnumerateArray()).GetProperty("id").GetString());
-
+        var listed = Assert.Single(events);
+        Assert.Equal("publication.snapshot", listed.Type);
+        Assert.Equal(projectId, Assert.Single(listed.Payload.GetProperty("projects").EnumerateArray()).GetProperty("id").GetString());
         events.Clear();
-        await coordinator.HandleAsync(new(AssistantWebBridge.ProtocolVersion, "research.open", "request-open",
-            JsonSerializer.SerializeToElement(new { sessionId = session.Id, projectId = project.Id })), Emit);
+        await coordinator.HandleAsync(new(AssistantProtocol.ProtocolVersion, "publication.open", "request-open",
+            JsonSerializer.SerializeToElement(new { sessionId = session.Id, projectId })), Emit);
         var detail = Assert.Single(events).Payload.GetProperty("detail");
-        Assert.Equal("question-1", Assert.Single(detail.GetProperty("nodes").EnumerateArray()).GetProperty("id").GetString());
-        Assert.Equal("verification", detail.GetProperty("checkpoint").GetProperty("stage").GetString());
-        Assert.Equal("Kandidat", Assert.Single(detail.GetProperty("hypotheses").EnumerateArray()).GetProperty("statement").GetString());
-        Assert.Equal("Zweite Quelle", Assert.Single(detail.GetProperty("verifications").EnumerateArray()).GetProperty("method").GetString());
-        Assert.Equal("Fundstelle belegt", Assert.Single(detail.GetProperty("claims").EnumerateArray()).GetProperty("statement").GetString());
+        Assert.Equal(workspace, detail.GetProperty("project").GetProperty("workspacePath").GetString());
+        Assert.False(detail.TryGetProperty("nodes", out _));
+        Assert.False(detail.TryGetProperty("hypotheses", out _));
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => coordinator.HandleAsync(
-            new(AssistantWebBridge.ProtocolVersion, "research.open", "request-foreign",
-                JsonSerializer.SerializeToElement(new { sessionId = session.Id, projectId = foreign.Id })), Emit));
+            new(AssistantProtocol.ProtocolVersion, "publication.open", "request-foreign",
+                JsonSerializer.SerializeToElement(new { sessionId = session.Id, projectId = "research-" + other.Id.ToString("N") })), Emit));
     }
 }

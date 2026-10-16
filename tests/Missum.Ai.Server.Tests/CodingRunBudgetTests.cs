@@ -1,4 +1,4 @@
-using Missum.Ai.Contracts;
+﻿using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Coding;
 using Missum.Ai.Server.Core.Configuration;
 using Missum.Ai.Server.Core.Data;
@@ -153,7 +153,7 @@ public sealed class CodingRunBudgetTests
     public async Task SevenDayOldScienceRunStillHonorsCallerCancellation(int? legacyTimeoutSeconds)
     {
         using var harness = new Harness(readCalls: 1);
-        var runId = await harness.CreateRunAsync(legacyTimeoutSeconds, RunMode.General, science: true);
+        var runId = await harness.CreateRunAsync(legacyTimeoutSeconds, RunMode.Coding, science: true);
         await harness.SetCreatedAtAsync(runId, DateTimeOffset.UtcNow.AddDays(-7));
         using var cancellation = new CancellationTokenSource();
         await cancellation.CancelAsync();
@@ -191,13 +191,13 @@ public sealed class CodingRunBudgetTests
     {
         // This regression exercises run budgets, not exhaustion of a small model's context.
         using var harness = new Harness(readCalls: 70, contextTokens: 1_048_576);
-        var runId = await harness.CreateRunAsync(legacyTimeoutSeconds, RunMode.General, science: true);
+        var runId = await harness.CreateRunAsync(legacyTimeoutSeconds, RunMode.Coding, science: true);
         await harness.SetCreatedAtAsync(runId, DateTimeOffset.UtcNow.AddDays(-7));
 
         Assert.Null(await harness.DriveAsync(runId));
 
         Assert.Equal(70, harness.ExecutedReads);
-        Assert.Equal(141, harness.Handler.ChatCalls);
+        Assert.Equal(71, harness.Handler.ChatCalls);
         Assert.Equal(RunState.Completed, (await harness.Repository.GetAsync(runId))!.State);
         var events = await harness.Repository.GetEventsAfterAsync(runId, 0);
         Assert.Equal(70, events.Count(item => item.Type == RunEventTypes.ClientToolProposed));

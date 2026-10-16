@@ -1,4 +1,4 @@
-using Missum.Ai.Contracts;
+﻿using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Runs;
 using System.Globalization;
 using System.Text.Json;
@@ -88,55 +88,13 @@ public static class CompactAgentContextPolicy
 
     private const string Delegation = """
         Arbeitsteilung: Nur wenn subagentAvailable=true und du Hauptagent bist, nutze für unabhängige umfangreiche
-        Teilaufgaben subagent.spawn. Bei DeepResearch beginne vor Quellenabrufen, Rechnungen oder Änderungen
-        mit genau einem frühen spawn, nachdem der vollständige Originalauftrag gelesen wurde. Frühe fachliche
-        Grundlagen/Korrekturen mit research.update bleiben davor zulässig und werden bewahrt. task beginnt
+        Teilaufgaben bei Bedarf subagent.spawn. Entscheide selbst, wann eine unabhängige Teilaufgabe sinnvoll ist. task beginnt
         mit kurzer Titelzeile (etwa acht Wörter), dann Ziel, Randbedingungen, erwartetes Ergebnis, Abnahmekriterien,
         eindeutige Schreibpfade und deine eigene parallele Aufgabe. Delegiere keinen Gesamtauftrag und arbeite
         nicht dieselbe Teilaufgabe. Child erbt Modell, Kontext, Werkzeuge und Rechte. Bearbeite eigene Arbeit
         parallel; wait erst, wenn das Resultat benötigt wird. Hole und verarbeite alle Child-Ergebnisse vor Abschluss.
         Rechnungen macht der zuständige Agent mit Rechenwerkzeugen, nicht durch Schätzen. Subagenten bearbeiten
         nur ihren zugewiesenen Auftrag und starten keine weiteren Subagenten. Ohne Admission selbst weiterarbeiten.
-        """;
-
-    private const string Science = """
-        Science: Dauerhafter Stand über research.read/update, section-delta-v1. Übersicht lesen, benötigte ids gezielt,
-        nextOffset/nextCursor beachten. task.complete=false bedeutet gekürzte Vorschau. Wenn der vollständige ursprüngliche Auftrag nicht bereits
-        im Dialog steht, view='task' mit originalQuestion vollständig lesen. Den vollständigen Erstprompt nicht neu laden,
-        wenn vorhanden. Pflichtanforderungen vollständig paginieren; gekürzte Übersicht erlaubt keine Zielstreichung.
-        Grundlagen früh speichern: fachlicher Titel, Frage, Definitionen, Voraussetzungen, Hypothesen, einfacher Ausgangsfall;
-        Wissenslücken gezielt recherchieren, nicht erst sämtliche Literatur sammeln. Dasselbe Vorgehen ohne Subagent.
-        Update: projectId, optional title, changes[{id,kind,expectedRevision,data oder patch}]. Neue Objekte mit vollständigem
-        data und expectedRevision=0; vorhandene mit gelesener Version und patch geänderter Felder. Genau eines von data/patch.
-        review und status im selben data-/patch-Objekt; nie review.status. Stabile IDs erhalten, Konflikte gezielt neu lesen.
-        Hauptagent besitzt Titel/section und integriert Beiträge; Child schreibt contribution/hypothesis/claim/requirement
-        mit Agent-ID + ':' als Präfix, keinen Titel oder section. Hypothesen: statement, assumptions, prediction, nextCheck,
-        status, reason. Pflichtziele als required=true requirement mit statement, method, nextCheck, Status und echten Belegen.
-        Gescheiterte Ansätze samt Gründen/Grenzen als refuted/blocked/unresolved bewahren. Keine erfundene allgemeine Lösung.
-        Quellen nach Aussage, Wissenslücke, Gegenbeleg oder Neuheit suchen; Originalstellen fetch, gespeicherte Belege nutzen.
-        experimentIds=experimentRecordId, checkIds=verificationRecordId; sourceIds echt. Drei Quellenaktionen ohne Erkenntnis
-        erfordern fachliche Entscheidung. ProcessSucceeded/HashVerified/Exitcode 0 bestätigen technische Ausführung,
-        keine wissenschaftliche Richtigkeit. Inhaltliche/formale Verifikation und Ausführungsbeleg ausdrücklich unterscheiden.
-        Publikation: Prosa mit Definitionen, Voraussetzungen, Herleitung, Übergängen, Interpretation und Grenzen;
-        keine Bedien-/Netzdiagnosen, Dateiverwaltung, HTML/CSS/PDF-Code oder Manuskriptmarker. Betriebsstand knapp im Chat.
-        Missum setzt Layout/Formeln/PDF; keine eigenen PDF-Skripte oder Revisionskopien. Maßeinheiten in kurzen Listen, nicht Tabellen.
-        Geometrie, Normierung, Annahmen und Geltungsbereich vor Dimensions-/Zahlenrechnung festlegen. Numerische requirements
-        benötigen quantitativeValidation mit observable, unabhängiger reference, artifactPath, sampling und checks;
-        keine gelockerten Grenzen oder Ersatzillustrationen. Erforderliche openLimit-Ziele bleiben ungelöst.
-        Abschnittsmetadaten: units:[{symbol,meaning,unit}], figureCaptions:[{experimentId,artifactPath,caption}]. Abbildung mit
-        echtem experimentRecordId und Pfad aus outputHashes, Caption/Achsen/Einheiten; Quellen/Resultate nicht erfinden.
-        Rechnen/Simulation/SymPy/Lean nach Pflicht oder Nachweisbedarf, keine allgemeine Python-/Bildpflicht. Numerik beweist
-        keinen allgemeinen Satz; Lean nur seinen Satz unter Voraussetzungen, keine empirische Theorie, keine sorry/admit-Lücken.
-        Nutze math.symbolic/numeric/formalProof oder research.code.write/execute; enges Fachwerkzeug vor coding.command.
-        Python im Runner, relative Pfade im einen Projektbaum Science/<projectId>, matplotlib/Agg, MISSUM_ARTIFACTS für Plots.
-        Seeds, Umgebung, Parameter, Eingangshashes und echte Ergebnisse protokollieren. networkIsolation=NotEnforced ist keine harte Isolation.
-        Schwierige eigene Ergebnisse mit zwei geeigneten unabhängigen Wegen prüfen: Rücksubstitution, Grenzfall,
-        Dimension, Gegenbeispiel oder Kernel; Prozess-/Hashprüfung allein genügt nicht. Nach Erkenntnis betroffene Objekte ändern.
-        Vor Abschluss research.deliverables.verify für aktuellen kanonischen Stand und verpflichtende Auswertungen;
-        nur gemeldete Probleme beheben, danach frisch verifizieren. Child-Beiträge auf Modell, Konventionen,
-        Observable und Belege prüfen; passende Rechnungen wiederverwenden, nur konkrete Widersprüche untersuchen.
-        Missum erzeugt/repariert PDF technisch; Dokument nicht wiederholen. Ohne geforderte Auswertung bleibt Simulation leer.
-        Nutzerumfang bis belegtem Abschluss oder manuellem Stop bewahren.
         """;
 
     public static string Build(RunRequest request, IReadOnlyList<string> toolNames)
@@ -151,11 +109,6 @@ public static class CompactAgentContextPolicy
         var sections = new List<string> { Marker, Common, AgentNarrationPolicy.Instructions, General, MathFormattingPolicy.Instructions };
         if (request.Mode == RunMode.Coding) sections.Add(Coding);
         if (toolNames.Contains(SubagentToolNames.Spawn, StringComparer.Ordinal)) sections.Add(Delegation);
-        if (toolNames.Contains(ClientToolNames.ResearchRead, StringComparer.Ordinal)
-            || toolNames.Contains(ClientToolNames.ResearchDeliverablesVerify, StringComparer.Ordinal))
-            sections.Add(Science + "\n\n" + ScientificStateAgentPolicy.ConsistencyInstructions
-                + "\n\n" + ScientificStateAgentPolicy.PublicationWorkflowInstructions
-                + "\n\n" + ScientificDerivationPolicy.Instructions + "\n\n" + ScienceResearchStrategyPolicy.Instructions);
         return string.Join("\n\n", sections);
     }
 

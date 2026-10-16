@@ -15,10 +15,11 @@ public sealed class ContextCapacityIntegrationTests
     private const string ModelId = "coding/ContextCapacity-Fixture~capacity";
 
     [Theory]
-    [InlineData(true, 1_048_576, 1_048_576, 258_000, 131_072)]
-    [InlineData(false, 1_048_576, 1_048_576, 258_000, 249_808)]
+    [InlineData(true, 1_048_576, 1_048_576, 1_048_576, 1_040_384)]
+    [InlineData(false, 1_048_576, 1_048_576, 1_048_576, 1_040_384)]
     [InlineData(true, 65_536, 1_048_576, 65_536, 61_440)]
     [InlineData(true, 1_048_576, 65_536, 65_536, 61_440)]
+    [InlineData(true, 258_000, 1_048_576, 258_000, 249_808)]
     public async Task ContextTelemetrySeparatesEffectiveModelWindowFromWorkflowInputBudget(
         bool science, int loadedContext, int requestedContext, int expectedWindow, int expectedInputBudget)
     {

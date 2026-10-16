@@ -1,4 +1,4 @@
-using Missum.Ai.Contracts;
+﻿using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Runs;
 using System.Text.Json;
 
@@ -90,8 +90,7 @@ public sealed class AgentToolCatalogTests
         Assert.Contains(restricted, static tool => tool.Name == WorkspaceTools.ImageInput);
         Assert.DoesNotContain(restricted, static tool => tool.Name == ClientToolNames.CodingCommand);
         Assert.DoesNotContain(restricted, static tool => tool.Name == ClientToolNames.MathSymbolic);
-        Assert.Contains(restricted, static tool => tool.Name == ClientToolNames.ResearchCodeWrite);
-        Assert.Contains(restricted, static tool => tool.Name == ClientToolNames.ResearchCodeRestore);
+        Assert.DoesNotContain(restricted, static tool => tool.Name.StartsWith("research.", StringComparison.Ordinal));
         Assert.DoesNotContain(restricted, static tool => tool.Name == WorkspaceTools.Open);
 
         var normal = catalog.GetAvailableTools(CreateRequest(
@@ -101,16 +100,14 @@ public sealed class AgentToolCatalogTests
         Assert.Contains(normal, static tool => tool.Name == ClientToolNames.MathNumeric);
         Assert.Contains(normal, static tool => tool.Name == ClientToolNames.MathSmt);
         Assert.Contains(normal, static tool => tool.Name == ClientToolNames.MathFormalProof);
-        Assert.Contains(normal, static tool => tool.Name == ClientToolNames.ResearchCodeExecute);
-        Assert.Contains(normal, static tool => tool.Name == ClientToolNames.ResearchCodeTest);
-        Assert.Contains(normal, static tool => tool.Name == ClientToolNames.ResearchCodeBenchmark);
+        Assert.DoesNotContain(normal, static tool => tool.Name.StartsWith("research.", StringComparison.Ordinal));
         Assert.Contains(normal, static tool => tool.Name == WorkspaceTools.Open);
 
         var general = catalog.GetAvailableTools(CreateRequest(
             ["coding", "workspace", "coding.process", "workspace.open"]) with { Mode = RunMode.General });
         Assert.DoesNotContain(general, static tool => tool.Name.StartsWith("research.code.", StringComparison.Ordinal));
-        Assert.DoesNotContain(general, static tool => tool.Name is ClientToolNames.MathSymbolic or ClientToolNames.MathNumeric
-            or ClientToolNames.MathSmt or ClientToolNames.MathFormalProof);
+        Assert.Equal(normal.Where(static tool => !tool.ServerSide).Select(static tool => tool.Name),
+            general.Where(static tool => !tool.ServerSide).Select(static tool => tool.Name));
     }
 
     [Fact]

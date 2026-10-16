@@ -6,7 +6,7 @@ namespace Missum.App.Services;
 
 /// <summary>
 /// Creates an A4 book-layout PDF for a generated session document by using the
-/// same Markdown, KaTeX and print styles as the assistant WebView.
+/// local Markdown, KaTeX and document print styles.
 /// </summary>
 public sealed partial class DocumentPdfExporter(ILogger<DocumentPdfExporter> logger) : IDisposable
 {
@@ -59,7 +59,7 @@ public sealed partial class DocumentPdfExporter(ILogger<DocumentPdfExporter> log
             }
 
             var script = ApplicationAssets.ResolvePath("Assets", "Scripts", "export-document.ps1");
-            var webAssets = ApplicationAssets.ResolvePath("Assets", "Web");
+            var webAssets = ApplicationAssets.ResolvePath("Assets", "DocumentRendering");
             if (!File.Exists(script) || !Directory.Exists(webAssets))
             {
                 throw new FileNotFoundException("Die lokalen Missum-Ressourcen für den Dokument-PDF-Export fehlen.", script);

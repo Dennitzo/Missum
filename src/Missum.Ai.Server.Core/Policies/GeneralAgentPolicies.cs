@@ -1,4 +1,4 @@
-using Missum.Ai.Contracts;
+﻿using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Runs;
 using System.Text.Json;
 
@@ -178,8 +178,7 @@ public static class GeneralAgentPolicies
             currentDateEuropeBerlin = localToday,
             expectedResponse = "assistant.agent.message.v1",
             toolSelection = effectiveTools.Count == 0 ? "none"
-                : effectiveTools.Contains("subagent.spawn", StringComparer.Ordinal)
-                    || effectiveTools.Contains(ClientToolNames.ResearchRead, StringComparer.Ordinal) ? "complete_direct_schemas"
+                : effectiveTools.Contains("subagent.spawn", StringComparer.Ordinal) ? "complete_direct_schemas"
                 : "names_then_selected_schema",
             clientCapabilities = request.ClientCapabilities ?? [],
             documentContextPresent = request.DocumentContext is not null
@@ -233,8 +232,7 @@ public static class GeneralAgentPolicies
         // The processor supplies its actual pipeline decision at the new-run
         // boundary. Canonical state and child requests are also always direct.
         // Historic client wrappers must not promise a pipeline that is skipped.
-        var directResearch = researchManagedByAgent || request.Subagent is not null
-            || ScientificStateCompletionPolicy.Enabled(request);
+        var directResearch = researchManagedByAgent || request.Subagent is not null;
         if (directResearch || !request.Messages.SelectMany(static message => message.Content)
             .Any(static part => part.Text?.StartsWith("[MISSUM_WEB_RESEARCH_REQUEST]", StringComparison.Ordinal) == true))
         {

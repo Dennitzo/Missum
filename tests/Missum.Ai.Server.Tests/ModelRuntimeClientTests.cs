@@ -159,6 +159,134 @@ public sealed class ModelRuntimeClientTests
         Assert.Empty(handler.RequestPaths);
     }
 
+    [Fact]
+    public async Task SubagentPreparationKeepsLongPrefillAliveAndReportsColdReplayHonestly()
+    {
+        var entered = new TaskCompletionSource<CancellationToken>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var clock = new PreparationTimeProvider();
+        var handler = new NativeRuntimeHandler
+        {
+            OnSubagentPrepare = async token =>
+            {
+                entered.SetResult(token);
+                await release.Task.WaitAsync(token);
+                return SubagentResponse(new
+                {
+                    allowed = true, modelId = NativeGeneralId, instanceId = NativeGeneralId + "@subagent", gpuIndex = 1,
+                    cacheStatus = "forked", cachedTokens = 138_000, sourceCachedTokens = 0,
+                    sourceEvaluatedTokens = 138_000, preparationSampledTokens = (int?)null,
+                    evaluatedGeneratedTokens = 0, preparationMode = "replayed",
+                });
+            },
+        };
+        using var client = CreateClient(new HttpClient(handler), clock);
+        var preparation = client.PrepareSubagentAsync("gpt-oss-120b", "parent", "child",
+            [new("user", "Vollständiger Elternkontext")], [], "general", "medium");
+        var token = await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        clock.Advance(TimeSpan.FromMinutes(6));
+        Assert.False(token.IsCancellationRequested);
+        Assert.False(preparation.IsCompleted);
+        release.SetResult();
+        var result = await preparation.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(0, result.SourceCachedTokens);
+        Assert.Equal(138_000, result.SourceEvaluatedTokens);
+        Assert.Null(result.PreparationSampledTokens);
+        Assert.Equal("replayed", result.PreparationMode);
+        Assert.Empty(handler.ModelOperations);
+    }
+
+    [Fact]
+    public async Task SubagentPreparationSafetyDeadlineIsTypedAndReleasesModelLeases()
+    {
+        var entered = new TaskCompletionSource<CancellationToken>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var clock = new PreparationTimeProvider();
+        var handler = new NativeRuntimeHandler
+        {
+            OnSubagentPrepare = async token =>
+            {
+                entered.SetResult(token);
+                await Task.Delay(Timeout.InfiniteTimeSpan, token);
+                throw new InvalidOperationException("A cancelled preparation must not return a successful response.");
+            },
+        };
+        using var client = CreateClient(new HttpClient(handler), clock);
+        using var caller = new CancellationTokenSource();
+        var preparation = client.PrepareSubagentAsync("gpt-oss-120b", "parent", "child", caller.Token);
+        var token = await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        clock.Advance(TimeSpan.FromMinutes(129));
+        Assert.False(token.IsCancellationRequested);
+        clock.Advance(TimeSpan.FromMinutes(1));
+        var exception = await Assert.ThrowsAsync<SubagentPreparationTimeoutException>(
+            () => preparation.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal("deadline_exceeded", exception.FailureKind);
+        Assert.IsAssignableFrom<OperationCanceledException>(exception.InnerException);
+        Assert.False(caller.IsCancellationRequested);
+        await client.CompleteChatAsync("gpt-oss-120b", [new("user", "Hauptauftrag fortsetzen")], [])
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(1, handler.ChatAttempts);
+    }
+
+    [Fact]
+    public async Task SubagentPreparationPreservesUserCancellationAndReleasesModelLeases()
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var handler = new NativeRuntimeHandler
+        {
+            OnSubagentPrepare = async token =>
+            {
+                entered.SetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, token);
+                throw new InvalidOperationException("A cancelled preparation must not return a successful response.");
+            },
+        };
+        using var client = CreateClient(new HttpClient(handler));
+        using var caller = new CancellationTokenSource();
+        var preparation = client.PrepareSubagentAsync("gpt-oss-120b", "parent", "child", caller.Token);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await caller.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => preparation.WaitAsync(TimeSpan.FromSeconds(5)));
+        await client.CompleteChatAsync("gpt-oss-120b", [new("user", "Neuer Auftrag")], [])
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(1, handler.ChatAttempts);
+    }
+
+    [Fact]
+    public async Task SubagentPreparationDoesNotConfuseInternalTransportCancellationWithUserStop()
+    {
+        var interruption = new TaskCanceledException("Native prepare connection timed out.");
+        var handler = new NativeRuntimeHandler { OnSubagentPrepare = _ => throw interruption };
+        using var client = CreateClient(new HttpClient(handler));
+        var exception = await Assert.ThrowsAsync<SubagentPreparationTimeoutException>(
+            () => client.PrepareSubagentAsync("gpt-oss-120b", "parent", "child"));
+        Assert.Equal("transport_cancelled", exception.FailureKind);
+        Assert.Same(interruption, exception.InnerException);
+    }
+
+    [Fact]
+    public async Task SubagentPreparationNativeTimeoutPreservesItsReasonEvenWithNullAvailabilityFields()
+    {
+        const string detail = "Seit fünf Minuten kein Fortschritt beim Einlesen des Elternkontexts.";
+        var handler = new NativeRuntimeHandler
+        {
+            OnSubagentPrepare = _ => Task.FromResult(SubagentResponse(new
+            {
+                allowed = false, reason = "subagent.preparation_timeout", detail,
+                modelId = (string?)null, instanceId = (string?)null, gpuIndex = (int?)null,
+                contextLength = (int?)null, requiredBytes = (long?)null, freeBytes = (long?)null,
+            })),
+        };
+        using var client = CreateClient(new HttpClient(handler));
+        var exception = await Assert.ThrowsAsync<SubagentPreparationTimeoutException>(
+            () => client.PrepareSubagentAsync("gpt-oss-120b", "parent", "child"));
+        Assert.Equal("native_timeout", exception.FailureKind);
+        Assert.Equal(NativeGeneralId, exception.ModelId);
+        Assert.Contains(detail, exception.Message, StringComparison.Ordinal);
+        await client.CompleteChatAsync("gpt-oss-120b", [new("user", "Weiter")], [])
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(1, handler.ChatAttempts);
+    }
+
     [Theory]
     [InlineData("prepare")]
     [InlineData("save")]
@@ -263,7 +391,7 @@ public sealed class ModelRuntimeClientTests
             model.Id == NativeQwenId
             && model.Role == "general"
             && model.Downloaded
-            && model.ContextTokens == 258_000);
+            && model.ContextTokens == 262_144);
         Assert.Contains(status.Models, model =>
             model.Id == NativeGeneralId
             && model.Role == "general"
@@ -446,10 +574,10 @@ public sealed class ModelRuntimeClientTests
     }
 
     [Theory]
-    [InlineData(1_048_576, 258_000)]
-    [InlineData(2_000_000, 258_000)]
+    [InlineData(1_048_576, 1_048_576)]
+    [InlineData(2_000_000, 2_000_000)]
     [InlineData(32_768, 32_768)]
-    public void FutureModelCatalogAndLoadedBudgetRespectProductCeiling(int advertised, int expected)
+    public void FutureModelCatalogAndLoadedBudgetUseTheirOwnMaximum(int advertised, int expected)
     {
         using var document = JsonDocument.Parse($$$"""
             {"data":[{"id":"coding/future-test-model","meta":{"n_ctx_train":{{{advertised}}}},"status":{"value":"loaded"}}]}
@@ -988,14 +1116,67 @@ public sealed class ModelRuntimeClientTests
         Assert.Equal(expected, ModelRuntimeClient.IsTransientInferenceFailure(exception));
     }
 
-    private static ModelRuntimeClient CreateClient(HttpClient http) => new(
+    private static ModelRuntimeClient CreateClient(HttpClient http, TimeProvider? preparationClock = null) => new(
         http,
         Options.Create(new MissumAiServerOptions
         {
             ModelRuntimeUri = new Uri("http://native.test:8081", UriKind.Absolute),
             GeneralModelId = "gpt-oss-120b",
         }),
-        NullLogger<ModelRuntimeClient>.Instance);
+        NullLogger<ModelRuntimeClient>.Instance)
+    {
+        SubagentPreparationTimeProvider = preparationClock ?? TimeProvider.System,
+    };
+
+    private static HttpResponseMessage SubagentResponse(object value) => new(HttpStatusCode.OK)
+    {
+        Content = new StringContent(JsonSerializer.Serialize(value), Encoding.UTF8, "application/json"),
+    };
+
+    private sealed class PreparationTimeProvider : TimeProvider
+    {
+        private readonly List<PreparationTimer> _timers = [];
+        private TimeSpan _elapsed;
+
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            var timer = new PreparationTimer(this, callback, state);
+            _timers.Add(timer);
+            timer.Change(dueTime, period);
+            return timer;
+        }
+
+        public void Advance(TimeSpan duration)
+        {
+            _elapsed += duration;
+            foreach (var timer in _timers.ToArray()) timer.FireIfDue();
+        }
+
+        private sealed class PreparationTimer(PreparationTimeProvider clock, TimerCallback callback, object? state) : ITimer
+        {
+            private TimeSpan? _deadline;
+            private TimeSpan _period;
+            private bool _disposed;
+
+            public bool Change(TimeSpan dueTime, TimeSpan period)
+            {
+                if (_disposed) return false;
+                _deadline = dueTime == Timeout.InfiniteTimeSpan ? null : clock._elapsed + dueTime;
+                _period = period;
+                return true;
+            }
+
+            public void FireIfDue()
+            {
+                if (_disposed || _deadline is not { } deadline || deadline > clock._elapsed) return;
+                _deadline = _period == Timeout.InfiniteTimeSpan ? null : clock._elapsed + _period;
+                callback(state);
+            }
+
+            public void Dispose() { _disposed = true; _deadline = null; }
+            public ValueTask DisposeAsync() { Dispose(); return ValueTask.CompletedTask; }
+        }
+    }
 
     private sealed class NativeRuntimeHandler(
         bool returnToolCall = false,
@@ -1023,6 +1204,7 @@ public sealed class ModelRuntimeClientTests
         public int ChatAttempts { get; private set; }
         public int TokenCountingAttempts { get; private set; }
         public Func<string, CancellationToken, Task>? OnCacheRequest { get; init; }
+        public Func<CancellationToken, Task<HttpResponseMessage>>? OnSubagentPrepare { get; init; }
         public Action<string>? OnChatRequest { get; init; }
         public bool ManagedGpuRuntime { get; init; }
         public int DelayedUnloadPolls { get; init; }
@@ -1071,6 +1253,8 @@ public sealed class ModelRuntimeClientTests
             var body = request.Content is null
                 ? string.Empty
                 : await request.Content.ReadAsStringAsync(cancellationToken);
+            if (request.Method == HttpMethod.Post && path == "/agents/prepare" && OnSubagentPrepare is not null)
+                return await OnSubagentPrepare(cancellationToken);
             if (request.Method == HttpMethod.Post && path == "/models/unload")
             {
                 using var operation = JsonDocument.Parse(body);

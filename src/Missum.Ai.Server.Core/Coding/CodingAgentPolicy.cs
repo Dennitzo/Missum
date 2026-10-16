@@ -1,4 +1,4 @@
-using Missum.Ai.Contracts;
+﻿using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Models;
 using Missum.Ai.Server.Core.Policies;
 
@@ -72,36 +72,13 @@ public static class CodingAgentPolicy
         """;
 
     public const string ScientificResearchPrompt = """
-        Wissenschaftliche Deep-Research-Ausführung: Wenn web.deepResearch ein Forschungsdossier mit projectId,
-        problem, hypotheses, verificationPlan, researchGraph oder checkpoint liefert, behandle es als überprüfbare
-        Arbeitsgrundlage und nicht als fertigen Beweis. Im Coding-Modus darfst du die erforderliche Forschungssoftware
-        selbstständig ausschließlich im ausgewählten Workspace erstellen und ausführen. Lege dafür reproduzierbare
-        Artefakte unter .assistant/research/<projectId>/ an: ein lesbares Protokoll, Quellcode, Eingabehashes,
-        Zufallsseeds, Umgebungs- beziehungsweise Lockdateien, Testergebnisse und ein Manifest der Ausführungen.
-        Verwende projektlokale Umgebungen. Verändere keine systemweite Installation.
-
-        Nutze für diese Arbeit vorrangig die angebotenen strukturierten Werkzeuge: math.symbolic und math.numeric
-        für reproduzierbare Rechnungen, math.smt und math.formalProof für logische beziehungsweise formale Prüfung,
-        research.code.write für hashgesicherte Forschungsdateien, research.code.execute/test/benchmark für
-        protokollierte Experimente und research.code.restore für konfliktbewusste Rücknahme. Nutze coding.command
-        nur, wenn keines dieser engeren Werkzeuge den erforderlichen Schritt ausdrücken kann. Ein Ergebnis mit
-        networkIsolation=NotEnforced ist keine hart netzwerkisolierte Ausführung und muss als solche behandelt werden.
-
-        Wähle die kleinste geeignete Werkzeugkette: SymPy für symbolische Algebra, mpmath für hohe Präzision,
-        NumPy und SciPy für Numerik, Pint für Einheiten, Hypothesis für Eigenschaftstests, Z3 für diskrete logische
-        Bedingungen und Lean für formale Beweise, sofern diese projektlokal verfügbar oder reproduzierbar installierbar
-        sind. Prüfe schwierige Resultate über mindestens zwei geeignete, möglichst unabhängige Wege. Dazu gehören
-        Rücksubstitution, Ableitung oder Integration, hochpräzise Stichproben, Rand- und Singularitätsfälle,
-        Dimensionsanalyse, Gegenbeispielsuche, alternative Herleitung, Differentialtests und formale Kernelprüfung.
-        Ein erfolgreicher Prozesslauf beweist nur den Prozessstatus. Numerische Stichproben sind kein formaler Beweis.
-
-        Klassifiziere neue Ideen als Kandidaten, bis die verlangte Verifikation tatsächlich belegt ist. Trenne bekannte
-        Resultate, daraus abgeleitete Resultate, empirisch gestützte Kandidaten, formal verifizierte Resultate,
-        ungelöste und widerlegte Hypothesen. Suche aktiv nach Gegenbelegen. Falls Daten, Ressourcen oder ein unabhängiger
-        Prüfweg fehlen, erhalte den Checkpoint und melde Unresolved oder Blocked mit dem genauen Grund, statt Gewissheit
-        zu erfinden. Halte manuelle Nutzeränderungen durch aktuelle Hashes und kleine Change-Sets geschützt.
+        Wähle bei wissenschaftlicher Projektarbeit den zum Auftrag passenden Lösungs- und Prüfweg selbst.
+        Webquellen, ein gültiger Lean-Beweis oder eine Simulation mit nachvollziehbaren Berechnungsdaten können
+        eine Aussage belegen; ein geeigneter Beleg genügt für die fachliche Prüfung dieser Aussage.
+        Recherche, Simulation und Lean sind Empfehlungen, sofern der Nutzer sie nicht ausdrücklich verlangt.
+        Verwende die gewöhnlichen Projektwerkzeuge für Dateien und Prozesse. Ein erfolgreicher Prozesslauf
+        bestätigt seine Ausführung; behaupte weitergehende fachliche Schlussfolgerungen nur mit passendem Beleg.
         """;
-
 
     public const string WorkingStatePrompt = """
         Nutze coding.updatePlan, sofern angeboten, für einen knappen Arbeitsplan und explizite Akzeptanzkriterien des

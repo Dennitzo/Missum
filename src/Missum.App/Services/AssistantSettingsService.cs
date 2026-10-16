@@ -7,7 +7,7 @@ using Missum.Core.Models;
 
 namespace Missum.App.Services;
 
-/// <summary>Shared preference/trigger/backup operations for WinUI and the LAN browser.</summary>
+/// <summary>Shared preference/trigger/backup operations for the native desktop.</summary>
 public sealed class AssistantSettingsService : IDisposable
 {
     private const int MaximumBackupBytes = 64 * 1024 * 1024;
@@ -34,7 +34,7 @@ public sealed class AssistantSettingsService : IDisposable
     /// <summary>Evaluated on the PC by the app host. Defaults to dark without a native window.</summary>
     public Func<string>? ResolvedThemeProvider { get; set; }
 
-    /// <summary>Immutable colors captured on the native UI thread; safe to read from LAN requests.</summary>
+    /// <summary>Immutable colors captured on the native UI thread; safe to read from background requests.</summary>
     public Func<AssistantResolvedAppearance?>? ResolvedAppearanceProvider { get; set; }
 
     /// <summary>The host checks active work, calls CompleteRestoreAsync, and schedules app restart.</summary>
@@ -135,7 +135,7 @@ public sealed class AssistantSettingsService : IDisposable
                 }
                 case "backup.create":
                 {
-                    var result = await CreateBrowserBackupAsync(cancellationToken).ConfigureAwait(false);
+                    var result = await CreateBackupResourceAsync(cancellationToken).ConfigureAwait(false);
                     await emit("backup.ready", result, envelope.RequestId).ConfigureAwait(false);
                     break;
                 }
@@ -200,7 +200,7 @@ public sealed class AssistantSettingsService : IDisposable
                 throw new AssistantSettingsConflictException(_settings.Current.PreferencesRevision);
             var normalized = NormalizePatch(patch);
             await ValidateTriggerBatchAsync(triggers, deleted, cancellationToken).ConfigureAwait(false);
-            // Preflight every edit before persistence; normal PC/browser writes use this shared gate.
+            // Preflight every edit before persistence; native settings writes use this shared gate.
             await _settings.UpdatePreferencesAsync(current => ApplyPatch(current, normalized), expectedRevision, cancellationToken).ConfigureAwait(false);
             saved = await SaveTriggerBatchAsync(triggers, deleted, cancellationToken).ConfigureAwait(false);
         }
@@ -299,7 +299,7 @@ public sealed class AssistantSettingsService : IDisposable
         await _backups.RestoreAsync(backupPath, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<object> CreateBrowserBackupAsync(CancellationToken cancellationToken)
+    private async Task<object> CreateBackupResourceAsync(CancellationToken cancellationToken)
     {
         RemoveExpiredResources();
         var id = Guid.NewGuid();
@@ -307,7 +307,7 @@ public sealed class AssistantSettingsService : IDisposable
         var path = ResourcePath(id);
         var result = await _backups.CreateAsync(path, cancellationToken).ConfigureAwait(false);
         _resources[id] = new(path, "application/octet-stream", fileName, DateTimeOffset.UtcNow.AddHours(1));
-        return new { id, url = $"/assistant/settings-resources/{id:D}", fileName, sha256 = result.Sha256,
+        return new { id, path, fileName, sha256 = result.Sha256,
             createdAt = result.CreatedAt, bytes = new FileInfo(path).Length };
     }
 
@@ -361,7 +361,7 @@ public sealed class AssistantSettingsService : IDisposable
 
     private string ResourcePath(Guid id)
     {
-        var directory = Path.Combine(_settings.DataDirectory, "LanWeb", "SettingsResources");
+        var directory = Path.Combine(_settings.DataDirectory, "BackupTransfers");
         Directory.CreateDirectory(directory);
         return Path.Combine(directory, $"{id:N}.missumbackup");
     }

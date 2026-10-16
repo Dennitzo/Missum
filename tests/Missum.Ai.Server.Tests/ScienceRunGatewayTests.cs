@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Gateway;
 using Missum.Ai.Server.Core.Runs;
@@ -12,13 +12,11 @@ namespace Missum.Ai.Server.Tests;
 
 public sealed class ScienceRunGatewayTests
 {
-    [Theory]
-    [InlineData(RunMode.Auto)]
-    [InlineData(RunMode.General)]
-    public async Task NewScienceProjectIsAcceptedThroughThePublicRunRouteWithDeliverablesVerification(RunMode mode)
+    [Fact]
+    public async Task PublicationProjectIsAcceptedAsAnOrdinaryCodingWorkspace()
     {
         await using var gateway = new GatewayFixture();
-        var request = gateway.ScienceRequest(mode);
+        var request = gateway.ScienceRequest(RunMode.Coding);
 
         var response = await gateway.SubmitAsync(request);
 
@@ -29,22 +27,20 @@ public sealed class ScienceRunGatewayTests
         Assert.Equal(request.SessionId, stored.SessionId);
         Assert.Equal(request.WorkspacePath, stored.WorkspacePath);
         Assert.Equal(request.ResearchOptions, stored.ResearchOptions);
-        Assert.Contains("research.deliverables", stored.ClientCapabilities!);
+        Assert.Null(stored.ResearchOptions);
+        Assert.False(stored.DeepResearch);
         var tools = new AgentToolCatalog().GetAvailableTools(stored);
-        var verifier = Assert.Single(tools, tool => tool.Name == ClientToolNames.ResearchDeliverablesVerify);
-        Assert.Equal(ToolRiskClass.ReadOnly, verifier.RiskClass);
-        Assert.Contains(tools, tool => tool.Name == "research.code.write");
-        Assert.Contains(tools, tool => tool.Name == "research.code.execute");
-        Assert.Contains(tools, tool => tool.Name == "math.formalProof");
-        Assert.True(ScientificRunCompletionPolicy.Applies(stored));
-        Assert.False(ScientificRunCompletionPolicy.Assess(stored, [], tools).Complete);
+        Assert.Contains(tools, tool => tool.Name == ClientToolNames.CodingWrite);
+        Assert.Contains(tools, tool => tool.Name == ClientToolNames.CodingCommand);
+        Assert.Contains(tools, tool => tool.Name == ClientToolNames.MathFormalProof);
+        Assert.DoesNotContain(tools, tool => tool.Name.StartsWith("research.", StringComparison.Ordinal));
     }
 
     [Fact]
     public async Task UnregisteredResearchCapabilityIsStillRejectedByThePublicRunRoute()
     {
         await using var gateway = new GatewayFixture();
-        var request = gateway.ScienceRequest(RunMode.General);
+        var request = gateway.ScienceRequest(RunMode.Coding);
         request = request with { ClientCapabilities = [.. request.ClientCapabilities!, "research.deliverables.unknown"] };
 
         var response = await gateway.SubmitAsync(request);
@@ -79,12 +75,11 @@ public sealed class ScienceRunGatewayTests
         internal RunRequest ScienceRequest(RunMode mode) => new(MissumAiProtocol.Version, mode,
             [new("user", [new("text", "Untersuche einen Oszillator mit Publikation und Python-Abbildung.")])],
             ClientCapabilities: ["documentIo", "documents", "visual-tools", "coding", "coding.evidence", "coding.process",
-                "workspace", "workspace.open", "research.sandbox", "research.deliverables"],
+                "workspace", "workspace.open", "math.lean"],
             SessionId: "science-new-project", WorkspacePath: _context.Root,
-            AllowedServerTools: ["web.search", "web.fetch", "web.deepResearch"], DeepResearch: true,
-            ConversationProfile: ConversationProfile.General,
-            ResearchOptions: new(ProjectId: "research-new-project", Profile: DeepResearchProfile.ScientificEvidence,
-                AutonomyLevel: ResearchAutonomyLevel.SandboxResearch));
+            AllowedServerTools: ["web.search", "web.fetch", "web.deepResearch"],
+            CodingOptions: new(WorkspacePath: _context.Root),
+            ConversationProfile: ConversationProfile.General);
 
         internal async Task<(int Status, JsonElement Body)> SubmitAsync(RunRequest input)
         {

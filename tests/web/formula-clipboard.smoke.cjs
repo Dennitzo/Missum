@@ -11,7 +11,7 @@ async function main() {
   });
   try {
     const page = await browser.newPage();
-    const web = path.resolve(__dirname, "../../src/Missum.App/Assets/Web");
+    const web = path.resolve(__dirname, "../../src/Missum.App/Assets/DocumentRendering");
     await page.setContent('<main id="message-list"></main><textarea id="composer"></textarea><div id="outside"></div>');
     await page.addStyleTag({ path: path.join(web, "vendor/katex/0.16.10/katex.min.css") });
     await page.addScriptTag({ path: path.join(web, "vendor/katex/0.16.10/katex.min.js") });

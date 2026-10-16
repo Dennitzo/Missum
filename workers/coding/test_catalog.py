@@ -237,7 +237,7 @@ class CatalogTests(unittest.TestCase):
         self.assertTrue(all(model["contextPolicy"] == "max-fit" for model in models))
         text = target.read_text()
         self.assertEqual(text.count("missum-context-train:262144,missum-context-policy:max-fit"), 2)
-        self.assertEqual(text.count("ctx-size = 258000"), 2)  # Shared product ceiling; metadata stays truthful.
+        self.assertEqual(text.count("ctx-size = 262144"), 2)  # Every model retains its own full metadata maximum.
         self.assertEqual(text.count("predict = -1"), 2)
 
     def test_missing_or_invalid_context_is_not_replaced_by_an_invented_maximum(self):

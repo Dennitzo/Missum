@@ -1,4 +1,4 @@
-using Missum.Ai.Contracts;
+﻿using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Coding;
 using Missum.Ai.Server.Core.Gateway;
 using Missum.Ai.Server.Core.Models;
@@ -271,7 +271,7 @@ public sealed class SubagentOrchestrationTests
         Assert.Equal("Parent policy", acceptedMessages[0].Content);
         Assert.Contains("Dateiinventur", acceptedMessages[^1].Content);
         Assert.Contains("SymPy", acceptedMessages[^1].Content);
-        Assert.Contains("research.deliverables.verify", acceptedMessages[^1].Content);
+        Assert.DoesNotContain("research.deliverables.verify", acceptedMessages[^1].Content);
         await repository.SaveCheckpointAsync(parent.Snapshot.RunId,
             new(acceptedMessages, 2, 2, 2, 2));
 
@@ -348,6 +348,125 @@ public sealed class SubagentOrchestrationTests
     private static RunRequest Request() => new(MissumAiProtocol.Version, RunMode.General,
         [new("user", [new("text", Text: "Delegate a separate file task.")])], ClientCapabilities: ["workspace", "coding", "subagents"],
         AllowedServerTools: [], PreferredGeneralModelId: ModelId, SessionId: "parent-session", WorkspacePath: "C:\\subagent-fixture");
+
+    [Theory]
+    [InlineData("transport")]
+    [InlineData("native")]
+    public async Task PreparationTimeoutIsReturnedToTheModelWithoutFailingTheParentOrCreatingAChild(string failure)
+    {
+        using var context = new TestServerContext();
+        using var handler = new DualAgentHandler(emitInitialSpawn: true) { PrepareFailure = failure };
+        using var http = new HttpClient(handler);
+        using var runtime = new ModelRuntimeClient(http, context.WrappedOptions, NullLogger<ModelRuntimeClient>.Instance);
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddMissumAiServerServices(context.Options, includeHostedServices: false);
+        services.AddSingleton(context.Database);
+        services.AddSingleton(runtime);
+        using var provider = services.BuildServiceProvider();
+        var repository = provider.GetRequiredService<RunRepository>();
+        var parent = await repository.CreateAsync(Request(), null);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+
+        await provider.GetRequiredService<RunProcessor>().ProcessAsync(parent.Snapshot.RunId, timeout.Token);
+
+        Assert.Equal(RunState.Completed, (await repository.GetAsync(parent.Snapshot.RunId))!.State);
+        Assert.Empty(await repository.GetSubagentRunsAsync(parent.Snapshot.RunId));
+        Assert.True(handler.ParentObservedPreparationFailure);
+        Assert.Equal(1, handler.PrepareCalls);
+        Assert.Equal(0, handler.ChildTurns);
+        var events = await repository.GetEventsAfterAsync(parent.Snapshot.RunId, 0);
+        Assert.Contains(events, item => item.Type == RunEventTypes.ServerToolCompleted
+            && item.Data.TryGetProperty("errorCode", out var code) && code.GetString() == "subagent.preparation_timeout");
+        Assert.DoesNotContain(events, item => item.Type is RunEventTypes.RunFailed or RunEventTypes.SubagentStarted);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LegacyScienceForkUsesExactParentSchemasAndDoesNotMutateItsCheckpointOnFailure(bool storedTools)
+    {
+        using var context = new TestServerContext();
+        using var handler = new DualAgentHandler { PrepareFailure = "native" };
+        using var http = new HttpClient(handler);
+        using var runtime = new ModelRuntimeClient(http, context.WrappedOptions, NullLogger<ModelRuntimeClient>.Instance);
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddMissumAiServerServices(context.Options, includeHostedServices: false);
+        services.AddSingleton(context.Database);
+        services.AddSingleton(runtime);
+        using var provider = services.BuildServiceProvider();
+        var repository = provider.GetRequiredService<RunRepository>();
+        var request = Request() with
+        {
+            ClientCapabilities = ["workspace", "coding", "subagents", "math.lean", "research.deliverables"],
+            ResearchOptions = new(ProjectId: "research-shared-parent-project", ProtocolVersion: 2),
+        };
+        var parent = await repository.CreateAsync(request, null);
+        var tools = RunProcessor.CreateModelToolDefinitions(new AgentToolCatalog().GetAvailableTools(request, true), null, true);
+        // A persisted catalog can predate current description/schema versions.
+        if (storedTools) tools[0] = tools[0] with { Description = "EXACT_PREVIOUS_PARENT_SCHEMA" };
+        var messages = new List<LmChatMessage> { new("system", "EXACT_PARENT_PREFIX"), new("user", "Task") };
+        var checkpoint = new AgentRunCheckpoint(messages, 2, 1, 138_000, 100,
+            ContextTools: storedTools ? tools : null, UseStableSubagentToolCatalog: true);
+        await repository.SaveCheckpointAsync(parent.Snapshot.RunId, checkpoint);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+
+        var result = await provider.GetRequiredService<RunProcessor>().ExecuteSubagentToolAsync(SubagentToolNames.Spawn,
+            JsonSerializer.SerializeToElement(new { task = "Prüfe ausschließlich den Lean-Beweis." }), parent.Snapshot.RunId,
+            "legacy-science-fork", request, new(ModelId, "coding", 32768), messages, timeout.Token);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal("subagent.preparation_timeout", result.ErrorCode);
+        using var preparation = JsonDocument.Parse(handler.LastPrepareBody!);
+        var actual = preparation.RootElement.GetProperty("prefill").GetProperty("tools");
+        var expected = JsonSerializer.SerializeToElement(ModelRuntimeClient.PrepareTransportTools(ModelId, tools));
+        Assert.Equal(expected.GetRawText(), actual.GetRawText());
+        Assert.DoesNotContain("research-shared-parent-project", actual.GetRawText());
+        Assert.Equal(JsonSerializer.Serialize(checkpoint),
+            JsonSerializer.Serialize(await repository.GetCheckpointAsync(parent.Snapshot.RunId)));
+        Assert.Empty(await repository.GetSubagentRunsAsync(parent.Snapshot.RunId));
+    }
+
+    [Fact]
+    public async Task ResumePreparationTimeoutPreservesStoppedChildHistoryAndDoesNotCreateAnotherRun()
+    {
+        using var context = new TestServerContext();
+        using var handler = new DualAgentHandler { PrepareFailure = "native" };
+        using var http = new HttpClient(handler);
+        using var runtime = new ModelRuntimeClient(http, context.WrappedOptions, NullLogger<ModelRuntimeClient>.Instance);
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddMissumAiServerServices(context.Options, includeHostedServices: false);
+        services.AddSingleton(context.Database);
+        services.AddSingleton(runtime);
+        using var provider = services.BuildServiceProvider();
+        var repository = provider.GetRequiredService<RunRepository>();
+        var processor = provider.GetRequiredService<RunProcessor>();
+        var request = Request();
+        var oldParent = await repository.CreateAsync(request, null);
+        const string task = "Continue own proof.";
+        var oldRequest = request with { SessionId = "old-child", Subagent = new(oldParent.Snapshot.RunId, "proof-agent", task, request.SessionId) };
+        var oldCheckpoint = new AgentRunCheckpoint([new("system", "SAVED_CHILD"), new("user", task)], 3, 2, 100, 50);
+        var oldChild = await repository.CreateSubagentAsync(oldRequest, oldCheckpoint, "old-operation");
+        await repository.CancelAsync(oldChild.RunId);
+        await repository.CancelAsync(oldParent.Snapshot.RunId);
+        var parent = await repository.CreateAsync(request, null);
+        var messages = new List<LmChatMessage> { new("system", "CURRENT_PARENT") };
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        await processor.AppendSubagentContinuationStateAsync(parent.Snapshot.RunId, oldParent.Snapshot.RunId, request, messages, timeout.Token);
+        await repository.SaveCheckpointAsync(parent.Snapshot.RunId, new(messages, 0, 0, 0, 0));
+
+        var result = await processor.ExecuteSubagentToolAsync(SubagentToolNames.Spawn,
+            JsonSerializer.SerializeToElement(new { task, resumeRunId = oldChild.RunId }), parent.Snapshot.RunId,
+            "resume-fails", request, new(ModelId, "coding", 32768), messages, timeout.Token);
+
+        Assert.Equal("subagent.preparation_timeout", result.ErrorCode);
+        Assert.Equal(RunState.Cancelled, (await repository.GetAsync(oldChild.RunId))!.State);
+        Assert.Equal(JsonSerializer.Serialize(oldCheckpoint), JsonSerializer.Serialize(await repository.GetCheckpointAsync(oldChild.RunId)));
+        Assert.Empty(await repository.GetSubagentRunsAsync(parent.Snapshot.RunId));
+        Assert.Equal(0, handler.ChildTurns);
+    }
 
     [Fact]
     public async Task GenericNativeVramDenialNeverPreparesOrStartsAChild()
@@ -640,6 +759,8 @@ public sealed class SubagentOrchestrationTests
         public int PrepareCalls { get; private set; }
         public string? LastPrepareBody { get; private set; }
         public string PrepareCacheStatus { get; init; } = "forked";
+        public string? PrepareFailure { get; init; }
+        public bool ParentObservedPreparationFailure { get; private set; }
         public int ChildTurns => Volatile.Read(ref _childTurns);
         public int ParentTurns => Volatile.Read(ref _parentTurns);
         public string[] ParentToolNames { get; private set; } = [];
@@ -675,6 +796,9 @@ public sealed class SubagentOrchestrationTests
                 {
                     PrepareCalls++;
                     LastPrepareBody = await request.Content!.ReadAsStringAsync(cancellationToken);
+                    if (PrepareFailure == "transport") throw new TaskCanceledException("Native preparation transport deadline.");
+                    if (PrepareFailure == "native") return Json(new { allowed = false, reason = "subagent.preparation_timeout",
+                        detail = "Fünf Minuten ohne Promptfortschritt.", modelId = ModelId });
                 }
                 if (!_primaryLoaded) DeniedBeforeLoad = true;
                 return Json(new { allowed = !denySubagent && _primaryLoaded, reason = !_primaryLoaded ? "subagent.primary_not_loaded" : denySubagent ? "subagent.insufficient_vram" : null, modelId = ModelId,
@@ -722,6 +846,12 @@ public sealed class SubagentOrchestrationTests
             if (denySubagent || holdChild || initiallyUnloaded) return Text("Der Hauptagent hat seine verfügbare Arbeit abgeschlossen.");
             if (emitInitialSpawn && parentTurn == 1)
                 return Tool(SubagentToolNames.Spawn, new { task = "Read child.txt and report its marker." });
+            if (PrepareFailure is not null)
+            {
+                ParentObservedPreparationFailure = messages.Any(message => message.GetProperty("role").GetString() == "tool"
+                    && message.GetProperty("content").GetString()?.Contains("subagent.preparation_timeout", StringComparison.Ordinal) == true);
+                return Text("Ich bearbeite die Teilaufgabe selbst weiter.");
+            }
             if (parentTurn == (emitInitialSpawn ? 2 : 1))
             {
                 await _childStarted.Task.WaitAsync(cancellationToken);

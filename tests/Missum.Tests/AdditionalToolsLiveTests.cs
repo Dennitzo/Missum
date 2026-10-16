@@ -251,7 +251,7 @@ public sealed class AdditionalToolsLiveTests(ITestOutputHelper output)
             }
         }
 
-        Task Command(string type, object payload) => coordinator.HandleAsync(new(AssistantWebBridge.ProtocolVersion, type,
+        Task Command(string type, object payload) => coordinator.HandleAsync(new(AssistantProtocol.ProtocolVersion, type,
             Guid.NewGuid().ToString("N"), JsonSerializer.SerializeToElement(payload, Json)), Emit, ct);
         Task Emit(string type, object payload, string? requestId)
         {

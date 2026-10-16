@@ -35,12 +35,16 @@ public sealed class ModelTokenProgressTests
     [Fact]
     public void ContextMaximumUsesDeepSeekMetadataAndDiscoveredUnknownModels()
     {
-        Assert.Equal(258000, ModelContextProfiles.ResolveMaximum("coding/DeepSeek-V4-Flash-Vision-Exp-UD-IQ1_S~31b467a216d0", "general"));
+        Assert.Equal(1_048_576, ModelContextProfiles.ResolveMaximum("coding/DeepSeek-V4-Flash-Vision-Exp-UD-IQ1_S~31b467a216d0", "general"));
         var id = "test/discovered-" + Guid.NewGuid();
         ModelContextProfiles.RegisterMaximum(id, 524288);
-        Assert.Equal(258000, ModelContextProfiles.ResolveMaximum(id, "general"));
+        Assert.Equal(524_288, ModelContextProfiles.ResolveMaximum(id, "general"));
         ModelContextProfiles.RegisterMaximum(id, 0);
-        Assert.Equal(258000, ModelContextProfiles.ResolveMaximum(id, "general"));
+        Assert.Equal(524_288, ModelContextProfiles.ResolveMaximum(id, "general"));
+        ModelContextProfiles.RegisterMaximum(id, 65_536);
+        Assert.Equal(65_536, ModelContextProfiles.ResolveMaximum(id, "general"));
+        ModelContextProfiles.RegisterMaximum(id, 2_000_000);
+        Assert.Equal(2_000_000, ModelContextProfiles.ResolveMaximum(id, "general"));
     }
 
     [Fact]

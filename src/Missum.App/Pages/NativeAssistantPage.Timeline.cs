@@ -1,4 +1,4 @@
-using System.Text.RegularExpressions;
+﻿using System.Text.RegularExpressions;
 using System.Text.Json;
 using Missum.App.Controls;
 using Microsoft.UI.Xaml;
@@ -21,7 +21,7 @@ public sealed partial class NativeAssistantPage
     private void RenderPromptTimeline(bool layoutCurrent = false)
     {
         if (PromptTimeline is null || ConversationContent is null || _disposed) return;
-        var messages = DisplayMessages.Values.OrderBy(MessageCreatedAt).ToArray();
+        var messages = OrderedDisplayMessages().ToArray();
         var prompts = messages.Where(message => S(message, "role") == "user"
             && !string.IsNullOrWhiteSpace(S(message, "content"))).ToArray();
         var visibility = prompts.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -347,8 +347,18 @@ internal static class NativePromptTimelineState
     internal static string PreviewText(string? value, int maximum)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(maximum, 2);
-        var normalized = Regex.Replace(value ?? string.Empty, "\\s+", " ").Trim();
-        return normalized.Length <= maximum ? normalized : normalized[..(maximum - 1)] + "…";
+        // A tooltip needs only its first characters, not a regex pass over a
+        // multi-day Science answer on every streamed update.
+        var preview = new System.Text.StringBuilder(maximum);
+        var space = false;
+        foreach (var character in value ?? string.Empty)
+        {
+            if (char.IsWhiteSpace(character)) { space = preview.Length > 0; continue; }
+            if (space) { preview.Append(' '); space = false; }
+            preview.Append(character);
+            if (preview.Length > maximum) return preview.ToString(0, maximum - 1) + "…";
+        }
+        return preview.ToString();
     }
 
     internal static string? SelectActive(IEnumerable<(string Id, double Offset)> prompts,

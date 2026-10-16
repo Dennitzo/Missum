@@ -1,4 +1,4 @@
-# Missum
+﻿# Missum
 
 Native WinUI 3 desktop application inspired by the supplied ChatGPT/Codex reference.
 The desktop chat uses XAML controls. Missum includes its coordinator, SQLite
@@ -30,7 +30,8 @@ Build and validation are separate; run the test or smoke scripts explicitly when
 
 Invoking `windows/publish.ps1` directly runs a native startup smoke check by default. It verifies all
 manifest hashes, launches a fresh isolated profile, confirms the native page has
-opened a persisted chat, and rejects a WebView2 profile. Smoke runs do not start
+opened a persisted chat, and checks that WebView2 profiles are confined to the
+internal document viewers. Smoke runs do not start
 or stop shared model services. This checks packaging and native startup; it does
 not replace a live model response and tool run.
 
@@ -38,41 +39,21 @@ Run the client regression suite separately with `./windows/test.ps1`, and the
 context/server checks with `./windows/test-agent-context.ps1`. Run build and test
 scripts sequentially so outputs are not locked by concurrent builds.
 
-## Browser access in the home network
+## Native desktop and document views
 
-Start Missum on the Windows PC and open `http://<PC-IP>:8080/assistant/`
-in Chrome on the Mac. The Windows settings page lists the LAN addresses.
-Access requires no certificates, login, pairing or additional Mac software.
-The host stays available while the window is minimized and ends when Missum exits.
+Missum runs exclusively as a native WinUI application. It does not start a LAN
+assistant website or a browser speech service. The gateway remains the local
+connection to the model and tools; it does not host a browser assistant.
 
-Chats, projects, tools, settings and files belong to the PC. Each browser tab
-keeps its own navigation, model selection and drafts. Submitted jobs retain
-their model and tool settings, and connected clients receive shared live answers.
-Reasoning levels are shared PC preferences per model. Browser submissions wait
-for the saved selection to be acknowledged, and the native model footer updates
-for that model; queued and running jobs keep their accepted parameters.
-The browser follows the native Missum sidebar, message timeline, action footer
-and composer. The floating **Ausgaben** panel opens from the top right and shows
-the PC workspace, file changes, subagents, sources and generated files; sources
-can open in their own tab, and generated files support browser preview/download.
-Views such as sources hide the panel automatically and restore it on returning
-to a chat if it was open.
-Selected tools appear beside **+** in the composer footer. Project creation opens
-a server folder picker with drives, breadcrumbs, folder filtering and recent
-workspaces; it validates the chosen PC folder before creating the project.
-Browser settings support connection tests, prompt triggers and backup downloads
-and uploads. Restore waits for active work, creates a safety backup and restarts
-Missum; the browser reconnects automatically. Backups also include client views
-and drafts, while older backups remain importable.
+Chats, projects, settings and files stay on the PC. Read-aloud, microphone,
+voice control and screen capture use the native Windows services. Read-aloud
+controls belong to the source message footer.
 
-Browser read-aloud uses WAV sections from the existing Supertonic-3 F5 service
-on the PC and plays them on the requesting client. Pause, resume, stop and text
-highlighting follow browser playback. A play button handles blocked autoplay.
-Read-aloud controls belong to their source message footer and never add a tool
-or status chip to the composer.
-Microphone, voice control and screen recording are unavailable at ordinary HTTP
-LAN addresses; use file or screenshot uploads. Windows speech functions remain
-available in the native application.
+The Publication and Simulation tabs retain their embedded PDF and HTML document
+viewers. These internal viewers provide PDF navigation, zoom and scrolling and
+interactive simulations. They are independent of the removed browser assistant.
+The PDF exporter uses the bundled Markdown/KaTeX resources in
+`Assets/DocumentRendering` and requires no CDN.
 
 ## Data and models
 
@@ -90,6 +71,10 @@ The native window opens directly on the AI assistant; the Datei menu links the
 AI assistant and settings without an additional outer navigation rail.
 Switch ChatGPT/Codex/Claude Science above the session list. Enter sends, Shift+Enter adds a line.
 Sessions, mode, project workspace and drafts persist locally.
+Claude Science uses the same project tools as Codex. Its editable `Publikation.md`
+and project files live directly in the selected workspace. The publication PDF
+keeps the existing layout and linked contents; plots and explained Lean proofs belong
+in their topic sections. Web search, Lean and simulations are optional evidence paths.
 Right-click a chat to rename/delete it. Attachments and file changes appear in
 the floating output overlay. Tool calls use the Missum coordinator and local tool broker.
 

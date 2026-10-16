@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -17,9 +17,9 @@ public sealed class ScienceProgressStreamTests
     private const string Report = "## Ergebnis\n\nDie Größen sind dimensionsgleich: $E=mc^2$.";
 
     [Theory]
-    [InlineData(ChatMode.ClaudeScience, 6)]
+    [InlineData(ChatMode.ClaudeScience, 0)]
     [InlineData(ChatMode.General, 0)]
-    public async Task ReattachedResearchEventsBecomeDurableNarrativeOnlyInScience(ChatMode mode, int expectedParagraphs)
+    public async Task ReattachedLegacyEventsCannotInjectSyntheticScienceNarration(ChatMode mode, int expectedParagraphs)
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var chats = environment.Get<IChatRepository>();
@@ -64,14 +64,6 @@ public sealed class ScienceProgressStreamTests
         Assert.Contains(updates, update => update.ToolStep?.Tool == MissumAiAssistantService.ReasoningStepTool
             && update.ToolStep.Status == "running" && update.ToolStep.Detail == "Ich prüfe zuerst die Einheiten.");
         Assert.DoesNotContain("Ich prüfe zuerst", restored.Content, StringComparison.Ordinal);
-        if (mode == ChatMode.ClaudeScience)
-        {
-            Assert.Contains(narration, step => step.Detail!.Contains("Quellenabruf 2", StringComparison.Ordinal));
-            Assert.DoesNotContain(narration, step => step.Detail!.Contains("Quellenabruf 1", StringComparison.Ordinal));
-            Assert.All(narration, step => Assert.Equal(0, step.ContentOffset));
-            Assert.Contains(updates, update => update.Kind == MissumAiAssistantUpdateKind.Delta
-                && update.Message.Content.Length == 0 && update.Message.ToolSteps?.Any(step => step.Tool == "assistant.narration") == true);
-        }
     }
 
     private sealed class Handler(Guid sessionId) : HttpMessageHandler

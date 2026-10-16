@@ -81,34 +81,7 @@ try {
     try { $null = Assert-MissumArtifactPath -Path (Join-Path $testRoot '..\..\..\outside-artifacts') }
     catch { $escapeRejected = $true }
     Assert-PublishSafety $escapeRejected 'Artifact paths that escape the workspace artifact tree must be rejected.'
-    # Exercise the actual port-selection statements, including unset URI input
-    # whose overload resolution differs in Windows PowerShell 5.1.
-    $smokeSource = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'smoke.ps1'))
-    $portStart = $smokeSource.IndexOf('$reservedPorts =', [StringComparison]::Ordinal)
-    $portEnd = $smokeSource.IndexOf('$smokeEnvironment =', [StringComparison]::Ordinal)
-    Assert-PublishSafety ($portStart -ge 0 -and $portEnd -gt $portStart) 'Smoke port selection was not found.'
-    $portSelection = [ScriptBlock]::Create($smokeSource.Substring($portStart, $portEnd - $portStart))
-    $previousGateway = [Environment]::GetEnvironmentVariable('ASSISTANT_GATEWAY_URL', 'Process')
-    $previousLanPort = [Environment]::GetEnvironmentVariable('ASSISTANT_LAN_WEB_PORT', 'Process')
-    $occupied = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
-    try {
-        $occupied.Start()
-        $occupiedPort = ([Net.IPEndPoint]$occupied.LocalEndpoint).Port
-        [Environment]::SetEnvironmentVariable('ASSISTANT_LAN_WEB_PORT', [string]$occupiedPort, 'Process')
-        foreach ($gateway in @($null, 'not-a-uri', 'http://127.0.0.1:8080')) {
-            [Environment]::SetEnvironmentVariable('ASSISTANT_GATEWAY_URL', $gateway, 'Process')
-            . $portSelection
-            Assert-PublishSafety ($smokeLanPort -ge 1024 -and $smokeLanPort -ne $occupiedPort -and -not $reservedPorts.Contains($smokeLanPort)) 'Smoke selected an occupied or reserved port.'
-            $probe = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $smokeLanPort)
-            try { $probe.Start() } finally { $probe.Stop() }
-        }
-    }
-    finally {
-        $occupied.Stop()
-        [Environment]::SetEnvironmentVariable('ASSISTANT_GATEWAY_URL', $previousGateway, 'Process')
-        [Environment]::SetEnvironmentVariable('ASSISTANT_LAN_WEB_PORT', $previousLanPort, 'Process')
-    }
-    Write-Host 'Publish safety passed: live-directory guard, rollback, manifest/sidecars, path confinement and isolated ports with unset/invalid/valid gateway.' -ForegroundColor Green
+    Write-Host 'Publish safety passed: live-directory guard, rollback, manifest/sidecars, path confinement.' -ForegroundColor Green
 }
 finally {
     $script:PublishSafetyFakeProcess = $null

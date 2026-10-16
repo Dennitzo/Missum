@@ -692,9 +692,16 @@ public sealed class SubagentChatStateTests
             reopened.GetRequiredService<IConversationSnapshotRepository>(), null, settings, activity);
         var snapshot = JsonSerializer.SerializeToElement(await coordinator.BuildSnapshotAsync(), JsonSerializerOptions.Web);
         AssertChildSnapshot(snapshot, child);
-        var projectedOutput = Assert.Single(Assert.Single(snapshot.GetProperty("subagents").EnumerateArray())
-            .GetProperty("messages").EnumerateArray().Last().GetProperty("toolSteps").EnumerateArray()).GetProperty("outputJson").GetString();
-        Assert.Equal(outputJson, projectedOutput);
+        var hydrated = await LoadChildAsync(coordinator, turn.AssistantMessage.Id, child);
+        Assert.False(hydrated.GetProperty("transcriptDeferred").GetBoolean());
+        var header = Assert.Single(hydrated.GetProperty("messages").EnumerateArray().Last().GetProperty("toolSteps").EnumerateArray());
+        Assert.True(header.GetProperty("detailsDeferred").GetBoolean());
+        JsonElement expanded = default;
+        await coordinator.HandleAsync(new(AssistantProtocol.ProtocolVersion, "tool.details", "expand-child",
+            JsonSerializer.SerializeToElement(new { sessionId = session.Id, messageId = child.AssistantMessage.Id,
+                parentMessageId = turn.AssistantMessage.Id, agentId = child.AgentId, stepId = "large-read" })), (type, payload, _) =>
+            { Assert.Equal("tool.details", type); expanded = JsonSerializer.SerializeToElement(payload, JsonSerializerOptions.Web); return Task.CompletedTask; });
+        Assert.Equal(outputJson, expanded.GetProperty("toolStep").GetProperty("outputJson").GetString());
     }
 
     [Fact]
@@ -739,6 +746,60 @@ public sealed class SubagentChatStateTests
     }
 
     [Fact]
+    public async Task OverviewReadsNoSidecarAndSelectedTranscriptHydratesLosslessly()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var child = Child() with { ProjectionRevision = 7 };
+        child = child with { AssistantMessage = child.AssistantMessage with
+            { Content = new string('x', AssistantToolStep.MaximumStructuredJsonCharacters + 4096) } };
+        var receipt = await child.PersistAsync(environment.Directory);
+        var parent = child.AssistantMessage with { Id = Guid.NewGuid(), Content = "Hauptantwort", ToolSteps = [Receipt(child, child.ReceiptId, receipt)] };
+        using var json = JsonDocument.Parse(receipt);
+        var path = Path.Combine(environment.Directory, "Subagents", json.RootElement.GetProperty("subagentStorageKey").GetString() + ".json");
+        await using (var locked = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            var summary = Assert.Single(SubagentChatState.ReadSummaries([parent]));
+            Assert.True(summary.TranscriptDeferred);
+            Assert.Equal(parent.Id, summary.ParentMessageId);
+            Assert.Equal(7, summary.ProjectionRevision);
+            Assert.Equal(Start, summary.AssistantMessage.CreatedAt);
+            Assert.Empty(summary.AssistantMessage.Content);
+            Assert.Empty(summary.PreviousMessages ?? []);
+        }
+        var hydrated = await SubagentChatState.ReadAsync(parent, child.AgentId, environment.Directory);
+        Assert.NotNull(hydrated);
+        Assert.False(hydrated.TranscriptDeferred);
+        Assert.Equal(child.AssistantMessage.Content, hydrated.AssistantMessage.Content);
+        Assert.Equal(parent.Id, hydrated.ParentMessageId);
+        Assert.Null(await SubagentChatState.ReadAsync(parent, "another-agent", environment.Directory));
+        Assert.Null(await SubagentChatState.ReadAsync(parent with { SessionId = Guid.NewGuid() }, child.AgentId, environment.Directory));
+        using var cancellation = new CancellationTokenSource(); cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => SubagentChatState.ReadAsync(parent, child.AgentId, environment.Directory, cancellation.Token));
+    }
+
+    [Fact]
+    public async Task DisplayToolHeadersLeaveDurableAndModelTranscriptUnchanged()
+    {
+        var child = Child();
+        child = child.Apply(Event(child, 1, RunEventTypes.TextDelta, new TextDeltaEvent("Vollständige Antwort")));
+        var step = new AssistantToolStep("proof", "math.formalProof", "completed", "Ausgabe",
+            InputJson: "{\"source\":\"theorem result : True := by trivial\"}", OutputJson: "{\"stdout\":\"KernelAccepted\"}", ContentOffset: 7);
+        child = child with { AssistantMessage = child.AssistantMessage with { ToolSteps = [step] } };
+        var parent = child.AssistantMessage with { Id = Guid.NewGuid(), ToolSteps = [Receipt(child, child.ReceiptId, JsonSerializer.Serialize(child, ProtocolJson))] };
+        var restored = await SubagentChatState.ReadAsync(parent, child.AgentId);
+        Assert.NotNull(restored);
+        var projection = restored.ForDisplay();
+        var header = Assert.Single(projection.AssistantMessage.ToolSteps!);
+        Assert.True(header.DetailsDeferred);
+        Assert.Null(header.InputJson); Assert.Null(header.OutputJson);
+        Assert.Equal(7, header.ContentOffset);
+        Assert.Equal(restored.AssistantMessage.Content, projection.AssistantMessage.Content);
+        Assert.Equal(step, restored.FindToolStep(child.AssistantMessage.Id, "proof"));
+        Assert.Equal(step, Assert.Single(child.AssistantMessage.ToolSteps));
+        Assert.Null(restored.FindToolStep(Guid.NewGuid(), "proof"));
+    }
+
+    [Fact]
     public async Task NestedTranscriptAndNativeSnapshotSurviveDatabaseAndCoordinatorReopen()
     {
         await using var environment = await TestEnvironment.CreateAsync();
@@ -778,7 +839,7 @@ public sealed class SubagentChatStateTests
         var snapshot = JsonSerializer.SerializeToElement(await coordinator.BuildSnapshotAsync(), JsonSerializerOptions.Web);
         AssertChildSnapshot(snapshot, child);
         JsonElement conversation = default;
-        await coordinator.HandleAsync(new(AssistantWebBridge.ProtocolVersion, "conversation.refresh", "subagent-reopen",
+        await coordinator.HandleAsync(new(AssistantProtocol.ProtocolVersion, "conversation.refresh", "subagent-reopen",
             JsonSerializer.SerializeToElement(new { sessionId = session.Id })), (type, payload, _) =>
             { Assert.Equal("conversation.snapshot", type); conversation = JsonSerializer.SerializeToElement(payload, JsonSerializerOptions.Web); return Task.CompletedTask; });
         AssertChildSnapshot(conversation, child);
@@ -848,6 +909,8 @@ public sealed class SubagentChatStateTests
         Assert.Equal(resumed.RunId, child.GetProperty("runId").GetString());
         Assert.Equal(40, child.GetProperty("projectionRevision").GetInt64());
         Assert.Equal(at, child.GetProperty("attemptStartedAt").GetDateTimeOffset());
+        Assert.True(child.GetProperty("transcriptDeferred").GetBoolean());
+        child = await LoadChildAsync(coordinator, turn.AssistantMessage.Id, resumed);
         var projected = child.GetProperty("messages").EnumerateArray().ToArray();
         Assert.Equal(4, projected.Length);
         Assert.Equal(original.AssistantMessage.Content, projected[1].GetProperty("content").GetString());
@@ -865,12 +928,22 @@ public sealed class SubagentChatStateTests
         var messages = child.GetProperty("messages").EnumerateArray().ToArray();
         Assert.Equal(2, messages.Length);
         Assert.Equal("user", messages[0].GetProperty("role").GetString());
-        Assert.Equal(expected.UserMessage.Content, messages[0].GetProperty("content").GetString());
+        Assert.Equal(child.GetProperty("transcriptDeferred").GetBoolean() ? "" : expected.UserMessage.Content, messages[0].GetProperty("content").GetString());
         Assert.Equal("assistant", messages[1].GetProperty("role").GetString());
-        Assert.Equal(expected.AssistantMessage.Content, messages[1].GetProperty("content").GetString());
+        Assert.Equal(child.GetProperty("transcriptDeferred").GetBoolean() ? "" : expected.AssistantMessage.Content, messages[1].GetProperty("content").GetString());
         Assert.Equal("completed", messages[1].GetProperty("status").GetString());
         Assert.Equal(expected.AssistantMessage.Id, child.GetProperty("runMessageId").GetGuid());
-        Assert.Equal(expected.AgentId, Assert.Single(messages[1].GetProperty("toolSteps").EnumerateArray()).GetProperty("agentId").GetString());
+        if (child.GetProperty("transcriptDeferred").GetBoolean()) Assert.Empty(messages[1].GetProperty("toolSteps").EnumerateArray());
+        else Assert.Equal(expected.AgentId, Assert.Single(messages[1].GetProperty("toolSteps").EnumerateArray()).GetProperty("agentId").GetString());
+    }
+
+    private static async Task<JsonElement> LoadChildAsync(AssistantCoordinator coordinator, Guid parentMessageId, SubagentChatState child)
+    {
+        JsonElement hydrated = default;
+        await coordinator.HandleAsync(new(AssistantProtocol.ProtocolVersion, "subagent.load", "hydrate-child",
+            JsonSerializer.SerializeToElement(new { sessionId = child.SessionId, parentMessageId, agentId = child.AgentId, runId = child.RunId })), (type, payload, _) =>
+            { Assert.Equal("subagent.snapshot", type); hydrated = JsonSerializer.SerializeToElement(payload, JsonSerializerOptions.Web); return Task.CompletedTask; });
+        return hydrated;
     }
 
     private static SubagentRunEvent Info(string task = "Analysiere die Datei") => new("parent-run", "child-run", "child-agent", task, "local-model", RunState.Running);

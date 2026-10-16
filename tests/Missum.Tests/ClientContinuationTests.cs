@@ -1,4 +1,4 @@
-using Missum.Ai.Contracts;
+﻿using Missum.Ai.Contracts;
 using Missum.App.Services;
 using Missum.App.ViewModels;
 using Missum.Core.Contracts;
@@ -191,7 +191,7 @@ public sealed class ClientContinuationTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task ScienceContinuationUsesSubmittedModelAndKeepsCanonicalResearchProtocolAndSession(bool webSearch)
+    public async Task ScienceContinuationUsesSelectedModelWithOrdinaryProjectToolsAndSession(bool webSearch)
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var seeded = await SeedAsync(environment, MessageStatus.Cancelled, ChatMode.ClaudeScience,
@@ -211,17 +211,16 @@ public sealed class ClientContinuationTests
         var final = await continuation;
         Assert.Equal(MessageStatus.Completed, final.Status);
         var request = Assert.Single(handler.Requests);
-        Assert.Equal(webSearch ? RunMode.General : RunMode.Auto, request.Mode);
-        Assert.Equal("fixture/selected", request.PreferredGeneralModelId);
+        Assert.Equal(RunMode.Coding, request.Mode);
+        Assert.Equal("fixture/selected", request.PreferredCodingModelId);
         Assert.Equal("xhigh", request.ReasoningEffort);
-        Assert.True(request.DeepResearch);
+        Assert.False(request.DeepResearch);
+        Assert.Null(request.ResearchOptions);
         Assert.Contains("visual-tools", request.ClientCapabilities!);
         Assert.Contains("media.inspect", request.AllowedServerTools!);
         Assert.Contains("media.analyze", request.AllowedServerTools!);
         Assert.Equal(seeded.Session.Id.ToString("D"), request.SessionId);
-        Assert.Equal("research-" + seeded.Session.Id.ToString("N"), request.ResearchOptions!.ProjectId);
-        Assert.Equal(2L, request.ResearchOptions.ProtocolVersion);
-        Assert.Equal(ResearchVerificationLevel.MultiPath, request.ResearchOptions.VerificationLevel);
+        Assert.DoesNotContain(request.ClientCapabilities!, capability => capability.StartsWith("research.", StringComparison.Ordinal));
         Assert.Equal(ChatMode.ClaudeScience, (await environment.Get<IChatRepository>().GetSessionAsync(seeded.Session.Id))!.ChatMode);
         Assert.Equal(seeded.Message.Id, final.Id);
         Assert.StartsWith(Partial, final.Content);
@@ -489,10 +488,11 @@ public sealed class ClientContinuationTests
             PromptTriggerAction.WebSearch);
         var handler = new ContinuationHandler(RunState.Cancelled);
         using var host = await Host.CreateAsync(environment, handler, includeScientificRepository: true);
+        var frozenWorkspace = (await environment.Get<IChatRepository>().GetSessionAsync(seeded.Session.Id))!.CodingWorkspacePath;
         var pending = await environment.Get<IMissumAiRunRepository>().BeginContinuationAttemptAsync(new(
             Guid.NewGuid(), seeded.Session.Id, seeded.Message.Id, PromptTriggerAction.WebSearch,
             "legacy-frozen-create", null, 0, "queued", "fixture/model", null,
-            DateTimeOffset.UtcNow, DateTimeOffset.UtcNow));
+            DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, WorkspacePath: frozenWorkspace));
         await environment.Get<IChatRepository>().UpdateMessageAsync(seeded.Message.Id, Partial, MessageStatus.Interrupted);
         var frozen = new RunRequest(MissumAiProtocol.Version, RunMode.General,
             [new("user", [new("text", Text: "Prüfe den gespeicherten fachlichen Stand.")])],
@@ -617,11 +617,11 @@ public sealed class ClientContinuationTests
         var chats = environment.Get<IChatRepository>();
         var session = await chats.CreateSessionAsync("Unveränderter Projekttitel", mode);
         string? workspace = null;
-        if (mode == ChatMode.Coding)
+        if (mode is ChatMode.Coding or ChatMode.ClaudeScience)
         {
             workspace = Directory.CreateDirectory(Path.Combine(environment.Directory, "original-project")).FullName;
             await File.WriteAllTextAsync(Path.Combine(workspace, "source.txt"), "original source\n");
-            await chats.SetCodingWorkspacePathAsync(session.Id, workspace, activateCoding: true);
+            await chats.SetCodingWorkspacePathAsync(session.Id, workspace, activateCoding: mode == ChatMode.Coding);
         }
         var turn = await chats.AddTurnAsync(session.Id, "Leite die Energiegleichung vollständig her.");
         await chats.UpdateMessageAsync(turn.AssistantMessage.Id, Partial, status);

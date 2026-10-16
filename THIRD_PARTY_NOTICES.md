@@ -22,7 +22,7 @@ Missum includes or depends on the following third-party components. Exact versio
 | Supertone/supertonic-3 | `3cadd1ee6394adea1bd021217a0e650ede09a323` | OpenRAIL-M |
 | xUnit.net and test runner | 2.9.3 / 3.1.5 | Apache-2.0 |
 
-KaTeX is bundled locally under `src/Missum.App/Assets/Web/vendor/katex/0.16.10`; its unmodified MIT license text is retained beside the distribution. The assistant web UI does not load libraries from a CDN. The native WinUI chat uses CSharpMath and SkiaSharp for LaTeX typesetting; their license notices are bundled in `Assets/Notices`.
+KaTeX is bundled locally under `src/Missum.App/Assets/DocumentRendering/vendor/katex/0.16.10`; its unmodified MIT license text is retained beside the distribution. The standalone PDF renderer loads these local resources without a CDN. The native WinUI chat uses CSharpMath and SkiaSharp for LaTeX typesetting; their license notices are bundled in `Assets/Notices`.
 
 The pinned Supertonic-3 assets are installed offline before deployment. No model files are fetched while a speech worker is running.
 

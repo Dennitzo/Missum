@@ -7,6 +7,51 @@ import session_cache
 from session_cache import NativeSessionCache
 
 
+class PreparationProgressTests(unittest.TestCase):
+    def setUp(self):
+        self.now = 0
+        self.cancelled = False
+        self.progress = session_cache.PreparationProgress(1_000_000,
+            lambda: self.cancelled, clock=lambda: self.now)
+
+    def test_advancing_tokens_allow_prefill_beyond_former_five_minute_deadline(self):
+        for index in range(1, 20):
+            self.now = index * 200
+            self.progress.observe({"prompt_progress": {"processed": index * 512}})
+        self.progress.check()
+        self.assertGreater(self.now, 300)
+
+    def test_heartbeat_or_repeated_count_does_not_extend_idle_deadline(self):
+        self.progress.observe({"prompt_progress": {"processed": 512}})
+        self.now = 250
+        self.progress.observe({"prompt_progress": {"processed": 512, "time_ms": 250000}})
+        self.progress.observe({"content": "", "tokens_evaluated": 1_000_000})
+        self.now = 300
+        with self.assertRaisesRegex(session_cache.PreparationTimeoutError, "no token progress"):
+            self.progress.check()
+
+    def test_invalid_progress_does_not_extend_idle_deadline(self):
+        self.now = 250
+        self.progress.observe({"prompt_progress": {"processed": 1_000_001}})
+        self.progress.observe({"prompt_progress": {"processed": True}})
+        self.now = 300
+        with self.assertRaises(session_cache.PreparationTimeoutError):
+            self.progress.check()
+
+    def test_continuous_progress_still_has_two_hour_ceiling(self):
+        for index in range(1, 36):
+            self.now = index * 200
+            self.progress.observe({"prompt_progress": {"processed": index * 512}})
+        self.now = session_cache.PREPARATION_MAXIMUM_SECONDS
+        with self.assertRaisesRegex(session_cache.PreparationTimeoutError, "two-hour"):
+            self.progress.check()
+
+    def test_caller_cancellation_is_distinct_from_timeout(self):
+        self.cancelled = True
+        with self.assertRaises(session_cache.PreparationCancelledError):
+            self.progress.check()
+
+
 class SessionCacheTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()

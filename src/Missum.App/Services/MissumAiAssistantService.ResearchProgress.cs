@@ -1,4 +1,4 @@
-using System.Security.Cryptography;
+﻿using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Missum.Ai.Contracts;
@@ -25,7 +25,8 @@ public sealed partial class MissumAiAssistantService
 
     private async Task EndResearchProgressAsync(MissumAiRunRecord run, string status)
     {
-        if (scientificResearch is null) return;
+        if (scientificResearch is null
+            || (await GetExecutionSessionAsync(run.SessionId, CancellationToken.None).ConfigureAwait(false))?.ChatMode == ChatMode.ClaudeScience) return;
         try
         {
             await new ScientificResearchProgressStore(scientificResearch, runs)
@@ -41,7 +42,8 @@ public sealed partial class MissumAiAssistantService
     private async Task PersistSubagentResearchProgressAsync(MissumAiRunRecord run, RunEvent outer,
         SubagentChatState child, CancellationToken token)
     {
-        if (scientificResearch is null) return;
+        if (scientificResearch is null
+            || (await GetExecutionSessionAsync(run.SessionId, CancellationToken.None).ConfigureAwait(false))?.ChatMode == ChatMode.ClaudeScience) return;
         try
         {
             await new ScientificResearchProgressStore(scientificResearch, runs)

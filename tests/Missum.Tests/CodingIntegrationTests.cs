@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using Missum.Ai.Contracts;
 using Missum.App.Services;
 using Missum.App.Pages;
@@ -165,7 +165,7 @@ public sealed class CodingIntegrationTests
         Assert.Equal("coding", snapshot.GetProperty("chatMode").GetString());
         Assert.True(snapshot.GetProperty("codingWorkspaceRequired").GetBoolean());
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => coordinator.HandleAsync(new(
-            AssistantWebBridge.ProtocolVersion,
+            AssistantProtocol.ProtocolVersion,
             "chat.send",
             "missing-workspace",
             JsonSerializer.SerializeToElement(new
@@ -193,6 +193,8 @@ public sealed class CodingIntegrationTests
             await settings.UpdateAsync(current => current with
             {
                 ActiveSessionId = session.Id,
+                ActiveCodingSessionId = session.Id,
+                SelectedChatMode = ChatMode.Coding,
                 SelectedModel = codingModel,
                 SelectedCodingModel = codingModel,
             });
@@ -201,8 +203,8 @@ public sealed class CodingIntegrationTests
             Assert.Equal(ModelContextProfiles.Qwen38Maximum, snapshot.GetProperty("contextLimit").GetInt32());
             Assert.Equal(codingModel, snapshot.GetProperty("model").GetString());
             contextUsed = snapshot.GetProperty("contextUsed").GetInt32();
-            Assert.Equal(("Prüfe die Projektdateien.".Length + 3) / 4, contextUsed);
-            Assert.Contains("Geschätzter Coding-Kontext", snapshot.GetProperty("contextNotice").GetString(), StringComparison.Ordinal);
+            Assert.Equal(0, contextUsed);
+            Assert.Contains("beim AI-Lauf ermittelt", snapshot.GetProperty("contextNotice").GetString(), StringComparison.Ordinal);
         }
 
         using var restartedSettings = new SettingsCoordinator(store);
@@ -215,7 +217,7 @@ public sealed class CodingIntegrationTests
 
         JsonElement? general = null;
         await coordinator.HandleAsync(new(
-            AssistantWebBridge.ProtocolVersion,
+            AssistantProtocol.ProtocolVersion,
             "mode.switch",
             "general",
             JsonSerializer.SerializeToElement(new { chatMode = "general" })), (type, payload, _) =>
@@ -249,7 +251,7 @@ public sealed class CodingIntegrationTests
                  { (second.Id, secondRoot), (first.Id, firstRoot), (unbound.Id, null), (first.Id, firstRoot) })
         {
             var envelope = new WebBridgeEnvelope(
-                AssistantWebBridge.ProtocolVersion, "session.open", Guid.NewGuid().ToString("D"),
+                AssistantProtocol.ProtocolVersion, "session.open", Guid.NewGuid().ToString("D"),
                 JsonSerializer.SerializeToElement(new { sessionId }));
             JsonElement? snapshot = null;
             await coordinator.HandleAsync(envelope, (type, payload, _) =>
@@ -277,7 +279,7 @@ public sealed class CodingIntegrationTests
 
         JsonElement? snapshot = null;
         await coordinator.HandleAsync(new(
-            AssistantWebBridge.ProtocolVersion,
+            AssistantProtocol.ProtocolVersion,
             "session.open",
             "open-coding",
             JsonSerializer.SerializeToElement(new { sessionId = first.Id })), (type, payload, _) =>
@@ -394,52 +396,6 @@ public sealed class CodingIntegrationTests
         Assert.Null(await chats.GetSessionAsync(session.Id));
     }
 
-    [Fact]
-    public async Task WorkspaceCommitHoldsTheChatGateUntilTheAtomicSaveFinishes()
-    {
-        using var gate = new SemaphoreSlim(1, 1);
-        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var commit = AssistantPage.CommitCodingWorkspaceAsync(gate, static () => false, async token =>
-        {
-            entered.TrySetResult();
-            await release.Task.WaitAsync(token);
-        });
-        try
-        {
-            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            Assert.False(await gate.WaitAsync(0));
-            Assert.False(commit.IsCompleted);
-        }
-        finally
-        {
-            release.TrySetResult();
-            await commit;
-        }
-        Assert.Equal(1, gate.CurrentCount);
-    }
-
-    [Fact]
-    public async Task WorkspaceCommitRejectsPendingOrActiveRunsAndAlwaysReleasesItsGate()
-    {
-        using var gate = new SemaphoreSlim(1, 1);
-        var committed = false;
-        Task Commit(CancellationToken _) { committed = true; return Task.CompletedTask; }
-        await gate.WaitAsync();
-        try
-        {
-            await Assert.ThrowsAsync<InvalidOperationException>(() => AssistantPage.CommitCodingWorkspaceAsync(gate, static () => false, Commit));
-            Assert.Equal(0, gate.CurrentCount);
-        }
-        finally { gate.Release(); }
-        await Assert.ThrowsAsync<InvalidOperationException>(() => AssistantPage.CommitCodingWorkspaceAsync(gate, static () => true, Commit));
-        Assert.False(committed);
-        Assert.Equal(1, gate.CurrentCount);
-        await Assert.ThrowsAsync<IOException>(() => AssistantPage.CommitCodingWorkspaceAsync(gate, static () => false,
-            static _ => throw new IOException("injected save failure")));
-        Assert.Equal(1, gate.CurrentCount);
-    }
-
     [Theory]
     [InlineData("coding.list", ToolRiskClass.ReadOnly)]
     [InlineData("coding.search", ToolRiskClass.ReadOnly)]
@@ -481,7 +437,7 @@ public sealed class CodingIntegrationTests
             Arguments = JsonSerializer.SerializeToElement(new { projectId = "proof", path = "candidate.py", content = "print(1)" }),
         };
         LocalToolBroker.ValidateProposal(symbolic);
-        LocalToolBroker.ValidateProposal(write);
+        Assert.Throws<InvalidDataException>(() => LocalToolBroker.ValidateProposal(write));
         Assert.Throws<InvalidDataException>(() => LocalToolBroker.ValidateProposal(symbolic with { RiskClass = ToolRiskClass.ReadOnly }));
         Assert.Throws<InvalidDataException>(() => LocalToolBroker.ValidateProposal(write with { RiskClass = ToolRiskClass.Process }));
         Assert.Throws<ArgumentException>(() => LocalToolBroker.ValidateProposal(symbolic with
@@ -583,7 +539,7 @@ public sealed class CodingIntegrationTests
             .GetProperty("activeSessionId").GetGuid();
         var requestId = Guid.NewGuid().ToString("D");
         var envelope = new WebBridgeEnvelope(
-            AssistantWebBridge.ProtocolVersion,
+            AssistantProtocol.ProtocolVersion,
             "session.tool",
             requestId,
             JsonSerializer.SerializeToElement(new { action, sessionId }));

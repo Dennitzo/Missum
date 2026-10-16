@@ -75,7 +75,7 @@ public sealed class CodingToolStepSettingsTests
         Assert.Equal(expanded, snapshot.GetProperty("codingToolStepsExpanded").GetBoolean());
         JsonElement? refreshed = null;
         await coordinator.HandleAsync(new WebBridgeEnvelope(
-            AssistantWebBridge.ProtocolVersion, "conversation.refresh", "expansion-refresh",
+            AssistantProtocol.ProtocolVersion, "conversation.refresh", "expansion-refresh",
             JsonSerializer.SerializeToElement(new { sessionId = snapshot.GetProperty("activeSessionId").GetGuid() })),
             (type, payload, requestId) =>
             {

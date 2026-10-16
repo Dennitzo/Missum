@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using Missum.App.Controls;
 using Missum.App.Services;
 using Microsoft.UI.Xaml;
@@ -39,7 +39,8 @@ public sealed partial class NativeAssistantPage
         var parentMessage = Guid.NewGuid().ToString();
         var parentRun = Guid.NewGuid();
         var agentId = "native-subagent-smoke:" + Guid.NewGuid().ToString("N");
-        var childMessage = Guid.NewGuid().ToString();
+        var childMessage = "00000000-0000-0000-0000-000000000001";
+        const string childAssignment = "ffffffff-ffff-ffff-ffff-ffffffffffff";
         var childRun = Guid.NewGuid();
         var now = DateTimeOffset.UtcNow;
         var child = JsonSerializer.SerializeToElement(new
@@ -52,7 +53,7 @@ public sealed partial class NativeAssistantPage
             generationState = "generating", generatedTokens = 12, generationUpdatedAt = now,
             messages = new object[]
             {
-                new { id = Guid.NewGuid(), sessionId = session, role = "user", status = "completed", content = "Analysiere die Datei und berechne $x^2$.", createdAt = now.AddSeconds(-3), updatedAt = now.AddSeconds(-3) },
+                new { id = childAssignment, sessionId = session, role = "user", status = "completed", content = "Analysiere die Datei und berechne $x^2$.", createdAt = now.AddSeconds(-2), updatedAt = now.AddSeconds(-2) },
                 new { id = childMessage, sessionId = session, role = "assistant", status = "streaming", content = "Das Ergebnis ist $x^2=4$.\n\n```python\nresult = 2 ** 2\n```", createdAt = now.AddSeconds(-2), updatedAt = now,
                     toolSteps = new object[]
                     {
@@ -115,12 +116,11 @@ public sealed partial class NativeAssistantPage
                 if (_mode != ownerChatMode || _sessionTabs.All(tab => tab.Id != session || tab.Mode != ownerChatMode))
                     throw new InvalidOperationException("Subagent navigation changed the owner's chat mode or session tab.");
                 if (ownerChatMode == "claudescience"
-                    && (_researchTabButton is not { } publicationTab || _simulationTabButton is not { } simulationTab
-                        || publicationTab.Parent != SessionTabsPanel || simulationTab.Parent != SessionTabsPanel
+                    && (_researchTabButton is not { } publicationTab
+                        || publicationTab.Parent != SessionTabsPanel
                         || SessionTabsPanel.Children.IndexOf(publicationTab) != 1
-                        || SessionTabsPanel.Children.IndexOf(simulationTab) != 2
-                        || (visibleChild is not null && SessionTabsPanel.Children.IndexOf(visibleChild.Container) < 3)))
-                    throw new InvalidOperationException("Claude Science publication and simulation tabs must remain alongside the child's native chat tab.");
+                        || (visibleChild is not null && SessionTabsPanel.Children.IndexOf(visibleChild.Container) < 2)))
+                    throw new InvalidOperationException("Claude Science publication tab must remain alongside the child's native chat tab.");
             }
             void VerifyParentStillStreaming()
             {
@@ -273,6 +273,10 @@ public sealed partial class NativeAssistantPage
                 || !_messageBlocks[childMessage].ContainsKey("tool:child-read")
                 || PromptTimeline.Visibility != Visibility.Visible || _promptTimelineMarkers.Count != 1)
                 throw new InvalidOperationException("The child tab did not reuse the native message, tool and timeline renderer.");
+            if (!ReferenceEquals(MessagesPanel.Children[0], _messageViews[childAssignment].View)
+                || !ReferenceEquals(MessagesPanel.Children[1], _messageViews[childMessage].View)
+                || _messageActionViews[childAssignment].IsAssistant)
+                throw new InvalidOperationException("The main-agent assignment must precede the child answer and keep its user-message role, including identical timestamps.");
             AssertChatCursorAbsent(MessageBody(_messageViews[childMessage].View));
             void VerifyChildModel(string effort)
             {
@@ -733,7 +737,8 @@ public sealed partial class NativeAssistantPage
             OpenSourcesTab(); UpdateLayout();
             if (_subagentOverviewHost.Visibility != Visibility.Collapsed || _activeSubagentOverviewSession is not null
                 || _sourcesHost.Content is not ScrollViewer { Content: StackPanel sourceBody }
-                || _sessionSources[owner].Length < 5 || sourceBody.Children.Count != _sessionSources[owner].Length + 1)
+                || _sessionSources[owner].Length < 5
+                || sourceBody.Children.OfType<StackPanel>().Count() != _sessionSources[owner].Length)
                 throw new InvalidOperationException("The complete source view must retain every action and replace the subagent view.");
         }
         finally
