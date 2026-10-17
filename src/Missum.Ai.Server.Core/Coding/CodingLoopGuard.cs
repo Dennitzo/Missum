@@ -18,8 +18,13 @@ public static class CodingLoopGuard
     private static readonly string[] ReceiptNestedFields = ["result", "evidence"];
     public static string BoundToolResult(string value, string? toolName = null)
     {
-        // Fresh file reads must reach context planning intact, including JSON escaping.
-        if (toolName == "coding.read") return value;
+        // Fresh file reads and delegated results must reach context planning intact,
+        // including JSON escaping. A finished agent's report is the parent's only
+        // complete result, not a disposable console preview. This also covers a
+        // completed resume returned by subagent.spawn. The normal model-context
+        // planner still handles actual context pressure after this handoff.
+        if (toolName is "coding.read" or CodingDeepResearchPipeline.ToolName
+            or SubagentToolNames.Wait or SubagentToolNames.Spawn) return value;
         var maximum = toolName == "coding.readOutput" ? 256_000 : MaximumToolResultCharacters;
         if (value.Length <= maximum) return value;
         var metadataBudget = 6000;

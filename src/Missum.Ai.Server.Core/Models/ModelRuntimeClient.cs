@@ -329,6 +329,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
         var queueMilliseconds = turnClock.Elapsed.TotalMilliseconds;
         string? preparedInstanceId = null;
         int? evaluatedPromptTokens = null;
+        var inferenceIncomplete = false;
         try
         {
             // The preset chooses the model's maximum that fits. A request limit is
@@ -418,7 +419,9 @@ public sealed partial class ModelRuntimeClient : IDisposable
                 structuredToolOnly,
                 context,
                 maximumOutputTokens,
-                timeout.Token).ConfigureAwait(false);
+                timeout.Token,
+                inferenceDispatched: () => inferenceIncomplete = true).ConfigureAwait(false);
+            inferenceIncomplete = false;
             if (nativeProgress is not null)
             {
                 await nativeProgress(
@@ -456,9 +459,11 @@ public sealed partial class ModelRuntimeClient : IDisposable
         {
             // Dispose/cancel only this inference request. Preserve its native
             // prefix just as for a deliberate interruption, without replaying it.
-            var exactTail = await SaveInterruptedSessionCacheAsync(preparedInstanceId, sessionCacheKey,
-                modelId.Contains("deepseek-v4", StringComparison.OrdinalIgnoreCase) ? evaluatedPromptTokens : null).ConfigureAwait(false);
-            if (exactTail is not null && nativeProgress is not null)
+            var exactTail = inferenceIncomplete
+                ? await SaveInterruptedSessionCacheAsync(preparedInstanceId, sessionCacheKey, evaluatedPromptTokens).ConfigureAwait(false)
+                : null;
+            if (modelId.Contains("deepseek-v4", StringComparison.OrdinalIgnoreCase)
+                && exactTail is not null && nativeProgress is not null)
                 await nativeProgress(new ModelRuntimeProgress("interruptedNativeTail", ContentDelta: exactTail,
                     ReasoningDelta: ResolveReasoningEffort(modelId, modelRole, reasoningEffort) == "none" ? "off" : "on"),
                     CancellationToken.None).ConfigureAwait(false);
@@ -466,9 +471,11 @@ public sealed partial class ModelRuntimeClient : IDisposable
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            var exactTail = await SaveInterruptedSessionCacheAsync(preparedInstanceId, sessionCacheKey,
-                modelId.Contains("deepseek-v4", StringComparison.OrdinalIgnoreCase) ? evaluatedPromptTokens : null).ConfigureAwait(false);
-            if (exactTail is not null && nativeProgress is not null)
+            var exactTail = inferenceIncomplete
+                ? await SaveInterruptedSessionCacheAsync(preparedInstanceId, sessionCacheKey, evaluatedPromptTokens).ConfigureAwait(false)
+                : null;
+            if (modelId.Contains("deepseek-v4", StringComparison.OrdinalIgnoreCase)
+                && exactTail is not null && nativeProgress is not null)
                 await nativeProgress(new ModelRuntimeProgress("interruptedNativeTail", ContentDelta: exactTail,
                     ReasoningDelta: ResolveReasoningEffort(modelId, modelRole, reasoningEffort) == "none" ? "off" : "on"),
                     CancellationToken.None).ConfigureAwait(false);
@@ -476,7 +483,16 @@ public sealed partial class ModelRuntimeClient : IDisposable
         }
         catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
         {
+            if (inferenceIncomplete)
+                await SaveInterruptedSessionCacheAsync(preparedInstanceId, sessionCacheKey, evaluatedPromptTokens).ConfigureAwait(false);
             throw new ModelGenerationTerminatedException("model_stall_timeout", exception);
+        }
+        catch (Exception exception) when (inferenceIncomplete && exception is (HttpRequestException or JsonException or IOException))
+        {
+            // Terminal run handling flushes the slot. Mark an incomplete native
+            // prompt first so that flush cannot overwrite a larger good cache.
+            await SaveInterruptedSessionCacheAsync(preparedInstanceId, sessionCacheKey, evaluatedPromptTokens).ConfigureAwait(false);
+            throw;
         }
         finally
         {
@@ -860,7 +876,8 @@ public sealed partial class ModelRuntimeClient : IDisposable
         int contextLength,
         int? maximumOutputTokens,
         CancellationToken cancellationToken,
-        string? completionEndpoint = null)
+        string? completionEndpoint = null,
+        Action? inferenceDispatched = null)
     {
         Exception? last = null;
         string? protocolRepairTool = null;
@@ -880,6 +897,8 @@ public sealed partial class ModelRuntimeClient : IDisposable
                 finally { tokenCountingMilliseconds += countingClock.Elapsed.TotalMilliseconds; }
                 requestPhase = "generation";
                 var requestClock = Stopwatch.StartNew();
+                cancellationToken.ThrowIfCancellationRequested();
+                inferenceDispatched?.Invoke();
                 using var response = await SendJsonAsync(
                     HttpMethod.Post,
                     completionEndpoint ?? "v1/chat/completions",

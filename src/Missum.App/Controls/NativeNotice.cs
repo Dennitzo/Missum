@@ -57,7 +57,7 @@ public static class NativeNotice
         private readonly InfoBar _notice;
         private readonly Button _copy = new()
         {
-            Content = new FontIcon { Glyph = "\uE8C8", FontSize = 14 },
+            Content = new FontIcon { Glyph = "\uE8C8", FontSize = 14, Foreground = NativeIconPalette.BrushFor("link") },
             Padding = new Thickness(8), MinWidth = 32, MinHeight = 32,
             VerticalAlignment = VerticalAlignment.Center,
         };

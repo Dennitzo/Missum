@@ -260,6 +260,7 @@ public sealed partial class MissumAiAssistantService(
                     ?? assistant;
                 await chats.UpdateMessageAsync(current.Id, current.Content, MessageStatus.Cancelled, cancellationToken: CancellationToken.None).ConfigureAwait(false);
                 var cancelled = current with { Status = MessageStatus.Cancelled, UpdatedAt = DateTimeOffset.UtcNow };
+                await CaptureSharedProjectContextAsync(session, cancelled).ConfigureAwait(false);
                 await update(new(MissumAiAssistantUpdateKind.Cancelled, cancelled, Status: "Abgebrochen")).ConfigureAwait(false);
                 return cancelled;
             }
@@ -273,6 +274,7 @@ public sealed partial class MissumAiAssistantService(
                 await chats.UpdateMessageAsync(assistant.Id, visible, MessageStatus.Failed, exception.Message, CancellationToken.None).ConfigureAwait(false);
                 var failed = await chats.GetMessageAsync(assistant.Id, CancellationToken.None).ConfigureAwait(false)
                     ?? current with { Content = visible, Status = MessageStatus.Failed, Error = exception.Message };
+                await CaptureSharedProjectContextAsync(session, failed).ConfigureAwait(false);
                 await update(new(MissumAiAssistantUpdateKind.Failed, failed, Error: exception.Message, Status: "Fehlgeschlagen")).ConfigureAwait(false);
                 return failed;
             }
@@ -315,6 +317,7 @@ public sealed partial class MissumAiAssistantService(
                     await runs.UpdateAsync(run.Id, run.ServerRunId, run.LastEventId, "cancelled",
                         run.SelectedModel, "client.run_already_cancelled", CancellationToken.None).ConfigureAwait(false);
                     await CancelPersistedServerRunsAsync([run.ServerRunId], cancellationToken: _activeCancellation.Token).ConfigureAwait(false);
+                    await CaptureSharedProjectContextAsync(message).ConfigureAwait(false);
                     continue;
                 }
                 _activeServerRunId = run.ServerRunId;
@@ -336,6 +339,7 @@ public sealed partial class MissumAiAssistantService(
                             CancellationToken.None).ConfigureAwait(false);
                         await CancelPersistedServerRunsAsync([run.ServerRunId], cancellationToken: _activeCancellation.Token).ConfigureAwait(false);
                         var failed = await chats.GetMessageAsync(message.Id, CancellationToken.None).ConfigureAwait(false) ?? message;
+                        await CaptureSharedProjectContextAsync(failed).ConfigureAwait(false);
                         await update(new(MissumAiAssistantUpdateKind.Failed, failed, Error: exception.Message, Status: "Projektordner fehlt")).ConfigureAwait(false);
                         continue;
                     }
@@ -355,6 +359,7 @@ public sealed partial class MissumAiAssistantService(
                     var current = await chats.GetMessageAsync(message.Id, CancellationToken.None).ConfigureAwait(false) ?? message;
                     await chats.UpdateMessageAsync(current.Id, current.Content, MessageStatus.Cancelled,
                         cancellationToken: CancellationToken.None).ConfigureAwait(false);
+                    await CaptureSharedProjectContextAsync(current with { Status = MessageStatus.Cancelled }).ConfigureAwait(false);
                     await update(new(MissumAiAssistantUpdateKind.Cancelled,
                         current with { Status = MessageStatus.Cancelled, UpdatedAt = DateTimeOffset.UtcNow }, Status: "Abgebrochen")).ConfigureAwait(false);
                 }
@@ -365,6 +370,7 @@ public sealed partial class MissumAiAssistantService(
                     await chats.UpdateMessageAsync(current.Id, visible, MessageStatus.Failed, exception.Message,
                         CancellationToken.None).ConfigureAwait(false);
                     var failed = await chats.GetMessageAsync(current.Id, CancellationToken.None).ConfigureAwait(false) ?? current;
+                    await CaptureSharedProjectContextAsync(failed).ConfigureAwait(false);
                     await update(new(MissumAiAssistantUpdateKind.Failed, failed, Error: exception.Message, Status: "Fehlgeschlagen")).ConfigureAwait(false);
                 }
             }
@@ -399,7 +405,7 @@ public sealed partial class MissumAiAssistantService(
             var serverRunIds = await StopPersistedRunsLocallyAsync(
                 runs,
                 chats,
-                cancellationToken: cancellationToken).ConfigureAwait(false);
+                cancellationToken: cancellationToken, capture: CaptureSharedProjectContextAsync).ConfigureAwait(false);
             _startupServerRunIds.UnionWith(serverRunIds);
             foreach (var serverRunId in serverRunIds)
                 if (await runs.GetByServerRunIdAsync(serverRunId, cancellationToken).ConfigureAwait(false) is { } stoppedRun)
@@ -439,6 +445,7 @@ public sealed partial class MissumAiAssistantService(
         IMissumAiRunRepository runRepository,
         IChatRepository chatRepository,
         bool applicationShutdown = false,
+        Func<ChatMessage, Task>? capture = null,
         CancellationToken cancellationToken = default)
     {
         var staleRuns = await runRepository.ListResumableAsync(cancellationToken).ConfigureAwait(false);
@@ -471,6 +478,8 @@ public sealed partial class MissumAiAssistantService(
                     MessageStatus.Cancelled,
                     applicationShutdown ? "Der AI-Lauf wurde beim Beenden von Missum gestoppt." : "Der AI-Lauf wurde beim Clientstart gestoppt.",
                     CancellationToken.None).ConfigureAwait(false);
+                if (capture is not null && await chatRepository.GetMessageTextAsync(message.Id, CancellationToken.None).ConfigureAwait(false) is { } committed)
+                    await capture(committed).ConfigureAwait(false);
             }
 
             if (!string.IsNullOrWhiteSpace(run.ServerRunId))

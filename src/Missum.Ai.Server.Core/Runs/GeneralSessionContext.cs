@@ -33,13 +33,13 @@ internal static class GeneralSessionContext
         var saved = previous.Checkpoint.Messages;
         if (saved.Count == 0 || (!previous.WasInterrupted
             && (saved[^1].Role != "assistant" || saved[^1].ToolCalls is { Count: > 0 }))) return false;
-        // Keep the current policy. Everything after the previous system prefix
-        // is chronological provider history, including reasoning and tool results.
-        var continued = initial.Where(message => message.Role == "system").ToList();
+        // This is an already evaluated branch. Its exact policy ordering is part
+        // of the native token prefix, including when the current policy builder
+        // would produce equivalent sections in a different order.
+        var continued = saved.TakeWhile(message => message.Role == "system").ToList();
         var pending = new HashSet<string>(StringComparer.Ordinal);
         foreach (var message in saved.SkipWhile(message => message.Role == "system"))
         {
-            if (message.Role != "tool") ClosePending();
             continued.Add(message);
             foreach (var call in message.ToolCalls ?? []) pending.Add(call.Id);
             if (message.Role == "tool" && message.ToolCallId is { } id) pending.Remove(id);

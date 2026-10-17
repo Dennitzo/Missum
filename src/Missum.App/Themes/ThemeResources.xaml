@@ -72,6 +72,7 @@
   <SolidColorBrush x:Key="MissumDiffAddedBackgroundBrush" Color="#133325" />
   <SolidColorBrush x:Key="MissumDiffRemovedBackgroundBrush" Color="#3B1D1A" />
   <SolidColorBrush x:Key="MissumAccentSubtleBrush" Color="{ThemeResource MissumAccentColor}" Opacity="0.14" />
+  <SolidColorBrush x:Key="MissumSelectionBrush" Color="{ThemeResource MissumLayerStrongColor}" />
   <SolidColorBrush x:Key="MissumAccentTextBrush" Color="{ThemeResource MissumAccentTextColor}" />
   <SolidColorBrush x:Key="MissumSuccessBrush" Color="{ThemeResource MissumSuccessColor}" />
   <SolidColorBrush x:Key="MissumWarningBrush" Color="{ThemeResource MissumWarningColor}" />
@@ -97,6 +98,37 @@
   <SolidColorBrush x:Key="ToggleSwitchKnobFillOnPressed" Color="{ThemeResource MissumAccentTextColor}" />
   <SolidColorBrush x:Key="ToggleSwitchKnobFillOnDisabled" Color="{ThemeResource MissumAccentTextColor}" Opacity="0.55" />
   <SolidColorBrush x:Key="NavigationViewSelectionIndicatorForeground" Color="{ThemeResource MissumAccentColor}" />
+
+  <!-- Framework-owned glyphs use the same retained brushes as app icons. -->
+  <StaticResource x:Key="TextControlButtonForeground" ResourceKey="MissumIconNavigationBrush" />
+  <StaticResource x:Key="TextControlButtonForegroundPointerOver" ResourceKey="MissumIconNavigationBrush" />
+  <StaticResource x:Key="TextControlButtonForegroundPressed" ResourceKey="MissumIconNavigationBrush" />
+  <StaticResource x:Key="AppBarButtonForeground" ResourceKey="MissumIconNavigationBrush" />
+  <StaticResource x:Key="AppBarButtonForegroundPointerOver" ResourceKey="MissumIconNavigationBrush" />
+  <StaticResource x:Key="AppBarButtonForegroundPressed" ResourceKey="MissumIconNavigationBrush" />
+  <StaticResource x:Key="ScrollBarButtonArrowForeground" ResourceKey="MissumIconNavigationBrush" />
+  <StaticResource x:Key="ScrollBarButtonArrowForegroundPointerOver" ResourceKey="MissumIconNavigationBrush" />
+  <StaticResource x:Key="ScrollBarButtonArrowForegroundPressed" ResourceKey="MissumIconNavigationBrush" />
+  <StaticResource x:Key="NavigationViewButtonForegroundPointerOver" ResourceKey="MissumIconNavigationBrush" />
+  <StaticResource x:Key="NavigationViewButtonForegroundPressed" ResourceKey="MissumIconNavigationBrush" />
+  <StaticResource x:Key="ToggleMenuFlyoutItemCheckGlyphForeground" ResourceKey="MissumIconNavigationBrush" />
+  <StaticResource x:Key="ToggleMenuFlyoutItemCheckGlyphForegroundPointerOver" ResourceKey="MissumIconNavigationBrush" />
+  <StaticResource x:Key="ToggleMenuFlyoutItemCheckGlyphForegroundPressed" ResourceKey="MissumIconNavigationBrush" />
+  <StaticResource x:Key="ExpanderChevronForeground" ResourceKey="MissumIconNavigationBrush" />
+  <StaticResource x:Key="ExpanderChevronPointerOverForeground" ResourceKey="MissumIconNavigationBrush" />
+  <StaticResource x:Key="ExpanderChevronPressedForeground" ResourceKey="MissumIconNavigationBrush" />
+  <StaticResource x:Key="ComboBoxDropDownGlyphForeground" ResourceKey="MissumIconNavigationBrush" />
+  <StaticResource x:Key="ComboBoxEditableDropDownGlyphForeground" ResourceKey="MissumIconNavigationBrush" />
+  <StaticResource x:Key="ComboBoxDropDownGlyphForegroundFocused" ResourceKey="MissumIconNavigationBrush" />
+  <StaticResource x:Key="ComboBoxDropDownGlyphForegroundFocusedPressed" ResourceKey="MissumIconNavigationBrush" />
+  <StaticResource x:Key="InfoBarErrorSeverityIconBackground" ResourceKey="MissumIconDangerBrush" />
+  <StaticResource x:Key="InfoBarWarningSeverityIconBackground" ResourceKey="MissumIconWarningBrush" />
+  <StaticResource x:Key="InfoBarSuccessSeverityIconBackground" ResourceKey="MissumIconSuccessBrush" />
+  <StaticResource x:Key="InfoBarInformationalSeverityIconBackground" ResourceKey="MissumIconNavigationBrush" />
+  <StaticResource x:Key="InfoBarErrorSeverityIconForeground" ResourceKey="MissumIconDangerForegroundBrush" />
+  <StaticResource x:Key="InfoBarWarningSeverityIconForeground" ResourceKey="MissumIconWarningForegroundBrush" />
+  <StaticResource x:Key="InfoBarSuccessSeverityIconForeground" ResourceKey="MissumIconSuccessForegroundBrush" />
+  <StaticResource x:Key="InfoBarInformationalSeverityIconForeground" ResourceKey="MissumIconNavigationForegroundBrush" />
 
   <!-- Keep WinUI control surfaces in the same accent-derived visual system. -->
   <StaticResource x:Key="NavigationViewDefaultPaneBackground" ResourceKey="MissumLayerBrush" />

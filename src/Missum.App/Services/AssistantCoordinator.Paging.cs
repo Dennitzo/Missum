@@ -72,6 +72,9 @@ public sealed partial class AssistantCoordinator
                 ?? await Task.Run(() => conversationSnapshots.GetToolStepAsync(sessionId, messageId, stepId, token), token).ConfigureAwait(false);
             if (step is null) throw new InvalidOperationException("Dieser Werkzeugschritt ist nicht mehr vorhanden.");
             step = await EnrichLeanDisplayAsync(step, sessionId, token).ConfigureAwait(false);
+            // Match compact snapshots so their next unchanged update can retain
+            // the already hydrated body instead of fetching it again.
+            step = step with { DisplayHeader = AssistantToolStepHeaders.Create(step) };
             await emit("tool.details", new { sessionId, messageId, toolStep = step }, envelope.RequestId).ConfigureAwait(false);
             return true;
         }

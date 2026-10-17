@@ -16,6 +16,8 @@ internal sealed partial class WindowsProcessJob : IDisposable
     private const uint ActiveProcess = 0x00000008;
     private const uint JobMemory = 0x00000200;
     private const int ExtendedLimitInformation = 9;
+    private const int ErrorAccessDenied = 5;
+    private const uint WaitObjectSignaled = 0;
     private readonly SafeJobHandle _handle;
 
     private WindowsProcessJob(SafeJobHandle handle) => _handle = handle;
@@ -54,8 +56,19 @@ internal sealed partial class WindowsProcessJob : IDisposable
     public void Assign(Process process)
     {
         ArgumentNullException.ThrowIfNull(process);
-        if (AssignProcessToJobObject(_handle, process.SafeHandle) == 0)
-            throw new Win32Exception(Marshal.GetLastPInvokeError(), "Der Coding-Prozess konnte keinem verwalteten Prozessjob zugeordnet werden.");
+        ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
+        var processHandle = process.SafeHandle;
+        // A short Git probe can finish between Process.Start and assignment.
+        // Check the original handle, never a PID that Windows could have reused;
+        // the caller must still consume the actual exit code and output.
+        if (WaitForSingleObject(processHandle, 0) == WaitObjectSignaled) return;
+        if (AssignProcessToJobObject(_handle, processHandle) != 0) return;
+        var error = Marshal.GetLastPInvokeError();
+        if (error == ErrorAccessDenied && WaitForSingleObject(processHandle, 0) == WaitObjectSignaled) return;
+        // Other failures must remain failures even if Windows terminated the
+        // process while rejecting it (for example a job resource limit).
+        throw new Win32Exception(error,
+            $"Der Coding-Prozess konnte keinem verwalteten Prozessjob zugeordnet werden. Windows-Fehler {error}: {new Win32Exception(error).Message}");
     }
 
     public void Dispose() => _handle.Dispose();
@@ -71,6 +84,10 @@ internal sealed partial class WindowsProcessJob : IDisposable
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     private static partial int AssignProcessToJobObject(SafeJobHandle job, SafeProcessHandle process);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    private static partial uint WaitForSingleObject(SafeProcessHandle process, uint milliseconds);
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]

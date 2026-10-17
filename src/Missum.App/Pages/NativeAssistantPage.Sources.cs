@@ -12,6 +12,7 @@ public sealed partial class NativeAssistantPage
     private readonly Dictionary<Guid, SourceAction[]> _sessionSources = [];
     private readonly Dictionary<Guid, SourceAction[]> _indexedSources = [];
     private readonly HashSet<Guid> _sourceIndexLoading = [];
+    private readonly Dictionary<Guid, long> _sourceIndexRevisions = [];
     private readonly HashSet<Guid> _sourceTabs = [];
     private Button? _sourcesTabButton;
     private Border? _sourcesTabContainer;
@@ -130,7 +131,7 @@ public sealed partial class NativeAssistantPage
     {
         var button = SidebarButton("\uE774", title); button.Padding = new(0, 6, 0, 6); button.MinHeight = 48; button.Height = double.NaN;
         var row = (Grid)button.Content;
-        row.Children.OfType<FontIcon>().Single().Foreground = Missum.App.Controls.NativeIconPalette.BrushFor("web");
+        row.Children.OfType<FontIcon>().Single().Foreground = Missum.App.Controls.NativeIconPalette.BrushFor("source");
         var oldTitle = row.Children.OfType<TextBlock>().Single();
         var labels = new StackPanel { Spacing = 2, VerticalAlignment = VerticalAlignment.Center };
         labels.Children.Add(new TextBlock { Text = title, FontSize = 14, Foreground = ThemeBrush("MissumTextBrush", 230), TextTrimming = TextTrimming.CharacterEllipsis });
@@ -150,7 +151,7 @@ public sealed partial class NativeAssistantPage
         var document = item.TryGetProperty("pageCount", out _);
         var button = SidebarButton("\uE8A5", action.Title);
         ((Grid)button.Content).Children.OfType<FontIcon>().Single().Foreground =
-            Missum.App.Controls.NativeIconPalette.BrushFor(Missum.App.Controls.NativeIconPalette.FileKey(action.Title));
+            Missum.App.Controls.NativeIconPalette.BrushFor("source");
         button.Padding = new(0, 6, 0, 6); button.MinHeight = 32;
         ToolTipService.SetToolTip(button, action.Title);
         var menu = new MenuFlyout(); var remove = new MenuFlyoutItem { Text = "Anhang entfernen" };
@@ -176,7 +177,7 @@ public sealed partial class NativeAssistantPage
         var row = (Grid)all.Content;
         row.Children.OfType<TextBlock>().Single().Opacity = .75;
         var icon = row.Children.OfType<FontIcon>().Single();
-        icon.Foreground = Missum.App.Controls.NativeIconPalette.BrushFor("link"); icon.Opacity = .75;
+        icon.Foreground = Missum.App.Controls.NativeIconPalette.BrushFor("source");
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(all, name);
         ToolTipService.SetToolTip(all, name);
         all.Click += (_, _) => open();
@@ -196,20 +197,30 @@ public sealed partial class NativeAssistantPage
         _ = LoadSourceIndexAsync(_session);
     }
 
-    private async Task LoadSourceIndexAsync(Guid sessionId)
+    private async Task LoadSourceIndexAsync(Guid sessionId, long? revision = null)
     {
-        if (!_sourceIndexLoading.Add(sessionId)) return;
+        if (_disposed || sessionId == Guid.Empty
+            || (revision.HasValue && _sourceIndexRevisions.TryGetValue(sessionId, out var loaded) && loaded == revision.Value)
+            || !_sourceIndexLoading.Add(sessionId)) return;
+        var requestedRevision = revision ?? (sessionId == _session ? ReadConversationRevision(_snapshot, "conversationRevision") : 0);
+        var succeeded = false;
         try
         {
             _sourcesContentSignature = null;
             if (_activeSourcesSession == sessionId) RenderSourcesContent();
-            await CommandAsync("sources.list", new { sessionId });
+            succeeded = await CommandAsync("sources.list", new { sessionId });
+            if (succeeded) _sourceIndexRevisions[sessionId] = requestedRevision;
         }
         finally
         {
             _sourceIndexLoading.Remove(sessionId);
             _sourcesContentSignature = null;
             if (!_disposed && _activeSourcesSession == sessionId && _session == sessionId) RenderSourcesContent();
+            // A newer snapshot can arrive while SQLite is reading. Coalesce it
+            // into one follow-up, without querying on streamed text fragments.
+            if (succeeded && !_disposed && _session == sessionId
+                && ReadConversationRevision(_snapshot, "conversationRevision") is var latest && latest != requestedRevision)
+                _ = LoadSourceIndexAsync(sessionId, latest);
         }
     }
 
@@ -277,14 +288,14 @@ public sealed partial class NativeAssistantPage
         {
             _sourcesTabButton = TabButton();
             var content = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 7 };
-            content.Children.Add(new FontIcon { Glyph = "\uE774", FontSize = 13, Foreground = Missum.App.Controls.NativeIconPalette.BrushFor("web") });
+            content.Children.Add(CreateTabIcon("\uE774"));
             content.Children.Add(new TextBlock { Text = "Quellen", FontSize = 13 });
             _sourcesTabButton.Content = content;
             _sourcesTabButton.Height = 30;
             _sourcesTabButton.Padding = new Thickness(10, 0, 5, 0);
             _sourcesTabButton.Click += (_, _) => OpenSourcesTab();
             var close = TabButton();
-            close.Content = new FontIcon { Glyph = "\uE711", FontSize = 11 };
+            close.Content = CreateTabIcon("\uE711", 11);
             close.Width = 24; close.Height = 24;
             close.Margin = new Thickness(0, 0, 3, 0);
             close.VerticalAlignment = VerticalAlignment.Center;

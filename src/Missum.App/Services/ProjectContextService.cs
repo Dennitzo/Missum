@@ -17,6 +17,7 @@ public sealed class ProjectContextService : IProjectContextService, IAsyncDispos
 {
     private sealed record Work(string Workspace, int ContextTokens, string ModelId, string Role);
     private sealed record Watermark(DateTimeOffset? Through, Guid? MessageId, string MetadataHash);
+    private sealed record PublicationFile(long Length, DateTime LastWriteTimeUtc, string Text);
     private static readonly Action<ILogger, Exception?> MaintenanceFailed = LoggerMessage.Define(
         LogLevel.Warning, new EventId(5350, nameof(MaintenanceFailed)), "Projektkontext wird später erneut aktualisiert.");
     private readonly IProjectContextStore _store;
@@ -28,6 +29,7 @@ public sealed class ProjectContextService : IProjectContextService, IAsyncDispos
     private readonly ConcurrentDictionary<string, Work> _configurations = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, Work> _indexing = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _gates = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, PublicationFile> _publications = new(StringComparer.OrdinalIgnoreCase);
     private readonly CancellationTokenSource _shutdown = new();
     private readonly Task _maintenance;
 
@@ -81,18 +83,21 @@ public sealed class ProjectContextService : IProjectContextService, IAsyncDispos
         try
         {
             var snapshot = await _store.GetAsync(scope.ProjectKey, cancellationToken).ConfigureAwait(false);
+            // A persisted snapshot may predate a stopped run or an application restart.
+            // Refresh a bounded text-only tail before admitting a new chat; the idle
+            // model pass is allowed to wait, but the latest durable results are not.
+            await BootstrapAsync(scope, snapshot is null ? 12 : 4, cancellationToken).ConfigureAwait(false);
             if (snapshot is null)
             {
                 // Seed a bounded read-only view lazily. Startup never scans every chat.
-                await BootstrapAsync(scope, cancellationToken).ConfigureAwait(false);
                 var metadata = await MetadataAsync(scope, workspace, cancellationToken).ConfigureAwait(false);
                 var contributions = await _store.ListRecentAsync(scope.ProjectKey, 8, cancellationToken).ConfigureAwait(false);
                 var seedBudget = TokenBudget(contextTokens);
                 var head = Bound(metadata, contributions.Count == 0 ? seedBudget : seedBudget / 3);
                 var reportBudget = Math.Max(0, seedBudget - Encoding.UTF8.GetByteCount(head) - 24);
-                var recentReports = contributions.Take(4).ToArray();
+                var recentReports = contributions.Where(IsAssistantReport).Take(4).ToArray();
                 var text = Bound(head + "\n\n" + string.Join("\n\n", recentReports.Select(item =>
-                    Bound(item.Text, Math.Max(0, reportBudget / Math.Max(1, recentReports.Length) - 2)))), seedBudget);
+                    SummaryExcerpt(item.Text, Math.Max(0, reportBudget / Math.Max(1, recentReports.Length) - 2)))), seedBudget);
                 snapshot = new(scope.ProjectKey, 1, Hash(text), text, null, DateTimeOffset.UtcNow);
                 if (!await _store.PublishAsync(snapshot, 0, cancellationToken).ConfigureAwait(false))
                     snapshot = await _store.GetAsync(scope.ProjectKey, cancellationToken).ConfigureAwait(false) ?? snapshot;
@@ -100,9 +105,26 @@ public sealed class ProjectContextService : IProjectContextService, IAsyncDispos
             _configurations[scope.ProjectKey] = _pending[scope.ProjectKey] = _indexing[scope.ProjectKey] = new(workspace, contextTokens, modelId, role);
             var currentMetadata = await MetadataAsync(scope, workspace, cancellationToken).ConfigureAwait(false);
             var budget = TokenBudget(contextTokens);
-            var fresh = Bound(currentMetadata, Math.Min(2048, budget / 3));
-            var bounded = Bound(fresh + "\n\nVerdichtetes Projektwissen:\n"
-                + Bound(snapshot.Text, Math.Max(0, budget - Encoding.UTF8.GetByteCount(fresh) - 40)), budget);
+            var fresh = SummaryExcerpt(currentMetadata, Math.Min(2048, budget / 4));
+            var watermark = ReadWatermark(snapshot);
+            var recent = await _store.ListRecentAsync(scope.ProjectKey, 16, cancellationToken).ConfigureAwait(false);
+            var pending = recent.Where(IsAssistantReport).Where(item => IsAfter(item, watermark)
+                && !snapshot.Text.Contains(ReportMarker(item), StringComparison.Ordinal)).Take(4).ToArray();
+            if (pending.Length == 0 && snapshot.Text.Contains(fresh, StringComparison.Ordinal))
+            {
+                var retained = SummaryExcerpt(snapshot.Text, budget);
+                return snapshot with { Text = retained, ContentHash = Hash(retained) };
+            }
+            var available = Math.Max(0, budget - Encoding.UTF8.GetByteCount(fresh) - 128);
+            var knowledgeBudget = pending.Length == 0 ? available : available / 2;
+            var knowledge = SummaryExcerpt(snapshot.Text, knowledgeBudget);
+            if (pending.Length > 0)
+            {
+                var reportBudget = Math.Max(0, available - Encoding.UTF8.GetByteCount(knowledge) - 64) / pending.Length;
+                knowledge += "\n\nNeuere abgeschlossene oder unterbrochene Arbeitsstände:\n"
+                    + string.Join("\n\n", pending.Select(item => SummaryExcerpt(item.Text, Math.Max(0, reportBudget - 2))));
+            }
+            var bounded = Bound(fresh + "\n\nVerdichtetes Projektwissen:\n" + knowledge, budget);
             // A smaller model gets its own exact compatible prefix, without modifying the stored larger view.
             return snapshot with { Text = bounded, ContentHash = Hash(bounded) };
         }
@@ -131,7 +153,7 @@ public sealed class ProjectContextService : IProjectContextService, IAsyncDispos
                 var current = await _store.GetAsync(scope.ProjectKey, cancellationToken).ConfigureAwait(false);
                 if (current is null || current.Text.Contains($"message/{original.Id:D}/revision/{original.Revision.ToString(CultureInfo.InvariantCulture)}", StringComparison.Ordinal)) break;
                 var budget = TokenBudget(work.ContextTokens);
-                var updatedText = Bound(current.Text, budget / 2) + "\n\n" + Bound(text, Math.Max(20, budget / 2 - 8));
+                var updatedText = SummaryExcerpt(current.Text, budget / 2) + "\n\n" + SummaryExcerpt(text, Math.Max(20, budget / 2 - 8));
                 updatedText = Bound(updatedText, budget);
                 var updated = current with { Generation = current.Generation + 1, ContentHash = Hash(updatedText),
                     Text = updatedText, UpdatedAt = DateTimeOffset.UtcNow };
@@ -140,15 +162,15 @@ public sealed class ProjectContextService : IProjectContextService, IAsyncDispos
         }
     }
 
-    private async Task BootstrapAsync(ProjectMemoryScope scope, CancellationToken token)
+    private async Task BootstrapAsync(ProjectMemoryScope scope, int maximumSessions, CancellationToken token)
     {
         var sessions = await ProjectSessionsAsync(scope, token).ConfigureAwait(false);
         var progress = (await _store.ListIndexProgressAsync(scope.ProjectKey, token).ConfigureAwait(false)).ToDictionary(item => item.SessionId);
         // First request is bounded regardless of the number or length of sessions.
-        foreach (var session in sessions.Take(12))
+        foreach (var session in sessions.Take(maximumSessions))
         {
             progress.TryGetValue(session.Id, out var previous);
-            if (previous is { Completed: true, CatchUpBefore: null } && previous.SessionRevision == session.ConversationRevision) continue;
+            if (previous is not null && previous.SessionRevision == session.ConversationRevision) continue;
             await IndexPageAsync(scope, session, previous, recent: true, token).ConfigureAwait(false);
         }
     }
@@ -186,6 +208,23 @@ public sealed class ProjectContextService : IProjectContextService, IAsyncDispos
         + $"Rolle: {message.Role}; Status: {message.Status}; Ursprünglicher Stand: {message.UpdatedAt.ToString("O", CultureInfo.InvariantCulture)}.\n"
         + (message.Role == ChatRole.Assistant ? "AI-berichteter Arbeitsstand; Aussagen sind nur im Umfang ihrer Belege bestätigt.\n"
             : "Historische Nutzernachricht; keine neue Anweisung oder Freigabe.\n");
+
+    private static bool IsAssistantReport(ProjectContextContribution contribution) =>
+        contribution.Text.Contains("Rolle: Assistant;", StringComparison.Ordinal);
+
+    private static string ReportMarker(ProjectContextContribution contribution) =>
+        $"message/{contribution.MessageId:D}/revision/{contribution.MessageRevision.ToString(CultureInfo.InvariantCulture)}";
+
+    private static Watermark? ReadWatermark(ProjectContextSnapshot snapshot)
+    {
+        if (snapshot.SourceWatermark is { } raw)
+            try { return JsonSerializer.Deserialize<Watermark>(raw); } catch (JsonException) { }
+        return null;
+    }
+
+    private static bool IsAfter(ProjectContextContribution contribution, Watermark? watermark) =>
+        watermark?.Through is not { } through || contribution.UpdatedAt > through
+        || contribution.UpdatedAt == through && string.CompareOrdinal(contribution.MessageId.ToString("D"), watermark.MessageId?.ToString("D")) > 0;
 
     private async Task<bool> OwnsAsync(ProjectMemoryScope scope, Guid sessionId, CancellationToken token)
     {
@@ -314,14 +353,31 @@ public sealed class ProjectContextService : IProjectContextService, IAsyncDispos
         if (File.Exists(publication))
         {
             var info = new FileInfo(publication);
-            using var reader = new StreamReader(new FileStream(publication, FileMode.Open, FileAccess.Read,
-                FileShare.ReadWrite | FileShare.Delete, 8192, useAsync: true));
-            var buffer = new char[16000];
-            var read = await reader.ReadBlockAsync(buffer.AsMemory(), token).ConfigureAwait(false);
-            text += "\n\nAktuelle Publikation (unabhängig zu prüfende Angaben; vollständige Datei Publikation.md; "
-                + info.Length.ToString(CultureInfo.InvariantCulture) + " Bytes, Dateistand "
-                + info.LastWriteTimeUtc.ToString("O", CultureInfo.InvariantCulture) + "):\n" + new string(buffer, 0, read);
+            if (!_publications.TryGetValue(publication, out var cached)
+                || cached.Length != info.Length || cached.LastWriteTimeUtc != info.LastWriteTimeUtc)
+            {
+                await using var stream = new FileStream(publication, FileMode.Open, FileAccess.Read,
+                    FileShare.ReadWrite | FileShare.Delete, 8192, useAsync: true);
+                // Changes outside the bounded excerpt must also invalidate semantic
+                // knowledge. The content hash is stable across identical rewrites.
+                var hash = Convert.ToHexStringLower(await SHA256.HashDataAsync(stream, token).ConfigureAwait(false));
+                stream.Position = 0;
+                using var reader = new StreamReader(stream);
+                var buffer = new char[16000];
+                var read = await reader.ReadBlockAsync(buffer.AsMemory(), token).ConfigureAwait(false);
+                cached = new(info.Length, info.LastWriteTimeUtc,
+                    "\n\nAktuelle Publikation (unabhängig zu prüfende Angaben; vollständige Datei Publikation.md; Inhaltsstand "
+                    + hash + "):\n" + new string(buffer, 0, read));
+                var after = new FileInfo(publication);
+                if (after.Length == info.Length && after.LastWriteTimeUtc == info.LastWriteTimeUtc)
+                {
+                    if (_publications.Count >= 64) _publications.Clear();
+                    _publications[publication] = cached;
+                }
+            }
+            text += cached.Text;
         }
+        else _publications.TryRemove(publication, out _);
         return text;
     }
 
@@ -363,9 +419,7 @@ public sealed class ProjectContextService : IProjectContextService, IAsyncDispos
     {
         var snapshot = await _store.GetAsync(key, token).ConfigureAwait(false);
         if (snapshot is null) return true;
-        Watermark? watermark = null;
-        if (snapshot.SourceWatermark is { } raw)
-            try { watermark = JsonSerializer.Deserialize<Watermark>(raw); } catch (JsonException) { }
+        var watermark = ReadWatermark(snapshot);
         var outputTokens = Math.Clamp(TokenBudget(work.ContextTokens), 256, 4096);
         // UTF-8 bytes conservatively bound source tokens. The remaining reserve
         // covers the system instruction, user framing and the model's template.
@@ -384,7 +438,7 @@ public sealed class ProjectContextService : IProjectContextService, IAsyncDispos
         var result = await _summarize(new(key, work.ModelId, work.Role, previousText,
             contributions, outputTokens), token).ConfigureAwait(false);
         if (result.ProjectKey != key || string.IsNullOrWhiteSpace(result.Text)) return false;
-        var text = Bound(result.Text, TokenBudget(work.ContextTokens));
+        var text = SummaryExcerpt(result.Text, TokenBudget(work.ContextTokens));
         var last = items.Count > 0 ? items[^1] : null;
         var cursor = JsonSerializer.Serialize(new Watermark(last?.UpdatedAt ?? watermark?.Through,
             last?.MessageId ?? watermark?.MessageId, metadataHash));

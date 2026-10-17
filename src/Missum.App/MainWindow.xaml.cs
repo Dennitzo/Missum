@@ -170,19 +170,16 @@ public sealed partial class MainWindow : Window
         var inactiveForeground = isLight
             ? Windows.UI.Color.FromArgb(180, 36, 29, 47)
             : Windows.UI.Color.FromArgb(180, 248, 244, 255);
-        var hoverBackground = isLight
-            ? Windows.UI.Color.FromArgb(24, 36, 29, 47)
-            : Windows.UI.Color.FromArgb(28, 255, 255, 255);
-        var pressedBackground = isLight
-            ? Windows.UI.Color.FromArgb(42, 36, 29, 47)
-            : Windows.UI.Color.FromArgb(48, 255, 255, 255);
+        var hoverBackground = Controls.NativeThemeBrushes.Resource("MissumHoverBrush", 48).Color;
+        var pressedBackground = Controls.NativeThemeBrushes.Resource("MissumPressedBrush", 56).Color;
 
         titleBar.ForegroundColor = foreground;
         titleBar.InactiveForegroundColor = inactiveForeground;
-        titleBar.ButtonForegroundColor = foreground;
-        titleBar.ButtonInactiveForegroundColor = inactiveForeground;
-        titleBar.ButtonHoverForegroundColor = foreground;
-        titleBar.ButtonPressedForegroundColor = foreground;
+        var icon = Missum.App.Controls.NativeIconPalette.ColorFor("navigation");
+        titleBar.ButtonForegroundColor = icon;
+        titleBar.ButtonInactiveForegroundColor = icon;
+        titleBar.ButtonHoverForegroundColor = icon;
+        titleBar.ButtonPressedForegroundColor = icon;
         titleBar.ButtonHoverBackgroundColor = hoverBackground;
         titleBar.ButtonPressedBackgroundColor = pressedBackground;
     }

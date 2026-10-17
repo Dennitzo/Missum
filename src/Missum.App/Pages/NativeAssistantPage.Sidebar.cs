@@ -146,7 +146,7 @@ public sealed partial class NativeAssistantPage
         var title = S(session, "title", "Neue Sitzung");
         var button = SidebarButton(null, title);
         if (projectChild) button.Padding = new Thickness(36, 4, 8, 4);
-        if (id == _session) button.Background = ThemeBrush("MissumAccentSubtleBrush", 46);
+        if (id == _session) button.Background = ThemeBrush("MissumSelectionBrush", 46);
         var row = (Grid)button.Content;
         var indicatorColumn = row.ColumnDefinitions.Count;
         // Reserve a narrow indicator column, so starting a run cannot move the title.
@@ -154,7 +154,7 @@ public sealed partial class NativeAssistantPage
         var ring = new ProgressRing
         {
             Width = 14, Height = 14, MinWidth = 14, MinHeight = 14,
-            Foreground = ThemeBrush("MissumAccentBrush", 185), IsActive = false, Visibility = Visibility.Collapsed,
+            Foreground = NativeIconPalette.BrushFor("navigation"), IsActive = false, Visibility = Visibility.Collapsed,
             VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Right,
         };
         AutomationProperties.SetName(ring, "Antwort wird erstellt");
@@ -167,7 +167,7 @@ public sealed partial class NativeAssistantPage
             catch (Exception exception) { ShowError(exception.Message); }
         };
         var menu = new MenuFlyout();
-        var rename = new MenuFlyoutItem { Text = "Umbenennen", Icon = new FontIcon { Glyph = "\uE70F", Foreground = NativeIconPalette.BrushFor("code") } };
+        var rename = new MenuFlyoutItem { Text = "Umbenennen", Icon = new FontIcon { Glyph = "\uE70F", Foreground = NativeIconPalette.BrushFor("navigation") } };
         rename.Click += async (_, _) =>
         {
             try

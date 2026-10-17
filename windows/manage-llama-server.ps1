@@ -16,6 +16,9 @@ param(
 
     [string] $CudaVersion = '12.4',
 
+    [ValidatePattern('^b[0-9]+$')]
+    [string] $ReleaseTag,
+
     [string] $TensorSplit = '1,1',
 
     [string] $ResolvedPathFile,
@@ -79,6 +82,13 @@ function Get-Utf8ResponseText {
 
 function Get-LatestBinaryRelease {
     $apiBase = $GitHubApiBase.TrimEnd('/')
+    if (-not [string]::IsNullOrWhiteSpace($ReleaseTag)) {
+        $selectedRelease = Invoke-GitHubRequest -Uri "$apiBase/repos/$repository/releases/tags/$ReleaseTag"
+        if (-not [string]::Equals([string]$selectedRelease.tag_name, $ReleaseTag, [StringComparison]::Ordinal)) {
+            throw "GitHub returned a different release than the explicitly selected '$ReleaseTag'."
+        }
+        return $selectedRelease
+    }
     $release = Invoke-GitHubRequest -Uri "$apiBase/repos/$repository/releases/latest"
     $pointerAsset = @($release.assets | Where-Object { $_.name -eq 'nightly-tag.txt' } | Select-Object -First 1)
     if ($pointerAsset.Count -eq 0) {
@@ -158,6 +168,7 @@ function Receive-ReleaseAsset {
     & curl.exe @(
         '--location',
         '--fail',
+        '--silent',
         '--show-error',
         '--retry', '8',
         '--retry-all-errors',
@@ -268,10 +279,13 @@ function Install-LatestLlamaServer {
 }
 
 function Get-InstalledLlamaServer {
+    param([string] $ExpectedReleaseTag)
     $manifestPath = Join-Path $InstallRoot 'current-release.json'
     if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { return $null }
     try {
         $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+        if (-not [string]::IsNullOrWhiteSpace($ExpectedReleaseTag) -and
+            -not [string]::Equals([string]$manifest.releaseTag, $ExpectedReleaseTag, [StringComparison]::Ordinal)) { return $null }
         $candidate = [string] $manifest.serverPath
         $expectedHash = [string] $manifest.serverSha256
         if ([string]::IsNullOrWhiteSpace($candidate) -or -not [IO.Path]::IsPathRooted($candidate) -or
@@ -499,7 +513,7 @@ switch ($Action) {
             try {
                 $resolvedServer = Install-LatestLlamaServer
             } catch {
-                $resolvedServer = Get-InstalledLlamaServer
+                $resolvedServer = Get-InstalledLlamaServer -ExpectedReleaseTag $ReleaseTag
                 if ($null -eq $resolvedServer) { throw }
                 Write-Warning "GitHub update check failed; continuing with the last verified llama.cpp installation. $($_.Exception.Message)"
             }

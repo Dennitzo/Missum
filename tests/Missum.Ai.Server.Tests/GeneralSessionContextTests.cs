@@ -230,7 +230,7 @@ public sealed class GeneralSessionContextTests
     }
 
     [Fact]
-    public void CurrentSystemPolicyReplacesHistoricalPolicyWhileToolResultsStayChronological()
+    public void EvaluatedSystemPolicyRemainsFrozenWhileToolResultsStayChronological()
     {
         var old = Request();
         var snapshot = Snapshot(old);
@@ -244,7 +244,9 @@ public sealed class GeneralSessionContextTests
         var initial = RunProcessor.CreateInitialMessages(next, "general", []);
         initial[0] = new("system", "Aktuelle verbindliche Policy");
         Assert.True(GeneralSessionContext.TryContinue(snapshot, next, initial, out var messages));
-        Assert.Equal("Aktuelle verbindliche Policy", Assert.Single(messages, m => m.Role == "system").Content);
+        Assert.Equal(snapshot.Checkpoint.Messages[0], messages[0]);
+        Assert.Equal(snapshot.Checkpoint.Messages, messages.Take(snapshot.Checkpoint.Messages.Count));
+        Assert.DoesNotContain(messages, message => message.Content == "Aktuelle verbindliche Policy");
         Assert.Contains(messages, m => m.Role == "tool" && m.Content == "Historische Fundstelle");
     }
 

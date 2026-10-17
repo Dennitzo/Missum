@@ -334,6 +334,148 @@ public sealed class ProjectContextServiceTests
         Assert.Equal("Newer original report", (await store.GetAsync(first!.ProjectKey))!.Text);
     }
 
+    [Theory]
+    [InlineData(MessageStatus.Completed)]
+    [InlineData(MessageStatus.Cancelled)]
+    [InlineData(MessageStatus.Interrupted)]
+    [InlineData(MessageStatus.Failed)]
+    public async Task WarmSnapshotIncludesNewDurableResultsBeforeIdleSummaryAfterRestart(MessageStatus status)
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        using var store = new SqliteProjectContextStore(environment.Get<SqliteDatabase>());
+        await using var memory = CreateMemory(environment);
+        var chats = environment.Get<IChatRepository>();
+        var workspace = Workspace(environment, "warm-project");
+        var session = await chats.CreateSessionAsync("Old session", ChatMode.ClaudeScience);
+        await chats.SetCodingWorkspacePathAsync(session.Id, workspace, false);
+        await chats.AddMessageAsync(session.Id, ChatRole.Assistant, "Die experimentelle Bestätigung bleibt offen.", MessageStatus.Completed);
+        await using (var first = CreateService(store, chats, memory))
+            await first.GetAsync(workspace, 1_048_576, "selected-model", "coding");
+        var key = ProjectMemoryScope.FromWorkspace(workspace).ProjectKey;
+        var previous = (await store.GetAsync(key))!;
+        var terminal = await chats.AddMessageAsync(session.Id, ChatRole.Assistant,
+            "Arbeitsankündigung. " + new string('x', 20_000) + " Abschlussergebnis: Kontrollfall korrigiert, experimenteller Nachweis fehlt.", status);
+        var next = await chats.CreateSessionAsync("New session", ChatMode.ClaudeScience);
+        await chats.SetCodingWorkspacePathAsync(next.Id, workspace, false);
+        await chats.AddMessageAsync(next.Id, ChatRole.User, "Prüfe die verbleibenden Fragen.", MessageStatus.Completed);
+
+        await using var restarted = CreateService(store, chats, memory);
+        var shared = (await restarted.GetAsync(workspace, 1_048_576, "selected-model", "coding"))!;
+        Assert.Contains("experimentelle Bestätigung bleibt offen", shared.Text, StringComparison.Ordinal);
+        Assert.Contains("Abschlussergebnis: Kontrollfall korrigiert, experimenteller Nachweis fehlt", shared.Text, StringComparison.Ordinal);
+        Assert.Contains("Status: " + status, shared.Text, StringComparison.Ordinal);
+        Assert.Contains(terminal.Id.ToString("D"), shared.Text, StringComparison.Ordinal);
+        Assert.Contains("AI-berichteter Arbeitsstand", shared.Text, StringComparison.Ordinal);
+        Assert.True(Encoding.UTF8.GetByteCount(shared.Text) <= ProjectContextService.TokenBudget(1_048_576));
+        Assert.Equal(previous, await store.GetAsync(key)); // No foreground model call or destructive summary replacement.
+        var repeated = (await restarted.GetAsync(workspace, 1_048_576, "selected-model", "coding"))!;
+        Assert.Equal(shared.ContentHash, repeated.ContentHash);
+        Assert.Equal(shared.Text, repeated.Text);
+    }
+
+    [Fact]
+    public async Task ColdSeedAndImmediateCaptureRetainTheEndOfLongAssistantReports()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        using var store = new SqliteProjectContextStore(environment.Get<SqliteDatabase>());
+        await using var memory = CreateMemory(environment);
+        var chats = environment.Get<IChatRepository>();
+        var workspace = Workspace(environment, "long-closed-work");
+        var session = await chats.CreateSessionAsync("Long research", ChatMode.ClaudeScience);
+        await chats.SetCodingWorkspacePathAsync(session.Id, workspace, false);
+        await chats.AddMessageAsync(session.Id, ChatRole.Assistant,
+            "Zuerst werde ich recherchieren. " + new string('a', 90_000) + " Finale Schlussfolgerung: $F=ma$ gilt nur unter den dokumentierten Voraussetzungen.", MessageStatus.Completed);
+        await using var service = CreateService(store, chats, memory);
+        var seeded = (await service.GetAsync(workspace, 1_048_576, "selected-model", "coding"))!;
+        Assert.Contains("Finale Schlussfolgerung: $F=ma$", seeded.Text, StringComparison.Ordinal);
+
+        var stopped = await chats.AddMessageAsync(session.Id, ChatRole.Assistant,
+            "Ich prüfe den nächsten Ansatz. " + new string('b', 90_000) + " Letztes Ergebnis: Ansatz verworfen; die quantitative Prüfung bleibt offen.", MessageStatus.Cancelled);
+        await service.CaptureAsync(workspace, stopped);
+        var captured = (await service.GetAsync(workspace, 1_048_576, "selected-model", "coding"))!;
+        Assert.Contains("Letztes Ergebnis: Ansatz verworfen; die quantitative Prüfung bleibt offen", captured.Text, StringComparison.Ordinal);
+        Assert.Contains("Status: Cancelled", captured.Text, StringComparison.Ordinal);
+        Assert.Contains("Finale Schlussfolgerung", captured.Text, StringComparison.Ordinal);
+        Assert.True(Encoding.UTF8.GetByteCount(captured.Text) <= ProjectContextService.TokenBudget(1_048_576));
+    }
+
+    [Fact]
+    public async Task IdenticalPublicationRewriteDoesNotChangeSharedPrefixOrScheduleAnotherSemanticMerge()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        using var store = new SqliteProjectContextStore(environment.Get<SqliteDatabase>());
+        await using var memory = CreateMemory(environment);
+        var workspace = Workspace(environment, "stable-publication");
+        var publication = Path.Combine(workspace, "Publikation.md");
+        const string content = "# Forschung\n\nKontrollfall belegt; weitere Verallgemeinerung offen.";
+        await File.WriteAllTextAsync(publication, content);
+        var summaries = 0;
+        await using var service = new ProjectContextService(store, environment.Get<IChatRepository>(), memory, (request, _) =>
+        {
+            summaries++;
+            return Task.FromResult(new ProjectContextSummarizeResult(request.ProjectKey, "Kontrollfall belegt; Verallgemeinerung bleibt offen."));
+        }, NullLogger<ProjectContextService>.Instance);
+        await service.GetAsync(workspace, 1_048_576, "selected-model", "coding");
+        Assert.True(await service.RefreshProjectAsync(workspace, 1_048_576, "selected-model", "coding"));
+        var first = (await service.GetAsync(workspace, 1_048_576, "selected-model", "coding"))!;
+        await File.WriteAllTextAsync(publication, content);
+        File.SetLastWriteTimeUtc(publication, DateTime.UtcNow.AddHours(1));
+        var same = (await service.GetAsync(workspace, 1_048_576, "selected-model", "coding"))!;
+        Assert.Equal(first.ContentHash, same.ContentHash);
+        Assert.Equal(first.Text, same.Text);
+        Assert.DoesNotContain("Dateistand", same.Text, StringComparison.Ordinal);
+        Assert.True(await service.RefreshProjectAsync(workspace, 1_048_576, "selected-model", "coding"));
+        Assert.Equal(1, summaries);
+    }
+
+    [Fact]
+    public async Task RestartedProjectUseResumesDurableSummaryBacklogWithoutForegroundInference()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        using var store = new SqliteProjectContextStore(environment.Get<SqliteDatabase>());
+        await using var memory = CreateMemory(environment);
+        var chats = environment.Get<IChatRepository>();
+        var workspace = Workspace(environment, "restart-summary");
+        var session = await chats.CreateSessionAsync("Research", ChatMode.ClaudeScience);
+        await chats.SetCodingWorkspacePathAsync(session.Id, workspace, false);
+        await using (var first = CreateService(store, chats, memory))
+            await first.GetAsync(workspace, 1_048_576, "selected-model", "coding");
+        var report = await chats.AddMessageAsync(session.Id, ChatRole.Assistant,
+            "Ein Teilresultat vor dem Stop ist gespeichert, die Gesamtaussage bleibt offen.", MessageStatus.Interrupted);
+        ProjectContextSummarizeRequest? received = null;
+        await using var restarted = new ProjectContextService(store, chats, memory, (request, _) =>
+        {
+            received = request;
+            return Task.FromResult(new ProjectContextSummarizeResult(request.ProjectKey, "Teilresultat gespeichert; Gesamtaussage offen."));
+        }, NullLogger<ProjectContextService>.Instance);
+        var shared = (await restarted.GetAsync(workspace, 1_048_576, "selected-model", "coding"))!;
+        Assert.Null(received);
+        Assert.Contains("Teilresultat vor dem Stop", shared.Text, StringComparison.Ordinal);
+        Assert.True(await restarted.RefreshProjectAsync(workspace, 1_048_576, "selected-model", "coding"));
+        Assert.NotNull(received);
+        Assert.Contains(received.Contributions, source => source.Contains(report.Id.ToString("D"), StringComparison.Ordinal)
+            && source.Contains("Status: Interrupted", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task PublicationChangesBeyondTheExcerptStillInvalidateTheContentFingerprint()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        using var store = new SqliteProjectContextStore(environment.Get<SqliteDatabase>());
+        await using var memory = CreateMemory(environment);
+        var workspace = Workspace(environment, "publication-tail");
+        var publication = Path.Combine(workspace, "Publikation.md");
+        var prefix = "# Projekt\n" + new string('x', 18_000);
+        await File.WriteAllTextAsync(publication, prefix + "\nOffenes Kapitel am Ende.");
+        await using var service = CreateService(store, environment.Get<IChatRepository>(), memory);
+        var first = (await service.GetAsync(workspace, 1_048_576, "selected-model", "coding"))!;
+        await File.WriteAllTextAsync(publication, prefix + "\nKorrigiertes Kapitel am Ende.");
+        var changed = (await service.GetAsync(workspace, 1_048_576, "selected-model", "coding"))!;
+        Assert.NotEqual(first.ContentHash, changed.ContentHash);
+        Assert.Contains("Inhaltsstand", changed.Text, StringComparison.Ordinal);
+        Assert.True(Encoding.UTF8.GetByteCount(changed.Text) <= ProjectContextService.TokenBudget(1_048_576));
+    }
+
     private static ProjectContextService CreateService(IProjectContextStore store, IChatRepository chats, IProjectMemoryStore memory) =>
         new(store, chats, memory, static (_, _) => throw new InvalidOperationException("No foreground summary call is allowed."), NullLogger<ProjectContextService>.Instance);
 

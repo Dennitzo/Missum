@@ -9,6 +9,95 @@ namespace Missum.Tests;
 
 public sealed class NormalizedConversationPersistenceTests
 {
+    [Fact]
+    public async Task NewToolHeadersRetainDisplaySummaryWithoutLoadingDetails()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var chats = environment.Get<IChatRepository>();
+        var snapshots = environment.Get<IConversationSnapshotRepository>();
+        var session = await chats.CreateSessionAsync("Informative closed tool");
+        var message = await chats.AddMessageAsync(session.Id, ChatRole.Assistant, "Answer", MessageStatus.Completed);
+        var step = ReadStep(0);
+        await chats.SaveToolStepDeltaAsync(message.Id, step);
+
+        var page = (await snapshots.GetPageAsync(session.Id))!;
+        var header = Assert.Single(Assert.Single(page.Conversation.Messages).ToolSteps!);
+        Assert.Equal(AssistantToolStepHeaders.Create(step), header.DisplayHeader);
+        Assert.Equal("work/consolidation_numerics.py", header.DisplayHeader!.FilePath);
+        Assert.Contains("25 Zeilen gelesen (1–25)", header.DisplayHeader.Summary);
+        Assert.Contains("Ausgabe gekürzt", header.DisplayHeader.Summary);
+        Assert.True(header.DetailsDeferred);
+        Assert.Null(header.InputJson);
+        Assert.Null(header.OutputJson);
+        Assert.Null(header.Detail);
+        Assert.Equal(step, await snapshots.GetToolStepAsync(session.Id, message.Id, step.Id));
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task OldToolDisplayHeadersAreUpgradedOnlyForRequestedPagesWithoutChangingHistory(bool legacy, bool oldCache)
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var chats = environment.Get<IChatRepository>();
+        var snapshots = environment.Get<IConversationSnapshotRepository>();
+        var session = await chats.CreateSessionAsync("Lazy display header migration");
+        var message = await chats.AddMessageAsync(session.Id, ChatRole.Assistant, "Unmodified answer", MessageStatus.Completed);
+        var steps = Enumerable.Range(0, 70).Select(ReadStep).ToArray();
+        if (legacy)
+        {
+            await SetLegacyAsync(environment, message.Id, steps);
+            if (oldCache)
+                await ExecuteAsync(environment, "INSERT INTO chat_message_ui_headers(message_id,headers_json) VALUES($id,$value);", message.Id,
+                    JsonSerializer.Serialize(steps.Select(step => step with { Detail = null, InputJson = null, OutputJson = null, DetailsDeferred = true }), JsonSerializerOptions.Web));
+        }
+        else
+        {
+            foreach (var step in steps) await chats.SaveToolStepDeltaAsync(message.Id, step);
+            await ExecuteAsync(environment, "UPDATE chat_tool_steps SET header_json=json_remove(header_json,'$.displayHeader') WHERE message_id=$id;", message.Id);
+        }
+        var historySql = legacy ? "SELECT tool_steps_json FROM chat_messages WHERE id=$id;"
+            : "SELECT json_group_array(json(step_json)) FROM (SELECT step_json FROM chat_tool_steps WHERE message_id=$id ORDER BY ordinal);";
+        var upgradedCountSql = legacy
+            ? "SELECT COUNT(*) FROM chat_message_ui_headers h,json_each(h.headers_json) step WHERE h.message_id=$id AND json_extract(step.value,'$.displayHeader.version')=1;"
+            : "SELECT COUNT(*) FROM chat_tool_steps WHERE message_id=$id AND json_extract(header_json,'$.displayHeader.version')=1;";
+        var originalHistory = await ScalarAsync(environment, historySql, message.Id);
+        var originalMessage = await chats.GetMessageTextAsync(message.Id);
+        var originalSession = await chats.GetSessionAsync(session.Id);
+
+        var page = (await snapshots.GetPageAsync(session.Id))!;
+        var headers = Assert.Single(page.Conversation.Messages).ToolSteps!;
+        Assert.Equal(64, headers.Count);
+        foreach (var header in headers)
+        {
+            Assert.Equal(AssistantToolStepHeaders.Create(steps.Single(step => step.Id == header.Id)), header.DisplayHeader);
+            Assert.True(header.DetailsDeferred);
+            Assert.Null(header.InputJson);
+            Assert.Null(header.OutputJson);
+            Assert.Null(header.Detail);
+        }
+        Assert.Equal("64", await ScalarAsync(environment, upgradedCountSql, message.Id));
+        var older = (await snapshots.GetToolStepsPageAsync(session.Id, message.Id, pageSize: 2,
+            beforeOrdinal: page.ToolStepWindows![message.Id].BeforeOrdinal))!;
+        Assert.Collection(older.Steps, step => Assert.Equal("read-4", step.Id), step => Assert.Equal("read-5", step.Id));
+        Assert.All(older.Steps, header => Assert.NotNull(header.DisplayHeader));
+        // The look-ahead row is not upgraded; the two requested repairs also survive the page transaction.
+        Assert.Equal("66", await ScalarAsync(environment, upgradedCountSql, message.Id));
+        Assert.Equal(originalHistory, await ScalarAsync(environment, historySql, message.Id));
+        Assert.Equal(JsonSerializer.Serialize(originalMessage), JsonSerializer.Serialize(await chats.GetMessageTextAsync(message.Id)));
+        Assert.Equal(originalSession, await chats.GetSessionAsync(session.Id));
+        Assert.Equal(steps[4], await snapshots.GetToolStepAsync(session.Id, message.Id, "read-4"));
+    }
+
+    private static AssistantToolStep ReadStep(int index) => new("read-" + index, "coding.read", "completed", new string('x', 5_000),
+        InputJson: "{\"path\":\"work/consolidation_numerics.py\",\"startLine\":1,\"endLine\":25}",
+        OutputJson: JsonSerializer.Serialize(new
+        {
+            path = "work/consolidation_numerics.py", startLine = 1, endLine = 25, lineCount = 25, truncated = true,
+            content = string.Join('\n', Enumerable.Range(1, 25).Select(line => "line " + line)),
+        }));
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -245,5 +334,16 @@ public sealed class NormalizedConversationPersistenceTests
         command.CommandText = sql;
         command.Parameters.AddWithValue("$id", id.ToString("D"));
         return Convert.ToString(await command.ExecuteScalarAsync(), CultureInfo.InvariantCulture);
+    }
+
+    private static async Task ExecuteAsync(TestEnvironment environment, string sql, Guid id, string? value = null)
+    {
+        await using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = environment.DatabasePath }.ToString());
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$id", id.ToString("D"));
+        if (value is not null) command.Parameters.AddWithValue("$value", value);
+        await command.ExecuteNonQueryAsync();
     }
 }

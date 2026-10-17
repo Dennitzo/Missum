@@ -167,7 +167,7 @@
                           HorizontalAlignment="Center"
                           VerticalAlignment="Center"
                           FontSize="16"
-                          Foreground="{ThemeResource MissumAccentBrush}"
+                          Foreground="{ThemeResource MissumIconNavigationBrush}"
                           Glyph="{Binding Glyph}" />
                         <ProgressRing
                           x:Name="ServiceProgress"
@@ -175,7 +175,7 @@
                           Height="20"
                           HorizontalAlignment="Center"
                           VerticalAlignment="Center"
-                          Foreground="{ThemeResource MissumAccentBrush}"
+                          Foreground="{ThemeResource MissumIconNavigationBrush}"
                           IsActive="{Binding IsBusy}"
                           IsTabStop="False" />
                       </Grid>

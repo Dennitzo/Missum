@@ -36,7 +36,10 @@ internal sealed record NativeModelPhasePresentation(
                 ? Math.Clamp((double)processed / TotalPromptTokens.Value, 0, 1) : (double?)null);
             var text = "Kontext wird verarbeitet";
             if (fraction is { } progress) text += " · " + progress.ToString("P0", CultureInfo.CurrentCulture);
-            if (ProcessedPromptTokens is { } count) text += $" · {count:N0} Eingangstoken";
+            if (ProcessedPromptTokens is { } count)
+                text += TotalPromptTokens is { } total
+                    ? $" · {count:N0} von {total:N0} Eingangstoken"
+                    : $" · {count:N0} Eingangstoken";
             return text;
         }
     }

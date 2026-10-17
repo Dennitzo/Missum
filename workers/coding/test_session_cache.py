@@ -200,6 +200,164 @@ class SessionCacheTests(unittest.TestCase):
         self.assertEqual(original, target.read_bytes())
         self.assertFalse(list(self.root.glob("*.pending")))
 
+    def test_cancelled_replacement_prefill_preserves_the_larger_durable_cache(self):
+        self.cache.prepare("model", "session")
+        self.tokens = 134957
+        self.cache.save("model", "session")
+        target = next(self.root.glob("*.bin"))
+        original, metadata = target.read_bytes(), target.with_suffix(".json").read_bytes()
+        self.cache.prepare("model", "session")
+        self.tokens = 6912
+        writes = len(self.actions("save"))
+
+        result = self.cache.save("model", "session", prompt_tokens=135000)
+
+        self.assertEqual("unchanged", result["status"])
+        self.assertEqual("interruptedPrefill", result["reason"])
+        self.assertEqual(134957, result["retainedTokens"])
+        self.assertEqual(6912, result["residentTokens"])
+        self.assertNotIn("generatedTail", result)
+        self.assertEqual(writes, len(self.actions("save")))
+        self.assertEqual(original, target.read_bytes())
+        self.assertEqual(metadata, target.with_suffix(".json").read_bytes())
+        self.assertTrue(self.cache.resident["model"]["dirty"])
+
+        # Stop is followed by a run-end flush, unload or process shutdown. None
+        # of these maintenance calls may silently undo the interruption guard.
+        for save in (lambda: self.cache.save("model", "session"),
+                     lambda: self.cache.save("model", None), self.cache.save_all):
+            save()
+            self.assertEqual(metadata, target.with_suffix(".json").read_bytes())
+        self.cache.prepare("model", "another-session")
+        self.assertEqual(metadata, target.with_suffix(".json").read_bytes())
+        self.assertEqual(writes, len(self.actions("save")))
+
+    def test_actual_native_saved_count_protects_cache_when_slot_reports_the_full_target(self):
+        self.cache.prepare("model", "session")
+        self.tokens = 134957
+        self.cache.save("model", "session")
+        target = next(self.root.glob("*.bin"))
+        original, metadata = target.read_bytes(), target.with_suffix(".json").read_bytes()
+        self.cache.prepare("model", "session")
+        self.tokens = 135000  # Slot metadata can describe the requested prompt.
+        native_router = self.cache.router
+
+        def save_only_processed_tokens(path, body=None, timeout=15):
+            result = native_router(path, body, timeout)
+            if "action=save" in path:
+                (self.root / body["filename"]).write_bytes(b"partial-new-prefill")
+                result["n_saved"] = 6912
+            return result
+
+        self.cache.router = save_only_processed_tokens
+        result = self.cache.save("model", "session", prompt_tokens=135000)
+
+        self.assertEqual("unchanged", result["status"])
+        self.assertEqual("interruptedPrefill", result["reason"])
+        self.assertEqual(6912, result["residentTokens"])
+        self.assertEqual(original, target.read_bytes())
+        self.assertEqual(metadata, target.with_suffix(".json").read_bytes())
+        self.assertFalse(list(self.root.glob("*.pending")))
+
+        # No model unload/restart is required. Despite misleading slot metadata,
+        # the next same-session request must load the larger preserved file.
+        restored = self.cache.prepare("model", "session")
+        self.assertEqual("restored", restored["status"])
+        self.assertEqual(1, len(self.actions("restore")))
+        self.assertNotIn("restore_preserved_snapshot", self.cache.resident["model"])
+
+    def test_completed_shorter_compaction_replaces_previously_protected_snapshot(self):
+        self.cache.prepare("model", "session")
+        self.tokens = 1000
+        self.cache.save("model", "session")
+        self.cache.prepare("model", "session")
+        self.tokens = 50
+        self.assertEqual("unchanged", self.cache.save("model", "session", prompt_tokens=1100)["status"])
+
+        self.cache.prepare("model", "session")
+        self.tokens = 400
+        result = self.cache.save("model", "session", new_tokens=350)
+
+        self.assertEqual("saved", result["status"])
+        self.assertEqual(400, result["savedTokens"])
+        self.assertNotIn("interrupted_prompt_tokens", self.cache.resident["model"])
+        metadata = json.loads(next(self.root.glob("*.bin")).with_suffix(".json").read_text())
+        self.assertEqual(400, metadata["tokens"])
+
+    def test_failed_direct_resume_cannot_remove_the_interrupted_prefill_guard(self):
+        self.cache.prepare("model", "session")
+        self.tokens = 1000
+        self.cache.save("model", "session")
+        target = next(self.root.glob("*.bin"))
+        original_metadata = target.with_suffix(".json").read_bytes()
+        self.cache.prepare("model", "session")
+        self.tokens = 50
+        self.assertEqual("unchanged", self.cache.save("model", "session", prompt_tokens=1100)["status"])
+        self.fail_restore = True
+        self.assertEqual("unavailable", self.cache.prepare("model", "session")["status"])
+        self.cache.save_all()
+        self.assertEqual(original_metadata, target.with_suffix(".json").read_bytes())
+        self.assertTrue(self.cache.resident["model"]["restore_preserved_snapshot"])
+
+    def test_unknown_native_saved_count_never_replaces_a_valid_snapshot(self):
+        self.cache.prepare("model", "session")
+        self.tokens = 1000
+        self.cache.save("model", "session")
+        target = next(self.root.glob("*.bin"))
+        original, metadata = target.read_bytes(), target.with_suffix(".json").read_bytes()
+        self.cache.prepare("model", "session")
+        self.tokens = 1100
+        native_router = self.cache.router
+        for count in (None, True, "100", 1.5, -1, 0):
+            with self.subTest(count=count):
+                def invalid_saved_count(path, body=None, timeout=15):
+                    result = native_router(path, body, timeout)
+                    if "action=save" in path:
+                        result["n_saved"] = count
+                    return result
+
+                self.cache.router = invalid_saved_count
+                result = self.cache.save("model", "session", prompt_tokens=1100)
+
+                self.assertEqual("unavailable", result["status"])
+                self.assertEqual(original, target.read_bytes())
+                self.assertEqual(metadata, target.with_suffix(".json").read_bytes())
+                self.assertFalse(list(self.root.glob("*.pending")))
+
+    def test_interrupted_initial_prefill_without_a_better_snapshot_is_still_saved(self):
+        self.cache.prepare("model", "session")
+        self.tokens = 50
+        result = self.cache.save("model", "session", prompt_tokens=1000)
+        self.assertEqual("saved", result["status"])
+        self.assertEqual(50, result["savedTokens"])
+
+    def test_interrupted_fully_evaluated_shorter_prompt_is_allowed_to_replace(self):
+        self.cache.prepare("model", "session")
+        self.tokens = 1000
+        self.cache.save("model", "session")
+        self.cache.prepare("model", "session")
+        self.tokens = 400
+        result = self.cache.save("model", "session", prompt_tokens=350)
+        self.assertEqual("saved", result["status"])
+        self.assertEqual(400, result["savedTokens"])
+
+    def test_model_fingerprint_change_cannot_preserve_another_configurations_snapshot(self):
+        self.cache.prepare("model", "session")
+        self.tokens = 1000
+        self.cache.save("model", "session")
+        original = next(self.root.glob("*.bin"))
+        original_metadata = original.with_suffix(".json").read_bytes()
+        self.version = 2
+        self.cache.invalidate("model")
+        self.tokens = 0
+        self.cache.prepare("model", "session")
+        self.tokens = 50
+        result = self.cache.save("model", "session", prompt_tokens=1000)
+        self.assertEqual("saved", result["status"])
+        self.assertEqual(50, result["savedTokens"])
+        self.assertEqual(2, len(list(self.root.glob("*.bin"))))
+        self.assertEqual(original_metadata, original.with_suffix(".json").read_bytes())
+
     def test_model_version_change_does_not_restore_incompatible_snapshot(self):
         self.cache.prepare("model", "session")
         self.cache.save("model", "session")

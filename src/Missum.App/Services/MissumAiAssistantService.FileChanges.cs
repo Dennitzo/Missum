@@ -2,6 +2,7 @@ using Missum.Core.Coding;
 using Missum.Core.Models;
 using System.Diagnostics;
 using System.Collections.Concurrent;
+using System.ComponentModel;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 
@@ -404,7 +405,9 @@ internal sealed class CodingChangesMonitor : IAsyncDisposable
     }
 
     private static bool IsStorageError(Exception exception) =>
-        exception is IOException or UnauthorizedAccessException or JsonException or ArgumentException;
+        // Git startup/job errors belong to this optional overview. They must
+        // not prevent submitting or continuing the user's assistant run.
+        exception is IOException or UnauthorizedAccessException or JsonException or ArgumentException or Win32Exception;
 
     public async ValueTask DisposeAsync()
     {

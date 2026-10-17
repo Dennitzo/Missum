@@ -273,17 +273,28 @@ public sealed partial record SubagentChatState(
         UserMessage = ProjectMessage(UserMessage), AssistantMessage = ProjectMessage(AssistantMessage),
     };
 
-    private static ChatMessage ProjectMessage(ChatMessage message) => message with
+    private static ChatMessage ProjectMessage(ChatMessage message)
     {
-        ToolExecution = null, ContextSummary = null,
-        ToolSteps = message.ToolSteps?.TakeLast(64).Select(step => step.Tool is "assistant.narration" or "assistant.progress"
-            ? step : step with
+        // The live thinking row uses the latest reasoning directly, including its
+        // last completed fragment before the next tool starts. It replaces the
+        // historical tool control, so that control cannot lazily load the text.
+        // Keep just this one live source; older reasoning and tool payloads stay deferred.
+        var liveReasoningId = message.Status == MessageStatus.Streaming
+            ? message.ToolSteps?.LastOrDefault(step => step.Tool == "assistant.reasoning")?.Id : null;
+        return message with
+        {
+            ToolExecution = null, ContextSummary = null,
+            ToolSteps = message.ToolSteps?.TakeLast(64).Select(step => step.Tool is "assistant.narration" or "assistant.progress"
+                ? step : step.Id == liveReasoningId ? step with
+                { InputJson = null, OutputJson = null, PreviewHtml = null, DetailsDeferred = false } : step with
             {
+                DisplayHeader = AssistantToolStepHeaders.Create(step),
                 Detail = null, InputJson = null, OutputJson = null, PreviewHtml = null,
                 Explanation = step.Explanation is { Length: > 400 } explanation ? explanation[..400] : step.Explanation,
                 DetailsDeferred = true,
             }).ToArray(),
-    };
+        };
+    }
 
     internal ConversationToolStepPage? GetToolStepPage(Guid messageId, int pageSize = 64, long? beforeOrdinal = null)
     {
@@ -451,7 +462,9 @@ public sealed partial record SubagentChatState(
 
     internal static ChatMessage Finish(ChatMessage message, MessageStatus status, DateTimeOffset at) => message with
     {
-        Status = status, UpdatedAt = at,
+        // Parent lifecycle receipts can arrive with a clock older than the last
+        // child token. The revision makes their terminal tool states authoritative.
+        Status = status, UpdatedAt = at, Revision = message.Revision + 1,
         ToolSteps = (message.ToolSteps ?? []).Select(step => step.Status == "running" ? step with
             { Status = status == MessageStatus.Completed ? "completed" : status.ToString().ToLowerInvariant(), CompletedAt = at, UpdatedAt = at } : step).ToArray(),
     };

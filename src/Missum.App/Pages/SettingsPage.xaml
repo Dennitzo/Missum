@@ -60,7 +60,7 @@
             </StackPanel>
             <Border Grid.Column="1" Style="{StaticResource MissumStatusPillStyle}">
               <StackPanel Orientation="Horizontal" Spacing="7">
-                <ProgressRing Width="15" Height="15" IsActive="{x:Bind ViewModel.IsBusy, Mode=OneWay}" />
+                <ProgressRing Width="15" Height="15" Foreground="{ThemeResource MissumIconNavigationBrush}" IsActive="{x:Bind ViewModel.IsBusy, Mode=OneWay}" />
                 <TextBlock MaxWidth="300" Text="{x:Bind ViewModel.ConnectionStatus, Mode=OneWay}" TextTrimming="CharacterEllipsis" />
               </StackPanel>
             </Border>
@@ -128,7 +128,7 @@
           <StackPanel Spacing="7">
             <TextBlock FontWeight="SemiBold" Text="Akzentfarbe" />
             <ListView x:Name="AccentColorList" HorizontalAlignment="Stretch" ItemsSource="{x:Bind AccentColors}" SelectionChanged="OnAccentColorChanged" SelectionMode="Single">
-              <ListView.ItemsPanel><ItemsPanelTemplate><ItemsWrapGrid Orientation="Horizontal" /></ItemsPanelTemplate></ListView.ItemsPanel>
+              <ListView.ItemsPanel><ItemsPanelTemplate><ItemsWrapGrid Orientation="Horizontal" ItemWidth="190" /></ItemsPanelTemplate></ListView.ItemsPanel>
               <ListView.ItemContainerStyle><Style TargetType="ListViewItem"><Setter Property="MinWidth" Value="118" /><Setter Property="Margin" Value="0,0,8,8" /><Setter Property="Padding" Value="8" /><Setter Property="HorizontalContentAlignment" Value="Stretch" /></Style></ListView.ItemContainerStyle>
               <ListView.ItemTemplate><DataTemplate x:DataType="local:SettingsAccentColorOption"><StackPanel Orientation="Horizontal" Spacing="8"><Ellipse Width="24" Height="24" Fill="{x:Bind PreviewBrush}" Stroke="{ThemeResource MissumStrokeBrush}" StrokeThickness="1" /><TextBlock VerticalAlignment="Center" Text="{x:Bind Name}" /></StackPanel></DataTemplate></ListView.ItemTemplate>
             </ListView>
@@ -237,7 +237,7 @@
                 PlaceholderText="Tabelle durchsuchen …"
                 Text="{x:Bind ViewModel.TriggerSearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                 TextChanged="OnTriggerSearchTextChanged">
-                <AutoSuggestBox.QueryIcon><FontIcon Glyph="&#xE721;" Foreground="{ThemeResource MissumIconWebBrush}" /></AutoSuggestBox.QueryIcon>
+                <AutoSuggestBox.QueryIcon><FontIcon Glyph="&#xE721;" Foreground="{ThemeResource MissumIconNavigationBrush}" /></AutoSuggestBox.QueryIcon>
               </AutoSuggestBox>
               <TextBlock
                 Grid.Row="1"

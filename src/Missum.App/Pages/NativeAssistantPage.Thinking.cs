@@ -80,8 +80,7 @@ public sealed partial class NativeAssistantPage
         if (_thinkingIndicators.Count == 0 || _conversationSelection?.IsSelecting == true) return;
         var now = DateTimeOffset.UtcNow;
         var visible = IsLoaded && BodyGrid.Visibility == Visibility.Visible;
-        var follow = visible && _conversationSelection?.IsSelecting != true
-            && ConversationScroll.ScrollableHeight - ConversationScroll.VerticalOffset < 90;
+        var follow = visible && ShouldFollowConversationTail;
         var changed = false;
         foreach (var (id, view) in _thinkingIndicators)
         {
@@ -116,7 +115,7 @@ public sealed partial class NativeAssistantPage
     private sealed class ThinkingIndicatorView : Grid
     {
         private readonly Button _toggle;
-        private readonly FontIcon _chevron = new() { Glyph = "\uE76C", FontSize = 10, Foreground = ThemeBrush("MissumMutedTextBrush", 140) };
+        private readonly FontIcon _chevron = new() { Glyph = "\uE76C", FontSize = 10, Foreground = NativeIconPalette.BrushFor("navigation") };
         private readonly StackPanel _details = new() { Spacing = 8, Margin = new(28, 2, 0, 0), Visibility = Visibility.Collapsed };
         private readonly NativeStreamingMarkdown _reasoning = new("");
         private readonly TextBlock _empty = new() { Text = "Noch kein Denkprozess vom Modell übermittelt.", FontSize = 14,
@@ -142,6 +141,7 @@ public sealed partial class NativeAssistantPage
         internal ScrollViewer? ScrollOwner { get; set; }
         internal Func<bool>? PinSelection { get; set; }
         internal Action<Action>? Project { get; set; }
+        internal Action? DisclosureInvoked { get; set; }
         private NativeVirtualizingTextView? _largeReasoning;
         internal bool HasBlockingTool { get; set; }
 
@@ -156,7 +156,7 @@ public sealed partial class NativeAssistantPage
             row.Children.Add(new FontIcon
             {
                 Glyph = ToolIconGlyph("research"), FontSize = 14, VerticalAlignment = VerticalAlignment.Center,
-                Foreground = new SolidColorBrush(ToolGlyphColor("research", "assistant.reasoning")),
+                Foreground = ToolGlyphBrush("research", "assistant.reasoning"),
             });
             Grid.SetColumn(Label, 1);
             row.Children.Add(Label);
@@ -164,7 +164,7 @@ public sealed partial class NativeAssistantPage
             _toggle = new Button { Content = row, HorizontalAlignment = HorizontalAlignment.Left,
                 HorizontalContentAlignment = HorizontalAlignment.Left, Padding = new(6, 5, 6, 5),
                 BorderThickness = new(0), Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent) };
-            _toggle.Click += (_, _) => SetExpanded(!IsExpanded);
+            _toggle.Click += (_, _) => { DisclosureInvoked?.Invoke(); SetExpanded(!IsExpanded); };
             _details.Children.Add(_reasoning); _details.Children.Add(_empty);
             Children.Add(new StackPanel { Spacing = 6, Children = { _toggle, _details } });
             SetExpanded(initiallyExpanded);

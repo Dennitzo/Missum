@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Missum.Ai.Contracts;
 using Missum.App.Controls;
+using Missum.App.Pages;
 using Missum.App.Services;
 using Missum.App.ViewModels;
 using Missum.Core.Contracts;
@@ -13,6 +14,49 @@ namespace Missum.Tests;
 
 public sealed class SubagentChatStateTests
 {
+    [Theory]
+    [InlineData(RunState.Completed, "completed")]
+    [InlineData(RunState.Cancelled, "cancelled")]
+    [InlineData(RunState.Failed, "failed")]
+    public void ParentTerminationWinsOverLaterChildClockAndFinalizesVisibleToolSteps(RunState state, string status)
+    {
+        var child = Child();
+        child = child with
+        {
+            AssistantMessage = child.AssistantMessage with
+            {
+                Revision = 8, UpdatedAt = Start.AddSeconds(10), Content = "Vollständiger Zwischenstand.",
+                ToolSteps = [new("reasoning", "assistant.reasoning", "running", "Geprüfter Gedankengang.",
+                    UpdatedAt: Start.AddSeconds(10))],
+            },
+        };
+        static JsonElement Dto(ChatMessage message) => JsonSerializer.SerializeToElement(new
+        {
+            id = message.Id, status = message.Status.ToString().ToLowerInvariant(), message.Revision,
+            message.UpdatedAt, message.Content, message.ToolSteps,
+        }, JsonSerializerOptions.Web);
+        var projection = new NativeAssistantPage.NativeMessageProjection(Dto(child.AssistantMessage), 0);
+        var oldVersion = projection.Version;
+        var finished = child.ObserveLifecycle(Info() with { State = state }, 1, Start.AddSeconds(9), started: false);
+        Assert.Equal(child.AssistantMessage.Revision + 1, finished.AssistantMessage.Revision);
+        Assert.True(finished.AssistantMessage.UpdatedAt < child.AssistantMessage.UpdatedAt);
+        projection.Adopt(Dto(finished.AssistantMessage));
+        Assert.Equal(status, projection.Source.GetProperty("status").GetString());
+        Assert.Equal(status, Assert.Single(projection.Steps).GetProperty("status").GetString());
+        Assert.Equal("Geprüfter Gedankengang.", Assert.Single(projection.Steps).GetProperty("detail").GetString());
+        Assert.Equal(child.AssistantMessage.Content, projection.Content);
+        Assert.True(projection.Version > oldVersion);
+        var childEvent = state switch
+        {
+            RunState.Completed => RunEventTypes.RunCompleted,
+            RunState.Cancelled => RunEventTypes.RunCancelled,
+            _ => RunEventTypes.RunFailed,
+        };
+        var directlyFinished = child.Apply(Event(child, 1, childEvent,
+            new RunFailedEvent("test.failure", "Fehler", Retryable: false)));
+        Assert.Equal(child.AssistantMessage.Revision + 1, directlyFinished.AssistantMessage.Revision);
+    }
+
     [Fact]
     public async Task OversizedActiveTranscriptJournalsUntilItsLastWriterLeaseEndsWithoutRetainingAnInactiveCopy()
     {
@@ -902,6 +946,59 @@ public sealed class SubagentChatStateTests
         Assert.Equal(step, restored.FindToolStep(child.AssistantMessage.Id, "proof"));
         Assert.Equal(step, Assert.Single(child.AssistantMessage.ToolSteps));
         Assert.Null(restored.FindToolStep(Guid.NewGuid(), "proof"));
+    }
+
+    [Fact]
+    public void CollapsedSubagentReadAlreadyCarriesTheCompleteTitleWithoutItsBody()
+    {
+        var child = Child();
+        var step = new AssistantToolStep("read-title", "coding.read", "completed",
+            InputJson: "{\"path\":\"work/calculation.py\",\"startLine\":7}",
+            OutputJson: "{\"path\":\"work/calculation.py\",\"startLine\":7,\"content\":\"x = 2\\nprint(x)\\n\",\"totalLines\":500,\"truncated\":true}");
+        child = child with { AssistantMessage = child.AssistantMessage with { ToolSteps = [step] } };
+        var header = Assert.Single(child.ForDisplay().AssistantMessage.ToolSteps!);
+        Assert.True(header.DetailsDeferred);
+        Assert.Null(header.InputJson);
+        Assert.Null(header.OutputJson);
+        Assert.Null(header.Detail);
+        Assert.Equal("work/calculation.py · 2 Zeilen gelesen (7–8) · Ausgabe gekürzt", header.DisplayHeader!.Summary);
+        Assert.Equal(step, Assert.Single(child.AssistantMessage.ToolSteps!));
+        var paged = child.GetToolStepPage(child.AssistantMessage.Id)!;
+        Assert.Equal(header.DisplayHeader, Assert.Single(paged.Steps).DisplayHeader);
+    }
+
+    [Theory]
+    [InlineData("subagent")]
+    [InlineData("deepResearch")]
+    public void LiveDisplayCarriesLatestReasoningWithoutHydratingHistoricalSteps(string kind)
+    {
+        var child = Child() with { Kind = kind };
+        var historical = Enumerable.Range(0, 70).Select(index => new AssistantToolStep("old-" + index,
+            "assistant.reasoning", "completed", "Historischer Denkprozess " + index, UpdatedAt: Start)).ToArray();
+        child = child with { AssistantMessage = child.AssistantMessage with { ToolSteps = historical } };
+        child = child.Apply(Event(child, 1, RunEventTypes.ReasoningDelta, new ReasoningDeltaEvent("Aktuelle Überlegung", 71)));
+        var current = child.AssistantMessage.ToolSteps![^1];
+        var display = child.ForDisplay();
+        Assert.Equal(64, display.AssistantMessage.ToolSteps!.Count);
+        Assert.Equal(current.Detail, display.AssistantMessage.ToolSteps[^1].Detail);
+        Assert.False(display.AssistantMessage.ToolSteps[^1].DetailsDeferred);
+        Assert.All(display.AssistantMessage.ToolSteps.SkipLast(1), step =>
+        {
+            Assert.True(step.DetailsDeferred);
+            Assert.Null(step.Detail);
+        });
+        Assert.True(display.ToolStepWindows![child.AssistantMessage.Id].HasMore);
+        Assert.Equal("Historischer Denkprozess 0", child.AssistantMessage.ToolSteps[0].Detail);
+
+        child = child.Apply(Event(child, 2, RunEventTypes.ReasoningDelta,
+            new ReasoningDeltaEvent(" ist abgeschlossen.", 71, State: "completed")));
+        Assert.Equal("Aktuelle Überlegung ist abgeschlossen.", child.ForDisplay().AssistantMessage.ToolSteps![^1].Detail);
+        var terminal = child.Apply(Event(child, 3, RunEventTypes.RunCompleted, new { }));
+        Assert.All(terminal.ForDisplay().AssistantMessage.ToolSteps!, step =>
+        {
+            Assert.True(step.DetailsDeferred);
+            Assert.Null(step.Detail);
+        });
     }
 
     [Fact]

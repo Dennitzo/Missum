@@ -121,19 +121,10 @@ public sealed partial class NativeAssistantPage
         InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(window));
         var file = await picker.PickSaveFileAsync();
         if (file is null) return;
-        var exporter = new NativeChatPdfExportService(App.Current.GetService<IConversationSnapshotRepository>(),
-            App.Current.GetService<IChatRepository>(), App.Current.GetService<IChatArtifactRepository>(),
-            App.Current.GetService<DocumentPdfExporter>());
+        var exporter = App.Current.GetService<NativeChatPdfExportService>();
         if (!_running) ChatStatus = "Chat-PDF wird erstellt …";
-        try
-        {
-            var receipt = await exporter.ExportAsync(sessionId, file.Path, _lifetime.Token);
-            if (!_disposed && !_running) ChatStatus = $"PDF gespeichert: {Path.GetFileName(receipt.SavedPath)}";
-        }
-        finally
-        {
-            if (!_disposed) await RefreshForExternalActivationAsync();
-        }
+        var receipt = await exporter.ExportAsync(sessionId, file.Path, _lifetime.Token);
+        if (!_disposed && !_running) ChatStatus = $"PDF gespeichert: {Path.GetFileName(receipt.SavedPath)}";
     }
 
     private async Task AppendNativeExtensionResultAsync(Guid sessionId, string title, JsonElement result)
@@ -225,7 +216,7 @@ public sealed partial class NativeAssistantPage
 
     private void UpdateCaptionChip()
     {
-        CaptionChip.SetTool("Live-Untertitel", "\uE7F4", Missum.App.Controls.NativeIconPalette.ColorFor("speech"));
+        CaptionChip.SetTool("Live-Untertitel", "\uE7F4", Missum.App.Controls.NativeIconPalette.BrushFor("speech"));
         CaptionChip.Visibility = _captionActive && _captionSessionId == _session ? Visibility.Visible : Visibility.Collapsed;
     }
 

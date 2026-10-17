@@ -29,9 +29,13 @@ public sealed class AssistantStreamingProjectionTests
         message = message with { ToolSteps = stream.ToolSteps };
         var coordinator = CreateCoordinator(environment, settings, snapshots, environment.Get<IChatArtifactRepository>());
         JsonElement loaded = default;
-        await coordinator.EmitMissumAiUpdateAsync(new(MissumAiAssistantUpdateKind.Status, message, ToolStep: step), async (type, _, _) =>
+        await coordinator.EmitMissumAiUpdateAsync(new(MissumAiAssistantUpdateKind.Status, message, ToolStep: step), async (type, statusPayload, _) =>
         {
             Assert.Equal("status.changed", type);
+            var displayed = JsonSerializer.SerializeToElement(statusPayload, JsonSerializerOptions.Web).GetProperty("toolStep");
+            Assert.True(displayed.GetProperty("detailsDeferred").GetBoolean());
+            Assert.Equal(JsonValueKind.Null, displayed.GetProperty("inputJson").ValueKind);
+            Assert.Equal("sample.py", displayed.GetProperty("displayHeader").GetProperty("summary").GetString());
             Assert.Null(await snapshots.GetToolStepAsync(session.Id, message.Id, step.Id));
             await coordinator.HandleAsync(new(AssistantProtocol.ProtocolVersion, "tool.details", "live-open",
                 JsonSerializer.SerializeToElement(new { sessionId = session.Id, messageId = message.Id, stepId = step.Id })),
@@ -44,6 +48,7 @@ public sealed class AssistantStreamingProjectionTests
         }, "live-status");
         Assert.Equal(step.Detail, loaded.GetProperty("toolStep").GetProperty("detail").GetString());
         Assert.Equal(step.InputJson, loaded.GetProperty("toolStep").GetProperty("inputJson").GetString());
+        Assert.Equal("sample.py", loaded.GetProperty("toolStep").GetProperty("displayHeader").GetProperty("summary").GetString());
         Assert.Equal(0, (await runs.GetAsync(run.Id))!.LastEventId);
         Assert.Null(await snapshots.GetToolStepAsync(session.Id, message.Id, step.Id));
         await stream.AcknowledgeAsync(run.ServerRunId!, 1, "running", null, force: true);
@@ -119,6 +124,68 @@ public sealed class AssistantStreamingProjectionTests
     }
 
     private static Task Ignore(string type, object payload, string? requestId) => Task.CompletedTask;
+
+    [Theory]
+    [InlineData("subagent", false)]
+    [InlineData("deepResearch", false)]
+    [InlineData("deepResearch", true)]
+    public async Task LiveSubagentSnapshotsCarryReasoningBeforeCompletionAndKeepTokenTicksStable(string kind, bool externalTranscript)
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        var chats = environment.Get<IChatRepository>();
+        var session = await chats.CreateSessionAsync("Live reasoning", ChatMode.ClaudeScience);
+        var parent = await chats.AddMessageAsync(session.Id, ChatRole.Assistant, "", MessageStatus.Streaming);
+        var child = SubagentChatState.Create(new("parent", "child", "agent", "Quellen prüfen", "model",
+            Missum.Ai.Contracts.RunState.Running, Specialization: kind), session.Id, DateTimeOffset.UtcNow);
+        var coordinator = CreateCoordinator(environment, settings, environment.Get<IConversationSnapshotRepository>(), environment.Get<IChatArtifactRepository>());
+        var firstText = (externalTranscript ? new string('r', 40_000) + " " : "") + "Die Originalquelle wird geprüft.";
+        child = child.Apply(Event(1, Missum.Ai.Contracts.RunEventTypes.ReasoningDelta,
+            new Missum.Ai.Contracts.ReasoningDeltaEvent(firstText, 1)));
+        var first = await Publish();
+        Assert.Equal(firstText, Reasoning(first).GetProperty("detail").GetString());
+        Assert.False(Reasoning(first).TryGetProperty("detailsDeferred", out var firstDeferred) && firstDeferred.GetBoolean());
+        Assert.Equal("streaming", first.GetProperty("messages")[1].GetProperty("status").GetString());
+
+        child = child.Apply(Event(2, Missum.Ai.Contracts.RunEventTypes.ModelGeneration,
+            new Missum.Ai.Contracts.ModelGenerationEvent("tokenProgress", GeneratedTokens: 12)));
+        var progress = await Publish();
+        Assert.Equal(first.GetProperty("transcriptRevision").GetInt64(), progress.GetProperty("transcriptRevision").GetInt64());
+        Assert.Equal(firstText, Reasoning(progress).GetProperty("detail").GetString());
+
+        child = child.Apply(Event(3, Missum.Ai.Contracts.RunEventTypes.ReasoningDelta,
+            new Missum.Ai.Contracts.ReasoningDeltaEvent(" Eine Einschränkung wird verglichen.", 1)));
+        var appended = await Publish();
+        Assert.Equal(firstText + " Eine Einschränkung wird verglichen.", Reasoning(appended).GetProperty("detail").GetString());
+        Assert.True(appended.GetProperty("transcriptRevision").GetInt64() > first.GetProperty("transcriptRevision").GetInt64());
+
+        child = child.Apply(Event(4, Missum.Ai.Contracts.RunEventTypes.RunCompleted, new { }));
+        var complete = await Publish();
+        Assert.Equal(JsonValueKind.Null, Reasoning(complete).GetProperty("detail").ValueKind);
+        Assert.True(Reasoning(complete).GetProperty("detailsDeferred").GetBoolean());
+
+        Missum.Ai.Contracts.RunEvent Event(long id, string type, object payload) => new(id, child.RunId, type,
+            DateTimeOffset.UtcNow.AddMilliseconds(id), JsonSerializer.SerializeToElement(payload, Missum.Ai.Contracts.MissumAiProtocol.CreateJsonOptions()));
+        static JsonElement Reasoning(JsonElement snapshot) => snapshot.GetProperty("messages")[1].GetProperty("toolSteps")[0];
+        async Task<JsonElement> Publish()
+        {
+            child = child with { ProjectionRevision = child.ProjectionRevision + 1 };
+            var receipt = new AssistantToolStep(child.ReceiptId, "subagent", child.Status,
+                OutputJson: await child.PersistAsync(settings.DataDirectory));
+            parent = parent with { ToolSteps = [receipt] };
+            JsonElement result = default;
+            await coordinator.EmitMissumAiUpdateAsync(new(MissumAiAssistantUpdateKind.SubagentChanged, parent,
+                ToolStep: receipt, Subagent: child), (type, payload, _) =>
+            {
+                if (type == "subagent.snapshot") result = JsonSerializer.SerializeToElement(payload, JsonSerializerOptions.Web);
+                return Task.CompletedTask;
+            }, "child-reasoning");
+            Assert.False(result.GetProperty("transcriptDeferred").GetBoolean());
+            Assert.Equal(parent.Id, result.GetProperty("parentMessageId").GetGuid());
+            return result;
+        }
+    }
 
     [Theory]
     [InlineData("chat.send", "agentId", "deep-research:activity")]

@@ -33,6 +33,12 @@ public sealed partial class ModelRuntimeClient
             throw new JsonException("Der native Tokenzähler lieferte keine gültige Promptlänge.");
 
         var outputTokens = ResolveMaximumOutputTokens(contextLength, inputTokens, maximumOutputTokens);
+        if (progress is not null)
+            // Keep the already measured full target before dispatching native
+            // inference. A Stop can arrive during the first prompt batch,
+            // before llama emits its first streaming progress frame.
+            await progress(new ModelRuntimeProgress("tokenCounting", PromptTokens: inputTokens),
+                cancellationToken).ConfigureAwait(false);
         var request = new Dictionary<string, object?>(body, StringComparer.Ordinal)
         {
             ["max_tokens"] = outputTokens,

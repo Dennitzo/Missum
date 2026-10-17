@@ -198,13 +198,11 @@ public sealed class NativeChatPdfExportTests(ITestOutputHelper output)
 
     [Fact]
     [Trait("Category", "Live")]
-    public async Task NativeChatExportRendersTheCompleteConversationAndStoresTheExactPdfArtifact()
+    public async Task NativeChatExportRendersTheCompleteConversationWithoutChangingChatOrArtifacts()
     {
         if (Environment.GetEnvironmentVariable("MISSUM_NATIVE_PDF_EXPORT_LIVE") != "1") return;
         await using var environment = await TestEnvironment.CreateAsync();
         var chats = environment.Get<IChatRepository>();
-        var artifacts = environment.Get<IChatArtifactRepository>();
-        var blobs = environment.Get<IBinaryObjectStore>();
         var settings = environment.Get<ISettingsStore>();
         var session = await chats.CreateSessionAsync("Vollstaendiger nativer PDF-Export", ChatMode.Coding);
         var other = await chats.CreateSessionAsync("Anderer geoeffneter Chat", ChatMode.General);
@@ -229,7 +227,7 @@ public sealed class NativeChatPdfExportTests(ITestOutputHelper output)
         var target = Path.Combine(environment.Directory, "Chat Export vollstaendig.pdf");
         await File.WriteAllTextAsync(target, "Previously selected file must be replaced with the complete PDF.");
         using var renderer = new DocumentPdfExporter(NullLogger<DocumentPdfExporter>.Instance);
-        var service = new NativeChatPdfExportService(environment.Get<IConversationSnapshotRepository>(), chats, artifacts, renderer);
+        var service = new NativeChatPdfExportService(environment.Get<IConversationSnapshotRepository>(), renderer);
         using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(4));
 
         var receipt = await service.ExportAsync(session.Id, target, deadline.Token);
@@ -240,36 +238,24 @@ public sealed class NativeChatPdfExportTests(ITestOutputHelper output)
         Assert.Equal(target, receipt.SavedPath);
         Assert.Equal(2, receipt.MessageCount);
         Assert.Equal(session.Id, receipt.SessionId);
-        Assert.Equal(digest, receipt.Artifact.Sha256);
-        Assert.Equal(savedBytes.LongLength, receipt.Artifact.Length);
-        Assert.Equal("application/pdf", receipt.Artifact.ContentType);
-        Assert.Equal(Path.GetFileName(target), receipt.Artifact.FileName);
-        Assert.Equal(receipt.Artifact.Id, Assert.Single(await artifacts.ListForMessageAsync(receipt.MessageId)).Id);
-        await using (var stored = await blobs.OpenReadAsync(receipt.Artifact.BlobId, deadline.Token))
-        {
-            using var copy = new MemoryStream();
-            await stored.CopyToAsync(copy, deadline.Token);
-            Assert.Equal(savedBytes, copy.ToArray());
-        }
-        Assert.True(await blobs.VerifyAsync(receipt.Artifact.BlobId, deadline.Token));
         using var pdf = PdfDocument.Open(savedBytes);
         Assert.True(pdf.NumberOfPages >= 3, $"Expected a multipage chat export, got {pdf.NumberOfPages} pages.");
         var extracted = string.Join('\n', pdf.GetPages().Select(page => page.Text));
         foreach (var marker in new[] { "USERPDFMARKER", "ASSISTANTPDFMARKER", "LASTPDFMARKER", "DIFFPDFMARKER", "oldValue", "newValue" })
             Assert.Contains(marker, extracted, StringComparison.Ordinal);
         var messages = await chats.ListMessagesAsync(session.Id, deadline.Token);
-        Assert.Equal(3, messages.Count);
-        Assert.Equal(JsonSerializer.Serialize(snapshot.Messages), JsonSerializer.Serialize(messages.Take(2)));
-        Assert.Equal(receipt.MessageId, messages[2].Id);
-        Assert.Equal(MessageStatus.Completed, messages[2].Status);
-        Assert.Contains(target, messages[2].Content, StringComparison.Ordinal);
-        Assert.Contains(digest, messages[2].Content, StringComparison.Ordinal);
+        Assert.Equal(2, messages.Count);
+        Assert.Equal(JsonSerializer.Serialize(snapshot.Messages), JsonSerializer.Serialize(messages));
+        var after = await environment.Get<IConversationSnapshotRepository>().GetAsync(session.Id, deadline.Token);
+        Assert.NotNull(after);
+        Assert.Equal(snapshot.Session, after.Session);
+        Assert.Equal(JsonSerializer.Serialize(snapshot.Artifacts), JsonSerializer.Serialize(after.Artifacts));
         Assert.Equal(otherBefore, await chats.GetSessionAsync(other.Id, deadline.Token));
         Assert.Empty(await chats.ListMessagesAsync(other.Id, deadline.Token));
         Assert.Equal(snapshot.Session.Draft, (await chats.GetSessionAsync(session.Id, deadline.Token))!.Draft);
         Assert.Equal(sessionIdsBefore, (await chats.ListSessionsAsync(cancellationToken: deadline.Token)).Select(item => item.Id).Order().ToArray());
         Assert.Equal(settingsBefore, JsonSerializer.Serialize(await settings.LoadAsync(deadline.Token)));
-        output.WriteLine($"Real renderer: {pdf.NumberOfPages} pages, {savedBytes.LongLength} bytes, SHA-256 {digest}, artifact {receipt.Artifact.Id}.");
+        output.WriteLine($"Real renderer: {pdf.NumberOfPages} pages, {savedBytes.LongLength} bytes, SHA-256 {digest}; chat unchanged.");
 
         var evidenceRoot = Environment.GetEnvironmentVariable("MISSUM_AI_LIVE_EVIDENCE_DIRECTORY");
         if (!string.IsNullOrWhiteSpace(evidenceRoot))
@@ -279,8 +265,8 @@ public sealed class NativeChatPdfExportTests(ITestOutputHelper output)
             File.Copy(target, Path.Combine(evidence, Path.GetFileName(target)));
             await File.WriteAllTextAsync(Path.Combine(evidence, "receipt.json"), JsonSerializer.Serialize(new
             {
-                receipt.SessionId, receipt.MessageId, receipt.Artifact, receipt.MessageCount,
-                pages = pdf.NumberOfPages, verifiedSha256 = digest, exactBlobMatch = true,
+                receipt.SessionId, receipt.MessageCount,
+                pages = pdf.NumberOfPages, verifiedSha256 = digest, chatUnchanged = true, artifactsUnchanged = true,
                 activeSessionUnchanged = true, otherSessionsUnchanged = true,
             }), deadline.Token);
             output.WriteLine("Evidence: " + evidence);

@@ -19,7 +19,7 @@ public sealed partial class AssistantCoordinator
         {
         state.AgentId, state.RunId, state.ParentRunId, state.SessionId, state.Title, state.Status,
         state.Kind, state.OriginToolStepId, state.OriginMessageId,
-        transcriptRevision = state.Kind == SubagentChatState.DeepResearchKind ? (long?)state.TranscriptRevision : null,
+        state.TranscriptRevision,
         canStop = !state.IsLegacyDeepResearch,
         canResume = !state.IsLegacyDeepResearch,
         state.GpuIndex,
@@ -28,7 +28,8 @@ public sealed partial class AssistantCoordinator
         messages = (state.PreviousMessages ?? []).Select(message => ToMessageDto(message,
             state.PreviousMessageArtifacts?.GetValueOrDefault(message.Id.ToString()), state.ToolStepWindows?.GetValueOrDefault(message.Id)))
             .Concat([ToMessageDto(state.UserMessage, toolWindow: state.ToolStepWindows?.GetValueOrDefault(state.UserMessage.Id)),
-                ToMessageDto(state.AssistantMessage, state.Artifacts, state.ToolStepWindows?.GetValueOrDefault(state.AssistantMessage.Id))]).ToArray(),
+                ToMessageDto(state.AssistantMessage, state.Artifacts, state.ToolStepWindows?.GetValueOrDefault(state.AssistantMessage.Id),
+                    preserveLiveReasoning: state.IsRunning)]).ToArray(),
         toolStepWindows = state.ToolStepWindows,
         state.IsRunning, state.Model, state.ContextUsed, state.ContextLimit,
         state.RunStatus, state.RunDetail, state.GenerationState, state.GeneratedTokens, state.GenerationUpdatedAt,

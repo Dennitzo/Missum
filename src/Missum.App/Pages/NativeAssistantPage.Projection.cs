@@ -1,6 +1,7 @@
 ﻿using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using Missum.App.Services;
 
 namespace Missum.App.Pages;
 
@@ -142,16 +143,21 @@ public sealed partial class NativeAssistantPage
         internal void Adopt(JsonElement source, long? firstOrdinal = null, bool preserveEarlier = false)
         {
             var at = S(source, "updatedAt");
-            var retainLive = DateTimeOffset.TryParse(UpdatedAt, CultureInfo.InvariantCulture,
-                System.Globalization.DateTimeStyles.RoundtripKind, out var currentAt)
-                && DateTimeOffset.TryParse(at, CultureInfo.InvariantCulture,
-                    System.Globalization.DateTimeStyles.RoundtripKind, out var incomingAt) && currentAt > incomingAt;
+            var retainLive = NativeMessageSnapshotPolicy.Compare(Source, source, UpdatedAt).PreservePayload;
+            var lifecycleChanged = S(Source, "status") != S(source, "status") || S(Source, "error") != S(source, "error");
             Source = source;
-            if (retainLive) return;
+            if (retainLive)
+            {
+                // Terminal chrome (including Fortsetzen) is part of the rendered
+                // revision even when a later token's content stays untouched.
+                if (lifecycleChanged) Version++;
+                return;
+            }
             var preceding = preserveEarlier && firstOrdinal.HasValue
                 ? _steps.Where(step => _ordinals.GetValueOrDefault(S(step, "id"), long.MaxValue) < firstOrdinal.Value).ToArray()
                 : [];
             var previousFirst = _firstOrdinal;
+            var previousSteps = _steps.ToDictionary(step => S(step, "id"), StringComparer.Ordinal);
             if (firstOrdinal.HasValue) _firstOrdinal = firstOrdinal.Value;
             _content.Clear().Append(S(source, "content"));
             _contentValue = null;
@@ -160,11 +166,27 @@ public sealed partial class NativeAssistantPage
             foreach (var step in preceding) PutStep(step, previousFirst + _steps.Count);
             var incomingFirst = _firstOrdinal;
             var incomingIndex = 0;
-            foreach (var step in Items(source, "toolSteps")) PutStep(step, incomingFirst + incomingIndex++);
+            foreach (var step in Items(source, "toolSteps"))
+                PutStep(RetainHydratedStep(step, previousSteps.GetValueOrDefault(S(step, "id"))), incomingFirst + incomingIndex++);
             if (preceding.Length > 0) _firstOrdinal = previousFirst;
             TotalSteps = incomingFirst + incomingIndex;
             UpdatedAt = at;
             Version++;
+        }
+
+        private static JsonElement RetainHydratedStep(JsonElement incoming, JsonElement previous)
+        {
+            if (previous.ValueKind != JsonValueKind.Object || S(incoming, "detailsDeferred") != "True") return incoming;
+            // The compact header is not a deletion of an expanded receipt. Its
+            // own timestamp, status and metadata identify the precise detail
+            // version; a newer receipt must still fetch/render its new result.
+            if (S(incoming, "updatedAt").Length == 0 || S(incoming, "updatedAt") != S(previous, "updatedAt")) return incoming;
+            foreach (var property in incoming.EnumerateObject())
+            {
+                if (property.Name is "detail" or "inputJson" or "outputJson" or "previewHtml" or "explanation" or "detailsDeferred") continue;
+                if (!previous.TryGetProperty(property.Name, out var value) || !JsonElement.DeepEquals(property.Value, value)) return incoming;
+            }
+            return previous;
         }
 
         internal void BeginGeneration(string generation)

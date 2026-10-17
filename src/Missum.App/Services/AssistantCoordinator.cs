@@ -38,70 +38,35 @@ public sealed partial class AssistantCoordinator(
     private const string DefaultSessionTitle = "Neue Sitzung";
     private sealed record QueuedChatInput(ChatSession Session, PromptTriggerMatch? Match);
     private const string DefaultSystemPrompt = "Du bist ein allgemeiner lokaler AI-Assistent. Unterstütze die konkrete Aufgabe des Nutzers, etwa beim Programmieren, Schreiben, Lernen, Analysieren oder Planen. Passe Sprache, Detailtiefe und Vorgehen an die Frage an. Unterscheide belegte Informationen von Annahmen, benenne relevante Unsicherheiten und erfinde keine Fakten, Quellen oder Ergebnisse.";
-    private static readonly HashSet<string> GenericSessionTitles = new(StringComparer.OrdinalIgnoreCase)
+    internal static string? DerivePromptSessionTitle(string prompt)
     {
-        "Neue Sitzung", "Neuer Chat", "Hallo", "Antwort", "Frage", "Allgemeiner Chat",
-        "Willkommen", "Missum Assistent", "Missum-Assistent", "Gespräch mit Missum",
-        "Weitermachen", "Weiter", "Fortsetzen", "Mach weiter", "Weiter machen", "Weiterarbeiten",
-        "Continue", "Resume", "Go on",
-    };
-
-    private static string? DerivePromptSessionTitle(string prompt)
-    {
-        var value = (prompt ?? string.Empty)
+        var value = string.Join(' ', (prompt ?? string.Empty)
             .Replace("**", string.Empty, StringComparison.Ordinal)
             .Replace("__", string.Empty, StringComparison.Ordinal)
-            .ReplaceLineEndings(" ")
-            .Trim(' ', '\t', '`', '"', '\'', '.', '!', '?', ';', ':', ',', '-', '–', '—')
-            .TrimStart('#');
-        foreach (var prefix in new[] { "Kannst du bitte ", "Kannst du ", "Könntest du bitte ", "Könntest du ", "Bitte " })
+            .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)).Trim(' ', '#', '`');
+        const int maximumLength = 160;
+        if (value.Length > maximumLength)
         {
-            if (value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-            {
-                value = value[prefix.Length..];
-                break;
-            }
+            var end = value.LastIndexOf(' ', maximumLength);
+            if (end <= 0) end = maximumLength;
+            if (char.IsHighSurrogate(value[end - 1])) end--;
+            value = value[..end].TrimEnd();
         }
-        value = string.Join(' ', value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
-        var words = value.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        if (words.Length > 6) value = string.Join(' ', words.Take(6));
-        if (value.Length > 64) value = value[..64].TrimEnd();
-        value = value.Trim();
-        if (value.Length == 0 || GenericSessionTitles.Contains(value)) return null;
-        return value;
+        return value.Length == 0 ? null : value;
     }
     private int _startupRunsHandled;
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, string> _checkedScienceTitles = new();
 
-    private async Task<ChatSession> RepairScienceTitleAsync(ChatSession session, CancellationToken cancellationToken)
+    private async Task<ChatSession> SaveSubmittedPromptTitleAsync(ChatSession session, string prompt,
+        Func<string, object, string?, Task> emit, string requestId, CancellationToken cancellationToken)
     {
-        if (session.ChatMode != ChatMode.ClaudeScience
-            || _checkedScienceTitles.TryGetValue(session.Id, out var checkedTitle) && checkedTitle == session.Title)
-            return session;
-        var original = (await chats.GetFirstUserMessageAsync(session.Id, cancellationToken).ConfigureAwait(false))?.Content;
-        var corrected = ScientificSessionTitle.FromPrompt(original);
-        // Repair only our previous automatic name or a default. An independent
-        // user rename is preserved, including across follow-up prompts/restarts.
-        if (corrected is not null && corrected != session.Title
-            && (GenericSessionTitles.Contains(session.Title) || session.Title == DerivePromptSessionTitle(original!)))
-        {
-            await chats.RenameSessionAsync(session.Id, corrected, cancellationToken).ConfigureAwait(false);
-            var messages = await chats.ListMessagesAsync(session.Id, cancellationToken).ConfigureAwait(false);
-            foreach (var message in messages.Where(message => message.Role == ChatRole.Assistant))
-            {
-                foreach (var step in (message.ToolSteps ?? []).Where(step => step.Id.StartsWith("science-introduction:", StringComparison.Ordinal)
-                    && step.Tool == "assistant.narration" && step.Detail?.StartsWith("**" + session.Title + "**\n\n", StringComparison.Ordinal) == true))
-                {
-                    await chats.SaveToolStepAsync(message.Id, step with
-                    {
-                        Detail = "**" + corrected + "**\n\n" + step.Detail![(session.Title.Length + 6)..],
-                    }, cancellationToken).ConfigureAwait(false);
-                }
-            }
-            session = session with { Title = corrected };
-        }
-        _checkedScienceTitles[session.Id] = session.Title;
-        return session;
+        var title = DerivePromptSessionTitle(prompt);
+        if (title is null || string.Equals(session.Title, title, StringComparison.Ordinal)) return session;
+        await chats.RenameSessionAsync(session.Id, title, cancellationToken).ConfigureAwait(false);
+        // Refresh only shared sidebar/tab metadata. A title change must not
+        // reload a long conversation or disturb a concurrent client's draft.
+        await emit("session.grouped", await BuildSessionSidebarSnapshotAsync(false, cancellationToken).ConfigureAwait(false),
+            requestId).ConfigureAwait(false);
+        return session with { Title = title };
     }
     private Task? _resumeTask;
     private readonly object _resumeLock = new();
@@ -742,10 +707,17 @@ public sealed partial class AssistantCoordinator(
             case "chat.steer":
                 if (missumAi is null) throw new InvalidOperationException("AI-Verbindung ist nicht verfügbar.");
                 var steeringSessionId = GetRequiredGuid(envelope.Payload, "sessionId");
+                var steeringPrompt = GetRequiredString(envelope.Payload, "prompt", 100_000);
                 var steeringAccepted = await missumAi.SteerAsync(steeringSessionId,
-                    GetRequiredString(envelope.Payload, "prompt", 100_000),
+                    steeringPrompt,
                     GetRequiredString(envelope.Payload, "inputId", 128),
                     GetOptionalString(envelope.Payload, "expectedRunId", 128), cancellationToken).ConfigureAwait(false);
+                // A retry of an old acknowledgement must not replace the title
+                // from a newer submission. Rejected steering keeps the old name.
+                if (!steeringAccepted.Duplicate
+                    && await chats.GetSessionAsync(steeringSessionId, CancellationToken.None).ConfigureAwait(false) is { } steeringSession)
+                    await SaveSubmittedPromptTitleAsync(steeringSession, steeringPrompt, emit, envelope.RequestId,
+                        CancellationToken.None).ConfigureAwait(false);
                 await emit("chat.steer.accepted", new { inputId = steeringAccepted.InputId,
                     sessionId = steeringSessionId, runId = steeringAccepted.RunId, sequence = steeringAccepted.Sequence }, envelope.RequestId).ConfigureAwait(false);
                 break;
@@ -1429,6 +1401,11 @@ public sealed partial class AssistantCoordinator(
 
         try
         {
+            // Commit at admission, before the model slot is available. Execution
+            // of this older queued prompt must never rename the session again.
+            if (!IsCancelCommand(prompt))
+                await SaveSubmittedPromptTitleAsync(session, prompt, emit, envelope.RequestId,
+                    CancellationToken.None).ConfigureAwait(false);
             await emit("chat.queued", new
             {
                 ticketId = ticket.TicketId,
@@ -1548,27 +1525,9 @@ public sealed partial class AssistantCoordinator(
         {
             throw new InvalidOperationException("Wähle für diese Coding-Sitzung zuerst ein vorhandenes Projekt oder einen Workspace aus.");
         }
-        string? promptTitle;
-        if (session.ChatMode == ChatMode.ClaudeScience)
-        {
-            session = await RepairScienceTitleAsync(session, cancellationToken).ConfigureAwait(false);
-            promptTitle = GenericSessionTitles.Contains(session.Title) ? ScientificSessionTitle.FromPrompt(prompt) : null;
-        }
-        else promptTitle = DerivePromptSessionTitle(prompt);
-        if (promptTitle is null && GenericSessionTitles.Contains(session.Title))
-        {
-            // Repair a formerly overwritten continuation title from user text.
-            // Assistant answers never supply a session name.
-            var firstPrompt = (await chats.GetFirstUserMessageAsync(sessionId, cancellationToken).ConfigureAwait(false))?.Content;
-            promptTitle = firstPrompt is null ? null : session.ChatMode == ChatMode.ClaudeScience
-                ? ScientificSessionTitle.FromPrompt(firstPrompt) : DerivePromptSessionTitle(firstPrompt);
-        }
-        if (promptTitle is { } derivedTitle
-            && !string.Equals(session.Title, derivedTitle, StringComparison.Ordinal))
-        {
-            await chats.RenameSessionAsync(sessionId, derivedTitle, cancellationToken).ConfigureAwait(false);
-            session = session with { Title = derivedTitle };
-        }
+        if (queuedInput is null)
+            session = await SaveSubmittedPromptTitleAsync(session, prompt, emit, envelope.RequestId,
+                cancellationToken).ConfigureAwait(false);
         await SaveDraftAsync(sessionId, string.Empty, cancellationToken).ConfigureAwait(false);
         var match = queuedInput is not null ? queuedInput.Match
             : await ResolveRequestedMatchAsync(session, prompt, envelope.Payload, cancellationToken).ConfigureAwait(false);
@@ -2364,8 +2323,10 @@ public sealed partial class AssistantCoordinator(
     };
 
     private static object ToMessageDto(ChatMessage message, IReadOnlyList<ChatArtifact>? messageArtifacts = null,
-        ConversationToolStepWindow? toolWindow = null)
+        ConversationToolStepWindow? toolWindow = null, bool preserveLiveReasoning = false)
     {
+        var liveReasoningId = preserveLiveReasoning && message.Status == MessageStatus.Streaming
+            ? message.ToolSteps?.LastOrDefault(step => step.Tool == "assistant.reasoning")?.Id : null;
         return new
         {
             id = message.Id,
@@ -2380,7 +2341,9 @@ public sealed partial class AssistantCoordinator(
             contentProfile = message.ContentProfile.ToString().ToLowerInvariant(),
             message.Revision,
             tool = message.ToolExecution,
-            toolSteps = (message.ToolSteps ?? []).TakeLast(64).Select(DisplayToolStep),
+            toolSteps = (message.ToolSteps ?? []).TakeLast(64).Select(step => step.Id == liveReasoningId
+                ? step with { InputJson = null, OutputJson = null, PreviewHtml = null }
+                : DisplayToolStep(step)),
             toolStepWindow = toolWindow ?? new ConversationToolStepWindow(message.ToolSteps?.Count ?? 0,
                 message.ToolSteps?.Count > 64, message.ToolSteps?.Count > 64 ? message.ToolSteps.Count - 64 : null),
             artifacts = AssistantArtifactOriginalResolver.DisplayArtifacts(messageArtifacts ?? [], message.ToolSteps)
@@ -2391,6 +2354,7 @@ public sealed partial class AssistantCoordinator(
 
     private static AssistantToolStep DisplayToolStep(AssistantToolStep step) => step with
     {
+        DisplayHeader = AssistantToolStepHeaders.Create(step),
         Detail = step.Tool is "assistant.narration" or "assistant.progress" ? step.Detail : null,
         InputJson = null, PreviewHtml = null,
         OutputJson = step.Tool is "assistant.continuation" or "subagent" or "subagent.completed"

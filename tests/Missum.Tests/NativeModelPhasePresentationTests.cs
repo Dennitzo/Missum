@@ -18,7 +18,7 @@ public sealed class NativeModelPhasePresentationTests
         var phase = new NativeModelPhasePresentation().Observe("promptProcessing", 70539, 80000, .88, Start);
         Assert.True(phase.IsProcessing);
         Assert.Contains("Kontext wird verarbeitet", phase.ProcessingLabel);
-        Assert.Contains($"{70539:N0} Eingangstoken", phase.ProcessingLabel);
+        Assert.Contains($"{70539:N0} von {80000:N0} Eingangstoken", phase.ProcessingLabel);
         Assert.Contains(.88.ToString("P0", CultureInfo.CurrentCulture), phase.ProcessingLabel);
         Assert.Contains($"{70539:N0} von {80000:N0} Eingangstoken", phase.ProcessingExplanation);
         Assert.Contains("Denkprozess erscheint", phase.ProcessingExplanation);
@@ -34,6 +34,17 @@ public sealed class NativeModelPhasePresentationTests
         Assert.DoesNotContain("Token", phase.ProcessingExplanation);
         Assert.Contains("Generierung beginnt", phase.ProcessingExplanation);
         Assert.Contains(.5.ToString("P0", CultureInfo.CurrentCulture), phase.Observe("promptProcessing", 100, 200, null, Start.AddSeconds(1)).ProcessingLabel);
+    }
+
+    [Fact]
+    public void PartialPrefillDoesNotPresentTheProcessedBatchAsTheEntireSessionContext()
+    {
+        var phase = new NativeModelPhasePresentation().Observe("promptProcessing", 5120, 127544, .04, Start);
+        Assert.Contains($"{5120:N0} von {127544:N0} Eingangstoken", phase.ProcessingLabel);
+        Assert.Contains(.04.ToString("P0", CultureInfo.CurrentCulture), phase.ProcessingLabel);
+        var withoutTotal = new NativeModelPhasePresentation().Observe("promptProcessing", 5120, null, null, Start);
+        Assert.Contains($"{5120:N0} Eingangstoken", withoutTotal.ProcessingLabel);
+        Assert.DoesNotContain(" von ", withoutTotal.ProcessingLabel);
     }
 
     [Theory]

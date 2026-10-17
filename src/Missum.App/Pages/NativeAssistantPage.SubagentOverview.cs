@@ -139,7 +139,7 @@ public sealed partial class NativeAssistantPage
             _subagentOverviewTabButton.Click += (_, _) => OpenSubagentOverview();
             AutomationProperties.SetName(_subagentOverviewTabButton, "Subagenten-Tab");
             var close = TabButton();
-            close.Content = new FontIcon { Glyph = "\uE711", FontSize = 11 };
+            close.Content = CreateTabIcon("\uE711", 11);
             close.Width = close.Height = 24; close.Margin = new(0, 0, 3, 0); close.VerticalAlignment = VerticalAlignment.Center;
             ToolTipService.SetToolTip(close, "Subagenten-Tab schließen");
             AutomationProperties.SetName(close, "Subagenten-Tab schließen");

@@ -150,13 +150,12 @@ public sealed partial class NativeAssistantPage
         if (_researchTabButton is null)
         {
             var content = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 7 };
-            content.Children.Add(new FontIcon { Glyph = "\uE9CE", FontSize = 13, Foreground = NativeIconPalette.BrushFor("research") });
+            content.Children.Add(CreateTabIcon("\uE9CE"));
             content.Children.Add(new TextBlock { Text = "Publikation", FontSize = 13 });
             _researchTabButton = TabButton();
             _researchTabButton.Content = content;
             _researchTabButton.Height = 32;
             _researchTabButton.Padding = new Thickness(10, 0, 10, 0);
-            _researchTabButton.BorderThickness = new Thickness(1);
             _researchTabButton.Click += (_, _) => QueueResearchTabSelection();
             AutomationProperties.SetName(_researchTabButton, "Publikation dieser Sitzung öffnen");
             ToolTipService.SetToolTip(_researchTabButton, "Wissenschaftliche Publikation · PDF mit mathematischen Formeln");

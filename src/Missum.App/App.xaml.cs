@@ -903,10 +903,10 @@ public partial class App : Application
         {
             ["window"] = Mixed(light ? 0xF3F0F5u : 0x202020u, light ? .07 : .08),
             ["layer"] = Mixed(light ? 0xFFFFFFu : 0x202020u, light ? .04 : .12, light ? (byte)248 : (byte)230),
-            ["layerStrong"] = Mixed(light ? 0xFAF8FCu : 0x2B2B2Bu, light ? .08 : .18, light ? (byte)255 : (byte)242),
-            ["input"] = Mixed(light ? 0xFFFFFFu : 0x333333u, light ? .09 : .20),
-            ["hover"] = Mixed(light ? 0xF5F1F7u : 0x303030u, light ? .13 : .23),
-            ["pressed"] = Mixed(light ? 0xEEE9F1u : 0x383838u, light ? .18 : .28),
+            ["layerStrong"] = Mixed(light ? 0xFAF8FCu : 0x2B2B2Bu, light ? .08 : .14, light ? (byte)255 : (byte)242),
+            ["input"] = Mixed(light ? 0xFFFFFFu : 0x333333u, light ? .09 : .16),
+            ["hover"] = Mixed(light ? 0xF5F1F7u : 0x303030u, light ? .13 : .16),
+            ["pressed"] = Mixed(light ? 0xEEE9F1u : 0x383838u, .18),
             ["stroke"] = Mixed(light ? 0x302A38u : 0xFFFFFFu, light ? .22 : .28, light ? (byte)82 : (byte)66),
             ["mutedText"] = light ? "#51465D" : "#999999",
             ["text"] = CssColor(foreground, 1),
@@ -920,13 +920,14 @@ public partial class App : Application
             colors["accent"] = CssColor(contrast.Accent, 1); colors["accentForeground"] = CssColor(contrast.AccentForeground, 1);
             colors["accentSubtle"] = CssColor(contrast.Accent, .14);
         }
-        var surfaces = light ? LightTextSurfaces(background) : [Microsoft.UI.Colors.Black];
+        var surfaces = NativePaletteSurfaces(background, light);
         colors["accentReadable"] = CssColor(highContrast is { } high
             ? ReadableAccentColor(high.Accent, [high.Background])
-            : light ? ReadableAccentColor(accent, surfaces) : accent, 1);
+            : ReadableAccentColor(accent, surfaces), 1);
         colors["titlebar"] = ComposeCssColors(colors["accentSubtle"], colors["window"]);
+        var iconSurfaces = highContrast is { } systemPalette ? [systemPalette.Background] : NativeIconSurfaces(background, light, accent);
         foreach (var name in new[] { "Web", "Research", "Image", "Audio", "Speech", "Pdf", "Document", "Plan", "Code", "Folder", "Navigation", "Link", "Add", "Danger", "Settings", "Subagent" })
-            colors["icon" + name] = CssColor(Controls.NativeIconPalette.ColorFor(name), 1);
+            colors["icon" + name] = CssColor(Controls.NativeIconPalette.ResolveColor(name, highContrast?.Accent ?? accent, iconSurfaces, highContrast?.Foreground), 1);
         return new(highContrast is not null ? "high-contrast" : light ? "light" : "dark", highContrast is not null,
             new System.Collections.ObjectModel.ReadOnlyDictionary<string, string>(colors));
     }
@@ -1061,10 +1062,12 @@ public partial class App : Application
 
         SetBrushColor("MissumWindowBrush", MixBackground(0x202020, background, 0.08, 0xFF));
         SetBrushColor("MissumLayerBrush", MixBackground(0x202020, background, 0.12, 0xE6));
-        SetBrushColor("MissumLayerStrongBrush", MixBackground(0x2B2B2B, background, 0.18, 0xF2));
-        SetBrushColor("MissumInputBrush", MixBackground(0x333333, background, 0.20, 0xFF));
-        SetBrushColor("MissumHoverBrush", MixBackground(0x303030, background, 0.23, 0xFF));
-        SetBrushColor("MissumPressedBrush", MixBackground(0x383838, background, 0.28, 0xFF));
+        // Limit bright custom backgrounds in dark mode: even selected/hovered
+        // surfaces must retain enough contrast for a single stable icon brush.
+        SetBrushColor("MissumLayerStrongBrush", MixBackground(0x2B2B2B, background, 0.14, 0xF2));
+        SetBrushColor("MissumInputBrush", MixBackground(0x333333, background, 0.16, 0xFF));
+        SetBrushColor("MissumHoverBrush", MixBackground(0x303030, background, 0.16, 0xFF));
+        SetBrushColor("MissumPressedBrush", MixBackground(0x383838, background, 0.18, 0xFF));
         SetBrushColor("MissumStrokeBrush", MixBackground(0xFFFFFF, background, 0.28, 0x42));
     }
 
@@ -1089,24 +1092,74 @@ public partial class App : Application
 
     private void UpdateReadableAccentBrush()
     {
+        UpdateSelectionSurfaceBrush();
         if (IsHighContrastEnabled())
         {
             var palette = ResolveHighContrastPalette();
             SetBrushColor("MissumAccentReadableBrush", ReadableAccentColor(palette.Accent, [palette.Background]));
+            Controls.NativeIconPalette.Apply(palette.Accent, [palette.Background], palette.Foreground);
             return;
         }
         _ = TryParsePaletteColor(AccentColor, out var accent);
         _ = TryParsePaletteColor(BackgroundColor, out var background);
         var light = _appliedTheme == AppTheme.Light || (_appliedTheme == AppTheme.System && _themeRoot?.ActualTheme == ElementTheme.Light);
-        SetBrushColor("MissumAccentReadableBrush", light ? ReadableAccentColor(accent, LightTextSurfaces(background)) : accent);
+        SetBrushColor("MissumAccentReadableBrush", ReadableAccentColor(accent, NativePaletteSurfaces(background, light)));
+        Controls.NativeIconPalette.Apply(accent, NativeIconSurfaces(background, light, accent));
     }
 
-    private static Windows.UI.Color[] LightTextSurfaces(Windows.UI.Color background) =>
-    [
-        MixBackground(0xF3F0F5, background, .07, 255), MixBackground(0xFFFFFF, background, .04, 255),
-        MixBackground(0xFAF8FC, background, .08, 255), MixBackground(0xFFFFFF, background, .09, 255),
-        MixBackground(0xF5F1F7, background, .13, 255), MixBackground(0xEEE9F1, background, .18, 255),
-    ];
+    private void UpdateSelectionSurfaceBrush()
+    {
+        Windows.UI.Color ReadColor(string key, Windows.UI.Color fallback)
+        {
+            if (Resources.TryGetValue(key, out var value) && value is SolidColorBrush brush)
+            {
+                var color = brush.Color;
+                color.A = (byte)Math.Clamp(Math.Round(color.A * brush.Opacity), 0, 255);
+                return color;
+            }
+            return fallback;
+        }
+
+        // Resolve the existing sidebar selection once into an opaque surface.
+        // Tabs sit on a different layer; reusing a translucent accent would
+        // otherwise make the same selected item visibly darker in the tab strip.
+        var window = ReadColor("MissumWindowBrush", Microsoft.UI.Colors.Black);
+        var sidebar = CompositeColor(ReadColor("MissumLayerBrush", window), window);
+        var selection = CompositeColor(ReadColor("MissumAccentSubtleBrush", Microsoft.UI.Colors.Transparent), sidebar);
+        SetBrushColor("MissumSelectionBrush", selection);
+    }
+
+    private static Windows.UI.Color[] NativePaletteSurfaces(Windows.UI.Color background, bool light)
+    {
+        var window = MixBackground(light ? 0xF3F0F5u : 0x202020u, background, light ? .07 : .08, 255);
+        return
+        [
+            window,
+            CompositeColor(MixBackground(light ? 0xFFFFFFu : 0x202020u, background, light ? .04 : .12, light ? (byte)248 : (byte)230), window),
+            CompositeColor(MixBackground(light ? 0xFAF8FCu : 0x2B2B2Bu, background, light ? .08 : .14, light ? (byte)255 : (byte)242), window),
+            MixBackground(light ? 0xFFFFFFu : 0x333333u, background, light ? .09 : .16, 255),
+            MixBackground(light ? 0xF5F1F7u : 0x303030u, background, light ? .13 : .16, 255),
+            MixBackground(light ? 0xEEE9F1u : 0x383838u, background, .18, 255),
+        ];
+    }
+
+    private static Windows.UI.Color[] NativeIconSurfaces(Windows.UI.Color background, bool light, Windows.UI.Color accent)
+    {
+        var surfaces = NativePaletteSurfaces(background, light);
+        accent.A = (byte)Math.Round(255 * .14);
+        // Selected rows, title bars and chip affordances layer the accent over
+        // a native surface. Include these states in the contrast calculation.
+        return [.. surfaces, .. surfaces.Select(surface => CompositeColor(accent, surface))];
+    }
+
+    private static Windows.UI.Color CompositeColor(Windows.UI.Color foreground, Windows.UI.Color background)
+    {
+        var alpha = foreground.A / 255d;
+        return Windows.UI.Color.FromArgb(255,
+            (byte)Math.Round(foreground.R * alpha + background.R * (1 - alpha)),
+            (byte)Math.Round(foreground.G * alpha + background.G * (1 - alpha)),
+            (byte)Math.Round(foreground.B * alpha + background.B * (1 - alpha)));
+    }
 
     internal static Windows.UI.Color ReadableAccentColor(Windows.UI.Color accent, Windows.UI.Color[] surfaces)
     {

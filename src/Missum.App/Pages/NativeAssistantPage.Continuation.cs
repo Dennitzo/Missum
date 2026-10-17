@@ -50,19 +50,35 @@ public sealed partial class NativeAssistantPage
             .OrderBy(MessageCreatedAt).ToArray();
         var user = conversation.TakeWhile(item => S(item, "id") != messageId)
             .LastOrDefault(item => S(item, "role") == "user");
-        return S(conversation.LastOrDefault(), "id") == messageId && S(user, "content").Trim().Length > 0
+        // A large answer may be the only message in the initial history page.
+        // The service validates the original prompt against durable history on click.
+        var hasPrompt = S(user, "content").Trim().Length > 0
+            || user.ValueKind != JsonValueKind.Object && _historyHasMore;
+        return S(conversation.LastOrDefault(), "id") == messageId && hasPrompt
             && (!Guid.TryParse(S(message, "sessionId"), out var owner) || owner == _session);
     }
 
     private bool HasActiveModelOperation()
     {
         if (_running || _sendPending) return true;
-        if (S(_snapshot, "isAiBusy") == "True") return true;
+        if (S(_snapshot, "isAiBusy") == "True"
+            && (!Guid.TryParse(S(_snapshot, "activeRunSessionId"), out var owner) || !_finishedSessions.Contains(owner))) return true;
         return _snapshot.ValueKind == JsonValueKind.Object
             && _snapshot.TryGetProperty("runQueue", out var queue)
             && queue.ValueKind == JsonValueKind.Object
             && queue.TryGetProperty("active", out var active)
             && S(active, "state") is "running" or "cancelling";
+    }
+
+    private void ObserveContinuationQueue(JsonElement data)
+    {
+        if (_snapshot.ValueKind == JsonValueKind.Object && data.TryGetProperty("runQueue", out var queue))
+        {
+            var snapshot = _snapshot.Deserialize<Dictionary<string, JsonElement>>(JsonOptions)!;
+            snapshot["runQueue"] = queue.Clone();
+            _snapshot = JsonSerializer.SerializeToElement(snapshot);
+        }
+        RefreshContinuationSteps();
     }
 
     private void RefreshContinuationStep(string messageId, JsonElement message)

@@ -98,10 +98,10 @@ public sealed partial class NativeAssistantPage
         var label = new TextBlock { FontSize = 13, MaxWidth = 184, TextTrimming = TextTrimming.CharacterEllipsis,
             VerticalAlignment = VerticalAlignment.Center };
         var content = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 7 };
-        content.Children.Add(new FontIcon { Glyph = "\uE8A5", FontSize = 13, Foreground = NativeIconPalette.BrushFor("code") }); content.Children.Add(label);
+        content.Children.Add(CreateTabIcon("\uE8A5")); content.Children.Add(label);
         var select = TabButton(); select.Content = content; select.Height = 30; select.MinWidth = 110;
         select.Padding = new Thickness(10, 0, 5, 0);
-        var close = TabButton(); close.Content = new FontIcon { Glyph = "\uE711", FontSize = 11 };
+        var close = TabButton(); close.Content = CreateTabIcon("\uE711", 11);
         close.Width = 24; close.Height = 24; close.Margin = new Thickness(0, 0, 3, 0);
         close.VerticalAlignment = VerticalAlignment.Center;
         ToolTipService.SetToolTip(close, "Änderungs-Tab schließen");
@@ -110,7 +110,7 @@ public sealed partial class NativeAssistantPage
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         row.Children.Add(select); Grid.SetColumn(close, 1); row.Children.Add(close);
         var container = new Border { Height = 32, MaxWidth = 258, CornerRadius = new CornerRadius(8),
-            BorderThickness = new Thickness(1), Child = row };
+            BorderThickness = new Thickness(0), Child = row };
         var tab = new ChangesReviewTab(sessionId, runId, container, label, select, close);
         UpdateReviewReceipt(tab, summary);
         select.Click += async (_, _) => await ActivateReviewTabAsync(tab);

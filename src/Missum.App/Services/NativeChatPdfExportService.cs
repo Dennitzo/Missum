@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Security.Cryptography;
 using System.Text;
 using Missum.Core.Contracts;
 using Missum.Core.Models;
@@ -9,8 +8,6 @@ namespace Missum.App.Services;
 /// <summary>Exports one durable conversation snapshot through the existing document renderer.</summary>
 public sealed class NativeChatPdfExportService(
     IConversationSnapshotRepository conversations,
-    IChatRepository chats,
-    IChatArtifactRepository artifacts,
     DocumentPdfExporter renderer)
 {
     public Task<ChatPdfExportReceipt> ExportAsync(Guid sessionId, string destinationPath,
@@ -47,8 +44,6 @@ public sealed class NativeChatPdfExportService(
             await pdf.ReadExactlyAsync(header, cancellationToken).ConfigureAwait(false);
             if (!header.AsSpan().SequenceEqual("%PDF-"u8)) throw new InvalidDataException("Die erzeugte Datei ist kein PDF.");
             pdf.Position = 0;
-            var sha = Convert.ToHexString(await SHA256.HashDataAsync(pdf, cancellationToken).ConfigureAwait(false)).ToLowerInvariant();
-            pdf.Position = 0;
 
             // A failed copy must not truncate an existing file chosen in the save picker.
             var pendingDestination = destination + "." + exportId + ".tmp";
@@ -64,36 +59,7 @@ public sealed class NativeChatPdfExportService(
             }
             finally { if (File.Exists(pendingDestination)) File.Delete(pendingDestination); }
 
-            var receiptMessage = await chats.AddMessageAsync(sessionId, ChatRole.Assistant,
-                "Chat-PDF gespeichert. Der Artefaktnachweis wird angelegt …", MessageStatus.Pending,
-                cancellationToken: cancellationToken).ConfigureAwait(false);
-            try
-            {
-                pdf.Position = 0;
-                var artifact = await artifacts.ImportAsync(receiptMessage.Id, "chat-pdf-" + exportId,
-                    Path.GetFileName(destination), "application/pdf", sha, pdf.Length, "native-chat-export", null,
-                    new Dictionary<string, string>(StringComparer.Ordinal)
-                    {
-                        ["format"] = "pdf",
-                        ["sessionId"] = sessionId.ToString("D"),
-                        ["conversationRevision"] = snapshot.Session.ConversationRevision.ToString(CultureInfo.InvariantCulture),
-                        ["messageCount"] = snapshot.Messages.Count.ToString(CultureInfo.InvariantCulture),
-                        ["exportedAt"] = DateTimeOffset.UtcNow.ToString("O"),
-                    }, pdf, cancellationToken).ConfigureAwait(false);
-                await chats.UpdateMessageAsync(receiptMessage.Id,
-                    $"Chat als PDF exportiert: **{Path.GetFileName(destination)}**\n\n"
-                    + $"{snapshot.Messages.Count} Nachrichten · Stand der Unterhaltung {snapshot.Session.ConversationRevision}.\n\n"
-                    + $"Datei: `{destination}`\n\nSHA-256: `{sha}`",
-                    MessageStatus.Completed, cancellationToken: cancellationToken).ConfigureAwait(false);
-                return new(sessionId, receiptMessage.Id, artifact, destination, snapshot.Messages.Count);
-            }
-            catch (Exception exception) when (exception is not OutOfMemoryException)
-            {
-                await chats.UpdateMessageAsync(receiptMessage.Id,
-                    $"Das PDF wurde unter `{destination}` gespeichert. Der Chat-Artefaktnachweis ist fehlgeschlagen.",
-                    MessageStatus.Failed, exception.Message, CancellationToken.None).ConfigureAwait(false);
-                throw;
-            }
+            return new(sessionId, destination, snapshot.Messages.Count);
         }
         finally
         {
@@ -142,4 +108,4 @@ public sealed class NativeChatPdfExportService(
     }
 }
 
-public sealed record ChatPdfExportReceipt(Guid SessionId, Guid MessageId, ChatArtifact Artifact, string SavedPath, int MessageCount);
+public sealed record ChatPdfExportReceipt(Guid SessionId, string SavedPath, int MessageCount);

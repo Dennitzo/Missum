@@ -36,6 +36,11 @@ class SessionCacheTailTests(unittest.TestCase):
         if "action=save" in path:
             (self.root / body["filename"]).write_bytes(self.bytes)
             return dict(n_saved=len(self.ids), n_written=len(self.bytes))
+        if "action=restore" in path:
+            target = self.root / body["filename"]
+            self.ids = NativeSessionCache._snapshot_tokens(target)
+            self.bytes = target.read_bytes()
+            return dict(n_restored=len(self.ids))
         if path == "detokenize":
             return dict(content=self.decoded)
         raise AssertionError(path)
@@ -51,6 +56,60 @@ class SessionCacheTailTests(unittest.TestCase):
     def test_older_plain_token_list_is_supported(self):
         self.bytes = snapshot(self.ids, packed=False)
         self.assertEqual(self.decoded, self.cache.save("model", "session", 2)["generatedTail"])
+
+    def test_b11507_checkpoint_appendix_keeps_the_existing_packed_token_offsets(self):
+        # PR26004 appends checkpoint state after the complete llama sequence
+        # state. The server_tokens v1 payload at the front remains unchanged.
+        self.bytes = snapshot(self.ids, version=4) + struct.pack("<III", 0x504b4353, 1, 1) + b"checkpoint-state" * 64
+        result = self.cache.save("model", "session", prompt_tokens=2)
+        target = next(self.root.glob("*.bin"))
+        self.assertEqual(self.decoded, result["generatedTail"])
+        self.assertEqual(len(self.ids), NativeSessionCache._snapshot_token_count(target))
+        self.assertEqual(self.ids, NativeSessionCache._snapshot_tokens(target))
+
+    def test_b11507_packed_media_context_does_not_enter_the_generated_text_tail(self):
+        # PR26640 serializes tokens before media indices/chunks, including
+        # LLAMA_TOKEN_NULL placeholders for images. Tail recovery must retain
+        # logical offsets without treating media payload bytes as text tokens.
+        self.ids = [101, -1, -1, 102, 201, 202]
+        media = b"opaque-media-chunk"
+        packed = struct.pack("<iII", -1, 1, len(self.ids))
+        packed += struct.pack("<" + "i" * len(self.ids), *self.ids)
+        packed += struct.pack("<III", 1, 1, len(media)) + media
+        packed += b"\0" * (-len(packed) % 4)
+        self.bytes = struct.pack("<III", 0x67677371, 4, len(packed) // 4) + packed + b"kv-state"
+
+        result = self.cache.save("model", "session", prompt_tokens=4)
+        target = next(self.root.glob("*.bin"))
+
+        self.assertEqual(self.decoded, result["generatedTail"])
+        self.assertEqual(len(self.ids), NativeSessionCache._snapshot_token_count(target))
+        self.assertEqual([201, 202], NativeSessionCache._snapshot_tail(target, 4, len(self.ids)))
+        self.assertIn(("detokenize", dict(model="model", tokens=[201, 202])), self.calls)
+        # Canonical text-only branch preparation intentionally fails closed for
+        # media; it must not silently strip an image and claim an exact prefix.
+        with self.assertRaisesRegex(ValueError, "requires text tokens"):
+            NativeSessionCache._snapshot_tokens(target)
+
+    def test_outer_sequence_versions_three_and_four_share_bounded_token_inspection_only(self):
+        target = self.root / "layout-fixture.bin"
+        for version in (3, 4):
+            for packed in (False, True):
+                with self.subTest(version=version, packed=packed):
+                    target.write_bytes(snapshot(self.ids, version=version, packed=packed))
+                    self.assertEqual(len(self.ids), NativeSessionCache._snapshot_token_count(target))
+                    self.assertEqual(self.ids, NativeSessionCache._snapshot_tokens(target))
+                    self.assertEqual([201, 202], NativeSessionCache._snapshot_tail(target, 2, len(self.ids)))
+
+    def test_unknown_outer_sequence_versions_remain_rejected_by_all_readers(self):
+        target = self.root / "unknown-layout.bin"
+        for version in (0, 2, 5, 99):
+            with self.subTest(version=version):
+                target.write_bytes(snapshot(self.ids, version=version))
+                for read in (NativeSessionCache._snapshot_token_count, NativeSessionCache._snapshot_tokens,
+                             lambda path: NativeSessionCache._snapshot_tail(path, 2, len(self.ids))):
+                    with self.assertRaises(ValueError):
+                        read(target)
 
     def test_empty_generated_tail_needs_no_detokenizer(self):
         result = self.cache.save("model", "session", len(self.ids))
@@ -90,6 +149,31 @@ class SessionCacheTailTests(unittest.TestCase):
         result = self.cache.save("model", "session", 100)
         self.assertEqual("saved", result["status"])
         self.assertNotIn("generatedTail", result)
+
+    def test_interrupted_prefill_preserves_native_file_when_metadata_is_missing_or_stale(self):
+        for packed, metadata in ((True, None), (False, {"tokens": 1, "bytes": 1}), (True, "damaged")):
+            with self.subTest(packed=packed, metadata=metadata):
+                self.cache.prepare("model", "session")
+                self.ids = [101, 102, 201, 202]
+                self.bytes = snapshot(self.ids, packed=packed)
+                self.cache.save("model", "session", new_tokens=4)
+                target = next(self.root.glob("*.bin"))
+                original = target.read_bytes()
+                if metadata is None:
+                    target.with_suffix(".json").unlink()
+                else:
+                    target.with_suffix(".json").write_text(json.dumps(metadata))
+                self.cache.prepare("model", "session")
+                self.ids = [901]
+                self.bytes = snapshot(self.ids, packed=packed)
+
+                result = self.cache.save("model", "session", prompt_tokens=10)
+
+                self.assertEqual("unchanged", result["status"])
+                self.assertEqual("interruptedPrefill", result["reason"])
+                self.assertEqual(4, result["retainedTokens"])
+                self.assertEqual(original, target.read_bytes())
+                self.assertNotIn("generatedTail", result)
 
     def test_tail_limit_rejects_before_reading_or_detokenizing_large_vectors(self):
         target = self.root / "fixture.bin"

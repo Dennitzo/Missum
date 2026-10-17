@@ -81,7 +81,7 @@ public sealed class ScienceWebResearchPolicyTests
     }
 
     [Fact]
-    public void NewScienceContinuationUsesNewPolicyWithoutRewritingOldCheckpointOrHistory()
+    public void NewSciencePolicyDoesNotRewriteAnAlreadyEvaluatedContinuationPrefix()
     {
         var previousRequest = Request(canonical: true);
         const string response = "Zwischenstand: Eine offene Annahme ist zu prüfen.";
@@ -98,8 +98,9 @@ public sealed class ScienceWebResearchPolicyTests
         var initial = RunProcessor.CreateInitialMessages(request, "general", WebTools,
             researchManagedByAgent: true);
 
+        AssertDirect(initial[0].Content!);
         Assert.True(GeneralSessionContext.TryContinue(previous, request, initial, out var continued));
-        AssertDirect(continued[0].Content!);
+        Assert.Equal(previousCheckpoint.Messages, continued.Take(previousCheckpoint.Messages.Count));
         Assert.Equal(previousPolicy, previousCheckpoint.Messages[0].Content);
         Assert.Equal(LegacyWrappedTask, previousCheckpoint.Messages[1].Content);
         Assert.Equal(LegacyWrappedTask, continued[1].Content);

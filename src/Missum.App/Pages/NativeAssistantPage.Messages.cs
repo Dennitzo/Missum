@@ -1,9 +1,10 @@
-﻿using System.Globalization;
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Missum.App.Controls;
 using Missum.App.Services;
+using Missum.Core.Models;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -84,7 +85,7 @@ public sealed partial class NativeAssistantPage
             if (!blocks.TryGetValue("liveStatus", out var statusView))
             {
                 var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
-                row.Children.Add(new ProgressRing { Width = 15, Height = 15, IsActive = true, Foreground = ThemeBrush("MissumAccentBrush", 176) });
+                row.Children.Add(new ProgressRing { Width = 15, Height = 15, IsActive = true, Foreground = NativeIconPalette.BrushFor("navigation") });
                 row.Children.Add(new TextBlock { FontSize = 14, Foreground = ThemeBrush("MissumMutedTextBrush", 160) });
                 blocks["liveStatus"] = statusView = row;
             }
@@ -208,6 +209,7 @@ public sealed partial class NativeAssistantPage
                 {
                     ScrollOwner = ConversationScroll, PinSelection = () => _conversationSelection?.IsSelecting == true,
                     Project = projection => RunUiCallback("ToolStep.LargeReasoning", projection),
+                    DisclosureInvoked = OnToolDisclosureInteraction,
                 };
                 view.LoadDetails = () => LoadToolStepDetailsAsync(messageId, id);
                 view.OpenResearch = () => OpenDeepResearchTabAsync(messageId, id);
@@ -263,6 +265,7 @@ public sealed partial class NativeAssistantPage
                 {
                     ScrollOwner = ConversationScroll, PinSelection = () => _conversationSelection?.IsSelecting == true,
                     Project = projection => RunUiCallback("Thinking.LargeReasoning", projection),
+                    DisclosureInvoked = OnToolDisclosureInteraction,
                 };
             var indicator = (ThinkingIndicatorView)thinking;
             indicator.IsMessageActive = true;
@@ -326,6 +329,7 @@ public sealed partial class NativeAssistantPage
         internal ScrollViewer? ScrollOwner { get; set; }
         internal Func<bool>? PinSelection { get; set; }
         internal Action<Action>? Project { get; set; }
+        internal Action? DisclosureInvoked { get; set; }
         private NativeVirtualizingTextView? _largeReasoning;
         private bool _loadingDetails;
         private bool _detailsInViewport;
@@ -339,9 +343,9 @@ public sealed partial class NativeAssistantPage
         private readonly TextBlock _added = new() { FontSize = 13, Foreground = ThemeBrush("MissumSuccessBrush", 160) };
         private readonly TextBlock _removed = new() { FontSize = 13, Foreground = ThemeBrush("MissumDangerBrush", 160) };
         private readonly StackPanel _counts = new() { Orientation = Orientation.Horizontal, Spacing = 7, Visibility = Visibility.Collapsed };
-        private readonly FontIcon _chevron = new() { Glyph = "\uE76C", FontSize = 10, Foreground = ThemeBrush("MissumMutedTextBrush", 140) };
+        private readonly FontIcon _chevron = new() { Glyph = "\uE76C", FontSize = 10, Foreground = NativeIconPalette.BrushFor("navigation") };
         private readonly TextBlock _status = new();
-        private readonly FontIcon _compactIcon = new() { Glyph = "\uE70F", FontSize = 14, Foreground = new SolidColorBrush(ToolGlyphColor("tool", "")), VerticalAlignment = VerticalAlignment.Center };
+        private readonly FontIcon _compactIcon = new() { Glyph = "\uE70F", FontSize = 14, Foreground = ToolGlyphBrush("tool", ""), VerticalAlignment = VerticalAlignment.Center };
         private NativeSubagentAvatar? _researchAvatar;
         private readonly Grid _headerRow = new() { ColumnSpacing = 8 };
         private JsonElement _step;
@@ -382,7 +386,7 @@ public sealed partial class NativeAssistantPage
                     NavigationTask = OpenResearch?.Invoke() ?? Task.FromResult(false);
                     await NavigationTask;
                 }
-                else SetExpanded(_details.Visibility != Visibility.Visible);
+                else { DisclosureInvoked?.Invoke(); SetExpanded(_details.Visibility != Visibility.Visible); }
             };
             var content = new StackPanel { Spacing = 10 };
             _details.Margin = new(24, 0, 0, 4);
@@ -443,7 +447,7 @@ public sealed partial class NativeAssistantPage
             _running = S(step, "status") is "running" or "pending";
             var iconKey = ToolStepIconKey(tool);
             _compactIcon.Glyph = ToolIconGlyph(iconKey);
-            _compactIcon.Foreground = new SolidColorBrush(ToolGlyphColor(iconKey, tool));
+            _compactIcon.Foreground = ToolGlyphBrush(iconKey, tool);
             _reasoning = tool == "assistant.reasoning";
             _status.Text = S(step, "status") switch { "completed" => "Abgeschlossen", "failed" => "Fehlgeschlagen", "denied" => "Abgelehnt", "cancelled" => "Abgebrochen", "interrupted" => "Unterbrochen", "steered" => "Umgelenkt", "pending" => "Wartet", _ => "In Bearbeitung" };
             if (IsResearchNavigation)
@@ -460,6 +464,21 @@ public sealed partial class NativeAssistantPage
                 _filePath = _diff = "";
                 _hasCounts = false;
                 _summary = "";
+                // Header metadata is intentionally independent of the lazy
+                // code/output bodies, including receipts loaded from history.
+                if (step.TryGetProperty("displayHeader", out var headerJson)
+                    && headerJson.ValueKind == JsonValueKind.Object
+                    && headerJson.Deserialize<ToolStepDisplayHeader>(JsonOptions) is { Version: AssistantToolStepHeaders.CurrentVersion } header)
+                {
+                    _filePath = header.FilePath ?? "";
+                    _summary = header.Summary ?? "";
+                    if (_fileMutation && header.AddedLines is { } added && header.RemovedLines is { } removed)
+                    {
+                        _hasCounts = true;
+                        _added.Text = $"+{added:N0}";
+                        _removed.Text = $"−{removed:N0}";
+                    }
+                }
                 if (IsExpanded) _ = LoadDetailsAsync();
                 UpdateHeader();
                 return;
@@ -494,7 +513,7 @@ public sealed partial class NativeAssistantPage
             }
             _diff = diff;
             var input = ReadMetadata(S(step, "inputJson"));
-            _summary = ToolSummary(tool, input, output);
+            _summary = AssistantToolStepHeaders.Summary(tool, input, output, _filePath);
             if (_details.Visibility == Visibility.Visible) RenderDetails();
             // Updates never change the user's fold state or open a completed file operation automatically.
             UpdateHeader();
@@ -504,10 +523,14 @@ public sealed partial class NativeAssistantPage
         {
             if (_loadingDetails || LoadDetails is null || !IsExpanded || !force && !_detailsInViewport) return;
             _loadingDetails = true;
+            var requestedAt = S(_step, "updatedAt");
+            var requestedStatus = S(_step, "status");
             if (S(_step, "tool") == "math.formalProof" && !_running) _leanSourceRequested = true;
-            _details.Children.Clear();
-            _details.Children.Add(new TextBlock { Text = "Werkzeugschritt wird geladen …", FontSize = 14,
-                Foreground = ThemeBrush("MissumMutedTextBrush", 160), TextWrapping = TextWrapping.Wrap });
+            // A newer receipt may need a refresh while this detail is being
+            // read. Retain its height and controls until replacement arrives.
+            if (_details.Children.Count == 0)
+                _details.Children.Add(new TextBlock { Text = "Werkzeugschritt wird geladen …", FontSize = 14,
+                    Foreground = ThemeBrush("MissumMutedTextBrush", 160), TextWrapping = TextWrapping.Wrap });
             try
             {
                 if (!await LoadDetails() && IsExpanded)
@@ -521,14 +544,19 @@ public sealed partial class NativeAssistantPage
                 _loadingDetails = false;
                 if (_leanSourceRequested && !IsTrue(_step, "detailsDeferred") && IsExpanded)
                 { _detailsDirty = true; RenderDetails(); }
+                // A result for A may be rejected because B streamed in while
+                // the request was pending. Fetch B even if no further tick
+                // arrives; unchanged failures must not create a retry loop.
+                if (IsExpanded && IsTrue(_step, "detailsDeferred")
+                    && (S(_step, "updatedAt") != requestedAt || S(_step, "status") != requestedStatus))
+                    _ = LoadDetailsAsync(force);
             }
         }
 
         private void UpdateHeader()
         {
             var expanded = _details.Visibility == Visibility.Visible;
-            var name = Path.GetFileName(_filePath.Replace('\\', '/'));
-            _title.Text = _fileMutation && !expanded && name.Length > 0 ? name : _label + (_summary.Length > 0 ? " · " + _summary : "");
+            _title.Text = _label + (_summary.Length > 0 ? " · " + _summary : "");
             var research = IsResearchNavigation ? ResearchIdentity?.Invoke() : null;
             if (_researchAvatar is not null) _researchAvatar.Visibility = research.HasValue ? Visibility.Visible : Visibility.Collapsed;
             _compactIcon.Visibility = research.HasValue ? Visibility.Collapsed : Visibility.Visible;
@@ -540,7 +568,7 @@ public sealed partial class NativeAssistantPage
                     _headerRow.Children.Add(_researchAvatar);
                 }
                 _researchAvatar.SetAgentId(child.AgentId, child.PlanetIndex);
-                _title.Text = child.Title;
+                _title.Text = ResearchTaskLabel(child.Title);
             }
             if (_running) _title.Text += " …";
             if (S(_step, "status") is "failed" or "denied" or "cancelled" or "interrupted") _title.Text += " · " + _status.Text;
@@ -548,8 +576,7 @@ public sealed partial class NativeAssistantPage
             _title.FontWeight = Microsoft.UI.Text.FontWeights.Normal;
             _title.Foreground = ThemeBrush("MissumMutedTextBrush", 160);
             _chevron.Glyph = IsResearchNavigation ? "\uE8A7" : expanded ? "\uE70D" : "\uE76C";
-            ToolTipService.SetToolTip(_toggle, IsResearchNavigation ? "Aufgabe und Werkzeugschritte im Subagent-Tab öffnen"
-                : _filePath.Length > 0 ? _filePath : _label + " · " + _summary);
+            ToolTipService.SetToolTip(_toggle, IsResearchNavigation ? "Aufgabe und Werkzeugschritte im Subagent-Tab öffnen" : _title.Text);
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_toggle,
                 _title.Text + (_counts.Visibility == Visibility.Visible ? " " + _added.Text + " " + _removed.Text : "")
                 + (IsResearchNavigation ? ", Recherchearbeit öffnen" : expanded ? ", ausgeklappt" : ", eingeklappt"));
@@ -616,40 +643,7 @@ public sealed partial class NativeAssistantPage
         }
 
         internal static string ToolSummary(string tool, JsonElement input, JsonElement output)
-        {
-            if (tool == "research.update" && input.ValueKind == JsonValueKind.Object
-                && input.TryGetProperty("changes", out var changes) && changes.ValueKind == JsonValueKind.Array)
-            {
-                var titles = changes.EnumerateArray().Select(change => change.TryGetProperty("data", out var data)
-                    ? S(data, "title", S(change, "id")) : S(change, "id")).Where(title => title.Length > 0).ToArray();
-                var summary = titles.Length == 1 ? titles[0] : titles.Length.ToString(CultureInfo.CurrentCulture) + " Forschungsobjekte";
-                return summary.Length > 100 ? summary[..97] + "…" : summary;
-            }
-            if (tool == "research.read") return "Hypothesen, offene Prüfungen und Publikationsstand";
-            if (tool is "subagent" or "subagent.spawn" or "subagent.wait")
-            {
-                var title = S(output, "title", S(input, "title", S(input, "task")));
-                return title.Length > 80 ? title[..77] + "…" : title;
-            }
-            var path = S(output, "path", S(output, "file", S(input, "path")));
-            var target = path.Length > 0 ? path.Replace('\\', '/') : S(input, "query", S(input, "url"));
-            if (tool is "coding.command" or "research.code.execute" or "research.code.test" or "research.code.benchmark") target = S(input, "executable") + " " + (input.ValueKind == JsonValueKind.Object && input.TryGetProperty("arguments", out var args) && args.ValueKind == JsonValueKind.Array ? string.Join(" ", args.EnumerateArray().Select(x => x.ToString())) : "");
-            var facts = new List<string>();
-            if (target.Length > 0) facts.Add(target);
-            if (tool == "coding.read" && output.ValueKind == JsonValueKind.Object && output.TryGetProperty("content", out var content) && content.ValueKind == JsonValueKind.String)
-            {
-                var lines = (content.GetString() ?? "").ReplaceLineEndings("\n");
-                var count = lines.Length == 0 ? 0 : lines.Count(c => c == '\n') + (lines.EndsWith('\n') ? 0 : 1);
-                var start = int.TryParse(S(output, "startLine"), out var first) ? first : 1;
-                facts.Add($"{count:N0} Zeilen gelesen" + (count > 0 ? $" ({start:N0}–{start + count - 1:N0})" : ""));
-            }
-            foreach (var (key, label) in new[] { ("entries", "Einträge"), ("matches", "Treffer"), ("results", "Treffer"), ("sources", "Quellen") })
-                if (output.ValueKind == JsonValueKind.Object && output.TryGetProperty(key, out var array) && array.ValueKind == JsonValueKind.Array) facts.Add($"{array.GetArrayLength():N0} {label}");
-            if (S(output, "exitCode") is { Length: > 0 } exit) facts.Add("Exitcode " + exit);
-            if (S(output, "error", S(output, "errorCode")) is { Length: > 0 } error) facts.Add(error);
-            if (IsTrue(output, "truncated")) facts.Add("Ausgabe gekürzt");
-            return string.Join(" · ", facts);
-        }
+            => AssistantToolStepHeaders.Summary(tool, input, output);
 
         internal static JsonElement ReadMetadata(string json)
         {

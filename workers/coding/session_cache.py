@@ -24,6 +24,10 @@ INTERRUPTED_SAVE_IDLE_SECONDS = 90.0
 PREPARATION_IDLE_SECONDS = 300.0
 PREPARATION_MAXIMUM_SECONDS = 2 * 60 * 60.0
 PROJECT_CONTEXT_END = "\n\nMISSUM_SHARED_PROJECT_CONTEXT_END_V1"
+# Native versions 3 and 4 retain the same leading token payload layout. Their
+# KV tensors differ and remain bound to the native binary/model fingerprint;
+# accepting this header for bounded inspection does not make KV interchangeable.
+NATIVE_SEQUENCE_TOKEN_LAYOUT_VERSIONS = (3, 4)
 
 
 def canonical_project_token_prefix(prefix_tokens, actual_tokens, prefix_rendered, actual_rendered, project_content, detokenize):
@@ -328,10 +332,11 @@ class NativeSessionCache:
                 current = None
                 slot = self._idle_slot(model)
             tokens = slot.get("n_prompt_tokens", slot.get("n_past", slot.get("n_tokens", 0)))
-            if current and current["identity"] == identity and tokens > 0:
+            if (current and current["identity"] == identity and tokens > 0
+                    and not current.get("restore_preserved_snapshot")):
                 current["dirty"] = True
                 return self._record(model, "prepare", dict(status="resident"))
-            if current and tokens > 0:
+            if current and tokens > 0 and not current.get("restore_preserved_snapshot"):
                 self._save(model)
             self.resident.pop(model, None)
             result = dict(status="bypass" if identity is None else "miss")
@@ -351,6 +356,12 @@ class NativeSessionCache:
                     result = dict(status="unavailable", detail=str(error)[:500])
             if identity:
                 self.resident[model] = dict(identity=identity, key=key, dirty=True)
+                if (result["status"] == "unavailable" and current and current["identity"] == identity
+                        and current.get("restore_preserved_snapshot")):
+                    # A transient failed restore must not let a following
+                    # shutdown save overwrite the still-preserved disk branch.
+                    self.resident[model].update(restore_preserved_snapshot=True,
+                        interrupted_prompt_tokens=current.get("interrupted_prompt_tokens"))
             return self._record(model, "prepare", result)
         except Exception as error:
             # An unavailable/busy slot does not invalidate its logical owner.
@@ -392,16 +403,34 @@ class NativeSessionCache:
             raise OSError("Insufficient native session cache space; conversation remains saved")
 
     @staticmethod
+    def _snapshot_token_count(path):
+        """Read a saved token count without loading its token vector or KV state."""
+        with path.open("rb") as stream:
+            magic, version, packed_count = struct.unpack("<III", stream.read(12))
+            if (magic != 0x67677371 or version not in NATIVE_SEQUENCE_TOKEN_LAYOUT_VERSIONS
+                    or not 0 < packed_count <= (path.stat().st_size - 12) // 4):
+                raise ValueError("Unsupported native session token vector")
+            marker = struct.unpack("<i", stream.read(4))[0]
+            if marker == -1:
+                server_version, token_count = struct.unpack("<II", stream.read(8))
+                if server_version != 1 or not 0 < token_count <= packed_count - 4:
+                    raise ValueError("Unsupported native server token vector")
+                return token_count
+            if marker < 0:
+                raise ValueError("Invalid native plain token vector")
+            return packed_count
+
+    @staticmethod
     def _snapshot_tail(path, prompt_tokens, saved_tokens):
-        # llama_state_seq_save_file v3 stores its token vector before the KV
-        # bytes. Recent servers wrap it in server_tokens::serialize v1. Read
+        # llama_state_seq_save_file v3/v4 store the same token vector before
+        # their version-specific KV bytes. server_tokens::serialize v1 wraps it. Read
         # only that bounded vector tail, never the potentially huge KV state.
         with path.open("rb") as stream:
             header = stream.read(12)
             if len(header) != 12:
                 raise ValueError("Incomplete native session header")
             magic, version, packed_count = struct.unpack("<III", header)
-            if magic != 0x67677371 or version != 3:
+            if magic != 0x67677371 or version not in NATIVE_SEQUENCE_TOKEN_LAYOUT_VERSIONS:
                 raise ValueError("Unsupported native session format")
             if packed_count < 1 or packed_count > (path.stat().st_size - 12) // 4:
                 raise ValueError("Invalid native session token bounds")
@@ -454,16 +483,56 @@ class NativeSessionCache:
             token_count = slot.get("n_prompt_tokens", slot.get("n_past", slot.get("n_tokens", 0)))
             if token_count <= 0:
                 raise RuntimeError("Native slot has no reusable tokens")
+            metadata = target.with_suffix(".json")
+            previous = None
+            if metadata.exists():
+                try:
+                    previous = json.loads(metadata.read_text(encoding="utf-8"))
+                except (OSError, ValueError, TypeError):
+                    pass
+            previous_tokens = None
+            if target.is_file():
+                try:
+                    # The file is authoritative if a former process stopped
+                    # between atomic cache replacement and metadata update.
+                    previous_tokens = self._snapshot_token_count(target)
+                except (OSError, ValueError, struct.error):
+                    # Future native formats can still use the byte-bound
+                    # metadata written alongside their successful snapshot.
+                    if (isinstance(previous, dict) and type(previous.get("tokens")) is int
+                            and previous["tokens"] > 0 and previous.get("bytes") == target.stat().st_size):
+                        previous_tokens = previous["tokens"]
+            interrupted_prompt = current.get("interrupted_prompt_tokens")
+
+            def preserve_interrupted_prefill(saved_tokens):
+                # Cancelling a replacement prompt can leave only its first few
+                # batches in the slot, despite restoring a complete old turn
+                # before inference. Never replace that durable, larger prefix
+                # with the incomplete replacement. Keep the guard for shutdown,
+                # unload and owner-switch saves as well as this explicit Stop.
+                if (type(interrupted_prompt) is not int or saved_tokens >= interrupted_prompt
+                        or previous_tokens is None or previous_tokens <= saved_tokens):
+                    return None
+                # On direct resume the partial slot is less useful than the
+                # preserved durable branch, even if slot metadata still claims
+                # the complete requested prompt. Restore that branch once.
+                current["restore_preserved_snapshot"] = True
+                return self._record(model, "save", dict(status="unchanged", reason="interruptedPrefill",
+                    retainedTokens=previous_tokens, residentTokens=saved_tokens,
+                    interruptedPromptTokens=interrupted_prompt,
+                    detail="Incomplete interrupted prompt did not replace the larger saved session cache"))
+
+            preserved = preserve_interrupted_prefill(token_count)
+            if preserved is not None:
+                return preserved
             # Reserve before the native writer starts. Subsequent snapshots use
             # measured bytes/token; the first uses GGUF cache dimensions when
             # available and an explicit conservative fallback otherwise.
             previous_bytes = target.stat().st_size if target.exists() else 0
-            metadata = target.with_suffix(".json")
             estimate = self.estimate_bytes(model, token_count) if self.estimate_bytes else None
             estimate = estimate if isinstance(estimate, int) and estimate > 0 else token_count * 256 * 1024
-            if metadata.exists():
+            if previous is not None:
                 try:
-                    previous = json.loads(metadata.read_text(encoding="utf-8"))
                     estimate = int(max(1, previous["bytes"]) / max(1, previous["tokens"]) * token_count * 1.1)
                 except (ValueError, TypeError, KeyError):
                     pass
@@ -471,8 +540,11 @@ class NativeSessionCache:
             self._prune(required=estimate, protected=[target.name], replacing=target)
             response = self.router("slots/0?action=save",
                          dict(model=model, filename=temporary.name), timeout=120)
-            if not temporary.is_file() or int(response.get("n_saved", 0)) <= 0:
+            if not temporary.is_file() or type(response.get("n_saved")) is not int or response["n_saved"] <= 0:
                 raise RuntimeError("Native server did not save a usable session cache")
+            preserved = preserve_interrupted_prefill(response["n_saved"])
+            if preserved is not None:
+                return preserved
             if temporary.stat().st_size > self.maximum_bytes:
                 raise OSError("Native session cache exceeds its disk allowance")
             temporary.replace(target)
@@ -512,6 +584,15 @@ class NativeSessionCache:
             current = self.resident.get(model)
             if current is None or (key is not None and current["identity"] != self._identity(model, key)):
                 return dict(status="unchanged")
+            if prompt_tokens is not None:
+                current["interrupted_prompt_tokens"] = prompt_tokens
+            elif type(new_tokens) is int and new_tokens > 0:
+                # This counter is supplied only after a completed model turn.
+                # A shorter completed prompt can be intentional compaction and
+                # must replace the old cache. Flush/unload/fork calls carry no
+                # such completion evidence and cannot remove the Stop guard.
+                current.pop("interrupted_prompt_tokens", None)
+                current.pop("restore_preserved_snapshot", None)
             progress = self.save_progress.get(current["identity"])
             if progress is None:
                 progress = dict(time=time.monotonic(), new_tokens=0)
@@ -532,7 +613,8 @@ class NativeSessionCache:
         """Read only the bounded text-token vector, never the KV tensors."""
         with path.open("rb") as stream:
             magic, version, packed_count = struct.unpack("<III", stream.read(12))
-            if magic != 0x67677371 or version != 3 or not 0 < packed_count <= 1_048_580:
+            if (magic != 0x67677371 or version not in NATIVE_SEQUENCE_TOKEN_LAYOUT_VERSIONS
+                    or not 0 < packed_count <= 1_048_580):
                 raise ValueError("Unsupported native session token vector")
             marker = struct.unpack("<i", stream.read(4))[0]
             if marker == -1:
@@ -558,9 +640,10 @@ class NativeSessionCache:
     def _prefill_fork(self, source_model, target, temporary, prefill, cancelled=None, preparation=None, canonical_tokens=None):
         """Evaluate a canonical branch on the source's live rollback checkpoints.
 
-        llama's slot file contains the final recurrent state, but not its earlier
-        rollback checkpoints. Re-rendered tool calls can otherwise force a restored
-        child to start cold. The sampled terminal token is never decoded into KV;
+        Legacy llama slot files contain only the final recurrent state; newer
+        files also persist earlier rollback checkpoints. Prepare the exact child
+        prefix on the live source so re-rendered tool calls cannot silently make
+        it incompatible. The sampled terminal token is never decoded into KV;
         verify the serialized vector rather than assuming n_predict=0 means no
         sampling (current native servers still sample one token with that value).
         """

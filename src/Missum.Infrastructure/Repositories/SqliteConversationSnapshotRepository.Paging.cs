@@ -15,6 +15,7 @@ public sealed partial class SqliteConversationSnapshotRepository
             'status',json_extract(s.value,'$.status'),'contentOffset',json_extract(s.value,'$.contentOffset'),
             'startedAt',json_extract(s.value,'$.startedAt'),'completedAt',json_extract(s.value,'$.completedAt'),
             'updatedAt',json_extract(s.value,'$.updatedAt'),'agentId',json_extract(s.value,'$.agentId'),
+            'displayHeader',json_extract(s.value,'$.displayHeader'),
             'explanation',substr(json_extract(s.value,'$.explanation'),1,400),
             'detail',CASE WHEN json_extract(s.value,'$.tool') IN ('assistant.narration','assistant.progress')
                 THEN json_extract(s.value,'$.detail') ELSE NULL END,
@@ -120,7 +121,9 @@ public sealed partial class SqliteConversationSnapshotRepository
         command.Parameters.AddWithValue("$message", messageId.ToString("D"));
         command.Parameters.AddWithValue("$session", sessionId.ToString("D"));
         if (await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is null) return null;
-        return await ReadToolStepPageAsync(connection, transaction, messageId, Math.Clamp(pageSize, 1, 128), beforeOrdinal, cancellationToken).ConfigureAwait(false);
+        var page = await ReadToolStepPageAsync(connection, transaction, messageId, Math.Clamp(pageSize, 1, 128), beforeOrdinal, cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return page;
     }
 
     private static async Task<ConversationToolStepPage> ReadToolStepPageAsync(SqliteConnection connection, SqliteTransaction transaction,
@@ -153,8 +156,84 @@ public sealed partial class SqliteConversationSnapshotRepository
         var more = rows.Count > pageSize;
         if (more) rows.RemoveAt(rows.Count - 1);
         rows.Reverse();
+        await RefreshToolStepHeadersAsync(connection, transaction, messageId, normalized, rows, token).ConfigureAwait(false);
         return new(messageId, rows.Select(row => row.Step).ToArray(), new(total, more,
             rows.Count > 0 ? rows[0].Ordinal : null, RequiresLegacyNormalization: !normalized && total > 0));
+    }
+
+    private static async Task RefreshToolStepHeadersAsync(SqliteConnection connection, SqliteTransaction transaction,
+        Guid messageId, bool normalized, List<(long Ordinal, AssistantToolStep Step)> rows, CancellationToken token)
+    {
+        var missing = rows.Where(row => row.Step.DisplayHeader?.Version != AssistantToolStepHeaders.CurrentVersion).ToArray();
+        if (missing.Length == 0) return;
+
+        // Upgrade only the visible page's disposable projection. Historical tool bodies remain unchanged,
+        // and neither chat revisions nor model/KV history are touched by this lazy presentation migration.
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.Parameters.AddWithValue("$message", messageId.ToString("D"));
+        var ordinalKeys = missing.Select((row, index) =>
+        {
+            var key = "$ordinal" + index;
+            command.Parameters.AddWithValue(key, row.Ordinal);
+            return key;
+        }).ToArray();
+        command.CommandText = normalized
+            ? $"SELECT ordinal,step_json FROM chat_tool_steps WHERE message_id=$message AND ordinal IN ({string.Join(',', ordinalKeys)});"
+            : $"""
+                SELECT CAST(s.key AS INTEGER),s.value FROM chat_messages m,json_each(m.tool_steps_json) s
+                WHERE m.id=$message AND CAST(s.key AS INTEGER) IN ({string.Join(',', ordinalKeys)});
+                """;
+        var replacements = new Dictionary<long, AssistantToolStep>();
+        await using (var reader = await command.ExecuteReaderAsync(token).ConfigureAwait(false))
+            while (await reader.ReadAsync(token).ConfigureAwait(false))
+                if (JsonSerializer.Deserialize<AssistantToolStep>(reader.GetString(1), JsonSerializerOptions.Web) is { } step)
+                    replacements[reader.GetInt64(0)] = ConversationToolStepStorage.Header(step);
+        if (replacements.Count == 0) return;
+
+        command.Parameters.Clear();
+        command.Parameters.AddWithValue("$message", messageId.ToString("D"));
+        if (normalized)
+        {
+            command.CommandText = "UPDATE chat_tool_steps SET header_json=$header WHERE message_id=$message AND ordinal=$ordinal;";
+            command.Parameters.Add("$header", SqliteType.Text);
+            command.Parameters.Add("$ordinal", SqliteType.Integer);
+            foreach (var (ordinal, header) in replacements)
+            {
+                command.Parameters["$header"].Value = JsonSerializer.Serialize(header, JsonSerializerOptions.Web);
+                command.Parameters["$ordinal"].Value = ordinal;
+                await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+            }
+        }
+        else
+        {
+            // Keep the legacy cache compact, including when it predates display headers. Updating all selected
+            // entries together avoids rewriting the whole cached array once for every step in a large message.
+            command.CommandText = $"""
+                INSERT OR IGNORE INTO chat_message_ui_headers(message_id,headers_json)
+                SELECT m.id,{HeadersSql} FROM chat_messages m
+                LEFT JOIN chat_message_ui_headers h ON h.message_id=m.id WHERE m.id=$message;
+                """;
+            await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+            var replacementValues = replacements.Select((pair, index) =>
+            {
+                command.Parameters.AddWithValue("$ordinal" + index, pair.Key);
+                command.Parameters.AddWithValue("$header" + index, JsonSerializer.Serialize(pair.Value, JsonSerializerOptions.Web));
+                return "($ordinal" + index + ",$header" + index + ")";
+            }).ToArray();
+            command.CommandText = $"""
+                WITH replacements(ordinal,header) AS (VALUES {string.Join(',', replacementValues)})
+                UPDATE chat_message_ui_headers SET headers_json=(
+                    SELECT json_group_array(json(header)) FROM (
+                        SELECT COALESCE(replacement.header,step.value) AS header FROM json_each(headers_json) step
+                        LEFT JOIN replacements replacement ON replacement.ordinal=CAST(step.key AS INTEGER)
+                        ORDER BY CAST(step.key AS INTEGER)))
+                WHERE message_id=$message;
+                """;
+            await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+        }
+        for (var index = 0; index < rows.Count; index++)
+            if (replacements.TryGetValue(rows[index].Ordinal, out var header)) rows[index] = (rows[index].Ordinal, header);
     }
 
     public async Task<AssistantToolStep?> GetToolStepAsync(Guid sessionId, Guid messageId, string stepId,

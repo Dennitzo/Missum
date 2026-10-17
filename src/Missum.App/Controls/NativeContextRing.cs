@@ -51,7 +51,7 @@ public sealed class NativeContextRing : Grid
     {
         var resources = Application.Current.Resources;
         var trackBrush = resources.TryGetValue("MissumStrokeBrush", out var track) && track is Brush brush ? brush : new SolidColorBrush(Microsoft.UI.Colors.Gray);
-        var usedBrush = resources.TryGetValue("MissumAccentBrush", out var accent) && accent is Brush accentBrush ? accentBrush : new SolidColorBrush(Microsoft.UI.Colors.MediumPurple);
+        var usedBrush = NativeIconPalette.BrushFor("navigation");
         if (!ReferenceEquals(_track.Stroke, trackBrush)) _track.Stroke = trackBrush;
         if (!ReferenceEquals(_used.Stroke, usedBrush)) _used.Stroke = usedBrush;
     }

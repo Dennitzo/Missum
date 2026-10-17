@@ -91,7 +91,7 @@ public sealed partial class NativeAssistantPage
             RefreshThinkingIndicators();
             if (!ReferenceEquals(row, _thinkingIndicators[messageId]) || row.Visibility != Visibility.Visible
                 || !row.IsProcessing || !row.Label.Text.StartsWith("Kontext wird verarbeitet", StringComparison.Ordinal)
-                || !row.Label.Text.Contains($"{70539:N0} Eingangstoken", StringComparison.Ordinal))
+                || !row.Label.Text.Contains($"{70539:N0} von {80000:N0} Eingangstoken", StringComparison.Ordinal))
                 throw new InvalidOperationException("Prompt processing was mislabeled as generated reasoning.");
             row.SetExpanded(true); await Task.Delay(30);
             if (row.ReasoningView.Visibility != Visibility.Collapsed
@@ -109,7 +109,7 @@ public sealed partial class NativeAssistantPage
             if (_messagesDirty || !ReferenceEquals(row, _thinkingIndicators[messageId]) || row.Label.Text != processingLabel)
                 throw new InvalidOperationException("Prompt-processing updates rebuilt controls or bypassed throttling.");
             RefreshThinkingIndicators(refreshTokens: true);
-            if (!row.Label.Text.Contains($"{72000:N0} Eingangstoken", StringComparison.Ordinal)
+            if (!row.Label.Text.Contains($"{72000:N0} von {80000:N0} Eingangstoken", StringComparison.Ordinal)
                 || !row.Label.Text.Contains(.9.ToString("P0", System.Globalization.CultureInfo.CurrentCulture), StringComparison.Ordinal))
                 throw new InvalidOperationException("Measured prompt progress did not reach the native row.");
             await SaveMathPreviewAsync(LayoutRoot, "native-thinking-processing-preview.png");

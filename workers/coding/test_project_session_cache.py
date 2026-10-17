@@ -19,6 +19,7 @@ class ProjectSessionCacheTests(unittest.TestCase):
         self.busy = False
         self.rewrite = False
         self.legacy_tokens = False
+        self.sequence_version = 3
         self.cache = NativeSessionCache(self.root, self.router, lambda _: {"version": self.version})
         self.prefill = dict(messages=[dict(role="system", content="policy"), dict(role="user", content="project")])
         self.inference = dict(messages=[*self.prefill["messages"], dict(role="user", content="new task")])
@@ -43,8 +44,8 @@ class ProjectSessionCacheTests(unittest.TestCase):
             return dict(timings=dict(prompt_n=len(self.tokens), cache_n=0), tokens_predicted=1)
         if "action=save" in path:
             vector = self.tokens
-            encoded = (struct.pack("<III", 0x67677371, 3, len(vector)) if self.legacy_tokens else
-                       struct.pack("<IIIiII", 0x67677371, 3, len(vector) + 4, -1, 1, len(vector)))
+            encoded = (struct.pack("<III", 0x67677371, self.sequence_version, len(vector)) if self.legacy_tokens else
+                       struct.pack("<IIIiII", 0x67677371, self.sequence_version, len(vector) + 4, -1, 1, len(vector)))
             encoded += struct.pack("<" + "i" * len(vector), *vector) + b"mock-kv"
             (self.root / body["filename"]).write_bytes(encoded)
             return dict(n_saved=len(vector), n_written=len(encoded))
@@ -123,6 +124,18 @@ class ProjectSessionCacheTests(unittest.TestCase):
         self.assertEqual("forked", self.prepare("session-a")["status"])
         self.assertEqual(list(range(1, 11)), self.tokens)
         self.assertEqual("forked", self.prepare("session-b")["status"])
+        self.assertEqual(1, sum(path == "completion" for path, _ in self.calls))
+
+    def test_b11507_v4_snapshots_seed_and_restore_independent_project_branches(self):
+        self.sequence_version = 4
+        self.assertEqual("forked", self.prepare("session-a")["status"])
+        self.tokens += [101, 102]
+        self.cache.prepare("model", "session-a")
+        self.cache.save("model", "session-a", new_tokens=2)
+        self.assertEqual("forked", self.prepare("session-b")["status"])
+        self.assertEqual(list(range(1, 11)), self.tokens)
+        self.assertEqual("restored", self.prepare("session-a")["status"])
+        self.assertEqual([*range(1, 11), 101, 102], self.tokens)
         self.assertEqual(1, sum(path == "completion" for path, _ in self.calls))
 
     def test_truncated_immutable_base_is_rebuilt_without_changing_a_saved_session(self):

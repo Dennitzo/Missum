@@ -597,11 +597,12 @@ try {
     $deepResearch = Get-Content -LiteralPath $deepResearchReport -Raw | ConvertFrom-Json
     foreach ($check in @('passed', 'headerOpensMatchingResearch', 'sharedTranscriptAndToolRenderer', 'sharedCopyReadFooter',
         'readonlyParentControlsPreserved', 'companionReceiptHiddenInBothRenderers', 'unifiedOutputsSection', 'sharedPlanetIcons',
-        'sharedTaskTitles', 'realResearchUsesNormalLifecycle', 'legacyResearchRemainsReadable')) {
+        'sharedTaskTitles', 'realResearchUsesNormalLifecycle', 'legacyResearchRemainsReadable',
+        'streamingReasoningVisible', 'liveSnapshotsRetainExpandedDetails', 'disclosureStopsTailFollowing', 'deepResearchLifecyclePrefix')) {
         if ($deepResearch.$check -ne $true) { throw "Native Deep Research failed: $check" }
     }
     Copy-Item -LiteralPath $deepResearchReport -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-deep-research-validation.json')) -Force
-    foreach ($previewName in @('native-deep-research-overview-preview.png', 'native-deep-research-preview.png')) {
+    foreach ($previewName in @('native-deep-research-overview-preview.png', 'native-deep-research-preview.png', 'native-deep-research-live-disclosure-preview.png')) {
         Copy-Item -LiteralPath (Join-Path $smokeData $previewName) -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.' + $previewName)) -Force
     }
     Write-Host 'Native research subagents, shared planet icons, task titles, lifecycle navigation and legacy transcript verified.'

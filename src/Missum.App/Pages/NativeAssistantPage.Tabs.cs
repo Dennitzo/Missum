@@ -67,7 +67,7 @@ public sealed partial class NativeAssistantPage
             VerticalAlignment = VerticalAlignment.Center,
         };
         var content = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 7, VerticalAlignment = VerticalAlignment.Center };
-        content.Children.Add(new FontIcon { Glyph = "\uE8F2", FontSize = 13, Foreground = NativeIconPalette.BrushFor(mode == "coding" ? "code" : mode == "claudescience" ? "research" : "navigation") });
+        content.Children.Add(CreateTabIcon("\uE8F2"));
         content.Children.Add(label);
         var select = TabButton();
         select.Content = content;
@@ -80,7 +80,7 @@ public sealed partial class NativeAssistantPage
             Height = 32,
             MaxWidth = 258,
             CornerRadius = new CornerRadius(8),
-            BorderThickness = new Thickness(1),
+            BorderThickness = new Thickness(0),
             Child = select,
         };
         var tab = new SessionTabState(sessionId, title, mode, border, label, select);
@@ -154,12 +154,14 @@ public sealed partial class NativeAssistantPage
         {
             control.Height = 32;
             control.CornerRadius = new CornerRadius(8);
-            control.BorderThickness = new Thickness(1);
+            control.BorderThickness = new Thickness(0);
             control.FontFamily = new FontFamily("Segoe UI Variable Text");
             control.FontSize = 13;
         }
-        control.Background = active ? ThemeBrush("MissumAccentSubtleBrush", 42) : ThemeBrush("MissumLayerStrongBrush", 29);
-        control.BorderBrush = active ? ThemeBrush("MissumAccentBrush", 72) : state.TransparentBorder;
+        // Match the selected project session; selection is a filled surface,
+        // never an accent outline. The shared brush also tracks live theme changes.
+        control.Background = active ? ThemeBrush("MissumSelectionBrush", 46) : ThemeBrush("MissumLayerStrongBrush", 29);
+        control.BorderBrush = state.TransparentBorder;
         control.Foreground = ThemeBrush(active ? "MissumTextBrush" : "MissumMutedTextBrush", active ? (byte)242 : (byte)170);
         state.Initialized = true;
         state.Active = active;
@@ -173,12 +175,12 @@ public sealed partial class NativeAssistantPage
         {
             container.Height = 32;
             container.CornerRadius = new CornerRadius(8);
-            container.BorderThickness = new Thickness(1);
+            container.BorderThickness = new Thickness(0);
             select.FontFamily = new FontFamily("Segoe UI Variable Text");
             select.FontSize = 13;
         }
-        container.Background = active ? ThemeBrush("MissumAccentSubtleBrush", 42) : ThemeBrush("MissumLayerStrongBrush", 29);
-        container.BorderBrush = active ? ThemeBrush("MissumAccentBrush", 72) : state.TransparentBorder;
+        container.Background = active ? ThemeBrush("MissumSelectionBrush", 46) : ThemeBrush("MissumLayerStrongBrush", 29);
+        container.BorderBrush = state.TransparentBorder;
         select.Foreground = ThemeBrush(active ? "MissumTextBrush" : "MissumMutedTextBrush", active ? (byte)242 : (byte)170);
         state.Initialized = true;
         state.Active = active;
@@ -199,9 +201,16 @@ public sealed partial class NativeAssistantPage
     private static void SetTabToolTip(Button target, string value) { if (ToolTipService.GetToolTip(target) as string != value) ToolTipService.SetToolTip(target, value); }
     private static void SetTabName(Button target, string value) { if (AutomationProperties.GetName(target) != value) AutomationProperties.SetName(target, value); }
     private static void SetTabHelp(Button target, string value) { if (AutomationProperties.GetHelpText(target) != value) AutomationProperties.SetHelpText(target, value); }
+    private static FontIcon CreateTabIcon(string glyph, double fontSize = 13) => new()
+    {
+        Glyph = glyph,
+        FontSize = fontSize,
+        Foreground = NativeIconPalette.BrushFor("navigation"),
+    };
+
     private static void SetTabCloseForeground(Button close)
     {
-        var brush = ThemeBrush("MissumMutedTextBrush", 155);
+        var brush = NativeIconPalette.BrushFor("navigation");
         if (!ReferenceEquals(close.Foreground, brush)) close.Foreground = brush;
     }
 

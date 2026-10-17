@@ -6,6 +6,9 @@ public sealed partial class NativeAssistantPage
 {
     private string? _researchNavigationSignature;
 
+    private static string ResearchTaskLabel(string title, bool research = true) => !research
+        || title.StartsWith("Deep Research", StringComparison.OrdinalIgnoreCase) ? title : "Deep Research · " + title;
+
     private static bool IsLegacyResearchIdentity(string agentId, string runId) =>
         agentId.StartsWith("deep-research:", StringComparison.Ordinal)
         || runId.StartsWith("deep-research-run:", StringComparison.Ordinal);

@@ -7,6 +7,32 @@ namespace Missum.Tests;
 public sealed class NativeLongSessionProjectionTests
 {
     [Fact]
+    public void LiveChildSnapshotsRetainHydratedReceiptsUntilTheirOwnVersionChanges()
+    {
+        var at = DateTimeOffset.UtcNow;
+        JsonElement Header(DateTimeOffset updated, string status = "completed") => JsonSerializer.SerializeToElement(new
+        { id = "source", tool = "web.fetch", status, updatedAt = updated, detailsDeferred = true });
+        JsonElement Snapshot(JsonElement step, int tick) => JsonSerializer.SerializeToElement(new
+        { id = "child", status = "streaming", content = "Antwort " + tick, updatedAt = at.AddSeconds(tick), toolSteps = new[] { step } });
+        var detail = JsonSerializer.SerializeToElement(new { id = "source", tool = "web.fetch", status = "completed",
+            updatedAt = at, detailsDeferred = false, outputJson = new string('x', 30_000) });
+        var state = new NativeAssistantPage.NativeMessageProjection(Snapshot(detail, 0), 0);
+        var retained = state.Steps[0];
+        for (var tick = 1; tick <= 10; tick++)
+        {
+            state.Adopt(Snapshot(Header(at), tick));
+            Assert.True(retained.Equals(state.Steps[0]));
+            Assert.Equal("Antwort " + tick, state.Content);
+        }
+        state.Adopt(Snapshot(Header(at, "failed"), 11));
+        Assert.True(state.Steps[0].GetProperty("detailsDeferred").GetBoolean());
+        state.PutStep(detail);
+        state.Adopt(Snapshot(Header(at.AddSeconds(12)), 12));
+        Assert.True(state.Steps[0].GetProperty("detailsDeferred").GetBoolean());
+        Assert.False(state.Steps[0].TryGetProperty("outputJson", out _));
+    }
+
+    [Fact]
     public async Task CancelledFormulaPreparationDoesNotEnterTheRasterizationWorker()
     {
         using var cancellation = new CancellationTokenSource();

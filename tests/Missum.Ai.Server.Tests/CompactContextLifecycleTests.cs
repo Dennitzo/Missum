@@ -11,6 +11,21 @@ namespace Missum.Ai.Server.Tests;
 
 public sealed class CompactContextLifecycleTests
 {
+    [Fact]
+    public void EquivalentContextToolsIgnoreCatalogOrderButRespectSchemaDescriptionAndProfileChanges()
+    {
+        var first = new LmToolDefinition("first", "First description", JsonSerializer.SerializeToElement(new
+            { type = "object", properties = new { path = new { type = "string" } } }));
+        var second = new LmToolDefinition("second", "Second description", JsonSerializer.SerializeToElement(new
+            { type = "object", properties = new { line = new { type = "integer" } } }));
+        Assert.True(RunProcessor.HaveEquivalentContextTools([first, second], [second, first]));
+        Assert.False(RunProcessor.HaveEquivalentContextTools([first], [first, second]));
+        Assert.False(RunProcessor.HaveEquivalentContextTools([first, first], [first, second]));
+        Assert.False(RunProcessor.HaveEquivalentContextTools([first], [first with { Description = "Changed" }]));
+        Assert.False(RunProcessor.HaveEquivalentContextTools([first], [first with { ContextProfileVersion = ToolContextProfiles.Current }]));
+        Assert.False(RunProcessor.HaveEquivalentContextTools([first], [first with { Parameters = second.Parameters }]));
+    }
+
     private static RunRequest Request() => new(MissumAiProtocol.Version, RunMode.General,
         [new("user", [new("text", Text: "Erkläre Trägheit.")])], SessionId: "same-session");
 

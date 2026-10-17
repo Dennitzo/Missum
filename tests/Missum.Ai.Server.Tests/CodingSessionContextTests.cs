@@ -1,5 +1,6 @@
 using Missum.Ai.Server.Core.Coding;
 using Missum.Ai.Server.Core.Models;
+using Missum.Ai.Server.Core.Policies;
 using Missum.Ai.Server.Core.Runs;
 using System.Text.Json;
 
@@ -7,6 +8,44 @@ namespace Missum.Ai.Server.Tests;
 
 public sealed class CodingSessionContextTests
 {
+    [Fact]
+    public void PreservedPolicyAndHistoricalSystemMessagesKeepTheirExactEvaluatedOrdering()
+    {
+        var originalPolicy = "Coding policy\n\n" + SubagentAgentPolicy.Manager
+            + "\n\n" + LeanAgentPolicy.Instructions + "\n\n" + AgentNarrationPolicy.Instructions;
+        var rebuiltPolicy = "Coding policy\n\n" + LeanAgentPolicy.Instructions
+            + "\n\n" + AgentNarrationPolicy.Instructions + "\n\n" + SubagentAgentPolicy.Manager;
+        var previous = new AgentRunCheckpoint([
+            new("system", originalPolicy), new("user", "Saved task"),
+            new("system", "Saved provider instruction at its original position"),
+            new("assistant", "Verified result", ReasoningContent: "Original reasoning")],
+            1, 0, 200, 30, PreserveSessionPromptPrefix: true);
+        var continued = CodingSessionContext.Continue(previous,
+            [new("system", rebuiltPolicy), new("user", "Next task")]);
+        Assert.Equal(previous.Messages, continued.Take(previous.Messages.Count));
+        Assert.Equal("Next task", continued[^1].Content);
+        Assert.DoesNotContain(continued, message => message.Content == rebuiltPolicy);
+    }
+
+    [Fact]
+    public void PreservedInterruptedCallIsClosedAfterTheSavedPrefixRatherThanInsideIt()
+    {
+        var call = new LmToolCall("interrupted-call", "coding.read", JsonSerializer.SerializeToElement(new { path = "source.cs" }));
+        var previous = new AgentRunCheckpoint([new("system", "Evaluated policy"), new("user", "Inspect source"),
+            new("assistant", ToolCalls: [call]), new("system", "Saved chronological instruction"),
+            new("assistant", "Interrupted visible tail")], 1, 1, 100, 10,
+            PreserveSessionPromptPrefix: true);
+
+        var continued = CodingSessionContext.Continue(previous, [new("system", "Rebuilt policy"), new("user", "Continue")]);
+
+        Assert.Equal(previous.Messages, continued.Take(previous.Messages.Count));
+        var receipt = continued[previous.Messages.Count];
+        Assert.Equal("tool", receipt.Role);
+        Assert.Equal(call.Id, receipt.ToolCallId);
+        Assert.True(JsonDocument.Parse(receipt.Content!).RootElement.GetProperty("outcomeUnknown").GetBoolean());
+        Assert.Equal("Continue", continued[^1].Content);
+    }
+
     [Fact]
     public void CompletedNativePromptIsAnUnchangedPrefixOfRepeatedFollowUps()
     {

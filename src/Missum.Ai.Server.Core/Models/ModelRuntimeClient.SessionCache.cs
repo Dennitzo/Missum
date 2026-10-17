@@ -12,6 +12,9 @@ public sealed partial class ModelRuntimeClient
         // supervisor drains the brief cancellation/slot-idle race before saving.
         // Keep the turn gate until it replies so a follow-up cannot overwrite
         // the slot while its interrupted prefix is being snapshotted.
+        // The full requested prompt count is needed for every model: a Stop
+        // during prefill must not overwrite a larger durable cache with only
+        // its first processed batches. Exact tail recovery remains model-specific.
         return string.IsNullOrEmpty(preparedModelId) || string.IsNullOrEmpty(sessionCacheKey)
             ? Task.FromResult<string?>(null)
             : UpdateSessionCacheAsync("save", preparedModelId, sessionCacheKey, interruptedPromptTokens: promptTokens,

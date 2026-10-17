@@ -18,6 +18,62 @@ public sealed class SubagentOrchestrationTests
     private const string ModelId = "coding/Qwen-Fixture-Q4~123456";
 
     [Theory]
+    [InlineData("web.deepResearch")]
+    [InlineData(SubagentToolNames.Spawn)]
+    public async Task CodingParentReceivesEntireDelegatedReportBeyondOrdinaryToolPreviewLimit(string toolName)
+    {
+        using var context = new TestServerContext();
+        var report = "Anfang des Berichts mit Größen und Einheiten.\n" + new string('a', 20_000)
+            + "\nENTSCHEIDENDER_BEFUND_IN_DER_MITTE\n" + new string('b', 20_000) + "\nOffene Punkte am Ende.";
+        using var handler = new DualAgentHandler(childImmediatelyComplete: true) { ChildReport = report };
+        using var http = new HttpClient(handler);
+        using var runtime = new ModelRuntimeClient(http, context.WrappedOptions, NullLogger<ModelRuntimeClient>.Instance);
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddMissumAiServerServices(context.Options, includeHostedServices: false);
+        services.AddSingleton(context.Database);
+        services.AddSingleton(runtime);
+        using var provider = services.BuildServiceProvider();
+        var repository = provider.GetRequiredService<RunRepository>();
+        var request = Request() with
+        {
+            Mode = RunMode.Coding, PreferredCodingModelId = ModelId,
+            AllowedServerTools = ["web.search", "web.fetch", "web.deepResearch"],
+        };
+        var parent = (await repository.CreateAsync(request, null)).Snapshot;
+        var call = new LmToolCall("delegated-report", toolName, JsonSerializer.SerializeToElement(new { task = "Originalquellen auswerten." }));
+        await repository.SaveCheckpointAsync(parent.RunId, new(
+            [new("system", "Stable parent policy"), new("user", "Vollständige Recherche übernehmen."), new("assistant", ToolCalls: [call])],
+            1, 0, 0, 0, ActiveToolCalls: [call], SelectedModelId: ModelId, UseStableSubagentToolCatalog: true));
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+
+        await provider.GetRequiredService<RunProcessor>().ProcessAsync(parent.RunId, timeout.Token);
+
+        Assert.Equal(RunState.Completed, (await repository.GetAsync(parent.RunId))!.State);
+        Assert.NotNull(handler.FinalDelegatedReceipt);
+        using var receipt = JsonDocument.Parse(handler.FinalDelegatedReceipt!);
+        var reportField = toolName == "web.deepResearch" ? "summary" : "result";
+        Assert.Equal(report, receipt.RootElement.GetProperty(reportField).GetString());
+        Assert.False(receipt.RootElement.TryGetProperty("truncated", out _));
+        Assert.Equal(1, handler.ChildTurns);
+        var child = Assert.Single(await repository.GetSubagentRunsAsync(parent.RunId));
+        Assert.Equal(report, CodingTextReconciler.Project(await repository.GetVisibleTextEventsAsync(child.Snapshot.RunId)));
+        Assert.True(await repository.HasConsumedSubagentResultAsync(parent.RunId, child.Snapshot.RunId));
+    }
+
+    [Fact]
+    public void CompletedResumeKeepsFullReportAndCompletionEvidenceAtParentHandoff()
+    {
+        var result = JsonSerializer.Serialize(new
+        {
+            status = "completed", runId = "completed-child", resumedFromRunId = "old-child",
+            result = new string('ü', 40_000),
+            completionEvidence = new[] { new { path = "proof.lean", content = new string('x', 40_000) } },
+        });
+        Assert.Equal(result, CodingLoopGuard.BoundToolResult(result, SubagentToolNames.Spawn));
+    }
+
+    [Theory]
     [InlineData(0)]
     [InlineData(1)]
     public async Task DeepResearchIsARealReplaySafeSubagentWithOriginalTaskAndOrdinaryEvents(int gpuIndex)
@@ -942,6 +998,8 @@ public sealed class SubagentOrchestrationTests
         public bool ChildInferenceCancelled { get; private set; }
         public bool SharedPrimary { get; init; }
         public bool ResearchParentAnswer { get; init; }
+        public string? ChildReport { get; init; }
+        public string? FinalDelegatedReceipt { get; private set; }
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
@@ -1002,7 +1060,7 @@ public sealed class SubagentOrchestrationTests
                         throw;
                     }
                 }
-                if (childImmediatelyComplete) return Text("Die eigene Aufgabe ist abgeschlossen.");
+                if (childImmediatelyComplete) return Text(ChildReport ?? "Die eigene Aufgabe ist abgeschlossen.");
                 return turn switch
                 {
                     1 => Tool(ClientToolNames.CodingRead, new { path = "child.txt" }),
@@ -1017,6 +1075,18 @@ public sealed class SubagentOrchestrationTests
                 FirstParentSystemPolicy = messages.First(static message => message.GetProperty("role").GetString() == "system").GetProperty("content").GetString();
             ParentStarted.TrySetResult();
             if (pauseParent) await ContinueParent.Task.WaitAsync(cancellationToken);
+            if (ChildReport is not null)
+            {
+                foreach (var message in messages.Where(static message => message.GetProperty("role").GetString() == "tool"))
+                {
+                    var receiptText = message.GetProperty("content").GetString();
+                    if (receiptText is null) continue;
+                    using var receipt = JsonDocument.Parse(receiptText);
+                    if (!receipt.RootElement.TryGetProperty("status", out var status) || status.GetString() != "completed") continue;
+                    FinalDelegatedReceipt = receiptText;
+                    return Text("Das vollständige delegierte Ergebnis wurde übernommen.");
+                }
+            }
             if (ResearchParentAnswer)
             {
                 Assert.Equal(1, ChildTurns);

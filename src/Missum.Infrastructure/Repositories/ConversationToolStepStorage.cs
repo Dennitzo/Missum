@@ -101,6 +101,7 @@ internal static class ConversationToolStepStorage
         var narration = step.Tool is "assistant.narration" or "assistant.progress";
         return step with
         {
+            DisplayHeader = AssistantToolStepHeaders.Create(step),
             Detail = narration ? step.Detail : null, PreviewHtml = null, InputJson = null,
             OutputJson = CompactReceipt(step), Explanation = step.Explanation is { Length: > 400 } text ? text[..400] : step.Explanation,
             DetailsDeferred = !narration,

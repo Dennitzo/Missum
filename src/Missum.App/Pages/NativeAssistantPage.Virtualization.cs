@@ -114,8 +114,7 @@ public sealed partial class NativeAssistantPage
             state.Panel.SetRows(logical.Select(block => VirtualRow(id, current, block)).ToArray());
             ObserveVirtualThinking(id, current, steps);
             _conversationSelection?.TrackSelectionWithin(state.Panel);
-            QueueConversationLayoutProjection(_scrollNewSessionToLatest
-                || ConversationScroll.ScrollableHeight - ConversationScroll.VerticalOffset < 90);
+            QueueConversationLayoutProjection(ShouldFollowConversationTail);
         });
     }
 
@@ -241,6 +240,7 @@ public sealed partial class NativeAssistantPage
                     : _settings.Current.CodingToolStepsExpanded;
                 var tool = new ToolStepView(expanded)
                 {
+                    DisclosureInvoked = OnToolDisclosureInteraction,
                     LoadDetails = () => LoadToolStepDetailsAsync(id, S(block.Data, "id")), ScrollOwner = ConversationScroll,
                     OpenResearch = () => OpenDeepResearchTabAsync(id, S(block.Data, "id")),
                     CanOpenResearch = () => FindDeepResearchView(id, S(block.Data, "id")) is not null,
@@ -267,6 +267,7 @@ public sealed partial class NativeAssistantPage
                 var thinkingExpanded = thinkingState.ExpandedSteps.GetValueOrDefault(block.Key, _settings.Current.CodingToolStepsExpanded);
                 var thinking = new ThinkingIndicatorView(thinkingExpanded)
                 {
+                    DisclosureInvoked = OnToolDisclosureInteraction,
                     IsMessageActive = true, ScrollOwner = ConversationScroll,
                     PinSelection = () => _conversationSelection?.IsSelecting == true,
                     Project = projection => RunUiCallback("Thinking.VirtualLargeReasoning", projection),

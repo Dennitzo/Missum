@@ -68,6 +68,14 @@ public sealed class DeepResearchSubagentClientTests
             Assert.True(snapshot.GetProperty("canResume").GetBoolean());
             Assert.Equal(gpuIndex, snapshot.GetProperty("gpuIndex").GetInt32());
         });
+        var liveThinking = observations.Where(snapshot => snapshot.GetProperty("status").GetString() == "running")
+            .SelectMany(snapshot => snapshot.GetProperty("messages").EnumerateArray())
+            .SelectMany(message => message.GetProperty("toolSteps").EnumerateArray())
+            .Where(step => step.GetProperty("tool").GetString() == "assistant.reasoning").ToArray();
+        Assert.Contains(liveThinking, step => step.GetProperty("detail").GetString() == "Ich vergleiche die Originalquelle."
+            && (!step.TryGetProperty("detailsDeferred", out var deferred) || !deferred.GetBoolean()));
+        Assert.Contains(liveThinking, step => step.GetProperty("detail").GetString() == "Ich vergleiche die Originalquelle. Eine Einschränkung bleibt offen."
+            && (!step.TryGetProperty("detailsDeferred", out var deferred) || !deferred.GetBoolean()));
         JsonElement refreshed = default;
         await coordinator.HandleAsync(new(AssistantProtocol.ProtocolVersion, "conversation.refresh", "reload-research",
             JsonSerializer.SerializeToElement(new { sessionId = session.Id })),
@@ -118,9 +126,18 @@ public sealed class DeepResearchSubagentClientTests
                 Add(RunEventTypes.ServerToolStarted, new { tool = "web.deepResearch", callId = "research-operation", arguments = new { task = info.Task } });
                 Add(RunEventTypes.SubagentStarted, info);
                 Add(RunEventTypes.SubagentEvent, new SubagentForwardedEvent(info.AgentId, "parent", info.RunId,
-                    new(100, info.RunId, RunEventTypes.TextDelta, At.AddSeconds(3), JsonSerializer.SerializeToElement(new TextDeltaEvent("Beleg aus der Originalquelle mit offener Einschränkung."), Json))));
+                    new(100, info.RunId, RunEventTypes.ReasoningDelta, At.AddSeconds(3), JsonSerializer.SerializeToElement(
+                        new ReasoningDeltaEvent("Ich vergleiche die Originalquelle.", 1), Json))));
                 Add(RunEventTypes.SubagentEvent, new SubagentForwardedEvent(info.AgentId, "parent", info.RunId,
-                    new(101, info.RunId, RunEventTypes.RunCompleted, At.AddSeconds(4), JsonSerializer.SerializeToElement(new RunCompletedEvent(null, info.ModelId, 100, 20), Json))));
+                    new(101, info.RunId, RunEventTypes.ModelGeneration, At.AddSeconds(4), JsonSerializer.SerializeToElement(
+                        new ModelGenerationEvent("tokenProgress", GeneratedTokens: 12), Json))));
+                Add(RunEventTypes.SubagentEvent, new SubagentForwardedEvent(info.AgentId, "parent", info.RunId,
+                    new(102, info.RunId, RunEventTypes.ReasoningDelta, At.AddSeconds(5), JsonSerializer.SerializeToElement(
+                        new ReasoningDeltaEvent(" Eine Einschränkung bleibt offen.", 1, State: "completed"), Json))));
+                Add(RunEventTypes.SubagentEvent, new SubagentForwardedEvent(info.AgentId, "parent", info.RunId,
+                    new(103, info.RunId, RunEventTypes.TextDelta, At.AddSeconds(6), JsonSerializer.SerializeToElement(new TextDeltaEvent("Beleg aus der Originalquelle mit offener Einschränkung."), Json))));
+                Add(RunEventTypes.SubagentEvent, new SubagentForwardedEvent(info.AgentId, "parent", info.RunId,
+                    new(104, info.RunId, RunEventTypes.RunCompleted, At.AddSeconds(7), JsonSerializer.SerializeToElement(new RunCompletedEvent(null, info.ModelId, 100, 20), Json))));
                 Add(RunEventTypes.SubagentCompleted, info with { State = RunState.Completed });
                 Add("subagent.resultConsumed", new { parentRunId = "parent", runId = info.RunId, agentId = info.AgentId, state = "completed" });
                 Add(RunEventTypes.ServerToolCompleted, new { tool = "web.deepResearch", callId = "research-operation", success = true, result = new { message = "Beleg übernommen." } });

@@ -278,6 +278,11 @@ public sealed partial class RunProcessor : BackgroundService
                     PreserveSessionPromptPrefix = previous.PreserveSessionPromptPrefix,
                     ProjectContext = previous.ProjectContext,
                     CacheEpoch = previous.CacheEpoch,
+                    ContextProfileVersion = previous.PreserveSessionPromptPrefix ? previous.ContextProfileVersion : contextProfileVersion,
+                    ContextTools = previous.PreserveSessionPromptPrefix ? previous.ContextTools : null,
+                    ToolCatalogSignature = previous.PreserveSessionPromptPrefix ? previous.ToolCatalogSignature : null,
+                    UseStableSubagentToolCatalog = previous.PreserveSessionPromptPrefix
+                        ? previous.UseStableSubagentToolCatalog : useStableSubagentToolCatalog,
                 };
                 if (codingPrevious.WasInterrupted) subagentContinuationParent = codingPrevious.SourceRunId;
                 _runtime.WriteLog("Information", "coding.session.context.restored", $"Run {runId}: {previous.Messages.Count} gespeicherte Kontextnachrichten derselben Sitzung übernommen.");
@@ -286,10 +291,35 @@ public sealed partial class RunProcessor : BackgroundService
                 && GeneralSessionContext.TryContinue(generalPrevious, request, checkpoint.Messages, out var continued))
             {
                 checkpoint = checkpoint with { Messages = continued, PreserveSessionPromptPrefix = true,
-                    ProjectContext = generalPrevious.Checkpoint.ProjectContext, CacheEpoch = generalPrevious.Checkpoint.CacheEpoch };
+                    ProjectContext = generalPrevious.Checkpoint.ProjectContext, CacheEpoch = generalPrevious.Checkpoint.CacheEpoch,
+                    ContextProfileVersion = generalPrevious.Checkpoint.ContextProfileVersion,
+                    ContextTools = generalPrevious.Checkpoint.ContextTools,
+                    ToolCatalogSignature = generalPrevious.Checkpoint.ToolCatalogSignature,
+                    UseStableSubagentToolCatalog = generalPrevious.Checkpoint.UseStableSubagentToolCatalog };
                 if (generalPrevious.WasInterrupted) subagentContinuationParent = generalPrevious.SourceRunId;
             }
-            if (request.ConversationProfile is not (ConversationProfile.Audiobook or ConversationProfile.ContextPreparation))
+            if (checkpoint.PreserveSessionPromptPrefix)
+            {
+                // Tool schemas precede messages in native chat templates. Preserve
+                // their evaluated order/profile along with the system text; current
+                // tool availability and argument validation still govern execution.
+                contextProfileVersion = checkpoint.ContextProfileVersion;
+                compactContext = contextProfileVersion == ToolContextProfiles.Current;
+                useStableSubagentToolCatalog = checkpoint.UseStableSubagentToolCatalog && CanDescribeSubagents(request);
+                checkpoint = checkpoint with { UseStableSubagentToolCatalog = useStableSubagentToolCatalog };
+                effectiveTools = _toolCatalog.GetAvailableTools(request, useStableSubagentToolCatalog);
+                availableTools = stagedWebResearchRequested && !useStableSubagentToolCatalog && !compactContext
+                    ? StagedWebResearchPipeline.RemoveFromMainAgentTools(effectiveTools) : effectiveTools;
+                if (checkpoint.ContextTools is { } savedTools)
+                {
+                    var requestedTools = CreateModelToolDefinitions(availableTools, null, directTools: true, contextProfileVersion);
+                    if (!HaveEquivalentContextTools(savedTools, requestedTools))
+                        checkpoint = checkpoint with { ContextTools = requestedTools,
+                            ToolCatalogSignature = ToolContextProfiles.Signature(requestedTools, selection.ModelId) };
+                }
+            }
+            if (!checkpoint.PreserveSessionPromptPrefix
+                && request.ConversationProfile is not (ConversationProfile.Audiobook or ConversationProfile.ContextPreparation))
             {
                 // Upgrade narration only at a new run boundary. Continued sessions may
                 // retain an older system prefix; an active checkpoint must stay stable.
@@ -318,7 +348,8 @@ public sealed partial class RunProcessor : BackgroundService
             {
                 var initialMessages = checkpoint.Messages.ToList();
                 AppendRuntimeContext(initialMessages, request, subagentAvailable, beforeLatestUser: true);
-                var initialTools = CreateModelToolDefinitions(availableTools, null, directTools: true, contextProfileVersion);
+                var initialTools = checkpoint.ContextTools?.ToArray()
+                    ?? CreateModelToolDefinitions(availableTools, null, directTools: true, contextProfileVersion);
                 checkpoint = checkpoint with { Messages = initialMessages, ContextTools = initialTools,
                     ToolCatalogSignature = ToolContextProfiles.Signature(initialTools, selection.ModelId) };
                 await _repository.AppendEventAsync(runId, "context.profile", new
@@ -354,8 +385,9 @@ public sealed partial class RunProcessor : BackgroundService
         }
 
         var messages = checkpoint.Messages.ToList();
-        if (!compactContext && isCoding && request.Subagent is null) CodingAgentPolicy.EnsureCurrentInstructions(messages);
-        if (!compactContext && useStableSubagentToolCatalog && request.Subagent is null)
+        if (!checkpoint.PreserveSessionPromptPrefix && !compactContext && isCoding && request.Subagent is null)
+            CodingAgentPolicy.EnsureCurrentInstructions(messages);
+        if (!checkpoint.PreserveSessionPromptPrefix && !compactContext && useStableSubagentToolCatalog && request.Subagent is null)
         {
             var systemIndex = messages.FindIndex(static message => message.Role == "system");
             if (systemIndex >= 0 && messages[systemIndex].Content?.Contains(SubagentAgentPolicy.Manager, StringComparison.Ordinal) != true)
@@ -999,7 +1031,7 @@ public sealed partial class RunProcessor : BackgroundService
                     subagentAvailable = loadedSubagentAvailable;
                     AppendRuntimeContext(messages, request, subagentAvailable);
                 }
-                if (!compactContext && loadedSubagentAvailable && !useStableSubagentToolCatalog)
+                if (!compactContext && loadedSubagentAvailable && !useStableSubagentToolCatalog && !preserveSessionPromptPrefix)
                 {
                     useStableSubagentToolCatalog = true;
                     effectiveTools = _toolCatalog.GetAvailableTools(request, subagentAvailable: true);

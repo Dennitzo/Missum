@@ -96,11 +96,23 @@ public sealed class RunSteeringClientTests
         await shared.StreamReady.Task.WaitAsync(deadline.Token);
         await Assert.ThrowsAsync<InvalidOperationException>(() => service.SteerAsync(Guid.NewGuid(), "Fremd", "wrong", "run-steer", deadline.Token));
         await Assert.ThrowsAsync<InvalidOperationException>(() => service.SteerAsync(session.Id, "Anderer Lauf", "wrong-run", "stale-run", deadline.Token));
-        var accepted = await service.SteerAsync(session.Id, "Nur die Änderung erklären.", "input-one", "run-steer", deadline.Token);
+        var coordinator = new AssistantCoordinator(chats, environment.Get<IDocumentIngestor>(),
+            environment.Get<IContextAssembler>(), environment.Get<IPromptTriggerRepository>(),
+            environment.Get<IAssistantAttachmentRepository>(), environment.Get<IChatArtifactRepository>(),
+            environment.Get<IConversationSnapshotRepository>(), service, settings, recent);
+        var steeringEnvelope = new WebBridgeEnvelope(AssistantProtocol.ProtocolVersion, "chat.steer", "steer-title",
+            JsonSerializer.SerializeToElement(new { sessionId = session.Id, prompt = "Nur die Änderung erklären.",
+                inputId = "input-one", expectedRunId = "run-steer" }));
+        JsonElement? accepted = null;
+        await coordinator.HandleAsync(steeringEnvelope, (type, payload, _) =>
+        {
+            if (type == "chat.steer.accepted") accepted = JsonSerializer.SerializeToElement(payload, JsonSerializerOptions.Web);
+            return Task.CompletedTask;
+        }, deadline.Token);
         await resume;
 
-        Assert.Equal("Umlenken", (await chats.GetSessionAsync(session.Id))!.Title);
-        Assert.Equal("run-steer", accepted.RunId);
+        Assert.Equal("Nur die Änderung erklären.", (await chats.GetSessionAsync(session.Id))!.Title);
+        Assert.Equal("run-steer", accepted!.Value.GetProperty("runId").GetString());
         Assert.Equal("completed", (await runs.GetAsync(local.Id))!.State);
         Assert.Equal(turn.AssistantMessage.Id, (await runs.GetAsync(local.Id))!.AssistantMessageId);
         var restored = (await chats.GetMessageAsync(turn.AssistantMessage.Id))!;
@@ -123,9 +135,12 @@ public sealed class RunSteeringClientTests
             history.Select(message => string.Concat(message.Content.Select(part => part.Text))));
 
         await chats.SaveDraftAsync(session.Id, "Ein neuer Entwurf nach Abschluss");
+        await chats.RenameSessionAsync(session.Id, "Titel einer neueren Eingabe");
         var duplicate = await service.SteerAsync(session.Id, "Nur die Änderung erklären.", "input-one", "run-steer", deadline.Token);
         Assert.True(duplicate.Duplicate);
-        Assert.Equal(accepted.RunId, duplicate.RunId);
+        Assert.Equal(accepted.Value.GetProperty("runId").GetString(), duplicate.RunId);
+        await coordinator.HandleAsync(steeringEnvelope, static (_, _, _) => Task.CompletedTask, deadline.Token);
+        Assert.Equal("Titel einer neueren Eingabe", (await chats.GetSessionAsync(session.Id))!.Title);
         Assert.Equal("Ein neuer Entwurf nach Abschluss", (await chats.GetSessionAsync(session.Id))!.Draft);
         Assert.DoesNotContain(shared.Requests, request => request == "POST /v1/runs" || request.EndsWith("/cancel", StringComparison.Ordinal));
     }

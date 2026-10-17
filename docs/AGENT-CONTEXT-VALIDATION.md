@@ -83,6 +83,18 @@ auch wenn gerade ein anderer Reiter geöffnet ist.
 
 ## Historische Live-Abnahme und Diagnosewerkzeuge
 
+Für dauerhafte KV-Snapshots von Hybrid-/Recurrent-Modellen benötigt Missum mindestens
+llama.cpp **b11507**. [Upstream-Korrektur #26004](https://github.com/ggml-org/llama.cpp/pull/26004)
+speichert die zum Zurückspringen benötigten Kontext-Checkpoints mit der Slot-Datei.
+Ältere Versionen können alle Tokens als wiederhergestellt melden und beim nächsten
+Prompt trotzdem vollständig neu rechnen. Bereits gespeicherte Dateien bleiben lesbar;
+fehlende Checkpoints erfordern einmalig einen vollständigen Prefill unter der korrigierten
+Runtime. Sitzungsnachrichten werden dadurch nicht verändert oder gelöscht.
+Eine geprüfte Version lässt sich mit `windows/manage-llama-server.ps1 -Action Update
+-ReleaseTag b11507` ausdrücklich auswählen. Ein fehlgeschlagener Download dieser Auswahl
+weicht nur auf eine hashgeprüfte Installation desselben Tags aus. Ohne `-ReleaseTag`
+bleibt die bisherige Auswahl der aktuellen offiziellen Version erhalten.
+
 Das deterministische Pflichtgate behauptet keine GPU-Messung. Die zusätzliche
 native Messung verlangt echte `usage.prompt_tokens_details.cached_tokens` und
 bricht bei fehlenden oder zu kleinen Werten ab. Sie läuft nur ohne aktive

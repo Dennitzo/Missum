@@ -34,7 +34,11 @@ public sealed class NativeDropdownChevron : DependencyObject
         ArgumentNullException.ThrowIfNull(button);
         if (button.Content is not DependencyObject content) return;
         var icon = FindDescendant(content, element => element is FontIcon { Glyph: ClosedGlyph or OpenGlyph or "\uE70E" }) as FontIcon;
-        if (icon is not null) icon.Glyph = expanded ? OpenGlyph : ClosedGlyph;
+        if (icon is not null)
+        {
+            icon.Glyph = expanded ? OpenGlyph : ClosedGlyph;
+            icon.Foreground = NativeIconPalette.BrushFor("navigation");
+        }
     }
 
     private static void OnIsEnabledChanged(DependencyObject sender, DependencyPropertyChangedEventArgs args)
@@ -74,14 +78,23 @@ public sealed class NativeDropdownChevron : DependencyObject
             // WinUI uses AnimatedChevronUpDownSmallVisualSource. Its glyph resources only affect
             // fallback rendering, so use that supported fallback instead of replacing the template.
             animated.Source = null;
-            if (animated.FallbackIconSource is FontIconSource fallback) fallback.Glyph = glyph;
+            animated.Foreground = NativeIconPalette.BrushFor("navigation");
+            if (animated.FallbackIconSource is FontIconSource fallback)
+            {
+                fallback.Glyph = glyph;
+                fallback.Foreground = animated.Foreground;
+            }
             else animated.FallbackIconSource = new FontIconSource
             {
                 Glyph = glyph, FontSize = 12, FontFamily = new FontFamily("Segoe MDL2 Assets"),
                 Foreground = animated.Foreground, IsTextScaleFactorEnabled = false,
             };
         }
-        else if (part is FontIcon icon) icon.Glyph = glyph;
+        else if (part is FontIcon icon)
+        {
+            icon.Glyph = glyph;
+            icon.Foreground = NativeIconPalette.BrushFor("navigation");
+        }
     }
 
     private static DependencyObject? FindDescendant(DependencyObject root, Func<DependencyObject, bool> predicate)

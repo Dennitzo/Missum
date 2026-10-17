@@ -98,6 +98,8 @@ public sealed partial class NativeAssistantPage
             ShowParentConversation();
             Inspector.Visibility = Visibility.Visible; UpdateLayout();
             var step = (SubagentLifecycleView)_messageBlocks[parentId]["tool:research-one-start"];
+            if (step.TaskLabel.Text != "Deep Research · Erste Recherche")
+                throw new InvalidOperationException("Die Recherche-Werkzeugzeile benennt ihre Deep-Research-Spezialisierung nicht.");
             if (new ButtonAutomationPeer(step).GetPattern(PatternInterface.Invoke) is not IInvokeProvider invoke)
                 throw new InvalidOperationException("Der Deep-Research-Werkzeugschritt besitzt keine zugängliche Tabnavigation.");
             invoke.Invoke();
@@ -149,6 +151,7 @@ public sealed partial class NativeAssistantPage
             if (!_messagesDirty || MessageContent(activeResearch.Messages[transcriptId]) != "Ein neuer Recherchebefund wurde übernommen.")
                 throw new InvalidOperationException("Eine neue Recherche-Transkriptrevision wurde nicht zur Darstellung übernommen.");
             RenderMessagesNow();
+            await VerifyDeepResearchLiveDisclosureSmokeAsync(activeResearch);
             var sourceMessageCount = _messages.Count;
             await SendAsync();
             if (_messages.Count != sourceMessageCount || !_running)
@@ -191,6 +194,8 @@ public sealed partial class NativeAssistantPage
                 JsonSerializer.Serialize(new { passed = true, headerOpensMatchingResearch = true, distinctOperations = 3,
                     nestedSubagentOriginResolves = true, historicalDetailsFallback = true, sharedSources = true,
                     tokenOnlySnapshotsRetainHydratedDetails = true, transcriptRevisionStillUpdates = true,
+                    streamingReasoningVisible = true, liveSnapshotsRetainExpandedDetails = true,
+                    disclosureStopsTailFollowing = true, deepResearchLifecyclePrefix = true,
                     sharedSubagentOverview = true, unifiedOutputsSection = true, sharedPlanetIcons = true, sharedTaskTitles = true,
                     realResearchUsesNormalLifecycle = true, legacyResearchRemainsReadable = true,
                     sharedTranscriptAndToolRenderer = true, sharedCopyReadFooter = true, readonlyParentControlsPreserved = true,

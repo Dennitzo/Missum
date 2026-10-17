@@ -68,7 +68,7 @@ public sealed partial class SqliteConversationSnapshotRepository
                 DateTimeOffset.TryParse(reader.GetString(3), out var time) ? time : DateTimeOffset.MinValue));
         }
         // Older large child receipts point to a lossless sidecar. Read those
-        // only on explicit source navigation and project their web receipts;
+        // on source-index reads and project their web receipts;
         // neither their chat bodies nor tool details are returned to the UI.
         command.CommandText = $$"""
             SELECT DISTINCT json_extract(s.value,'$.outputJson')->>'$.subagentStorageKey',

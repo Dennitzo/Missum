@@ -167,11 +167,10 @@ public sealed partial class NativeAssistantPage
             var previousRunId = S(child.Snapshot, "runId");
             if (!SubagentChatState.AcceptSnapshot(previousRunId, child.CreatedAt, child.ProjectionRevision,
                 child.PreviousRunIds, runId, created, projectionRevision)) return;
-            // Research model-progress snapshots carry fresh token/context
+            // Model-progress snapshots carry fresh token/context
             // metadata without changing the source transcript. Retain hydrated
-            // details and native owners; normal subagent behavior is unchanged.
-            preserveResearchTranscript = child.IsDeepResearch && S(snapshot, "kind") == "deepResearch"
-                && previousRunId == runId && !child.TranscriptDeferred
+            // details and native owners for both specialized and regular children.
+            preserveResearchTranscript = previousRunId == runId && !child.TranscriptDeferred
                 && child.Status == status && child.IsRunning == isRunning
                 && transcriptRevision.HasValue && child.TranscriptRevision == transcriptRevision;
             retainHydratedTranscript = deferred && !child.TranscriptDeferred && previousRunId == runId
@@ -233,7 +232,7 @@ public sealed partial class NativeAssistantPage
         var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 7, VerticalAlignment = VerticalAlignment.Center };
         row.Children.Add(SubagentIcon(agentId, 13, planetIndex)); row.Children.Add(label);
         var select = TabButton(); select.Content = row; select.Height = 30; select.Padding = new(10, 0, 5, 0);
-        var close = TabButton(); close.Content = new FontIcon { Glyph = "\uE711", FontSize = 11 };
+        var close = TabButton(); close.Content = CreateTabIcon("\uE711", 11);
         close.Width = close.Height = 24; close.Margin = new(0, 0, 3, 0); close.VerticalAlignment = VerticalAlignment.Center;
         var grid = new Grid(); grid.ColumnDefinitions.Add(new() { Width = new(1, GridUnitType.Star) });
         grid.ColumnDefinitions.Add(new() { Width = GridLength.Auto }); grid.Children.Add(select);
@@ -307,6 +306,8 @@ public sealed partial class NativeAssistantPage
         private bool _completion;
         private bool _appearanceChosen;
         private bool _legacyCompletion;
+        private bool _deepResearch;
+        private string _displayTitle = "";
 
         internal SubagentLifecycleView(Func<string, int> planetIndexFor)
         {
@@ -339,6 +340,7 @@ public sealed partial class NativeAssistantPage
         {
             var output = ToolStepView.ReadMetadata(S(step, "outputJson"));
             var input = ToolStepView.ReadMetadata(S(step, "inputJson"));
+            _deepResearch = child?.IsDeepResearch == true || S(output, "kind") == "deepResearch" || S(step, "kind") == "deepResearch";
             _completion = S(step, "tool") == SubagentChatState.CompletionTool;
             if (!_appearanceChosen)
             {
@@ -358,11 +360,12 @@ public sealed partial class NativeAssistantPage
         internal void UpdateState(NativeSubagentState child)
         {
             AgentId = child.AgentId;
+            _deepResearch = child.IsDeepResearch;
             if (_runId.Length > 0 && _runId != S(child.Snapshot, "runId"))
             {
                 // Historical lifecycle cards keep their original task/attempt;
                 // their tab still exposes that attempt's retained transcript.
-                UpdateLabels(TaskLabel.Text.Length > 0 ? TaskLabel.Text : _task, canOpen: true);
+                UpdateLabels(_displayTitle.Length > 0 ? _displayTitle : _task, canOpen: true);
                 return;
             }
             var assigned = child.Messages.Values.LastOrDefault(message => S(message, "role") == "user");
@@ -372,7 +375,8 @@ public sealed partial class NativeAssistantPage
 
         private void UpdateLabels(string title, bool canOpen)
         {
-            if (TaskLabel.Text.Length == 0) TaskLabel.Text = SubagentChatState.TaskTitle(title);
+            if (_displayTitle.Length == 0) _displayTitle = SubagentChatState.TaskTitle(title);
+            TaskLabel.Text = ResearchTaskLabel(_displayTitle, _deepResearch);
             StateLabel.Text = _completion || _legacyCompletion ? "hat die Arbeit beendet" : "hat die Arbeit begonnen";
             Icon.SetAgentId(AgentId, AgentId.Length == 0 ? null : _planetIndexFor(AgentId));
             IsEnabled = canOpen;
@@ -414,15 +418,21 @@ public sealed partial class NativeAssistantPage
         var signature = SubagentListSignature(children);
         if (_subagentOverlaySignature == signature) return;
         _subagentOverlaySignature = signature;
-        SubagentsSection.Visibility = children.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+        SubagentsSection.Visibility = Visibility.Visible;
+        EnsureSubagentSummary();
+        _subagentSummaryButton!.IsEnabled = _session != Guid.Empty;
         if (children.Length == 0)
         {
-            SubagentsPanel.Children.Clear();
-            _subagentSummaryIcons?.Children.Clear(); _subagentSummaryAvatars.Clear();
+            _subagentSummaryIcons!.Children.Clear(); _subagentSummaryAvatars.Clear();
+            _subagentSummaryLabel!.Text = "Noch keine Subagenten";
+            _subagentSummaryLabel.Foreground = ThemeBrush("MissumMutedTextBrush", 160);
+            _subagentSummaryFinished!.Text = "";
+            _subagentSummaryFinished.Visibility = Visibility.Collapsed;
+            AutomationProperties.SetName(_subagentSummaryButton, "Noch keine Subagenten · Übersicht öffnen");
+            ToolTipService.SetToolTip(_subagentSummaryButton, "Subagentenübersicht öffnen");
         }
         else
         {
-            EnsureSubagentSummary();
             var working = children.Where(child => child.IsRunning).ToArray();
             var active = working.Length;
             var inactive = children.Length - active;
@@ -458,10 +468,10 @@ public sealed partial class NativeAssistantPage
                 .GroupBy(SubagentStatusLabel).Select(group => group.Count() + " " + group.Key.ToLowerInvariant());
             ToolTipService.SetToolTip(_subagentSummaryButton!, label + "\nSubagentenübersicht öffnen"
                 + string.Concat(exceptions.Select(detail => "\n" + detail)));
-            if (SubagentsPanel.Children.Count != 1 || !ReferenceEquals(SubagentsPanel.Children[0], _subagentSummaryButton))
-            {
-                SubagentsPanel.Children.Clear(); SubagentsPanel.Children.Add(_subagentSummaryButton!);
-            }
+        }
+        if (SubagentsPanel.Children.Count != 1 || !ReferenceEquals(SubagentsPanel.Children[0], _subagentSummaryButton))
+        {
+            SubagentsPanel.Children.Clear(); SubagentsPanel.Children.Add(_subagentSummaryButton!);
         }
         if (_activeSubagentOverviewSession == _session) RenderSubagentOverviewContent();
     }
@@ -570,6 +580,11 @@ public sealed partial class NativeAssistantPage
     private void RefreshConversationTab()
     {
         _conversationSelection?.Clear();
+        // A parent's pending scroll-to-latest must never follow a child tab's
+        // expanding details or override the child's saved reading position.
+        _scrollNewSessionToLatest = false;
+        _readingToolConversation = null;
+        _conversationScrollIntent++;
         // Keep the stable message/footer owners while changing the projection.
         // Disclosure choices are transient and reset to the current global
         // default only for the conversation being shown, without rereading KV.
@@ -580,11 +595,12 @@ public sealed partial class NativeAssistantPage
         RefreshComposerModelDisplay();
         RenderMessagesNow(); RefreshContextDisplay(); RefreshChatNotices(); RenderSessionTabs();
         var key = ConversationViewKey;
+        var scrollIntent = _conversationScrollIntent;
         var offset = _conversationOffsets.GetValueOrDefault(key);
         ConversationScroll.ChangeView(null, offset, null, disableAnimation: true);
         DispatcherQueue.TryEnqueue(() => RunUiCallback("Subagent.RestoreScroll", () =>
         {
-            if (!_disposed && key == ConversationViewKey)
+            if (!_disposed && key == ConversationViewKey && scrollIntent == _conversationScrollIntent)
             { ConversationScroll.ChangeView(null, offset, null, disableAnimation: true); SyncOuterScroll(); }
         }));
     }

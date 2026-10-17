@@ -29,11 +29,14 @@ public sealed class NativeLightPaletteTests
     }
 
     [Fact]
-    public void DarkAppearanceRetainsTheOriginalAccentAndNormalForegroundPalette()
+    public void DarkAppearanceRetainsTheSavedAccentAndCorrectsTheReadableForeground()
     {
         var appearance = Missum.App.App.CreateSavedAppearance(new AppSettings { Theme = AppTheme.Dark, AccentColor = "#A970FF", BackgroundColor = "#181818" }, false, null);
         Assert.Equal("#A970FF", appearance.Colors["accent"]);
-        Assert.Equal(appearance.Colors["accent"], appearance.Colors["accentReadable"]);
+        var window = Parse(appearance.Colors["window"]);
+        foreach (var role in new[] { "window", "layer", "layerStrong", "input", "hover", "pressed" })
+            Assert.True(Missum.App.App.TextContrastRatio(Parse(appearance.Colors["accentReadable"]),
+                Composite(Parse(appearance.Colors[role]), window)) >= 4.5);
         Assert.Equal("#FFFFFF", appearance.Colors["text"]);
         Assert.Equal("#999999", appearance.Colors["mutedText"]);
     }

@@ -11,6 +11,13 @@ public sealed partial class NativeAssistantPage
     // Returning to A must not reuse a footer still parented to A's discarded bubble.
     private async Task<int> VerifyMessageNavigationSmokeAsync()
     {
+        if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_RESPONSIVENESS") == "palette")
+            return await VerifyIconPaletteSmokeAsync();
+        if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_RESPONSIVENESS") == "sources")
+        {
+            await VerifySourceAutoloadSmokeAsync();
+            return await VerifyIconPaletteSmokeAsync();
+        }
         var original = _snapshot.Clone();
         if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_RESPONSIVENESS") == "focused")
         {
@@ -285,13 +292,15 @@ public sealed partial class NativeAssistantPage
         var allSources = (Button)SourcesPanel.Children[^1];
         var allRow = (Grid)allSources.Content;
         var allIcon = allRow.Children.OfType<FontIcon>().Single();
-        if (allRow.Children.OfType<TextBlock>().Single().Opacity >= 1 || allIcon.Glyph != "\uE71B" || allIcon.Opacity >= 1
+        if (allRow.Children.OfType<TextBlock>().Single().Opacity >= 1 || allIcon.Glyph != "\uE71B" || allIcon.Opacity != 1
             || Microsoft.UI.Xaml.Automation.AutomationProperties.GetName(allSources) != "Alle Quellen anzeigen")
-            throw new InvalidOperationException("The all-sources action must use the muted link symbol.");
-        VerifyIconBrush(allIcon.Foreground, "link");
-        VerifyIconBrush(((Grid)((Button)SourcesPanel.Children[0]).Content).Children.OfType<FontIcon>().Single().Foreground, "web");
+            throw new InvalidOperationException("The all-sources action must use an accent link symbol with a muted label.");
+        VerifyIconBrush(allIcon.Foreground, "web");
+        VerifyIconBrush(((Grid)((Button)SourcesPanel.Children[0]).Content).Children.OfType<FontIcon>().Single().Foreground, "source");
         VerifyIconBrush(((Grid)InspectorProjectRow.Content).Children.OfType<FontIcon>().Single().Foreground, "folder");
-        VerifyIconBrush(((Grid)ChangesSummaryButton.Content).Children.OfType<Microsoft.UI.Xaml.Shapes.Path>().Single().Stroke, "code");
+        if (((Grid)ChangesSummaryButton.Content).Children.OfType<Microsoft.UI.Xaml.Shapes.Path>().Single().Stroke
+            is not Microsoft.UI.Xaml.Media.SolidColorBrush changesBrush || changesBrush.Color != NativeThemeBrushes.MutedText.Color)
+            throw new InvalidOperationException("The changes icon must use the muted color.");
         VerifyIconBrush(DictationIcon.Foreground, "speech");
         var parsedUrls = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var parsedTitles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -353,8 +362,8 @@ public sealed partial class NativeAssistantPage
         {
             foreach (var (tool, key) in new[] {
                 ("web.search", "web"), ("coding.read", "code"), ("coding.updatePlan", "plan"),
-                ("research.code.execute", "code"), ("research.deep", "research"), ("math.formalProof", "research"),
-                ("math.smt", "research"), ("assistant.reasoning", "research"), ("assistant.progress", "research"),
+                ("research.code.execute", "code"), ("research.deep", "research"), ("math.formalProof", "lean"),
+                ("math.smt", "code"), ("assistant.reasoning", "research"), ("assistant.progress", "research"),
                 ("document.create", "document"), ("image.generate", "image"), ("speech.synthesize", "speech"),
                 ("audiobook.generate", "audiobook"), ("captions.stream", "captions"), ("extension.custom", "tool") })
             {
@@ -618,7 +627,7 @@ public sealed partial class NativeAssistantPage
         {
             _running = false;
             ComposerSurface.Width = 600;
-            SelectedToolChip.SetTool("Planen", "\uEA80", Missum.App.Controls.NativeIconPalette.ColorFor("plan"));
+            SelectedToolChip.SetTool("Planen", "\uEA80", Missum.App.Controls.NativeIconPalette.BrushFor("plan"));
             SelectedToolChip.Visibility = Microsoft.UI.Xaml.Visibility.Visible;
             Composer.Focus(Microsoft.UI.Xaml.FocusState.Programmatic);
             SelectedToolChip.SetPointerState(false);
@@ -642,8 +651,8 @@ public sealed partial class NativeAssistantPage
                 throw new InvalidOperationException("Keyboard focus did not expose chip removal.");
             Composer.Focus(Microsoft.UI.Xaml.FocusState.Programmatic);
             SelectedToolChip.SetKeyboardFocusState(false);
-            SelectedToolChip.SetTool("Ein sehr langer Werkzeugname für die Platzprüfung", "\uE8A5", Missum.App.Controls.NativeIconPalette.ColorFor("document"));
-            CaptionChip.SetTool("Live-Untertitel", "\uE7F4", Missum.App.Controls.NativeIconPalette.ColorFor("speech"));
+            SelectedToolChip.SetTool("Ein sehr langer Werkzeugname für die Platzprüfung", "\uE8A5", Missum.App.Controls.NativeIconPalette.BrushFor("document"));
+            CaptionChip.SetTool("Live-Untertitel", "\uE7F4", Missum.App.Controls.NativeIconPalette.BrushFor("speech"));
             VerifyChipColor(SelectedToolChip, "document");
             VerifyChipColor(CaptionChip, "speech");
             CaptionChip.Visibility = Microsoft.UI.Xaml.Visibility.Visible;

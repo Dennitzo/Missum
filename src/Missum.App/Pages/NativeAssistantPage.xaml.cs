@@ -254,7 +254,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             RenderMessages();
         }
         if (type == "host.error") { ShowError(S(data, "message")); return; }
-        if (type == "queue.changed") { UpdateSidebarActivity(data); return; }
+        if (type == "queue.changed") { UpdateSidebarActivity(data); ObserveContinuationQueue(data); return; }
         if (type == "session.grouped")
         {
             // A peer's project/session edit updates the shared sidebar, while
@@ -319,6 +319,10 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                 if (data.TryGetProperty("changesSummary", out var changes)) RenderChanges(changes);
                 SetRunning();
                 SyncResearchSession();
+                // Closed tool details and older pages intentionally omit URLs.
+                // Load only the compact source index, independently of the tab.
+                if (!_selectionInputSmokeActive && (changed || type == "state.snapshot"))
+                    _ = LoadSourceIndexAsync(_session, ReadConversationRevision(data, "conversationRevision"));
             }
             return;
         }
@@ -405,17 +409,14 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             || S(current, "sessionId") != S(incoming, "sessionId")) return incoming;
         var currentRevision = ReadConversationRevision(current, "revision");
         var incomingRevision = ReadConversationRevision(incoming, "revision");
-        // Completion and cancellation are newer message states too. An older
-        // snapshot must not resurrect their streaming text. Deltas carry a new
-        // timestamp but may retain the prior snapshot's revision, so compare both.
-        // A real retry advances revision/time and remains eligible for adoption.
-        var newerRevision = currentRevision > 0 && incomingRevision > 0 && currentRevision > incomingRevision;
-        var newerTimestamp = DateTimeOffset.TryParse(MessageUpdatedAt(current), out var liveAt)
-            && DateTimeOffset.TryParse(S(incoming, "updatedAt"), out var snapshotAt) && liveAt > snapshotAt;
-        if (!newerRevision && !newerTimestamp) return incoming;
+        var merge = NativeMessageSnapshotPolicy.Compare(current, incoming, MessageUpdatedAt(current));
+        if (!merge.PreservePayload) return incoming;
         var merged = incoming.Deserialize<Dictionary<string, JsonElement>>()!;
-        foreach (var field in new[] { "content", "toolSteps", "updatedAt", "status", "error", "contextSummary" })
+        foreach (var field in new[] { "content", "toolSteps", "updatedAt", "contextSummary" })
             if (current.TryGetProperty(field, out var value)) merged[field] = value;
+        if (merge.PreserveLifecycle)
+            foreach (var field in new[] { "status", "error" })
+                if (current.TryGetProperty(field, out var value)) merged[field] = value;
         merged["content"] = JsonSerializer.SerializeToElement(MessageContent(current));
         merged["toolSteps"] = JsonSerializer.SerializeToElement(MessageSteps(current));
         merged["updatedAt"] = JsonSerializer.SerializeToElement(MessageUpdatedAt(current));
@@ -470,6 +471,8 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     private readonly Dictionary<string, (JsonElement Source, string Signature)> _sourceMessageSignatures = new(StringComparer.Ordinal);
     private void ResetConversationViews()
     {
+        _readingToolConversation = null;
+        _conversationScrollIntent++;
         _toolDetailGeneration++;
         _conversationSelection?.Clear();
         // WinUI elements have exactly one parent. Footer controls and context
@@ -497,13 +500,16 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
 
     private void QueueSessionScrollToLatest()
     {
-        if (_sessionScrollQueued || !_scrollNewSessionToLatest || _disposed) return;
+        if (_sessionScrollQueued || !_scrollNewSessionToLatest || !CanFollowConversationTail || _disposed) return;
         _sessionScrollQueued = true;
         var session = _session;
+        var owner = ConversationViewKey;
+        var scrollIntent = _conversationScrollIntent;
         DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => RunUiCallback("Session.ScrollLatest", () =>
         {
             _sessionScrollQueued = false;
-            if (_disposed || session != _session || !_scrollNewSessionToLatest) return;
+            if (_disposed || session != _session || owner != ConversationViewKey
+                || scrollIntent != _conversationScrollIntent || !_scrollNewSessionToLatest || !CanFollowConversationTail) return;
             OnScrollToBottom(this, new RoutedEventArgs());
         }));
     }
@@ -520,8 +526,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             return;
         }
         RenderSources(_snapshot);
-        var follow = _scrollNewSessionToLatest
-            || _conversationSelection?.IsSelecting != true && ConversationScroll.ScrollableHeight - ConversationScroll.VerticalOffset < 90;
+        var follow = ShouldFollowConversationTail;
         var index = 0;
         foreach (var stale in _messageViews.Keys.Where(id => !IsKnownConversationMessage(id)).ToArray())
         { MessagesPanel.Children.Remove(_messageViews[stale].View); _messageViews.Remove(stale); _renderedMessageSources.Remove(stale); _messageBlocks.Remove(stale); _messageActionViews.Remove(stale); _thinkingIndicators.Remove(stale); _thinkingStates.Remove(stale); }
@@ -571,7 +576,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                     layout.Children.Add(new Border { Width = 28, Height = 28, CornerRadius = new(14), VerticalAlignment = VerticalAlignment.Top,
                         Background = childAgent is null ? ThemeBrush("MissumAccentSubtleBrush", 42) : new SolidColorBrush(Microsoft.UI.Colors.Transparent),
                         Child = childAgent is null
-                            ? new FontIcon { Glyph = "\uE99A", FontSize = 15, Foreground = ThemeBrush("MissumAccentBrush", 176) }
+                            ? new FontIcon { Glyph = "\uE99A", FontSize = 15, Foreground = NativeIconPalette.BrushFor("navigation") }
                             : SubagentIcon(childAgent.AgentId, 26, childAgent.PlanetIndex) });
                     bubble.Child = null;
                     Grid.SetColumn(messageBody, 1); layout.Children.Add(messageBody); bubble.Child = layout;
@@ -605,6 +610,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         _conversationLayoutProjectionQueued = true;
         var owner = ConversationViewKey;
         var offset = ConversationScroll.VerticalOffset;
+        var scrollIntent = _conversationScrollIntent;
         // Streaming must not synchronously force measure/arrange of the entire
         // scientific conversation. Use the completed framework layout instead.
         void Project(object? sender, object args)
@@ -616,7 +622,8 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             {
                 RefreshVirtualConversationViewport();
                 RenderPromptTimeline(layoutCurrent: true);
-                if (follow && !_messageWindowLoading && _conversationSelection?.IsSelecting != true
+                if (follow && CanFollowConversationTail && scrollIntent == _conversationScrollIntent
+                    && !_messageWindowLoading && _conversationSelection?.IsSelecting != true
                     && Math.Abs(ConversationScroll.VerticalOffset - offset) < 1)
                     ConversationScroll.ChangeView(null, ConversationScroll.ScrollableHeight, null, true);
                 QueueSessionScrollToLatest();
@@ -759,9 +766,17 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         finally { _syncingScroll = false; }
     }
     private void OnOuterScrollChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
-    { if (!_syncingScroll) { _scrollNewSessionToLatest = false; ConversationScroll.ChangeView(null, e.NewValue, null, true); } }
+    {
+        if (_syncingScroll) return;
+        _scrollNewSessionToLatest = false;
+        _conversationScrollIntent++;
+        if (e.NewValue > e.OldValue && e.NewValue >= ConversationScroll.ScrollableHeight - 1) _readingToolConversation = null;
+        ConversationScroll.ChangeView(null, e.NewValue, null, true);
+    }
     private void OnScrollToBottom(object sender, RoutedEventArgs e)
     {
+        _readingToolConversation = null;
+        _conversationScrollIntent++;
         ConversationContent.UpdateLayout();
         ConversationScroll.ChangeView(null, ConversationScroll.ScrollableHeight, null, true);
         SyncOuterScroll();
@@ -775,6 +790,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         var point = e.GetCurrentPoint(AssistantFrame);
         if (point.Properties.IsHorizontalMouseWheel || point.Properties.MouseWheelDelta == 0) return;
         _scrollNewSessionToLatest = false;
+        _conversationScrollIntent++;
         var modifiers = e.KeyModifiers;
         if (modifiers.HasFlag(VirtualKeyModifiers.Control) || modifiers.HasFlag(VirtualKeyModifiers.Shift)) return;
         var scroll = ReviewScroll.Visibility == Visibility.Visible ? ReviewScroll : ConversationScroll;
@@ -809,6 +825,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(SendButton, label);
         ToolTipService.SetToolTip(SendButton, label);
         UpdateSidebarActivity();
+        RefreshContinuationSteps();
     }
     private async void OnSendClick(object sender, RoutedEventArgs e) => await SendAsync();
     private async Task SendAsync()

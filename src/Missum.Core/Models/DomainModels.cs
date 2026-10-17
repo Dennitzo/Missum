@@ -63,7 +63,8 @@ public sealed record AssistantToolStep(
     DateTimeOffset? CompletedAt = null,
     DateTimeOffset? UpdatedAt = null,
     string? AgentId = null,
-    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)] bool DetailsDeferred = false)
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)] bool DetailsDeferred = false,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] ToolStepDisplayHeader? DisplayHeader = null)
 {
     // Display/storage limit only. Tool collection and model-context budgets are independent.
     public const int MaximumDetailCharacters = 2_097_152;

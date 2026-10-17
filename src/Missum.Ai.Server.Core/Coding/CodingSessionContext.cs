@@ -10,17 +10,19 @@ internal static class CodingSessionContext
 
     internal static IReadOnlyList<LmChatMessage> Continue(AgentRunCheckpoint previous, IReadOnlyList<LmChatMessage> initial)
     {
-        // Only conversation data crosses the run boundary. Current policy, tools, task,
-        // counters and execution state belong to the new run; never replay pending calls.
-        var result = initial.Where(message => message.Role == "system").ToList();
+        // An evaluated conversation owns its exact system prefix as well. Rebuilding
+        // equivalent policy sections in another order invalidates all native KV tokens.
+        // Legacy, unevaluated history still adopts the current policy. Execution state
+        // remains run-local and outstanding historical calls are never replayed.
+        var result = (previous.PreserveSessionPromptPrefix ? previous.Messages : initial)
+            .TakeWhile(message => message.Role == "system").ToList();
         var pending = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var message in previous.Messages)
+        foreach (var message in previous.Messages.SkipWhile(message => message.Role == "system"))
         {
-            if (message.Role is not ("user" or "assistant" or "tool")
-                && !(previous.PreserveSessionPromptPrefix && IsHistoricalTurnInstruction(message))) continue;
+            if (!previous.PreserveSessionPromptPrefix && message.Role is not ("user" or "assistant" or "tool")) continue;
             if (!previous.PreserveSessionPromptPrefix && message.Role == "user" && (message.Content?.StartsWith(StateMarker, StringComparison.Ordinal) == true
                 || message.Content?.StartsWith(CodingEvidenceContext.Marker, StringComparison.Ordinal) == true)) continue;
-            if (message.Role != "tool" && pending.Count > 0) ClosePending();
+            if (!previous.PreserveSessionPromptPrefix && message.Role != "tool" && pending.Count > 0) ClosePending();
             result.Add(message);
             foreach (var call in message.ToolCalls ?? []) pending.Add(call.Id);
             if (message.Role == "tool" && message.ToolCallId is { } id) pending.Remove(id);
@@ -50,11 +52,6 @@ internal static class CodingSessionContext
             pending.Clear();
         }
     }
-
-    private static bool IsHistoricalTurnInstruction(LmChatMessage message) => message.Role == "system"
-        && (message.Content == RunProcessor.EmptyResponseRepairPrompt
-            || message.Content == CodingCompletionGuard.RepairPrompt
-            || message.Content?.StartsWith(CodingRunBudget.PromptMarker, StringComparison.Ordinal) == true);
 
     internal static CodingWorkingState? RestoreWorkingState(AgentRunCheckpoint previous)
     {

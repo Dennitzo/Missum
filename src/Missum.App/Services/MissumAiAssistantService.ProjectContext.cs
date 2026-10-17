@@ -54,4 +54,16 @@ public sealed partial class MissumAiAssistantService
         catch (Exception error) when (error is not OutOfMemoryException)
         { ProjectMemoryUnavailable(logger, session.Id.ToString("D"), error); }
     }
+
+    private async Task CaptureSharedProjectContextAsync(ChatMessage message)
+    {
+        if (projectContexts is null) return;
+        try
+        {
+            var session = await GetExecutionSessionAsync(message.SessionId, CancellationToken.None).ConfigureAwait(false);
+            await CaptureSharedProjectContextAsync(session, message).ConfigureAwait(false);
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        { ProjectMemoryUnavailable(logger, message.SessionId.ToString("D"), error); }
+    }
 }

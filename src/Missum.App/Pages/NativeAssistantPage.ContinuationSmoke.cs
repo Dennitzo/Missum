@@ -253,6 +253,7 @@ public sealed partial class NativeAssistantPage
                 }
             }
             finally { MessagesPanel.Children.Remove(receiptView); }
+            VerifyPagedContinuationTerminalSmoke(snapshot);
         }
         finally
         {
@@ -263,5 +264,54 @@ public sealed partial class NativeAssistantPage
             ApplyEvent("state.snapshot", original);
             RenderMessagesNow();
         }
+    }
+
+    private void VerifyPagedContinuationTerminalSmoke(Dictionary<string, JsonElement> basis)
+    {
+        var session = Guid.NewGuid();
+        var messageId = Guid.NewGuid().ToString();
+        var now = DateTimeOffset.UtcNow;
+        var page = new Dictionary<string, JsonElement>(basis)
+        {
+            ["activeSessionId"] = JsonSerializer.SerializeToElement(session),
+            ["activeRunSessionId"] = JsonSerializer.SerializeToElement(session),
+            ["isRunning"] = JsonSerializer.SerializeToElement(true),
+            ["isAiBusy"] = JsonSerializer.SerializeToElement(true),
+            ["runQueue"] = JsonSerializer.SerializeToElement(new { active = new { sessionId = session, state = "running" } }),
+            ["historyPage"] = JsonSerializer.SerializeToElement(new { hasMore = true }),
+            ["messages"] = JsonSerializer.SerializeToElement(new[] { new
+            {
+                id = messageId, sessionId = session, role = "assistant", content = "Bisherige Arbeit.",
+                status = "streaming", revision = 40L, createdAt = now, updatedAt = now,
+            } }),
+        };
+        try
+        {
+            ApplyEvent("state.snapshot", JsonSerializer.SerializeToElement(page)); RenderMessagesNow();
+            ApplyNativeMessageDelta(JsonSerializer.SerializeToElement(new
+            { messageId, revision = 1, contentAppend = " Letztes Token.", updatedAt = now.AddSeconds(2) }));
+            ApplyEvent("conversation.messageCommitted", JsonSerializer.SerializeToElement(new
+            {
+                sessionId = session,
+                message = new
+                {
+                    id = messageId, sessionId = session, role = "assistant", content = "Dauerhaft gespeicherte Arbeit.",
+                    status = "cancelled", revision = 41L, createdAt = now, updatedAt = now.AddSeconds(1),
+                },
+            }));
+            _finishedSessions.Add(session); _running = false; SetRunning(); RenderMessagesNow();
+            var step = (ContinuationToolStepView)_messageBlocks[messageId]["continuation"];
+            if (step.Visibility != Visibility.Visible || step.ContinueButton.IsEnabled)
+                throw new InvalidOperationException("A paged stopped answer must offer continuation while awaiting queue release.");
+            ApplyEvent("queue.changed", JsonSerializer.SerializeToElement(new { runQueue = new { active = (object?)null } }));
+            if (!step.ContinueButton.IsEnabled || S(_messages[messageId], "status") != "cancelled"
+                || MessageContent(_messages[messageId]) != "Dauerhaft gespeicherte Arbeit." || _messages.Count != 1)
+                throw new InvalidOperationException("The final revision and idle queue must restore continuation without loading the older user prompt.");
+            ApplyEvent("queue.changed", JsonSerializer.SerializeToElement(new
+            { runQueue = new { active = new { sessionId = Guid.NewGuid(), state = "running" } } }));
+            if (step.ContinueButton.IsEnabled)
+                throw new InvalidOperationException("Continuation must remain disabled while a different scheduled run owns the model.");
+        }
+        finally { _finishedSessions.Remove(session); }
     }
 }

@@ -38,6 +38,7 @@ public sealed partial class SettingsPage : Page
         new("Grün", "#8FBD45", Windows.UI.Color.FromArgb(255, 143, 189, 69)),
         new("Orange", "#F4B860", Windows.UI.Color.FromArgb(255, 244, 184, 96)),
         new("Pink", "#D95BA8", Windows.UI.Color.FromArgb(255, 217, 91, 168)),
+        new("Cyberpunk 2077", NativeIconPalette.CyberpunkAccent, NativeIconPalette.CyberpunkAccentColor),
     ];
 
     public IReadOnlyList<SettingsAccentColorOption> BackgroundColors { get; } =

@@ -12,8 +12,8 @@ public sealed class NativeComposerToolChip : Button
     private readonly Border _close = new()
     {
         Width = 14, Height = 14, CornerRadius = new(7), Opacity = 0,
-        Background = new SolidColorBrush(Microsoft.UI.Colors.Gray),
-        Child = new FontIcon { Glyph = "\uE711", FontSize = 8, Foreground = new SolidColorBrush(Microsoft.UI.Colors.White) },
+        Background = NativeThemeBrushes.Resource("MissumAccentSubtleBrush", 40),
+        Child = new FontIcon { Glyph = "\uE711", FontSize = 8, Foreground = NativeIconPalette.BrushFor("danger") },
     };
     private readonly TextBlock _label = new() { FontSize = 13, MaxWidth = 180, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center };
     private bool _hovered;
@@ -44,10 +44,10 @@ public sealed class NativeComposerToolChip : Button
         Unloaded += (_, _) => { _hovered = false; _keyboardFocused = false; _transition?.Stop(); };
     }
 
-    public void SetTool(string label, string glyph, Windows.UI.Color? color = null)
+    public void SetTool(string label, string glyph, Brush? iconBrush = null)
     {
         _label.Text = label; _icon.Glyph = glyph;
-        _icon.Foreground = color is { } iconColor ? new SolidColorBrush(iconColor) : NativeIconPalette.BrushFor("tool");
+        _icon.Foreground = iconBrush ?? NativeIconPalette.BrushFor("tool");
         ToolTipService.SetToolTip(this, label + " entfernen");
         AutomationProperties.SetName(this, label + " entfernen");
         UpdateAffordance();

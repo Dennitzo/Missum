@@ -1373,7 +1373,7 @@ public sealed class AssistantIntegrationTests
     }
 
     [Fact]
-    public async Task NewSciencePromptStoresTheCompleteSubjectBeforeConnectingToTheModel()
+    public async Task NewSciencePromptStoresTheLatestPromptBeforeConnectingToTheModel()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var chats = environment.Get<IChatRepository>();
@@ -1386,20 +1386,21 @@ public sealed class AssistantIntegrationTests
         await Assert.ThrowsAsync<InvalidOperationException>(() => HandleAsync(coordinator, "chat.send", new
         {
             sessionId = session.Id,
-            prompt = "Erstelle eine wissenschaftliche Publikation:\nEinsteinsche Feldgleichungen, Allgemeine Relativitätstheorie und Quantenmechanik kombinieren und eine allgemeine Gleichung finden.",
+            prompt = "Erstelle eine wissenschaftliche Publikation:\nEinsteinsche Feldgleichungen und Quantenmechanik kombinieren.",
         }));
 
-        Assert.Equal("Einsteinsche Feldgleichungen, Allgemeine Relativitätstheorie und Quantenmechanik",
+        Assert.Equal("Erstelle eine wissenschaftliche Publikation: Einsteinsche Feldgleichungen und Quantenmechanik kombinieren.",
             (await chats.GetSessionAsync(session.Id))!.Title);
     }
 
     [Fact]
-    public async Task ScienceFollowupDoesNotReplaceTheOriginalResearchTitle()
+    public async Task ScienceFollowupReplacesTheOriginalResearchTitle()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var chats = environment.Get<IChatRepository>();
         const string title = "Quantenfelder in gekrümmter Raumzeit";
         var session = await chats.CreateSessionAsync(title, ChatMode.ClaudeScience);
+        await chats.SetCodingWorkspacePathAsync(session.Id, environment.Directory, activateCoding: false);
         await chats.AddMessageAsync(session.Id, ChatRole.User, "Erstelle eine wissenschaftliche Publikation: " + title, MessageStatus.Completed);
         using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
         await settings.InitializeAsync();
@@ -1410,7 +1411,8 @@ public sealed class AssistantIntegrationTests
         await Assert.ThrowsAsync<InvalidOperationException>(() => HandleAsync(coordinator, "chat.send",
             new { sessionId = session.Id, prompt = "Ergänze jetzt die mathematischen Grenzfälle ausführlich." }));
 
-        Assert.Equal(title, (await chats.GetSessionAsync(session.Id))!.Title);
+        Assert.Equal("Ergänze jetzt die mathematischen Grenzfälle ausführlich.",
+            (await chats.GetSessionAsync(session.Id))!.Title);
     }
 
     [Fact]

@@ -10,6 +10,41 @@ namespace Missum.Tests;
 
 public sealed class CodingChangesIntegrationTests
 {
+    [Theory]
+    [InlineData(false, 5)]
+    [InlineData(true, 5)]
+    [InlineData(false, 1816)]
+    [InlineData(true, 1816)]
+    public async Task NativeGitFailureDoesNotAbortStartingOrContinuingTheRun(bool resume, int nativeError)
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var workspace = Directory.CreateDirectory(Path.Combine(environment.Directory, "project")).FullName;
+        var storage = Path.Combine(environment.Directory, "changes");
+        var events = new ConcurrentQueue<CodingChangesSummary>();
+        var failures = new ConcurrentQueue<Exception>();
+        var failure = new System.ComponentModel.Win32Exception(nativeError, "Git-Prozessjob nicht verfügbar");
+        await using (var monitor = new CodingChangesMonitor(workspace, storage, Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(),
+            summary => { events.Enqueue(summary); return Task.CompletedTask; }, failures.Enqueue))
+        {
+            // Inject the native initialization failure without changing installed
+            // Git or host job permissions. Exercise the actual optional-preflight boundary.
+            var initializationError = typeof(CodingChangesMonitor).GetField("_initializationError",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            Assert.NotNull(initializationError);
+            initializationError.SetValue(monitor, failure);
+
+            await monitor.StartAsync(resume, CancellationToken.None);
+            await monitor.RefreshAsync();
+        }
+        Assert.Same(failure, Assert.Single(failures));
+        var unavailable = Assert.Single(events);
+        Assert.True(unavailable.IsPartial);
+        Assert.Empty(unavailable.Files);
+        Assert.Contains(failure.Message, unavailable.Notice, StringComparison.Ordinal);
+        Assert.False(File.Exists(Path.Combine(storage, "git-baseline.json")));
+        Assert.False(File.Exists(Path.Combine(storage, "git-capture-started")));
+    }
+
     [Fact]
     public async Task ContinuationHasItsOwnBaselineAndFinishedReceiptDoesNotIncludeLaterWork()
     {

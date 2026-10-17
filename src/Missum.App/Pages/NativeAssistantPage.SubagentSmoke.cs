@@ -727,8 +727,15 @@ public sealed partial class NativeAssistantPage
             var foreign = Guid.NewGuid();
             _session = foreign; SyncSessionTabs(); RenderSubagentOverlay();
             if (_activeSubagentOverviewSession is not null || _subagentOverviewHost.Visibility != Visibility.Collapsed
-                || overviewTab.Parent == SessionTabsPanel || SubagentsSection.Visibility != Visibility.Collapsed)
+                || overviewTab.Parent == SessionTabsPanel || SubagentsSection.Visibility != Visibility.Visible
+                || SubagentsPanel.Children.Count != 1 || _subagentSummaryLabel?.Text != "Noch keine Subagenten")
                 throw new InvalidOperationException("A subagent overview must never leak into another session.");
+            OpenSubagentOverview(); UpdateLayout();
+            if (_activeSubagentOverviewSession != foreign || SubagentOverviewRows().Length != 0
+                || _subagentOverviewHost.Content is not ScrollViewer { Content: StackPanel emptyOverview }
+                || !emptyOverview.Children.OfType<TextBlock>().Any(text => text.Text == "Noch keine Subagenten in dieser Sitzung"))
+                throw new InvalidOperationException("The persistent empty subagent summary must open an empty overview for its own session.");
+            _subagentOverviewTabs.Remove(foreign);
             _session = owner; SyncSessionTabs(); RenderSubagentOverlay();
             if (overviewTab.Parent != SessionTabsPanel)
                 throw new InvalidOperationException("Returning to a session must restore its open overview tab.");

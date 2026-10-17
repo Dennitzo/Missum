@@ -3,6 +3,7 @@ using Missum.Ai.Server.Core.Coding;
 using Missum.Ai.Server.Core.Data;
 using Missum.Ai.Server.Core.Gateway;
 using Missum.Ai.Server.Core.Models;
+using Missum.Ai.Server.Core.Policies;
 using Missum.Ai.Server.Core.Runs;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -15,6 +16,147 @@ namespace Missum.Ai.Server.Tests;
 public sealed class GeneralSessionCacheIntegrationTests
 {
     private static readonly int[] ContinuedRequestIndices = [2, 3, 4];
+
+    [Fact]
+    public async Task CodingContinuationKeepsEvaluatedPolicyOrderAndToolSchemaOrderWithoutFreshGpuAdmission()
+    {
+        using var context = new TestServerContext();
+        context.Options.ModelRuntimeUri = new("http://native.test:19090");
+        context.Options.CodingModelId = NativeHandler.ModelA;
+        using var native = new NativeHandler();
+        using var services = new Services(context, native);
+        var request = Request("pinned-prefix-session", [Message("user", "Prüfe das Projekt.")], NativeHandler.ModelA) with
+        {
+            Mode = RunMode.Coding, PreferredCodingModelId = NativeHandler.ModelA,
+            ClientCapabilities = ["coding", "subagents", "math.lean"],
+            CodingOptions = new(WorkspacePath: "C:/cache-test", ContinueSessionContext: true),
+        };
+        var available = new AgentToolCatalog().GetAvailableTools(request, subagentAvailable: true);
+        var tools = RunProcessor.CreateModelToolDefinitions(available, null, directTools: true).Reverse().ToArray();
+        var original = RunProcessor.CreateInitialMessages(request, "coding", available.Select(tool => tool.Name).ToArray());
+        Assert.Contains(SubagentAgentPolicy.Manager, original[0].Content, StringComparison.Ordinal);
+        Assert.Contains(LeanAgentPolicy.Instructions, original[0].Content, StringComparison.Ordinal);
+        original[0] = original[0] with { Content = original[0].Content!
+            .Replace("\n\n" + SubagentAgentPolicy.Manager, string.Empty, StringComparison.Ordinal)
+            + "\n\n" + SubagentAgentPolicy.Manager };
+        var evaluated = ModelRuntimeClient.PrepareLanguageBoundMessages(original);
+        var checkpoint = new AgentRunCheckpoint([.. evaluated, new("assistant", "Gespeicherte Prüfung.")], 1, 0, 100, 10,
+            PreserveSessionPromptPrefix: true, UseStableSubagentToolCatalog: true,
+            ContextTools: tools, ToolCatalogSignature: ToolContextProfiles.Signature(tools, NativeHandler.ModelA));
+        var previousRun = (await services.Repository.CreateAsync(request, null)).Snapshot.RunId;
+        await services.Repository.SaveCheckpointAsync(previousRun, checkpoint);
+        Assert.True(await services.Repository.FinalizeConversationAsync(previousRun, new(null, NativeHandler.ModelA, 100, 10)));
+
+        await services.CompleteAsync(request with { Messages = [.. request.Messages,
+            Message("assistant", "Gespeicherte Prüfung."), Message("user", "Setze die Prüfung fort.")] });
+
+        var sent = Assert.Single(native.Requests).Body;
+        var sentMessages = sent.GetProperty("messages").EnumerateArray().ToArray();
+        Assert.Equal(checkpoint.Messages.Count, sentMessages.Take(checkpoint.Messages.Count).Count());
+        for (var index = 0; index < checkpoint.Messages.Count; index++)
+        {
+            Assert.Equal(checkpoint.Messages[index].Role, sentMessages[index].GetProperty("role").GetString());
+            Assert.Equal(checkpoint.Messages[index].Content, sentMessages[index].GetProperty("content").GetString());
+        }
+        Assert.Equal(ModelRuntimeClient.PrepareTransportTools(NativeHandler.ModelA, tools).GetRawText(),
+            sent.GetProperty("tools").GetRawText());
+        Assert.True(native.SubagentAdmissionChecks >= 2);
+        Assert.DoesNotContain(native.Operations, operation => operation.Path == "/agents/prepare");
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CodingContinuationAdvertisesTheExplicitlyChangedClientToolsWithoutRemovingHistory(bool removeTool)
+    {
+        using var context = new TestServerContext();
+        context.Options.ModelRuntimeUri = new("http://native.test:19090");
+        context.Options.CodingModelId = NativeHandler.ModelA;
+        using var native = new NativeHandler();
+        using var services = new Services(context, native);
+        var extension = new ToolDescriptor("com.example.lookup", "Liest einen ausgewählten lokalen Datensatz.", ToolRiskClass.ReadOnly,
+            JsonSerializer.SerializeToElement(new { type = "object", properties = new { query = new { type = "string" } } }),
+            TimeoutSeconds: 30, MaximumOutputBytes: 16_384);
+        var request = Request("changed-tools-session", [Message("user", "Prüfe das Projekt.")], NativeHandler.ModelA) with
+        {
+            Mode = RunMode.Coding, PreferredCodingModelId = NativeHandler.ModelA,
+            ClientCapabilities = ["coding", "subagents"], ClientTools = removeTool ? [extension] : [],
+            CodingOptions = new(WorkspacePath: "C:/cache-test", ContinueSessionContext: true),
+        };
+        var available = new AgentToolCatalog().GetAvailableTools(request, subagentAvailable: true);
+        var savedTools = RunProcessor.CreateModelToolDefinitions(available, null, directTools: true).Reverse().ToArray();
+        var evaluated = ModelRuntimeClient.PrepareLanguageBoundMessages(RunProcessor.CreateInitialMessages(request, "coding",
+            available.Select(tool => tool.Name).ToArray()));
+        var checkpoint = new AgentRunCheckpoint([.. evaluated, new("assistant", "Gespeicherte Prüfung.")], 1, 0, 100, 10,
+            PreserveSessionPromptPrefix: true, UseStableSubagentToolCatalog: true, ContextTools: savedTools);
+        var previousRun = (await services.Repository.CreateAsync(request, null)).Snapshot.RunId;
+        await services.Repository.SaveCheckpointAsync(previousRun, checkpoint);
+        Assert.True(await services.Repository.FinalizeConversationAsync(previousRun, new(null, NativeHandler.ModelA, 100, 10)));
+        var followUp = request with { ClientTools = removeTool ? [] : [extension], Messages = [.. request.Messages,
+            Message("assistant", "Gespeicherte Prüfung."), Message("user", "Nutze die aktuelle Werkzeugauswahl.")] };
+
+        await services.CompleteAsync(followUp);
+
+        var sent = Assert.Single(native.Requests).Body;
+        var sentMessages = sent.GetProperty("messages").EnumerateArray().ToArray();
+        for (var index = 0; index < checkpoint.Messages.Count; index++)
+        {
+            Assert.Equal(checkpoint.Messages[index].Role, sentMessages[index].GetProperty("role").GetString());
+            Assert.Equal(checkpoint.Messages[index].Content, sentMessages[index].GetProperty("content").GetString());
+        }
+        var currentTools = RunProcessor.CreateModelToolDefinitions(new AgentToolCatalog()
+            .GetAvailableTools(followUp, subagentAvailable: true), null, directTools: true);
+        var sentTools = sent.GetProperty("tools");
+        Assert.Equal(ModelRuntimeClient.PrepareTransportTools(NativeHandler.ModelA, currentTools).GetRawText(), sentTools.GetRawText());
+        Assert.Equal(!removeTool, sentTools.EnumerateArray().Any(tool => tool.GetProperty("function").GetProperty("name").GetString()
+            == ModelRuntimeClient.ToTransportToolName(extension.Name)));
+        Assert.DoesNotContain(native.Operations, operation => operation.Path == "/agents/prepare");
+    }
+
+    [Fact]
+    public async Task ExplicitSubagentCapabilityRemovalRetiresItsSchemasWithoutRewritingHistory()
+    {
+        using var context = new TestServerContext();
+        context.Options.ModelRuntimeUri = new("http://native.test:19090");
+        context.Options.CodingModelId = NativeHandler.ModelA;
+        using var native = new NativeHandler();
+        using var services = new Services(context, native);
+        var request = Request("removed-subagents-session", [Message("user", "Prüfe das Projekt.")], NativeHandler.ModelA) with
+        {
+            Mode = RunMode.Coding, PreferredCodingModelId = NativeHandler.ModelA,
+            ClientCapabilities = ["coding", "subagents"],
+            CodingOptions = new(WorkspacePath: "C:/cache-test", ContinueSessionContext: true),
+        };
+        var available = new AgentToolCatalog().GetAvailableTools(request, subagentAvailable: true);
+        var evaluated = ModelRuntimeClient.PrepareLanguageBoundMessages(RunProcessor.CreateInitialMessages(request, "coding",
+            available.Select(tool => tool.Name).ToArray()));
+        var checkpoint = new AgentRunCheckpoint([.. evaluated, new("assistant", "Gespeicherte Prüfung.")], 1, 0, 100, 10,
+            PreserveSessionPromptPrefix: true, UseStableSubagentToolCatalog: true,
+            ContextTools: RunProcessor.CreateModelToolDefinitions(available, null, directTools: true));
+        var previousRun = (await services.Repository.CreateAsync(request, null)).Snapshot.RunId;
+        await services.Repository.SaveCheckpointAsync(previousRun, checkpoint);
+        Assert.True(await services.Repository.FinalizeConversationAsync(previousRun, new(null, NativeHandler.ModelA, 100, 10)));
+        var followUp = request with { ClientCapabilities = ["coding"], Messages = [.. request.Messages,
+            Message("assistant", "Gespeicherte Prüfung."), Message("user", "Setze die Prüfung ohne Subagenten fort.")] };
+
+        await services.CompleteAsync(followUp);
+
+        var sent = Assert.Single(native.Requests).Body;
+        var sentMessages = sent.GetProperty("messages").EnumerateArray().ToArray();
+        for (var index = 0; index < checkpoint.Messages.Count; index++)
+        {
+            Assert.Equal(checkpoint.Messages[index].Role, sentMessages[index].GetProperty("role").GetString());
+            Assert.Equal(checkpoint.Messages[index].Content, sentMessages[index].GetProperty("content").GetString());
+        }
+        var currentTools = RunProcessor.CreateModelToolDefinitions(new AgentToolCatalog()
+            .GetAvailableTools(followUp, subagentAvailable: false), null, directTools: true);
+        Assert.Equal(ModelRuntimeClient.PrepareTransportTools(NativeHandler.ModelA, currentTools).GetRawText(),
+            sent.GetProperty("tools").GetRawText());
+        Assert.Equal(0, native.SubagentAdmissionChecks);
+        Assert.DoesNotContain(native.Operations, operation => operation.Path == "/agents/prepare");
+        var nextRun = (await services.Repository.CreateAsync(followUp, null)).Snapshot.RunId;
+        Assert.False((await services.Repository.GetSessionContextAsync(nextRun, followUp))!.UseStableSubagentToolCatalog);
+    }
 
     [Fact]
     public async Task CompletedToolCallSavesNativeSessionBeforeTheClientToolCanStart()
@@ -244,6 +386,7 @@ public sealed class GeneralSessionCacheIntegrationTests
         internal List<string> Answers { get; } = [];
         internal bool HoldFirstCompletion { get; init; }
         internal bool ReturnToolCall { get; init; }
+        internal int SubagentAdmissionChecks { get; private set; }
         internal TaskCompletionSource InferenceStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal static string Reasoning(int ordinal) => $"Ich prüfe den erhaltenen Sitzungskontext im Testschritt {ordinal}.";
 
@@ -259,6 +402,12 @@ public sealed class GeneralSessionCacheIntegrationTests
             var model = body.GetProperty("model").GetString()!;
             var session = body.TryGetProperty("sessionKey", out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
             Operations.Add(new(path, model, session));
+            if (path == "/agents/status")
+            {
+                SubagentAdmissionChecks++;
+                return Json(new { allowed = false, reason = "subagent.insufficient_vram", modelId = model,
+                    instanceId = (string?)null, gpuIndex = (int?)null, contextLength = 32768 });
+            }
             if (path == "/models/unload") { _loaded = null; return Json(new { success = true }); }
             if (path == "/models/load") { _loaded = model; return Json(new { success = true }); }
             if (path == "/sessions/prepare") { _sessions[model] = session; return Json(new { status = "prepared" }); }
