@@ -102,12 +102,40 @@ public sealed class AgentToolModelIdentityTests
         if (requestedModel is not null) Assert.DoesNotContain(DefaultGeneralId, fixture.Handler.LoadedModels);
     }
 
+    [Theory]
+    [InlineData(false, GpuLeaseMode.Exclusive)]
+    [InlineData(true, GpuLeaseMode.Shared)]
+    public async Task AudioAnalysisUsesTheAdmittedPrimaryLaneInsteadOfTheSecondaryLane(bool sharedSubagent, GpuLeaseMode expectedLane)
+    {
+        using var fixture = new ExecutorFixture();
+        fixture.Handler.SetResidentModel(SelectedGeneralId);
+        var observed = new List<GpuLeaseMode>();
+        fixture.Handler.OnInference = () => observed.Add(Assert.Single(fixture.ActiveGpuLeases).Mode);
+        var bytes = Encoding.UTF8.GetBytes("shared primary audio fixture");
+        var hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
+        var upload = await fixture.Uploads.CreateAsync(new("audio.wav", "audio/wav", bytes.Length, hash));
+        using (var stream = new MemoryStream(bytes, writable: false))
+            await fixture.Uploads.PutChunkAsync(upload.UploadId, 0, stream, hash);
+        await fixture.Uploads.CompleteAsync(upload.UploadId);
+
+        var result = await fixture.Executor.ExecuteAsync("media.analyze",
+            JsonSerializer.SerializeToElement(new { uploadId = upload.UploadId, prompt = "Beschreibe den Inhalt." }),
+            "primary-audio-lane", SelectedGeneralId, "none", currentUploadIds: null,
+            runtimeInstanceId: sharedSubagent ? SelectedGeneralId : null);
+
+        Assert.True(result.Succeeded, result.ErrorMessage);
+        Assert.Equal(expectedLane, Assert.Single(observed));
+        Assert.Equal(SelectedGeneralId, Assert.Single(fixture.Handler.ChatModels));
+        Assert.Empty(fixture.Handler.LoadedModels);
+    }
+
     private sealed class ExecutorFixture : IDisposable
     {
         public TestServerContext Context { get; } = new();
         public RuntimeHandler Handler { get; } = new();
         public UploadService Uploads { get; }
         public AgentToolExecutor Executor { get; }
+        public IReadOnlyList<GpuLeaseActivity> ActiveGpuLeases => _scheduler.ActiveActivities;
         private readonly HttpClient _http;
         private readonly ModelRuntimeClient _model;
         private readonly GpuLeaseScheduler _scheduler;
@@ -145,6 +173,8 @@ public sealed class AgentToolModelIdentityTests
         public List<string> EmbeddingModels { get; } = [];
         public List<string> ChatModels { get; } = [];
         public int TranscriptionRequests { get; private set; }
+        public Action? OnInference { get; set; }
+        public void SetResidentModel(string modelId) => _loadedModel = modelId;
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
@@ -187,6 +217,7 @@ public sealed class AgentToolModelIdentityTests
                 }).ToArray() });
             }
             Assert.Equal("/v1/chat/completions", path);
+            OnInference?.Invoke();
             ChatModels.Add(model);
             return Json(new { choices = new[] { new { message = new { role = "assistant", content = "Der rote Apfel liegt auf dem Tisch." }, finish_reason = "stop" } },
                 usage = new { prompt_tokens = 100, completion_tokens = 10 } });

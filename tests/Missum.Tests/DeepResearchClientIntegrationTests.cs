@@ -157,7 +157,7 @@ public sealed class DeepResearchClientIntegrationTests
                 Assert.Equal($"research-{session.Id:N}", sent.ResearchOptions?.ProjectId);
                 Assert.Equal(coding ? ResearchAutonomyLevel.CodingWorkspaceResearch : ResearchAutonomyLevel.ReadOnlyResearch,
                     sent.ResearchOptions?.AutonomyLevel);
-                Assert.Equal(ResearchVerificationLevel.MultiPath, sent.ResearchOptions?.VerificationLevel);
+                Assert.Equal(ResearchVerificationLevel.Standard, sent.ResearchOptions?.VerificationLevel);
             }
             else Assert.Null(sent.ResearchOptions);
             Assert.Equal(session.Id.ToString("D"), sent.SessionId);

@@ -7,6 +7,21 @@ namespace Missum.Ai.Server.Tests;
 public sealed class AgentToolCatalogTests
 {
     private static readonly string[] RequiredQueryProperties = ["query"];
+    [Theory]
+    [InlineData(1, 1)]
+    [InlineData(12, 12)]
+    public void DeepResearchAcceptsTaskAppropriateScopeWithoutForcingMultiPathReview(int searches, int sources)
+    {
+        var catalog = new AgentToolCatalog();
+        var request = CreateRequest([]) with { AllowedServerTools = ["web.search", "web.fetch", "web.deepResearch"] };
+        var tool = catalog.Resolve("web.deepResearch", catalog.GetAvailableTools(request));
+        catalog.Validate(tool, JsonSerializer.SerializeToElement(new { task = "Prüfe die konkrete Forschungsfrage.", maximumSearches = searches, maximumSources = sources }));
+        Assert.Equal("standard", tool.Schema.GetProperty("properties").GetProperty("verificationLevel").GetProperty("default").GetString());
+        Assert.Equal(ResearchVerificationLevel.Standard, new DeepResearchOptions().VerificationLevel);
+        Assert.Throws<ArgumentException>(() => catalog.Validate(tool,
+            JsonSerializer.SerializeToElement(new { task = "Research", maximumSources = 13 })));
+    }
+
     [Fact]
     public void CompactSelectorExposesNamesWithoutFullToolSchemas()
     {

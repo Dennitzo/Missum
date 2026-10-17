@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -30,6 +30,16 @@ public sealed partial class NativeAssistantPage
 
     private async Task VerifyThinkingIndicatorSmokeAsync(JsonElement original)
     {
+        var previousFixture = _selectionInputSmokeActive;
+        _selectionInputSmokeActive = true;
+        try { await VerifyThinkingIndicatorFixtureAsync(original); }
+        finally { _selectionInputSmokeActive = previousFixture; }
+    }
+
+    private async Task VerifyThinkingIndicatorFixtureAsync(JsonElement original)
+    {
+        var originalDefault = _settings.Current.CodingToolStepsExpanded;
+        await _settings.UpdateAsync(settings => settings with { CodingToolStepsExpanded = false });
         var owner = Guid.NewGuid();
         var messageId = Guid.NewGuid().ToString();
         var snapshot = original.Deserialize<Dictionary<string, JsonElement>>(JsonOptions)!;
@@ -268,6 +278,7 @@ public sealed partial class NativeAssistantPage
         {
             _finishedSessions.Remove(owner);
             _thinkingStates.Remove(messageId);
+            await _settings.UpdateAsync(settings => settings with { CodingToolStepsExpanded = originalDefault });
             ApplyEvent("state.snapshot", original); RenderMessagesNow();
         }
     }

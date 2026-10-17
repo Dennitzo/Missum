@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using Missum.App.Controls;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Documents;
@@ -37,6 +37,7 @@ public sealed partial class NativeAssistantPage
             ApplyEvent("state.snapshot", JsonSerializer.SerializeToElement(snapshot));
             RenderMessagesNow(); RefreshThinkingIndicators();
             var answer = _messageBlocks[answerId].Values.OfType<NativeStreamingMarkdown>().Single();
+            await WaitForNativeMathPreparationAsync(answer);
             VerifyHeadings(answer);
             var row = _thinkingIndicators[reasoningId];
             row.SetExpanded(true);
@@ -50,6 +51,7 @@ public sealed partial class NativeAssistantPage
             RenderMessagesNow(); RefreshThinkingIndicators();
             if (!row.IsExpanded || !ReferenceEquals(reasoning, row.ReasoningView) || !ReferenceEquals(headingBefore, reasoning.Children[1]))
                 throw new InvalidOperationException("Streaming an indented heading rebuilt or collapsed the native reasoning disclosure.");
+            await WaitForNativeMathPreparationAsync(reasoning);
             VerifyHeadings(reasoning);
             AssertChatCursorAbsent(LayoutRoot);
             await SaveMathPreviewAsync(LayoutRoot, "native-markdown-headings-preview.png");

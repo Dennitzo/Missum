@@ -841,9 +841,30 @@ class GpuLoadManager:
                       for instance in (item["id"], item["id"] + "@subagent")]
             return self.sessions.delete(session_ids, session_keys, models)
 
-    def session_save(self, model, key, prompt_tokens=None):
+    def session_save(self, model, key, prompt_tokens=None, force=True, new_tokens=None):
         with self.lock:
-            return self.sessions.save(model, key, prompt_tokens)
+            return self.sessions.save(model, key, prompt_tokens, force, new_tokens)
+
+    def project_session_prepare(self, body, cancelled=None):
+        with self.lock:
+            return self.sessions.prepare_project(body["model"], body["sessionKey"], body["projectKey"],
+                body["cacheEpoch"], body["prefixHash"], body["prefill"], body["firstInference"],
+                body.get("sessionId"), body.get("parentSessionId"), cancelled)
+
+    def session_reset_epoch(self, epoch):
+        with self.lock:
+            # Resident unowned/stateless native requests also make a reset busy.
+            current = self.router("v1/models").get("data", [])
+            loaded = []
+            for item in current:
+                state = item.get("status", {}).get("value")
+                if state == "loading":
+                    return dict(status="busy", epoch=epoch)
+                if state in ("loaded", "sleeping"):
+                    loaded.append(item["id"])
+                    if any(slot.get("is_processing") for slot in self.sessions._slots(item["id"])):
+                        return dict(status="busy", epoch=epoch)
+            return self.sessions.reset_epoch(epoch, loaded_models=loaded)
 
     def session_fork(self, source_model, source_key, model, key):
         with self.lock:
@@ -1011,6 +1032,42 @@ class GpuLoadManager:
             return None
 
     def agent_status(self, model_id, context_length=None):
+        """Prefer an admitted independent GPU1 slot, otherwise share the primary.
+
+        Sharing selects the already loaded exact model; it never creates a
+        second allocation or changes its context. Session keys still identify
+        independent KV branches, and the server serializes primary-slot turns.
+        """
+        with self.lock:
+            secondary = self._secondary_agent_status(model_id, context_length)
+            if secondary["allowed"]:
+                return dict(secondary, executionMode="parallel")
+            if secondary["reason"] in ("subagent.model_not_language", "subagent.primary_not_loaded",
+                                       "subagent.context_unavailable", "subagent.context_too_large",
+                                       "subagent.primary_not_gpu0"):
+                return secondary
+            base = secondary["modelId"]
+            parent = next((item for item in self.router("v1/models")["data"]
+                           if item["id"] == base and item.get("status", {}).get("value") in ("loaded", "sleeping")), None)
+            if parent is None:
+                return dict(secondary, reason="subagent.primary_not_loaded")
+            primary_gpu = next((item for item in gpu_inventory() if item["index"] == 0), None)
+            if primary_gpu is None:
+                return secondary
+            parent_device = self._argument(parent, "--device") or self.placements.get(base)
+            if parent_device and primary_gpu["device"] not in parent_device.split(","):
+                return dict(secondary, reason="subagent.primary_not_gpu0")
+            context = self.router("props?model=" + urllib.parse.quote(base, safe=""))\
+                .get("default_generation_settings", {}).get("n_ctx")
+            if type(context) is not int or context < 2048:
+                return dict(secondary, reason="subagent.context_unavailable")
+            if context_length is not None and context_length > context:
+                return dict(secondary, reason="subagent.context_too_large")
+            return dict(allowed=True, reason=None, modelId=base, instanceId=base, gpuIndex=0,
+                        contextLength=context, requiredBytes=0, freeBytes=primary_gpu["free"],
+                        executionMode="shared_primary", parallelUnavailableReason=secondary["reason"])
+
+    def _secondary_agent_status(self, model_id, context_length=None):
         with self.lock:
             model = self.session_model(model_id)
             base = model["id"]
@@ -1020,7 +1077,8 @@ class GpuLoadManager:
                 return dict(result, reason="subagent.model_not_language")
             current = self.router("v1/models")["data"]
             active = [item for item in current if item.get("status", {}).get("value") in ("loaded", "loading", "sleeping")]
-            parent = next((item for item in active if item["id"] == base), None)
+            parent = next((item for item in active if item["id"] == base
+                           and item.get("status", {}).get("value") in ("loaded", "sleeping")), None)
             if parent is None:
                 return dict(result, reason="subagent.primary_not_loaded")
             devices = gpu_inventory()
@@ -1070,7 +1128,17 @@ class GpuLoadManager:
             if not availability["allowed"]:
                 return availability
             base, replica = availability["modelId"], availability["instanceId"]
-            self.load(replica)
+            if replica != base:
+                try:
+                    self.load(replica)
+                except (OSError, RuntimeError, ValueError):
+                    # A measured admission can still lose a race with another
+                    # GPU allocation. Keep the usable primary and its context;
+                    # no retry may silently move a second copy onto GPU0.
+                    shared = self.agent_status(base)
+                    if not shared["allowed"] or shared["instanceId"] != base:
+                        raise
+                    availability, replica = shared, base
             self.sessions._check_preparation_cancelled(cancelled)
             cache = (self.sessions.fork(base, source_key, replica, key, prefill, session_id, parent_session_id, cancelled)
                      if source_key and key else self.sessions.prepare(replica, key, session_id, parent_session_id))
@@ -1090,7 +1158,7 @@ class GpuLoadManager:
         """
         replica = model_id + "@subagent"
         try:
-            availability = self.agent_status(model_id)
+            availability = self._secondary_agent_status(model_id)
             if not availability["allowed"]:
                 return dict(availability, loaded=False, reused=False)
             result = self.load(replica)
@@ -1134,7 +1202,7 @@ class GpuLoadManager:
                 return result
             devices = gpu_inventory()
             if replica:
-                availability = self.agent_status(base)
+                availability = self._secondary_agent_status(base)
                 if not availability["allowed"]:
                     raise ValueError(availability["reason"])
                 device = next(item["device"] for item in devices if item["index"] == 1)
@@ -1230,8 +1298,9 @@ def start_gpu_control(manager, host, port):
             try:
                 length = int(self.headers.get("Content-Length", "0"))
                 if self.path not in ("/models/load", "/sessions/prepare", "/sessions/save", "/sessions/fork", "/sessions/delete",
+                                     "/sessions/project-prepare", "/sessions/reset-epoch",
                                      "/agents/status", "/agents/prepare") or not 0 < length <= (
-                                         16 * 1024**2 if self.path == "/agents/prepare" else 1024**2 if self.path == "/sessions/delete" else 8192):
+                                         16 * 1024**2 if self.path in ("/agents/prepare", "/sessions/project-prepare") else 1024**2 if self.path == "/sessions/delete" else 8192):
                     raise ValueError("Invalid GPU control request")
                 body = json.loads(self.rfile.read(length))
                 if self.path.startswith("/sessions/"):
@@ -1239,7 +1308,12 @@ def start_gpu_control(manager, host, port):
                         result = manager.session_prepare(body["model"], body.get("sessionKey"),
                             body.get("sessionId"), body.get("parentSessionId"))
                     elif self.path == "/sessions/save":
-                        result = manager.session_save(body["model"], body.get("sessionKey"), body.get("promptTokens"))
+                        result = manager.session_save(body["model"], body.get("sessionKey"), body.get("promptTokens"),
+                            body.get("force", True), body.get("newTokens"))
+                    elif self.path == "/sessions/project-prepare":
+                        result = manager.project_session_prepare(body, self.client_disconnected)
+                    elif self.path == "/sessions/reset-epoch":
+                        result = manager.session_reset_epoch(body["epoch"])
                     elif self.path == "/sessions/delete":
                         result = manager.session_delete(body.get("sessionIds", []), body.get("sessionKeys", []))
                     else:

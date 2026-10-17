@@ -116,11 +116,23 @@ public sealed class AssistantCancellationRoutingTests
         Assert.DoesNotContain(updates, update => update.Kind == MissumAiAssistantUpdateKind.Failed);
         Assert.Single(requests, request => request == "POST /v1/runs/run-stop/cancel");
         // Reopening after an offline stop sends the durable cancellation again;
-        // it must never reattach the cancelled message to the inference stream.
-        await Resume(deadline.Token).WaitAsync(deadline.Token);
+        // a confirmed stop needs no retry. A new service must recover the outbox
+        // from disk without reattaching the cancelled inference stream.
+        var pendingPath = Path.Combine(settings.DataDirectory, "Diagnostics", "pending-run-cancellations.json");
+        Assert.Equal(offline, File.Exists(pendingPath));
+        if (offline)
+            Assert.Equal("run-stop", Assert.Single(JsonSerializer.Deserialize<string[]>(await File.ReadAllTextAsync(pendingPath, deadline.Token))!));
+        using var reopened = new MissumAiAssistantService(connection, chats, environment.Get<IAssistantAttachmentRepository>(),
+            environment.Get<IChatArtifactRepository>(), runs, environment.Get<IClientToolExecutionRepository>(),
+            environment.Get<IBinaryObjectStore>(), environment.Get<IDocumentIngestor>(), null!, null!, null!, null!, null!,
+            settings, recent, NullLogger<MissumAiAssistantService>.Instance);
+        await reopened.ResumePendingAsync(static _ => Task.CompletedTask, deadline.Token).WaitAsync(deadline.Token);
         Assert.Equal("cancelled", (await runs.GetAsync(run.Id))!.State);
         Assert.Empty(await runs.ListResumableAsync());
-        Assert.Equal(2, requests.Count(request => request == "POST /v1/runs/run-stop/cancel"));
+        Assert.Equal(offline ? 2 : 1, requests.Count(request => request == "POST /v1/runs/run-stop/cancel"));
+        Assert.False(File.Exists(pendingPath));
+        await reopened.ResumePendingAsync(static _ => Task.CompletedTask, deadline.Token).WaitAsync(deadline.Token);
+        Assert.Equal(offline ? 2 : 1, requests.Count(request => request == "POST /v1/runs/run-stop/cancel"));
         Assert.Single(requests, request => request.EndsWith("/events", StringComparison.Ordinal));
         Assert.Equal(JsonSerializer.Serialize(message), JsonSerializer.Serialize(await chats.GetMessageAsync(message.Id)));
     }
@@ -162,19 +174,15 @@ public sealed class AssistantCancellationRoutingTests
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
         using var oldPage = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
         using var newPage = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
-        var original = service.ResumePendingAsync(async update =>
-        {
-            if (update.ToolStep is { Id: "cleanup", Status: "cancelled" })
-            {
-                cleanupReached.TrySetResult();
-                await releaseCleanup.Task.WaitAsync(deadline.Token);
-            }
-        }, oldPage.Token);
+        var original = service.ResumePendingAsync(static _ => Task.CompletedTask, oldPage.Token);
         await firstStreaming.Task.WaitAsync(deadline.Token);
         // This older saved run is next in the normal updated_at ordering. It is
         // created after the original reader took its own repository snapshot.
         await runs.CreateAsync(new(Guid.NewGuid(), second.Id, secondTurn.AssistantMessage.Id, null,
             "second-key", "run-second", 0, "running", "fixture", null, now.AddDays(-1), now.AddDays(-1)));
+        // Page detachment must not terminate tools. Pause at the durable-state
+        // check instead, while the old reader still owns the execution gate.
+        runRepository.PauseNextRead(cleanupReached, releaseCleanup.Task);
         oldPage.Cancel();
         await cleanupReached.Task.WaitAsync(deadline.Token);
         runRepository.ResumableSnapshot = await runs.ListResumableAsync(deadline.Token);
@@ -213,11 +221,22 @@ public sealed class AssistantCancellationRoutingTests
 
     private sealed class SnapshotRunRepository(IMissumAiRunRepository inner) : IMissumAiRunRepository
     {
+        private Func<Task>? _beforeNextRead;
+        public void PauseNextRead(TaskCompletionSource reached, Task release) => _beforeNextRead = async () =>
+        {
+            reached.TrySetResult();
+            await release;
+        };
         public IReadOnlyList<MissumAiRunRecord>? ResumableSnapshot { get; set; }
         public Task<MissumAiRunRecord> CreateAsync(MissumAiRunRecord run, CancellationToken cancellationToken = default) => inner.CreateAsync(run, cancellationToken);
         public Task<MissumAiRunRecord> BeginAttemptAsync(MissumAiRunRecord run, CancellationToken cancellationToken = default) => inner.BeginAttemptAsync(run, cancellationToken);
         public Task<MissumAiRunRecord> BeginContinuationAttemptAsync(MissumAiRunRecord run, CancellationToken cancellationToken = default) => inner.BeginContinuationAttemptAsync(run, cancellationToken);
-        public Task<MissumAiRunRecord?> GetAsync(Guid id, CancellationToken cancellationToken = default) => inner.GetAsync(id, cancellationToken);
+        public async Task<MissumAiRunRecord?> GetAsync(Guid id, CancellationToken cancellationToken = default)
+        {
+            var result = await inner.GetAsync(id, cancellationToken);
+            if (Interlocked.Exchange(ref _beforeNextRead, null) is { } barrier) await barrier();
+            return result;
+        }
         public Task<MissumAiRunRecord?> GetByServerRunIdAsync(string serverRunId, CancellationToken cancellationToken = default) => inner.GetByServerRunIdAsync(serverRunId, cancellationToken);
         public Task<MissumAiRunRecord?> GetByAssistantMessageIdAsync(Guid assistantMessageId, CancellationToken cancellationToken = default) => inner.GetByAssistantMessageIdAsync(assistantMessageId, cancellationToken);
         public Task<IReadOnlyList<MissumAiRunRecord>> ListResumableAsync(CancellationToken cancellationToken = default) =>

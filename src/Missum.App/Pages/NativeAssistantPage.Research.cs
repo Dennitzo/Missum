@@ -47,7 +47,7 @@ public sealed partial class NativeAssistantPage
         timer.Tick += (_, _) =>
         {
             RunUiCallback("researchRefreshTimer.Tick", RenderResearchView);
-            if (!_disposed && _mode == "claudescience" && (_running || _activeResearchSessionId == _session))
+            if (!_disposed && _mode == "claudescience" && (_activeResearchSessionId == _session && ResearchHost.Visibility == Visibility.Visible))
                 _ = RefreshNativeResearchAsync(_session);
         };
         return timer;

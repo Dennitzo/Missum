@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Text.Json;
 using Microsoft.UI.Dispatching;
 
@@ -81,8 +81,8 @@ public sealed partial class NativeAssistantPage
                 var step = new { id = "reasoning-responsiveness", tool = "assistant.reasoning", status = "running",
                     outputJson = JsonSerializer.Serialize(new { text = "Kontrollrechnung " + fragment }), updatedAt = DateTimeOffset.UtcNow };
                 ApplyEvent("chat.delta", JsonSerializer.SerializeToElement(new { sessionId = owner,
-                    messageId = S(activeMessage, "id"), content = S(activeMessage, "content") + "\n\nFortschritt " + fragment,
-                    toolSteps = Items(activeMessage, "toolSteps").Append(JsonSerializer.SerializeToElement(step)).ToArray() }));
+                    messageId = S(activeMessage, "id"), contentAppend = "\n\nFortschritt " + fragment,
+                    revision = fragment + 1, toolStep = step }));
                 await Task.Delay(80, _lifetime.Token);
             }
             await inputProbes;
@@ -94,20 +94,19 @@ public sealed partial class NativeAssistantPage
             latencies.Sort();
             var p95 = latencies[(int)Math.Ceiling(latencies.Count * .95) - 1];
             var activeId = S(activeMessage, "id");
-            var priorStart = _messageStepStarts.GetValueOrDefault(activeId);
             var windowVerified = false;
-            if (Items(activeMessage, "toolSteps").Length > MessageStepBatch * 2)
+            var logicalBlocks = 0;
+            var realizedBlocks = 0;
+            if (_virtualMessages.TryGetValue(activeId, out var virtualized))
             {
-                if (priorStart <= 0 || _messageBlocks[activeId].Keys.Count(key => key.StartsWith("tool:", StringComparison.Ordinal)) > MessageStepBatch + 1)
-                    throw new InvalidOperationException("Die lange Antwort erzeugt weiterhin alle historischen Werkzeugansichten.");
-                var tailKey = _messageBlocks[activeId].Keys.Last(key => key.StartsWith("text:", StringComparison.Ordinal));
-                var tailView = _messageBlocks[activeId][tailKey];
-                QueueEarlierMessageBlocks(activeId);
-                for (var wait = 0; wait < 100 && _messageWindowLoading; wait++) await Task.Delay(20, _lifetime.Token);
-                if (_messageStepStarts[activeId] != Math.Max(0, priorStart - MessageStepBatch)
-                    || !ReferenceEquals(tailView, _messageBlocks[activeId][tailKey])
+                for (var wait = 0; wait < 150 && (virtualized.Preparing || virtualized.Panel.LogicalCount == 0); wait++)
+                    await Task.Delay(20, _lifetime.Token);
+                virtualized.Panel.RefreshViewport();
+                logicalBlocks = virtualized.Panel.LogicalCount;
+                realizedBlocks = virtualized.Panel.RealizedCount;
+                if (logicalBlocks == 0 || realizedBlocks > 256
                     || !_messageActionViews[activeId].Text.StartsWith(S(activeMessage, "content"), StringComparison.Ordinal))
-                    throw new InvalidOperationException("Abschnittsweises Nachladen verändert den bestehenden Text oder den vollständigen Kopier-/Vorlesetext.");
+                    throw new InvalidOperationException("Die große Antwort wurde nicht als begrenztes Fenster mit vollständigem Kopier-/Vorlese-Quelltext projiziert.");
                 windowVerified = true;
             }
             await SaveMathPreviewAsync(LayoutRoot, "native-responsiveness-preview.png");
@@ -115,7 +114,8 @@ public sealed partial class NativeAssistantPage
                 JsonSerializer.Serialize(new { processId = Environment.ProcessId, messageCount = replayMessages.Length,
                     toolStepCount = replayMessages.Sum(message => Items(message, "toolSteps").Length),
                     activeToolStepCount = Items(activeMessage, "toolSteps").Length,
-                    windowedHistoryAndFullCopyTextVerified = windowVerified,
+                    windowedHistoryAndFullCopyTextVerified = windowVerified, logicalBlocks, realizedBlocks,
+                    publicationViewerCount = _publicationPool.Count, inactiveProjectionBytes = _inactiveProjectionBytes,
                     characterCount = replayMessages.Sum(message => S(message, "content").Length), selectionQueries = 10_000,
                     selectionQueryMilliseconds = selectionWatch.Elapsed.TotalMilliseconds,
                     dispatcherP95Milliseconds = p95, dispatcherMaxMilliseconds = latencies[^1],
@@ -128,5 +128,6 @@ public sealed partial class NativeAssistantPage
             ApplyEvent("state.snapshot", original);
             RenderMessagesNow();
         }
+        await VerifyLongSessionProjectionSmokeAsync(original);
     }
 }

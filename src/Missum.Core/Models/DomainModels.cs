@@ -105,7 +105,8 @@ public sealed record ConversationSnapshot(
 /// <summary>Display-only pagination; never used to assemble a model request or cache prefix.</summary>
 public sealed record ConversationCursor(DateTimeOffset CreatedAt, Guid Id);
 public sealed record ConversationPage(ConversationSnapshot Conversation, bool HasMore,
-    ConversationCursor? Before, int TotalMessages);
+    ConversationCursor? Before, int TotalMessages,
+    IReadOnlyDictionary<Guid, ConversationToolStepWindow>? ToolStepWindows = null);
 
 public sealed record SessionContextPreparation(
     string CacheKey,

@@ -62,7 +62,7 @@ public sealed class ScienceRunGatewayTests
         {
             Repository = new RunRepository(_context.Database, new RunEventNotifier());
             _services = new ServiceCollection().AddLogging().AddRouting()
-                .AddSingleton(Repository).AddSingleton<RunWorkChannel>()
+                .AddSingleton(Repository).AddSingleton<RunWorkChannel>().AddSingleton<ProjectContextSummaryWork>()
                 .AddSingleton(new ServerRuntimeState(_context.WrappedOptions)).BuildServiceProvider();
             var routes = new RouteBuilder(_services);
             GatewayEndpoints.Map(routes);

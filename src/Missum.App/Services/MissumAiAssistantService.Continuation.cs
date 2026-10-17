@@ -30,9 +30,13 @@ public sealed partial class MissumAiAssistantService
             var token = _activeCancellation.Token;
             var session = await chats.GetSessionAsync(sessionId, token).ConfigureAwait(false)
                 ?? throw new InvalidOperationException("Die AI-Sitzung wurde nicht gefunden.");
-            var history = await chats.ListMessagesAsync(sessionId, token).ConfigureAwait(false);
+            var history = await LoadModelHistoryAsync(sessionId, token).ConfigureAwait(false);
             var anchor = ValidateContinuationAnchor(sessionId, assistantMessageId, history);
-            assistant = anchor.Assistant;
+            // Only the resumed message needs its execution receipts (frozen
+            // create payload, timing and child ownership). Model-history paging
+            // must not erase those recovery records or load every old tool body.
+            assistant = await chats.GetMessageAsync(anchor.Assistant.Id, token).ConfigureAwait(false)
+                ?? throw new InvalidOperationException("Die fortzusetzende AI-Nachricht wurde nicht gefunden.");
             var persisted = await runs.GetByAssistantMessageIdAsync(assistant.Id, token).ConfigureAwait(false);
             if (persisted is not null && (persisted.SessionId != sessionId || persisted.AssistantMessageId != assistant.Id))
                 throw new InvalidDataException("Der gespeicherte Lauf gehört nicht zu dieser AI-Nachricht.");

@@ -12,6 +12,17 @@ public sealed class ExplicitDeepResearchTests
     private static readonly string[] ResearchTools = ["web.search", "web.fetch", "web.deepResearch"];
     private static readonly string[] CodingCapabilities = ["coding"];
 
+    [Theory]
+    [InlineData(null, ResearchVerificationLevel.Standard)]
+    [InlineData("standard", ResearchVerificationLevel.Standard)]
+    [InlineData("multiPath", ResearchVerificationLevel.MultiPath)]
+    [InlineData("formalWherePossible", ResearchVerificationLevel.FormalWherePossible)]
+    [InlineData("unknown", ResearchVerificationLevel.Standard)]
+    public void VerificationLevelParserPreservesExplicitOptionsAndUsesStandardDefault(string? value, ResearchVerificationLevel expected)
+    {
+        Assert.Equal(expected, RunProcessor.ParseResearchVerificationLevel(value));
+    }
+
     [Fact]
     public void GeneralSelectionRequestsExistingPipelineWithoutPromptMagicAndDeselectionDoesNot()
     {

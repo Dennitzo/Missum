@@ -22,7 +22,9 @@ public sealed partial class ScientificPublicationService : IDisposable, IScienti
     private readonly string _defaultDirectory;
     private readonly IChatRepository? _chats;
     private readonly IMissumAiRunRepository? _runs;
-    private readonly Dictionary<string, ScientificPublicationArtifact> _current = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, ScientificPublicationArtifact> _current = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _projectGates = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, CachedDependencies> _dependencies = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, WorkspaceDocument> _workspaces = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _documents = new(StringComparer.Ordinal);
 
@@ -98,9 +100,10 @@ public sealed partial class ScientificPublicationService : IDisposable, IScienti
 
     public async Task<string?> EnsureProjectDocumentAsync(string projectId, CancellationToken cancellationToken = default)
     {
-        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var gate = ProjectGate(projectId);
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try { return await ResolveDocumentAsync(projectId, _defaultDirectory, cancellationToken).ConfigureAwait(false); }
-        finally { _gate.Release(); }
+        finally { gate.Release(); }
     }
 
     /// <summary>Renders the current Markdown file. Database state is never written back over authored text.</summary>
@@ -109,11 +112,14 @@ public sealed partial class ScientificPublicationService : IDisposable, IScienti
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(projectId);
         ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
-        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var gate = ProjectGate(projectId);
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             var source = await ResolveDocumentAsync(projectId, outputDirectory, cancellationToken).ConfigureAwait(false);
             if (source is null) return null;
+            if (_dependencies.TryGetValue(source, out var cached) && cached.Stamps.All(pair => FileStamp.Read(pair.Key) == pair.Value))
+                return _current[projectId] = cached.Artifact with { ProjectId = projectId };
             var raw = await File.ReadAllTextAsync(source, cancellationToken).ConfigureAwait(false);
             if (string.IsNullOrWhiteSpace(raw)) return null;
             var directory = Path.GetDirectoryName(source)!;
@@ -126,7 +132,10 @@ public sealed partial class ScientificPublicationService : IDisposable, IScienti
                 new DateTimeOffset(File.GetLastWriteTimeUtc(source)), fingerprint);
             var receiptPath = Path.Combine(directory, "publication.json");
             if (await IsDirectPublicationCurrentAsync(receiptPath, pdf, fingerprint, cancellationToken).ConfigureAwait(false))
+            {
+                RememberDependencies(source, pdf, receiptPath, images.SourceFiles, artifact);
                 return _current[projectId] = artifact;
+            }
 
             // This temporary rendering directory is deleted immediately; it is not a project revision.
             // The editable source and the previous readable PDF remain in place on render failure.
@@ -161,6 +170,7 @@ public sealed partial class ScientificPublicationService : IDisposable, IScienti
                     File.Move(pendingReceipt, receiptPath, overwrite: true);
                 }
                 finally { if (File.Exists(pendingReceipt)) File.Delete(pendingReceipt); }
+                RememberDependencies(source, pdf, receiptPath, latestImages.SourceFiles, artifact);
                 return _current[projectId] = artifact;
             }
             catch (Exception exception) when (IsContentRenderError(exception))
@@ -170,7 +180,29 @@ public sealed partial class ScientificPublicationService : IDisposable, IScienti
             }
             finally { if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true); }
         }
-        finally { _gate.Release(); }
+        finally { gate.Release(); }
+    }
+
+    private SemaphoreSlim ProjectGate(string projectId) => _projectGates.GetOrAdd(
+        _workspaces.TryGetValue(projectId, out var workspace) ? Path.GetFullPath(workspace.Directory) : projectId,
+        static _ => new(1, 1));
+
+    private void RememberDependencies(string source, string pdf, string receipt, IReadOnlyList<string> images,
+        ScientificPublicationArtifact artifact)
+    {
+        var stamps = images.Concat([source, pdf, receipt]).Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(path => path, FileStamp.Read, StringComparer.OrdinalIgnoreCase);
+        _dependencies[source] = new(artifact, stamps);
+    }
+
+    private sealed record CachedDependencies(ScientificPublicationArtifact Artifact, Dictionary<string, FileStamp> Stamps);
+    private readonly record struct FileStamp(long Length, DateTime WrittenAt, DateTime CreatedAt)
+    {
+        internal static FileStamp Read(string path)
+        {
+            var file = new FileInfo(path);
+            return file.Exists ? new(file.Length, file.LastWriteTimeUtc, file.CreationTimeUtc) : new(-1, default, default);
+        }
     }
 
     private async Task<string?> ResolveDocumentAsync(string projectId, string outputDirectory, CancellationToken token)
@@ -703,7 +735,11 @@ public sealed partial class ScientificPublicationService : IDisposable, IScienti
         return header.AsSpan().SequenceEqual("%PDF-"u8);
     }
 
-    public void Dispose() => _gate.Dispose();
+    public void Dispose()
+    {
+        _gate.Dispose();
+        foreach (var gate in _projectGates.Values) gate.Dispose();
+    }
 
     private sealed record PublicationSnapshot(ScientificResearchProject Project, ResearchResultSnapshot Results,
         IReadOnlyList<ResearchLiteratureEntry> Works, IReadOnlyList<ResearchEvidenceRecord> Evidence, ResearchStoredReport? Report,

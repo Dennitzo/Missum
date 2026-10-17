@@ -1,4 +1,4 @@
-namespace Missum.App.Services;
+﻿namespace Missum.App.Services;
 
 public sealed partial class AssistantCoordinator
 {
@@ -12,14 +12,24 @@ public sealed partial class AssistantCoordinator
         return children.Select(ToSubagentDto).ToArray();
     }
 
-    private object ToSubagentDto(SubagentChatState state) => new
+    private object ToSubagentDto(SubagentChatState state)
     {
+        state = state.ForDisplay();
+        return new
+        {
         state.AgentId, state.RunId, state.ParentRunId, state.SessionId, state.Title, state.Status,
+        state.Kind, state.OriginToolStepId, state.OriginMessageId,
+        transcriptRevision = state.Kind == SubagentChatState.DeepResearchKind ? (long?)state.TranscriptRevision : null,
+        canStop = !state.IsLegacyDeepResearch,
+        canResume = !state.IsLegacyDeepResearch,
+        state.GpuIndex,
         state.TranscriptDeferred, state.ParentMessageId,
         planetIndex = _browserPlanetIdentities.Value.GetOrAssign(state.AgentId),
         messages = (state.PreviousMessages ?? []).Select(message => ToMessageDto(message,
-            state.PreviousMessageArtifacts?.GetValueOrDefault(message.Id.ToString())))
-            .Concat([ToMessageDto(state.UserMessage), ToMessageDto(state.AssistantMessage, state.Artifacts)]).ToArray(),
+            state.PreviousMessageArtifacts?.GetValueOrDefault(message.Id.ToString()), state.ToolStepWindows?.GetValueOrDefault(message.Id)))
+            .Concat([ToMessageDto(state.UserMessage, toolWindow: state.ToolStepWindows?.GetValueOrDefault(state.UserMessage.Id)),
+                ToMessageDto(state.AssistantMessage, state.Artifacts, state.ToolStepWindows?.GetValueOrDefault(state.AssistantMessage.Id))]).ToArray(),
+        toolStepWindows = state.ToolStepWindows,
         state.IsRunning, state.Model, state.ContextUsed, state.ContextLimit,
         state.RunStatus, state.RunDetail, state.GenerationState, state.GeneratedTokens, state.GenerationUpdatedAt,
         state.ProcessedPromptTokens, state.TotalPromptTokens, state.PromptProgress,
@@ -28,5 +38,6 @@ public sealed partial class AssistantCoordinator
         state.PreviousRunIds,
         attemptStartedAt = state.AssistantMessage.CreatedAt,
         runMessageId = state.AssistantMessage.Id,
-    };
+        };
+    }
 }

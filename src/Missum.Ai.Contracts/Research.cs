@@ -32,7 +32,8 @@ public sealed record WebFetchResponse(
     string Content,
     bool IsUntrusted,
     DateTimeOffset RetrievedAt,
-    IReadOnlyList<string> RedirectChain);
+    IReadOnlyList<string> RedirectChain,
+    string? FragmentStatus = null);
 
 public sealed record SpeechRequest(
     string Text,

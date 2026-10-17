@@ -102,8 +102,9 @@ public sealed partial class ModelRuntimeClient
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(childSessionCacheKey);
-        // Fork an idle immutable prefix while retaining both turn leases. The
-        // instances then use independent leases and snapshot paths in parallel.
+        // Fork an idle immutable prefix while retaining both turn leases. An
+        // admitted GPU1 replica has its own turn lease; a shared GPU0 branch
+        // keeps the primary lease and restores its independent snapshot key.
         var turnLease = await AcquireTurnAsync(null, cancellationToken).ConfigureAwait(false);
         try
         {
@@ -129,7 +130,10 @@ public sealed partial class ModelRuntimeClient
                             json.RootElement.TryGetProperty("detail", out var timeoutDetail) && timeoutDetail.ValueKind == JsonValueKind.String
                                 ? timeoutDetail.GetString() ?? "Die native Vorbereitung meldet keinen weiteren Fortschritt."
                                 : "Die native Vorbereitung meldet keinen weiteren Fortschritt.");
-                    if (!availability.Allowed || availability.InstanceId is null || availability.GpuIndex != 1)
+                    if (!availability.Allowed || availability.ModelId != installed.Id
+                        || availability.InstanceId is null || availability.GpuIndex is not (0 or 1)
+                        || availability.GpuIndex == 0 && availability.InstanceId != installed.Id
+                        || availability.GpuIndex == 1 && availability.InstanceId != installed.Id + "@subagent")
                         throw new InvalidOperationException(availability.Reason ?? "subagent.runtime_unavailable");
                     var cacheStatus = json.RootElement.TryGetProperty("cacheStatus", out var cache) ? cache.GetString() ?? "miss" : "miss";
                     // A resumed child has its own canonical message history and no

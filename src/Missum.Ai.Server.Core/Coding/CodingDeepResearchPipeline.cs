@@ -34,6 +34,8 @@ internal static partial class CodingDeepResearchPipeline
     private static readonly string[] RequiredSynthesisFields = ["findings", "uncertainties"];
     private static readonly string[] RequiredSkepticFields = ["counterexamples", "issues"];
     private static readonly string[] RequiredVerificationFields = ["assessments", "questionAssessments", "issueAssessments"];
+    private static readonly string[] SynthesisAssessmentStatuses = ["supported", "provisionallySupported", "refuted", "conflictingEvidence", "unresolved"];
+    private static readonly string[] NoEvidenceIds = ["NO_EVIDENCE_AVAILABLE"];
     private static readonly string[] RequiredVerificationAssessmentFields = ["claimIndex", "status", "method", "confidence"];
     private static readonly string[] VerificationStatuses = ["verified", "provisionallySupported", "conflictingEvidence", "refuted", "unresolved"];
     private static readonly char[] SearchTokenPunctuation = ['\'', '"', '(', ')', '[', ']', '{', '}', ',', ';', '!', '?'];
@@ -72,11 +74,24 @@ internal static partial class CodingDeepResearchPipeline
         Action<AgentToolSpec, JsonElement> validateTool,
         Func<DeepResearchProgress, CancellationToken, Task> progress,
         CancellationToken cancellationToken = default) =>
+        ExecuteAsync(task, maximumSearches, maximumSources, modelId, contextLength, remainingModelCalls, remainingToolCalls,
+            searchTool, fetchTool, invokeModel, executeTool, validateTool, progress, null, cancellationToken);
+
+    public static Task<CodingDeepResearchExecution> ExecuteAsync(
+        string task, int maximumSearches, int maximumSources, string modelId, int contextLength,
+        int remainingModelCalls, int remainingToolCalls,
+        AgentToolSpec searchTool, AgentToolSpec fetchTool,
+        Func<StagedWebResearchModelRequest, CancellationToken, Task<LmChatResult>> invokeModel,
+        Func<LmToolCall, CancellationToken, Task<AgentToolExecutionResult>> executeTool,
+        Action<AgentToolSpec, JsonElement> validateTool,
+        Func<DeepResearchProgress, CancellationToken, Task> progress,
+        Func<DeepResearchActivity, CancellationToken, Task>? activity,
+        CancellationToken cancellationToken = default) =>
         ExecuteWithOptionsAsync(task, maximumSearches, maximumSources, modelId, contextLength,
             "coding", remainingModelCalls, remainingToolCalls, searchTool, fetchTool, invokeModel, executeTool,
-            validateTool, progress, null, null, cancellationToken);
+            validateTool, progress, null, null, activity, cancellationToken);
 
-    public static async Task<CodingDeepResearchExecution> ExecuteWithOptionsAsync(
+    public static Task<CodingDeepResearchExecution> ExecuteWithOptionsAsync(
         string task, int maximumSearches, int maximumSources, string modelId, int contextLength,
         string modelRole,
         int remainingModelCalls, int remainingToolCalls,
@@ -87,11 +102,28 @@ internal static partial class CodingDeepResearchPipeline
         Func<DeepResearchProgress, CancellationToken, Task> progress,
         DeepResearchOptions? researchOptions = null,
         IReadOnlyList<ScientificWorkCandidate>? metadataCandidates = null,
+        CancellationToken cancellationToken = default) =>
+        ExecuteWithOptionsAsync(task, maximumSearches, maximumSources, modelId, contextLength, modelRole,
+            remainingModelCalls, remainingToolCalls, searchTool, fetchTool, invokeModel, executeTool, validateTool,
+            progress, researchOptions, metadataCandidates, null, cancellationToken);
+
+    public static async Task<CodingDeepResearchExecution> ExecuteWithOptionsAsync(
+        string task, int maximumSearches, int maximumSources, string modelId, int contextLength,
+        string modelRole,
+        int remainingModelCalls, int remainingToolCalls,
+        AgentToolSpec searchTool, AgentToolSpec fetchTool,
+        Func<StagedWebResearchModelRequest, CancellationToken, Task<LmChatResult>> invokeModel,
+        Func<LmToolCall, CancellationToken, Task<AgentToolExecutionResult>> executeTool,
+        Action<AgentToolSpec, JsonElement> validateTool,
+        Func<DeepResearchProgress, CancellationToken, Task> progress,
+        DeepResearchOptions? researchOptions,
+        IReadOnlyList<ScientificWorkCandidate>? metadataCandidates,
+        Func<DeepResearchActivity, CancellationToken, Task>? activity,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(task);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(task.Length, RunProcessor.MaximumResearchTaskCharacters);
-        if (maximumSearches is < 2 or > 3 || maximumSources is < 2 or > 6)
+        if (maximumSearches is < 1 or > 12 || maximumSources is < 1 or > 12)
             throw new ArgumentOutOfRangeException(nameof(maximumSearches));
         var modelLimit = Math.Min(MaximumModelCalls, remainingModelCalls);
         var toolLimit = Math.Min(MaximumToolCalls, remainingToolCalls);
@@ -116,6 +148,9 @@ internal static partial class CodingDeepResearchPipeline
         var verificationPlan = new List<string>();
         var searchResults = new Dictionary<string, WebSearchResult[]>(StringComparer.OrdinalIgnoreCase);
         string? errorCode = null;
+        string? operationalFailure = null;
+        string? summary = null;
+        string? synthesisAssessment = null, assessmentReason = null;
         var language = researchOptions.PreferredLanguages is { Count: > 0 } preferredLanguages ? preferredLanguages[0]
             : StagedWebResearchPipeline.ResolvePreferredSearchLanguage(task);
         var searchProfile = resolvedProfile == DeepResearchProfile.Web
@@ -128,45 +163,42 @@ internal static partial class CodingDeepResearchPipeline
         try
         {
             await progress(new("deepResearchInterpretation", 0, 1), token).ConfigureAwait(false);
-            var researchIterations = 0;
-            while (true)
-            {
-                researchIterations++;
-                if (researchIterations > 3)
-                    throw new ResearchBudgetException("Deep Research hat nach mehreren Runden noch keine sinnvolle Lösung erreicht.");
-            // Reserve plan, at least two source selections, synthesis and all associated network calls.
-            if (modelLimit < 4 || toolLimit < 4)
+            // Reserve planning, one possible source selection and the result.
+            // The model chooses how much research is appropriate within these technical limits.
+            if (modelLimit < 3 || toolLimit < 1)
                 throw new ResearchBudgetException("Für Deep Research sind nicht mehr genug Modell- oder Werkzeugrunden verfügbar.");
-            maximumSearches = Math.Min(maximumSearches, toolLimit - 2);
-            maximumSources = Math.Min(maximumSources, Math.Min(modelLimit - 2, toolLimit - maximumSearches));
-            if (maximumSources < 2) throw new ResearchBudgetException("Das verbleibende Recherchebudget reicht nicht für zwei Quellen.");
+            maximumSearches = Math.Min(maximumSearches, Math.Max(0, toolLimit - 1));
+            maximumSources = Math.Min(maximumSources, modelLimit - 2);
             await progress(new("deepResearchPlanning", 0, maximumSearches), token).ConfigureAwait(false);
             var response = await InvokeAsync(PlanToolName,
                 [new("system", UntrustedInstruction + ProfilePlanningPolicy(resolvedProfile)
-                    + " Zerlege die Rechercheaufgabe in zwei bis drei unterschiedliche, konkrete Teilfragen. "
-                    + "Formuliere jede SearXNG-Abfrage mit 2 bis 4 präzisen Schlüsselwörtern zu genau einem Aspekt. "
-                    + "Beginne mit dem exakten API- oder Produktnamen. Keine ganzen Sätze, keine Auflistung aller Teilprobleme, "
-                    + "keine geratenen Versionsnummern und keine langen Fehlerzitate. Beispiel: 'Python asyncio.timeout cancellation documentation'. "
+                    + " Du bist das spezialisierte Deep-Research-Werkzeug des äußeren Assistenten. Wähle selbst einen passenden Rechercheweg und arbeite die Ergebnisse mit Quellen und offenen Grenzen auf. "
+                    + $"Plane null bis {maximumSearches} konkrete Suchfragen; null ist bei direkt bekannten Original-URLs sinnvoll. "
+                    + "Kurze präzise SearXNG-Abfragen sind meist hilfreich. Keine geratenen Versionsnummern und keine langen Fehlerzitate. "
                     + "Formuliere neutrale offene Fragen: Unterstelle keine unbestätigten Fehler, Rückgabewerte, Methodennamen oder "
                     + "Versionsänderungen. Prüfe zuerst, ob eine genannte API oder Behauptung tatsächlich existiert; behandle Annahmen nicht als Fakten. "
-                    + "Plane diese kurzen Suchanfragen, bevor Quellen gelesen werden. Bevorzuge offizielle Dokumentation, Repositories, "
-                    + "Versionshinweise und Primärquellen. Benenne Annahmen, mögliche Hypothesen und mindestens zwei voneinander unabhängige Prüfwege. "
+                    + "Originalquellen, Dokumentation und Primärarbeiten können helfen. Entscheide anhand der Aufgabe, welche Belege und Bewertungstiefe nötig sind. "
+                    + "Wähle mit sourceLimit die passende Zahl weiterer Originaltextabrufe bis zur verfügbaren Obergrenze; null sinnvolle Abrufe bedeutet sourceLimit=0. Dies ist keine Pflichtzahl. "
+                    + "Setze review=true nur, wenn zusätzliche getrennte kritische Modellprüfungen für diese Aufgabe sinnvoll sind; sonst lasse es aus oder wähle false. "
                     + "Keine Umsetzung, keine erfundenen Ergebnisse. Nutze research.plan."), new("user", JsonSerializer.Serialize(new
                     { task, problem, researchOptions.ResumeCheckpointId, researchOptions.ProtocolVersion, researchOptions.UpdateSince }, Json))],
                 PlanSchema()).ConfigureAwait(false);
             var planArguments = RequiredArguments(response, PlanToolName);
             var planned = planArguments.GetProperty("questions");
-            if (planned.ValueKind != JsonValueKind.Array || planned.GetArrayLength() is < 2 or > 3)
-                throw new InvalidDataException("Der Rechercheplan muss zwei bis drei Teilfragen enthalten.");
+            if (planned.ValueKind != JsonValueKind.Array || planned.GetArrayLength() > 12)
+                throw new InvalidDataException("Der Rechercheplan darf höchstens zwölf Suchfragen enthalten.");
             foreach (var question in planned.EnumerateArray().Take(maximumSearches))
                 plan.Add(new($"subquestion-{plan.Count + 1}", RequiredText(question, "question", 300), NormalizeProfileQuery(RequiredText(question, "query", 500), searchProfile)));
             EnsureDistinctPlanQueries(plan, searchProfile);
             AddOptionalTextArray(planArguments, "hypotheses", hypotheses, 6, 500);
             AddOptionalTextArray(planArguments, "verificationPlan", verificationPlan, 8, 500);
-            if (researchOptions.VerificationLevel != ResearchVerificationLevel.Standard && verificationPlan.Count < 2)
+            var reviewRequested = researchOptions.VerificationLevel != ResearchVerificationLevel.Standard
+                || planArguments.TryGetProperty("review", out var review) && review.ValueKind == JsonValueKind.True;
+            if (planArguments.TryGetProperty("sourceLimit", out var sourceLimit))
             {
-                verificationPlan.Add("Zentrale Aussage gegen eine unabhängige Originalquelle prüfen.");
-                verificationPlan.Add("Aktiv nach Gegenbeispielen, Widersprüchen und kritischen Randfällen suchen.");
+                if (!sourceLimit.TryGetInt32(out var requestedSources) || requestedSources is < 0 or > 12)
+                    throw new InvalidDataException("sourceLimit muss eine ganze Zahl zwischen null und zwölf sein.");
+                maximumSources = Math.Min(maximumSources, requestedSources);
             }
             var userSources = StagedWebResearchPipeline.ReadUserProvidedUrls(task)
                 .Where(IsPublicHttpUrl)
@@ -187,8 +219,8 @@ internal static partial class CodingDeepResearchPipeline
                     {
                         var retryQuery = NormalizeProfileQuery(question.Query, searchProfile, simplify: true);
                         var pendingSearches = plan.Count - questionIndex - 1;
-                        // At most one empty-result retry per question; reserve every remaining planned search and two fetches.
-                        if (!searchResults.ContainsKey(retryQuery) && toolCalls + 1 + pendingSearches + 2 <= toolLimit)
+                        // One bounded query refinement, while preserving remaining searches and a source read.
+                        if (!searchResults.ContainsKey(retryQuery) && toolCalls + 1 + pendingSearches + 1 <= toolLimit)
                             results = await SearchAsync(retryQuery).ConfigureAwait(false);
                         if (results.Length == 0) uncertainties.Add($"Keine Suchtreffer zur Teilfrage: {Bound(question.Question, 150)}.");
                     }
@@ -196,6 +228,7 @@ internal static partial class CodingDeepResearchPipeline
                 }
                 catch (HttpRequestException exception)
                 {
+                    operationalFailure = exception.Message;
                     // A blocked search engine is not evidence that an original documentation URL is unavailable.
                     // Stop calling the affected search profile, retain prior candidates, and verify originals below.
                     uncertainties.Add(Bound(exception.Message, 500));
@@ -255,6 +288,8 @@ internal static partial class CodingDeepResearchPipeline
                     continue;
                 }
                 var candidate = userSources.Concat(candidates).FirstOrDefault(candidate => string.Equals(NormalizeFetchUrl(candidate.Url), attemptUrl, StringComparison.OrdinalIgnoreCase));
+                if (candidate is not null)
+                    selectedUrl = StagedWebResearchPipeline.PreserveFetchTargetFragment(selectedUrl, candidate.Url);
                 userSources.RemoveAll(candidate => NormalizeFetchUrl(candidate.Url) == attemptUrl);
                 candidates.RemoveAll(candidate => NormalizeFetchUrl(candidate.Url) == attemptUrl);
                 // The selected phrase is retained; result volume is controlled by the host.
@@ -313,28 +348,45 @@ internal static partial class CodingDeepResearchPipeline
                 var evidence = Bound(string.Join("\n\n", windows), 4_000);
                 sources.Add(new("S" + (sources.Count + 1).ToString(System.Globalization.CultureInfo.InvariantCulture),
                     candidate?.Title ?? new Uri(sourceUrl).Host, sourceUrl, evidence, windows));
+                if (activity is not null)
+                {
+                    var source = sources[^1];
+                    await activity(new("fetch", "completed", "Originaltext als Beleg erfasst", "source-" + source.Id,
+                        "web.fetch", Url: source.Url, Sources: [new(source.Id, source.Title, source.Url, Bound(source.Content, 400))],
+                        Text: source.Content), token).ConfigureAwait(false);
+                }
             }
-            if (sources.Count == 0) throw new InvalidDataException("Keine Originalquelle konnte verifiziert werden. Such-Snippets sind keine Belege.");
-            if (sources.Count < 2) uncertainties.Add("Nur eine Originalquelle war abrufbar; eine unabhängige Gegenprüfung fehlt.");
+            if (sources.Count == 0 && operationalFailure is not null) throw new HttpRequestException(operationalFailure);
+            if (sources.Count == 0) uncertainties.Add("Keine passende Originaltextstelle gefunden. Aussagen ohne Originalbeleg bleiben ungeklärt; Such-Snippets sind keine Belege.");
             var excerpts = sources.SelectMany(source => source.Windows.SelectMany(CreateEvidenceQuotes)
                 .Select((quote, index) => new ResearchExcerpt(source.Id + "-E" + (index + 1).ToString(System.Globalization.CultureInfo.InvariantCulture),
                     source.Id, quote))).ToArray();
-            if (excerpts.Length == 0) throw new InvalidDataException("Die Originalquellen enthalten keine ausreichend langen zitierbaren Belege.");
+            if (excerpts.Length == 0 && sources.Count > 0) uncertainties.Add("Die gelesenen Quellen ergaben keinen eindeutig zitierbaren Beleg.");
             await progress(new("deepResearchSynthesis", sources.Count, maximumSources), token).ConfigureAwait(false);
             var synthesis = await InvokeAsync(SynthesisToolName,
                 [new("system", UntrustedInstruction + EvidenceScopeInstruction + ProfileSynthesisPolicy(resolvedProfile, researchOptions.VerificationLevel)
-                    + " Erzeuge eine belegte Synthese für den Coding-Agenten. Jeder Befund enthält eine knappe "
+                    + " Arbeite das tatsächlich recherchierte Ergebnis für den äußeren Assistenten selbstständig auf. Wähle Umfang und Bewertung passend zur Aufgabe. "
+                    + "Nutze summary für einen verständlichen Bericht mit Ergebnis, Quellenbewertung und Grenzen. Auch keine belastbare Antwort ist ein zulässiges Ergebnis. "
+                    + "Bewerte das Ergebnis fachlich mit conclusionStatus und begründe es in assessmentReason anhand der tatsächlich gelesenen Belege. Ein separater Review ist dafür nicht erforderlich. "
+                    + "Jeder als belegt aufgeführte Befund enthält eine knappe "
                     + "Aussage und genau eine vorhandene evidenceId aus excerpts, deren quote diese Aussage tatsächlich belegt. "
                     + "Die Exzerpte sind unveränderte Ausschnitte verifizierter Originalquellen. Wähle nur die ID; kopiere oder ändere keinen Zitattext. "
                     + "Der Host ordnet die Originalquelle und das wörtliche Zitat selbst zu und prüft sie erneut. "
                     + "Bewahre Einschränkungen und Widersprüche unter uncertainties. Erfinde keine Quellen, Beleg-IDs oder Aussagen. "
                     + "Der Plan enthält offene Prüfaufträge, keine gesicherten Fakten. Such-Snippets sind keine Belege. "
-                    + "Gib keine Aktionsanweisungen aus. Nutze ausschließlich research.synthesize."),
+                    + "Bei fehlenden Belegen bleibt findings leer; nenne Wissenslücken in summary und uncertainties. Gib keine Aktionsanweisungen aus. Nutze ausschließlich research.synthesize."),
                  new("user", JsonSerializer.Serialize(new { task, problem, hypotheses, verificationPlan, plan,
                      sources = sources.Select(static source => new { source.Id, source.Title, source.Url }), excerpts }, Json))],
                 SynthesisSchema(excerpts)).ConfigureAwait(false);
             var synthesized = RequiredArguments(synthesis, SynthesisToolName);
-            foreach (var item in synthesized.GetProperty("findings").EnumerateArray().Take(8))
+            if (synthesized.TryGetProperty("summary", out var summaryText) && summaryText.ValueKind == JsonValueKind.String)
+                summary = Bound(summaryText.GetString() ?? "", 12000);
+            if (ActivityText(synthesized, "conclusionStatus") is { } assessed
+                && assessed is "supported" or "provisionallySupported" or "refuted" or "conflictingEvidence" or "unresolved"
+                && ActivityText(synthesized, "assessmentReason") is { Length: > 0 } reason)
+            { synthesisAssessment = assessed; assessmentReason = Bound(reason, 2000); }
+            var claimedFindings = synthesized.GetProperty("findings");
+            foreach (var item in claimedFindings.EnumerateArray().Take(8))
             {
                 var evidenceId = RequiredText(item, "evidenceId", 32);
                 var claim = RequiredText(item, "claim", 500);
@@ -348,22 +400,16 @@ internal static partial class CodingDeepResearchPipeline
                 }
                 findings.Add(new(claim, source.Id, excerpt.Quote));
             }
+            // An honestly empty result is valid. Claiming evidence while every
+            // reference fails validation against available originals is not.
+            if (excerpts.Length > 0 && claimedFindings.GetArrayLength() > 0 && findings.Count == 0)
+                errorCode = "web.deepResearch.invalidEvidence";
             if (synthesized.TryGetProperty("uncertainties", out var unknowns) && unknowns.ValueKind == JsonValueKind.Array)
                 uncertainties.AddRange(unknowns.EnumerateArray().Take(6).Where(static item => item.ValueKind == JsonValueKind.String)
                     .Select(static item => Bound(item.GetString()!, 300)));
             if (findings.Count == 0)
-            {
-                if (modelCalls < modelLimit && toolCalls < toolLimit)
-                {
-                    plan.Clear();
-                    sources.Clear();
-                    searchResults.Clear();
-                    uncertainties.Add("Die erste Recherche lieferte keine belegten Befunde; eine weitere Runde mit neuen Teilfragen wird ausgeführt.");
-                    continue;
-                }
-                throw new InvalidDataException("Die Synthese enthielt keine mit Originaltext belegten Befunde.");
-            }
-            if (modelCalls + 2 <= modelLimit)
+                uncertainties.Add("Es liegt kein mit Originaltext belegter Befund vor; die Frage bleibt offen.");
+            if (reviewRequested && findings.Count > 0 && modelCalls + 2 <= modelLimit)
             {
                 try
                 {
@@ -400,9 +446,7 @@ internal static partial class CodingDeepResearchPipeline
                     && exception is (InvalidDataException or JsonException or KeyNotFoundException or ModelGenerationTerminatedException))
                 { uncertainties.Add("Die getrennte Skeptiker- oder Verifikationsphase lieferte kein gültiges strukturiertes Ergebnis."); }
             }
-            else uncertainties.Add("Das verbleibende Modellbudget reichte nicht für getrennte Skeptiker- und Verifikationsphasen.");
-            break;
-            }
+            else if (reviewRequested && findings.Count > 0) uncertainties.Add("Das verbleibende Modellbudget reichte nicht für die angefragten getrennten Prüfphasen.");
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         // Model transport failures belong to the durable provider retry path.
@@ -428,7 +472,22 @@ internal static partial class CodingDeepResearchPipeline
             if (ContextPlanner.EstimateTokens(request.Messages) > ContextPlanner.ComputeInputTokenBudget(contextLength, request.MaximumOutputTokens))
                 throw new ResearchBudgetException("Die Belege überschreiten das verfügbare Kontextbudget; verkleinere die Rechercheaufgabe.");
             modelCalls++;
-            var response = await invokeModel(request, token).ConfigureAwait(false);
+            var stepId = "model-" + modelCalls.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var title = ModelActivityTitle(request.RequiredToolName);
+            if (activity is not null)
+                await activity(new("model", "running", title, stepId, request.RequiredToolName), token).ConfigureAwait(false);
+            LmChatResult response;
+            try { response = await invokeModel(request, token).ConfigureAwait(false); }
+            catch (Exception error) when (error is not OutOfMemoryException)
+            {
+                if (activity is not null)
+                    await activity(new("model", ActivityFailureStatus(error), title, stepId, request.RequiredToolName,
+                        Detail: Bound(error.Message, 2000)), CancellationToken.None).ConfigureAwait(false);
+                throw;
+            }
+            if (activity is not null)
+                await activity(new("model", "completed", title, stepId, request.RequiredToolName,
+                    Text: FormatModelActivity(response)), token).ConfigureAwait(false);
             inputTokens += response.InputTokens;
             outputTokens += response.OutputTokens;
             return response;
@@ -466,7 +525,28 @@ internal static partial class CodingDeepResearchPipeline
             if (toolCalls >= toolLimit) throw new ResearchBudgetException("Das Werkzeugbudget der Recherche ist erreicht.");
             validateTool(tool, call.Arguments);
             toolCalls++;
-            return await executeTool(call, token).ConfigureAwait(false);
+            var stepId = "tool-" + toolCalls.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var phase = call.Name == "web.search" ? "search" : "fetch";
+            var title = call.Name == "web.search" ? "Websuche" : "Originalquelle lesen";
+            var query = ActivityText(call.Arguments, "query");
+            var url = ActivityText(call.Arguments, "url");
+            if (activity is not null)
+                await activity(new(phase, "running", title, stepId, call.Name, Query: query, Url: url), token).ConfigureAwait(false);
+            AgentToolExecutionResult result;
+            try { result = await executeTool(call, token).ConfigureAwait(false); }
+            catch (Exception error) when (error is not OutOfMemoryException)
+            {
+                if (activity is not null)
+                    await activity(new(phase, ActivityFailureStatus(error), title, stepId, call.Name,
+                        Detail: Bound(error.Message, 2000), Query: query, Url: url), CancellationToken.None).ConfigureAwait(false);
+                throw;
+            }
+            if (activity is not null)
+                await activity(new(phase, result.Succeeded ? "completed" : "failed", title, stepId, call.Name,
+                    Detail: result.ErrorMessage, Query: query, Url: url,
+                    Sources: ActivitySources(call.Name, result.Result), Text: FormatToolActivity(call.Name, result), ErrorCode: result.ErrorCode), token).ConfigureAwait(false);
+            if (!result.Succeeded) operationalFailure ??= result.ErrorMessage ?? result.ErrorCode ?? "Ein Recherchewerkzeug ist fehlgeschlagen.";
+            return result;
         }
 
         AgentToolExecutionResult CreateResult()
@@ -475,26 +555,30 @@ internal static partial class CodingDeepResearchPipeline
             // question or repeated graph descriptions must never evict findings.
                 var coverage = CreateCoverage(plan, findings.Count, verificationResults, questionAssessments, issueAssessments,
                     CreateOpenIssues(uncertainties, counterexamples));
-                var conclusionStatus = ClassifyVerifiedConclusion(errorCode, findings.Select(static finding => finding.SourceId).ToArray(), verificationResults, coverage.IsComplete);
+                var coverageAssessed = questionAssessments.Count > 0 || issueAssessments.Count > 0;
+                var conclusionStatus = ClassifyVerifiedConclusion(errorCode, findings.Select(static finding => finding.SourceId).ToArray(), verificationResults, coverage.IsComplete, synthesisAssessment);
                 var value = JsonSerializer.SerializeToElement(new
                 {
-                    success = errorCode is null, provider = "searxng", isFallback = false, isUntrusted = true,
+                    success = errorCode is null, provider = "searxng", isFallback = false, isUntrusted = true, summary, assessmentReason,
                     errorCode, message = errorCode is not null ? "Recherche unvollständig; Einschränkungen beachten."
-                        : coverage.IsComplete ? "Belegte Recherche abgeschlossen." : "Recherche mit offenen Fragen abgeschlossen.",
+                        : conclusionStatus is "supported" or "verified" or "refuted" ? "Recherche abgeschlossen; fachliche Bewertung und Grenzen beachten."
+                            : "Recherche mit offenen Fragen abgeschlossen.",
                     profile = DeepResearchProfileNames.ToProtocolName(resolvedProfile),
                     autonomyLevel = JsonNamingPolicy.CamelCase.ConvertName(researchOptions.AutonomyLevel.ToString()),
                     verificationLevel = JsonNamingPolicy.CamelCase.ConvertName(researchOptions.VerificationLevel.ToString()),
                     projectId = researchOptions.ProjectId,
                     problem, hypotheses, verificationPlan, plan, findings, counterexamples, verifications = verificationResults,
-                    coverage, researchGraph = CreateResearchGraph(coverage, conclusionStatus),
+                    coverageAssessed, coverage = coverageAssessed ? coverage : null,
+                    researchGraph = coverageAssessed ? CreateResearchGraph(coverage, conclusionStatus) : null,
                     metadataProviders = (metadataCandidates ?? []).Select(static candidate => candidate.Provider)
                         .Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase),
                     searchDiagnostics,
                     sources = sources.Where(source => findings.Any(finding => finding.SourceId == source.Id))
                         .Select(static source => new { source.Id, source.Title, source.Url }),
-                    uncertainties = coverage.Issues.Where(static issue => issue.IsMaterialOpen).Select(static issue => issue.Text)
+                    uncertainties = (coverageAssessed ? coverage.Issues.Where(static issue => issue.IsMaterialOpen).Select(static issue => issue.Text)
                         .Concat(coverage.Questions.Where(static question => !question.IsComplete)
                             .SelectMany(static question => question.RemainingGaps.Length > 0 ? question.RemainingGaps : [question.Reason]))
+                        : [])
                         .Concat(uncertainties).Distinct(StringComparer.Ordinal).Take(8),
                     conclusionStatus,
                     checkpoint = new
@@ -502,7 +586,7 @@ internal static partial class CodingDeepResearchPipeline
                         id = "research-" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
                             System.Text.Encoding.UTF8.GetBytes(task + "\n" + resolvedProfile))).ToLowerInvariant()[..24],
                         phase = errorCode is null ? "synthesis" : "research",
-                        resumable = errorCode is not null || !coverage.IsComplete,
+                        resumable = errorCode is not null || conclusionStatus is "unresolved" or "provisionallySupported" or "conflictingEvidence",
                         resumedFrom = researchOptions.ResumeCheckpointId,
                     },
                     budget = new { modelCalls, toolCalls, maximumSeconds = (int?)null },
@@ -553,20 +637,21 @@ internal static partial class CodingDeepResearchPipeline
     private static JsonElement RequiredArguments(LmChatResult response, string name) => response.ToolCalls.Count == 1 && response.ToolCalls[0].Name == name
         ? response.ToolCalls[0].Arguments : throw new InvalidDataException($"Der Rechercheturn lieferte keinen eindeutigen Aufruf von {name}.");
     internal static string ClassifyConclusion(string? errorCode, IReadOnlyCollection<string> findingSourceIds) =>
-        errorCode is null && findingSourceIds.Count >= 2
-            && findingSourceIds.Distinct(StringComparer.Ordinal).Count() >= 2
-                ? "stronglySupported"
+        errorCode is null && findingSourceIds.Count > 0
+                ? "supported"
                 : findingSourceIds.Count > 0 ? "provisionallySupported" : "unresolved";
     private static string ClassifyVerifiedConclusion(string? errorCode, string[] findingSourceIds,
-        List<ResearchVerificationResult> verifications, bool coverageComplete)
+        List<ResearchVerificationResult> verifications, bool coverageComplete, string? synthesisAssessment)
     {
         if (verifications.Any(static item => item.Status == "refuted")) return "refuted";
         if (verifications.Any(static item => item.Status == "conflictingEvidence")) return "conflictingEvidence";
-        if (!coverageComplete) return findingSourceIds.Length > 0 ? "provisionallySupported" : "unresolved";
         var sourceStatus = ClassifyConclusion(errorCode, findingSourceIds);
-        if (sourceStatus == "stronglySupported" && Enumerable.Range(0, findingSourceIds.Length)
+        if (findingSourceIds.Length == 0) return "unresolved";
+        if (verifications.Count == 0) return errorCode is null ? synthesisAssessment ?? sourceStatus : sourceStatus;
+        if (!coverageComplete) return "provisionallySupported";
+        if (sourceStatus == "supported" && Enumerable.Range(0, findingSourceIds.Length)
             .All(index => FindingStatus(index, verifications) == "verified")) return "verified";
-        return sourceStatus == "stronglySupported" ? "provisionallySupported" : sourceStatus;
+        return "provisionallySupported";
     }
     private static string RequiredText(JsonElement value, string name, int maximum) =>
         value.TryGetProperty(name, out var item) && item.ValueKind == JsonValueKind.String && item.GetString() is { Length: > 0 } text
@@ -793,44 +878,36 @@ internal static partial class CodingDeepResearchPipeline
         KnownQuantities: [],
         UnknownQuantities: ["Die im Auftrag verlangte zentrale Antwort oder Lösung."],
         Definitions: [],
-        Constraints: profile is DeepResearchProfile.SystematicReview
-            ? ["Vollständige Suchstrategie und begründete Screeningentscheidungen erhalten."]
-            : ["Nur tatsächlich abgerufene Originalquellen als Belege verwenden."],
+        Constraints: ["Nur tatsächlich abgerufene Originaltextstellen als gelesene Belege ausgeben."],
         Assumptions: [],
-        SuccessCriteria: profile is DeepResearchProfile.MathematicalInvestigation
-            ? ["Definitionsbereiche und Nebenbedingungen nennen.", "Mindestens zwei geeignete Prüfwege festlegen."]
-            : ["Zentrale Aussagen mit Originaltext belegen.", "Widersprüche und Unsicherheiten sichtbar machen."],
-        RequiredEvidence: profile is DeepResearchProfile.MathematicalInvestigation
-            ? ["Zitierfähige Definitionen oder bekannte Sätze für verwendete externe Resultate."]
-            : ["Erfolgreich abgerufene Fundstellen aus Originalquellen."],
-        RequiredVerification: profile is DeepResearchProfile.Web
-            ? ["Originalquellenprüfung"]
-            : ["unabhängige Quellenprüfung", "Gegenbelegsuche", "methodische Plausibilitätsprüfung"],
+        SuccessCriteria: ["Das tatsächlich erreichte Ergebnis und verbleibende Unsicherheiten verständlich darstellen."],
+        RequiredEvidence: [],
+        RequiredVerification: [],
         Ambiguities: []);
 
     private static string ProfilePlanningPolicy(DeepResearchProfile profile) => profile switch
     {
         DeepResearchProfile.MathematicalInvestigation =>
-            "Formalisiere Symbole, Definitionsbereiche, Nebenbedingungen und den zu beweisenden oder zu berechnenden Satz. Plane symbolische, numerische und wenn möglich formale Gegenprüfungen.",
+            "Bei mathematischen Fragen können Definitionen, Nebenbedingungen und passende symbolische oder numerische Vergleiche hilfreich sein; wähle selbst geeignete Wege.",
         DeepResearchProfile.OpenProblem =>
-            "Trenne bekannte Ergebnisse von der Wissenslücke. Plane mehrere Kandidatenhypothesen, eine Neuheitssuche und aktive Gegenbeispielsuche. Bezeichne keine neue Idee ohne Prüfung als gelöst.",
+            "Bei offenen Problemen können bekannte Resultate, Wissenslücken und alternative Ideen Orientierung geben. Ungeprüfte neue Ideen sind keine gelösten Probleme.",
         DeepResearchProfile.SystematicReview =>
-            "Formuliere eine reproduzierbare Such- und Screeningstrategie. Erfasse Ein- und Ausschlusskriterien, Gegenpositionen, Replikationen und negative Ergebnisse.",
+            "Für ausdrücklich gewünschte systematische Reviews kann eine nachvollziehbare Such- und Auswahlstrategie mit Gegenpositionen und negativen Ergebnissen hilfreich sein.",
         DeepResearchProfile.ScopingReview =>
-            "Kartiere Begriffe, Methoden, Datensätze, Forschungsgruppen und offene Lücken breit, ohne heterogene Befunde zu einer Scheingenauigkeit zusammenzufassen.",
+            "Für eine Übersicht können Begriffe, Methoden, Datensätze und offene Lücken hilfreich sein; vermeide unbegründete Scheingenauigkeit.",
         DeepResearchProfile.ReplicationAudit =>
-            "Bestimme behauptete Resultate, benötigte Daten, Software, Parameter und reproduzierbare Prüfschritte. Suche nach Korrekturen und unabhängigen Replikationen.",
+            "Bei Replikationsfragen können Daten, Software, Parameter, Korrekturen und unabhängige Replikationen hilfreich sein.",
         DeepResearchProfile.ScientificEvidence =>
-            "Priorisiere Primärarbeiten, Methoden, Datensätze, Gegenbefunde, Replikationen und Rücknahmen. Trenne Abstract-only-Evidenz von geprüftem Volltext.",
-        _ => "Plane eine quellenbasierte, ergebnisoffene Webrecherche.",
+            "Primärarbeiten, Methoden, Datensätze und Gegenbefunde können der Bewertung dienen. Unterscheide gelesenen Volltext von bloßen Abstracts oder Snippets.",
+        _ => "Wähle selbst eine passende ergebnisoffene Recherche.",
     };
 
     private static string ProfileSynthesisPolicy(DeepResearchProfile profile, ResearchVerificationLevel verification) =>
         ProfilePlanningPolicy(profile)
-        + " Klassifiziere Aussagen als quellenberichtet, abgeleitet, berechnet, beobachtet, formal verifiziert, Modellinferenz oder spekulative Hypothese."
+        + " Unterscheide, soweit relevant, Quellenberichte, eigene Schlussfolgerungen und offene Vermutungen."
         + (verification == ResearchVerificationLevel.Standard
             ? string.Empty
-            : " Verlange für zentrale Befunde mehrere unabhängige Prüfwege und nenne fehlende Verifikation ausdrücklich.");
+            : " Eine vertiefte Prüfung wurde angefragt; wähle dafür geeignete Vergleiche selbst und nenne verbleibende Grenzen.");
 
     private static bool ContainsAny(string value, params string[] terms) =>
         terms.Any(term => value.Contains(term, StringComparison.Ordinal));
@@ -844,23 +921,26 @@ internal static partial class CodingDeepResearchPipeline
     }
 
     private static JsonElement PlanSchema() => JsonSerializer.Deserialize<JsonElement>("""
-        {"type":"object","properties":{"questions":{"type":"array","minItems":2,"maxItems":3,"items":{"type":"object","properties":{"question":{"type":"string","maxLength":300},"query":{"type":"string","maxLength":500}},"required":["question","query"],"additionalProperties":false}},"hypotheses":{"type":"array","maxItems":6,"items":{"type":"string","maxLength":500}},"verificationPlan":{"type":"array","maxItems":8,"items":{"type":"string","maxLength":500}}},"required":["questions"],"additionalProperties":false}
+        {"type":"object","properties":{"questions":{"type":"array","minItems":0,"maxItems":12,"items":{"type":"object","properties":{"question":{"type":"string","maxLength":300},"query":{"type":"string","maxLength":500}},"required":["question","query"],"additionalProperties":false}},"sourceLimit":{"type":"integer","minimum":0,"maximum":12},"review":{"type":"boolean"},"hypotheses":{"type":"array","maxItems":6,"items":{"type":"string","maxLength":500}},"verificationPlan":{"type":"array","maxItems":8,"items":{"type":"string","maxLength":500}}},"required":["questions"],"additionalProperties":false}
         """);
     private static JsonElement SynthesisSchema(IReadOnlyList<ResearchExcerpt> excerpts) => JsonSerializer.SerializeToElement(new
     {
         type = "object",
         properties = new
         {
+            summary = new { type = "string", maxLength = 12000 },
+            conclusionStatus = new { type = "string", @enum = SynthesisAssessmentStatuses },
+            assessmentReason = new { type = "string", maxLength = 2000 },
             findings = new
             {
-                type = "array", maxItems = 8,
+                type = "array", maxItems = excerpts.Count == 0 ? 0 : 8,
                 items = new
                 {
                     type = "object",
                     properties = new
                     {
                         claim = new { type = "string", maxLength = 500 },
-                        evidenceId = new { type = "string", maxLength = 32, @enum = excerpts.Select(static excerpt => excerpt.Id).ToArray() },
+                        evidenceId = new { type = "string", maxLength = 32, @enum = excerpts.Count == 0 ? NoEvidenceIds : excerpts.Select(static excerpt => excerpt.Id).ToArray() },
                     },
                     required = RequiredFindingFields, additionalProperties = false,
                 },

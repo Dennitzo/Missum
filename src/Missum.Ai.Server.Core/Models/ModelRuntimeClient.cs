@@ -147,8 +147,10 @@ public sealed partial class ModelRuntimeClient : IDisposable
             var runtimeModels = await GetRuntimeModelsAsync(timeout.Token).ConfigureAwait(false);
             var selected = ResolveInstalledModel(runtimeModels, runtimeInstanceId ?? modelId)
                 ?? throw new FileNotFoundException($"Das lokale Unsloth-Modell '{modelId}' ist nicht installiert.");
-            if (runtimeInstanceId is not null && (!selected.IsSubagent
-                || !string.Equals(selected.BaseModelId, ResolveInstalledModel(runtimeModels, modelId)?.Id, StringComparison.Ordinal)))
+            var requestedBase = ResolveInstalledModel(runtimeModels, modelId)?.Id;
+            if (runtimeInstanceId is not null && !(selected.IsSubagent
+                ? string.Equals(selected.BaseModelId, requestedBase, StringComparison.Ordinal)
+                : string.Equals(selected.Id, requestedBase, StringComparison.Ordinal)))
                 throw new ArgumentException("Die Subagent-Instanz muss dasselbe installierte Modell wie der Hauptagent verwenden.", nameof(runtimeInstanceId));
             var restoresManagedPair = selected.IsSubagent && selected.BaseModelId is { } restoredBase
                 && ResolveInstalledModel(runtimeModels, restoredBase) is { ManagedGpuPlacement: true, State: not ("loaded" or "sleeping") };
@@ -294,7 +296,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
         CancellationToken cancellationToken = default) =>
         CompleteChatWithCacheOwnershipAsync(modelId, messages, tools, null, null, maximumOutputTokens,
             modelRole, reasoningEffort, requireToolCall, requiredToolName, requiredContextLength, nativeProgress,
-            structuredToolOnly, sessionCacheKey, responseSchema, runtimeInstanceId, cancellationToken);
+            structuredToolOnly, sessionCacheKey, responseSchema, runtimeInstanceId, cancellationToken: cancellationToken);
 
     internal async Task<LmChatResult> CompleteChatWithCacheOwnershipAsync(
         string modelId,
@@ -313,6 +315,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
         string? sessionCacheKey = null,
         JsonElement? responseSchema = null,
         string? runtimeInstanceId = null,
+        ProjectCacheBinding? projectCache = null,
         CancellationToken cancellationToken = default)
     {
         ValidateToolChoice(tools, requireToolCall, requiredToolName);
@@ -332,9 +335,6 @@ public sealed partial class ModelRuntimeClient : IDisposable
             // an upper bound; it must not require a larger allocation after fitting.
             var preparation = await PrepareNativeModelAsync(modelId, 0, null, cancellationToken, runtimeInstanceId).ConfigureAwait(false);
             preparedInstanceId = preparation.InstanceId;
-            await UpdateSessionCacheAsync("prepare", preparation.InstanceId, sessionCacheKey,
-                sessionId: sessionCacheOwnerId, parentSessionId: sessionCacheParentOwnerId,
-                cancellationToken: cancellationToken).ConfigureAwait(false);
             var context = requiredContextLength is { } requested
                 ? Math.Min(requested, preparation.ContextLength) : preparation.ContextLength;
             if (nativeProgress is not null)
@@ -387,6 +387,13 @@ public sealed partial class ModelRuntimeClient : IDisposable
                     : "auto";
             }
 
+            if (projectCache is null || string.IsNullOrEmpty(sessionCacheKey)
+                || !await PrepareProjectSessionCacheAsync(preparation.InstanceId, sessionCacheKey, sessionCacheOwnerId,
+                    sessionCacheParentOwnerId, projectCache, messages, body, cancellationToken).ConfigureAwait(false))
+                await UpdateSessionCacheAsync("prepare", preparation.InstanceId, sessionCacheKey,
+                    sessionId: sessionCacheOwnerId, parentSessionId: sessionCacheParentOwnerId,
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(ModelTurnTimeout);
             var stallProgress = new NativeInferenceStallProgress(() => timeout.CancelAfter(ModelTurnTimeout));
@@ -432,10 +439,13 @@ public sealed partial class ModelRuntimeClient : IDisposable
                         cancellationToken).ConfigureAwait(false);
                 }
             }
-            // Persist every completed round, including tool calls. Long coding
-            // runs must survive a process restart before their final response.
+            // Journal/checkpoint persistence owns correctness. Disposable KV writes
+            // are batched at idle turn boundaries; an answer ending a run is forced.
             if (!string.IsNullOrEmpty(sessionCacheKey))
-                await UpdateSessionCacheAsync("save", preparation.InstanceId, sessionCacheKey, cancellationToken: cancellationToken).ConfigureAwait(false);
+                await UpdateSessionCacheAsync("save", preparation.InstanceId, sessionCacheKey,
+                    forceSave: result.ToolCalls.Count == 0,
+                    newTokens: Math.Max(0, result.Metrics?.PromptEvaluatedTokens ?? 0) + Math.Max(0, result.OutputTokens),
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
             return result with { Metrics = (result.Metrics ?? new ModelTurnMetrics()) with
             {
                 RuntimeQueueMilliseconds = queueMilliseconds,
@@ -782,6 +792,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
 
     private async Task<string?> UpdateSessionCacheAsync(string operation, string model, string? sessionKey,
         int? interruptedPromptTokens = null, string? sessionId = null, string? parentSessionId = null,
+        bool forceSave = true, int? newTokens = null,
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -810,7 +821,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
         try
         {
             using var response = await SendJsonAsync(HttpMethod.Post, path, new { model, sessionKey, promptTokens = interruptedPromptTokens,
-                sessionId, parentSessionId }, timeout.Token,
+                sessionId, parentSessionId, force = forceSave, newTokens }, timeout.Token,
                 bufferContent: true).ConfigureAwait(false);
             using var result = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(false),
                 cancellationToken: timeout.Token).ConfigureAwait(false);
@@ -1166,18 +1177,15 @@ public sealed partial class ModelRuntimeClient : IDisposable
 
             lastReportedFragments = accumulator.GeneratedFragments;
             progressClock.Restart();
+            var generatedTokens = accumulator.OutputTokens > 0 ? accumulator.OutputTokens : accumulator.GeneratedFragments;
             await nativeProgress(
                 new ModelRuntimeProgress(
                     "tokenProgress",
                     PromptProgress: accumulator.InputTokens > 0 ? 1 : null,
                     PromptTokens: accumulator.InputTokens > 0 ? accumulator.InputTokens : null,
                     ProcessedPromptTokens: accumulator.InputTokens > 0 ? accumulator.InputTokens : null,
-                    GeneratedTokens: accumulator.OutputTokens > 0
-                        ? accumulator.OutputTokens
-                        : accumulator.GeneratedFragments,
-                    CurrentTokens: accumulator.InputTokens > 0
-                        ? accumulator.InputTokens + Math.Max(accumulator.OutputTokens, accumulator.GeneratedFragments)
-                        : accumulator.GeneratedFragments),
+                    GeneratedTokens: generatedTokens,
+                    CurrentTokens: accumulator.InputTokens + generatedTokens),
                 cancellationToken).ConfigureAwait(false);
         }
 
@@ -1250,10 +1258,13 @@ public sealed partial class ModelRuntimeClient : IDisposable
             LastReasoningDelta = null;
             LastToolDelta = null;
             _measurement.Observe(root);
+            // Prefill contains real input counts before usage is available.
+            // Output-only usage frames must retain them; complete usage wins.
+            var measured = _measurement.Build();
+            InputTokens = measured.InputTokens ?? InputTokens;
+            OutputTokens = measured.OutputTokens ?? OutputTokens;
             if (root.TryGetProperty("usage", out var usage) && usage.ValueKind == JsonValueKind.Object)
             {
-                InputTokens = ReadInt(usage, "prompt_tokens", "input_tokens");
-                OutputTokens = ReadInt(usage, "completion_tokens", "output_tokens");
                 if (usage.TryGetProperty("completion_tokens_details", out var details))
                 {
                     ReasoningTokens = ReadInt(details, "reasoning_tokens");

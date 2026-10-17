@@ -1,4 +1,4 @@
-using Microsoft.UI.Xaml;
+﻿using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Media;
@@ -7,7 +7,7 @@ using Microsoft.UI.Xaml.Media.Imaging;
 namespace Missum.App.Controls;
 
 /// <summary>A native, accessible formula; its original LaTeX remains copyable.</summary>
-public sealed class NativeFormulaView : Button
+public sealed class NativeFormulaView : Button, IDisposable
 {
     private readonly string _source;
     internal string Source => _source;
@@ -15,7 +15,10 @@ public sealed class NativeFormulaView : Button
     private readonly double _fontSize;
     private readonly string? _renderLatex;
     private bool? _renderedDark;
+    private long _renderGeneration;
+    private CancellationTokenSource? _renderCancellation;
     internal bool IsTypeset { get; private set; }
+    internal bool IsRendering { get; private set; }
     internal double RenderedHeight { get; private set; }
     internal double RenderedBaselineOffset { get; private set; }
 
@@ -52,6 +55,7 @@ public sealed class NativeFormulaView : Button
         };
         Loaded += (_, _) => Render();
         ActualThemeChanged += (_, _) => Render();
+        Unloaded += (_, _) => Dispose();
         Render();
     }
 
@@ -66,7 +70,52 @@ public sealed class NativeFormulaView : Button
             || (trim.StartsWith(@"\[", StringComparison.Ordinal) && trim.EndsWith(@"\]", StringComparison.Ordinal)) ? 2
             : trim.StartsWith('$') && trim.EndsWith('$') ? 1 : 0;
         var latex = _renderLatex ?? (delimiter > 0 && trim.Length >= delimiter * 2 ? trim[delimiter..^delimiter] : trim);
-        var bitmap = NativeMathRenderer.Render(latex, _display, _fontSize, dark);
+        _renderCancellation?.Cancel();
+        _renderCancellation?.Dispose();
+        _renderCancellation = new CancellationTokenSource();
+        var generation = ++_renderGeneration;
+        RenderedHeight = Math.Max(RenderedHeight, _fontSize + 4);
+        // Preserve a native layout slot while the first bitmap is prepared.
+        // RenderedHeight alone informs the paragraph baseline but does not
+        // give a display-formula ScrollViewer a measurable child yet.
+        if (Content is null) { MinWidth = _fontSize; MinHeight = _fontSize + 4; }
+        IsRendering = true;
+        _ = RenderAsync(latex, dark, generation, _renderCancellation.Token);
+    }
+
+    private async Task RenderAsync(string latex, bool dark, long generation, CancellationToken cancellationToken)
+    {
+        NativeMathBitmap bitmap;
+        try { bitmap = await NativeMathRenderer.RenderAsync(latex, _display, _fontSize, dark, cancellationToken).ConfigureAwait(false); }
+        catch (OperationCanceledException) { return; }
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+        {
+            if (generation != _renderGeneration || cancellationToken.IsCancellationRequested) return;
+            IsRendering = false;
+            try { ApplyBitmap(bitmap); }
+            catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or System.Runtime.InteropServices.COMException)
+            {
+                IsTypeset = false;
+                Content = new TextBlock { Text = _source, TextWrapping = TextWrapping.Wrap,
+                    IsTextSelectionEnabled = true, FontSize = _fontSize };
+            }
+        });
+    }
+
+    public void Dispose()
+    {
+        _renderCancellation?.Cancel();
+        _renderCancellation?.Dispose();
+        _renderCancellation = null;
+        _renderedDark = null;
+        _renderGeneration++;
+        IsRendering = false;
+        GC.SuppressFinalize(this);
+    }
+
+    private void ApplyBitmap(NativeMathBitmap bitmap)
+    {
+        MinWidth = 0; MinHeight = 0;
         IsTypeset = bitmap.Error is null && bitmap.Png.Length > 0;
         RenderedHeight = bitmap.Height;
         RenderedBaselineOffset = bitmap.BaselineOffset;

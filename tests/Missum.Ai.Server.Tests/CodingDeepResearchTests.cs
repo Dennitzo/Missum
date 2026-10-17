@@ -38,8 +38,8 @@ public sealed class CodingDeepResearchTests
     }
 
     [Theory]
-    [InlineData("{\"task\":\"API\",\"maximumSearches\":1}")]
-    [InlineData("{\"task\":\"API\",\"maximumSources\":7}")]
+    [InlineData("{\"task\":\"API\",\"maximumSearches\":0}")]
+    [InlineData("{\"task\":\"API\",\"maximumSources\":13}")]
     [InlineData("{\"task\":\"API\",\"url\":\"https://invented.example/\"}")]
     public void DeepResearchRejectsUnknownOrUnboundedArguments(string arguments)
     {
@@ -50,10 +50,10 @@ public sealed class CodingDeepResearchTests
 
     [Theory]
     [InlineData(null, new string[0], "unresolved")]
-    [InlineData(null, new[] { "source-1", "source-1" }, "provisionallySupported")]
-    [InlineData(null, new[] { "source-1", "source-2" }, "stronglySupported")]
+    [InlineData(null, new[] { "source-1", "source-1" }, "supported")]
+    [InlineData(null, new[] { "source-1", "source-2" }, "supported")]
     [InlineData("web.deepResearch.incomplete", new[] { "source-1", "source-2" }, "provisionallySupported")]
-    public void ConclusionRequiresTwoIndependentSources(string? errorCode, string[] sourceIds, string expected)
+    public void SourceSupportDoesNotRequireAnArbitraryIndependentSourceCount(string? errorCode, string[] sourceIds, string expected)
     {
         Assert.Equal(expected, CodingDeepResearchPipeline.ClassifyConclusion(errorCode, sourceIds));
     }
@@ -301,8 +301,9 @@ public sealed class CodingDeepResearchTests
         Assert.True(result.GetProperty("success").GetBoolean());
         Assert.Equal(2, result.GetProperty("findings").GetArrayLength());
         Assert.Equal("provisionallySupported", result.GetProperty("conclusionStatus").GetString());
-        Assert.All(result.GetProperty("coverage").GetProperty("questions").EnumerateArray(), question =>
-            Assert.Equal("unresolved", question.GetProperty("status").GetString()));
+        Assert.False(result.GetProperty("coverageAssessed").GetBoolean());
+        Assert.False(result.TryGetProperty("coverage", out _));
+        Assert.False(result.TryGetProperty("researchGraph", out _));
         Assert.All(result.GetProperty("verifications").EnumerateArray(), finding => Assert.Equal("verified", finding.GetProperty("status").GetString()));
     }
 
@@ -389,7 +390,8 @@ public sealed class CodingDeepResearchTests
     {
         var harness = new Harness { EvidenceText = quote };
         var execution = await harness.RunAsync();
-        Assert.False(execution.Result.Succeeded);
+        Assert.True(execution.Result.Succeeded);
+        Assert.Equal("unresolved", execution.Result.Result.GetProperty("conclusionStatus").GetString());
         Assert.Empty(execution.Result.Result.GetProperty("findings").EnumerateArray());
         Assert.Empty(execution.Result.Result.GetProperty("sources").EnumerateArray());
     }
@@ -404,9 +406,13 @@ public sealed class CodingDeepResearchTests
         var harness = new Harness { EvidenceIdOverride = evidenceId };
         var execution = await harness.RunAsync();
         Assert.False(execution.Result.Succeeded);
+        Assert.Equal("web.deepResearch.invalidEvidence", execution.Result.ErrorCode);
+        Assert.Equal("unresolved", execution.Result.Result.GetProperty("conclusionStatus").GetString());
         Assert.Empty(execution.Result.Result.GetProperty("findings").EnumerateArray());
         Assert.Empty(execution.Result.Result.GetProperty("sources").EnumerateArray());
         Assert.Contains("verworfen", execution.Result.Result.GetRawText(), StringComparison.Ordinal);
+        Assert.Single(harness.ModelRequests, item => item.RequiredToolName == CodingDeepResearchPipeline.PlanToolName);
+        Assert.DoesNotContain(harness.ModelRequests, item => item.RequiredToolName is CodingDeepResearchPipeline.SkepticToolName or CodingDeepResearchPipeline.VerificationToolName);
     }
 
     [Fact]
@@ -505,11 +511,12 @@ public sealed class CodingDeepResearchTests
             FailFetch = fails, NoFetchMatches = noMatches,
         };
         var execution = await harness.RunAsync();
-        Assert.False(execution.Result.Succeeded);
+        Assert.Equal(!fails, execution.Result.Succeeded);
         Assert.Equal(noMatches ? 6 : 4, execution.ToolCalls);
         Assert.Empty(execution.Result.Result.GetProperty("sources").EnumerateArray());
         Assert.Empty(execution.Result.Result.GetProperty("findings").EnumerateArray());
-        Assert.DoesNotContain("deepResearchSynthesis", harness.Progress);
+        if (fails) Assert.DoesNotContain("deepResearchSynthesis", harness.Progress);
+        else Assert.Contains("deepResearchSynthesis", harness.Progress);
     }
 
     [Theory]
@@ -541,10 +548,23 @@ public sealed class CodingDeepResearchTests
     }
 
     [Fact]
+    public async Task UserFragmentSurvivesModelSelectionWithoutBreakingPageDeduplication()
+    {
+        const string page = "https://docs.python.org/3/library/asyncio-task.html";
+        var harness = new Harness { Review = false, TaskText = "Prüfe " + page + "#asyncio.timeout .",
+            SelectionUrls = [page, page + "#other-function"] };
+        var execution = await harness.RunAsync();
+        Assert.True(execution.Result.Succeeded);
+        var fetch = Assert.Single(harness.WebCalls, call => call.Name == "web.fetch");
+        Assert.Equal(page + "#asyncio.timeout", fetch.Arguments.GetProperty("url").GetString());
+        Assert.Equal(page, Assert.Single(execution.Result.Result.GetProperty("sources").EnumerateArray()).GetProperty("url").GetString());
+    }
+
+    [Fact]
     public async Task InsufficientOuterBudgetDoesNotStartModelsOrNetworkCalls()
     {
         var harness = new Harness();
-        var execution = await harness.RunAsync(modelBudget: 3);
+        var execution = await harness.RunAsync(modelBudget: 2);
         Assert.False(execution.Result.Succeeded);
         Assert.Equal("web.deepResearch.budget", execution.Result.ErrorCode);
         Assert.Empty(harness.ModelRequests);
@@ -639,14 +659,15 @@ public sealed class CodingDeepResearchTests
     }
 
     [Fact]
-    public async Task SmallOuterBudgetReservesTwoSourcesAndSynthesisBeforePlanningExtraSearches()
+    public async Task SmallOuterBudgetKeepsOneSourceAndSynthesisWithoutRequiringTwoSources()
     {
         var harness = new Harness { PlannedSearches = 3 };
         var execution = await harness.RunAsync(modelBudget: 4, toolBudget: 4, maximumSearches: 3, maximumSources: 6);
         Assert.True(execution.Result.Succeeded, execution.Result.Result.GetRawText());
         Assert.Equal(4, execution.ToolCalls);
-        Assert.Equal(4, execution.ModelCalls);
-        Assert.Equal(2, execution.Result.Result.GetProperty("plan").GetArrayLength());
+        Assert.Equal(3, execution.ModelCalls);
+        Assert.Equal(3, execution.Result.Result.GetProperty("plan").GetArrayLength());
+        Assert.Single(execution.Result.Result.GetProperty("sources").EnumerateArray());
     }
 
     [Fact]
@@ -750,8 +771,8 @@ public sealed class CodingDeepResearchTests
         var execution = await harness.RunAsync(modelBudget: 4, toolBudget: 4);
         Assert.True(execution.Result.Succeeded, execution.Result.Result.GetRawText());
         Assert.Equal(4, execution.ToolCalls);
-        Assert.Equal(4, execution.ModelCalls);
-        Assert.Equal(2, execution.Result.Result.GetProperty("sources").GetArrayLength());
+        Assert.Equal(3, execution.ModelCalls);
+        Assert.Single(execution.Result.Result.GetProperty("sources").EnumerateArray());
     }
 
     [Fact]
@@ -833,6 +854,7 @@ public sealed class CodingDeepResearchTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
         Assert.Single(harness.WebCalls);
         Assert.DoesNotContain("deepResearchSynthesis", harness.Progress);
+        Assert.Contains(harness.Activities, activity => activity.Phase == "search" && activity.Status == "cancelled");
     }
 
     [Fact]
@@ -845,6 +867,87 @@ public sealed class CodingDeepResearchTests
         Assert.Equal(0, execution.ToolCalls);
         Assert.Contains("180 Sekunden", execution.Result.Result.GetProperty("uncertainties")[0].GetString()!, StringComparison.Ordinal);
         Assert.Equal("deepResearchCompleted", harness.Progress[^1]);
+        Assert.Contains(harness.Activities, activity => activity.Phase == "model" && activity.Status == "failed"
+            && activity.Detail!.Contains("180 Sekunden", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ModelCanChooseOneSourceWithoutMandatorySeparateReview()
+    {
+        var harness = new Harness { Review = false, SourceLimit = 1, PlannedSearches = 1 };
+        var result = await harness.RunAsync(maximumSearches: 12, maximumSources: 12);
+        Assert.True(result.Result.Succeeded);
+        Assert.Equal(3, result.ModelCalls);
+        Assert.Equal(2, result.ToolCalls);
+        Assert.Single(result.Result.Result.GetProperty("sources").EnumerateArray());
+        Assert.Equal("supported", result.Result.Result.GetProperty("conclusionStatus").GetString());
+        Assert.False(result.Result.Result.GetProperty("coverageAssessed").GetBoolean());
+        Assert.False(result.Result.Result.TryGetProperty("coverage", out _));
+        Assert.DoesNotContain(result.Result.Result.GetProperty("uncertainties").EnumerateArray(),
+            item => item.GetString()!.Contains("Abdeckung", StringComparison.Ordinal));
+        Assert.DoesNotContain(harness.ModelRequests, item => item.RequiredToolName is CodingDeepResearchPipeline.SkepticToolName or CodingDeepResearchPipeline.VerificationToolName);
+        Assert.Empty(result.Result.Result.GetProperty("problem").GetProperty("requiredVerification").EnumerateArray());
+    }
+
+    [Fact]
+    public async Task ModelCanFinishWithAnHonestOpenResultAndNoMandatorySearchOrFetch()
+    {
+        var harness = new Harness { Review = false, SourceLimit = 0, PlannedSearches = 0, EmptyFindings = true };
+        var result = await harness.RunAsync(maximumSearches: 12, maximumSources: 12);
+        Assert.True(result.Result.Succeeded);
+        Assert.Equal(2, result.ModelCalls);
+        Assert.Empty(harness.WebCalls);
+        Assert.Equal("unresolved", result.Result.Result.GetProperty("conclusionStatus").GetString());
+        Assert.Contains("bleibt offen", result.Result.Result.GetProperty("summary").GetString(), StringComparison.Ordinal);
+        Assert.Single(harness.ModelRequests, item => item.RequiredToolName == CodingDeepResearchPipeline.PlanToolName);
+    }
+
+    [Theory]
+    [InlineData("supported")]
+    [InlineData("refuted")]
+    [InlineData("unresolved")]
+    public async Task RegularSynthesisCanMakeItsOwnEvidenceBoundAssessmentWithoutAnotherReview(string status)
+    {
+        var harness = new Harness { Review = false, SynthesisStatus = status };
+        var result = await harness.RunAsync();
+        Assert.True(result.Result.Succeeded);
+        Assert.Equal(status, result.Result.Result.GetProperty("conclusionStatus").GetString());
+        Assert.Contains("Originaltextstellen", result.Result.Result.GetProperty("assessmentReason").GetString(), StringComparison.Ordinal);
+        Assert.Equal(4, result.ModelCalls);
+        Assert.Empty(result.Result.Result.GetProperty("verifications").EnumerateArray());
+    }
+
+    [Fact]
+    public async Task UnsupportedFindingsDoNotTriggerAnAutomaticResearchLoop()
+    {
+        var harness = new Harness { EmptyFindings = true };
+        var result = await harness.RunAsync();
+        Assert.True(result.Result.Succeeded);
+        Assert.Null(result.Result.ErrorCode);
+        Assert.Equal(4, result.ModelCalls);
+        Assert.Empty(result.Result.Result.GetProperty("findings").EnumerateArray());
+        Assert.Equal("unresolved", result.Result.Result.GetProperty("conclusionStatus").GetString());
+        Assert.Single(harness.ModelRequests, item => item.RequiredToolName == CodingDeepResearchPipeline.PlanToolName);
+    }
+
+    [Fact]
+    public async Task DetailedActivitiesDescribeActualQueriesSourcesModelResultsAndStableStepPairs()
+    {
+        var harness = new Harness { Review = false };
+        await harness.RunAsync();
+        var plan = Assert.Single(harness.Activities, activity => activity.Tool == CodingDeepResearchPipeline.PlanToolName && activity.Status == "completed");
+        Assert.Contains("official API cancellation", plan.Text, StringComparison.Ordinal);
+        foreach (var call in harness.WebCalls)
+        {
+            var field = call.Name == "web.search" ? "query" : "url";
+            var target = call.Arguments.GetProperty(field).GetString();
+            var start = Assert.Single(harness.Activities, activity => activity.Status == "running" && activity.Tool == call.Name
+                && (field == "query" ? activity.Query : activity.Url) == target);
+            Assert.Contains(harness.Activities, activity => activity.StepId == start.StepId && activity.Status == "completed");
+        }
+        Assert.Contains(harness.Activities, activity => activity.Sources?.Any(source => source.Id == "S1" && source.Snippet!.Contains("CancellationToken", StringComparison.Ordinal)) == true);
+        Assert.Contains(harness.Activities, activity => activity.Tool == CodingDeepResearchPipeline.SynthesisToolName
+            && activity.Status == "completed" && activity.Text!.Contains("Abbruch wird unterstützt", StringComparison.Ordinal));
     }
 
     private static RunRequest Request() => new(MissumAiProtocol.Version, RunMode.Coding,
@@ -863,6 +966,10 @@ public sealed class CodingDeepResearchTests
         public bool NoFetchMatches { get; init; }
         public bool HoldSearch { get; init; }
         public bool FailModel { get; init; }
+        public bool Review { get; init; } = true;
+        public bool EmptyFindings { get; init; }
+        public int? SourceLimit { get; init; }
+        public string SynthesisStatus { get; init; } = "supported";
         public string? FailModelAt { get; init; }
         public Exception? ModelFailure { get; init; }
         public bool EmptyInitialSearches { get; init; }
@@ -889,6 +996,7 @@ public sealed class CodingDeepResearchTests
         public string IssueStatus { get; init; } = "nonMaterial";
         public string? CoverageFault { get; init; }
         public List<string> Progress { get; } = [];
+        public List<DeepResearchActivity> Activities { get; } = [];
         public List<LmToolCall> WebCalls { get; } = [];
         public List<StagedWebResearchModelRequest> ModelRequests { get; } = [];
         public TaskCompletionSource SearchEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -904,7 +1012,8 @@ public sealed class CodingDeepResearchTests
             var tools = catalog.GetAvailableTools(Request());
             return CodingDeepResearchPipeline.ExecuteAsync(TaskText, maximumSearches, maximumSources, "coding/model", contextTokens,
                 modelBudget, toolBudget, catalog.Resolve("web.search", tools), catalog.Resolve("web.fetch", tools), ModelAsync, ToolAsync,
-                catalog.Validate, (progress, _) => { Progress.Add(progress.State); return Task.CompletedTask; }, cancellationToken);
+                catalog.Validate, (progress, _) => { Progress.Add(progress.State); return Task.CompletedTask; },
+                (activity, _) => { Activities.Add(activity); return Task.CompletedTask; }, cancellationToken);
         }
 
         private Task<LmChatResult> ModelAsync(StagedWebResearchModelRequest request, CancellationToken cancellationToken)
@@ -918,15 +1027,16 @@ public sealed class CodingDeepResearchTests
             {
                 CodingDeepResearchPipeline.PlanToolName => new { questions = SearchQueries.Take(PlannedSearches)
                     .Select((query, index) => new { question = SearchQuestions is { } questions && index < questions.Count
-                        ? questions[index] : query + "?", query }).ToArray(), hypotheses = Hypotheses, verificationPlan = VerificationPlan },
+                        ? questions[index] : query + "?", query }).ToArray(), hypotheses = Hypotheses, verificationPlan = VerificationPlan, review = Review, sourceLimit = SourceLimit },
                 "web.fetch" => new { url = SelectUrl(), query = "cancellation" },
-                CodingDeepResearchPipeline.SynthesisToolName => new { findings = new[]
+                CodingDeepResearchPipeline.SynthesisToolName => new { summary = EmptyFindings ? "Die Frage bleibt offen; belastbare Belege fehlen." : "Tatsächlich gelesene Originalquellen wurden gegenübergestellt.",
+                    conclusionStatus = EmptyFindings ? "unresolved" : SynthesisStatus, assessmentReason = "Bewertung anhand der tatsächlich gelesenen Originaltextstellen.", findings = new[]
                 {
                     new { claim = ClaimOverride ?? "Abbruch wird unterstützt.", evidenceId = EvidenceIdOverride ?? "S1-E1" },
                     new { claim = ClaimOverride ?? "Der zweite Beleg bestätigt den Abbruch.", evidenceId = EvidenceIdOverride ?? "S2-E1" },
                     new { claim = "Erfundenes Zitat", evidenceId = "S1-E999" },
                     new { claim = "Erfundene Quelle", evidenceId = "S9-E1" },
-                }, uncertainties = OpenIssue is null ? [] : new[] { OpenIssue } },
+                }.Take(EmptyFindings ? 0 : 4).ToArray(), uncertainties = OpenIssue is null ? [] : new[] { OpenIssue } },
                 CodingDeepResearchPipeline.SkepticToolName => new { counterexamples = SkepticCounterexample is null ? [] : new[] { SkepticCounterexample }, issues = SkepticIssues },
                 CodingDeepResearchPipeline.VerificationToolName => VerifierResponse(request),
                 _ => throw new InvalidOperationException(name),

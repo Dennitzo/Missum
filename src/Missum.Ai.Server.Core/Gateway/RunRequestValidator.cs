@@ -23,6 +23,7 @@ public static class RunRequestValidator
         "math.lean",
         "research.deliverables",
         "subagents",
+        "project.history",
     };
     private static readonly HashSet<string> ServerTools = new(StringComparer.Ordinal)
     {
@@ -33,6 +34,7 @@ public static class RunRequestValidator
     public static void Validate(RunRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
+        ProjectContextPolicy.Validate(request.ProjectContext);
         if (request.ContextProfileVersion is not (null or "legacy" or "compact-v1"))
             throw new ArgumentException("Unsupported context profile.");
         if (request.Subagent is not null)

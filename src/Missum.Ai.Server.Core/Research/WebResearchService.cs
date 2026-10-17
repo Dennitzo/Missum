@@ -248,9 +248,13 @@ public sealed partial class WebResearchService : IDisposable
                 }
 
                 redirects.Add(current.ToString());
-                current = response.Headers.Location.IsAbsoluteUri
+                var redirected = response.Headers.Location.IsAbsoluteUri
                     ? response.Headers.Location
                     : new Uri(current, response.Headers.Location);
+                // Redirect targets without their own fragment inherit the
+                // original client-side target, which is never sent over HTTP.
+                current = !response.Headers.Location.OriginalString.Contains('#') && !string.IsNullOrEmpty(current.Fragment)
+                    ? new UriBuilder(redirected) { Fragment = current.Fragment[1..] }.Uri : redirected;
                 if (current.Scheme is not ("http" or "https") || !string.IsNullOrEmpty(current.UserInfo))
                 {
                     throw new HttpRequestException("Fetch redirect changed to a forbidden URL scheme.");
@@ -271,13 +275,14 @@ public sealed partial class WebResearchService : IDisposable
                 current,
                 response.Content.Headers.ContentType?.MediaType,
                 bytes);
-            var content = ExtractFetchedContent(
+            var content = ExtractFetchedContentForTarget(
                 bytes,
                 mediaType,
                 response.Content.Headers.ContentType?.CharSet,
+                current.Fragment,
                 cancellationToken);
 
-            return new WebFetchResponse(current.ToString(), mediaType, content, true, DateTimeOffset.UtcNow, redirects);
+            return new WebFetchResponse(current.ToString(), mediaType, content.Content, true, DateTimeOffset.UtcNow, redirects, content.FragmentStatus);
         }
 
         throw new HttpRequestException("Fetch failed unexpectedly.");
@@ -789,10 +794,10 @@ public sealed partial class WebResearchService : IDisposable
     [GeneratedRegex("<(script|style)\\b[^>]*>.*?</\\1>", RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.CultureInvariant)]
     private static partial Regex ScriptAndStyleRegex();
 
-    [GeneratedRegex("</?(?:span|code|a|strong|em|b|i|u|s|small|mark|abbr|kbd|samp|var|sub|sup|wbr)\\b[^>]*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    [GeneratedRegex("</?(?:span|code|a|strong|em|b|i|u|s|small|mark|abbr|kbd|samp|var|sub|sup|wbr)\\b(?:\"[^\"]*\"|'[^']*'|[^'\">])*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex InlineHtmlTagRegex();
 
-    [GeneratedRegex("<[^>]+>", RegexOptions.CultureInvariant)]
+    [GeneratedRegex("<!--.*?-->|<(?:\"[^\"]*\"|'[^']*'|[^'\">])+>", RegexOptions.Singleline | RegexOptions.CultureInvariant)]
     private static partial Regex HtmlTagRegex();
 
     [GeneratedRegex("\\s+", RegexOptions.CultureInvariant)]

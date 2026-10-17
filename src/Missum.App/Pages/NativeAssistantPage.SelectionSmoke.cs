@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using System.Text.Json;
 using Missum.App.Controls;
 using Missum.App.Services;
@@ -64,7 +64,7 @@ public sealed partial class NativeAssistantPage
                 if (index % 10 == 0) await Task.Delay(20, _lifetime.Token);
                 if (!ReferenceEquals(bubble, _messageViews[id].View) || !ReferenceEquals(paragraph, markdown.Children[0])
                     || run.Text != initial || paragraph.SelectedText != expected || selection.SelectedText != expected
-                    || Math.Abs(ConversationScroll.VerticalOffset - offset) > 1 || !_running || S(_messages[id], "content") != latest
+                    || Math.Abs(ConversationScroll.VerticalOffset - offset) > 1 || !_running || MessageContent(_messages[id]) != latest
                     || _messageActionViews[id].Text != latest)
                     throw new InvalidOperationException("Streaming verschiebt die Markierung oder hält den AI-Lauf statt nur dessen Textprojektion an.");
             }
@@ -93,9 +93,16 @@ public sealed partial class NativeAssistantPage
 
             selection.Clear();
             await Task.Delay(100, _lifetime.Token); RenderMessagesNow(); UpdateLayout();
-            if (selection.HasSelection || _messageViews[id].Signature.IndexOf(latest, StringComparison.Ordinal) < 0
-                || !Descendants(bubble).OfType<NativeFormulaView>().Any() || !_running)
-                throw new InvalidOperationException("Nach Aufhebung der Auswahl wird der neueste Antwortstand nicht einschließlich des Parserwechsels gerendert.");
+            await WaitForNativeMathPreparationAsync(bubble);
+            var displayed = MessageBody(bubble).Children.OfType<NativeStreamingMarkdown>().First();
+            var formulas = Descendants(bubble).OfType<NativeFormulaView>().ToArray();
+            if (selection.HasSelection || displayed.Source != latest
+                || _renderedMessageVersions.GetValueOrDefault(id) != MessageVersion(_messages[id])
+                || formulas.Length != 1 || formulas.Any(formula => !formula.IsTypeset) || !_running)
+                throw new InvalidOperationException("Nach Aufhebung der Auswahl wird der neueste Antwortstand nicht einschließlich des Parserwechsels gerendert: "
+                    + JsonSerializer.Serialize(new { selection.HasSelection, sourceCurrent = displayed.Source == latest,
+                        renderedVersion = _renderedMessageVersions.GetValueOrDefault(id), sourceVersion = MessageVersion(_messages[id]),
+                        formulas = formulas.Length, allTypeset = formulas.All(formula => formula.IsTypeset), _running }));
             var currentParagraph = MessageBody(bubble).Children.OfType<NativeStreamingMarkdown>().First().Children.OfType<TextBlock>().First();
             var currentRun = currentParagraph.Inlines.OfType<Run>().First();
             currentParagraph.Select(currentRun.ContentStart.GetPositionAtOffset(4, LogicalDirection.Forward),

@@ -25,7 +25,9 @@ public static class DependencyInjection
         services.AddSingleton(options);
         services.AddSingleton<SqliteDatabase>();
         services.AddSingleton<IMissumDatabase>(static provider => provider.GetRequiredService<SqliteDatabase>());
-        services.AddSingleton<IChatRepository, SqliteChatRepository>();
+        services.AddSingleton<SqliteChatRepository>();
+        services.AddSingleton<IChatRepository>(static provider => provider.GetRequiredService<SqliteChatRepository>());
+        services.AddSingleton<IStreamingConversationRepository>(static provider => provider.GetRequiredService<SqliteChatRepository>());
         services.AddSingleton<IConversationSnapshotRepository, SqliteConversationSnapshotRepository>();
         services.AddSingleton<IPromptTriggerRepository, SqlitePromptTriggerRepository>();
         services.AddSingleton<IAssistantAttachmentRepository, SqliteAssistantAttachmentRepository>();

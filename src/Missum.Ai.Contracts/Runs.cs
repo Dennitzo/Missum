@@ -63,7 +63,8 @@ public sealed record RunRequest(
     [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<ToolDescriptor>? ClientTools = null,
     [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] DeepResearchOptions? ResearchOptions = null,
     [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] SubagentRunContext? Subagent = null,
-    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] string? ContextProfileVersion = null);
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] string? ContextProfileVersion = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] ProjectContextRef? ProjectContext = null);
 
 /// <summary>Gateway-created branch of an existing run. Permissions and model selection are inherited.</summary>
 public sealed record SubagentRunContext(
@@ -72,7 +73,11 @@ public sealed record SubagentRunContext(
     string AssignedTask,
     string? ParentSessionId,
     string? RuntimeInstanceId = null,
-    string? ParentSessionCacheKey = null);
+    string? ParentSessionCacheKey = null,
+    string? Specialization = null,
+    string? OriginToolStepId = null,
+    int? GpuIndex = null,
+    ResearchAutonomyLevel? ResearchAutonomy = null);
 
 public sealed record SubagentRunEvent(
     string ParentRunId,
@@ -82,7 +87,10 @@ public sealed record SubagentRunEvent(
     string ModelId,
     RunState State,
     string? SessionId = null,
-    string? ErrorCode = null);
+    string? ErrorCode = null,
+    string? Specialization = null,
+    string? OriginToolStepId = null,
+    int? GpuIndex = null);
 
 /// <summary>Durably relayed child event on the parent's event stream.</summary>
 public sealed record SubagentForwardedEvent(string AgentId, string ParentRunId, string RunId, RunEvent Event);
@@ -145,7 +153,7 @@ public sealed record DeepResearchOptions(
     long? ProtocolVersion = null,
     string? ResumeCheckpointId = null,
     ResearchAutonomyLevel AutonomyLevel = ResearchAutonomyLevel.ReadOnlyResearch,
-    ResearchVerificationLevel VerificationLevel = ResearchVerificationLevel.MultiPath,
+    ResearchVerificationLevel VerificationLevel = ResearchVerificationLevel.Standard,
     int? MaximumWorks = null,
     int? MaximumFullTexts = null,
     IReadOnlyList<string>? PreferredLanguages = null,
@@ -270,6 +278,7 @@ public static class RunEventTypes
     public const string ResearchCheckpointCreated = "research.checkpoint.created";
     public const string ResearchReportCompleted = "research.report.completed";
     public const string ResearchWarning = "research.warning";
+    public const string DeepResearchProgress = "deep_research.progress";
 }
 
 public sealed record ResearchProgressEvent(

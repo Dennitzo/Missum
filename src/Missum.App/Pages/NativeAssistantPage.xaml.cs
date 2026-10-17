@@ -127,7 +127,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         {
             renderer = "WinUI3", page = GetType().Name, sessionId = _session, ready = _session != Guid.Empty, navigationSmokeVisits,
             loadedMessageCount = _messages.Count, historyHasMore = _historyHasMore,
-            deferredToolCount = _messages.Values.SelectMany(message => Items(message, "toolSteps"))
+            deferredToolCount = _messages.Values.SelectMany(message => MessageSteps(message))
                 .Count(step => step.TryGetProperty("detailsDeferred", out var value) && value.ValueKind == JsonValueKind.True),
         }), _lifetime.Token);
     }
@@ -218,7 +218,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             try
             {
                 if (_disposed) return;
-                if (type is "conversation.page" or "tool.details" && !_navigationState.IsCurrent(generation)) return;
+                if (type is "conversation.page" or "conversation.blocks.page" or "subagent.blocks.page" or "tool.details" && !_navigationState.IsCurrent(generation)) return;
                 if (NativeNavigationState.IsFullSnapshot(type)
                     && (!_navigationState.CanApplySnapshot(generation,
                         Guid.TryParse(S(json, "activeSessionId"), out var activeSession) ? activeSession : Guid.Empty,
@@ -346,21 +346,16 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                 if (!_changeReceiptState.ObserveStarted(_session, startedId, ReadConversationRevision(data), startedRun)) return;
                 ResetChangesSummary();
             }
-            if (data.TryGetProperty("message", out var message)) { _messages[S(message, "id")] = PreserveNewerLiveMessage(message); RenderMessages(); }
-        }
-        if (type == "chat.delta")
-        {
-            var id = S(data, "messageId");
-            if (_messages.TryGetValue(id, out var previous))
+            if (data.TryGetProperty("message", out var message))
             {
-                var merged = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(previous.GetRawText())!;
-                merged["content"] = data.GetProperty("content");
-                if (data.TryGetProperty("toolSteps", out var steps)) merged["toolSteps"] = steps;
-                if (data.TryGetProperty("updatedAt", out var updatedAt)) merged["updatedAt"] = updatedAt;
-                _messages[id] = JsonSerializer.SerializeToElement(merged);
+                var id = S(message, "id");
+                _messages[id] = PreserveNewerLiveMessage(message);
+                if (type == "chat.started" && data.TryGetProperty("streamGeneration", out var generation))
+                    ProjectionFor(_messages[id]).BeginGeneration(generation.GetString() ?? "");
                 RenderMessages();
             }
         }
+        if (type == "chat.delta") ApplyNativeMessageDelta(data);
         if (type is "chat.started" or "chat.queued") { _finishedSessions.Remove(_session); _running = true; SetRunning(); }
         if (type is "chat.completed" or "chat.cancelled" or "chat.failed")
         {
@@ -378,11 +373,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             var id = S(data, "messageId");
             if (data.TryGetProperty("toolStep", out var step) && step.ValueKind == JsonValueKind.Object && _messages.TryGetValue(id, out var current))
             {
-                var steps = Items(current, "toolSteps").ToList();
-                var position = steps.FindIndex(s => S(s, "id") == S(step, "id"));
-                if (position >= 0) steps[position] = step; else steps.Add(step);
-                var merged = current.Deserialize<Dictionary<string, JsonElement>>()!; merged["toolSteps"] = JsonSerializer.SerializeToElement(steps);
-                _messages[id] = JsonSerializer.SerializeToElement(merged); RenderMessages();
+                ApplyNativeMessageDelta(data);
             }
         }
         if (type == "coding.changes") RenderChanges(data);
@@ -396,6 +387,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     {
         // A snapshot read can precede an already delivered live delta. Retain
         // its newer text while still accepting snapshot metadata and artifacts.
+        ObserveToolStepWindows(data);
         var incoming = Items(data, "messages");
         if (preserveLive) incoming = incoming.Select(PreserveNewerLiveMessage).ToArray();
         var hasPage = data.TryGetProperty("historyPage", out var page);
@@ -418,12 +410,18 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         // timestamp but may retain the prior snapshot's revision, so compare both.
         // A real retry advances revision/time and remains eligible for adoption.
         var newerRevision = currentRevision > 0 && incomingRevision > 0 && currentRevision > incomingRevision;
-        var newerTimestamp = DateTimeOffset.TryParse(S(current, "updatedAt"), out var liveAt)
+        var newerTimestamp = DateTimeOffset.TryParse(MessageUpdatedAt(current), out var liveAt)
             && DateTimeOffset.TryParse(S(incoming, "updatedAt"), out var snapshotAt) && liveAt > snapshotAt;
         if (!newerRevision && !newerTimestamp) return incoming;
         var merged = incoming.Deserialize<Dictionary<string, JsonElement>>()!;
         foreach (var field in new[] { "content", "toolSteps", "updatedAt", "status", "error", "contextSummary" })
             if (current.TryGetProperty(field, out var value)) merged[field] = value;
+        merged["content"] = JsonSerializer.SerializeToElement(MessageContent(current));
+        merged["toolSteps"] = JsonSerializer.SerializeToElement(MessageSteps(current));
+        merged["updatedAt"] = JsonSerializer.SerializeToElement(MessageUpdatedAt(current));
+        var liveProjection = ProjectionFor(current);
+        merged["toolStepWindow"] = JsonSerializer.SerializeToElement(new { totalSteps = liveProjection.TotalSteps,
+            hasMore = liveProjection.FirstOrdinal > 0, beforeOrdinal = liveProjection.FirstOrdinal });
         merged["revision"] = JsonSerializer.SerializeToElement(Math.Max(currentRevision, incomingRevision));
         // Artifact ingestion can finish independently of a text snapshot. Keep
         // new snapshot artifacts without discarding already delivered originals.
@@ -441,10 +439,10 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         foreach (var (id, pending) in _pendingUserMessages.ToArray())
         {
             if (S(pending, "sessionId") != _session.ToString()) continue;
-            if ((S(pending, "steeringInputId") is { Length: > 0 } inputId && _messages.Values.Any(message => Items(message, "toolSteps").Any(step => S(step, "id") == "steering-" + inputId)))
+            if ((S(pending, "steeringInputId") is { Length: > 0 } inputId && _messages.Values.Any(message => MessageSteps(message).Any(step => S(step, "id") == "steering-" + inputId)))
                 || _messages.Values.Any(message => !S(message, "id").StartsWith("pending:", StringComparison.Ordinal) && S(message, "role") == "user"
                 && S(message, "sessionId") == S(pending, "sessionId")
-                && Missum.Core.Chat.ChatContentSanitizer.Sanitize(S(message, "content")) == Missum.Core.Chat.ChatContentSanitizer.Sanitize(S(pending, "content"))
+                && Missum.Core.Chat.ChatContentSanitizer.Sanitize(MessageContent(message)) == Missum.Core.Chat.ChatContentSanitizer.Sanitize(S(pending, "content"))
                 && MessageCreatedAt(message) >= MessageCreatedAt(pending)))
             { _pendingUserMessages.Remove(id); _messages.Remove(id); }
             else _messages[id] = pending;
@@ -482,6 +480,13 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         _lastConversationOffset = 0;
         _renderedMessageSources.Clear();
         _sourceMessageSignatures.Clear();
+        _liveMessageProjections.Clear();
+        _renderedMessageVersions.Clear();
+        _toolStepWindows.Clear();
+        _blockPagesLoading.Clear();
+        _messageAuxiliarySteps.Clear();
+        foreach (var state in _virtualMessages.Values) state.Generation++;
+        _virtualMessages.Clear();
         _messageBlocks.Clear();
         _thinkingIndicators.Clear();
         _messageActionViews.Clear();
@@ -527,6 +532,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         {
             var id = S(message, "id");
             if (_renderedMessageSources.TryGetValue(id, out var renderedSource) && renderedSource.Equals(message)
+                && _renderedMessageVersions.GetValueOrDefault(id) == MessageVersion(message)
                 && _messageViews.TryGetValue(id, out var unchanged))
             {
                 if (MessagesPanel.Children.IndexOf(unchanged.View) != index)
@@ -534,10 +540,11 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                 index++; continue;
             }
             UpdateMessageActions(id, message);
-            var signature = S(message, "content") + S(message, "toolSteps") + S(message, "error") + S(message, "artifacts") + S(message, "status") + S(message, "liveStatus");
+            var signature = MessageVersion(message).ToString(System.Globalization.CultureInfo.InvariantCulture);
             if (_messageViews.TryGetValue(id, out var cached) && cached.Signature == signature)
             {
                 _renderedMessageSources[id] = message;
+                _renderedMessageVersions[id] = MessageVersion(message);
                 if (MessagesPanel.Children.IndexOf(cached.View) != index)
                 { MessagesPanel.Children.Remove(cached.View); MessagesPanel.Children.Insert(index, cached.View); }
                 index++; continue;
@@ -578,6 +585,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             _conversationSelection?.TrackSelectionWithin(bubble);
             _messageViews[id] = (signature, bubble); index++;
             _renderedMessageSources[id] = message;
+            _renderedMessageVersions[id] = MessageVersion(message);
         }
         if (deferLayout) QueueConversationLayoutProjection(follow);
         else
@@ -606,6 +614,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             if (_disposed || owner != ConversationViewKey) return;
             RunUiCallback("Conversation.LayoutProjection", () =>
             {
+                RefreshVirtualConversationViewport();
                 RenderPromptTimeline(layoutCurrent: true);
                 if (follow && !_messageWindowLoading && _conversationSelection?.IsSelecting != true
                     && Math.Abs(ConversationScroll.VerticalOffset - offset) < 1)
@@ -635,7 +644,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     {
         var id = S(message, "id");
         if (_sourceMessageSignatures.TryGetValue(id, out var cached) && cached.Source.Equals(message)) return cached.Signature;
-        var signature = string.Join("|", Items(message, "toolSteps").Where(IsSourceToolStep)
+        var signature = string.Join("|", MessageSteps(message).Where(IsSourceToolStep)
             .Select(step => S(step, "id") + S(step, "updatedAt")
                 + S(step, "inputJson").GetHashCode(StringComparison.Ordinal) + S(step, "outputJson").GetHashCode(StringComparison.Ordinal)));
         _sourceMessageSignatures[id] = (message, signature);
@@ -728,6 +737,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         RunUiCallback("Conversation.ViewChanged", () =>
         {
             SyncOuterScroll();
+            RefreshVirtualConversationViewport();
             UpdatePromptTimelineSelection();
             if (!e.IsIntermediate && !LoadMessageBlocksOnUpwardScroll() && ConversationScroll.VerticalOffset < 240 && !_scrollNewSessionToLatest)
                 _ = LoadEarlierMessagesAsync();
@@ -794,7 +804,8 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
 
         ModelButton.IsEnabled = ActiveSubagent is null;
         SendIcon.Glyph = stop ? "\uE71A" : "\uE74A";
-        var label = preparingContinuation ? "Vorbereitung stoppen" : stop ? "Aktivität stoppen" : _running ? "Antwort umlenken" : "Nachricht senden";
+        var label = ActiveSubagent?.IsLegacyDeepResearch == true ? "Historische Recherche · Steuerung im Hauptchat"
+            : preparingContinuation ? "Vorbereitung stoppen" : stop ? "Aktivität stoppen" : _running ? "Antwort umlenken" : "Nachricht senden";
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(SendButton, label);
         ToolTipService.SetToolTip(SendButton, label);
         UpdateSidebarActivity();
@@ -1197,7 +1208,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     }
     public async Task DisposeAsync()
     {
-        var publications = _publicationViews.Values.ToArray();
+        var publications = _publicationPool.Values.Concat(_publicationViews.Values).Distinct().ToArray();
         Dispose();
         // Keep the window/dispatcher alive until pending WebView2 operations
         // have settled and every retained browser has closed on its UI thread.

@@ -9,6 +9,7 @@ namespace Missum.Ai.Server.Core.Data;
 
 public sealed class MissumAiDatabase : IDisposable
 {
+    private const int CurrentSchemaVersion = 3;
     private readonly MissumAiServerOptions _options;
     private readonly JsonSerializerOptions _jsonOptions = MissumAiProtocol.CreateJsonOptions();
     private readonly SemaphoreSlim _initializeGate = new(1, 1);
@@ -42,12 +43,28 @@ public sealed class MissumAiDatabase : IDisposable
             Directory.CreateDirectory(_options.LogDirectory);
 
             await using var connection = await OpenConnectionCoreAsync(cancellationToken).ConfigureAwait(false);
+            await using var versionCommand = connection.CreateCommand();
+            versionCommand.CommandText = "PRAGMA user_version;";
+            var previousVersion = Convert.ToInt32(await versionCommand.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture);
+            if (previousVersion > CurrentSchemaVersion)
+                throw new InvalidDataException("The gateway database was created by a newer Missum version.");
             await using var command = connection.CreateCommand();
             // WAL belongs to the database, not an individual connection. Do
             // not ask every concurrent status reader to change journal mode.
             command.CommandText = "PRAGMA journal_mode=WAL;\n" + Schema;
             _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-            await ValidateDatabaseAsync(connection, cancellationToken).ConfigureAwait(false);
+            if (previousVersion < CurrentSchemaVersion)
+            {
+                // Full scans belong to a real migration/explicit diagnostic,
+                // not every normal startup of an overnight-sized run journal.
+                await ValidateDatabaseAsync(connection, cancellationToken).ConfigureAwait(false);
+                versionCommand.CommandText = """
+                    INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+                    VALUES(3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+                    PRAGMA user_version=3;
+                    """;
+                _ = await versionCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
             _initialized = true;
         }
         finally
@@ -63,6 +80,13 @@ public sealed class MissumAiDatabase : IDisposable
     }
 
     public JsonSerializerOptions JsonOptions => _jsonOptions;
+
+    public async Task ValidateIntegrityAsync(CancellationToken cancellationToken = default)
+    {
+        using var maintenance = await EnterMaintenanceAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await ValidateDatabaseAsync(connection, cancellationToken).ConfigureAwait(false);
+    }
 
     /// <summary>Serialize the two potentially long startup maintenance transactions without blocking a SQLite worker.</summary>
     internal async Task<IDisposable> EnterMaintenanceAsync(CancellationToken cancellationToken)
@@ -207,6 +231,21 @@ public sealed class MissumAiDatabase : IDisposable
             checkpoint_json TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS runtime_context_state (
+            singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+            cache_epoch TEXT NOT NULL
+        );
+        INSERT OR IGNORE INTO runtime_context_state(singleton, cache_epoch) VALUES(1, 'project-context-v1');
+        CREATE TABLE IF NOT EXISTS session_context_heads (
+            session_id TEXT NOT NULL,
+            workspace_key TEXT NOT NULL COLLATE NOCASE,
+            role TEXT NOT NULL,
+            project_key TEXT NOT NULL,
+            cache_epoch TEXT NOT NULL,
+            run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+            PRIMARY KEY(session_id, workspace_key, role)
+        );
+
         CREATE TABLE IF NOT EXISTS run_checkpoints (
             run_id TEXT PRIMARY KEY,
             checkpoint_json TEXT NOT NULL,
@@ -265,6 +304,5 @@ public sealed class MissumAiDatabase : IDisposable
         VALUES(1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
         INSERT OR IGNORE INTO schema_migrations(version, applied_at)
         VALUES(2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
-        PRAGMA user_version = 2;
         """;
 }

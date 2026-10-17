@@ -1,4 +1,4 @@
-using Missum.Core.Models;
+﻿using Missum.Core.Models;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -7,6 +7,14 @@ namespace Missum.Infrastructure.Repositories;
 
 public sealed partial class SqliteConversationSnapshotRepository
 {
+    private const string SourceToolRowsSql = """
+        SELECT step.message_id,step.step_json AS value FROM chat_tool_steps step JOIN chat_messages owner ON owner.id=step.message_id
+        WHERE owner.session_id=$session AND (step.tool_name LIKE 'web.%' OR step.tool_name LIKE 'research.%' OR step.tool_name='subagent')
+        UNION ALL
+        SELECT owner.id,s.value FROM chat_messages owner,json_each(owner.tool_steps_json) s
+        WHERE owner.session_id=$session AND NOT EXISTS(SELECT 1 FROM chat_tool_step_messages normalized WHERE normalized.message_id=owner.id)
+        """;
+
     public async Task<IReadOnlyList<ConversationSource>> GetSourcesAsync(Guid sessionId, CancellationToken cancellationToken = default)
     {
         await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
@@ -14,12 +22,12 @@ public sealed partial class SqliteConversationSnapshotRepository
         // JSON receipts may embed another JSON string (including inline child
         // transcripts). Traverse those inside SQLite, returning only source
         // addresses and labels. Closed tool outputs never cross into the UI.
-        command.CommandText = """
+        command.CommandText = $$"""
             WITH RECURSIVE documents(message_id,step_id,tool,at,payload,depth) AS (
                 SELECT m.id,json_extract(s.value,'$.id'),json_extract(s.value,'$.tool'),
                     COALESCE(json_extract(s.value,'$.updatedAt'),json_extract(s.value,'$.startedAt'),m.created_at),
                     s.value,0
-                FROM chat_messages m,json_each(CASE WHEN json_valid(m.tool_steps_json) THEN m.tool_steps_json ELSE '[]' END) s
+                FROM chat_messages m JOIN ({{SourceToolRowsSql}}) s ON s.message_id=m.id
                 WHERE m.session_id=$session AND (json_extract(s.value,'$.tool') LIKE 'web.%'
                     OR json_extract(s.value,'$.tool') LIKE 'research.%' OR json_extract(s.value,'$.tool')='subagent')
                 UNION ALL
@@ -62,10 +70,10 @@ public sealed partial class SqliteConversationSnapshotRepository
         // Older large child receipts point to a lossless sidecar. Read those
         // only on explicit source navigation and project their web receipts;
         // neither their chat bodies nor tool details are returned to the UI.
-        command.CommandText = """
+        command.CommandText = $$"""
             SELECT DISTINCT json_extract(s.value,'$.outputJson')->>'$.subagentStorageKey',
                 json_extract(s.value,'$.outputJson')->>'$.agentId',json_extract(s.value,'$.outputJson')->>'$.runId'
-            FROM chat_messages m,json_each(CASE WHEN json_valid(m.tool_steps_json) THEN m.tool_steps_json ELSE '[]' END) s
+            FROM chat_messages m JOIN ({{SourceToolRowsSql}}) s ON s.message_id=m.id
             WHERE m.session_id=$session AND json_extract(s.value,'$.tool')='subagent'
                 AND json_valid(json_extract(s.value,'$.outputJson'))
                 AND json_extract(s.value,'$.outputJson')->>'$.subagentStorageKey' IS NOT NULL;
@@ -82,7 +90,8 @@ public sealed partial class SqliteConversationSnapshotRepository
                 || !key.Equals(Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sessionId + ":" + run + ":" + agent))), StringComparison.OrdinalIgnoreCase)) continue;
             try
             {
-                await using var stream = File.OpenRead(Path.Combine(Path.GetDirectoryName(database.DatabasePath)!, "Subagents", key + ".json"));
+                var transcriptPath = Path.Combine(Path.GetDirectoryName(database.DatabasePath)!, "Subagents", key + ".json");
+                await using var stream = File.OpenRead(transcriptPath);
                 using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken).ConfigureAwait(false);
                 var root = document.RootElement;
                 if (ReadSourceText(root, "sessionId") != sessionId.ToString("D") || ReadSourceText(root, "agentId") != agent
@@ -100,6 +109,29 @@ public sealed partial class SqliteConversationSnapshotRepository
                             if (step.TryGetProperty("inputJson", out var input)) CollectExternalSources(input, ReadSourceText(step, "id"), tool, at, sources, 0);
                             if (step.TryGetProperty("outputJson", out var output)) CollectExternalSources(output, ReadSourceText(step, "id"), tool, at, sources, 0);
                         }
+                // New transcript journals append only changed tool receipts; their source URLs remain available without hydrating a child chat.
+                var journalPath = transcriptPath + ".journal.jsonl";
+                if (File.Exists(journalPath))
+                {
+                    using var journal = new StreamReader(journalPath, Encoding.UTF8);
+                    while (await journal.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
+                    {
+                        if (line.Length == 0) continue;
+                        using var patch = JsonDocument.Parse(line);
+                        if (!patch.RootElement.TryGetProperty("metadata", out var metadata)
+                            || ReadSourceText(metadata, "sessionId") != sessionId.ToString("D") || ReadSourceText(metadata, "runId") != run
+                            || !patch.RootElement.TryGetProperty("tools", out var changes) || changes.ValueKind != JsonValueKind.Array) continue;
+                        foreach (var change in changes.EnumerateArray())
+                        {
+                            if (!change.TryGetProperty("step", out var step)) continue;
+                            var tool = ReadSourceText(step, "tool");
+                            if (!tool.StartsWith("web.", StringComparison.Ordinal) && !tool.StartsWith("research.", StringComparison.Ordinal)) continue;
+                            var at = DateTimeOffset.TryParse(ReadSourceText(step, "updatedAt"), out var timestamp) ? timestamp : DateTimeOffset.MinValue;
+                            if (step.TryGetProperty("inputJson", out var input)) CollectExternalSources(input, ReadSourceText(step, "id"), tool, at, sources, 0);
+                            if (step.TryGetProperty("outputJson", out var output)) CollectExternalSources(output, ReadSourceText(step, "id"), tool, at, sources, 0);
+                        }
+                    }
+                }
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException) { }
         }

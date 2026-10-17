@@ -47,13 +47,14 @@ public sealed partial class RunProcessor
         if (source.Snapshot.State is not (RunState.Cancelled or RunState.Interrupted or RunState.Failed))
             return SubagentFailure("subagent.source_still_running",
                 "Der ursprüngliche Subagent ist noch aktiv. Warte auf seinen tatsächlichen Endzustand; es wurde kein paralleler Fortsetzungsversuch gestartet.");
-        if (await _repository.GetSubagentRunsAsync(activeOnly: true, cancellationToken: token).ConfigureAwait(false) is { Count: > 0 })
-            return SubagentFailure("subagent.gpu_busy",
-                "GPU1 bearbeitet bereits einen Subagenten. Der gespeicherte abgebrochene Auftrag bleibt erhalten und wurde noch nicht fortgesetzt.");
         var availability = await _modelRuntime.GetSubagentAvailabilityAsync(selection.ModelId, selection.ContextLength, token).ConfigureAwait(false);
         if (!availability.Allowed)
             return SubagentFailure("subagent.insufficient_vram", availability.Reason
-                ?? "Das aktuelle Modell lässt derzeit keinen GPU1-Subagenten zu; der frühere Auftrag bleibt gespeichert.");
+                ?? "Das aktuelle Modell lässt derzeit keinen Subagenten zu; der frühere Auftrag bleibt gespeichert.");
+        if (availability.GpuIndex == 1 && (await _repository.GetSubagentRunsAsync(activeOnly: true,
+                cancellationToken: token).ConfigureAwait(false)).Any(static child => child.Request.Subagent?.GpuIndex is null or 1))
+            return SubagentFailure("subagent.gpu_busy",
+                "Die parallele GPU bearbeitet bereits einen Subagenten. Der gespeicherte Auftrag bleibt erhalten.");
         var sourceCheckpoint = await _repository.GetSubagentContinuationCheckpointAsync(sourceRunId, token).ConfigureAwait(false);
         if (sourceCheckpoint is null || sourceCheckpoint.Messages.Count == 0)
             return SubagentFailure("subagent.continuation_checkpoint_missing",
@@ -113,7 +114,8 @@ public sealed partial class RunProcessor
         {
             return SubagentPreparationFailure(parentRunId, exception);
         }
-        childRequest = childRequest with { Subagent = childRequest.Subagent! with { RuntimeInstanceId = prepared.InstanceId } };
+        childRequest = childRequest with { Subagent = childRequest.Subagent! with
+            { RuntimeInstanceId = prepared.InstanceId, GpuIndex = prepared.GpuIndex } };
         var checkpoint = sourceCheckpoint with
         {
             Messages = childMessages,
@@ -211,7 +213,7 @@ public sealed partial class RunProcessor
             state = child.State, runId = child.RunId, agentId = request.Subagent!.AgentId,
             resumedFromRunId = sourceRunId, task = request.Subagent.AssignedTask,
             sessionId = request.SessionId, modelId = child.SelectedModel ?? request.PreferredGeneralModelId,
-            gpuIndex = 1, errorCode = child.ErrorCode,
+            gpuIndex = request.Subagent.GpuIndex ?? 1, errorCode = child.ErrorCode,
             instruction = "Der tatsächliche Zustand dieses Fortsetzungsversuchs gilt. Arbeite parallel an deiner eigenen Aufgabe; verwende subagent.wait mit dieser runId für das neue Ergebnis. Abgeschlossene Teilaufgaben werden nicht erneut ausgeführt.",
         }, MissumAiProtocol.CreateJsonOptions()), [],
             Succeeded: child.State is not (RunState.Cancelled or RunState.Interrupted or RunState.Failed),

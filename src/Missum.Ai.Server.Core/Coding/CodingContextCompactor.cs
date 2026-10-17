@@ -38,6 +38,7 @@ internal static class CodingContextCompactor
         var currentRequestIndex = -1;
         for (var index = messages.Count - 1; index >= 0; index--)
             if (messages[index].Role == "user" && messages[index].Content?.StartsWith(MemoryMarker, StringComparison.Ordinal) != true
+                && !ProjectContextPolicy.IsBase(messages[index]) && !ProjectContextPolicy.IsUpdate(messages[index])
                 && !ContextPlanner.IsRuntimeContext(messages[index])
                 && !ContextPlanner.IsNativeRuntimeInstruction(messages[index])
                 && !ModelRuntimeClient.IsLanguageReminder(messages[index])
@@ -82,7 +83,7 @@ internal static class CodingContextCompactor
             if (InstructionIdentity(messages[index]) is { } identity) latestInstructions[identity] = index;
         }
         var archive = messages.Take(cut).Where((message, index) => message.Role != "system" && index != currentRequestIndex
-            && !ContextPlanner.IsRuntimeContext(message) && InstructionIdentity(message) is null
+            && !ContextPlanner.IsRuntimeContext(message) && InstructionIdentity(message) is null && !ProjectContextPolicy.IsBase(message)
             && !ModelRuntimeClient.IsLanguageReminder(message)
             && message.Content?.StartsWith(CodingEvidenceContext.Marker, StringComparison.Ordinal) != true).ToArray();
         if (archive.Length == 0) return null;
@@ -102,7 +103,7 @@ internal static class CodingContextCompactor
         // Only the leading policy belongs before the conversation. Dynamic
         // budget/repair instructions must keep their chronological position;
         // moving them forward would rewrite the cached native system prefix.
-        var initialSystemCount = messages.TakeWhile(message => message.Role == "system").Count();
+        var initialSystemCount = messages.TakeWhile(message => message.Role == "system" || ProjectContextPolicy.IsBase(message)).Count();
         var preservedContext = latestInstructions.Values.Append(latestRuntimeIndex)
             .Where(index => index >= initialSystemCount && index < cut).Distinct().Order().Select(index => messages[index]).ToArray();
         return new CodingCompactionPlan(

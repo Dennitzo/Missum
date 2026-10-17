@@ -18,7 +18,7 @@ public sealed partial class ModelRuntimeClient
                 cancellationToken: CancellationToken.None);
     }
 
-    internal static string BuildSessionCacheKey(string sessionId, string role, string? workspacePath = null)
+    internal static string BuildSessionCacheKey(string sessionId, string role, string? workspacePath = null, string? projectKey = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
         ArgumentException.ThrowIfNullOrWhiteSpace(role);
@@ -26,7 +26,10 @@ public sealed partial class ModelRuntimeClient
         // this identity. The supervisor separately binds snapshots to the exact
         // native model, binary, template and cache configuration.
         var workspace = (workspacePath ?? string.Empty).Trim().Replace('\\', '/').TrimEnd('/').ToUpperInvariant();
-        var scope = JsonSerializer.Serialize(new[] { sessionId, role.Trim().ToLowerInvariant(), workspace });
-        return "missum-session-v2-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(scope))).ToLowerInvariant();
+        var scope = JsonSerializer.Serialize(new[] { sessionId, role.Trim().ToLowerInvariant(), workspace, projectKey });
+        if (projectKey is null)
+            scope = JsonSerializer.Serialize(new[] { sessionId, role.Trim().ToLowerInvariant(), workspace });
+        return (projectKey is null ? "missum-session-v2-" : "missum-project-session-v1-")
+            + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(scope))).ToLowerInvariant();
     }
 }

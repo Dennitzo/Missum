@@ -741,7 +741,7 @@ public sealed partial class AgentToolExecutor
         await using var lease = await _scheduler.AcquireAsync(
             "vision",
             runId,
-            runtimeInstanceId is null ? GpuLeaseMode.Exclusive : GpuLeaseMode.CodingSecondary,
+            MediaInferenceLeaseMode(runtimeInstanceId),
             cancellationToken).ConfigureAwait(false);
         if (runtimeInstanceId is null)
             context.ModelId = await _workers.PrepareLmModelAsync(modelId, modelId == _options.VisionModelId ? _options.VisionContextLength : 0, cancellationToken).ConfigureAwait(false);
@@ -793,7 +793,7 @@ public sealed partial class AgentToolExecutor
         await using var lease = await _scheduler.AcquireAsync(
             "audio-analysis",
             runId,
-            runtimeInstanceId is null ? GpuLeaseMode.Exclusive : GpuLeaseMode.CodingSecondary,
+            MediaInferenceLeaseMode(runtimeInstanceId),
             cancellationToken).ConfigureAwait(false);
         var requestedModel = string.IsNullOrWhiteSpace(selectedModelId) ? _options.GeneralModelId : selectedModelId;
         string modelId;
@@ -801,7 +801,7 @@ public sealed partial class AgentToolExecutor
             modelId = await _workers.PrepareLmModelAsync(requestedModel, requestedModel == _options.GeneralModelId ? _options.GeneralContextLength : 0, cancellationToken).ConfigureAwait(false);
         else
         {
-            // Keep the canonical base model identity separate from its GPU1
+            // Keep the canonical base model identity separate from its delegated
             // execution instance. Preparing the base through the ordinary
             // worker path could change residency while the parent is active.
             var status = await _modelRuntime.GetStatusAsync(cancellationToken).ConfigureAwait(false);
@@ -838,7 +838,7 @@ public sealed partial class AgentToolExecutor
         await using var lease = await _scheduler.AcquireAsync(
             "video-audio-fusion",
             runId,
-            runtimeInstanceId is null ? GpuLeaseMode.Exclusive : GpuLeaseMode.CodingSecondary,
+            MediaInferenceLeaseMode(runtimeInstanceId),
             cancellationToken).ConfigureAwait(false);
         if (runtimeInstanceId is null)
             _ = await _workers.PrepareLmModelAsync(modelId, modelId == _options.GeneralModelId ? _options.GeneralContextLength : 0, cancellationToken).ConfigureAwait(false);
@@ -855,6 +855,13 @@ public sealed partial class AgentToolExecutor
             ? throw new InvalidDataException("The general model returned no combined video and audio analysis.")
             : response.Content;
     }
+
+    internal static GpuLeaseMode MediaInferenceLeaseMode(string? runtimeInstanceId) => runtimeInstanceId switch
+    {
+        null => GpuLeaseMode.Exclusive,
+        _ when runtimeInstanceId.EndsWith("@subagent", StringComparison.Ordinal) => GpuLeaseMode.CodingSecondary,
+        _ => GpuLeaseMode.Shared,
+    };
 
     internal static IReadOnlyList<LmChatMessage> BuildVideoAndAudioFusionMessages(
         string prompt,
@@ -1045,6 +1052,13 @@ public sealed partial class AgentToolExecutor
     {
         ArgumentNullException.ThrowIfNull(response);
         var searchableContent = RemoveResearchBoilerplate(response.Content);
+        var fragmentScope = response.FragmentStatus switch
+        {
+            "resolved" => " Der URL-Anker wurde aufgelöst; diese Textfenster stammen aus seinem HTML-Zielbereich.",
+            "not_found" => " Der URL-Anker konnte nicht aufgelöst werden; die Textfenster beziehen sich auf die vollständige Seite.",
+            "unsupported" => " Der URL-Anker wird für dieses Medienformat nicht aufgelöst; die Textfenster beziehen sich auf das vollständige Dokument.",
+            _ => "",
+        };
         var queries = ReadFetchQueries(arguments);
         if (queries.Length == 0)
         {
@@ -1061,10 +1075,11 @@ public sealed partial class AgentToolExecutor
                 MissingQueries: [],
                 Preview: searchableContent[..previewLength].Trim(),
                 RequiresTargetedFetch: true,
-                Instruction: "Rufe web.fetch für dieselbe URL erneut mit query oder queries auf. Der vollständige Quelltext wird nicht in den Modellkontext geladen.",
+                Instruction: "Rufe web.fetch für dieselbe URL erneut mit query oder queries auf. Der vollständige Quelltext wird nicht in den Modellkontext geladen." + fragmentScope,
                 response.IsUntrusted,
                 response.RetrievedAt,
-                response.RedirectChain);
+                response.RedirectChain,
+                response.FragmentStatus);
         }
 
         var maximumResults = GetInt(arguments, "maximumResults", 8);
@@ -1182,12 +1197,13 @@ public sealed partial class AgentToolExecutor
             missingQueries,
             Preview: null,
             RequiresTargetedFetch: false,
-            Instruction: found
+            Instruction: (found
                 ? "Verwende ausschließlich die gelieferten Trefferfenster als Webbeleg. Suche bei fehlendem Kontext mit einer weiteren konkreten Phrase."
-                : "Keine der angeforderten Phrasen wurde in der Quelle gefunden. Wiederhole nicht dieselbe Suche; wähle eine andere Phrase oder Quelle.",
+                : "Keine der angeforderten Phrasen wurde in der Quelle gefunden. Wiederhole nicht dieselbe Suche; wähle eine andere Phrase oder Quelle.") + fragmentScope,
             response.IsUntrusted,
             response.RetrievedAt,
-            response.RedirectChain);
+            response.RedirectChain,
+            response.FragmentStatus);
     }
 
     internal static string RemoveResearchBoilerplate(string content)
@@ -1426,7 +1442,8 @@ internal sealed record TargetedWebFetchResult(
     string Instruction,
     bool IsUntrusted,
     DateTimeOffset RetrievedAt,
-    IReadOnlyList<string> RedirectChain);
+    IReadOnlyList<string> RedirectChain,
+    string? FragmentStatus = null);
 
 internal sealed record TargetedWebFetchMatch(
     string Query,

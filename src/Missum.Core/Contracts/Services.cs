@@ -39,6 +39,15 @@ public interface IChatRepository
     Task DeleteEmptySessionGroupAsync(Guid groupId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<ChatMessage>> ListMessagesAsync(Guid sessionId, CancellationToken cancellationToken = default);
     Task<ChatMessage?> GetMessageAsync(Guid messageId, CancellationToken cancellationToken = default);
+    async Task<ChatMessage?> GetMessageTextAsync(Guid messageId, CancellationToken cancellationToken = default) =>
+        await GetMessageAsync(messageId, cancellationToken).ConfigureAwait(false) is { } message ? message with { ToolSteps = [] } : null;
+    async Task<ChatMessage?> GetFirstUserMessageAsync(Guid sessionId, CancellationToken cancellationToken = default) =>
+        (await ListMessagesAsync(sessionId, cancellationToken).ConfigureAwait(false)).FirstOrDefault(message => message.Role == ChatRole.User);
+    async Task<IReadOnlyList<ChatMessage>> ListContextMessagesAsync(Guid sessionId, int maximumMessages = 256,
+        ConversationCursor? before = null, CancellationToken cancellationToken = default) =>
+        (await ListMessagesAsync(sessionId, cancellationToken).ConfigureAwait(false))
+            .Where(message => before is null || message.CreatedAt < before.CreatedAt || message.CreatedAt == before.CreatedAt && message.Id.CompareTo(before.Id) < 0)
+            .TakeLast(Math.Clamp(maximumMessages, 1, 512)).Select(message => message with { ToolSteps = [] }).ToArray();
     Task<ChatTurn> AddTurnAsync(
         Guid sessionId,
         string userContent,
@@ -57,6 +66,10 @@ public interface IChatRepository
     Task UpdateMessageWithToolStepsAsync(Guid messageId, string content, MessageStatus status, IReadOnlyList<AssistantToolStep> toolSteps, CancellationToken cancellationToken = default);
     Task SetMessageContextSummaryAsync(Guid messageId, string contextSummary, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<AssistantToolStep>> SaveToolStepAsync(Guid messageId, AssistantToolStep toolStep, CancellationToken cancellationToken = default);
+    async Task<AssistantToolStep> SaveToolStepDeltaAsync(Guid messageId, AssistantToolStep toolStep,
+        CancellationToken cancellationToken = default) =>
+        (await SaveToolStepAsync(messageId, toolStep, cancellationToken).ConfigureAwait(false)).First(step => step.Id == toolStep.Id);
+    Task NormalizeToolStepsAsync(Guid messageId, CancellationToken cancellationToken = default) => Task.CompletedTask;
     Task<SessionContextPreparation?> GetSessionContextPreparationAsync(string cacheKey, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<SessionContextPreparation>> ListSessionContextPreparationsAsync(
         Guid sessionId,
@@ -75,7 +88,39 @@ public interface IConversationSnapshotRepository
         CancellationToken cancellationToken = default);
     Task<AssistantToolStep?> GetToolStepAsync(Guid sessionId, Guid messageId, string stepId,
         CancellationToken cancellationToken = default);
+    async Task<AssistantToolStep?> GetSubagentReceiptAsync(Guid sessionId, Guid messageId, string agentId,
+        CancellationToken cancellationToken = default)
+    {
+        var snapshot = await GetAsync(sessionId, cancellationToken).ConfigureAwait(false);
+        foreach (var step in snapshot?.Messages.FirstOrDefault(message => message.Id == messageId)?.ToolSteps?.Reverse() ?? [])
+        {
+            if (step.Tool != "subagent" || step.OutputJson is null) continue;
+            using var document = System.Text.Json.JsonDocument.Parse(step.OutputJson);
+            if (document.RootElement.TryGetProperty("agentId", out var value) && value.GetString() == agentId) return step;
+        }
+        return null;
+    }
     Task<IReadOnlyList<ConversationSource>> GetSourcesAsync(Guid sessionId, CancellationToken cancellationToken = default);
+    async Task<IReadOnlyList<ChatMessage>> GetAuxiliaryMessagesAsync(Guid sessionId, CancellationToken cancellationToken = default) =>
+        (await GetAsync(sessionId, cancellationToken).ConfigureAwait(false))?.Messages
+            .Select(message => message with { Content = "", ToolSteps = (message.ToolSteps ?? [])
+                .Where(step => step.Tool is "subagent" or "assistant.continuation").ToArray() })
+            .Where(message => message.ToolSteps is { Count: > 0 }).ToArray() ?? [];
+    async Task<ConversationToolStepPage?> GetToolStepsPageAsync(Guid sessionId, Guid messageId, int pageSize = 64,
+        long? beforeOrdinal = null, CancellationToken cancellationToken = default)
+    {
+        var snapshot = await GetAsync(sessionId, cancellationToken).ConfigureAwait(false);
+        var steps = snapshot?.Messages.FirstOrDefault(message => message.Id == messageId)?.ToolSteps;
+        if (steps is null) return null;
+        var end = (int)Math.Min(beforeOrdinal ?? steps.Count, steps.Count);
+        var start = Math.Max(0, end - Math.Clamp(pageSize, 1, 128));
+        return new(messageId, steps.Skip(start).Take(end - start).ToArray(), new(steps.Count, start > 0, start));
+    }
+}
+
+public interface IStreamingConversationRepository
+{
+    Task CommitStreamAsync(ConversationStreamBatch batch, CancellationToken cancellationToken = default);
 }
 
 public interface IPromptTriggerRepository

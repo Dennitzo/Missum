@@ -52,6 +52,7 @@ public sealed class ScientificPresentationCoordinator(ScientificPublicationServi
         var released = false;
         try
         {
+            await Task.Delay(500, _shutdown.Token).ConfigureAwait(false);
             while (!_shutdown.IsCancellationRequested)
             {
                 lock (state) state.Dirty = false;

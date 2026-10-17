@@ -7,6 +7,13 @@ namespace Missum.Ai.Server.Core.Runs;
 
 public sealed partial class RunProcessor
 {
+    internal static ResearchVerificationLevel ParseResearchVerificationLevel(string? value) => value switch
+    {
+        "multiPath" => ResearchVerificationLevel.MultiPath,
+        "formalWherePossible" => ResearchVerificationLevel.FormalWherePossible,
+        _ => ResearchVerificationLevel.Standard,
+    };
+
     internal static AgentRunCheckpoint ScheduleExplicitDeepResearch(
         AgentRunCheckpoint checkpoint,
         string runId,

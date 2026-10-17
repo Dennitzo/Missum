@@ -20,6 +20,14 @@ public sealed class MissumAiClient : IDisposable
 
     public Uri? BaseAddress => _httpClient.BaseAddress;
 
+    public Task<ProjectContextSummarizeResult> SummarizeProjectContextAsync(ProjectContextSummarizeRequest request,
+        CancellationToken cancellationToken = default) =>
+        PostAsync<ProjectContextSummarizeRequest, ProjectContextSummarizeResult>("v1/project-context/summarize", request, cancellationToken);
+
+    public Task<ContextCacheResetResult> ResetContextCacheAsync(ContextCacheResetRequest request,
+        CancellationToken cancellationToken = default) =>
+        PostAsync<ContextCacheResetRequest, ContextCacheResetResult>("v1/context/cache/reset", request, cancellationToken);
+
     public MissumAiClient(HttpClient httpClient, string? clientId = null, bool ownsHttpClient = false, TimeSpan? streamIdleTimeout = null)
     {
         _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));

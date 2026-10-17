@@ -14,14 +14,23 @@ public sealed class StagedResearchUserSourceTests
     private static readonly JsonSerializerOptions Json = MissumAiProtocol.CreateJsonOptions();
 
     [Fact]
-    public void DirectTaskUrlsAreBoundedDeduplicatedAndStripCitationPunctuationAndFragments()
+    public void DirectTaskUrlsKeepSpecificAnchorsWhileDeduplicatingPagesAndStrippingCitationPunctuation()
     {
         var urls = StagedWebResearchPipeline.ReadUserProvidedUrls(
             $"Prüfe [{Pathlib}]({Pathlib}#pathlib.Path.exists), dann <{OsPath}>. "
             + "Ignoriere file:///C:/secret.txt, javascript:alert(1), https://name:secret@example.org/ und http://localhost/admin.");
-        Assert.Equal([Pathlib, OsPath], urls);
+        Assert.Equal([Pathlib + "#pathlib.Path.exists", OsPath], urls);
         Assert.Equal(6, StagedWebResearchPipeline.ReadUserProvidedUrls(string.Join(' ',
             Enumerable.Range(0, 12).Select(index => $"https://example.org/reference/{index}"))).Count);
+    }
+
+    [Theory]
+    [InlineData(Pathlib, Pathlib + "#pathlib.Path.exists", Pathlib + "#pathlib.Path.exists")]
+    [InlineData(Pathlib + "#pathlib.Path.is_file", Pathlib + "#pathlib.Path.exists", Pathlib + "#pathlib.Path.is_file")]
+    [InlineData(OsPath, Pathlib + "#pathlib.Path.exists", OsPath)]
+    public void OriginalFragmentIsRestoredOnlyWhenTheSameFetchTargetLostIt(string selected, string original, string expected)
+    {
+        Assert.Equal(expected, StagedWebResearchPipeline.PreserveFetchTargetFragment(selected, original));
     }
 
     [Theory]

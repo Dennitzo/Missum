@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
@@ -10,7 +10,7 @@ using Missum.Core.Models;
 namespace Missum.App.Services;
 
 /// <summary>A session-scoped child transcript, persisted with its parent's delegation receipt.</summary>
-public sealed record SubagentChatState(
+public sealed partial record SubagentChatState(
     string AgentId, string RunId, string ParentRunId, Guid SessionId, string Title, string Status,
     ChatMessage UserMessage, ChatMessage AssistantMessage,
     long LastEventId = 0, string? Model = null, int? ContextUsed = null, int? ContextLimit = null,
@@ -23,13 +23,18 @@ public sealed record SubagentChatState(
     IReadOnlyList<string>? AuthorizedConsumerRunIds = null,
     int? ProcessedPromptTokens = null, int? TotalPromptTokens = null, double? PromptProgress = null,
     [property: JsonIgnore] bool TranscriptDeferred = false,
-    [property: JsonIgnore] Guid? ParentMessageId = null)
+    [property: JsonIgnore] Guid? ParentMessageId = null,
+    string Kind = "subagent", string? OriginToolStepId = null, long DeepResearchSequence = 0, Guid? OriginMessageId = null,
+    long TranscriptRevision = 0, int? GpuIndex = null)
 {
     internal const string ReceiptTool = "subagent";
     internal const string CompletionTool = "subagent.completed";
     internal string ReceiptId => StoredReceiptId ?? "subagent:" + AgentId + ":" + RunId;
     internal string CompletionReceiptId => "subagent-completed:" + AgentId + ":" + RunId;
+    [JsonIgnore] internal IReadOnlyDictionary<Guid, ConversationToolStepWindow>? ToolStepWindows { get; init; }
     public bool IsRunning => Status is "queued" or "running" or "waitingForClient";
+    [JsonIgnore] public bool IsLegacyDeepResearch => AgentId.StartsWith(DeepResearchAgentPrefix, StringComparison.Ordinal)
+        || RunId.StartsWith("deep-research-run:", StringComparison.Ordinal);
     public string LifecycleText => TaskTitle(Title) + " hat die Arbeit begonnen";
     internal static readonly JsonSerializerOptions JsonOptions = MissumAiProtocol.CreateJsonOptions();
 
@@ -60,7 +65,8 @@ public sealed record SubagentChatState(
         return new(data.AgentId, data.RunId, data.ParentRunId, session, title, StateName(data.State),
             new(StableId(data.RunId + ":user"), session, ChatRole.User, data.Task, MessageStatus.Completed, at, at),
             new(StableId(data.RunId + ":assistant"), session, ChatRole.Assistant, "", MessageStatus.Streaming, at, at),
-            Model: data.ModelId, RunStatus: "Aufgabe übernommen", ResultDelivered: false);
+            Model: data.ModelId, RunStatus: "Aufgabe übernommen", ResultDelivered: false,
+            Kind: data.Specialization ?? "subagent", OriginToolStepId: data.OriginToolStepId, GpuIndex: data.GpuIndex);
     }
 
     internal SubagentChatState ObserveLifecycle(SubagentRunEvent data, long eventId, DateTimeOffset at, bool started)
@@ -83,12 +89,15 @@ public sealed record SubagentChatState(
                 PreviousMessageArtifacts = previousArtifacts,
                 LifecycleEventId = eventId,
                 ProjectionRevision = ProjectionRevision,
+                ParentMessageId = ParentMessageId, OriginMessageId = OriginMessageId,
             };
         }
         if (data.ParentRunId != ParentRunId || eventId <= LifecycleEventId) return this;
-        var next = this with { Status = StateName(data.State), Model = data.ModelId, LifecycleEventId = eventId };
+        var next = this with { Status = StateName(data.State), Model = data.ModelId, LifecycleEventId = eventId,
+            Kind = data.Specialization ?? Kind, OriginToolStepId = data.OriginToolStepId ?? OriginToolStepId,
+            GpuIndex = data.GpuIndex ?? GpuIndex };
         if (!next.IsRunning)
-            next = next with { AssistantMessage = Finish(next.AssistantMessage,
+            next = next with { TranscriptRevision = next.TranscriptRevision + 1, AssistantMessage = Finish(next.AssistantMessage,
                 data.State == RunState.Completed ? MessageStatus.Completed
                     : data.State == RunState.Cancelled ? MessageStatus.Cancelled : MessageStatus.Failed, at) };
         return next;
@@ -154,6 +163,7 @@ public sealed record SubagentChatState(
         return next with
         {
             Status = actual, RunStatus = runStatus, RunDetail = null,
+            TranscriptRevision = TranscriptRevision + 1,
             GenerationState = actual, GenerationUpdatedAt = item.CreatedAt,
             AssistantMessage = Finish(next.AssistantMessage, messageStatus, item.CreatedAt),
         };
@@ -169,9 +179,10 @@ public sealed record SubagentChatState(
     }
 
     internal AssistantToolStep? CompletionReceipt(int contentOffset, DateTimeOffset at) =>
-        ResultDelivered is true && Status == "completed" && AssistantMessage.Status == MessageStatus.Completed
+        !IsLegacyDeepResearch && ResultDelivered is true && Status == "completed" && AssistantMessage.Status == MessageStatus.Completed
             ? new(CompletionReceiptId, CompletionTool, "completed", TaskTitle(Title) + " hat die Arbeit beendet",
-                OutputJson: JsonSerializer.Serialize(new { AgentId, RunId, ParentRunId, SessionId, Title, status = "completed", resultDelivered = true }, JsonOptions),
+                OutputJson: JsonSerializer.Serialize(new { AgentId, RunId, ParentRunId, SessionId, Title, Kind, OriginToolStepId,
+                    OriginMessageId, GpuIndex, status = "completed", resultDelivered = true }, JsonOptions),
                 ContentOffset: contentOffset, StartedAt: at, CompletedAt: at, UpdatedAt: at, AgentId: AgentId)
             : null;
 
@@ -220,7 +231,15 @@ public sealed record SubagentChatState(
                 new(StableId(runId + ":user"), parent.SessionId, ChatRole.User, "", MessageStatus.Completed, at, at),
                 new(StableId(runId + ":assistant"), parent.SessionId, ChatRole.Assistant, "", messageStatus, at, at),
                 ResultDelivered: delivered, ProjectionRevision: revision, StoredReceiptId: receipt.Id,
-                TranscriptDeferred: true, ParentMessageId: parent.Id);
+                TranscriptDeferred: true, ParentMessageId: parent.Id,
+                Kind: Text(root, "kind") ?? (agentId.StartsWith(DeepResearchAgentPrefix, StringComparison.Ordinal) ? DeepResearchKind : "subagent"),
+                OriginToolStepId: Text(root, "originToolStepId"),
+                OriginMessageId: Guid.TryParse(Text(root, "originMessageId"), out var originMessage) ? originMessage : null,
+                TranscriptRevision: root.TryGetProperty("transcriptRevision", out var transcriptRevision)
+                    && transcriptRevision.ValueKind == JsonValueKind.Number
+                    && transcriptRevision.TryGetInt64(out var parsedTranscriptRevision) ? parsedTranscriptRevision : 0,
+                GpuIndex: root.TryGetProperty("gpuIndex", out var gpuIndex) && gpuIndex.ValueKind == JsonValueKind.Number
+                    && gpuIndex.TryGetInt32(out var parsedGpu) ? parsedGpu : null);
         }
         catch (JsonException) { return null; }
     }
@@ -244,8 +263,12 @@ public sealed record SubagentChatState(
         (PreviousMessages ?? []).Concat([UserMessage, AssistantMessage]).FirstOrDefault(message => message.Id == messageId)
             ?.ToolSteps?.FirstOrDefault(step => step.Id == stepId);
 
-    internal SubagentChatState ForDisplay() => this with
+    internal SubagentChatState ForDisplay() => ToolStepWindows is not null ? this : this with
     {
+        ToolStepWindows = (PreviousMessages ?? []).Concat([UserMessage, AssistantMessage])
+            .Where(message => message.ToolSteps is { Count: > 0 }).ToDictionary(message => message.Id, message =>
+                new ConversationToolStepWindow(message.ToolSteps!.Count, message.ToolSteps.Count > 64,
+                    message.ToolSteps.Count > 64 ? message.ToolSteps.Count - 64 : null)),
         PreviousMessages = PreviousMessages?.Select(ProjectMessage).ToArray(),
         UserMessage = ProjectMessage(UserMessage), AssistantMessage = ProjectMessage(AssistantMessage),
     };
@@ -253,7 +276,7 @@ public sealed record SubagentChatState(
     private static ChatMessage ProjectMessage(ChatMessage message) => message with
     {
         ToolExecution = null, ContextSummary = null,
-        ToolSteps = message.ToolSteps?.Select(step => step.Tool is "assistant.narration" or "assistant.progress"
+        ToolSteps = message.ToolSteps?.TakeLast(64).Select(step => step.Tool is "assistant.narration" or "assistant.progress"
             ? step : step with
             {
                 Detail = null, InputJson = null, OutputJson = null, PreviewHtml = null,
@@ -261,6 +284,17 @@ public sealed record SubagentChatState(
                 DetailsDeferred = true,
             }).ToArray(),
     };
+
+    internal ConversationToolStepPage? GetToolStepPage(Guid messageId, int pageSize = 64, long? beforeOrdinal = null)
+    {
+        var message = (PreviousMessages ?? []).Concat([UserMessage, AssistantMessage]).FirstOrDefault(item => item.Id == messageId);
+        if (message is null) return null;
+        var steps = message.ToolSteps ?? [];
+        var end = (int)Math.Clamp(beforeOrdinal ?? steps.Count, 0, steps.Count);
+        var start = Math.Max(0, end - Math.Clamp(pageSize, 1, 64));
+        var display = ProjectMessage(message with { ToolSteps = steps.Skip(start).Take(end - start).ToArray() });
+        return new(messageId, display.ToolSteps ?? [], new(steps.Count, start > 0, start));
+    }
 
     private static async Task<SubagentChatState?> DeserializeStoredAsync(string json, string? dataDirectory,
         CancellationToken cancellationToken)
@@ -273,8 +307,7 @@ public sealed record SubagentChatState(
             if (dataDirectory is null || keyValue.ValueKind != JsonValueKind.String) return null;
             var key = keyValue.GetString();
             if (key is not { Length: 64 } || key.Any(character => !char.IsAsciiHexDigit(character))) return null;
-            var text = await File.ReadAllTextAsync(Path.Combine(dataDirectory, "Subagents", key + ".json"), cancellationToken).ConfigureAwait(false);
-            var state = Deserialize(text);
+            var state = await ReadTranscriptAsync(Path.Combine(dataDirectory, "Subagents", key + ".json"), cancellationToken).ConfigureAwait(false);
             return state?.StorageKey == key ? state : null;
         }
         catch (Exception exception) when (exception is JsonException or IOException or UnauthorizedAccessException) { return null; }
@@ -282,23 +315,15 @@ public sealed record SubagentChatState(
 
     internal async Task<string> PersistAsync(string dataDirectory)
     {
-        var json = JsonSerializer.Serialize(this, JsonOptions);
-        if (json.Length < AssistantToolStep.MaximumStructuredJsonCharacters - 1024) return json;
-        // Large transcripts remain lossless without exceeding the repository's tool-result display limit.
+        // Small transcripts remain compatible inline. Growing conversations use bounded append-only patches.
+        if (CanRemainInline()) return JsonSerializer.Serialize(this, JsonOptions);
         var key = StorageKey;
         var directory = Path.Combine(dataDirectory, "Subagents");
         Directory.CreateDirectory(directory);
-        var path = Path.Combine(directory, key + ".json");
-        var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
-        try
-        {
-            await File.WriteAllTextAsync(temporary, json, new UTF8Encoding(false)).ConfigureAwait(false);
-            File.Move(temporary, path, overwrite: true);
-        }
-        finally { if (File.Exists(temporary)) File.Delete(temporary); }
+        await PersistTranscriptAsync(Path.Combine(directory, key + ".json")).ConfigureAwait(false);
         return JsonSerializer.Serialize(new { subagentStorageKey = key, agentId = AgentId, runId = RunId,
             ParentRunId, SessionId, title = Title, status = Status, resultDelivered = ResultDelivered,
-            ProjectionRevision, attemptStartedAt = AssistantMessage.CreatedAt }, JsonOptions);
+            ProjectionRevision, attemptStartedAt = AssistantMessage.CreatedAt, Kind, OriginToolStepId, OriginMessageId, TranscriptRevision, GpuIndex }, JsonOptions);
     }
 
     private string StorageKey => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(SessionId + ":" + RunId + ":" + AgentId))).ToLowerInvariant();
@@ -313,17 +338,17 @@ public sealed record SubagentChatState(
             if (dataDirectory is null || keyValue.ValueKind != JsonValueKind.String) return null;
             var key = keyValue.GetString();
             if (key is not { Length: 64 } || key.Any(character => !char.IsAsciiHexDigit(character))) return null;
-            var state = Deserialize(File.ReadAllText(Path.Combine(dataDirectory, "Subagents", key + ".json")));
+            var state = ReadTranscriptAsync(Path.Combine(dataDirectory, "Subagents", key + ".json"), CancellationToken.None).GetAwaiter().GetResult();
             return state?.StorageKey == key ? state : null;
         }
         catch (Exception exception) when (exception is JsonException or IOException or UnauthorizedAccessException) { return null; }
     }
 
-    private static SubagentChatState? Deserialize(string json)
+    private static SubagentChatState? Deserialize(string json, JsonSerializerOptions? options = null)
     {
         try
         {
-            var state = JsonSerializer.Deserialize<SubagentChatState>(json, JsonOptions);
+            var state = JsonSerializer.Deserialize<SubagentChatState>(json, options ?? JsonOptions);
             return state is not null && !string.IsNullOrWhiteSpace(state.AgentId) && !string.IsNullOrWhiteSpace(state.RunId)
                 && !string.IsNullOrWhiteSpace(state.ParentRunId) && state.SessionId != Guid.Empty
                 && state.UserMessage is { Role: ChatRole.User } user && state.AssistantMessage is { Role: ChatRole.Assistant } assistant
@@ -337,7 +362,7 @@ public sealed record SubagentChatState(
     {
         if (item.RunId != RunId || item.Id <= LastEventId) return this;
         var next = this with { LastEventId = item.Id };
-        var message = AssistantMessage with { UpdatedAt = item.CreatedAt, Revision = AssistantMessage.Revision + 1 };
+        var message = AssistantMessage;
         switch (item.Type)
         {
             case RunEventTypes.TextDelta:
@@ -409,7 +434,11 @@ public sealed record SubagentChatState(
                 message = Finish(message, MessageStatus.Cancelled, item.CreatedAt);
                 break;
         }
-        return next with { AssistantMessage = message };
+        return ReferenceEquals(message, AssistantMessage) ? next : next with
+        {
+            TranscriptRevision = TranscriptRevision + 1,
+            AssistantMessage = message with { UpdatedAt = item.CreatedAt, Revision = AssistantMessage.Revision + 1 },
+        };
     }
 
     internal static ChatMessage AddStep(ChatMessage message, AssistantToolStep incoming)

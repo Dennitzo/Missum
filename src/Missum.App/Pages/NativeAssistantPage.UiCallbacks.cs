@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 
@@ -50,7 +50,7 @@ public sealed partial class NativeAssistantPage
                 _uiRenderTickSmokeProbe?.Invoke();
                 UpdateVoiceVisual();
                 UpdateRunDurations();
-                if (_messagesDirty)
+                if (_messagesDirty && BodyGrid.Visibility == Microsoft.UI.Xaml.Visibility.Visible)
                 {
                     var projectionFaults = _uiCallbackFaultCount;
                     RenderMessagesNow(deferLayout: true);

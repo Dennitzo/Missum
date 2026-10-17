@@ -69,7 +69,8 @@ public sealed partial class RunProcessor
                     await _repository.EnsureSubagentLifecycleEventAsync(RunEventTypes.SubagentCompleted,
                         new(parentRunId, child.RunId, relation.AgentId, relation.AssignedTask,
                             final.SelectedModel ?? request.PreferredGeneralModelId ?? request.PreferredCodingModelId ?? "",
-                            final.State, request.SessionId, final.ErrorCode)).ConfigureAwait(false);
+                            final.State, request.SessionId, final.ErrorCode, relation.Specialization,
+                            relation.OriginToolStepId, relation.GpuIndex)).ConfigureAwait(false);
             }
         }
         if (completions.Count > 0) await Task.WhenAll(completions).ConfigureAwait(false);
@@ -77,7 +78,11 @@ public sealed partial class RunProcessor
 
     internal static string BuildRunSessionCacheKey(RunRequest request, string runId, string role) =>
         ModelRuntimeClient.BuildSessionCacheKey(request.SessionId ?? runId, role,
-            request.Mode == RunMode.Coding ? request.CodingOptions?.WorkspacePath : request.WorkspacePath);
+            request.Mode == RunMode.Coding ? request.CodingOptions?.WorkspacePath : request.WorkspacePath,
+            request.ProjectContext?.ProjectKey);
+
+    internal static GpuLeaseMode SubagentLeaseMode(SubagentRunContext? relation) =>
+        relation is null || relation.GpuIndex == 0 ? GpuLeaseMode.Shared : GpuLeaseMode.CodingSecondary;
 
     /// <summary>Preserves every evaluated parent message and closes outstanding parent-only tool calls.</summary>
     internal static IReadOnlyList<LmChatMessage> ForkSubagentMessages(IReadOnlyList<LmChatMessage> parentMessages, string task,
@@ -138,7 +143,7 @@ public sealed partial class RunProcessor
         List<LmChatMessage> parentMessages, CancellationToken cancellationToken)
     {
         if (parentRequest.Subagent is not null)
-            return SubagentFailure("subagent.recursion_denied", "Der GPU1-Subagent kann keine weiteren Subagenten starten.");
+            return SubagentFailure("subagent.recursion_denied", "Ein Subagent bearbeitet seinen Auftrag selbst und kann keine weiteren Subagenten starten.");
         if (toolName == SubagentToolNames.Wait)
             return await WaitForSubagentAsync(parentRunId, arguments.GetProperty("runId").GetString()!, cancellationToken).ConfigureAwait(false);
         await _subagentSpawnGate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -158,13 +163,14 @@ public sealed partial class RunProcessor
             if (arguments.TryGetProperty("resumeRunId", out _))
                 return await ResumeSubagentAsync(arguments, parentRunId, operationId, parentRequest,
                     selection, parentMessages, cancellationToken).ConfigureAwait(false);
-            var active = await _repository.GetSubagentRunsAsync(activeOnly: true, cancellationToken: cancellationToken).ConfigureAwait(false);
-            if (active.Count > 0)
-                return SubagentFailure("subagent.gpu_busy", "GPU1 bearbeitet bereits einen Subagenten. Arbeite weiter und warte auf dessen Ergebnis.");
             var availability = await _modelRuntime.GetSubagentAvailabilityAsync(selection.ModelId, selection.ContextLength, cancellationToken).ConfigureAwait(false);
             if (!availability.Allowed)
                 return SubagentFailure("subagent.insufficient_vram", availability.Reason ?? "Das aktuelle Modell belegt die für den Subagenten benötigten GPU-Ressourcen.");
+            var active = await _repository.GetSubagentRunsAsync(activeOnly: true, cancellationToken: cancellationToken).ConfigureAwait(false);
+            if (availability.GpuIndex == 1 && active.Any(static child => child.Request.Subagent?.GpuIndex is null or 1))
+                return SubagentFailure("subagent.gpu_busy", "Die parallele GPU bearbeitet bereits einen Subagenten. Arbeite weiter und warte auf dessen Ergebnis.");
             var task = arguments.GetProperty("task").GetString()!;
+            var research = toolName == CodingDeepResearchPipeline.ToolName;
             var identity = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(operationId))).ToLowerInvariant();
             var agentId = "subagent-" + identity[..16];
             var childSessionId = new Guid(Convert.FromHexString(identity[..32])).ToString();
@@ -179,7 +185,9 @@ public sealed partial class RunProcessor
                 // Starting a second staged research pipeline would change its assigned scope.
                 DeepResearch = false,
                 ResearchOptions = null,
-                Subagent = new(parentRunId, agentId, task, parentRequest.SessionId, ParentSessionCacheKey: parentCacheKey),
+                Subagent = new(parentRunId, agentId, task, parentRequest.SessionId, ParentSessionCacheKey: parentCacheKey,
+                    Specialization: research ? "deepResearch" : null, OriginToolStepId: operationId,
+                    ResearchAutonomy: research ? ResearchSubagentAutonomy(arguments) : null),
                 Messages = [.. parentRequest.Messages, new("user", [new("text", Text: task)])],
             };
             var childCacheKey = BuildRunSessionCacheKey(childRequest, agentId, selection.Role);
@@ -187,7 +195,8 @@ public sealed partial class RunProcessor
             var childContextProfile = parentCheckpoint?.ContextProfileVersion;
             childRequest = childRequest with { ContextProfileVersion = childContextProfile };
             var childWorkingState = childRequest.Mode == RunMode.Coding ? CodingWorkingState.Create(task) : null;
-            var childContext = WithWorkingState(ForkSubagentMessages(parentMessages, task, agentId), childWorkingState).ToList();
+            var childContext = WithWorkingState(ForkSubagentMessages(parentMessages,
+                research ? CreateResearchSubagentAssignment(task, arguments) : task, agentId), childWorkingState).ToList();
             if (childContextProfile == ToolContextProfiles.Current)
                 AppendRuntimeContext(childContext, childRequest, subagentAvailable: false);
             var childMessages = ModelRuntimeClient.PrepareLanguageBoundMessages(childContext);
@@ -207,14 +216,16 @@ public sealed partial class RunProcessor
             {
                 return SubagentPreparationFailure(parentRunId, exception);
             }
-            childRequest = childRequest with { Subagent = childRequest.Subagent! with { RuntimeInstanceId = prepared.InstanceId } };
+            childRequest = childRequest with { Subagent = childRequest.Subagent! with
+                { RuntimeInstanceId = prepared.InstanceId, GpuIndex = prepared.GpuIndex } };
             var checkpoint = new AgentRunCheckpoint(childMessages, 0, 0, 0, 0,
                 WorkingState: childWorkingState, WorkingStatePromptIncluded: childWorkingState is not null,
                 PreserveSessionPromptPrefix: true, SelectedModelId: selection.ModelId,
                 SelectedReasoningEffort: childRequest.ReasoningEffort, UseStableSubagentToolCatalog: true,
                 ContextProfileVersion: childContextProfile, ContextTools: childTools,
                 ToolCatalogSignature: childContextProfile is not null ? ToolContextProfiles.Signature(childTools, selection.ModelId) : null,
-                ResearchStateStamp: parentCheckpoint?.ResearchStateStamp);
+                ResearchStateStamp: parentCheckpoint?.ResearchStateStamp,
+                CacheEpoch: parentCheckpoint?.CacheEpoch, ProjectContext: parentCheckpoint?.ProjectContext);
             var child = await _repository.CreateSubagentAsync(childRequest, checkpoint, operationId, cancellationToken).ConfigureAwait(false);
             await EnsureSubagentStartedAsync(child, childRequest, cancellationToken).ConfigureAwait(false);
             await _repository.AppendEventAsync(child.RunId, "subagent.contextForked", new
@@ -257,7 +268,7 @@ public sealed partial class RunProcessor
                 ? "started" : child.State.ToString().ToLowerInvariant(),
             isRunning = child.State is RunState.Queued or RunState.Running or RunState.WaitingForClient,
             runId = child.RunId, agentId = request.Subagent!.AgentId,
-            modelId = child.SelectedModel ?? request.PreferredGeneralModelId, gpuIndex = 1,
+            modelId = child.SelectedModel ?? request.PreferredGeneralModelId, gpuIndex = request.Subagent.GpuIndex ?? 1,
             task = request.Subagent.AssignedTask, sessionId = request.SessionId,
             instruction = child.State is RunState.Cancelled or RunState.Interrupted or RunState.Failed
                 ? "Dieser Subagent arbeitet nicht mehr. Setze die noch benötigte eigene Teilaufgabe gezielt mit subagent.spawn und resumeRunId fort; warte nicht auf den abgebrochenen Lauf."
@@ -273,7 +284,7 @@ public sealed partial class RunProcessor
         await _repository.EnsureSubagentLifecycleEventAsync(RunEventTypes.SubagentStarted,
             new(relation.ParentRunId, child.RunId, relation.AgentId, relation.AssignedTask,
                 child.SelectedModel ?? request.PreferredGeneralModelId ?? request.PreferredCodingModelId ?? "", child.State,
-                request.SessionId, child.ErrorCode), cancellationToken).ConfigureAwait(false);
+                request.SessionId, child.ErrorCode, relation.Specialization, relation.OriginToolStepId, relation.GpuIndex), cancellationToken).ConfigureAwait(false);
     }
 
     private Task StartSubagentRunner(string runId, RunRequest request)
@@ -347,7 +358,8 @@ public sealed partial class RunProcessor
                 await _repository.EnsureSubagentLifecycleEventAsync(RunEventTypes.SubagentCompleted,
                     new(relation.ParentRunId, runId, relation.AgentId, relation.AssignedTask,
                         final.SelectedModel ?? request.PreferredGeneralModelId ?? request.PreferredCodingModelId ?? "",
-                        final.State, request.SessionId, final.ErrorCode)).ConfigureAwait(false);
+                        final.State, request.SessionId, final.ErrorCode, relation.Specialization,
+                        relation.OriginToolStepId, relation.GpuIndex)).ConfigureAwait(false);
         }
     }
 

@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 
@@ -54,8 +54,23 @@ public sealed partial class NativeAssistantPage
 
     private bool ApplyPagedHistoryEvent(string type, JsonElement data)
     {
-        if (type is not ("conversation.page" or "tool.details")) return false;
+        if (type is not ("conversation.page" or "conversation.blocks.page" or "subagent.blocks.page" or "tool.details")) return false;
         if (S(data, "sessionId") != _session.ToString()) return true;
+        if (type is "conversation.blocks.page" or "subagent.blocks.page")
+        {
+            var id = S(data, "messageId");
+            var messages = _messages.ContainsKey(id) ? _messages
+                : _subagents.Values.FirstOrDefault(child => child.SessionId == _session && child.Messages.ContainsKey(id))?.Messages;
+            if (messages is not null && messages.TryGetValue(id, out var message))
+            {
+                ProjectionFor(message).Prepend(Items(data, "steps"));
+                if (data.TryGetProperty("window", out var window)) _toolStepWindows[id] = window.Clone();
+                _renderedMessageSources.Remove(id);
+                _sourceMessageSignatures.Remove(id);
+                RenderMessages();
+            }
+            return true;
+        }
         if (type == "conversation.page")
         {
             // Anchor the actual visible control, so late image/math layout does not jump the viewport.
@@ -73,6 +88,7 @@ public sealed partial class NativeAssistantPage
                 var id = S(message, "id");
                 if (!_messages.ContainsKey(id)) _messages[id] = message.Clone();
             }
+            ObserveToolStepWindows(data);
             ApplyHistoryPageCursor(data);
             foreach (var child in Items(data, "subagents")) ObserveSubagentSnapshot(child);
             _scrollNewSessionToLatest = false;
@@ -89,15 +105,13 @@ public sealed partial class NativeAssistantPage
             : _subagents.Values.FirstOrDefault(child => child.Messages.ContainsKey(messageId))?.Messages;
         if (owner is null || !owner.TryGetValue(messageId, out var current)) return true;
         var incoming = data.GetProperty("toolStep");
-        var steps = Items(current, "toolSteps").ToList();
-        var position = steps.FindIndex(s => S(s, "id") == S(incoming, "id"));
-        if (position < 0) return true;
-        if (DateTimeOffset.TryParse(S(steps[position], "updatedAt"), out var storedAt)
+        var projection = ProjectionFor(current);
+        var stored = projection.Steps.FirstOrDefault(step => S(step, "id") == S(incoming, "id"));
+        if (stored.ValueKind != JsonValueKind.Object) return true;
+        if (DateTimeOffset.TryParse(S(stored, "updatedAt"), out var storedAt)
             && DateTimeOffset.TryParse(S(incoming, "updatedAt"), out var loadedAt) && storedAt > loadedAt) return true;
-        steps[position] = incoming.Clone();
-        var merged = current.Deserialize<Dictionary<string, JsonElement>>()!;
-        merged["toolSteps"] = JsonSerializer.SerializeToElement(steps, JsonOptions);
-        owner[messageId] = JsonSerializer.SerializeToElement(merged, JsonOptions);
+        projection.PutStep(incoming.Clone());
+        _renderedMessageSources.Remove(messageId);
         RenderMessages();
         return true;
     }

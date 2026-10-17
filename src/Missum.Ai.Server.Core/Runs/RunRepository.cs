@@ -226,6 +226,10 @@ public sealed partial class RunRepository
         command.CommandText = """
             INSERT INTO run_events(run_id, event_type, data_json, created_at)
                 VALUES($run, $type, $data, $now);
+            INSERT INTO coding_session_contexts(run_id, checkpoint_json)
+            SELECT run_id, checkpoint_json FROM run_checkpoints WHERE run_id=$run
+                AND json_extract(checkpoint_json, '$.cacheEpoch') IS NOT NULL
+            ON CONFLICT(run_id) DO UPDATE SET checkpoint_json=excluded.checkpoint_json;
             DELETE FROM run_checkpoints WHERE run_id = $run;
             """;
         command.Parameters.AddWithValue("$type", RunEventTypes.RunCompleted);
@@ -817,7 +821,21 @@ public sealed partial class RunRepository
             WHERE c.run_id = $run AND (
                 (r.mode = 'Coding' AND json_extract(r.request_json, '$.codingOptions.workspacePath') IS NOT NULL)
                 OR (r.mode IN ('Auto','General') AND json_extract(r.request_json, '$.sessionId') IS NOT NULL))
+                AND $epoch IS NULL
             ON CONFLICT(run_id) DO UPDATE SET checkpoint_json = excluded.checkpoint_json;
+            INSERT INTO session_context_heads(session_id, workspace_key, role, project_key, cache_epoch, run_id)
+            SELECT json_extract(r.request_json, '$.sessionId'),
+                replace(rtrim(COALESCE(json_extract(r.request_json, '$.codingOptions.workspacePath'), json_extract(r.request_json, '$.workspacePath'), ''), '/\'), '\', '/'),
+                CASE WHEN r.mode='Coding' THEN 'coding' ELSE 'general' END,
+                $project, $epoch, $run
+            FROM runs r WHERE r.run_id=$run AND $epoch IS NOT NULL
+                AND $project IS NOT NULL
+                AND json_extract(r.request_json, '$.sessionId') IS NOT NULL
+                AND r.state IN ('Queued','Running','WaitingForClient','Interrupted')
+            ON CONFLICT(session_id, workspace_key, role) DO UPDATE SET project_key=excluded.project_key,
+                cache_epoch=excluded.cache_epoch, run_id=excluded.run_id
+            WHERE (SELECT created_at FROM runs WHERE run_id=excluded.run_id)
+                >= (SELECT created_at FROM runs WHERE run_id=session_context_heads.run_id);
             INSERT INTO run_events(run_id, event_type, data_json, created_at)
             SELECT $run, 'run.steering.applied', json_object('inputId', input_id, 'sequence', sequence,
                 'sessionId', session_id, 'text', text, 'visibleTextOffset', $offset), $updated
@@ -834,6 +852,8 @@ public sealed partial class RunRepository
         command.Parameters.AddWithValue("$updated", MissumAiDatabase.FormatTimestamp(DateTimeOffset.UtcNow));
         command.Parameters.AddWithValue("$steering", checkpoint.AppliedSteeringSequence);
         command.Parameters.AddWithValue("$offset", visibleSteeringOffset);
+        command.Parameters.AddWithValue("$epoch", (object?)checkpoint.CacheEpoch ?? DBNull.Value);
+        command.Parameters.AddWithValue("$project", (object?)checkpoint.ProjectContext?.ProjectKey ?? DBNull.Value);
         _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         _notifier.Notify(runId);
@@ -862,6 +882,14 @@ public sealed partial class RunRepository
     {
         if (request.Mode != RunMode.Coding || request.CodingOptions?.ContinueSessionContext != true
             || string.IsNullOrWhiteSpace(request.SessionId) || string.IsNullOrWhiteSpace(request.CodingOptions.WorkspacePath)) return null;
+        if (request.ProjectContext is not null)
+        {
+            var head = await GetProjectSessionHeadAsync(currentRunId, request, cancellationToken).ConfigureAwait(false);
+            return head is { WasInterrupted: true } interruptedHead
+                ? (RestoreInterruptedVisibleTail(interruptedHead.Checkpoint,
+                    await GetContinuationEventsAsync(interruptedHead.SourceRunId, 0, cancellationToken).ConfigureAwait(false)),
+                    interruptedHead.SourceRunId, true) : head;
+        }
         await using var connection = await _database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
@@ -900,15 +928,21 @@ public sealed partial class RunRepository
         // The table predates General continuation. Its rows are run-scoped and
         // cascade with the run; retaining the name avoids rewriting user data.
         command.CommandText = """
-            SELECT r.run_id, c.checkpoint_json, r.request_json, r.state
-            FROM coding_session_contexts c JOIN runs r ON r.run_id = c.run_id
+            SELECT r.run_id, COALESCE(c.checkpoint_json, live.checkpoint_json), r.request_json, r.state
+            FROM runs r LEFT JOIN coding_session_contexts c ON r.run_id = c.run_id
+            LEFT JOIN run_checkpoints live ON live.run_id=r.run_id
             WHERE r.run_id != $run AND r.mode IN ('Auto','General') AND r.state IN ('Completed','Failed','Cancelled','Interrupted')
-                AND json_extract(r.request_json, '$.sessionId') = $session
+                AND json_extract(r.request_json, '$.sessionId') = $session AND COALESCE(c.checkpoint_json, live.checkpoint_json) IS NOT NULL
+                AND ($project = '' OR r.run_id=(SELECT run_id FROM session_context_heads WHERE session_id=$session
+                    AND workspace_key=$workspace COLLATE NOCASE AND role='general' AND project_key=$project
+                    AND cache_epoch=(SELECT cache_epoch FROM runtime_context_state WHERE singleton=1)))
                 AND r.created_at < (SELECT created_at FROM runs WHERE run_id = $run)
             ORDER BY r.created_at DESC LIMIT 1;
             """;
         command.Parameters.AddWithValue("$run", currentRunId);
         command.Parameters.AddWithValue("$session", request.SessionId);
+        command.Parameters.AddWithValue("$project", request.ProjectContext?.ProjectKey ?? string.Empty);
+        command.Parameters.AddWithValue("$workspace", ProjectContextPolicy.NormalizeWorkspace(request.WorkspacePath));
         string previousRun;
         AgentRunCheckpoint? checkpoint;
         RunRequest? previousRequest;

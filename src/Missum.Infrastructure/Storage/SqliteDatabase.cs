@@ -8,7 +8,7 @@ namespace Missum.Infrastructure.Storage;
 
 public sealed class SqliteDatabase : IMissumDatabase, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 55;
+    public const int CurrentSchemaVersion = 56;
     private static readonly Action<ILogger, string, Exception?> DatabaseInitialized = LoggerMessage.Define<string>(
         LogLevel.Information, new EventId(1000, nameof(DatabaseInitialized)), "SQLite-Datenbank {DatabasePath} wurde initialisiert.");
     private static readonly Action<ILogger, string?, Exception?> IntegrityCheckFailed = LoggerMessage.Define<string?>(
@@ -48,6 +48,8 @@ public sealed class SqliteDatabase : IMissumDatabase, IAsyncDisposable
             await using var connection = await OpenConnectionCoreAsync(cancellationToken).ConfigureAwait(false);
             await ConfigureConnectionAsync(connection, cancellationToken).ConfigureAwait(false);
             await EnableWalModeAsync(connection, cancellationToken).ConfigureAwait(false);
+            var previousVersion = await ReadSchemaVersionAsync(connection, cancellationToken).ConfigureAwait(false);
+            var previousSchema = await ReadSchemaCookieAsync(connection, cancellationToken).ConfigureAwait(false);
             // Earlier migrations now use the new table name, so convert legacy schemas first.
             await LegacyProfileMigration.RenameRunTableAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationOneAsync(connection, cancellationToken).ConfigureAwait(false);
@@ -107,7 +109,11 @@ public sealed class SqliteDatabase : IMissumDatabase, IAsyncDisposable
             await ApplyMigrationFiftyThreeAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationFiftyFourAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationFiftyFiveAsync(connection, cancellationToken).ConfigureAwait(false);
-            await VerifyIntegrityAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationFiftySixAsync(connection, cancellationToken).ConfigureAwait(false);
+            // A full scan belongs to migrations/recovery and explicit diagnostics, not every ordinary launch.
+            if (previousVersion != CurrentSchemaVersion
+                || previousSchema != await ReadSchemaCookieAsync(connection, cancellationToken).ConfigureAwait(false))
+                await VerifyIntegrityAsync(connection, cancellationToken).ConfigureAwait(false);
             Volatile.Write(ref _initialized, 1);
             DatabaseInitialized(_logger, DatabasePath, null);
         }
@@ -2615,6 +2621,52 @@ public sealed class SqliteDatabase : IMissumDatabase, IAsyncDisposable
         command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToDb());
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task<int> ReadSchemaVersionAsync(SqliteConnection connection, CancellationToken token)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations');";
+        if (Convert.ToInt32(await command.ExecuteScalarAsync(token).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0) return 0;
+        command.CommandText = "SELECT COALESCE(MAX(version),0) FROM schema_migrations;";
+        return Convert.ToInt32(await command.ExecuteScalarAsync(token).ConfigureAwait(false), CultureInfo.InvariantCulture);
+    }
+
+    private static async Task<int> ReadSchemaCookieAsync(SqliteConnection connection, CancellationToken token)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = "PRAGMA schema_version;";
+        return Convert.ToInt32(await command.ExecuteScalarAsync(token).ConfigureAwait(false), CultureInfo.InvariantCulture);
+    }
+
+    private static async Task ApplyMigrationFiftySixAsync(SqliteConnection connection, CancellationToken token)
+    {
+        await using var command = connection.CreateCommand();
+        // Only schema is migrated at launch. Each old message is imported atomically when explicitly normalized or first edited.
+        command.CommandText = """
+            CREATE TABLE IF NOT EXISTS chat_tool_step_messages(
+                message_id TEXT PRIMARY KEY REFERENCES chat_messages(id) ON DELETE CASCADE
+            ) STRICT;
+            CREATE TABLE IF NOT EXISTS chat_tool_steps(
+                message_id TEXT NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
+                step_id TEXT NOT NULL, ordinal INTEGER NOT NULL, content_offset INTEGER NULL,
+                tool_name TEXT NOT NULL, child_agent_id TEXT NULL,
+                header_json TEXT NOT NULL CHECK(json_valid(header_json)),
+                step_json TEXT NOT NULL CHECK(json_valid(step_json)),
+                PRIMARY KEY(message_id,step_id), UNIQUE(message_id,ordinal)
+            ) STRICT;
+            CREATE INDEX IF NOT EXISTS ix_chat_tool_steps_offset ON chat_tool_steps(message_id,content_offset);
+            CREATE INDEX IF NOT EXISTS ix_chat_tool_steps_child ON chat_tool_steps(message_id,tool_name,child_agent_id,ordinal);
+            CREATE TRIGGER IF NOT EXISTS invalidate_normalized_tool_steps AFTER UPDATE OF tool_steps_json ON chat_messages
+            WHEN OLD.tool_steps_json <> NEW.tool_steps_json
+            BEGIN
+                DELETE FROM chat_tool_steps WHERE message_id=NEW.id;
+                DELETE FROM chat_tool_step_messages WHERE message_id=NEW.id;
+            END;
+            INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(56,$now);
+            """;
+        command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToDb());
+        await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
     }
 
     private static async Task ApplyMarkerMigrationAsync(SqliteConnection connection, int version, CancellationToken cancellationToken)

@@ -1,4 +1,4 @@
-using Missum.Core.Contracts;
+﻿using Missum.Core.Contracts;
 using Missum.Core.Models;
 using Missum.Infrastructure.Storage;
 using Microsoft.Data.Sqlite;
@@ -48,13 +48,13 @@ public sealed partial class SqliteConversationSnapshotRepository(SqliteDatabase 
         await using (var command = connection.CreateCommand())
         {
             command.Transaction = transaction;
-            command.CommandText = """
-                SELECT id,session_id,role,content,status,created_at,updated_at,error,
-                       tool_name,tool_context,tool_status,tool_detail,tool_provider,context_summary,
-                       content_profile,revision,tool_steps_json
-                FROM chat_messages
-                WHERE session_id=$session
-                ORDER BY created_at,id;
+            command.CommandText = $"""
+                SELECT m.id,m.session_id,m.role,m.content,m.status,m.created_at,m.updated_at,m.error,
+                       m.tool_name,m.tool_context,m.tool_status,m.tool_detail,m.tool_provider,m.context_summary,
+                       m.content_profile,m.revision,{ConversationToolStepStorage.CompleteStepsSql}
+                FROM chat_messages m
+                WHERE m.session_id=$session
+                ORDER BY m.created_at,m.id;
                 """;
             command.Parameters.AddWithValue("$session", sessionId.ToString("D"));
             await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
@@ -68,7 +68,7 @@ public sealed partial class SqliteConversationSnapshotRepository(SqliteDatabase 
         await using (var command = connection.CreateCommand())
         {
             command.Transaction = transaction;
-            command.CommandText = SqliteChatArtifactRepository.SelectSql + """
+            command.CommandText = SqliteChatArtifactRepository.DisplaySelectSql + """
 
                 JOIN chat_messages message ON message.id=a.message_id
                 WHERE message.session_id=$session

@@ -1,4 +1,4 @@
-using System.Security.Cryptography;
+﻿using System.Security.Cryptography;
 using System.Net;
 using System.Text.Json;
 using Missum.App.Controls;

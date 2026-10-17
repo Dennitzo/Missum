@@ -12,6 +12,7 @@ public sealed partial class NativeAssistantPage
 {
     private readonly Dictionary<string, NativeSubagentState> _subagents = new(StringComparer.Ordinal);
     private long _subagentObservationOrder;
+    private long _subagentProjectionAccessOrder;
     private long _subagentActivationGeneration;
     private readonly Dictionary<string, double> _conversationOffsets = new(StringComparer.Ordinal);
     private string? _activeSubagentId;
@@ -35,8 +36,20 @@ public sealed partial class NativeAssistantPage
     private IReadOnlyDictionary<string, JsonElement> DisplayMessages => ActiveSubagent?.Messages ?? _messages;
     // A delegation creates the assignment and answer at the same timestamp.
     // Preserve request-before-answer order instead of ordering random message IDs.
-    private IOrderedEnumerable<JsonElement> OrderedDisplayMessages() => DisplayMessages.Values
-        .OrderBy(MessageCreatedAt).ThenBy(message => S(message, "role") == "user" ? 0 : 1);
+    private string? _orderedDisplayOwner;
+    private string[] _orderedMessageIds = [];
+    private IEnumerable<JsonElement> OrderedDisplayMessages()
+    {
+        var messages = DisplayMessages;
+        if (_orderedDisplayOwner != ConversationViewKey || _orderedMessageIds.Length != messages.Count
+            || _orderedMessageIds.Any(id => !messages.ContainsKey(id)))
+        {
+            _orderedDisplayOwner = ConversationViewKey;
+            _orderedMessageIds = messages.Values.OrderBy(MessageCreatedAt)
+                .ThenBy(message => S(message, "role") == "user" ? 0 : 1).Select(message => S(message, "id")).ToArray();
+        }
+        return _orderedMessageIds.Select(id => messages[id]);
+    }
 
     private bool DisplayRunning => ActiveSubagent is { } child ? child.IsRunning : _running;
     private double DisplayContextUsed => ActiveSubagent is { } child ? child.ContextUsed : _contextUsed;
@@ -85,6 +98,11 @@ public sealed partial class NativeAssistantPage
     {
         if (sessionChanged)
         {
+            foreach (var previous in _subagents.Values.Where(child => child.SessionId != _session).ToArray())
+            {
+                ReleaseSubagentProjection(previous);
+                if (!previous.IsRunning) { SessionTabsPanel.Children.Remove(previous.Container); _subagents.Remove(previous.AgentId); }
+            }
             _subagentActivationGeneration++;
             _activeSubagentId = null;
             _parentComposerDraft = _parentComposerPlaceholder = null;
@@ -131,7 +149,9 @@ public sealed partial class NativeAssistantPage
         var deferred = S(snapshot, "transcriptDeferred") == "True";
         var created = SubagentCreatedAt(snapshot);
         _ = long.TryParse(S(snapshot, "projectionRevision"), out var projectionRevision);
+        long? transcriptRevision = long.TryParse(S(snapshot, "transcriptRevision"), out var contentRevision) ? contentRevision : null;
         var retainHydratedTranscript = false;
+        var preserveResearchTranscript = false;
         if (!_subagents.TryGetValue(agentId, out var child))
         {
             _subagents[agentId] = child = CreateSubagentTab(agentId, owner);
@@ -147,8 +167,15 @@ public sealed partial class NativeAssistantPage
             var previousRunId = S(child.Snapshot, "runId");
             if (!SubagentChatState.AcceptSnapshot(previousRunId, child.CreatedAt, child.ProjectionRevision,
                 child.PreviousRunIds, runId, created, projectionRevision)) return;
+            // Research model-progress snapshots carry fresh token/context
+            // metadata without changing the source transcript. Retain hydrated
+            // details and native owners; normal subagent behavior is unchanged.
+            preserveResearchTranscript = child.IsDeepResearch && S(snapshot, "kind") == "deepResearch"
+                && previousRunId == runId && !child.TranscriptDeferred
+                && child.Status == status && child.IsRunning == isRunning
+                && transcriptRevision.HasValue && child.TranscriptRevision == transcriptRevision;
             retainHydratedTranscript = deferred && !child.TranscriptDeferred && previousRunId == runId
-                && child.ProjectionRevision == projectionRevision;
+                && (child.ProjectionRevision == projectionRevision || preserveResearchTranscript);
             if (previousRunId.Length > 0 && previousRunId != runId)
             {
                 if (deferred) child.Messages.Clear();
@@ -162,7 +189,8 @@ public sealed partial class NativeAssistantPage
             if (previousRun.ValueKind == JsonValueKind.String && previousRun.GetString() is { Length: > 0 } previousRunId)
                 child.PreviousRunIds.Add(previousRunId);
         child.ProjectionRevision = projectionRevision;
-        if (!retainHydratedTranscript) child.Snapshot = snapshot.Clone();
+        child.TranscriptRevision = transcriptRevision;
+        if (!retainHydratedTranscript || preserveResearchTranscript) child.Snapshot = snapshot.Clone();
         child.SessionId = owner;
         child.Title = SubagentChatState.TaskTitle(S(snapshot, "title", "Subagent"));
         child.Status = status;
@@ -170,21 +198,27 @@ public sealed partial class NativeAssistantPage
         if (double.TryParse(S(snapshot, "contextUsed"), out var used)) child.ContextUsed = used;
         if (double.TryParse(S(snapshot, "contextLimit"), out var limit)) child.ContextLimit = limit;
         child.TranscriptDeferred = deferred && !retainHydratedTranscript;
-        if (!deferred)
+        if (!deferred && !preserveResearchTranscript)
         {
             child.Messages.Clear();
             foreach (var message in Items(snapshot, "messages")) child.Messages[S(message, "id")] = message.Clone();
+            child.RetainedBytes = child.Messages.Values.Sum(MessagePayloadBytes);
+            child.ProjectionLastAccess = ++_subagentProjectionAccessOrder;
         }
+        if (!preserveResearchTranscript) EnforceInactiveProjectionBudget();
         // DTOs without a top-level creation time retain the assigned user
         // message's timestamp. Token and completion updates never change recency.
         if (created is not null) child.CreatedAt = created;
         ObserveThinkingProgress(snapshot);
-        RefreshSubagentLifecycleRows(child);
-        RefreshSubagentSources();
+        if (!preserveResearchTranscript)
+        {
+            RefreshSubagentLifecycleRows(child);
+            RefreshSubagentSources();
+        }
         if (ReferenceEquals(ActiveSubagent, child))
         {
             if (child.TranscriptDeferred) _ = EnsureSubagentTranscriptAsync(child);
-            RenderMessages();
+            if (!preserveResearchTranscript) RenderMessages();
             RefreshContextDisplay();
             RefreshChatNotices();
             RefreshComposerModelDisplay();
@@ -356,16 +390,17 @@ public sealed partial class NativeAssistantPage
             if (child.SessionId != _session || !child.TabOpen)
             { SessionTabsPanel.Children.Remove(child.Container); continue; }
             var active = _activeSubagentId == child.AgentId && BodyGrid.Visibility == Visibility.Visible;
-            SetTabText(child.Label, "Subagent · " + child.Title);
+            const string kindLabel = "Subagent";
+            SetTabText(child.Label, kindLabel + " · " + child.Title);
             ApplyTabAppearance(child.Container, child.Select, active);
             SetTabCloseForeground(child.Close);
             SetTabEnabled(child.Select, !_sessionTabNavigationBusy);
             SetTabEnabled(child.Close, !_sessionTabNavigationBusy);
-            SetTabName(child.Select, "Subagent-Tab: " + child.Title);
-            SetTabHelp(child.Select, active ? "Aktiver Subagent" : "Aufgabe und Werkzeugschritte öffnen");
-            SetTabName(child.Close, "Subagent-Tab schließen: " + child.Title);
+            SetTabName(child.Select, kindLabel + "-Tab: " + child.Title);
+            SetTabHelp(child.Select, active ? "Aktiver " + kindLabel + "-Tab" : "Aufgabe und Werkzeugschritte öffnen");
+            SetTabName(child.Close, kindLabel + "-Tab schließen: " + child.Title);
             SetTabToolTip(child.Select, child.Title + "\n" + SubagentStatusLabel(child));
-            SetTabToolTip(child.Close, "Subagent-Tab schließen");
+            SetTabToolTip(child.Close, kindLabel + "-Tab schließen");
             PositionTab(child.Container, index);
             index++;
         }
@@ -374,6 +409,7 @@ public sealed partial class NativeAssistantPage
 
     private void RenderSubagentOverlay()
     {
+        RefreshResearchNavigation();
         var children = SessionSubagents();
         var signature = SubagentListSignature(children);
         if (_subagentOverlaySignature == signature) return;
@@ -402,13 +438,13 @@ public sealed partial class NativeAssistantPage
             {
                 var child = representatives[index];
                 var variant = child.PlanetIndex;
-                if (!_subagentSummaryAvatars.TryGetValue(variant, out var avatar))
-                    _subagentSummaryAvatars[variant] = avatar = SubagentIcon(child.AgentId, 14, variant);
-                avatar.SetAgentId(child.AgentId, variant);
-                if (index >= _subagentSummaryIcons!.Children.Count || !ReferenceEquals(_subagentSummaryIcons.Children[index], avatar))
+                if (!_subagentSummaryAvatars.TryGetValue(variant, out var icon))
+                    _subagentSummaryAvatars[variant] = icon = SubagentIcon(child.AgentId, 14, variant);
+                icon.SetAgentId(child.AgentId, variant);
+                if (index >= _subagentSummaryIcons!.Children.Count || !ReferenceEquals(_subagentSummaryIcons.Children[index], icon))
                 {
-                    _subagentSummaryIcons.Children.Remove(avatar);
-                    _subagentSummaryIcons.Children.Insert(index, avatar);
+                    _subagentSummaryIcons.Children.Remove(icon);
+                    _subagentSummaryIcons.Children.Insert(index, icon);
                 }
             }
             while (_subagentSummaryIcons!.Children.Count > representatives.Length)
@@ -483,6 +519,7 @@ public sealed partial class NativeAssistantPage
             || !_subagents.TryGetValue(child.AgentId, out var current) || !ReferenceEquals(current, child)) return;
         var owner = _session;
         var activation = ++_subagentActivationGeneration;
+        child.ProjectionLastAccess = ++_subagentProjectionAccessOrder;
         if (!await EnsureSubagentTranscriptAsync(child)) return;
         if (_disposed || child.SessionId != _session || owner != _session || activation != _subagentActivationGeneration) return;
         if (_dictationSession == owner)
@@ -493,7 +530,8 @@ public sealed partial class NativeAssistantPage
         { _parentComposerDraft = Composer.Text; _parentComposerPlaceholder = Composer.PlaceholderText; _draftTimer.Stop(); }
         ShowChatView();
         child.TabOpen = true; SubagentTabStates.Open(child.SessionId, child.AgentId); _activeSubagentId = child.AgentId;
-        _rendering = true; Composer.Text = ""; Composer.PlaceholderText = "Aufgabe vom Hauptagenten"; _rendering = false;
+        _rendering = true; Composer.Text = ""; Composer.PlaceholderText = child.IsLegacyDeepResearch
+            ? "Historische Recherche · Nur-Lese-Ansicht. Steuerung im Hauptchat." : "Aufgabe vom Hauptagenten"; _rendering = false;
         RefreshConversationTab();
     }
 
@@ -536,13 +574,7 @@ public sealed partial class NativeAssistantPage
         // Disclosure choices are transient and reset to the current global
         // default only for the conversation being shown, without rereading KV.
         MessagesPanel.Children.Clear();
-        foreach (var (messageId, message) in DisplayMessages)
-        {
-            if (!_messageBlocks.TryGetValue(messageId, out var blocks)) continue;
-            foreach (var step in Items(message, "toolSteps"))
-                if (blocks.TryGetValue("tool:" + S(step, "id"), out var view) && view is ToolStepView tool)
-                    tool.SetExpanded(S(step, "tool") != "assistant.reasoning" && _settings.Current.CodingToolStepsExpanded);
-        }
+        ResetToolDisclosureDefaults(DisplayMessages.Keys);
         _sourcesSignature = null;
         UpdateComposerNavigationState();
         RefreshComposerModelDisplay();
@@ -566,7 +598,10 @@ public sealed partial class NativeAssistantPage
         internal string Status { get; set; } = "running";
         internal DateTimeOffset? CreatedAt { get; set; }
         internal long ObservationOrder { get; set; }
+        internal long ProjectionLastAccess { get; set; }
         internal long ProjectionRevision { get; set; }
+        internal long? TranscriptRevision { get; set; }
+        internal long RetainedBytes { get; set; }
         internal HashSet<string> PreviousRunIds { get; } = new(StringComparer.Ordinal);
         internal bool IsRunning { get; set; } = true;
         internal bool TabOpen { get; set; }
@@ -575,6 +610,8 @@ public sealed partial class NativeAssistantPage
         internal double ContextUsed { get; set; }
         internal double ContextLimit { get; set; }
         internal JsonElement Snapshot { get; set; }
+        internal bool IsDeepResearch => S(Snapshot, "kind") == "deepResearch";
+        internal bool IsLegacyDeepResearch => IsDeepResearch && IsLegacyResearchIdentity(AgentId, S(Snapshot, "runId"));
         internal Dictionary<string, JsonElement> Messages { get; } = new(StringComparer.Ordinal);
         internal Border Container { get; } = container;
         internal Button Select { get; } = select;

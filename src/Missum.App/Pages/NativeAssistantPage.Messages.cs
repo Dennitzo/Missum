@@ -23,6 +23,7 @@ public sealed partial class NativeAssistantPage
         if (_lastHeaderSecond == second) return;
         if (_conversationSelection?.IsSelecting == true) return;
         _lastHeaderSecond = second;
+        EnforceInactiveProjectionBudget();
         foreach (var (id, blocks) in _messageBlocks)
             if (blocks.TryGetValue("header", out var header) && DisplayMessages.TryGetValue(id, out var message)
                 && S(message, "status") is "streaming" or "pending")
@@ -51,9 +52,10 @@ public sealed partial class NativeAssistantPage
 
     private void UpdateMessageBlocks(string messageId, JsonElement message, StackPanel panel)
     {
+        if (UpdateVirtualMessageBlocks(messageId, message, panel)) return;
         if (!_messageBlocks.TryGetValue(messageId, out var blocks)) _messageBlocks[messageId] = blocks = new(StringComparer.Ordinal);
         var desired = new List<FrameworkElement>();
-        var content = S(message, "content");
+        var content = MessageContent(message);
         var assistant = S(message, "role") == "assistant";
         var visibleAnswer = new StringBuilder(content.TrimEnd());
         if (assistant)
@@ -101,7 +103,7 @@ public sealed partial class NativeAssistantPage
             else ((NativeStreamingMarkdown)element).UpdateText(value);
             desired.Add(element);
         }
-        var messageSteps = Items(message, "toolSteps");
+        var messageSteps = MessageSteps(message);
         var artifacts = VisibleNativeMessageArtifacts(Items(message, "artifacts"));
         var stepIds = messageSteps.Select(step => S(step, "id")).Where(id => id.Length > 0).ToHashSet(StringComparer.Ordinal);
         var stepArtifacts = artifacts.Where(artifact => stepIds.Contains(S(artifact, "stepId")))
@@ -128,7 +130,7 @@ public sealed partial class NativeAssistantPage
         var latestReasoning = messageSteps.LastOrDefault(step => S(step, "tool") == "assistant.reasoning"
             && NativeThinkingIndicatorState.IsOwnedStep(S(step, "agentId"), reasoningOwner));
         FrameworkElement? latestReasoningView = null;
-        var subagentReceipts = messageSteps.Where(step => S(step, "tool") == "subagent").ToArray();
+        var subagentReceipts = messageSteps.Where(step => S(step, "tool") is "subagent" or "subagent.completed").ToArray();
         var positionedSteps = stepArtifacts.Count > 0 ? OrderNativeArtifactSteps(messageSteps) : messageSteps;
         var firstStep = MessageStepStart(messageId, positionedSteps);
         if (firstStep > 0)
@@ -151,9 +153,11 @@ public sealed partial class NativeAssistantPage
             Text("text:" + offset, content[offset..next]); offset = next;
             var id = S(step, "id", "step:" + sequence++);
             var tool = S(step, "tool");
+            if (IsDeepResearchReceipt(step)) { ArtifactsAfterStep(id); continue; }
             // The persisted child receipt owns its lifecycle row. Keep rejected
             // manager calls visible, and coalesce only calls for an accepted child.
-            if (IsAcceptedSubagentManagementStep(step, subagentReceipts)) { ArtifactsAfterStep(id); continue; }
+            if (IsAcceptedSubagentManagementStep(step, subagentReceipts) || IsAcceptedDeepResearchStep(step, subagentReceipts))
+            { ArtifactsAfterStep(id); continue; }
             if (tool is "subagent" or "subagent.completed")
             {
                 var lifecycleKey = "tool:" + id;
@@ -200,8 +204,15 @@ public sealed partial class NativeAssistantPage
             var key = "tool:" + id;
             if (!blocks.TryGetValue(key, out var element))
             {
-                var view = new ToolStepView(tool != "assistant.reasoning" && _settings.Current.CodingToolStepsExpanded);
+                var view = new ToolStepView(_settings.Current.CodingToolStepsExpanded)
+                {
+                    ScrollOwner = ConversationScroll, PinSelection = () => _conversationSelection?.IsSelecting == true,
+                    Project = projection => RunUiCallback("ToolStep.LargeReasoning", projection),
+                };
                 view.LoadDetails = () => LoadToolStepDetailsAsync(messageId, id);
+                view.OpenResearch = () => OpenDeepResearchTabAsync(messageId, id);
+                view.CanOpenResearch = () => FindDeepResearchView(messageId, id) is not null;
+                view.ResearchIdentity = () => ResearchIdentity(messageId, id);
                 view.SubagentRequested += async agentId =>
                 {
                     if (_subagents.TryGetValue(agentId, out var child)) await ActivateSubagentTabAsync(child);
@@ -248,7 +259,11 @@ public sealed partial class NativeAssistantPage
         if (streaming)
         {
             if (!blocks.TryGetValue("thinkingIndicator", out var thinking))
-                blocks["thinkingIndicator"] = thinking = new ThinkingIndicatorView();
+                blocks["thinkingIndicator"] = thinking = new ThinkingIndicatorView(_settings.Current.CodingToolStepsExpanded)
+                {
+                    ScrollOwner = ConversationScroll, PinSelection = () => _conversationSelection?.IsSelecting == true,
+                    Project = projection => RunUiCallback("Thinking.LargeReasoning", projection),
+                };
             var indicator = (ThinkingIndicatorView)thinking;
             indicator.IsMessageActive = true;
             indicator.HasBlockingTool = hasBlockingTool || liveStatus.Length > 0;
@@ -308,9 +323,18 @@ public sealed partial class NativeAssistantPage
     private sealed class ToolStepView : Grid
     {
         internal Func<Task<bool>>? LoadDetails { get; set; }
+        internal ScrollViewer? ScrollOwner { get; set; }
+        internal Func<bool>? PinSelection { get; set; }
+        internal Action<Action>? Project { get; set; }
+        private NativeVirtualizingTextView? _largeReasoning;
         private bool _loadingDetails;
         private bool _detailsInViewport;
         internal event Action<string>? SubagentRequested;
+        internal Func<Task<bool>>? OpenResearch { get; set; }
+        internal Func<bool>? CanOpenResearch { get; set; }
+        internal Func<(string AgentId, int PlanetIndex, string Title)?>? ResearchIdentity { get; set; }
+        internal Task? NavigationTask { get; private set; }
+        internal event Action<bool>? ExpansionChanged;
         private readonly TextBlock _title = new() { FontSize = 14, Foreground = ThemeBrush("MissumMutedTextBrush", 160), TextTrimming = TextTrimming.CharacterEllipsis };
         private readonly TextBlock _added = new() { FontSize = 13, Foreground = ThemeBrush("MissumSuccessBrush", 160) };
         private readonly TextBlock _removed = new() { FontSize = 13, Foreground = ThemeBrush("MissumDangerBrush", 160) };
@@ -318,6 +342,8 @@ public sealed partial class NativeAssistantPage
         private readonly FontIcon _chevron = new() { Glyph = "\uE76C", FontSize = 10, Foreground = ThemeBrush("MissumMutedTextBrush", 140) };
         private readonly TextBlock _status = new();
         private readonly FontIcon _compactIcon = new() { Glyph = "\uE70F", FontSize = 14, Foreground = new SolidColorBrush(ToolGlyphColor("tool", "")), VerticalAlignment = VerticalAlignment.Center };
+        private NativeSubagentAvatar? _researchAvatar;
+        private readonly Grid _headerRow = new() { ColumnSpacing = 8 };
         private JsonElement _step;
         private string _diff = "";
         private bool _detailsDirty;
@@ -326,7 +352,7 @@ public sealed partial class NativeAssistantPage
         private bool _reasoning;
         private readonly StackPanel _details = new() { Spacing = 8, Visibility = Visibility.Collapsed };
         private readonly Button _toggle;
-        private string? _signature;
+        private bool _hasStep;
         private string _label = "";
         private string _filePath = "";
         private string _summary = "";
@@ -337,7 +363,7 @@ public sealed partial class NativeAssistantPage
         public ToolStepView(bool initiallyExpanded = false)
         {
             _initiallyExpanded = initiallyExpanded;
-            var row = new Grid { ColumnSpacing = 8 };
+            var row = _headerRow;
             row.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
             row.ColumnDefinitions.Add(new() { Width = new(1, GridUnitType.Star) });
             row.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
@@ -349,7 +375,15 @@ public sealed partial class NativeAssistantPage
             Grid.SetColumn(_chevron, 3); row.Children.Add(_chevron);
             _toggle = new Button { Content = row, HorizontalContentAlignment = HorizontalAlignment.Left, HorizontalAlignment = HorizontalAlignment.Left,
                 Padding = new(6, 5, 6, 5), BorderThickness = new(0), Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent) };
-            _toggle.Click += (_, _) => SetExpanded(_details.Visibility != Visibility.Visible);
+            _toggle.Click += async (_, _) =>
+            {
+                if (IsResearchNavigation)
+                {
+                    NavigationTask = OpenResearch?.Invoke() ?? Task.FromResult(false);
+                    await NavigationTask;
+                }
+                else SetExpanded(_details.Visibility != Visibility.Visible);
+            };
             var content = new StackPanel { Spacing = 10 };
             _details.Margin = new(24, 0, 0, 4);
             content.Children.Add(_toggle); content.Children.Add(_details);
@@ -363,21 +397,26 @@ public sealed partial class NativeAssistantPage
             };
         }
 
-        internal void SetExpanded(bool expanded)
+        internal void SetExpanded(bool expanded, bool forceDetails = true)
         {
+            if (IsResearchNavigation) { _details.Visibility = Visibility.Collapsed; UpdateHeader(); return; }
+            var changed = IsExpanded != expanded;
             _details.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
-            if (expanded && IsTrue(_step, "detailsDeferred")) _ = LoadDetailsAsync(force: true);
+            if (expanded && IsTrue(_step, "detailsDeferred")) _ = LoadDetailsAsync(force: forceDetails);
             else if (expanded) RenderDetails();
-            else { _details.Children.Clear(); _detailsDirty = true; }
+            else { _details.Children.Clear(); _largeReasoning = null; _detailsDirty = true; }
             UpdateHeader();
+            if (changed) ExpansionChanged?.Invoke(expanded);
         }
 
         public void Update(JsonElement step, int number = 1)
         {
-            var signature = step.GetRawText();
-            if (signature == _signature) return;
-            var firstUpdate = _signature is null;
-            _signature = signature;
+            if (_step.Equals(step)) return;
+            var firstUpdate = !_hasStep;
+            // Stable receipt identity is sufficient: a changed JsonElement must
+            // be projected even if it has no timestamp or its text length stays
+            // the same. Never duplicate a megabyte reasoning/output as raw JSON.
+            _hasStep = true;
             _step = step.Clone();
             _detailsDirty = true;
             var tool = S(step, "tool");
@@ -391,19 +430,30 @@ public sealed partial class NativeAssistantPage
                 "research.code.test" => "Berechnung prüfen", "research.code.benchmark" => "Berechnung vergleichen",
                 "research.deliverables.verify" => "Forschungsergebnisse prüfen",
                 "research.read" => "Forschungsstand lesen", "research.update" => "Forschungsstand ergänzen",
+                "research.plan" => "Recherche planen", "research.synthesize" => "Rechercheergebnis aufarbeiten",
+                "research.skeptic" => "Ergebnisse kritisch prüfen", "research.verify" => "Belege bewerten",
+                "research.model" => "Recherche bearbeiten", "research.operation" => "Rechercheauftrag",
                 "math.formalProof" => "Lean-Beweis prüfen", "assistant.progress" => "Fortschritt",
                 "assistant.continuation" => S(step, "status") switch
                 {
                     "completed" => "Lauf fortgesetzt", "failed" or "denied" => "Fortsetzen fehlgeschlagen",
                     "cancelled" or "interrupted" => "Fortsetzung abgebrochen", _ => "Fortsetzung wird vorbereitet",
                 },
-                "web.search" => "Websuche", "web.fetch" => "Webseite lesen", _ => S(step, "label", tool) };
+                "web.search" => "Websuche", "web.fetch" => "Webseite lesen", "web.deepResearch" => "Deep Research", _ => S(step, "label", tool) };
             _running = S(step, "status") is "running" or "pending";
             var iconKey = ToolStepIconKey(tool);
             _compactIcon.Glyph = ToolIconGlyph(iconKey);
             _compactIcon.Foreground = new SolidColorBrush(ToolGlyphColor(iconKey, tool));
             _reasoning = tool == "assistant.reasoning";
             _status.Text = S(step, "status") switch { "completed" => "Abgeschlossen", "failed" => "Fehlgeschlagen", "denied" => "Abgelehnt", "cancelled" => "Abgebrochen", "interrupted" => "Unterbrochen", "steered" => "Umgelenkt", "pending" => "Wartet", _ => "In Bearbeitung" };
+            if (IsResearchNavigation)
+            {
+                // This receipt opens the real research transcript. Its nested
+                // operations use the same normal message/tool renderer there.
+                _details.Visibility = Visibility.Collapsed;
+                _filePath = _diff = _summary = ""; _hasCounts = false;
+                UpdateHeader(); return;
+            }
             if (firstUpdate) _details.Visibility = _initiallyExpanded ? Visibility.Visible : Visibility.Collapsed;
             if (IsTrue(step, "detailsDeferred"))
             {
@@ -411,6 +461,15 @@ public sealed partial class NativeAssistantPage
                 _hasCounts = false;
                 _summary = "";
                 if (IsExpanded) _ = LoadDetailsAsync();
+                UpdateHeader();
+                return;
+            }
+            if (_reasoning)
+            {
+                _filePath = _diff = _summary = "";
+                _hasCounts = false;
+                if (_running) _status.Text = "Denkt nach";
+                if (IsExpanded) RenderDetails();
                 UpdateHeader();
                 return;
             }
@@ -435,8 +494,7 @@ public sealed partial class NativeAssistantPage
             }
             _diff = diff;
             var input = ReadMetadata(S(step, "inputJson"));
-            _summary = _reasoning ? "" : ToolSummary(tool, input, output);
-            if (_reasoning && _running) _status.Text = "Denkt nach";
+            _summary = ToolSummary(tool, input, output);
             if (_details.Visibility == Visibility.Visible) RenderDetails();
             // Updates never change the user's fold state or open a completed file operation automatically.
             UpdateHeader();
@@ -471,16 +529,40 @@ public sealed partial class NativeAssistantPage
             var expanded = _details.Visibility == Visibility.Visible;
             var name = Path.GetFileName(_filePath.Replace('\\', '/'));
             _title.Text = _fileMutation && !expanded && name.Length > 0 ? name : _label + (_summary.Length > 0 ? " · " + _summary : "");
+            var research = IsResearchNavigation ? ResearchIdentity?.Invoke() : null;
+            if (_researchAvatar is not null) _researchAvatar.Visibility = research.HasValue ? Visibility.Visible : Visibility.Collapsed;
+            _compactIcon.Visibility = research.HasValue ? Visibility.Collapsed : Visibility.Visible;
+            if (research is { } child)
+            {
+                if (_researchAvatar is null)
+                {
+                    _researchAvatar = new(child.AgentId, 14, child.PlanetIndex);
+                    _headerRow.Children.Add(_researchAvatar);
+                }
+                _researchAvatar.SetAgentId(child.AgentId, child.PlanetIndex);
+                _title.Text = child.Title;
+            }
             if (_running) _title.Text += " …";
             if (S(_step, "status") is "failed" or "denied" or "cancelled" or "interrupted") _title.Text += " · " + _status.Text;
             _counts.Visibility = _fileMutation && _hasCounts ? Visibility.Visible : Visibility.Collapsed;
             _title.FontWeight = Microsoft.UI.Text.FontWeights.Normal;
             _title.Foreground = ThemeBrush("MissumMutedTextBrush", 160);
-            _chevron.Glyph = expanded ? "\uE70D" : "\uE76C";
-            ToolTipService.SetToolTip(_toggle, _filePath.Length > 0 ? _filePath : _label + " · " + _summary);
+            _chevron.Glyph = IsResearchNavigation ? "\uE8A7" : expanded ? "\uE70D" : "\uE76C";
+            ToolTipService.SetToolTip(_toggle, IsResearchNavigation ? "Aufgabe und Werkzeugschritte im Subagent-Tab öffnen"
+                : _filePath.Length > 0 ? _filePath : _label + " · " + _summary);
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_toggle,
                 _title.Text + (_counts.Visibility == Visibility.Visible ? " " + _added.Text + " " + _removed.Text : "")
-                + (expanded ? ", ausgeklappt" : ", eingeklappt"));
+                + (IsResearchNavigation ? ", Recherchearbeit öffnen" : expanded ? ", ausgeklappt" : ", eingeklappt"));
+        }
+
+        private bool IsResearchNavigation => S(_step, "tool") == "web.deepResearch"
+            && OpenResearch is not null && CanOpenResearch?.Invoke() != false;
+
+        internal void RefreshResearchNavigation()
+        {
+            if (!IsResearchNavigation) return;
+            _details.Visibility = Visibility.Collapsed; _details.Children.Clear();
+            UpdateHeader();
         }
 
         private bool _leanSourceRequested;
@@ -493,6 +575,17 @@ public sealed partial class NativeAssistantPage
             if (_reasoning || S(_step, "tool") == "assistant.continuation")
             {
                 var text = S(_step, "detail", S(_step, "explanation"));
+                if (text.Length > 8192 && ScrollOwner is { } scroll)
+                {
+                    if (_largeReasoning is null)
+                    {
+                        _largeReasoning = new NativeVirtualizingTextView(scroll, PinSelection, Project);
+                        _details.Children.Clear(); _details.Children.Add(_largeReasoning);
+                    }
+                    _largeReasoning.UpdateText(text);
+                    return;
+                }
+                _largeReasoning = null;
                 if (_details.Children.FirstOrDefault() is NativeStreamingMarkdown existing) existing.UpdateText(text);
                 else { _details.Children.Clear(); _details.Children.Add(new NativeStreamingMarkdown(text)); }
                 return;

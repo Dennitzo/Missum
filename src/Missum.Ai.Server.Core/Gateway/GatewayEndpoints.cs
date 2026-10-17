@@ -16,7 +16,7 @@ using System.Text.Json;
 
 namespace Missum.Ai.Server.Core.Gateway;
 
-internal static class GatewayEndpoints
+internal static partial class GatewayEndpoints
 {
     private static readonly JsonSerializerOptions JsonOptions = MissumAiProtocol.CreateJsonOptions();
 
@@ -31,6 +31,8 @@ internal static class GatewayEndpoints
         endpoints.MapGet("/v1/services/status", WriteServiceStatusAsync);
         endpoints.MapPost("/v1/context/embeddings", CreateEmbeddingsAsync);
         endpoints.MapPost("/v1/context/embeddings/release", ReleaseEmbeddingsAsync);
+        endpoints.MapPost("/v1/context/cache/reset", ResetContextCacheAsync);
+        endpoints.MapPost("/v1/project-context/summarize", SummarizeProjectContextAsync);
 
         endpoints.MapPost("/v1/runs", CreateRunAsync);
         endpoints.MapGet("/v1/runs/{runId}", GetRunAsync);
@@ -159,6 +161,9 @@ internal static class GatewayEndpoints
     {
         var request = await ReadJsonAsync<RunRequest>(context).ConfigureAwait(false);
         RunRequestValidator.Validate(request);
+        var projectWork = context.RequestServices.GetRequiredService<ProjectContextSummaryWork>();
+        using var admission = await projectWork.EnterAdmissionAsync(context.RequestAborted).ConfigureAwait(false);
+        projectWork.Preempt();
         var idempotencyKey = context.Request.Headers[MissumAiHeaders.IdempotencyKey].FirstOrDefault();
         if (idempotencyKey?.Length > 128)
         {

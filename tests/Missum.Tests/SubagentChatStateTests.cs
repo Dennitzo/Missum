@@ -13,6 +13,111 @@ namespace Missum.Tests;
 
 public sealed class SubagentChatStateTests
 {
+    [Fact]
+    public async Task OversizedActiveTranscriptJournalsUntilItsLastWriterLeaseEndsWithoutRetainingAnInactiveCopy()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var child = Child();
+        child = child with { AssistantMessage = child.AssistantMessage with { Content = new string('x', 16 * 1024 * 1024 + 1) } };
+        using var firstWriter = child.AcquireTranscriptWriter(environment.Directory);
+        using var secondWriter = child.AcquireTranscriptWriter(environment.Directory);
+        var receipt = await child.PersistAsync(environment.Directory);
+        using var descriptor = JsonDocument.Parse(receipt);
+        var snapshot = Path.Combine(environment.Directory, "Subagents", descriptor.RootElement.GetProperty("subagentStorageKey").GetString() + ".json");
+        var originalBytes = new FileInfo(snapshot).Length;
+        for (var index = 1; index <= 2; index++)
+        {
+            child = child with { LastEventId = index, ProjectionRevision = index,
+                AssistantMessage = child.AssistantMessage with { Content = child.AssistantMessage.Content + " Nachtrag " + index } };
+            receipt = await child.PersistAsync(environment.Directory);
+            if (index == 1) firstWriter.Dispose();
+        }
+        Assert.Equal(originalBytes, new FileInfo(snapshot).Length);
+        Assert.InRange(new FileInfo(snapshot + ".journal.jsonl").Length, 1, 64_000);
+        var parent = child.AssistantMessage with { ToolSteps = [Receipt(child, child.ReceiptId, receipt)] };
+        await using (var locked = new FileStream(snapshot, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            Assert.Equal(child.AssistantMessage.Content,
+                (await SubagentChatState.ReadAsync(parent, child.AgentId, environment.Directory))!.AssistantMessage.Content);
+        secondWriter.Dispose();
+        await using (var locked = new FileStream(snapshot, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            Assert.Null(await SubagentChatState.ReadAsync(parent, child.AgentId, environment.Directory));
+        var restored = await SubagentChatState.ReadAsync(parent, child.AgentId, environment.Directory);
+        Assert.Equal(child.AssistantMessage.Content, restored!.AssistantMessage.Content);
+        Assert.Equal(2, restored.LastEventId);
+    }
+
+    [Fact]
+    public async Task LongTranscriptAppendsOnlyChangedTextAndReasoningAndReplaysLosslessly()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var child = Child();
+        var reasoning = new AssistantToolStep("thinking", "assistant.reasoning", "running", new string('r', 80_000), UpdatedAt: Start);
+        child = child with { AssistantMessage = child.AssistantMessage with { Content = new string('x', 80_000), ToolSteps = [reasoning] } };
+        var receipt = await child.PersistAsync(environment.Directory);
+        using var descriptor = JsonDocument.Parse(receipt);
+        var key = descriptor.RootElement.GetProperty("subagentStorageKey").GetString();
+        var snapshot = Path.Combine(environment.Directory, "Subagents", key + ".json");
+        var original = await File.ReadAllBytesAsync(snapshot);
+        for (var index = 1; index <= 12; index++)
+        {
+            reasoning = reasoning with { Detail = reasoning.Detail + " nächster Schritt", UpdatedAt = Start.AddSeconds(index) };
+            child = child with
+            {
+                ProjectionRevision = index, LastEventId = index,
+                AssistantMessage = child.AssistantMessage with
+                {
+                    Content = child.AssistantMessage.Content + " weiterer Satz.", ToolSteps = [reasoning], UpdatedAt = Start.AddSeconds(index),
+                },
+            };
+            receipt = await child.PersistAsync(environment.Directory);
+        }
+        Assert.Equal(original, await File.ReadAllBytesAsync(snapshot));
+        Assert.InRange(new FileInfo(snapshot + ".journal.jsonl").Length, 1, 80_000);
+        var parent = child.AssistantMessage with { ToolSteps = [Receipt(child, child.ReceiptId, receipt)] };
+        var restored = await SubagentChatState.ReadAsync(parent, child.AgentId, environment.Directory);
+        Assert.NotNull(restored);
+        Assert.Equal(child.AssistantMessage.Content, restored.AssistantMessage.Content);
+        Assert.Equal(reasoning, Assert.Single(restored.AssistantMessage.ToolSteps!));
+        Assert.Equal(12, restored.LastEventId);
+        await File.AppendAllTextAsync(snapshot + ".journal.jsonl", "{incomplete");
+        var recovered = await SubagentChatState.ReadAsync(parent, child.AgentId, environment.Directory);
+        Assert.Equal(child.AssistantMessage.Content, recovered!.AssistantMessage.Content);
+        child = recovered with { AssistantMessage = recovered.AssistantMessage with { Content = recovered.AssistantMessage.Content + " Nach Wiederaufnahme." } };
+        receipt = await child.PersistAsync(environment.Directory);
+        Assert.False(File.Exists(snapshot + ".journal.jsonl"));
+        parent = parent with { ToolSteps = [Receipt(child, child.ReceiptId, receipt)] };
+        Assert.Equal(child.AssistantMessage.Content, (await SubagentChatState.ReadAsync(parent, child.AgentId, environment.Directory))!.AssistantMessage.Content);
+    }
+
+    [Fact]
+    public async Task SelectedTranscriptUsesDecodedCacheAndInvalidatesItWhenTheSnapshotChanges()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var child = Child();
+        child = child with { AssistantMessage = child.AssistantMessage with { Content = new string('x', 80_000) } };
+        var receipt = await child.PersistAsync(environment.Directory);
+        using var descriptor = JsonDocument.Parse(receipt);
+        var key = descriptor.RootElement.GetProperty("subagentStorageKey").GetString();
+        var snapshot = Path.Combine(environment.Directory, "Subagents", key + ".json");
+        var parent = child.AssistantMessage with { ToolSteps = [Receipt(child, child.ReceiptId, receipt)] };
+        await using (var locked = new FileStream(snapshot, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            var first = await SubagentChatState.ReadAsync(parent, child.AgentId, environment.Directory);
+            var second = await SubagentChatState.ReadAsync(parent, child.AgentId, environment.Directory);
+            Assert.NotNull(first);
+            Assert.NotNull(second);
+            Assert.Same(first.AssistantMessage, second.AssistantMessage);
+            Assert.Equal(child.AssistantMessage.Content, second.AssistantMessage.Content);
+        }
+        var changed = child with { AssistantMessage = child.AssistantMessage with { Content = "Extern erneuerter Forschungsstand." } };
+        await File.WriteAllTextAsync(snapshot, JsonSerializer.Serialize(changed, ProtocolJson));
+        var refreshed = await SubagentChatState.ReadAsync(parent, child.AgentId, environment.Directory);
+        Assert.Equal(changed.AssistantMessage.Content, refreshed!.AssistantMessage.Content);
+        await using (var locked = new FileStream(snapshot, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            Assert.Equal(changed.AssistantMessage.Content,
+                (await SubagentChatState.ReadAsync(parent, child.AgentId, environment.Directory))!.AssistantMessage.Content);
+    }
+
     private static readonly DateTimeOffset Start = new(2026, 10, 2, 12, 0, 0, TimeSpan.Zero);
     private static readonly JsonSerializerOptions ProtocolJson = MissumAiProtocol.CreateJsonOptions();
 

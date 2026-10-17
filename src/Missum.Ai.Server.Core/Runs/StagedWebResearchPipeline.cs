@@ -141,6 +141,7 @@ internal sealed class StagedWebResearchPipeline
         // search snippet, model proposal or fetched page into this allowlist.
         // Keep the actual search response untouched, including its result count.
         var userUrls = ReadUserProvidedUrls(normalizedTask);
+        var userUrlKeys = userUrls.Select(NormalizeUrl).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var remaining = userUrls.Select(static url => new WebSearchResult(UserProvidedSourceTitle, url, null))
             .Concat(search.Results)
             .Where(static result => TryNormalizePublicUrl(result.Url, out _))
@@ -164,9 +165,9 @@ internal sealed class StagedWebResearchPipeline
                         modelId,
                         modelRole,
                         CreateFetchMessages(normalizedTask,
-                            remaining.Where(candidate => !userUrls.Contains(NormalizeUrl(candidate.Url))).ToArray(),
+                            remaining.Where(candidate => !userUrlKeys.Contains(NormalizeUrl(candidate.Url))).ToArray(),
                             fetched, preferredLanguage,
-                            userProvidedSources: remaining.Where(candidate => userUrls.Contains(NormalizeUrl(candidate.Url))).ToArray()),
+                            userProvidedSources: remaining.Where(candidate => userUrlKeys.Contains(NormalizeUrl(candidate.Url))).ToArray()),
                         [fetchTool.ToLmDefinition()],
                         null,
                         RequireToolCall: true,
@@ -969,6 +970,15 @@ internal sealed class StagedWebResearchPipeline
         WebSearchResult selected,
         string task)
     {
+        var requestedUrl = StringArgument(call.Arguments, "url");
+        var fetchUrl = requestedUrl is null ? selected.Url : PreserveFetchTargetFragment(requestedUrl, selected.Url);
+        if (requestedUrl != fetchUrl)
+        {
+            var arguments = call.Arguments.EnumerateObject().ToDictionary(static property => property.Name,
+                static property => property.Value.Clone(), StringComparer.Ordinal);
+            arguments["url"] = JsonSerializer.SerializeToElement(fetchUrl);
+            call = call with { Arguments = JsonSerializer.SerializeToElement(arguments, JsonOptions) };
+        }
         if (call.Arguments.TryGetProperty("query", out var query)
             && query.ValueKind == JsonValueKind.String
             && !string.IsNullOrWhiteSpace(query.GetString()))
@@ -1052,10 +1062,16 @@ internal sealed class StagedWebResearchPipeline
         .Select(static match => match.Value.TrimEnd(UrlTrailingPunctuation))
         .Where(static value => value.Length <= 2_048 && TryNormalizePublicUrl(value, out var uri)
             && string.IsNullOrEmpty(uri.UserInfo) && !uri.IsLoopback)
-        .Select(NormalizeUrl)
-        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .GroupBy(NormalizeUrl, StringComparer.OrdinalIgnoreCase)
+        .Select(static group => group.FirstOrDefault(value => !string.IsNullOrEmpty(new Uri(value).Fragment)) ?? group.First())
+        .Select(static value => NormalizeUrl(value) + new Uri(value).Fragment)
         .Take(MaximumFetchedSources)
         .ToArray();
+
+    internal static string PreserveFetchTargetFragment(string selectedUrl, string originalUrl) =>
+        TryNormalizePublicUrl(selectedUrl, out var selected) && string.IsNullOrEmpty(selected.Fragment)
+        && TryNormalizePublicUrl(originalUrl, out var original) && !string.IsNullOrEmpty(original.Fragment)
+        && UrlsEqual(selectedUrl, originalUrl) ? selected.AbsoluteUri + original.Fragment : selectedUrl;
 
     private static bool TryNormalizePublicUrl(string value, out Uri uri)
     {

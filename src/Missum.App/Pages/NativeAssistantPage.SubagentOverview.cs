@@ -101,11 +101,12 @@ public sealed partial class NativeAssistantPage
             Grid.SetColumn(avatar, Grid.GetColumn(oldIcon)); row.Children.Remove(oldIcon); row.Children.Add(avatar);
             var oldTitle = row.Children.OfType<TextBlock>().Single();
             var labels = new StackPanel { Spacing = 2, VerticalAlignment = VerticalAlignment.Center };
-            labels.Children.Add(new TextBlock { Text = child.Title, FontSize = 16, Foreground = ThemeBrush("MissumTextBrush", 230), TextWrapping = TextWrapping.Wrap });
+            var title = child.Title;
+            labels.Children.Add(new TextBlock { Text = title, FontSize = 16, Foreground = ThemeBrush("MissumTextBrush", 230), TextWrapping = TextWrapping.Wrap });
             labels.Children.Add(new TextBlock { Text = status, FontSize = 14,
                 Foreground = ThemeBrush("MissumMutedTextBrush", 145), Opacity = .75 });
             Grid.SetColumn(labels, Grid.GetColumn(oldTitle)); row.Children.Remove(oldTitle); row.Children.Add(labels);
-            AutomationProperties.SetName(button, child.Title + " · " + status);
+            AutomationProperties.SetName(button, title + " · " + status);
             AutomationProperties.SetHelpText(button, "Subagent-Aufgabe und Werkzeugschritte öffnen");
             ToolTipService.SetToolTip(button, child.Title + "\n" + status);
             button.Click += async (_, _) => await ActivateSubagentTabAsync(child);

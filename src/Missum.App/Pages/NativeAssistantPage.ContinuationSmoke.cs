@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using Missum.App.Controls;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
@@ -204,7 +204,7 @@ public sealed partial class NativeAssistantPage
             {
                 ApplyEvent(eventType, JsonSerializer.SerializeToElement(acceptedSnapshot));
                 RenderMessagesNow();
-                if (S(_messages[key], "status") != "completed" || S(_messages[key], "content") != "Der Auftrag ist nun abgeschlossen."
+                if (S(_messages[key], "status") != "completed" || MessageContent(_messages[key]) != "Der Auftrag ist nun abgeschlossen."
                     || ReadConversationRevision(_messages[key], "revision") != 30)
                     throw new InvalidOperationException("An older streaming snapshot replaced the completed answer.");
             }
@@ -216,7 +216,7 @@ public sealed partial class NativeAssistantPage
                 ["revision"] = JsonSerializer.SerializeToElement(31L),
             };
             ApplyEvent("conversation.messageCommitted", JsonSerializer.SerializeToElement(new { sessionId = session, message = retry }));
-            if (S(_messages[key], "status") != "streaming" || S(_messages[key], "content") != "Ein neuer Fortsetzungsversuch.")
+            if (S(_messages[key], "status") != "streaming" || MessageContent(_messages[key]) != "Ein neuer Fortsetzungsversuch.")
                 throw new InvalidOperationException("A newer retry was blocked by the completed answer's snapshot guard.");
             // The prior completion must not then overwrite the new attempt.
             ApplyEvent("conversation.messageCommitted", JsonSerializer.SerializeToElement(new { sessionId = session, message = completed }));

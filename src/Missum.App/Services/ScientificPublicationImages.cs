@@ -17,6 +17,7 @@ public static partial class ScientificPublicationImages
 
     public sealed record PreparedImages(string Markdown, ImmutableArray<ImageArtifact> Images)
     {
+        internal IReadOnlyList<string> SourceFiles { get; init; } = [];
         public async Task WriteImagesAsync(string stagingDirectory, CancellationToken cancellationToken = default)
         {
             if (Images.IsDefaultOrEmpty) return;
@@ -49,6 +50,7 @@ public static partial class ScientificPublicationImages
         var source = Path.GetFullPath(sourceDirectory);
         var images = ImmutableArray.CreateBuilder<ImageArtifact>();
         var byHash = new HashSet<string>(StringComparer.Ordinal);
+        var sourceFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var code = CodeRanges(markdown);
         var output = new StringBuilder(markdown.Length);
         var previous = 0;
@@ -75,6 +77,7 @@ public static partial class ScientificPublicationImages
             var image = await ReadImageAsync(candidate, DateTimeOffset.MinValue, MaximumImageBytes, cancellationToken).ConfigureAwait(false)
                 ?? throw new ScientificPublicationContentException("Die lokale Publikationsabbildung konnte nicht geladen werden: " + reference
                     + ". Nutze eine vorhandene PNG- oder JPEG-Datei bis 8 MiB.");
+            sourceFiles.Add(candidate);
             if (byHash.Add(image.Sha256))
             {
                 total += image.Bytes.Length;
@@ -85,7 +88,7 @@ public static partial class ScientificPublicationImages
             output.Append("![").Append(EscapeCaption(match.Groups["alt"].Value)).Append("](").Append(image.RelativePath).Append(')');
         }
         output.Append(markdown, previous, markdown.Length - previous);
-        return new(output.ToString(), images.ToImmutable());
+        return new(output.ToString(), images.ToImmutable()) { SourceFiles = sourceFiles.ToArray() };
     }
 
     internal static string SafePath(string root, string relative)

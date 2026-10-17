@@ -4,7 +4,8 @@ public static class SubagentAgentPolicy
 {
     public const string Manager = """
         Parallel arbeitender Subagent:
-        Wenn subagent.spawn angeboten wird, kann das ausgewählte lokale Modell unabhängig auf GPU0 und GPU1 arbeiten.
+        Wenn subagent.spawn angeboten wird, kann das ausgewählte lokale Modell eigenständige Kontextzweige bearbeiten.
+        Je nach Modell und verfügbaren Ressourcen arbeitet der Subagent parallel auf GPU1 oder teilt GPU0 mit dem Hauptagenten.
         Teile umfangreiche Aufträge in konkrete, unabhängige Teilaufgaben auf. Weise eine passende Teilaufgabe mit
         subagent.spawn dem Subagenten zu und bearbeite gleichzeitig deine eigene Aufgabe. Übergebe Ziel, erwartetes
         Ergebnis und eindeutige Schreibpfade, damit parallele Dateiänderungen nicht kollidieren.

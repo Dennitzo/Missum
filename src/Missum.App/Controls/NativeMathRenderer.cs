@@ -27,6 +27,7 @@ public static class NativeMathRenderer
     // A one-DIP transparent guard preserves antialiasing without inflating inline spacing.
     private const float Padding = 1;
     private static readonly object Gate = new();
+    private static readonly SemaphoreSlim RasterizationWorker = new(1, 1);
     private static readonly Dictionary<CacheKey, LinkedListNode<CacheItem>> Cache = [];
     private static readonly LinkedList<CacheItem> Recency = new();
     private static readonly Lazy<HashSet<string>> KnownCommands = new(() =>
@@ -34,6 +35,19 @@ public static class NativeMathRenderer
     private static int _cachedBytes;
 
     static NativeMathRenderer() => NativeBoxedMathPainter.RegisterCommands();
+
+    public static async Task<NativeMathBitmap> RenderAsync(string latex, bool display, double fontSize = 16,
+        bool dark = true, CancellationToken cancellationToken = default)
+    {
+        // Await admission without blocking ThreadPool threads on CSharpMath's
+        // shared font lock. Recycling or a changed source cancels queued work.
+        await RasterizationWorker.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await Task.Run(() => Render(latex, display, fontSize, dark), cancellationToken).ConfigureAwait(false);
+        }
+        finally { RasterizationWorker.Release(); }
+    }
 
     public static NativeMathBitmap Render(string latex, bool display, double fontSize = 16, bool dark = true)
     {

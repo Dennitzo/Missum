@@ -1,4 +1,4 @@
-using Microsoft.UI.Input;
+﻿using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
@@ -458,6 +458,13 @@ internal sealed class NativeConversationSelection
     internal void TrackSelectionWithin(FrameworkElement container)
     {
         TrackSelectionTree(container);
+        if (_dragging)
+        {
+            // Virtualized paragraphs reached by autoscroll join the same
+            // logical drag. Existing selected native nodes stay pinned.
+            var previous = _nodes.ToDictionary(node => node.View);
+            _nodes = Collect(_messages).Select(node => previous.GetValueOrDefault(node.View, node)).ToList();
+        }
     }
 
     private readonly ConditionalWeakTable<NativeStreamingMarkdown, TrackedMarkdownRevision> _trackedMarkdown = new();

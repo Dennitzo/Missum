@@ -13,13 +13,33 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
     internal const double BodyFontSize = 16;
     private readonly List<SectionView> _sections = [];
     private string _text = string.Empty;
+    internal string Source => _text;
     internal long RenderRevision { get; private set; }
+    private long _preparationGeneration;
+    internal bool IsPreparing { get; private set; }
+    private string? _reloadPreparation;
     internal IReadOnlyList<Grid> RenderedTables => _sections.Where(section => section.Specification.Kind == SectionKind.Table)
         .Select(section => section.Table!.Grid).ToArray();
 
     public NativeStreamingMarkdown(string text)
     {
         Spacing = 9;
+        Unloaded += (_, _) =>
+        {
+            if (!IsPreparing) return;
+            // A pending worker must not create formula controls in a discarded
+            // transcript. A retained control can resume on its next load.
+            _reloadPreparation = _text;
+            _preparationGeneration++;
+            IsPreparing = false;
+        };
+        Loaded += (_, _) =>
+        {
+            if (_reloadPreparation is not { } pending) return;
+            _reloadPreparation = null;
+            _text = "";
+            UpdateText(pending);
+        };
         UpdateText(text);
     }
 
@@ -28,9 +48,43 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
     {
         ArgumentNullException.ThrowIfNull(text);
         if (string.Equals(_text, text, StringComparison.Ordinal)) return;
+        _reloadPreparation = null;
         _text = text;
+        var generation = ++_preparationGeneration;
+        if (text.Length > 1024)
+        {
+            IsPreparing = true;
+            _ = PrepareSectionsAsync(text, generation);
+            return;
+        }
+        IsPreparing = false;
+        ApplySections(ParseSections(text));
+    }
+
+    private async Task PrepareSectionsAsync(string source, long generation)
+    {
+        List<SectionSpec> specifications;
+        try { specifications = await Task.Run(() => ParseSections(source)).ConfigureAwait(false); }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException)
+        { specifications = [new(SectionKind.Paragraph, source, 0, "")]; }
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+        {
+            if (generation != _preparationGeneration) return;
+            IsPreparing = false;
+            try { ApplySections(specifications); }
+            catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or System.Runtime.InteropServices.COMException)
+            {
+                Children.Clear(); _sections.Clear();
+                Children.Add(new TextBlock { Text = source, TextWrapping = TextWrapping.Wrap,
+                    IsTextSelectionEnabled = true, FontSize = BodyFontSize, Foreground = NativeThemeBrushes.Text });
+                RenderRevision++;
+            }
+        });
+    }
+
+    private void ApplySections(List<SectionSpec> specifications)
+    {
         RenderRevision++;
-        var specifications = ParseSections(text);
         var next = new SectionView?[specifications.Count];
         var used = new HashSet<SectionView>();
 

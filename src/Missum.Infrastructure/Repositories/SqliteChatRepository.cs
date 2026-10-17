@@ -1,4 +1,4 @@
-using Missum.Core.Chat;
+﻿using Missum.Core.Chat;
 using Missum.Core.Contracts;
 using Missum.Core.Extensions;
 using Missum.Core.Models;
@@ -8,7 +8,7 @@ using System.Text.Json;
 
 namespace Missum.Infrastructure.Repositories;
 
-public sealed class SqliteChatRepository(SqliteDatabase database) : IChatRepository
+public sealed partial class SqliteChatRepository(SqliteDatabase database) : IChatRepository, IStreamingConversationRepository
 {
     public Task DeleteEmptySessionGroupAsync(Guid groupId, CancellationToken cancellationToken = default) =>
         database.WriteAsync(async (connection, transaction, token) =>
@@ -255,9 +255,9 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
     {
         await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
-        command.CommandText = """
-            SELECT id,session_id,role,content,status,created_at,updated_at,error,tool_name,tool_context,tool_status,tool_detail,tool_provider,context_summary,content_profile,revision,tool_steps_json
-            FROM chat_messages WHERE session_id=$id ORDER BY created_at,id;
+        command.CommandText = $"""
+            SELECT m.id,m.session_id,m.role,m.content,m.status,m.created_at,m.updated_at,m.error,m.tool_name,m.tool_context,m.tool_status,m.tool_detail,m.tool_provider,m.context_summary,m.content_profile,m.revision,{ConversationToolStepStorage.CompleteStepsSql}
+            FROM chat_messages m WHERE m.session_id=$id ORDER BY m.created_at,m.id;
             """;
         command.Parameters.AddWithValue("$id", sessionId.ToString("D"));
         var result = new List<ChatMessage>();
@@ -344,6 +344,7 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
                 AND trim(content)=''
                 AND tool_name IS NULL
                 AND COALESCE(json_array_length(tool_steps_json),0)=0
+                AND NOT EXISTS(SELECT 1 FROM chat_tool_steps steps WHERE steps.message_id=chat_messages.id)
                 AND NOT EXISTS(SELECT 1 FROM chat_artifacts artifact WHERE artifact.message_id=chat_messages.id)
                 """;
             command.CommandText = $"SELECT COUNT(*) FROM chat_messages WHERE {predicate};";
@@ -387,73 +388,22 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
         ValidateToolStep(toolStep);
         return database.WriteAsync<IReadOnlyList<AssistantToolStep>>(async (connection, transaction, token) =>
         {
-            await using var command = connection.CreateCommand();
-            command.Transaction = transaction;
-            command.CommandText = "SELECT tool_steps_json FROM chat_messages WHERE id=$id;";
-            command.Parameters.AddWithValue("$id", messageId.ToString("D"));
-            var json = await command.ExecuteScalarAsync(token).ConfigureAwait(false) as string
-                ?? throw new InvalidOperationException("Die Werkzeugnachricht wurde nicht gefunden.");
-            var steps = JsonSerializer.Deserialize<List<AssistantToolStep>>(json, JsonSerializerOptions.Web) ?? [];
-            var index = steps.FindIndex(value => string.Equals(value.Id, toolStep.Id, StringComparison.Ordinal));
-            if (index >= 0)
-            {
-                var merged = AssistantToolStep.Merge(steps[index], toolStep);
-                if (steps[index] == merged) return steps;
-                steps[index] = merged;
-            }
-            else
-            {
-                steps.Add(toolStep);
-            }
-            command.CommandText = """
-                UPDATE chat_messages SET tool_steps_json=$steps,revision=revision+1,updated_at=$now WHERE id=$id;
-                UPDATE chat_sessions SET conversation_revision=conversation_revision+1,updated_at=$now
-                    WHERE id=(SELECT session_id FROM chat_messages WHERE id=$id);
-                """;
-            command.Parameters.AddWithValue("$steps", JsonSerializer.Serialize(steps, JsonSerializerOptions.Web));
-            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToDb());
-            await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
-            return steps;
+            await SaveToolStepCoreAsync(connection, transaction, messageId, toolStep, token).ConfigureAwait(false);
+            return await ConversationToolStepStorage.ReadAllAsync(connection, transaction, messageId, token).ConfigureAwait(false);
         }, cancellationToken);
     }
 
     public Task UpdateMessageWithToolStepsAsync(Guid messageId, string content, MessageStatus status,
         IReadOnlyList<AssistantToolStep> toolSteps, CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(toolSteps);
-        if (toolSteps.Select(static step => step.Id).Distinct(StringComparer.Ordinal).Count() != toolSteps.Count)
-            throw new ArgumentException("Ungültige Werkzeugchronologie.", nameof(toolSteps));
-        foreach (var step in toolSteps) ValidateToolStep(step);
-        var visibleContent = ChatContentSanitizer.Sanitize(content);
-        if (toolSteps.Any(step => step.ContentOffset > visibleContent.Length))
-            throw new ArgumentException("Werkzeugposition liegt außerhalb des Nachrichtentextes.", nameof(toolSteps));
+        ValidateStepBatch(content, toolSteps);
         return database.WriteAsync(async (connection, transaction, token) =>
         {
-            await using var command = connection.CreateCommand();
-            command.Transaction = transaction;
-            command.CommandText = "SELECT tool_steps_json FROM chat_messages WHERE id=$id;";
-            command.Parameters.AddWithValue("$id", messageId.ToString("D"));
-            var storedJson = await command.ExecuteScalarAsync(token).ConfigureAwait(false) as string
-                ?? throw new InvalidOperationException("Die Werkzeugnachricht wurde nicht gefunden.");
-            var mergedSteps = JsonSerializer.Deserialize<List<AssistantToolStep>>(storedJson, JsonSerializerOptions.Web) ?? [];
+            await ConversationToolStepStorage.EnsureNormalizedAsync(connection, transaction, messageId, token).ConfigureAwait(false);
+            var stepsChanged = false;
             foreach (var step in toolSteps)
-            {
-                var index = mergedSteps.FindIndex(value => value.Id == step.Id);
-                if (index < 0) mergedSteps.Add(step);
-                else mergedSteps[index] = AssistantToolStep.Merge(mergedSteps[index], step);
-            }
-            if (mergedSteps.Any(step => step.ContentOffset > visibleContent.Length))
-                throw new InvalidOperationException("Die Werkzeugchronologie passt nicht zum neuen Nachrichtentext.");
-            command.CommandText = """
-                UPDATE chat_messages SET content=$content,status=$status,tool_steps_json=$steps,revision=revision+1,updated_at=$now WHERE id=$id;
-                UPDATE chat_sessions SET conversation_revision=conversation_revision+1,updated_at=$now
-                    WHERE id=(SELECT session_id FROM chat_messages WHERE id=$id);
-                """;
-            command.Parameters.AddWithValue("$content", visibleContent);
-            command.Parameters.AddWithValue("$status", SqliteMapping.EnumName(status));
-            command.Parameters.AddWithValue("$steps", JsonSerializer.Serialize(mergedSteps, JsonSerializerOptions.Web));
-            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToDb());
-            await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+                stepsChanged |= (await ConversationToolStepStorage.UpsertChangeAsync(connection, transaction, messageId, step, token).ConfigureAwait(false)).Changed;
+            await UpdateStreamMessageAsync(connection, transaction, messageId, content, status, stepsChanged, token).ConfigureAwait(false);
         }, cancellationToken);
     }
 
@@ -688,10 +638,10 @@ public sealed class SqliteChatRepository(SqliteDatabase database) : IChatReposit
     {
         await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
-        command.CommandText = """
-            SELECT id,session_id,role,content,status,created_at,updated_at,error,tool_name,tool_context,tool_status,tool_detail,tool_provider,context_summary,content_profile,revision,tool_steps_json
-            FROM chat_messages
-            WHERE id=$id;
+        command.CommandText = $"""
+            SELECT m.id,m.session_id,m.role,m.content,m.status,m.created_at,m.updated_at,m.error,m.tool_name,m.tool_context,m.tool_status,m.tool_detail,m.tool_provider,m.context_summary,m.content_profile,m.revision,{ConversationToolStepStorage.CompleteStepsSql}
+            FROM chat_messages m
+            WHERE m.id=$id;
             """;
         command.Parameters.AddWithValue("$id", messageId.ToString("D"));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);

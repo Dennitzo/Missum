@@ -23,7 +23,7 @@ public sealed partial class NativeAssistantPage
         if (PromptTimeline is null || ConversationContent is null || _disposed) return;
         var messages = OrderedDisplayMessages().ToArray();
         var prompts = messages.Where(message => S(message, "role") == "user"
-            && !string.IsNullOrWhiteSpace(S(message, "content"))).ToArray();
+            && !string.IsNullOrWhiteSpace(MessageContent(message))).ToArray();
         var visibility = prompts.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
         if (PromptTimeline.Visibility != visibility) PromptTimeline.Visibility = visibility;
         if (prompts.Length == 0)
@@ -35,8 +35,10 @@ public sealed partial class NativeAssistantPage
             return;
         }
 
+        var promptIds = prompts.Select(prompt => S(prompt, "id")).ToHashSet(StringComparer.Ordinal);
+        var previews = PromptPreviewIndex(messages);
         foreach (var stale in _promptTimelineMarkers.Keys
-                     .Where(id => prompts.All(prompt => S(prompt, "id") != id)).ToArray())
+                     .Where(id => !promptIds.Contains(id)).ToArray())
         {
             if (ToolTipService.GetToolTip(_promptTimelineMarkers[stale].HitTarget) is ToolTip preview)
                 preview.IsOpen = false;
@@ -116,7 +118,7 @@ public sealed partial class NativeAssistantPage
             }
             if (!marker.IsHovered)
             {
-                var content = PromptPreviewContent(messages, prompt);
+                var content = previews[id];
                 if (marker.PreviewContent == content) continue;
                 var preview = new ToolTip { Content = CreatePromptPreview(content), Placement = PlacementMode.Right };
                 preview.Opened += (_, _) =>
@@ -134,16 +136,39 @@ public sealed partial class NativeAssistantPage
         UpdatePromptTimelineSelection();
     }
 
-    private static PromptTimelinePreviewContent PromptPreviewContent(JsonElement[] messages, JsonElement prompt)
+    private readonly Dictionary<string, (long PromptVersion, string AnswerId, long AnswerVersion, PromptTimelinePreviewContent Content)> _promptPreviewCache = new(StringComparer.Ordinal);
+
+    private Dictionary<string, PromptTimelinePreviewContent> PromptPreviewIndex(JsonElement[] messages)
     {
-        var promptId = S(prompt, "id");
-        var absoluteIndex = Array.FindIndex(messages, message => S(message, "id") == promptId);
-        var answer = absoluteIndex >= 0
-            ? messages.Skip(absoluteIndex + 1).FirstOrDefault(message => S(message, "role") == "assistant")
-            : default;
-        return new PromptTimelinePreviewContent(
-            $"{messages.Take(absoluteIndex + 1).Count(message => S(message, "role") == "user")}) " + NativePromptTimelineState.PreviewText(S(prompt, "content"), 118),
-            NativePromptTimelineState.PreviewText(S(answer, "content"), 190));
+        var result = new Dictionary<string, PromptTimelinePreviewContent>(StringComparer.Ordinal);
+        var number = 0;
+        for (var index = 0; index < messages.Length; index++)
+        {
+            var prompt = messages[index];
+            if (S(prompt, "role") != "user") continue;
+            number++;
+            var id = S(prompt, "id");
+            var answer = default(JsonElement);
+            // Each message is visited at most once by the inner search: the
+            // next prompt terminates this prompt's answer interval.
+            for (var next = index + 1; next < messages.Length && S(messages[next], "role") != "user"; next++)
+                if (S(messages[next], "role") == "assistant") { answer = messages[next]; break; }
+            var answerId = S(answer, "id");
+            var promptVersion = MessageVersion(prompt);
+            var answerVersion = answer.ValueKind == JsonValueKind.Object ? MessageVersion(answer) : 0;
+            if (!_promptPreviewCache.TryGetValue(id, out var previous) || previous.PromptVersion != promptVersion
+                || previous.AnswerId != answerId || previous.AnswerVersion != answerVersion)
+            {
+                var content = new PromptTimelinePreviewContent(
+                    $"{number}) " + NativePromptTimelineState.PreviewText(MessageContent(prompt), 118),
+                    answer.ValueKind == JsonValueKind.Object ? NativePromptTimelineState.PreviewText(MessageContent(answer), 190) : "");
+                previous = (promptVersion, answerId, answerVersion, content);
+                _promptPreviewCache[id] = previous;
+            }
+            result[id] = previous.Content;
+        }
+        foreach (var stale in _promptPreviewCache.Keys.Where(id => !result.ContainsKey(id)).ToArray()) _promptPreviewCache.Remove(stale);
+        return result;
     }
 
     private static Border CreatePromptPreview(PromptTimelinePreviewContent content)

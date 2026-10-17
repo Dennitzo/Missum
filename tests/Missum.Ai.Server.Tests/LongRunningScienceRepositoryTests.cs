@@ -159,7 +159,7 @@ public sealed class LongRunningScienceRepositoryTests
     [InlineData("event")]
     [InlineData("checkpoint")]
     [InlineData("metadata")]
-    public async Task CleanupKeepsWeekOldArtifactsNeededByAnActiveScienceRun(string reference)
+    public async Task CleanupKeepsWeekOldScienceEvidenceAfterItsRunCompletes(string reference)
     {
         using var context = new TestServerContext();
         var repository = Repository(context);
@@ -185,8 +185,8 @@ public sealed class LongRunningScienceRepositoryTests
         Assert.NotNull(await repository.GetAsync(run.RunId));
         await repository.UpdateStateAsync(run.RunId, RunState.Completed);
         await cleanup.CleanupExpiredAsync();
-        Assert.Null(await artifacts.ResolveAsync(artifact.ArtifactId));
-        Assert.False(File.Exists(Path.Combine(context.Options.ArtifactDirectory, artifact.ArtifactId + ".bin")));
+        Assert.NotNull(await artifacts.ResolveAsync(artifact.ArtifactId));
+        Assert.True(File.Exists(Path.Combine(context.Options.ArtifactDirectory, artifact.ArtifactId + ".bin")));
     }
 
     [Fact]

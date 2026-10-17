@@ -55,7 +55,7 @@ public sealed partial class MissumAiAssistantService
         if (!string.IsNullOrWhiteSpace(message.Error)) text.AppendLine(message.Error);
         foreach (var step in message.ToolSteps ?? [])
         {
-            if (step.Tool is ReasoningStepTool or "assistant.progress" or "assistant.narration") continue;
+            if (step.Tool is ReasoningStepTool or "assistant.progress" or "assistant.narration" || IsDisplayOnlyResearchActivity(step)) continue;
             text.AppendLine(CultureInfo.InvariantCulture, $"{step.Tool} | {step.Status} | {step.Id}");
             text.AppendLine("Eingabe: " + step.InputJson);
             text.AppendLine("Ergebnis: " + (step.OutputJson ?? step.Detail));
@@ -75,7 +75,8 @@ public sealed partial class MissumAiAssistantService
             text.AppendLine("Gespeicherte Zusammenfassung: " + ClipCodingHistory(message.ContextSummary, 4_000));
         text.AppendLine(ClipCodingHistory(message.Content, 20_000));
         if (!string.IsNullOrWhiteSpace(message.Error)) text.AppendLine("Abbruchgrund: " + ClipCodingHistory(message.Error, 1_000));
-        var steps = (message.ToolSteps ?? []).Where(step => step.Tool is not (ReasoningStepTool or "assistant.progress" or "assistant.narration")).ToArray();
+        var steps = (message.ToolSteps ?? []).Where(step => step.Tool is not (ReasoningStepTool or "assistant.progress" or "assistant.narration")
+            && !IsDisplayOnlyResearchActivity(step)).ToArray();
         // Prefer committed edits, commands and failures over repeated broad directory reads.
         var candidates = steps.Select((step, index) => (step, index))
             .OrderBy(item => item.step.Tool is "coding.write" or "coding.edit" or "coding.command" or "coding.updatePlan"
@@ -117,6 +118,21 @@ public sealed partial class MissumAiAssistantService
                 "addedLines", "removedLines", "stderr", "stdout" })
                 if (root.TryGetProperty(name, out var value)) result.Append(name).Append('=').Append(ClipCodingHistory(value.ToString(), 650)).Append(';');
         }
+    }
+
+    private static bool IsDisplayOnlyResearchActivity(AssistantToolStep step)
+    {
+        if (step.Tool is not ("web.deepResearch" or "subagent" or "subagent.completed")) return false;
+        try
+        {
+            using var document = JsonDocument.Parse(step.Tool == "web.deepResearch" ? step.InputJson ?? "null" : step.OutputJson ?? "null");
+            var root = document.RootElement;
+            return root.ValueKind == JsonValueKind.Object && (step.Tool == "web.deepResearch"
+                ? root.TryGetProperty("activityProjection", out var marker) && marker.ValueKind == JsonValueKind.True
+                : root.TryGetProperty("agentId", out var agent) && agent.ValueKind == JsonValueKind.String
+                    && agent.GetString()?.StartsWith(SubagentChatState.DeepResearchAgentPrefix, StringComparison.Ordinal) == true);
+        }
+        catch (JsonException) { return false; }
     }
 
     private static string ClipCodingHistory(string? text, int limit)

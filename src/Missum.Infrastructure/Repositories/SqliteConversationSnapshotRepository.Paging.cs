@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using Missum.Core.Models;
 using Missum.Infrastructure.Storage;
@@ -32,8 +32,13 @@ public sealed partial class SqliteConversationSnapshotRepository
                     'sessionId',json_extract(s.value,'$.outputJson')->>'$.sessionId',
                     'title',json_extract(s.value,'$.outputJson')->>'$.title',
                     'status',json_extract(s.value,'$.outputJson')->>'$.status',
+                    'kind',json_extract(s.value,'$.outputJson')->>'$.kind',
+                    'originToolStepId',json_extract(s.value,'$.outputJson')->>'$.originToolStepId',
+                    'originMessageId',json_extract(s.value,'$.outputJson')->>'$.originMessageId',
+                    'gpuIndex',json_extract(s.value,'$.outputJson')->>'$.gpuIndex',
                     'resultDelivered',json_extract(s.value,'$.outputJson')->>'$.resultDelivered',
                     'projectionRevision',json_extract(s.value,'$.outputJson')->>'$.projectionRevision',
+                    'transcriptRevision',json_extract(s.value,'$.outputJson')->>'$.transcriptRevision',
                     'attemptStartedAt',COALESCE(json_extract(s.value,'$.outputJson')->>'$.attemptStartedAt',
                         json_extract(s.value,'$.outputJson')->>'$.assistantMessage.createdAt'),
                     'subagentStorageKey',json_extract(s.value,'$.outputJson')->>'$.subagentStorageKey')||'' ELSE NULL END,
@@ -61,11 +66,10 @@ public sealed partial class SqliteConversationSnapshotRepository
         if (session is null) return null;
         command.CommandText = "SELECT COUNT(*) FROM chat_messages WHERE session_id=$session;";
         var total = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), System.Globalization.CultureInfo.InvariantCulture);
-        command.CommandText = $"""
+        command.CommandText = """
             SELECT m.id,m.session_id,m.role,m.content,m.status,m.created_at,m.updated_at,m.error,
-                m.tool_name,m.tool_context,m.tool_status,NULL,m.tool_provider,NULL,m.content_profile,m.revision,
-                {HeadersSql},h.message_id
-            FROM chat_messages m LEFT JOIN chat_message_ui_headers h ON h.message_id=m.id
+                m.tool_name,m.tool_context,m.tool_status,NULL,m.tool_provider,NULL,m.content_profile,m.revision,NULL
+            FROM chat_messages m
             WHERE m.session_id=$session AND ($before IS NULL OR (m.created_at,m.id)<($before,$beforeId))
             ORDER BY m.created_at DESC,m.id DESC LIMIT $limit;
             """;
@@ -73,17 +77,18 @@ public sealed partial class SqliteConversationSnapshotRepository
         command.Parameters.AddWithValue("$beforeId", before?.Id.ToString("D") ?? "");
         command.Parameters.AddWithValue("$limit", pageSize + 1);
         var messages = new List<ChatMessage>();
-        var cache = new List<(Guid Id, long Revision, string Json)>();
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
-            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            {
-                var message = SqliteChatRepository.ReadMessage(reader);
-                messages.Add(message);
-                if (reader.IsDBNull(17)) cache.Add((message.Id, message.Revision, reader.GetString(16)));
-            }
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false)) messages.Add(SqliteChatRepository.ReadMessage(reader));
         var hasMore = messages.Count > pageSize;
         if (hasMore) messages.RemoveAt(messages.Count - 1);
         messages.Reverse();
+        var windows = new Dictionary<Guid, ConversationToolStepWindow>();
+        for (var index = 0; index < messages.Count; index++)
+        {
+            var toolPage = await ReadToolStepPageAsync(connection, transaction, messages[index].Id, 64, null, cancellationToken).ConfigureAwait(false);
+            messages[index] = messages[index] with { ToolSteps = toolPage.Steps };
+            if (toolPage.Window.TotalSteps > 0) windows[messages[index].Id] = toolPage.Window;
+        }
         var artifacts = new Dictionary<Guid, IReadOnlyList<ChatArtifact>>();
         if (messages.Count > 0)
         {
@@ -94,32 +99,62 @@ public sealed partial class SqliteConversationSnapshotRepository
                 command.Parameters.AddWithValue(key, message.Id.ToString("D"));
                 return key;
             });
-            command.CommandText = SqliteChatArtifactRepository.SelectSql
+            command.CommandText = SqliteChatArtifactRepository.DisplaySelectSql
                 + " WHERE a.message_id IN (" + string.Join(',', keys) + ") ORDER BY a.created_at,a.id;";
             artifacts = (await SqliteChatArtifactRepository.ReadAsync(command, cancellationToken).ConfigureAwait(false))
                 .GroupBy(a => a.MessageId).ToDictionary(g => g.Key, g => (IReadOnlyList<ChatArtifact>)g.ToArray());
         }
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        // Cache only the displayed page. No eager migration of old transcripts, no conversation revision change.
-        if (cache.Count > 0) await database.WriteAsync(async (writer, tx, token) =>
-        {
-            await using var save = writer.CreateCommand();
-            save.Transaction = tx;
-            save.CommandText = """
-                INSERT OR IGNORE INTO chat_message_ui_headers(message_id,headers_json)
-                SELECT id,$headers FROM chat_messages WHERE id=$id AND revision=$revision;
-                """;
-            foreach (var item in cache)
-            {
-                save.Parameters.Clear();
-                save.Parameters.AddWithValue("$id", item.Id.ToString("D"));
-                save.Parameters.AddWithValue("$revision", item.Revision);
-                save.Parameters.AddWithValue("$headers", item.Json);
-                await save.ExecuteNonQueryAsync(token).ConfigureAwait(false);
-            }
-        }, cancellationToken).ConfigureAwait(false);
         return new(new(session, messages, artifacts), hasMore,
-            messages.Count > 0 ? new(messages[0].CreatedAt, messages[0].Id) : null, total);
+            messages.Count > 0 ? new(messages[0].CreatedAt, messages[0].Id) : null, total, windows);
+    }
+
+    public async Task<ConversationToolStepPage?> GetToolStepsPageAsync(Guid sessionId, Guid messageId, int pageSize = 64,
+        long? beforeOrdinal = null, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT 1 FROM chat_messages WHERE id=$message AND session_id=$session;";
+        command.Parameters.AddWithValue("$message", messageId.ToString("D"));
+        command.Parameters.AddWithValue("$session", sessionId.ToString("D"));
+        if (await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is null) return null;
+        return await ReadToolStepPageAsync(connection, transaction, messageId, Math.Clamp(pageSize, 1, 128), beforeOrdinal, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task<ConversationToolStepPage> ReadToolStepPageAsync(SqliteConnection connection, SqliteTransaction transaction,
+        Guid messageId, int pageSize, long? beforeOrdinal, CancellationToken token)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.Parameters.AddWithValue("$message", messageId.ToString("D"));
+        command.CommandText = "SELECT EXISTS(SELECT 1 FROM chat_tool_step_messages WHERE message_id=$message);";
+        var normalized = Convert.ToInt64(await command.ExecuteScalarAsync(token).ConfigureAwait(false), System.Globalization.CultureInfo.InvariantCulture) != 0;
+        command.CommandText = normalized ? "SELECT COUNT(*) FROM chat_tool_steps WHERE message_id=$message;"
+            : "SELECT COALESCE(json_array_length(tool_steps_json),0) FROM chat_messages WHERE id=$message;";
+        var total = Convert.ToInt32(await command.ExecuteScalarAsync(token).ConfigureAwait(false), System.Globalization.CultureInfo.InvariantCulture);
+        command.CommandText = normalized ? """
+            SELECT ordinal,header_json FROM chat_tool_steps WHERE message_id=$message AND ($before IS NULL OR ordinal<$before)
+            ORDER BY ordinal DESC LIMIT $limit;
+            """ : $"""
+            SELECT CAST(s.key AS INTEGER),s.value
+            FROM chat_messages m LEFT JOIN chat_message_ui_headers h ON h.message_id=m.id,json_each({HeadersSql}) s
+            WHERE m.id=$message AND ($before IS NULL OR CAST(s.key AS INTEGER)<$before)
+            ORDER BY CAST(s.key AS INTEGER) DESC LIMIT $limit;
+            """;
+        command.Parameters.AddWithValue("$before", (object?)beforeOrdinal ?? DBNull.Value);
+        command.Parameters.AddWithValue("$limit", pageSize + 1);
+        var rows = new List<(long Ordinal, AssistantToolStep Step)>();
+        await using (var reader = await command.ExecuteReaderAsync(token).ConfigureAwait(false))
+            while (await reader.ReadAsync(token).ConfigureAwait(false))
+                if (JsonSerializer.Deserialize<AssistantToolStep>(reader.GetString(1), JsonSerializerOptions.Web) is { } step)
+                    rows.Add((reader.GetInt64(0), step));
+        var more = rows.Count > pageSize;
+        if (more) rows.RemoveAt(rows.Count - 1);
+        rows.Reverse();
+        return new(messageId, rows.Select(row => row.Step).ToArray(), new(total, more,
+            rows.Count > 0 ? rows[0].Ordinal : null, RequiresLegacyNormalization: !normalized && total > 0));
     }
 
     public async Task<AssistantToolStep?> GetToolStepAsync(Guid sessionId, Guid messageId, string stepId,
@@ -128,12 +163,40 @@ public sealed partial class SqliteConversationSnapshotRepository
         await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
+            SELECT step.step_json FROM chat_tool_steps step JOIN chat_messages m ON m.id=step.message_id
+            WHERE m.id=$message AND m.session_id=$session AND step.step_id=$step
+            UNION ALL
             SELECT s.value FROM chat_messages m,json_each(m.tool_steps_json) s
-            WHERE m.id=$message AND m.session_id=$session AND json_extract(s.value,'$.id')=$step LIMIT 1;
+            WHERE m.id=$message AND m.session_id=$session AND json_extract(s.value,'$.id')=$step
+                AND NOT EXISTS(SELECT 1 FROM chat_tool_step_messages normalized WHERE normalized.message_id=m.id)
+            LIMIT 1;
             """;
         command.Parameters.AddWithValue("$message", messageId.ToString("D"));
         command.Parameters.AddWithValue("$session", sessionId.ToString("D"));
         command.Parameters.AddWithValue("$step", stepId);
+        return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is string json
+            ? JsonSerializer.Deserialize<AssistantToolStep>(json, JsonSerializerOptions.Web) : null;
+    }
+
+    public async Task<AssistantToolStep?> GetSubagentReceiptAsync(Guid sessionId, Guid messageId, string agentId,
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT payload FROM (
+                SELECT step.step_json AS payload,step.ordinal AS ordinal FROM chat_tool_steps step JOIN chat_messages m ON m.id=step.message_id
+                WHERE m.id=$message AND m.session_id=$session AND step.tool_name='subagent' AND step.child_agent_id=$agent
+                UNION ALL
+                SELECT s.value,CAST(s.key AS INTEGER) FROM chat_messages m,json_each(m.tool_steps_json) s
+                WHERE m.id=$message AND m.session_id=$session AND json_extract(s.value,'$.tool')='subagent'
+                    AND json_valid(json_extract(s.value,'$.outputJson')) AND json_extract(s.value,'$.outputJson')->>'$.agentId'=$agent
+                    AND NOT EXISTS(SELECT 1 FROM chat_tool_step_messages normalized WHERE normalized.message_id=m.id)
+            ) ORDER BY ordinal DESC LIMIT 1;
+            """;
+        command.Parameters.AddWithValue("$message", messageId.ToString("D"));
+        command.Parameters.AddWithValue("$session", sessionId.ToString("D"));
+        command.Parameters.AddWithValue("$agent", agentId);
         return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is string json
             ? JsonSerializer.Deserialize<AssistantToolStep>(json, JsonSerializerOptions.Web) : null;
     }

@@ -237,29 +237,103 @@ class SubagentRuntimeTests(unittest.TestCase):
             self.assertIn("batch-size = 256\nubatch-size = 256", block)
         self.assertEqual(self.manager.placements, {self.base: "CUDA0", self.child: "CUDA1"})
 
-    def test_actual_multi_gpu_placement_disables_delegation_for_any_model(self):
+    def test_actual_multi_gpu_placement_delegates_on_the_existing_primary_without_replica(self):
         self.primary["status"]["args"] = ["--device", "CUDA0,CUDA1", "--split-mode", "layer"]
         with patch.object(catalog, "gpu_inventory", return_value=self.devices):
             result = self.manager.agent_status(self.base)
-        self.assertFalse(result["allowed"])
-        self.assertEqual("subagent.primary_uses_multiple_gpus", result["reason"])
+        self.assertTrue(result["allowed"])
+        self.assertEqual(self.base, result["instanceId"])
+        self.assertEqual(0, result["gpuIndex"])
+        self.assertEqual("shared_primary", result["executionMode"])
+        self.assertEqual("subagent.primary_uses_multiple_gpus", result["parallelUnavailableReason"])
         self.assertFalse(self.loads)
 
     def test_actual_free_vram_blocks_new_replica_but_resident_replica_remains_usable(self):
         self.devices[1]["free"] = 1024**3
         with patch.object(catalog, "gpu_inventory", return_value=self.devices):
-            self.assertEqual("subagent.vram_insufficient", self.manager.agent_status(self.base)["reason"])
+            shared = self.manager.agent_status(self.base)
+            self.assertTrue(shared["allowed"])
+            self.assertEqual(self.base, shared["instanceId"])
+            self.assertEqual("subagent.vram_insufficient", shared["parallelUnavailableReason"])
             self.active.append(dict(id=self.child, status=dict(value="loaded")))
-            self.assertTrue(self.manager.agent_status(self.base)["allowed"])
+            parallel = self.manager.agent_status(self.base)
+            self.assertTrue(parallel["allowed"])
+            self.assertEqual(self.child, parallel["instanceId"])
+            self.assertEqual("parallel", parallel["executionMode"])
 
     def test_failed_replica_never_retries_using_primary_gpu(self):
         self.fail = True
         with patch.object(catalog, "gpu_inventory", return_value=self.devices):
             with self.assertRaisesRegex(RuntimeError, "subagent.vram_allocation_failed"):
                 self.manager.load(self.child)
-            self.assertEqual("subagent.vram_allocation_failed", self.manager.agent_status(self.base)["reason"])
+            available = self.manager.agent_status(self.base)
+            self.assertTrue(available["allowed"])
+            self.assertEqual(self.base, available["instanceId"])
+            self.assertEqual("subagent.vram_allocation_failed", available["parallelUnavailableReason"])
         self.assertEqual([self.child], self.loads)
         self.assertEqual("CUDA1", self.manager.placements[self.child])
+
+    def test_shared_preparation_uses_independent_keys_without_loading_or_reconfiguring_model(self):
+        self.devices[1]["free"] = 1024**3
+        with patch.object(catalog, "gpu_inventory", return_value=self.devices), patch.object(
+                self.manager.sessions, "fork", return_value=dict(status="forked", restoredTokens=230)) as fork:
+            result = self.manager.agent_prepare(self.base, "parent", "child", {}, "child-session", "parent-session")
+        self.assertTrue(result["allowed"])
+        self.assertEqual((self.base, 0, "forked", 230),
+                         (result["instanceId"], result["gpuIndex"], result["cacheStatus"], result["cachedTokens"]))
+        self.assertEqual([], self.loads)
+        self.assertEqual({}, self.manager.policies)
+        fork.assert_called_once_with(self.base, "parent", self.base, "child", {}, "child-session", "parent-session", None)
+
+    def test_failed_secondary_allocation_prepares_shared_branch_without_loading_another_primary(self):
+        self.failed_models.add(self.child)
+        with patch.object(catalog, "gpu_inventory", return_value=self.devices), patch.object(
+                self.manager.sessions, "fork", return_value=dict(status="forked", restoredTokens=230)) as fork:
+            result = self.manager.agent_prepare(self.base, "parent", "child", {})
+        self.assertTrue(result["allowed"])
+        self.assertEqual((self.base, 0), (result["instanceId"], result["gpuIndex"]))
+        self.assertEqual("subagent.vram_allocation_failed", result["parallelUnavailableReason"])
+        self.assertEqual([self.child], self.loads)
+        self.assertEqual("loaded", self.primary["status"]["value"])
+        fork.assert_called_once_with(self.base, "parent", self.base, "child", {}, None, None, None)
+
+    def test_shared_admission_rejects_another_models_resident_slot_and_unfinished_primary_load(self):
+        for status in ("loading", "failed"):
+            with self.subTest(status=status), patch.object(catalog, "gpu_inventory", return_value=self.devices[:1]):
+                self.primary["status"]["value"] = status
+                result = self.manager.agent_status(self.base)
+                self.assertFalse(result["allowed"])
+                self.assertEqual("subagent.primary_not_loaded", result["reason"])
+        self.active[:] = [dict(id="other-model", status=dict(value="loaded"))]
+        self.assertEqual("subagent.primary_not_loaded", self.manager.agent_status(self.base)["reason"])
+
+    def test_one_gpu_shared_admission_preserves_the_actual_primary_context_limit(self):
+        with patch.object(catalog, "gpu_inventory", return_value=self.devices[:1]):
+            result = self.manager.agent_status(self.base, 32768)
+            self.assertTrue(result["allowed"])
+            self.assertEqual((self.base, 0, 32768), (result["instanceId"], result["gpuIndex"], result["contextLength"]))
+            rejected = self.manager.agent_status(self.base, 32769)
+            self.assertFalse(rejected["allowed"])
+            self.assertEqual("subagent.context_too_large", rejected["reason"])
+
+    def test_shared_canonical_fork_preserves_parent_and_child_snapshots_across_owner_switches(self):
+        cache, state, _, canonical, source, prefill = self.canonical_cache()
+        result = cache.fork(self.base, "parent", self.base, "child", prefill,
+                            session_id="child-session", parent_session_id="parent-session")
+        self.assertEqual("forked", result["status"])
+        self.assertEqual(canonical, state[self.base])
+        self.assertEqual("child", cache.resident[self.base]["key"])
+        parent_file = self.root / (cache._identity(self.base, "parent") + ".bin")
+        child_file = self.root / (cache._identity(self.base, "child") + ".bin")
+        self.assertEqual(source, cache._snapshot_tokens(parent_file))
+        self.assertEqual(canonical, cache._snapshot_tokens(child_file))
+        child_progress = [*canonical, 5000, 5001]
+        state[self.base] = child_progress
+        self.assertEqual("restored", cache.prepare(self.base, "parent")["status"])
+        self.assertEqual(source, state[self.base])
+        self.assertEqual(child_progress, cache._snapshot_tokens(child_file))
+        self.assertEqual("restored", cache.prepare(self.base, "child")["status"])
+        self.assertEqual(child_progress, state[self.base])
 
     def test_physical_primary_must_be_gpu_zero_even_when_cuda_device_order_differs(self):
         self.devices[0]["device"], self.devices[1]["device"] = "CUDA1", "CUDA0"
@@ -318,7 +392,7 @@ class SubagentRuntimeTests(unittest.TestCase):
                 model = urllib.parse.parse_qs(path.split("?", 1)[1])["model"][0]
                 return [dict(id=0, is_processing=False, n_prompt_tokens=len(state[model]))]
             if path == "apply-template":
-                self.assertEqual(self.base, body["model"])
+                self.assertIn(body["model"], (self.base, self.child))
                 self.assertEqual("none", body["reasoning_effort"])
                 if body["add_generation_prompt"]:
                     return dict(prompt="first-native-inference")
@@ -330,17 +404,20 @@ class SubagentRuntimeTests(unittest.TestCase):
                     return dict(tokens=[*([5000] if rewrite_prefix else []), *canonical, 4000, 4001])
                 return dict(tokens=canonical.copy())
             if path == "completion":
-                self.assertEqual(self.base, body["model"])
+                self.assertIn(body["model"], (self.base, self.child))
                 self.assertEqual(1, body["n_predict"])
                 self.assertEqual(canonical, body["prompt"])
-                state[self.base] = canonical.copy()
+                state[body["model"]] = canonical.copy()
                 if extra_token:
-                    state[self.base].append(3000)
+                    state[body["model"]].append(3000)
                 if corrupt_token:
-                    state[self.base][-1] = 3000
+                    state[body["model"]][-1] = 3000
                 reused = 0 if cold else 200
-                return dict(tokens_predicted=sampled, tokens_cached=len(state[self.base]),
+                return dict(tokens_predicted=sampled, tokens_cached=len(state[body["model"]]),
                     timings=dict(cache_n=reused, prompt_n=len(canonical) - reused))
+            if "action=erase" in path:
+                state[body["model"]] = []
+                return dict(success=True)
             if "action=save" in path:
                 vector = state[body["model"]]
                 encoded = struct.pack("<IIIiII", 0x67677371, 3, len(vector) + 4, -1, 1, len(vector))
@@ -358,6 +435,120 @@ class SubagentRuntimeTests(unittest.TestCase):
         calls.clear()
         prefill = dict(messages=[dict(role="user", content="delegated task")], tools=[], reasoning_effort="none")
         return cache, state, calls, canonical, source_tokens, prefill
+
+    def test_first_child_before_any_parent_inference_prefills_canonical_history_directly_on_secondary(self):
+        cache, state, calls, canonical, _, prefill = self.canonical_cache(cold=True)
+        state[self.base] = []
+        cache.resident.clear()
+        result = cache.fork(self.base, "parent", self.child, "child", prefill)
+        self.assertEqual("forked", result["status"])
+        self.assertEqual("coldCanonical", result["preparationMode"])
+        self.assertEqual((0, len(canonical)), (result["sourceCachedTokens"], result["sourceEvaluatedTokens"]))
+        self.assertEqual([], state[self.base])
+        self.assertEqual(canonical, state[self.child])
+        self.assertEqual("child", cache.resident[self.child]["key"])
+        self.assertNotIn(self.base, cache.resident)
+        self.assertFalse((self.root / (cache._identity(self.base, "parent") + ".bin")).exists())
+        self.assertEqual([self.child], [body["model"] for path, body in calls if path == "completion"])
+        self.assertFalse(any("action=restore" in path for path, _ in calls))
+        count = len(calls)
+        self.assertEqual("resident", cache.fork(self.base, "parent", self.child, "child", prefill)["status"])
+        self.assertFalse(any(path == "completion" for path, _ in calls[count:]))
+
+    def test_first_shared_child_preserves_another_owner_without_creating_a_fake_parent_snapshot(self):
+        cache, state, calls, canonical, _, prefill = self.canonical_cache(cold=True)
+        cache.resident.clear()
+        state[self.base] = [700, 701, 702]
+        cache.prepare(self.base, "foreign")
+        calls.clear()
+        result = cache.fork(self.base, "parent", self.base, "child", prefill)
+        self.assertEqual("forked", result["status"])
+        self.assertEqual("coldCanonical", result["preparationMode"])
+        self.assertEqual(0, result["sourceCachedTokens"])
+        self.assertEqual(canonical, state[self.base])
+        self.assertEqual("child", cache.resident[self.base]["key"])
+        foreign_file = self.root / (cache._identity(self.base, "foreign") + ".bin")
+        self.assertEqual([700, 701, 702], cache._snapshot_tokens(foreign_file))
+        self.assertFalse((self.root / (cache._identity(self.base, "parent") + ".bin")).exists())
+        self.assertEqual("restored", cache.prepare(self.base, "foreign")["status"])
+        self.assertEqual([700, 701, 702], state[self.base])
+        self.assertEqual("restored", cache.prepare(self.base, "child")["status"])
+        self.assertEqual(canonical, state[self.base])
+
+    def test_first_secondary_child_preserves_the_secondary_slots_previous_owner_and_leaves_primary_alone(self):
+        cache, state, _, canonical, source, prefill = self.canonical_cache(cold=True)
+        cache.resident.clear()
+        state[self.child] = [600, 601]
+        cache.prepare(self.child, "other-child")
+        result = cache.fork(self.base, "parent", self.child, "child", prefill)
+        self.assertEqual("forked", result["status"])
+        self.assertEqual(source, state[self.base])
+        self.assertEqual(canonical, state[self.child])
+        self.assertEqual([600, 601], cache._snapshot_tokens(
+            self.root / (cache._identity(self.child, "other-child") + ".bin")))
+        self.assertFalse((self.root / (cache._identity(self.base, "parent") + ".bin")).exists())
+
+    def test_cancelled_first_shared_child_restores_actual_previous_owner_and_never_creates_parent(self):
+        cache, state, calls, canonical, _, prefill = self.canonical_cache(cold=True)
+        cache.resident.clear()
+        previous = [700, 701, 702]
+        state[self.base] = previous.copy()
+        cache.prepare(self.base, "foreign")
+
+        def interrupted(body, cancelled):
+            state[body["model"]] = canonical[:50]
+            raise PreparationCancelledError("caller stopped")
+
+        cache.prepare_completion = interrupted
+        result = cache.fork(self.base, "parent", self.base, "child", prefill)
+        self.assertEqual("subagent.preparation_cancelled", result["reason"])
+        self.assertEqual(previous, state[self.base])
+        self.assertEqual("foreign", cache.resident[self.base]["key"])
+        self.assertTrue(any("action=restore" in path for path, _ in calls))
+        cache.save_all()
+        self.assertEqual(previous, cache._snapshot_tokens(self.root / (cache._identity(self.base, "foreign") + ".bin")))
+        self.assertFalse((self.root / (cache._identity(self.base, "parent") + ".bin")).exists())
+        self.assertFalse((self.root / (cache._identity(self.base, "child") + ".bin")).exists())
+
+    def test_cancelled_first_child_with_no_previous_owner_drains_and_erases_partial_unowned_state(self):
+        cache, state, calls, canonical, _, prefill = self.canonical_cache(cold=True)
+        cache.resident.clear()
+        state[self.base] = []
+
+        def interrupted(body, cancelled):
+            state[body["model"]] = canonical[:50]
+            raise PreparationTimeoutError("no progress")
+
+        cache.prepare_completion = interrupted
+        result = cache.fork(self.base, "parent", self.base, "child", prefill)
+        self.assertEqual("subagent.preparation_timeout", result["reason"])
+        self.assertEqual([], state[self.base])
+        self.assertNotIn(self.base, cache.resident)
+        self.assertTrue(any("action=erase" in path for path, _ in calls))
+        cache.save_all()
+        self.assertFalse(list(self.root.glob("*.bin")))
+
+    def test_first_child_cannot_overwrite_a_foreign_owner_when_its_safety_save_fails(self):
+        cache, state, calls, _, _, prefill = self.canonical_cache(cold=True)
+        cache.resident.clear()
+        foreign = [700, 701, 702]
+        state[self.base] = foreign.copy()
+        cache.prepare(self.base, "foreign")
+        original = cache.router
+
+        def router(path, body=None, timeout=15):
+            if "action=save" in path:
+                raise OSError("foreign owner cannot be saved")
+            return original(path, body, timeout)
+
+        cache.router = router
+        calls.clear()
+        result = cache.fork(self.base, "parent", self.base, "child", prefill)
+        self.assertEqual("unavailable", result["status"])
+        self.assertIn("foreign owner cannot be saved", result["detail"])
+        self.assertEqual(foreign, state[self.base])
+        self.assertEqual("foreign", cache.resident[self.base]["key"])
+        self.assertFalse(any(path == "completion" for path, _ in calls))
 
     def test_canonical_fork_reuses_source_checkpoints_saves_no_generated_tokens_and_retains_parent_file(self):
         cache, state, calls, canonical, source, prefill = self.canonical_cache()

@@ -23,6 +23,8 @@ public sealed partial class NativeAssistantPage
                 await VerifySelectionClipboardSmokeAsync(original);
                 await VerifyStreamingMessageFooterSmokeAsync(original);
                 await VerifyThinkingIndicatorSmokeAsync(original);
+                await VerifyToolExpansionDefaultsSmokeAsync(original);
+                await VerifyDeepResearchSmokeAsync(original);
                 await VerifySourcesSmokeAsync(original);
                 await VerifyResponsivenessSmokeAsync(original);
             }
@@ -116,6 +118,14 @@ public sealed partial class NativeAssistantPage
         AssertChatCursorAbsent(body);
         if (!label.Text.Contains("Uhr ·", StringComparison.Ordinal) || !label.Text.EndsWith("lang gearbeitet", StringComparison.Ordinal))
             throw new InvalidOperationException("Completion did not finalize the header.");
+        // The preceding assertions deliberately projected a temporary message
+        // directly. Commit that fixture source before an await lets the normal
+        // render timer reconcile it; otherwise the timer correctly restores the
+        // old source and removes the manually attached receipt under capture.
+        _messages[activeId] = JsonSerializer.SerializeToElement(active);
+        RenderMessagesNow();
+        _messagesDirty = false;
+        body = MessageBody(_messageViews[activeId].View);
         var readInput = JsonSerializer.SerializeToElement(new { path = "src/example.cs", startLine = 10 });
         var readOutput = JsonSerializer.SerializeToElement(new { path = "src/example.cs", totalLines = 500, startLine = 10, content = "10: var x = 1;\n11: return x;\n", truncated = true });
         var summary = ToolStepView.ToolSummary("coding.read", readInput, readOutput);
@@ -185,6 +195,8 @@ public sealed partial class NativeAssistantPage
         await VerifySelectionClipboardSmokeAsync(original);
         await VerifySelectionScrollSmokeAsync(original);
         await VerifyThinkingIndicatorSmokeAsync(original);
+        await VerifyToolExpansionDefaultsSmokeAsync(original);
+        await VerifyDeepResearchSmokeAsync(original);
         await VerifyToolIconColorsSmokeAsync();
         await VerifyContinuationSmokeAsync(original);
         await VerifySourcesSmokeAsync(original);
@@ -514,7 +526,7 @@ public sealed partial class NativeAssistantPage
             var fixture = Environment.GetEnvironmentVariable("MISSUM_SCIENCE_PDF_SMOKE_PATH");
             if (!string.IsNullOrWhiteSpace(fixture) && File.Exists(fixture))
             {
-                var pdf = new NativePublicationView();
+                var pdf = GetPublicationView(_session, fixture);
                 _scienceBody!.Children.Add(pdf);
                 foreach (var pane in _scienceBody.Children.OfType<FrameworkElement>())
                     pane.Visibility = ReferenceEquals(pane, pdf) ? Visibility.Visible : Visibility.Collapsed;
@@ -672,37 +684,48 @@ public sealed partial class NativeAssistantPage
         if (math.Children.OfType<Missum.App.Controls.NativeMathParagraph>().Any())
             throw new InvalidOperationException("An unfinished streamed formula was rendered prematurely.");
         math.UpdateText("Ein Bruch $\\frac{1}{2}$ im Satz.");
+        await WaitForNativeMathPreparationAsync(math);
         var paragraph = math.Children.OfType<Missum.App.Controls.NativeMathParagraph>().Single();
         var formula = paragraph.TrailingInlines.OfType<Microsoft.UI.Xaml.Documents.InlineUIContainer>()
             .Select(inline => inline.Child).OfType<Missum.App.Controls.NativeFormulaView>().Single();
         AssertChatCursorAbsent(math);
         if (!formula.IsTypeset || math.Children.Count != 1)
-            throw new InvalidOperationException("Inline math failed or an extra streaming decoration was rendered.");
+            throw new InvalidOperationException("Inline math failed or an extra streaming decoration was rendered: "
+                + JsonSerializer.Serialize(new { formula.IsTypeset, formula.IsRendering, formula.IsLoaded,
+                    formula.Source, content = formula.Content?.GetType().Name, children = math.Children.Count,
+                    tooltip = ToolTipService.GetToolTip(formula)?.ToString() }));
         math.UpdateText("Ein Bruch $\\frac{1}{2}$ im Satz. Weiterer Text");
+        await WaitForNativeMathPreparationAsync(math);
         if (!ReferenceEquals(formula, paragraph.TrailingInlines.OfType<Microsoft.UI.Xaml.Documents.InlineUIContainer>().Single().Child))
             throw new InvalidOperationException("A text delta rebuilt an unchanged inline formula.");
         math.UpdateText("```latex\n$\\frac{1}{2}$\n```\n`$x^2$` bleibt Code.");
+        await WaitForNativeMathPreparationAsync(math);
         if (math.Children.OfType<Missum.App.Controls.NativeMathParagraph>().Any() || math.Children.OfType<ScrollViewer>().Any())
             throw new InvalidOperationException("Code examples must preserve their literal LaTeX source.");
         foreach (var protectedSource in new[] { "`code\n$x$\n`", "$$\n$x$" })
         {
             math.UpdateText(protectedSource);
+            await WaitForNativeMathPreparationAsync(math);
             if (math.Children.OfType<Missum.App.Controls.NativeMathParagraph>().Any() || math.Children.OfType<ScrollViewer>().Any())
                 throw new InvalidOperationException("Multiline code and unfinished display formulas must remain literal while streaming.");
         }
         math.UpdateText("**Die Formel $x^2$ gilt**");
+        await WaitForNativeMathPreparationAsync(math);
         var boldParagraph = math.Children.OfType<Missum.App.Controls.NativeMathParagraph>().Single();
         if (!boldParagraph.TrailingInlines.OfType<Microsoft.UI.Xaml.Documents.Bold>().Any())
             throw new InvalidOperationException("Mathematics lost the surrounding Markdown emphasis.");
         math.UpdateText("[Wert $x$](https://example.com)");
+        await WaitForNativeMathPreparationAsync(math);
         var linkParagraph = math.Children.OfType<Missum.App.Controls.NativeMathParagraph>().Single();
         if (!linkParagraph.TrailingInlines.OfType<Microsoft.UI.Xaml.Documents.Hyperlink>().Any()
             || !linkParagraph.TrailingInlines.OfType<Microsoft.UI.Xaml.Documents.InlineUIContainer>().Any(inline => inline.Child is Missum.App.Controls.NativeFormulaView { IsTypeset: true }))
             throw new InvalidOperationException("Mathematics lost the surrounding Markdown hyperlink.");
         var unsupported = new Missum.App.Controls.NativeFormulaView("$\\thisCommandDoesNotExist{x}$", false);
+        await WaitForNativeMathPreparationAsync(unsupported);
         if (unsupported.IsTypeset || unsupported.Content is not TextBlock { Text: "$\\thisCommandDoesNotExist{x}$" })
             throw new InvalidOperationException("Unsupported formulas must preserve their readable LaTeX source.");
         math.UpdateText("## Mathematische Darstellung\nEin Bruch $\\frac{1}{2}$ und die Wurzel $\\sqrt{x^2+y^2}$ im laufenden Text.\n\n$$\\int_0^\\infty e^{-x}\\,dx=1$$\n\n$$\\begin{aligned}a&=b+c\\\\d&=e-f\\end{aligned}$$\n\n$$A=\\begin{pmatrix}1&2\\\\3&4\\end{pmatrix}$$\n\nFormeln bleiben als LaTeX kopierbar.");
+        await WaitForNativeMathPreparationAsync(math);
         if (math.Children.OfType<ScrollViewer>().Count() != 3 || math.Children.OfType<ScrollViewer>().Any(view => view.Content is not Missum.App.Controls.NativeFormulaView { IsTypeset: true }))
             throw new InvalidOperationException("Display formulas, aligned equations or matrices failed in the portable native runtime.");
         math.MaxWidth = 740;
@@ -712,6 +735,7 @@ public sealed partial class NativeAssistantPage
         {
             var liveText = await File.ReadAllTextAsync(liveInput);
             math.UpdateText(liveText);
+            await WaitForNativeMathPreparationAsync(math);
             var displayCount = Missum.App.Controls.NativeMathSyntax.Split(liveText).Count(segment => segment.IsMath && segment.Display);
             if (displayCount == 0 || math.Children.OfType<ScrollViewer>().Count() != displayCount
                 || math.Children.OfType<ScrollViewer>().Any(view => view.Content is not Missum.App.Controls.NativeFormulaView { IsTypeset: true }))
@@ -736,6 +760,7 @@ public sealed partial class NativeAssistantPage
                 throw new InvalidOperationException("The screenshot's loose Markdown table did not render as native rows and columns.");
             var cells = table.Children.ToArray();
             markdown.UpdateText(source + "\n\n| **AdS/CFT** | Exakte Dualität | Übertragung auf de-Sitter-Räume |\n\nFormeln und Text verwenden dieselbe Schriftgröße.");
+            await WaitForNativeMathPreparationAsync(markdown);
             if (!ReferenceEquals(table, markdown.RenderedTables.Single()) || table.RowDefinitions.Count != 4
                 || cells.Where((cell, index) => !ReferenceEquals(cell, table.Children[index])).Any())
                 throw new InvalidOperationException("A streamed table row replaced existing cells or lost its table layout.");
@@ -778,16 +803,16 @@ public sealed partial class NativeAssistantPage
                     throw new InvalidOperationException("Answer text was not visibly rendered before run completion.");
                 AssertChatCursorAbsent(MessageBody(_messageViews[id].View));
             }
-            var newestContent = S(_messages[id], "content");
+            var newestContent = MessageContent(_messages[id]);
             ApplyEvent("conversation.snapshot", JsonSerializer.SerializeToElement(new { sessionId = session, messages = snapshot["messages"] }));
-            if (S(_messages[id], "content") != newestContent)
+            if (MessageContent(_messages[id]) != newestContent)
                 throw new InvalidOperationException("Ein verzögerter Snapshot hat bereits sichtbaren Streamingtext zurückgesetzt.");
             ApplyEvent("state.snapshot", JsonSerializer.SerializeToElement(snapshot));
-            if (S(_messages[id], "content") != newestContent)
+            if (MessageContent(_messages[id]) != newestContent)
                 throw new InvalidOperationException("Eine verzögerte Zustandsantwort hat neueren Streamingtext zurückgesetzt.");
             ApplyEvent("conversation.messageCommitted", JsonSerializer.SerializeToElement(new { sessionId = session,
                 message = snapshot["messages"][0] }));
-            if (S(_messages[id], "content") != newestContent)
+            if (MessageContent(_messages[id]) != newestContent)
                 throw new InvalidOperationException("Eine ältere Commitmeldung hat neueren Streamingtext zurückgesetzt.");
             await File.WriteAllTextAsync(Path.Combine(App.Current.DataDirectory, "native-chat-streaming-validation.json"),
                 JsonSerializer.Serialize(new { renderer = "WinUI3", passed = true, visibleDeltasBeforeCompletion = 3,
@@ -797,14 +822,39 @@ public sealed partial class NativeAssistantPage
         finally { ApplyEvent("state.snapshot", original); RenderMessagesNow(); }
     }
 
-    private static async Task SaveMathPreviewAsync(Microsoft.UI.Xaml.FrameworkElement math, string filename)
+    private async Task SaveMathPreviewAsync(Microsoft.UI.Xaml.FrameworkElement math, string filename)
     {
-        math.UpdateLayout();
-        await Task.Delay(100);
+        await WaitForNativeMathPreparationAsync(math);
+        math.StartBringIntoView(new BringIntoViewOptions { AnimationDesired = false });
         var bitmap = new Microsoft.UI.Xaml.Media.Imaging.RenderTargetBitmap();
-        await bitmap.RenderAsync(math);
+        Exception? lastFailure = null;
+        var captured = false;
+        for (var attempt = 0; attempt < 50 && !captured; attempt++)
+        {
+            LayoutRoot.UpdateLayout();
+            math.UpdateLayout();
+            if (math.IsLoaded && math.XamlRoot is not null && math.ActualWidth > 0 && math.ActualHeight > 0)
+            {
+                await WaitForNativePreviewFrameAsync();
+                try
+                {
+                    await bitmap.RenderAsync(math);
+                    captured = true;
+                }
+                catch (ArgumentException exception) { lastFailure = exception; }
+            }
+            if (!captured) await Task.Delay(20, _lifetime.Token);
+        }
+        if (!captured)
+            throw new InvalidOperationException("Native preview capture failed: " + JsonSerializer.Serialize(new
+            {
+                filename, type = math.GetType().Name, math.IsLoaded, math.ActualWidth, math.ActualHeight,
+                desiredWidth = math.DesiredSize.Width, desiredHeight = math.DesiredSize.Height,
+                visibility = math.Visibility.ToString(), owner = math.Parent?.GetType().Name,
+                attached = math.XamlRoot is not null, conversation = ConversationViewKey,
+            }), lastFailure);
         if (bitmap.PixelWidth < 100 || bitmap.PixelHeight < 60)
-            throw new InvalidOperationException("The native formula preview has no visible layout.");
+            throw new InvalidOperationException($"The native preview {filename} has no visible layout: {bitmap.PixelWidth}x{bitmap.PixelHeight}.");
         var pixels = await bitmap.GetPixelsAsync();
         using var file = File.Create(Path.Combine(App.Current.DataDirectory, filename));
         using var stream = file.AsRandomAccessStream();
@@ -812,5 +862,15 @@ public sealed partial class NativeAssistantPage
         encoder.SetPixelData(Windows.Graphics.Imaging.BitmapPixelFormat.Bgra8, Windows.Graphics.Imaging.BitmapAlphaMode.Premultiplied,
             (uint)bitmap.PixelWidth, (uint)bitmap.PixelHeight, 96, 96, System.Runtime.InteropServices.WindowsRuntime.WindowsRuntimeBufferExtensions.ToArray(pixels));
         await encoder.FlushAsync();
+    }
+
+    private async Task WaitForNativePreviewFrameAsync()
+    {
+        var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        void Rendering(object? sender, object args) => ready.TrySetResult();
+        Microsoft.UI.Xaml.Media.CompositionTarget.Rendering += Rendering;
+        try { await ready.Task.WaitAsync(TimeSpan.FromMilliseconds(100), _lifetime.Token); }
+        catch (TimeoutException) { /* RenderAsync still verifies that this target can actually be captured. */ }
+        finally { Microsoft.UI.Xaml.Media.CompositionTarget.Rendering -= Rendering; }
     }
 }

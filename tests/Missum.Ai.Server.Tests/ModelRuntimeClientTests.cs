@@ -197,6 +197,78 @@ public sealed class ModelRuntimeClientTests
     }
 
     [Fact]
+    public async Task SubagentPreparationAcceptsTheExactPrimaryInstanceWithoutAdditionalModelLoading()
+    {
+        var handler = new NativeRuntimeHandler
+        {
+            OnSubagentPrepare = _ => Task.FromResult(SubagentResponse(new
+            {
+                allowed = true, modelId = NativeGeneralId, instanceId = NativeGeneralId, gpuIndex = 0,
+                cacheStatus = "forked", cachedTokens = 12_000, sourceCachedTokens = 11_000,
+            })),
+        };
+        using var client = CreateClient(new HttpClient(handler));
+        var prepared = await client.PrepareSubagentAsync("gpt-oss-120b", "parent-key", "child-key");
+        Assert.Equal(NativeGeneralId, prepared.InstanceId);
+        Assert.Equal(0, prepared.GpuIndex);
+        Assert.Equal(12_000, prepared.CachedTokens);
+        Assert.Empty(handler.ModelOperations);
+    }
+
+    [Theory]
+    [InlineData(0, NativeQwenId)]
+    [InlineData(0, NativeGeneralId + "@subagent")]
+    [InlineData(1, NativeGeneralId)]
+    [InlineData(2, NativeGeneralId)]
+    public async Task SubagentPreparationRejectsAnInstanceThatDoesNotMatchItsAdmittedLane(int gpuIndex, string instanceId)
+    {
+        var handler = new NativeRuntimeHandler
+        {
+            OnSubagentPrepare = _ => Task.FromResult(SubagentResponse(new
+            {
+                allowed = true, modelId = NativeGeneralId, instanceId, gpuIndex,
+                cacheStatus = "forked", cachedTokens = 100,
+            })),
+        };
+        using var client = CreateClient(new HttpClient(handler));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => client.PrepareSubagentAsync("gpt-oss-120b", "parent", "child"));
+        Assert.Empty(handler.ModelOperations);
+    }
+
+    [Fact]
+    public async Task SharedPrimarySubagentUsesTheMainTurnGateAndItsOwnSessionKey()
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var preparations = 0;
+        var handler = new NativeRuntimeHandler
+        {
+            OnCacheRequest = async (path, token) =>
+            {
+                if (path == "/sessions/prepare" && Interlocked.Increment(ref preparations) == 1)
+                {
+                    entered.SetResult();
+                    await release.Task.WaitAsync(token);
+                }
+            },
+        };
+        using var client = CreateClient(new HttpClient(handler));
+        var parent = client.CompleteChatAsync("gpt-oss-120b", [new("user", "Hauptauftrag")], [], sessionCacheKey: "parent-key");
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var child = client.CompleteChatAsync("gpt-oss-120b", [new("user", "Rechercheauftrag")], [],
+            sessionCacheKey: "child-key", runtimeInstanceId: NativeGeneralId);
+        Assert.False(child.IsCompleted);
+        Assert.Equal(1, preparations);
+        release.SetResult();
+        await Task.WhenAll(parent, child).WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(2, preparations);
+        Assert.Equal(2, handler.ChatAttempts);
+        Assert.Equal("parent-key", handler.CacheBodies[0].GetProperty("sessionKey").GetString());
+        Assert.Equal("child-key", handler.CacheBodies[2].GetProperty("sessionKey").GetString());
+        Assert.Empty(handler.ModelOperations);
+    }
+
+    [Fact]
     public async Task SubagentPreparationSafetyDeadlineIsTypedAndReleasesModelLeases()
     {
         var entered = new TaskCompletionSource<CancellationToken>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -765,10 +837,12 @@ public sealed class ModelRuntimeClientTests
         Assert.False(body.RootElement.GetProperty("chat_template_kwargs").GetProperty("enable_thinking").GetBoolean());
     }
 
-    [Fact]
-    public async Task StreamingTurnReportsFinalUsageWithoutPrivateSlotsEndpoint()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task StreamingTurnReportsFinalUsageWithoutPrivateSlotsEndpoint(bool streamingTokenProgress)
     {
-        var handler = new NativeRuntimeHandler(returnToolCall: false);
+        var handler = new NativeRuntimeHandler(returnToolCall: false, streamingTokenProgress: streamingTokenProgress);
         using var client = CreateClient(new HttpClient(handler));
         var progress = new List<ModelRuntimeProgress>();
 
@@ -783,10 +857,18 @@ public sealed class ModelRuntimeClientTests
             });
 
         Assert.Contains(progress, item => item.State == "generationStarted");
-        var tokens = Assert.Single(progress, item => item.State == "tokenProgress");
-        Assert.Equal(100, tokens.PromptTokens);
-        Assert.Equal(20, tokens.GeneratedTokens);
-        Assert.Equal(120, tokens.CurrentTokens);
+        var tokens = progress.Last(item => item.State == "tokenProgress");
+        Assert.Equal(streamingTokenProgress ? 3_900 : 100, tokens.PromptTokens);
+        Assert.Equal(streamingTokenProgress ? 305 : 20, tokens.GeneratedTokens);
+        Assert.Equal(streamingTokenProgress ? 4_205 : 120, tokens.CurrentTokens);
+        if (streamingTokenProgress)
+        {
+            Assert.Contains(progress, item => item.State == "promptProcessing" && item.PromptTokens == 3_871);
+            Assert.Contains(progress, item => item.State == "tokenProgress" && item.GeneratedTokens == 8
+                && item.PromptTokens == 3_871 && item.CurrentTokens == 3_879);
+            Assert.Contains(progress, item => item.State == "tokenProgress" && item.GeneratedTokens == 301
+                && item.PromptTokens == 3_871 && item.CurrentTokens == 4_172);
+        }
         Assert.DoesNotContain(handler.RequestPaths, path => path.StartsWith("/slots", StringComparison.Ordinal));
     }
 
@@ -1191,7 +1273,8 @@ public sealed class ModelRuntimeClientTests
         int tokenCountingFailures = 0,
         bool streamingReasoning = false,
         bool jsonReasoning = false,
-        bool malformedStreamingTool = false) : HttpMessageHandler
+        bool malformedStreamingTool = false,
+        bool streamingTokenProgress = false) : HttpMessageHandler
     {
         internal const string ReasoningText = "## Plan\n\n1. Datei prüfen.\n2. `änderung` anwenden.\n\nAbschließend testen.";
         private string? _loadedKey = NativeGeneralId;
@@ -1290,6 +1373,18 @@ public sealed class ModelRuntimeClientTests
                 }
                 OnChatRequest?.Invoke(body);
                 ChatBodies.Add(body);
+                if (streamingTokenProgress)
+                {
+                    var frames = new StringBuilder("data: {\"prompt_progress\":{\"total\":3871,\"processed\":3871,\"cache\":3000}}\n\n");
+                    for (var index = 0; index < 16; index++)
+                        frames.Append("data: ").Append(JsonSerializer.Serialize(new
+                        {
+                            choices = new[] { new { delta = new { content = "x" } } },
+                            usage = index == 15 ? new { completion_tokens = 301 } : null,
+                        })).Append("\n\n");
+                    frames.Append("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3900,\"completion_tokens\":305}}\n\ndata: [DONE]\n\n");
+                    return new(HttpStatusCode.OK) { Content = new StringContent(frames.ToString(), Encoding.UTF8, "text/event-stream") };
+                }
                 if (streamingReasoning)
                 {
                     var frames = new StringBuilder();

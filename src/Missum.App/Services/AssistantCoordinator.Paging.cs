@@ -16,13 +16,41 @@ public sealed partial class AssistantCoordinator
                 ? cursor.Deserialize<ConversationCursor>(JsonSerializerOptions.Web) : null;
             var page = await Task.Run(() => conversationSnapshots.GetPageAsync(sessionId, before: before, cancellationToken: token), token).ConfigureAwait(false)
                 ?? throw new InvalidOperationException("Die Sitzung ist nicht mehr vorhanden.");
+            var auxiliary = await PrepareDisplayedPageAsync(page, token).ConfigureAwait(false);
             await emit("conversation.page", new
             {
-                sessionId, page.HasMore, page.Before, page.TotalMessages,
+                sessionId, page.HasMore, page.Before, page.TotalMessages, toolStepWindows = page.ToolStepWindows,
                 messages = page.Conversation.Messages.Select(message => ToMessageDto(message,
-                    page.Conversation.Artifacts.GetValueOrDefault(message.Id))),
-                subagents = ToSubagentDtos(SubagentChatState.ReadSummaries(page.Conversation.Messages)),
+                    page.Conversation.Artifacts.GetValueOrDefault(message.Id), page.ToolStepWindows?.GetValueOrDefault(message.Id))),
+                auxiliaryMessages = auxiliary.Select(message => new { id = message.Id, toolSteps = message.ToolSteps ?? [] }),
+                subagents = ToSubagentDtos(ReadActivitySummaries(auxiliary)),
             }, envelope.RequestId).ConfigureAwait(false);
+            return true;
+        }
+        if (envelope.Type == "conversation.blocks.page")
+        {
+            var sessionId = GetRequiredGuid(envelope.Payload, "sessionId");
+            var messageId = GetRequiredGuid(envelope.Payload, "messageId");
+            long? before = envelope.Payload.TryGetProperty("beforeOrdinal", out var ordinal) && ordinal.TryGetInt64(out var value) ? value : null;
+            var page = await conversationSnapshots.GetToolStepsPageAsync(sessionId, messageId, 64, before, token).ConfigureAwait(false);
+            if (page is null) throw new InvalidOperationException("Die Werkzeugnachricht ist nicht mehr vorhanden.");
+            await emit("conversation.blocks.page", new { sessionId, messageId, page.Steps, page.Window }, envelope.RequestId).ConfigureAwait(false);
+            return true;
+        }
+        if (envelope.Type == "subagent.blocks.page")
+        {
+            var sessionId = GetRequiredGuid(envelope.Payload, "sessionId");
+            var parentId = GetRequiredGuid(envelope.Payload, "parentMessageId");
+            var messageId = GetRequiredGuid(envelope.Payload, "messageId");
+            var agentId = GetRequiredString(envelope.Payload, "agentId", 128);
+            long? before = envelope.Payload.TryGetProperty("beforeOrdinal", out var ordinal) && ordinal.TryGetInt64(out var value) ? value : null;
+            var parent = await ReadSubagentParentAsync(sessionId, parentId, agentId, token).ConfigureAwait(false);
+            if (parent is null) throw new InvalidOperationException("Der Subagent gehört nicht zur Sitzung.");
+            var child = await SubagentChatState.ReadAsync(parent, agentId, settings.DataDirectory, token).ConfigureAwait(false);
+            child ??= await ReadHistoricalDeepResearchAsync(sessionId, parentId, agentId, token).ConfigureAwait(false);
+            var page = child?.GetToolStepPage(messageId, beforeOrdinal: before)
+                ?? throw new InvalidOperationException("Diese Subagenten-Nachricht ist nicht mehr vorhanden.");
+            await emit("subagent.blocks.page", new { sessionId, parentMessageId = parentId, agentId, messageId, page.Steps, page.Window }, envelope.RequestId).ConfigureAwait(false);
             return true;
         }
         if (envelope.Type == "tool.details")
@@ -33,12 +61,15 @@ public sealed partial class AssistantCoordinator
             AssistantToolStep? step;
             if (GetOptionalGuid(envelope.Payload, "parentMessageId") is { } parentId)
             {
-                var parent = await Task.Run(() => chats.GetMessageAsync(parentId, token), token).ConfigureAwait(false);
+                var parent = await ReadSubagentParentAsync(sessionId, parentId, GetRequiredString(envelope.Payload, "agentId", 128), token).ConfigureAwait(false);
                 if (parent?.SessionId != sessionId) throw new InvalidOperationException("Der Subagent gehört nicht zur Sitzung.");
-                var child = await SubagentChatState.ReadAsync(parent, GetRequiredString(envelope.Payload, "agentId", 128), settings.DataDirectory, token).ConfigureAwait(false);
+                var agentId = GetRequiredString(envelope.Payload, "agentId", 128);
+                var child = await SubagentChatState.ReadAsync(parent, agentId, settings.DataDirectory, token).ConfigureAwait(false)
+                    ?? await ReadHistoricalDeepResearchAsync(sessionId, parentId, agentId, token).ConfigureAwait(false);
                 step = child?.FindToolStep(messageId, stepId);
             }
-            else step = await Task.Run(() => conversationSnapshots.GetToolStepAsync(sessionId, messageId, stepId, token), token).ConfigureAwait(false);
+            else step = FindLiveToolStep(sessionId, messageId, stepId)
+                ?? await Task.Run(() => conversationSnapshots.GetToolStepAsync(sessionId, messageId, stepId, token), token).ConfigureAwait(false);
             if (step is null) throw new InvalidOperationException("Dieser Werkzeugschritt ist nicht mehr vorhanden.");
             step = await EnrichLeanDisplayAsync(step, sessionId, token).ConfigureAwait(false);
             await emit("tool.details", new { sessionId, messageId, toolStep = step }, envelope.RequestId).ConfigureAwait(false);
@@ -49,14 +80,30 @@ public sealed partial class AssistantCoordinator
             var sessionId = GetRequiredGuid(envelope.Payload, "sessionId");
             var parentMessageId = GetRequiredGuid(envelope.Payload, "parentMessageId");
             var agentId = GetRequiredString(envelope.Payload, "agentId", 128);
-            var parent = await Task.Run(() => chats.GetMessageAsync(parentMessageId, token), token).ConfigureAwait(false);
+            var parent = await ReadSubagentParentAsync(sessionId, parentMessageId, agentId, token).ConfigureAwait(false);
             if (parent?.SessionId != sessionId) throw new InvalidOperationException("Der Subagent gehört nicht zur Sitzung.");
             var child = await SubagentChatState.ReadAsync(parent, agentId, settings.DataDirectory, token).ConfigureAwait(false)
+                ?? await ReadHistoricalDeepResearchAsync(sessionId, parentMessageId, agentId, token).ConfigureAwait(false)
                 ?? throw new InvalidOperationException("Der Subagentenverlauf ist nicht mehr vorhanden.");
             await emit("subagent.snapshot", ToSubagentDto(child.ForDisplay()), envelope.RequestId).ConfigureAwait(false);
             return true;
         }
         return false;
+    }
+
+    private async Task<ChatMessage?> ReadSubagentParentAsync(Guid sessionId, Guid messageId, string agentId, CancellationToken token)
+    {
+        var parent = await chats.GetMessageTextAsync(messageId, token).ConfigureAwait(false);
+        if (parent?.SessionId != sessionId) return null;
+        var receipt = FindLiveToolStep(sessionId, messageId, agentId, subagent: true)
+            ?? await conversationSnapshots.GetSubagentReceiptAsync(sessionId, messageId, agentId, token).ConfigureAwait(false);
+        if (receipt is not null) return parent with { ToolSteps = [receipt] };
+        // Old research steps have no companion receipt. Keep only their thin
+        // headers here; full details are read by the explicit historical loader.
+        if (agentId.StartsWith("deep-research:", StringComparison.Ordinal))
+            return (await conversationSnapshots.GetAuxiliaryMessagesAsync(sessionId, token).ConfigureAwait(false))
+                .FirstOrDefault(message => message.Id == messageId) ?? parent;
+        return parent with { ToolSteps = [] };
     }
     private async Task<AssistantToolStep> EnrichLeanDisplayAsync(AssistantToolStep step, Guid sessionId, CancellationToken token)
     {

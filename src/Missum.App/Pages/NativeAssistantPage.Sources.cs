@@ -31,7 +31,7 @@ public sealed partial class NativeAssistantPage
     private void RefreshSubagentSources()
     {
         var signature = _session + "|" + string.Join("|", _subagents.Values.Where(child => child.SessionId == _session)
-            .SelectMany(child => child.Messages.Values).SelectMany(message => Items(message, "toolSteps"))
+            .SelectMany(child => child.Messages.Values).SelectMany(message => MessageSteps(message))
             .Where(IsSourceToolStep)
             .Select(step => S(step, "id") + S(step, "updatedAt") + S(step, "inputJson").GetHashCode(StringComparison.Ordinal)
                 + S(step, "outputJson").GetHashCode(StringComparison.Ordinal)));
@@ -45,7 +45,7 @@ public sealed partial class NativeAssistantPage
     {
         var actions = new List<SourceAction>(_indexedSources.GetValueOrDefault(_session, []));
         foreach (var message in OwnerSourceMessages())
-        foreach (var step in Items(message, "toolSteps"))
+        foreach (var step in MessageSteps(message))
         {
             var tool = S(step, "tool");
             if (!IsSourceToolStep(step)) continue;

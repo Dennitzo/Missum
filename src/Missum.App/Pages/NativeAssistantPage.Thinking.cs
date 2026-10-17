@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using Missum.App.Controls;
 using Missum.App.Services;
 using Microsoft.UI.Xaml.Automation;
@@ -14,6 +14,34 @@ public sealed partial class NativeAssistantPage
     private readonly Dictionary<string, NativeThinkingIndicatorState> _thinkingStates = new(StringComparer.Ordinal);
     private readonly Dictionary<string, ThinkingIndicatorView> _thinkingIndicators = new(StringComparer.Ordinal);
     private readonly Dictionary<string, NativeModelPhasePresentation> _modelPhases = new(StringComparer.Ordinal);
+    private bool? _observedToolExpansionDefault;
+
+    private void ResetToolDisclosureDefaults(IEnumerable<string> messageIds)
+    {
+        var expanded = _settings.Current.CodingToolStepsExpanded;
+        foreach (var id in messageIds)
+        {
+            if (_virtualMessages.TryGetValue(id, out var virtualized)) virtualized.ExpandedSteps.Clear();
+            if (!_messageBlocks.TryGetValue(id, out var blocks)) continue;
+            foreach (var view in blocks.Values.ToArray())
+                if (view is ToolStepView tool) tool.SetExpanded(expanded, forceDetails: false);
+                else if (view is ThinkingIndicatorView thinking) thinking.SetExpanded(expanded);
+        }
+    }
+
+    private void ApplyToolExpansionDefaultIfChanged()
+    {
+        var expanded = _settings.Current.CodingToolStepsExpanded;
+        if (_observedToolExpansionDefault == expanded) return;
+        // Defer replacing selected detail runs, or projecting a hidden chat.
+        // The unchanged observed value leaves the new default pending until
+        // selection ends and the native conversation is visible again.
+        if (!IsLoaded || BodyGrid.Visibility != Visibility.Visible || _conversationSelection?.IsSelecting == true) return;
+        var initialized = _observedToolExpansionDefault.HasValue;
+        _observedToolExpansionDefault = expanded;
+        if (initialized)
+            ResetToolDisclosureDefaults(DisplayMessages.Keys);
+    }
 
     private void ObserveThinkingProgress(JsonElement data)
     {
@@ -46,6 +74,9 @@ public sealed partial class NativeAssistantPage
     // the existing timer; label changes share the header's once-per-second tick.
     private void RefreshThinkingIndicators(bool refreshTokens = false)
     {
+        // The same timer observes an explicit checkbox change, including when
+        // no thinking row is currently present. Ordinary ticks remain O(1).
+        ApplyToolExpansionDefaultIfChanged();
         if (_thinkingIndicators.Count == 0 || _conversationSelection?.IsSelecting == true) return;
         var now = DateTimeOffset.UtcNow;
         var visible = IsLoaded && BodyGrid.Visibility == Visibility.Visible;
@@ -92,7 +123,10 @@ public sealed partial class NativeAssistantPage
             Foreground = ThemeBrush("MissumMutedTextBrush", 160), TextWrapping = TextWrapping.Wrap };
         private string _reasoningId = "";
         private string _reasoningText = "";
+        internal string ReasoningId => _reasoningId;
         private FrameworkElement? _historyView;
+        private bool _thinkingVisible;
+        internal event Action<bool>? ExpansionChanged;
         private string? _processingExplanation;
         internal bool IsProcessing => _processingExplanation is not null;
         internal bool IsExpanded => _details.Visibility == Visibility.Visible;
@@ -105,9 +139,13 @@ public sealed partial class NativeAssistantPage
             TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center,
         };
         internal bool IsMessageActive { get; set; }
+        internal ScrollViewer? ScrollOwner { get; set; }
+        internal Func<bool>? PinSelection { get; set; }
+        internal Action<Action>? Project { get; set; }
+        private NativeVirtualizingTextView? _largeReasoning;
         internal bool HasBlockingTool { get; set; }
 
-        internal ThinkingIndicatorView()
+        internal ThinkingIndicatorView(bool initiallyExpanded = false)
         {
             HorizontalAlignment = HorizontalAlignment.Stretch;
             Visibility = Visibility.Collapsed;
@@ -129,14 +167,19 @@ public sealed partial class NativeAssistantPage
             _toggle.Click += (_, _) => SetExpanded(!IsExpanded);
             _details.Children.Add(_reasoning); _details.Children.Add(_empty);
             Children.Add(new StackPanel { Spacing = 6, Children = { _toggle, _details } });
-            UpdateAccessibility();
+            SetExpanded(initiallyExpanded);
         }
 
         internal void UpdateReasoning(string id, string text, FrameworkElement? historyView)
         {
             if (!ReferenceEquals(_historyView, historyView) && _historyView is not null) _historyView.Visibility = Visibility.Visible;
+            var historyChanged = !ReferenceEquals(_historyView, historyView);
             _historyView = historyView;
-            if (id != _reasoningId) { _reasoningId = id; SetExpanded(false); }
+            // The live row is one disclosure throughout the view. A provider's
+            // next reasoning receipt must not undo a manual fold choice.
+            if (id != _reasoningId) { _reasoningId = id; ExpansionChanged?.Invoke(IsExpanded); }
+            if (historyChanged && historyView is ToolStepView history)
+                history.SetExpanded(IsExpanded, forceDetails: false);
             if (_reasoningText == text) return;
             _reasoningText = text;
             if (IsExpanded) RenderReasoning();
@@ -146,26 +189,49 @@ public sealed partial class NativeAssistantPage
         {
             // Keep one live disclosure. Its durable receipt returns to the
             // chronology once the answer starts or generation finishes.
+            if (visible && !_thinkingVisible && _historyView is ToolStepView history)
+                SetExpanded(history.IsExpanded);
+            _thinkingVisible = visible;
             if (_historyView is not null) _historyView.Visibility = visible ? Visibility.Collapsed : Visibility.Visible;
         }
 
         internal void SetExpanded(bool expanded)
         {
+            var changed = IsExpanded != expanded;
             _details.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
             _chevron.Glyph = expanded ? "\uE70D" : "\uE76C";
             if (expanded) RenderReasoning();
+            else if (_largeReasoning is not null)
+            { _details.Children.Remove(_largeReasoning); _largeReasoning = null; }
+            if (_historyView is ToolStepView history && history.IsExpanded != expanded)
+                history.SetExpanded(expanded, forceDetails: false);
             UpdateAccessibility();
+            if (changed) ExpansionChanged?.Invoke(expanded);
         }
 
         private void RenderReasoning()
         {
             if (IsProcessing)
             {
+                if (_largeReasoning is not null) _largeReasoning.Visibility = Visibility.Collapsed;
                 _reasoning.Visibility = Visibility.Collapsed;
                 _empty.Text = _processingExplanation!;
                 _empty.Visibility = Visibility.Visible;
                 return;
             }
+            if (_reasoningText.Length > 8192 && ScrollOwner is { } scroll)
+            {
+                if (_largeReasoning is null)
+                {
+                    _largeReasoning = new NativeVirtualizingTextView(scroll, PinSelection, Project);
+                    _details.Children.Insert(0, _largeReasoning);
+                }
+                _largeReasoning.UpdateText(_reasoningText);
+                _largeReasoning.Visibility = Visibility.Visible;
+                _reasoning.Visibility = _empty.Visibility = Visibility.Collapsed;
+                return;
+            }
+            if (_largeReasoning is not null) _largeReasoning.Visibility = Visibility.Collapsed;
             _reasoning.UpdateText(_reasoningText);
             _reasoning.Visibility = string.IsNullOrWhiteSpace(_reasoningText) ? Visibility.Collapsed : Visibility.Visible;
             _empty.Text = "Noch kein Denkprozess vom Modell übermittelt.";

@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using Missum.App.Controls;
 using Microsoft.UI.Xaml.Automation;
 
@@ -59,7 +59,7 @@ public sealed partial class NativeAssistantPage
                 ApplyEvent("chat.delta", JsonSerializer.SerializeToElement(new
                 { sessionId = owner, messageId = answerId, content = streamedSource }));
                 // Exercise the same incremental render timer as a local-model delta.
-                await Task.Delay(180);
+                await Task.Delay(180); await WaitForNativeMathPreparationAsync(LayoutRoot);
                 if (!_messageBlocks.TryGetValue(answerId, out var blocks) || !blocks.Values.OfType<NativeStreamingMarkdown>().Any())
                     throw new InvalidOperationException("Scientific math did not become visible before answer completion.");
                 VerifyNoDanglingFormula(blocks.Values.OfType<NativeStreamingMarkdown>().Single());
@@ -70,7 +70,7 @@ public sealed partial class NativeAssistantPage
             var answerFormula = Descendants(answer).OfType<NativeFormulaView>().Last();
             ApplyEvent("chat.delta", JsonSerializer.SerializeToElement(new
             { sessionId = owner, messageId = answerId, content = LooseMathSmokeSource + " Die Herleitung wird fortgesetzt." }));
-            await Task.Delay(180);
+            await Task.Delay(180); await WaitForNativeMathPreparationAsync(LayoutRoot);
             if (!Descendants(answer).OfType<NativeFormulaView>().Any(formula => ReferenceEquals(formula, answerFormula)))
                 throw new InvalidOperationException("Appending prose rebuilt an unchanged loose formula in the answer.");
             await SaveMathPreviewAsync(LayoutRoot, "native-loose-math-answer-preview.png");
@@ -93,7 +93,7 @@ public sealed partial class NativeAssistantPage
                     sessionId = owner, messageId = reasoningId, content = "", toolSteps = new[] { new
                     { id = "loose-math-reasoning", tool = "assistant.reasoning", status = "running", detail = streamedSource, contentOffset = 0, updatedAt = DateTimeOffset.UtcNow } },
                 }));
-                await Task.Delay(180); RefreshThinkingIndicators();
+                await Task.Delay(180); await WaitForNativeMathPreparationAsync(LayoutRoot); RefreshThinkingIndicators();
                 if (!row.IsExpanded || !ReferenceEquals(reasoning, row.ReasoningView))
                     throw new InvalidOperationException("Loose math streaming rebuilt or collapsed the reasoning disclosure.");
                 VerifyNoDanglingFormula(reasoning);
@@ -105,7 +105,7 @@ public sealed partial class NativeAssistantPage
                 sessionId = owner, messageId = reasoningId, content = "", toolSteps = new[] { new
                 { id = "loose-math-reasoning", tool = "assistant.reasoning", status = "running", detail = LooseMathSmokeSource + " Die Herleitung wird fortgesetzt.", contentOffset = 0, updatedAt = DateTimeOffset.UtcNow } },
             }));
-            await Task.Delay(180); RefreshThinkingIndicators();
+            await Task.Delay(180); await WaitForNativeMathPreparationAsync(LayoutRoot); RefreshThinkingIndicators();
             if (!Descendants(reasoning).OfType<NativeFormulaView>().Any(formula => ReferenceEquals(formula, reasoningFormula)))
                 throw new InvalidOperationException("Appending prose rebuilt an unchanged loose formula in the reasoning disclosure.");
             AssertChatCursorAbsent(LayoutRoot);
@@ -172,25 +172,26 @@ public sealed partial class NativeAssistantPage
                 foreach (var prefix in new[] { source[..Math.Min(72, source.Length - 2)], source[..^2] })
                 {
                     ApplyEvent("chat.delta", JsonSerializer.SerializeToElement(new { sessionId = owner, messageId, content = prefix }));
-                    await Task.Delay(180, _lifetime.Token);
+                    await Task.Delay(180, _lifetime.Token); await WaitForNativeMathPreparationAsync(LayoutRoot);
                     if (Descendants(MessageBody(_messageViews[messageId].View)).OfType<NativeFormulaView>().Any())
                         throw new InvalidOperationException("Eine noch offene Displayformel wurde vor ihrem schließenden Delimiter als vollständige Formel dargestellt.");
                 }
                 ApplyEvent("chat.delta", JsonSerializer.SerializeToElement(new { sessionId = owner, messageId, content = source }));
-                await Task.Delay(180, _lifetime.Token);
+                await Task.Delay(180, _lifetime.Token); await WaitForNativeMathPreparationAsync(LayoutRoot);
                 var formula = Descendants(MessageBody(_messageViews[messageId].View)).OfType<NativeFormulaView>().Single();
                 if (!formula.IsTypeset || formula.RenderedHeight < 15 || formula.FontSize != NativeStreamingMarkdown.BodyFontSize
                     || AutomationProperties.GetName(formula) != "Formel: " + source)
                     throw new InvalidOperationException("Eine vollständig gespeicherte Physikformel blieb roh oder verlor ihren unveränderten Kopiertext: " + source);
                 ApplyEvent("chat.delta", JsonSerializer.SerializeToElement(new
                 { sessionId = owner, messageId, content = source + "\n\nDie Rechnung wird weiter erläutert." }));
-                await Task.Delay(180, _lifetime.Token);
+                await Task.Delay(180, _lifetime.Token); await WaitForNativeMathPreparationAsync(LayoutRoot);
                 if (!Descendants(MessageBody(_messageViews[messageId].View)).OfType<NativeFormulaView>().Any(item => ReferenceEquals(item, formula)))
                     throw new InvalidOperationException("Ein weiterer Textabschnitt hat die bereits korrekt dargestellte Physikformel neu aufgebaut.");
             }
             var completed = "## Physikformeln aus der gespeicherten Antwort\n\n" + string.Join("\n\n", StoredPhysicsDisplaySmokeSources)
                 + "\n\nDie Größenbefehle werden ausschließlich für die Darstellung angepasst; der ursprüngliche LaTeX-Text bleibt erhalten.";
             ApplyEvent("state.snapshot", Snapshot(completed, "completed")); RenderMessagesNow(); UpdateLayout();
+            await WaitForNativeMathPreparationAsync(LayoutRoot);
             var completedFormulas = Descendants(MessageBody(_messageViews[messageId].View)).OfType<NativeFormulaView>().ToArray();
             if (completedFormulas.Length != 2 || completedFormulas.Any(formula => !formula.IsTypeset)
                 || StoredPhysicsDisplaySmokeSources.Any(source => !completedFormulas.Any(formula => AutomationProperties.GetName(formula) == "Formel: " + source)))

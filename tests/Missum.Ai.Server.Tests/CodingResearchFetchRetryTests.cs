@@ -96,6 +96,10 @@ public sealed class CodingResearchFetchRetryTests
         {
             Assert.Equal(Pathlib, execution.Result.Result.GetProperty("sources")[0].GetProperty("url").GetString());
             Assert.Contains(execution.Result.Result.GetProperty("uncertainties").EnumerateArray(), static item =>
+                item.GetString()!.Contains("Keine passende Fundstelle", StringComparison.Ordinal));
+            Assert.Contains(execution.Result.Result.GetProperty("uncertainties").EnumerateArray(), static item =>
+                item.GetString()!.Contains("nicht durch Originaltext belegter Befund wurde verworfen", StringComparison.Ordinal));
+            Assert.DoesNotContain(execution.Result.Result.GetProperty("uncertainties").EnumerateArray(), static item =>
                 item.GetString()!.Contains("Nur eine Originalquelle", StringComparison.Ordinal));
         }
     }

@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using Missum.App.Services;
 using Missum.App.Controls;
 using Microsoft.UI.Xaml;
@@ -48,7 +48,7 @@ public sealed partial class NativeAssistantPage
         if (!_messageActionViews.TryGetValue(messageId, out var view))
             _messageActionViews[messageId] = view = CreateMessageActionView(messageId);
         view.SessionId = Guid.TryParse(S(message, "sessionId"), out var sessionId) ? sessionId : _session;
-        view.Text = S(message, "content");
+        view.Text = MessageContent(message);
         view.IsAssistant = string.Equals(S(message, "role"), "assistant", StringComparison.OrdinalIgnoreCase);
         var status = S(message, "status").ToLowerInvariant();
         view.IsStreaming = view.IsAssistant && status is "streaming" or "pending";
@@ -85,13 +85,29 @@ public sealed partial class NativeAssistantPage
 
     private MenuFlyout? CreateReadFromMenu(FrameworkElement target, Windows.Foundation.Point point)
     {
+        for (DependencyObject? source = target; source is not null; source = VisualTreeHelper.GetParent(source))
+        {
+            if (source is not NativeStreamingMarkdown { Tag: NativeSourceAnchor anchor } || anchor.Start < 0) continue;
+            if (!DisplayMessages.TryGetValue(anchor.MessageId, out var original)
+                || !_messageActionViews.TryGetValue(anchor.MessageId, out var action) || !action.CanRead || action.IsStreaming) return null;
+            var fullText = MessageContent(original);
+            var offset = Math.Clamp(anchor.Start, 0, fullText.Length);
+            var excerpt = fullText[offset..];
+            var menu = new MenuFlyout();
+            var read = new MenuFlyoutItem { Text = "Ab hier vorlesen" };
+            var owner = _session;
+            var updatedAt = DateTimeOffset.TryParse(MessageUpdatedAt(original), out var at) ? at : DateTimeOffset.MinValue;
+            read.Click += async (_, _) => { if (_session == owner) await StartMessageSpeechAsync(action, excerpt, updatedAt); };
+            menu.Items.Add(read);
+            return menu;
+        }
         foreach (var (id, entry) in _messageViews)
         {
             if (!_messageActionViews.TryGetValue(id, out var view) || !view.CanRead || view.IsStreaming || view.SessionId != _session) continue;
             var blocks = MessageBody(entry.View).Children.OfType<Missum.App.Controls.NativeStreamingMarkdown>().Cast<FrameworkElement>().ToArray();
             var excerpt = Missum.App.Controls.NativeConversationSelection.ReadableSuffix(blocks, target);
             if (excerpt.Length == 0) continue;
-            if (!DisplayMessages.TryGetValue(id, out var message) || !DateTimeOffset.TryParse(S(message, "updatedAt"), out var updatedAt)) return null;
+            if (!DisplayMessages.TryGetValue(id, out var message) || !DateTimeOffset.TryParse(MessageUpdatedAt(message), out var updatedAt)) return null;
             var session = _session;
             var menu = new MenuFlyout();
             var read = new MenuFlyoutItem { Text = "Ab hier vorlesen", Icon = new FontIcon { Glyph = "\uE767", Foreground = NativeIconPalette.BrushFor("speech") } };

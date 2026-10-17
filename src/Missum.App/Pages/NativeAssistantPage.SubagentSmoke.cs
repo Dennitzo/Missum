@@ -185,7 +185,7 @@ public sealed partial class NativeAssistantPage
                 || MessageBody(parentBubble).Children.OfType<SubagentLifecycleView>().Count() != 1)
                 throw new InvalidOperationException("Accepted spawn/wait calls must share the child's single lifecycle row.");
             var failedManager = JsonSerializer.SerializeToElement(new { tool = "subagent.wait", status = "failed", inputJson = JsonSerializer.Serialize(new { runId = childRun }) });
-            if (IsAcceptedSubagentManagementStep(failedManager, Items(_messages[parentMessage], "toolSteps").Where(step => S(step, "tool") == "subagent").ToArray()))
+            if (IsAcceptedSubagentManagementStep(failedManager, MessageSteps(_messages[parentMessage]).Where(step => S(step, "tool") == "subagent").ToArray()))
                 throw new InvalidOperationException("Failed manager calls must retain their own tool feedback.");
             if (ActiveSubagent is not null || !ReferenceEquals(parentBubble, _messageViews[parentMessage].View)
                 || childState.Container.Parent != SessionTabsPanel || SubagentsSection.Visibility != Visibility.Visible
@@ -329,7 +329,7 @@ public sealed partial class NativeAssistantPage
                 throw new InvalidOperationException("Result delivery replaced the cached lifecycle row.");
             VerifyLifecycle(lifecycle, childState, "hat die Arbeit begonnen");
             var parentWithCompletion = _messages[parentMessage].Deserialize<Dictionary<string, JsonElement>>(JsonOptions)!;
-            var continuedParentText = S(_messages[parentMessage], "content") + "\n\nIch habe meinen eigenen Forschungsstrang weiterbearbeitet.";
+            var continuedParentText = MessageContent(_messages[parentMessage]) + "\n\nIch habe meinen eigenen Forschungsstrang weiterbearbeitet.";
             parentWithCompletion["content"] = JsonSerializer.SerializeToElement(continuedParentText);
             var completionStep = JsonSerializer.SerializeToElement(new
             {
@@ -337,7 +337,7 @@ public sealed partial class NativeAssistantPage
                 contentOffset = continuedParentText.Length,
                 outputJson = JsonSerializer.Serialize(new { agentId, runId = childRun, title = "Datei analysieren", status = "completed", resultDelivered = true }),
             });
-            parentWithCompletion["toolSteps"] = JsonSerializer.SerializeToElement(Items(_messages[parentMessage], "toolSteps").Append(completionStep));
+            parentWithCompletion["toolSteps"] = JsonSerializer.SerializeToElement(MessageSteps(_messages[parentMessage]).Append(completionStep));
             _messages[parentMessage] = JsonSerializer.SerializeToElement(parentWithCompletion, JsonOptions);
             RenderMessagesNow(); UpdateLayout();
             var completionLifecycle = _messageBlocks[parentMessage]["tool:parent-delegate-completed"] as SubagentLifecycleView
@@ -403,7 +403,7 @@ public sealed partial class NativeAssistantPage
                     liveSteps.Add(JsonSerializer.SerializeToElement(new
                     {
                         id = "live-parent-completed", tool = "subagent.completed", agentId = liveId, status = "completed",
-                        contentOffset = S(_messages[parentMessage], "content").Length, outputJson = JsonSerializer.Serialize(scoped, JsonOptions),
+                        contentOffset = MessageContent(_messages[parentMessage]).Length, outputJson = JsonSerializer.Serialize(scoped, JsonOptions),
                     }, JsonOptions));
                 owner["toolSteps"] = JsonSerializer.SerializeToElement(liveSteps);
                 _messages[parentMessage] = JsonSerializer.SerializeToElement(owner, JsonOptions);
@@ -704,7 +704,7 @@ public sealed partial class NativeAssistantPage
                 id = "overview-parent-source-after-navigation", tool = "web.fetch", status = "completed", updatedAt = now.AddHours(1),
                 outputJson = "{\"title\":\"Neue Hauptagent-Quelle\",\"url\":\"https://example.com/new-parent-source\"}",
             });
-            parentWithNewSource["toolSteps"] = JsonSerializer.SerializeToElement(Items(_messages[parentMessage], "toolSteps").Append(newestParentSource));
+            parentWithNewSource["toolSteps"] = JsonSerializer.SerializeToElement(MessageSteps(_messages[parentMessage]).Append(newestParentSource));
             _messages[parentMessage] = JsonSerializer.SerializeToElement(parentWithNewSource, JsonOptions);
             RenderMessagesNow(); UpdateLayout();
             if (ActiveSubagent?.AgentId != newest || _sourcesSignature == sourceSignature || SourcesPanel.Children.Count != 2

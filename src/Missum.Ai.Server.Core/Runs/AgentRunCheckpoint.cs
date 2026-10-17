@@ -42,4 +42,6 @@ public sealed record AgentRunCheckpoint(
     string? ContextProfileVersion = null,
     string? ToolCatalogSignature = null,
     IReadOnlyList<LmToolDefinition>? ContextTools = null,
-    string? ResearchStateStamp = null);
+    string? ResearchStateStamp = null,
+    string? CacheEpoch = null,
+    Missum.Ai.Contracts.ProjectContextRef? ProjectContext = null);

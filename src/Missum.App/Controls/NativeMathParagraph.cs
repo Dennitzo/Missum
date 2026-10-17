@@ -1,4 +1,4 @@
-using Microsoft.UI.Xaml;
+﻿using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Documents;
 using Microsoft.UI.Xaml.Media;
@@ -13,6 +13,9 @@ public sealed class NativeMathParagraph : UserControl
     private readonly List<(NativeStreamingMarkdown.MathInlineSpec Spec, Inline Inline, Run? Run)> _runs = [];
     private double _renderedFontSize;
     internal InlineCollection TrailingInlines => _paragraph.Inlines;
+    // InlineUIContainer children may not exist in the visual tree until the
+    // first arrange. Async readiness must still see their logical workers.
+    internal IEnumerable<NativeFormulaView> FormulaViews => _runs.SelectMany(run => Formulas(run.Inline));
     internal TextAlignment TextAlignment { get => _text.TextAlignment; set => _text.TextAlignment = value; }
 
     public NativeMathParagraph()
@@ -55,7 +58,11 @@ public sealed class NativeMathParagraph : UserControl
             Run? run = null;
             Inline content;
             if (piece.IsMath)
-                content = new InlineUIContainer { Child = new NativeFormulaView(piece.Text, piece.Display, FontSize, piece.Uri, piece.RenderLatex) };
+            {
+                var formula = new NativeFormulaView(piece.Text, piece.Display, FontSize, piece.Uri, piece.RenderLatex);
+                formula.SizeChanged += (_, _) => UpdateFormulaLineHeight();
+                content = new InlineUIContainer { Child = formula };
+            }
             else
             {
                 run = new Run { Text = piece.Text, FontFamily = new FontFamily(piece.Kind == NativeStreamingMarkdown.InlineKind.Code ? "Cascadia Mono" : "Segoe UI Variable Text") };
@@ -74,8 +81,14 @@ public sealed class NativeMathParagraph : UserControl
         while (_runs.Count > pieces.Count) { _paragraph.Inlines.RemoveAt(_runs.Count - 1); _runs.RemoveAt(_runs.Count - 1); }
         // A fraction may need more depth than a text glyph. Reserve its natural height
         // after baseline alignment rather than shrinking or clipping the formula image.
+        UpdateFormulaLineHeight();
+    }
+
+    private void UpdateFormulaLineHeight()
+    {
         var formulaHeight = _runs.Select(run => FormulaHeight(run.Inline)).DefaultIfEmpty().Max();
-        _text.LineHeight = Math.Max(FontSize * 26 / 16, formulaHeight + FontSize * 0.2);
+        var height = Math.Max(FontSize * 26 / 16, formulaHeight + FontSize * 0.2);
+        if (Math.Abs(_text.LineHeight - height) > .1) _text.LineHeight = height;
     }
 
     private static double FormulaHeight(Inline inline) => inline switch
@@ -83,5 +96,12 @@ public sealed class NativeMathParagraph : UserControl
         InlineUIContainer { Child: NativeFormulaView formula } => formula.RenderedHeight,
         Span span => span.Inlines.Select(FormulaHeight).DefaultIfEmpty().Max(),
         _ => 0
+    };
+
+    private static IEnumerable<NativeFormulaView> Formulas(Inline inline) => inline switch
+    {
+        InlineUIContainer { Child: NativeFormulaView formula } => [formula],
+        Span span => span.Inlines.SelectMany(Formulas),
+        _ => [],
     };
 }

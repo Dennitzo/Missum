@@ -59,6 +59,7 @@ public sealed class StartupStorageConcurrencyTests
             seed.Parameters.AddWithValue("$expired", expired);
             await seed.ExecuteNonQueryAsync();
         }
+        var originalHistory = await repository.GetEventsAfterAsync(expired, 0);
         using var cleanup = new StorageCleanupService(context.Database, context.WrappedOptions);
         var hold = await context.Database.EnterMaintenanceAsync(CancellationToken.None);
         Task cleaning;
@@ -75,8 +76,9 @@ public sealed class StartupStorageConcurrencyTests
         Assert.Contains(active, await recovering);
         Assert.Equal(RunState.Queued, (await repository.GetAsync(active))!.State);
         Assert.NotNull(await repository.GetCheckpointAsync(active));
-        Assert.Null(await repository.GetAsync(expired));
-        Assert.Empty(await repository.GetEventsAfterAsync(expired, 0));
+        Assert.Equal(RunState.Completed, (await repository.GetAsync(expired))!.State);
+        Assert.Equal(originalHistory.Select(item => item.Id),
+            (await repository.GetEventsAfterAsync(expired, 0)).Select(item => item.Id));
     }
 
     [Fact]

@@ -66,6 +66,75 @@ public sealed class WebResearchServiceTests
         Assert.Equal("one two three A B x<y & z", text);
     }
 
+    [Theory]
+    [InlineData("#asyncio.timeout")]
+    [InlineData("#asyncio%2Etimeout")]
+    public void SphinxFragmentSelectsItsDefinitionAndBodyBeforeTargetedPhraseRanking(string fragment)
+    {
+        const string html = "<dl><dt id='asyncio.as_completed'>asyncio.as_completed()</dt><dd>A TimeoutError is raised by the async for loop. These tasks continue running.</dd></dl>"
+            + "<dl><dt id='asyncio.timeout'><span>asyncio.</span><span>timeout</span>()</dt><!-- definition body --><dd>The context manager transforms CancelledError into TimeoutError. "
+            + "TimeoutError can only be caught outside of the context manager.<pre>try: async with asyncio.timeout(10): await operation()\nexcept TimeoutError: pass</pre></dd></dl>"
+            + "<dl><dt id='asyncio.timeout_at'>asyncio.timeout_at()</dt><dd>A different absolute deadline API.</dd></dl>";
+        var extracted = WebResearchService.ExtractFetchedContentForTarget(Encoding.UTF8.GetBytes(html), "text/html", "utf-8", fragment);
+        Assert.Equal("resolved", extracted.FragmentStatus);
+        Assert.StartsWith("asyncio.timeout()", extracted.Content, StringComparison.Ordinal);
+        Assert.Contains("outside of the context manager", extracted.Content, StringComparison.Ordinal);
+        Assert.DoesNotContain("as_completed", extracted.Content, StringComparison.Ordinal);
+        Assert.DoesNotContain("absolute deadline", extracted.Content, StringComparison.Ordinal);
+        var response = new WebFetchResponse("https://docs.python.org/3/library/asyncio-task.html" + fragment,
+            "text/html", extracted.Content, true, DateTimeOffset.UtcNow, [], extracted.FragmentStatus);
+        var targeted = AgentToolExecutor.CreateTargetedFetchResult(response,
+            JsonSerializer.SerializeToElement(new { query = "TimeoutError", contextCharacters = 700 }));
+        Assert.True(targeted.Found);
+        Assert.Equal("resolved", targeted.FragmentStatus);
+        Assert.All(targeted.Matches, match => Assert.Equal(match.Text,
+            AgentToolExecutor.RemoveResearchBoilerplate(extracted.Content)[match.StartCharacter..match.EndCharacter]));
+        Assert.DoesNotContain("as_completed", string.Join(' ', targeted.Matches.Select(match => match.Text)), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MissingFragmentUsesTransparentFullPageFallbackWithoutModifyingTheSource()
+    {
+        const string html = "<section id='actual'><h2>Original section</h2><p>The measured value is exact.</p></section>";
+        var bytes = Encoding.UTF8.GetBytes(html);
+        var extracted = WebResearchService.ExtractFetchedContentForTarget(bytes, "text/html", "utf-8", "#missing");
+        Assert.Equal("not_found", extracted.FragmentStatus);
+        Assert.Equal(WebResearchService.ExtractFetchedContent(bytes, "text/html", "utf-8"), extracted.Content);
+        var response = new WebFetchResponse("https://example.org/#missing", "text/html", extracted.Content,
+            true, DateTimeOffset.UtcNow, [], extracted.FragmentStatus);
+        var targeted = AgentToolExecutor.CreateTargetedFetchResult(response, JsonSerializer.SerializeToElement(new { query = "measured" }));
+        Assert.Contains("vollständige Seite", targeted.Instruction, StringComparison.Ordinal);
+        Assert.DoesNotContain("URL-Anker", Assert.Single(targeted.Matches).Text, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("<section><a name='legacy'></a><p>Original result.</p></section>", "#legacy", "Original result.")]
+    [InlineData("<body><a name='legacy'></a><h2>Target</h2><p>Original result.</p><h2>Other</h2><p>Unrelated.</p></body>", "#legacy", "Target Original result.")]
+    [InlineData("<h2 id='topic'>Target</h2><p>Original result.</p><h2>Other</h2><p>Unrelated.</p>", "#topic", "Target Original result.")]
+    [InlineData("<section><h2 id='topic'>Target</h2><section><h3>Child</h3><p>Nested.</p></section><p>Original result.</p></section><h2>Other</h2>", "#topic", "Target Child Nested. Original result.")]
+    [InlineData("<p title=\"see id='target'\">Wrong.</p><p id='target' title='x > y'>Original result.</p>", "#target", "Original result.")]
+    [InlineData("<a href='target' title='target'>Wrong.</a><p id='target'>Original result.</p>", "#target", "Original result.")]
+    [InlineData("<a href='target' title='target'>Wrong.</a><section><a name='target'></a><p>Original result.</p></section>", "#target", "Original result.")]
+    public void NamedAndHeadingAnchorsKeepOnlyTheirOwnText(string html, string fragment, string expected)
+    {
+        var extracted = WebResearchService.ExtractFetchedContentForTarget(Encoding.UTF8.GetBytes(html), "text/html", "utf-8", fragment);
+        Assert.Equal("resolved", extracted.FragmentStatus);
+        Assert.Equal(expected, extracted.Content);
+    }
+
+    [Theory]
+    [InlineData("<div id='target'><p>Original result.</p>")]
+    [InlineData("<h2 id='target'>Original result.")]
+    [InlineData("<h2><span id='target'>Original result.</span>")]
+    [InlineData("<a name='target'></a><h2>Original result.")]
+    public void UnclosedAnchorBlockFallsBackWithoutClaimingSectionResolution(string html)
+    {
+        var bytes = Encoding.UTF8.GetBytes(html);
+        var extracted = WebResearchService.ExtractFetchedContentForTarget(bytes, "text/html", "utf-8", "#target");
+        Assert.Equal("not_found", extracted.FragmentStatus);
+        Assert.Equal(WebResearchService.ExtractFetchedContent(bytes, "text/html", "utf-8"), extracted.Content);
+    }
+
     [Fact]
     public void FetchUsesBrowserCompatibleRequestHeaders()
     {

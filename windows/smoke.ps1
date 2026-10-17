@@ -577,10 +577,50 @@ try {
     Copy-Item -LiteralPath (Join-Path $smokeData 'native-paging-preview.png') -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-paging-preview.png')) -Force
     Write-Host 'Native SQLite paging, scroll anchor, lazy tool/subagent details and unchanged context preparation verified.'
 
+    $expansionReport = Join-Path $smokeData 'native-tool-expansion-validation.json'
+    if (-not (Test-Path -LiteralPath $expansionReport -PathType Leaf)) { throw 'Native tool expansion evidence is missing.' }
+    $expansion = Get-Content -LiteralPath $expansionReport -Raw | ConvertFrom-Json
+    foreach ($check in @('passed', 'historicalAndLiveReasoningFollowSetting', 'explicitSettingUpdatesRetainedControls',
+        'manualChoiceSurvivesStreaming', 'manualChoiceSurvivesVirtualizationAndRecycling',
+        'parentChildNavigationRestoresDefault', 'sessionNavigationRestoresDefault')) {
+        if ($expansion.$check -ne $true) { throw "Native tool expansion failed: $check" }
+    }
+    if ($expansion.cases -ne 6 -or $expansion.modes -ne 3 -or $expansion.defaults -ne 2 -or
+        $expansion.modelRequests -ne 0 -or $expansion.userDataModified -ne $false) {
+        throw 'Native tool expansion did not validate both defaults in all modes in isolation.'
+    }
+    Copy-Item -LiteralPath $expansionReport -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-tool-expansion-validation.json')) -Force
+    Write-Host 'Native automatic tool/reasoning expansion, explicit settings changes and manual fold state verified.'
+
+    $deepResearchReport = Join-Path $smokeData 'native-deep-research-validation.json'
+    if (-not (Test-Path -LiteralPath $deepResearchReport -PathType Leaf)) { throw 'Native Deep Research evidence is missing.' }
+    $deepResearch = Get-Content -LiteralPath $deepResearchReport -Raw | ConvertFrom-Json
+    foreach ($check in @('passed', 'headerOpensMatchingResearch', 'sharedTranscriptAndToolRenderer', 'sharedCopyReadFooter',
+        'readonlyParentControlsPreserved', 'companionReceiptHiddenInBothRenderers', 'unifiedOutputsSection', 'sharedPlanetIcons',
+        'sharedTaskTitles', 'realResearchUsesNormalLifecycle', 'legacyResearchRemainsReadable')) {
+        if ($deepResearch.$check -ne $true) { throw "Native Deep Research failed: $check" }
+    }
+    Copy-Item -LiteralPath $deepResearchReport -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-deep-research-validation.json')) -Force
+    foreach ($previewName in @('native-deep-research-overview-preview.png', 'native-deep-research-preview.png')) {
+        Copy-Item -LiteralPath (Join-Path $smokeData $previewName) -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.' + $previewName)) -Force
+    }
+    Write-Host 'Native research subagents, shared planet icons, task titles, lifecycle navigation and legacy transcript verified.'
+
     $responsivenessReport = Join-Path $smokeData 'native-responsiveness-validation.json'
     if (Test-Path -LiteralPath $responsivenessReport -PathType Leaf) {
         Copy-Item -LiteralPath $responsivenessReport -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-responsiveness-validation.json')) -Force
         Copy-Item -LiteralPath (Join-Path $smokeData 'native-responsiveness-preview.png') -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-responsiveness-preview.png')) -Force
+    }
+    if ($env:MISSUM_SMOKE_UI_LONG_SESSION -eq '1') {
+        $longSessionReport = Join-Path $smokeData 'native-long-session-validation.json'
+        if (-not (Test-Path -LiteralPath $longSessionReport -PathType Leaf)) { throw 'Native long-session evidence is missing.' }
+        $longSession = Get-Content -LiteralPath $longSessionReport -Raw | ConvertFrom-Json
+        if ($longSession.passed -ne $true -or $longSession.processId -ne $process.Id -or
+            $longSession.initialToolHeaders -ne 64 -or $longSession.durableToolSteps -ne 2500) {
+            throw 'Native long-session latency, bounded rendering or history preservation failed.'
+        }
+        Copy-Item -LiteralPath $longSessionReport -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-long-session-validation.json')) -Force
+        Write-Host 'Native long-session replay: bounded controls, exact source, dispatcher and warm navigation verified.'
     }
     if (-not $process.CloseMainWindow() -or -not $process.WaitForExit(5000)) {
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
@@ -588,6 +628,12 @@ try {
     }
 }
 finally {
+    foreach ($name in @('native-ui-failure.json', 'native-long-session-validation.json', 'native-responsiveness-validation.json', 'native-tool-expansion-validation.json', 'native-deep-research-validation.json')) {
+        $report = Join-Path $smokeData $name
+        if (Test-Path -LiteralPath $report -PathType Leaf) {
+            Copy-Item -LiteralPath $report -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.' + $name)) -Force
+        }
+    }
     if ($null -ne $process -and -not $process.HasExited) {
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
         $process.WaitForExit(5000) | Out-Null

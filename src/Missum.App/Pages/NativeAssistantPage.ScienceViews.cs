@@ -9,6 +9,8 @@ public sealed partial class NativeAssistantPage
 {
     private string? _scienceViewSignature;
     private readonly Dictionary<Guid, NativePublicationView> _publicationViews = [];
+    private readonly Dictionary<string, NativePublicationView> _publicationPool = new(StringComparer.OrdinalIgnoreCase);
+    private readonly LinkedList<string> _publicationRecency = new();
     private readonly Dictionary<string, FrameworkElement> _scienceEmptyBodies = new(StringComparer.Ordinal);
     private Grid? _scienceRoot, _scienceBody;
     private InfoBar? _scienceNotice;
@@ -46,7 +48,7 @@ public sealed partial class NativeAssistantPage
         FrameworkElement body;
         if (presentation?.Publication is { } pdf)
         {
-            if (!_publicationViews.TryGetValue(owner, out var viewer)) _publicationViews[owner] = viewer = new NativePublicationView();
+            var viewer = GetPublicationView(owner, pdf.PdfPath);
             if (viewer.Parent is null) _scienceBody!.Children.Add(viewer);
             body = viewer;
             _ = LoadPublicationAsync(viewer, pdf, owner, state.SelectedProjectId!);
@@ -95,12 +97,39 @@ public sealed partial class NativeAssistantPage
         if (!ReferenceEquals(ResearchHost.Content, _scienceRoot)) ResearchHost.Content = _scienceRoot;
     }
 
+    private NativePublicationView GetPublicationView(Guid owner, string path)
+    {
+        var key = Path.GetFullPath(path);
+        if (!_publicationPool.TryGetValue(key, out var view))
+        {
+            view = new NativePublicationView();
+            _publicationPool[key] = view;
+        }
+        _publicationViews[owner] = view;
+        _publicationRecency.Remove(key); _publicationRecency.AddFirst(key);
+        // Native PDF engines are shared by the stable publication path, not by
+        // chat count. At most the active publication and one recent viewer live.
+        while (_publicationPool.Count > 2 && _publicationRecency.Last is { } last)
+        {
+            var stale = _publicationPool[last.Value];
+            _publicationPool.Remove(last.Value); _publicationRecency.RemoveLast();
+            _scienceBody?.Children.Remove(stale);
+            foreach (var session in _publicationViews.Where(pair => ReferenceEquals(pair.Value, stale)).Select(pair => pair.Key).ToArray())
+                _publicationViews.Remove(session);
+            stale.Dispose();
+        }
+        foreach (var previous in _publicationViews.Where(pair => pair.Key != owner && ReferenceEquals(pair.Value, view)).Select(pair => pair.Key).ToArray())
+            _publicationViews.Remove(previous);
+        return view;
+    }
+
     private void UpdatePublicationActivity()
     {
         var visible = !_disposed && _mode == "claudescience" && _activeResearchSessionId == _session
             && ResearchHost.Visibility == Visibility.Visible && ReferenceEquals(ResearchHost.Content, _scienceRoot);
-        foreach (var (owner, viewer) in _publicationViews)
-            viewer.SetActive(visible && owner == _session && viewer.Parent == _scienceBody && viewer.Visibility == Visibility.Visible);
+        var current = _publicationViews.GetValueOrDefault(_session);
+        foreach (var viewer in _publicationPool.Values.Concat(_publicationViews.Values).Distinct())
+            viewer.SetActive(visible && ReferenceEquals(viewer, current) && viewer.Parent == _scienceBody && viewer.Visibility == Visibility.Visible);
     }
 
     private static string PublicationContentKey(ScientificPublicationArtifact pdf) =>
@@ -122,8 +151,10 @@ public sealed partial class NativeAssistantPage
 
     private void DisposeScienceViews()
     {
-        foreach (var viewer in _publicationViews.Values) viewer.Dispose();
+        foreach (var viewer in _publicationPool.Values.Concat(_publicationViews.Values).Distinct()) viewer.Dispose();
         _publicationViews.Clear();
+        _publicationPool.Clear();
+        _publicationRecency.Clear();
         _scienceEmptyBodies.Clear();
     }
 }

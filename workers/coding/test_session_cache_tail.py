@@ -130,7 +130,7 @@ class SessionCacheTailTests(unittest.TestCase):
             with urllib.request.urlopen(request, timeout=5) as response:
                 result = json.load(response)
             self.assertIn("status", result)
-        manager.session_save.assert_called_once_with("model", "session", 123)
+        manager.session_save.assert_called_once_with("model", "session", 123, True, None)
         manager.session_prepare.assert_called_once_with("model", "session", None, None)
 
 

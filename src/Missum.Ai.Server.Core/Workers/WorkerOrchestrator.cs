@@ -113,7 +113,7 @@ public sealed class WorkerOrchestrator : IDisposable
         await using var lease = await _scheduler.AcquireAsync(
             "caption-translation",
             sessionId,
-            GpuLeaseMode.CodingSecondary,
+            GpuLeaseMode.Exclusive,
             cancellationToken).ConfigureAwait(false);
         // CompleteChatAsync loads the selected model using its fitted runtime context.
         // A fixed server-default context can exceed the selected model's capacity.
@@ -262,10 +262,14 @@ public sealed class WorkerOrchestrator : IDisposable
         return state.Snapshot();
     }
 
-    public async Task<SpeechParagraphResponse> SynthesizeSpeechParagraphAsync(
+    public Task<SpeechParagraphResponse> SynthesizeSpeechParagraphAsync(
         string sessionId,
         SpeechParagraphRequest request,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        SynthesizeSpeechParagraphCoreAsync(sessionId, request, transientPlayback: true, cancellationToken);
+
+    private async Task<SpeechParagraphResponse> SynthesizeSpeechParagraphCoreAsync(
+        string sessionId, SpeechParagraphRequest request, bool transientPlayback, CancellationToken cancellationToken)
     {
         if (!_speechSessions.TryGetValue(sessionId, out var state))
         {
@@ -281,11 +285,12 @@ public sealed class WorkerOrchestrator : IDisposable
                 cancellationToken).ConfigureAwait(false);
             var result = synthesis.Result;
             state.UpdatedAt = DateTimeOffset.UtcNow;
+            var metadata = SpeechArtifactMetadata(result.Metadata, transientPlayback);
             var artifact = await ImportAsync(
                 result.RelativePath,
                 result.FileName,
                 result.MediaType,
-                result.Metadata,
+                metadata,
                 cancellationToken).ConfigureAwait(false);
             return new SpeechParagraphResponse(
                 artifact,
@@ -302,6 +307,12 @@ public sealed class WorkerOrchestrator : IDisposable
             state.Gate.Release();
         }
     }
+
+    internal static IReadOnlyDictionary<string, string>? SpeechArtifactMetadata(
+        IReadOnlyDictionary<string, string>? metadata, bool transientPlayback) => transientPlayback
+        ? new Dictionary<string, string>(metadata ?? new Dictionary<string, string>(), StringComparer.Ordinal)
+            { ["purpose"] = "speech-playback", ["transient"] = "true" }
+        : metadata;
 
     public async Task<SpeechSessionSnapshot> EndSpeechSessionAsync(
         string sessionId,
@@ -345,9 +356,10 @@ public sealed class WorkerOrchestrator : IDisposable
         var cancelled = false;
         try
         {
-            var paragraph = await SynthesizeSpeechParagraphAsync(
+            var paragraph = await SynthesizeSpeechParagraphCoreAsync(
                 session.SessionId,
                 new SpeechParagraphRequest(request.Text, 0, request.Speed),
+                transientPlayback: false,
                 cancellationToken).ConfigureAwait(false);
             return new SpeechResponse(paragraph.Artifact, paragraph.Provider);
         }

@@ -593,6 +593,14 @@ public sealed class SqliteChatArtifactRepository(
             var metadata = JsonSerializer.Deserialize<Dictionary<string, string>>(reader.GetString(10))
                 ?? new Dictionary<string, string>();
             var stepId = reader.IsDBNull(11) ? null : reader.GetString(11);
+            if (reader.FieldCount > 12)
+            {
+                // Display anchors are derived inside the conversation snapshot.
+                // Never persist them or trust a stale value in artifact metadata.
+                metadata.Remove("sourceContentOffset");
+                if (!reader.IsDBNull(12) && reader.GetInt64(12) is >= 0 and <= int.MaxValue)
+                    metadata["sourceContentOffset"] = reader.GetInt64(12).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
             items.Add(new ChatArtifact(
                 Guid.Parse(reader.GetString(0)), Guid.Parse(reader.GetString(1)), Guid.Parse(reader.GetString(2)),
                 reader.GetString(3), reader.GetString(4), reader.GetString(5), reader.GetString(6), reader.GetInt64(7),
@@ -604,6 +612,20 @@ public sealed class SqliteChatArtifactRepository(
     internal const string SelectSql = """
         SELECT a.id, a.message_id, a.blob_id, a.server_artifact_id, a.file_name, a.content_type,
                a.sha256, a.length, a.provider, a.created_at, a.metadata_json, a.step_id
+        FROM chat_artifacts a
+        """;
+
+    internal const string DisplaySelectSql = """
+        SELECT a.id, a.message_id, a.blob_id, a.server_artifact_id, a.file_name, a.content_type,
+               a.sha256, a.length, a.provider, a.created_at, a.metadata_json, a.step_id,
+               COALESCE((SELECT step.content_offset FROM chat_tool_steps step
+                   WHERE step.message_id=a.message_id AND step.step_id=a.step_id),
+                   CASE WHEN a.step_id IS NOT NULL AND NOT EXISTS(
+                       SELECT 1 FROM chat_tool_step_messages normalized WHERE normalized.message_id=a.message_id)
+                   THEN (SELECT CAST(json_extract(s.value,'$.contentOffset') AS INTEGER)
+                       FROM chat_messages owner,json_each(owner.tool_steps_json) s
+                       WHERE owner.id=a.message_id AND json_extract(s.value,'$.id')=a.step_id LIMIT 1) END)
+                   AS source_content_offset
         FROM chat_artifacts a
         """;
 }

@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Text.Json;
 using Missum.App.Controls;
 using Missum.App.Services;
@@ -81,6 +81,7 @@ public sealed partial class NativeAssistantPage
             var openWatch = Stopwatch.StartNew();
             if (!await CommandAsync("session.open", new { sessionId = fixture.Session.Id }))
                 throw new InvalidOperationException("Die gespeicherte Paging-Sitzung konnte nicht geöffnet werden.");
+            ShowChatView();
             RenderMessagesNow();
             await WaitForPagingSmokeAsync(() => ConversationScroll.ScrollableHeight > 300
                 && ConversationScroll.ScrollableHeight - ConversationScroll.VerticalOffset <= 4,
@@ -90,7 +91,7 @@ public sealed partial class NativeAssistantPage
                 || !_messages.Keys.ToHashSet().SetEquals(fixture.Messages.TakeLast(24).Select(message => message.Id.ToString()))
                 || ConversationScroll.ScrollableHeight - ConversationScroll.VerticalOffset > 4)
                 throw new InvalidOperationException("Der erste UI-Abruf muss genau die neuesten 24 Nachrichten laden und unten beginnen.");
-            var header = Items(_messages[fixture.ToolMessageId], "toolSteps").Single(step => S(step, "id") == fixture.Step.Id);
+            var header = MessageSteps(_messages[fixture.ToolMessageId]).Single(step => S(step, "id") == fixture.Step.Id);
             if (!PagingSmokeFlag(header, "detailsDeferred") || S(header, "outputJson").Length != 0)
                 throw new InvalidOperationException("Der eingeklappte Werkzeugschritt hat seine große Ausgabe vorzeitig geladen.");
             if (!_subagents.TryGetValue(fixture.Child.AgentId, out var child) || !child.TranscriptDeferred || child.Messages.Count != 0)
@@ -130,32 +131,37 @@ public sealed partial class NativeAssistantPage
             if (!_messages.Keys.ToHashSet().SetEquals(fixture.Messages.Select(message => message.Id.ToString())))
                 throw new InvalidOperationException("Die dargestellte Historie enthält nach dem Nachladen fehlende oder doppelte Nachrichten.");
 
-            var tool = _messageBlocks[fixture.ToolMessageId]["tool:" + fixture.Step.Id] as ToolStepView
-                ?? throw new InvalidOperationException("Der native Werkzeugschritt fehlt.");
+            var tool = await PagingSmokeToolInViewportAsync(fixture.ToolMessageId, fixture.Step.Id);
             if (tool.IsExpanded || Descendants(tool).OfType<NativeToolResultView>().Any())
                 throw new InvalidOperationException("Eingeklappte Werkzeugdetails wurden bereits gerendert.");
             var detailWatch = Stopwatch.StartNew();
             InvokePagingSmokeTool(tool);
-            await WaitForPagingSmokeAsync(() => !PagingSmokeFlag(Items(_messages[fixture.ToolMessageId], "toolSteps").Single(step => S(step, "id") == fixture.Step.Id), "detailsDeferred")
-                && Descendants(tool).OfType<NativeToolResultView>().Any(), "Aufklappen hat die Werkzeugdetails nicht geladen und gerendert.");
+            await WaitForPagingSmokeAsync(() => !PagingSmokeFlag(MessageSteps(_messages[fixture.ToolMessageId]).Single(step => S(step, "id") == fixture.Step.Id), "detailsDeferred")
+                && _messageBlocks[fixture.ToolMessageId].TryGetValue("tool:" + fixture.Step.Id, out var current)
+                && current is ToolStepView { IsExpanded: true, IsLoaded: true }
+                && Descendants(current).OfType<NativeToolResultView>().Any(), "Aufklappen hat die Werkzeugdetails nicht geladen und gerendert.");
+            tool = await PagingSmokeToolInViewportAsync(fixture.ToolMessageId, fixture.Step.Id);
             detailWatch.Stop();
-            if (S(Items(_messages[fixture.ToolMessageId], "toolSteps").Single(step => S(step, "id") == fixture.Step.Id), "outputJson") != fixture.Step.OutputJson)
+            if (S(MessageSteps(_messages[fixture.ToolMessageId]).Single(step => S(step, "id") == fixture.Step.Id), "outputJson") != fixture.Step.OutputJson)
                 throw new InvalidOperationException("Die nachgeladene Werkzeugausgabe wurde verändert oder abgeschnitten.");
 
             await ActivateSubagentTabAsync(child);
             if (!ReferenceEquals(ActiveSubagent, child) || child.TranscriptDeferred || child.Messages.Count != 2)
                 throw new InvalidOperationException("Der Subagententab hat sein gespeichertes Transkript nicht bedarfsgerecht geladen.");
             var childMessageId = fixture.Child.AssistantMessage.Id.ToString();
-            var childTool = _messageBlocks[childMessageId]["tool:child-paging-receipt"] as ToolStepView
-                ?? throw new InvalidOperationException("Der Subagent verwendet nicht den gemeinsamen nativen Werkzeugrenderer.");
-            if (childTool.IsExpanded || !PagingSmokeFlag(Items(child.Messages[childMessageId], "toolSteps").Single(), "detailsDeferred"))
+            var childTool = await PagingSmokeToolInViewportAsync(childMessageId, "child-paging-receipt");
+            if (childTool.IsExpanded || !PagingSmokeFlag(MessageSteps(child.Messages[childMessageId]).Single(), "detailsDeferred"))
                 throw new InvalidOperationException("Der Subagent hat eingeklappte Werkzeugdetails vorzeitig geladen.");
             InvokePagingSmokeTool(childTool);
-            await WaitForPagingSmokeAsync(() => !PagingSmokeFlag(Items(child.Messages[childMessageId], "toolSteps").Single(), "detailsDeferred")
-                && Descendants(childTool).OfType<NativeToolResultView>().Any(), "Der Subagent hat seine Werkzeugdetails nicht nachgeladen.");
+            await WaitForPagingSmokeAsync(() => !PagingSmokeFlag(MessageSteps(child.Messages[childMessageId]).Single(), "detailsDeferred")
+                && _messageBlocks[childMessageId].TryGetValue("tool:child-paging-receipt", out var current)
+                && current is ToolStepView { IsExpanded: true, IsLoaded: true }
+                && Descendants(current).OfType<NativeToolResultView>().Any(), "Der Subagent hat seine Werkzeugdetails nicht nachgeladen.");
             ShowParentConversation();
+            tool = await PagingSmokeToolInViewportAsync(fixture.ToolMessageId, fixture.Step.Id);
             if (tool.IsExpanded) throw new InvalidOperationException("Der Tabwechsel hat die Standard-Einklappung nicht wiederhergestellt.");
             await ActivateSubagentTabAsync(child);
+            childTool = await PagingSmokeToolInViewportAsync(childMessageId, "child-paging-receipt");
             if (childTool.IsExpanded) throw new InvalidOperationException("Der Subagententab hat die Standard-Einklappung nicht wiederhergestellt.");
             ShowParentConversation();
 
@@ -195,6 +201,73 @@ public sealed partial class NativeAssistantPage
         {
             if (watch.Elapsed > TimeSpan.FromSeconds(5)) throw new InvalidOperationException(failure);
             await Task.Delay(20, _lifetime.Token);
+        }
+    }
+
+    private async Task<ToolStepView> PagingSmokeToolInViewportAsync(string messageId, string stepId)
+    {
+        _scrollNewSessionToLatest = false;
+        var stable = 0;
+        double? scrollTarget = null;
+        try
+        {
+            await WaitForPagingSmokeAsync(() =>
+            {
+                _scrollNewSessionToLatest = false;
+                LayoutRoot.UpdateLayout();
+                var bubble = _messageViews[messageId].View;
+                var tool = _messageBlocks.GetValueOrDefault(messageId)?.GetValueOrDefault("tool:" + stepId) as ToolStepView;
+                // A BringIntoView request can run before the pending block plan
+                // replaces estimated heights. Re-resolve the current row and
+                // target its actual content coordinate after each layout.
+                var target = Top(tool is { IsLoaded: true } ? tool : bubble, ConversationContent);
+                if (target is { } y)
+                {
+                    scrollTarget = Math.Clamp(y - 16, 0, ConversationScroll.ScrollableHeight);
+                    if (Math.Abs(ConversationScroll.VerticalOffset - scrollTarget.Value) > 1)
+                    {
+                        stable = 0;
+                        ConversationScroll.ChangeView(null, scrollTarget.Value, null, true);
+                    }
+                }
+                RefreshVirtualConversationViewport();
+                if (tool is not { IsLoaded: true } || Top(tool, ConversationScroll) is not { } top
+                    || tool.ActualHeight <= 0 || top + tool.ActualHeight <= 0 || top >= ConversationScroll.ViewportHeight)
+                { stable = 0; return false; }
+                if (_virtualMessages.TryGetValue(messageId, out var virtualized)
+                    && (virtualized.Preparing || virtualized.Version != MessageVersion(DisplayMessages[messageId])))
+                { stable = 0; return false; }
+                return ++stable >= 2;
+            }, "Der Werkzeugschritt konnte nicht im tatsächlichen sichtbaren Nachrichtenfenster angezeigt werden.");
+        }
+        catch (InvalidOperationException exception)
+        {
+            var bubble = _messageViews.GetValueOrDefault(messageId).View;
+            var tool = _messageBlocks.GetValueOrDefault(messageId)?.GetValueOrDefault("tool:" + stepId) as ToolStepView;
+            var virtualized = _virtualMessages.GetValueOrDefault(messageId);
+            throw new InvalidOperationException(exception.Message + " " + JsonSerializer.Serialize(new
+            {
+                messageId, stepId, messages = DisplayMessages.Count, bodyVisibility = BodyGrid.Visibility.ToString(),
+                sourcesVisibility = _sourcesHost.Visibility.ToString(), _activeSourcesSession,
+                bubbleLoaded = bubble?.IsLoaded, bubbleTop = Top(bubble, ConversationContent), bubbleHeight = bubble?.ActualHeight,
+                toolLoaded = tool?.IsLoaded, toolExpanded = tool?.IsExpanded, toolTop = Top(tool, ConversationScroll),
+                toolHeight = tool?.ActualHeight, toolOwner = tool?.Parent?.GetType().Name,
+                offset = ConversationScroll.VerticalOffset, viewport = ConversationScroll.ViewportHeight,
+                scrollActualHeight = ConversationScroll.ActualHeight,
+                scrollable = ConversationScroll.ScrollableHeight, scrollTarget, _scrollNewSessionToLatest,
+                virtualized = virtualized is not null, preparing = virtualized?.Preparing, version = virtualized?.Version,
+                sourceVersion = DisplayMessages.TryGetValue(messageId, out var source) ? MessageVersion(source) : (long?)null,
+                realized = virtualized?.Panel.RealizedCount, logical = virtualized?.Panel.LogicalCount,
+            }), exception);
+        }
+        return (ToolStepView)_messageBlocks[messageId]["tool:" + stepId];
+
+        static double? Top(FrameworkElement? view, UIElement relative)
+        {
+            if (view is null || !view.IsLoaded) return null;
+            try { return view.TransformToVisual(relative).TransformPoint(new()).Y; }
+            catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or System.Runtime.InteropServices.COMException)
+            { return null; }
         }
     }
 

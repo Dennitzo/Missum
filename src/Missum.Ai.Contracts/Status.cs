@@ -21,7 +21,8 @@ public sealed record CapabilitySnapshot(
     bool SupportsCodingSessionContext = false,
     bool SupportsRunSteering = false,
     IReadOnlyList<ExtensionCapability>? Extensions = null,
-    IReadOnlyList<string>? ContextProfiles = null);
+    IReadOnlyList<string>? ContextProfiles = null,
+    bool SupportsProjectContext = false);
 
 public sealed record ExtensionCapability(
     string Id,

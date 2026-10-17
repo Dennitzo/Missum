@@ -34,6 +34,7 @@ public static class MissumAiServerHostExtensions
         services.AddSingleton<MissumAiDatabase>();
         services.AddSingleton<RunEventNotifier>();
         services.AddSingleton<RunRepository>();
+        services.AddSingleton<ProjectContextSummaryWork>();
         services.AddSingleton<RunWorkChannel>();
         services.AddSingleton<ModelRouter>();
         services.AddSingleton<AgentToolCatalog>();

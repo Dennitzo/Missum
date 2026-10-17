@@ -15,6 +15,60 @@ public sealed class PublicationFileWorkflowTests
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
 
     [Fact]
+    public async Task UnchangedPublicationDoesNotReopenImagePayloadsAndImageEditInvalidatesCache()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var image = Path.Combine(environment.Directory, "plot.png");
+        await File.WriteAllBytesAsync(image, Png);
+        var renderCount = 0;
+        using var service = Service(environment, async (source, token) =>
+        {
+            renderCount++;
+            return await PdfAsync(source, token);
+        });
+        var markdown = await service.EnsureWorkspaceDocumentAsync("cached-images", environment.Directory);
+        await File.WriteAllTextAsync(markdown, "# Untersuchung\n\n![Messung](plot.png)\n");
+        var first = (await service.EnsureCurrentAsync("cached-images"))!;
+        await using (var locked = new FileStream(image, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            var unchanged = await service.EnsureCurrentAsync("cached-images");
+            Assert.Equal(first.ContentHash, unchanged!.ContentHash);
+            Assert.Equal(1, renderCount);
+        }
+        await File.WriteAllBytesAsync(image, ChangedPng());
+        var updated = await service.EnsureCurrentAsync("cached-images");
+        Assert.NotEqual(first.ContentHash, updated!.ContentHash);
+        Assert.Equal(2, renderCount);
+    }
+
+    [Fact]
+    public async Task SlowPublicationDoesNotBlockAnotherWorkspace()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var firstRoot = Path.Combine(environment.Directory, "first");
+        var secondRoot = Path.Combine(environment.Directory, "second");
+        Directory.CreateDirectory(firstRoot);
+        Directory.CreateDirectory(secondRoot);
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var service = Service(environment, async (source, token) =>
+        {
+            if (source.StartsWith(firstRoot, StringComparison.OrdinalIgnoreCase))
+            {
+                started.TrySetResult();
+                await release.Task.WaitAsync(token);
+            }
+            return await PdfAsync(source, token);
+        });
+        await service.EnsureWorkspaceDocumentAsync("first-workspace", firstRoot);
+        await service.EnsureWorkspaceDocumentAsync("second-workspace", secondRoot);
+        var first = service.EnsureCurrentAsync("first-workspace");
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        try { Assert.NotNull(await service.EnsureCurrentAsync("second-workspace").WaitAsync(TimeSpan.FromSeconds(5))); }
+        finally { release.TrySetResult(); await first; }
+    }
+
+    [Fact]
     public async Task ExistingNestedPublicationRemainsTheAuthoritativeFile()
     {
         await using var environment = await TestEnvironment.CreateAsync();

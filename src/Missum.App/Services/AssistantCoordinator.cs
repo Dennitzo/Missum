@@ -78,11 +78,7 @@ public sealed partial class AssistantCoordinator(
         if (session.ChatMode != ChatMode.ClaudeScience
             || _checkedScienceTitles.TryGetValue(session.Id, out var checkedTitle) && checkedTitle == session.Title)
             return session;
-        var messages = await chats.ListMessagesAsync(session.Id, cancellationToken).ConfigureAwait(false);
-        var original = messages.Where(message => message.Role == ChatRole.User)
-            .OrderBy(message => message.CreatedAt).ThenBy(message => message.Id)
-            .Select(message => message.Content)
-            .FirstOrDefault(prompt => ScientificSessionTitle.FromPrompt(prompt) is not null);
+        var original = (await chats.GetFirstUserMessageAsync(session.Id, cancellationToken).ConfigureAwait(false))?.Content;
         var corrected = ScientificSessionTitle.FromPrompt(original);
         // Repair only our previous automatic name or a default. An independent
         // user rename is preserved, including across follow-up prompts/restarts.
@@ -90,6 +86,7 @@ public sealed partial class AssistantCoordinator(
             && (GenericSessionTitles.Contains(session.Title) || session.Title == DerivePromptSessionTitle(original!)))
         {
             await chats.RenameSessionAsync(session.Id, corrected, cancellationToken).ConfigureAwait(false);
+            var messages = await chats.ListMessagesAsync(session.Id, cancellationToken).ConfigureAwait(false);
             foreach (var message in messages.Where(message => message.Role == ChatRole.Assistant))
             {
                 foreach (var step in (message.ToolSteps ?? []).Where(step => step.Id.StartsWith("science-introduction:", StringComparison.Ordinal)
@@ -347,6 +344,7 @@ public sealed partial class AssistantCoordinator(
         var page = await conversationSnapshots.GetPageAsync(activeSession.Id, cancellationToken: cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Die aktive Chat-Sitzung wurde nicht gefunden.");
         var conversation = page.Conversation;
+        var auxiliary = await PrepareDisplayedPageAsync(page, cancellationToken).ConfigureAwait(false);
         var session = conversation.Session with { Draft = AssistantClientExecutionScope.Draft(conversation.Session.Id, conversation.Session.Draft, settings.Current) };
         var selectedChatMode = session.ChatMode;
         var sessions = await chats.ListSessionsAsync(selectedChatMode, cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -388,9 +386,12 @@ public sealed partial class AssistantCoordinator(
             sessions = sessions.Select(ToSessionDto),
             messages = messages.Select(message => ToMessageDto(
                 message,
-                artifactItems.TryGetValue(message.Id, out var messageArtifacts) ? messageArtifacts : null)),
-            subagents = ToSubagentDtos(SubagentChatState.ReadSummaries(messages)),
+                artifactItems.TryGetValue(message.Id, out var messageArtifacts) ? messageArtifacts : null,
+                page.ToolStepWindows?.GetValueOrDefault(message.Id))),
+            subagents = ToSubagentDtos(ReadActivitySummaries(auxiliary)),
+            auxiliaryMessages = auxiliary.Select(message => new { id = message.Id, toolSteps = message.ToolSteps }),
             historyPage = new { page.HasMore, page.Before, page.TotalMessages },
+            toolStepWindows = page.ToolStepWindows,
             conversationRevision = session.ConversationRevision,
             documents = documentItems.Select(ToDocumentDto),
             attachments = attachmentItems.Select(ToAttachmentDto),
@@ -516,18 +517,22 @@ public sealed partial class AssistantCoordinator(
         var page = await Task.Run(() => conversationSnapshots.GetPageAsync(sessionId, cancellationToken: cancellationToken), cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Die Chat-Sitzung wurde nicht gefunden.");
         var conversation = page.Conversation;
+        var auxiliary = await PrepareDisplayedPageAsync(page, cancellationToken).ConfigureAwait(false);
         return new
         {
             activeSessionId = sessionId,
-            subagents = ToSubagentDtos(SubagentChatState.ReadSummaries(conversation.Messages)),
+            subagents = ToSubagentDtos(ReadActivitySummaries(auxiliary)),
+            auxiliaryMessages = auxiliary.Select(message => new { id = message.Id, toolSteps = message.ToolSteps }),
             historyPage = new { page.HasMore, page.Before, page.TotalMessages },
+            toolStepWindows = page.ToolStepWindows,
             chatMode = ChatModeName(conversation.Session.ChatMode),
             conversationRevision = conversation.Session.ConversationRevision,
             codingToolStepsExpanded = CurrentSettings.CodingToolStepsExpanded,
             changesSummary = missumAi is null ? null : await missumAi.GetChangesSummaryAsync(sessionId, conversation.Messages, cancellationToken).ConfigureAwait(false),
             messages = conversation.Messages.Select(message => ToMessageDto(
                 message,
-                conversation.Artifacts.TryGetValue(message.Id, out var messageArtifacts) ? messageArtifacts : null)),
+                conversation.Artifacts.TryGetValue(message.Id, out var messageArtifacts) ? messageArtifacts : null,
+                page.ToolStepWindows?.GetValueOrDefault(message.Id))),
         };
     }
 
@@ -562,6 +567,7 @@ public sealed partial class AssistantCoordinator(
         CancellationToken cancellationToken = default)
     {
         if (await HandleDisplayReadAsync(envelope, emit, cancellationToken).ConfigureAwait(false)) return;
+        EnsureActivityCommandIsSupported(envelope);
         switch (envelope.Type)
         {
             case "app.ready":
@@ -1553,11 +1559,9 @@ public sealed partial class AssistantCoordinator(
         {
             // Repair a formerly overwritten continuation title from user text.
             // Assistant answers never supply a session name.
-            promptTitle = (await chats.ListMessagesAsync(sessionId, cancellationToken).ConfigureAwait(false))
-                .Where(message => message.Role == ChatRole.User)
-                .OrderBy(message => message.CreatedAt).ThenBy(message => message.Id)
-                .Select(message => session.ChatMode == ChatMode.ClaudeScience
-                    ? ScientificSessionTitle.FromPrompt(message.Content) : DerivePromptSessionTitle(message.Content)).FirstOrDefault(title => title is not null);
+            var firstPrompt = (await chats.GetFirstUserMessageAsync(sessionId, cancellationToken).ConfigureAwait(false))?.Content;
+            promptTitle = firstPrompt is null ? null : session.ChatMode == ChatMode.ClaudeScience
+                ? ScientificSessionTitle.FromPrompt(firstPrompt) : DerivePromptSessionTitle(firstPrompt);
         }
         if (promptTitle is { } derivedTitle
             && !string.Equals(session.Title, derivedTitle, StringComparison.Ordinal))
@@ -1783,12 +1787,19 @@ public sealed partial class AssistantCoordinator(
             : null;
     }
 
-    private async Task<bool> HasAudiobookContentAsync(Guid sessionId, CancellationToken cancellationToken) =>
-        (await chats.ListMessagesAsync(sessionId, cancellationToken).ConfigureAwait(false)).Any(static message =>
-            message.Role == ChatRole.Assistant
-            && message.ContentProfile == MessageContentProfile.Audiobook
-            && !string.IsNullOrWhiteSpace(message.Content)
-            && message.Status is MessageStatus.Completed or MessageStatus.Cancelled or MessageStatus.Interrupted);
+    private async Task<bool> HasAudiobookContentAsync(Guid sessionId, CancellationToken cancellationToken)
+    {
+        ConversationCursor? before = null;
+        while (true)
+        {
+            var page = await chats.ListContextMessagesAsync(sessionId, 256, before, cancellationToken).ConfigureAwait(false);
+            if (page.Any(static message => message.Role == ChatRole.Assistant
+                && message.ContentProfile == MessageContentProfile.Audiobook && !string.IsNullOrWhiteSpace(message.Content)
+                && message.Status is MessageStatus.Completed or MessageStatus.Cancelled or MessageStatus.Interrupted)) return true;
+            if (page.Count < 256) return false;
+            before = new(page[0].CreatedAt, page[0].Id);
+        }
+    }
 
     private static bool IsAudiobookContinuationRequest(string prompt, PromptTriggerMatch? match)
     {
@@ -1848,15 +1859,13 @@ public sealed partial class AssistantCoordinator(
         Func<string, object, string?, Task> emit,
         string requestId)
     {
+        // The UI can request an expanded step reentrantly from emit, before
+        // write-behind acknowledges this event. Publish its full source first.
+        ObserveLiveToolStep(update);
         if (update.Kind == MissumAiAssistantUpdateKind.SubagentChanged && update.Subagent is { } subagent)
         {
-            await emit("subagent.snapshot", ToSubagentDto(subagent), requestId).ConfigureAwait(false);
-            await emit("chat.delta", new
-            {
-                messageId = update.Message.Id, sessionId = update.Message.SessionId,
-                content = update.Message.Content, toolSteps = update.Message.ToolSteps ?? [],
-                updatedAt = update.Message.UpdatedAt,
-            }, requestId).ConfigureAwait(false);
+            await emit("subagent.snapshot", ToSubagentDto(subagent with { ParentMessageId = update.Message.Id }), requestId).ConfigureAwait(false);
+            await emit("chat.delta", ProjectStreamDelta(update), requestId).ConfigureAwait(false);
             return;
         }
         await ObserveDisplayStateAsync(update).ConfigureAwait(false);
@@ -1892,6 +1901,7 @@ public sealed partial class AssistantCoordinator(
         switch (update.Kind)
         {
             case MissumAiAssistantUpdateKind.Started:
+                ResetStreamProjection(update.Message);
                 var sessionMessages = (await conversationSnapshots.GetPageAsync(update.Message.SessionId,
                     cancellationToken: CancellationToken.None).ConfigureAwait(false))?.Conversation.Messages ?? [];
                 var currentSession = await chats.GetSessionAsync(
@@ -1913,6 +1923,7 @@ public sealed partial class AssistantCoordinator(
                 await emit("chat.started", new
                 {
                     sessionId = update.Message.SessionId,
+                    streamGeneration = StreamGeneration(update.Message.Id),
                     conversationRevision = currentSession?.ConversationRevision,
                     session = currentSession is null ? null : ToSessionDto(currentSession),
                     userMessage = precedingUserMessage is null
@@ -1940,17 +1951,10 @@ public sealed partial class AssistantCoordinator(
                 }, requestId).ConfigureAwait(false);
                 break;
             case MissumAiAssistantUpdateKind.Delta:
-                // The service already persisted this update. Both clients accept the
+                // The service owns persistence of this update. The UI accepts the
                 // live projection; rereading the entire conversation per fragment
                 // duplicates delivery and makes streaming cost grow with history.
-                await emit("chat.delta", new
-                {
-                    messageId = update.Message.Id,
-                    sessionId = update.Message.SessionId,
-                    content = update.Message.Content,
-                    toolSteps = update.Message.ToolSteps ?? [],
-                    updatedAt = update.Message.UpdatedAt,
-                }, requestId).ConfigureAwait(false);
+                await emit("chat.delta", ProjectStreamDelta(update), requestId).ConfigureAwait(false);
                 break;
             case MissumAiAssistantUpdateKind.Status:
                 await emit("status.changed", new
@@ -1968,7 +1972,10 @@ public sealed partial class AssistantCoordinator(
                     model = update.Model,
                     contextUsed = update.ContextUsed,
                     contextSource = update.ContextSource,
-                    toolStep = update.ToolStep,
+                    toolStep = LiveDisplayToolStep(update.ToolStep),
+                    toolStepOrdinal = StreamStepOrdinal(update), toolStepCount = update.Message.ToolSteps?.Count,
+                    revision = NextStreamRevision(update.Message.Id),
+                    streamGeneration = StreamGeneration(update.Message.Id),
                     runId = missumAi?.ActiveRunId,
                     contextLimit = update.ContextLimit,
                     contextWasTruncated = update.ContextUsed.HasValue ? update.ContextWasCompacted : (bool?)null,
@@ -2356,7 +2363,8 @@ public sealed partial class AssistantCoordinator(
         run.StartedAt,
     };
 
-    private static object ToMessageDto(ChatMessage message, IReadOnlyList<ChatArtifact>? messageArtifacts = null)
+    private static object ToMessageDto(ChatMessage message, IReadOnlyList<ChatArtifact>? messageArtifacts = null,
+        ConversationToolStepWindow? toolWindow = null)
     {
         return new
         {
@@ -2372,12 +2380,28 @@ public sealed partial class AssistantCoordinator(
             contentProfile = message.ContentProfile.ToString().ToLowerInvariant(),
             message.Revision,
             tool = message.ToolExecution,
-            toolSteps = message.ToolSteps ?? [],
-            artifacts = AssistantArtifactOriginalResolver.DisplayArtifacts(messageArtifacts ?? [], message.ToolSteps).Select(ToArtifactDto),
+            toolSteps = (message.ToolSteps ?? []).TakeLast(64).Select(DisplayToolStep),
+            toolStepWindow = toolWindow ?? new ConversationToolStepWindow(message.ToolSteps?.Count ?? 0,
+                message.ToolSteps?.Count > 64, message.ToolSteps?.Count > 64 ? message.ToolSteps.Count - 64 : null),
+            artifacts = AssistantArtifactOriginalResolver.DisplayArtifacts(messageArtifacts ?? [], message.ToolSteps)
+                .Select(artifact => ToArtifactDtoWithPosition(artifact,
+                    message.ToolSteps?.FirstOrDefault(step => step.Id == artifact.StepId)?.ContentOffset)),
         };
     }
 
-    private static object ToArtifactDto(ChatArtifact artifact) => new
+    private static AssistantToolStep DisplayToolStep(AssistantToolStep step) => step with
+    {
+        Detail = step.Tool is "assistant.narration" or "assistant.progress" ? step.Detail : null,
+        InputJson = null, PreviewHtml = null,
+        OutputJson = step.Tool is "assistant.continuation" or "subagent" or "subagent.completed"
+            && step.OutputJson?.Length <= 32768 ? step.OutputJson : null,
+        Explanation = step.Explanation is { Length: > 400 } explanation ? explanation[..400] : step.Explanation,
+        DetailsDeferred = step.Tool is not ("assistant.narration" or "assistant.progress"),
+    };
+
+    private static object ToArtifactDto(ChatArtifact artifact) => ToArtifactDtoWithPosition(artifact, null);
+
+    private static object ToArtifactDtoWithPosition(ChatArtifact artifact, int? offset) => new
     {
         id = artifact.Id,
         artifact.FileName,
@@ -2387,6 +2411,8 @@ public sealed partial class AssistantCoordinator(
         artifact.CreatedAt,
         artifact.Metadata,
         stepId = artifact.StepId,
+        contentOffset = offset ?? (int.TryParse(artifact.Metadata?.GetValueOrDefault("sourceContentOffset"),
+            System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var position) ? (int?)position : null),
     };
 
     private static object ToDocumentDto(StoredDocument document) => new
