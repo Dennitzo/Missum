@@ -101,6 +101,11 @@ public sealed class LongRunningScienceClientTests
                 part.Text?.Contains("Mathematikvorlesung", StringComparison.Ordinal) == true
                 && part.Text.Contains("statt Lean-Syntax", StringComparison.Ordinal)
                 && part.Text.Contains("geprüften Aussage und ihren Voraussetzungen", StringComparison.Ordinal)));
+            Assert.Contains(request.Messages, message => message.Content.Any(part =>
+                part.Text?.Contains("## Literatur und Daten", StringComparison.Ordinal) == true
+                && part.Text.Contains("### Forschungsdaten", StringComparison.Ordinal)
+                && part.Text.Contains("1, 1.1, 1.2, 2", StringComparison.Ordinal)
+                && part.Text.Contains("Websuche, Lean und Simulationen sind Möglichkeiten", StringComparison.Ordinal)));
         }
         if (continuing)
             Assert.Contains(request.Messages, message => message.Content.Any(part => part.Text?.Contains(original, StringComparison.Ordinal) == true));

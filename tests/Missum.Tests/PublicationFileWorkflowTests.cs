@@ -15,6 +15,44 @@ public sealed class PublicationFileWorkflowTests
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
 
     [Fact]
+    public async Task OldNumberingEditionIsRefreshedOnceWithoutEditingTheManuscript()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var source = Path.Combine(environment.Directory, "Publikation.md");
+        const string raw = "# Untersuchung\n\n## 1. Modell\n\nText.\n\n## 2. Literatur und Daten\n\n### 2.1 Fachliteratur\n\nQuelle.";
+        await File.WriteAllTextAsync(source, raw);
+        var pdf = (await PdfAsync(source, CancellationToken.None))!;
+        static string Hash(string text) => Convert.ToHexStringLower(
+            System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(text)));
+        await File.WriteAllTextAsync(Path.Combine(environment.Directory, "publication.json"),
+            System.Text.Json.JsonSerializer.Serialize(new
+            {
+                fingerprint = Hash("scientific-publication-v11-mathematical-proof-exposition-linked-table-of-contents\n" + raw + "\n"),
+                markdownSha256 = Hash(raw),
+                pdfSha256 = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(await File.ReadAllBytesAsync(pdf))),
+            }));
+        var renderCount = 0;
+        async Task<string?> Render(string path, CancellationToken token)
+        {
+            renderCount++;
+            return await PdfAsync(path, token);
+        }
+        using (var service = Service(environment, Render))
+        {
+            service.RegisterWorkspace("edition-update", environment.Directory);
+            Assert.NotNull(await service.EnsureCurrentAsync("edition-update"));
+        }
+        Assert.Equal(1, renderCount);
+        using (var reopened = Service(environment, Render))
+        {
+            reopened.RegisterWorkspace("edition-update", environment.Directory);
+            Assert.NotNull(await reopened.EnsureCurrentAsync("edition-update"));
+        }
+        Assert.Equal(1, renderCount);
+        Assert.Equal(raw, await File.ReadAllTextAsync(source));
+    }
+
+    [Fact]
     public async Task UnchangedPublicationDoesNotReopenImagePayloadsAndImageEditInvalidatesCache()
     {
         await using var environment = await TestEnvironment.CreateAsync();
@@ -113,7 +151,8 @@ public sealed class PublicationFileWorkflowTests
         using var service = Service(environment);
         var source = await service.EnsureWorkspaceDocumentAsync("research-new-file", environment.Directory, "Offene Frage");
         Assert.Equal(Path.Combine(environment.Directory, "Publikation.md"), source);
-        Assert.Equal("# Offene Frage\n\n", await File.ReadAllTextAsync(source));
+        Assert.Equal("# Offene Frage\n\n## Literatur und Daten\n\n### Fachliteratur\n\n### Forschungsdaten\n\n",
+            await File.ReadAllTextAsync(source));
         Assert.Null(await environment.Get<IScientificResearchRepository>().GetProjectAsync("research-new-file"));
 
         await File.WriteAllTextAsync(source, "# Offene Frage\n\n## Ansatz\n\nDie Annahme wird untersucht.");

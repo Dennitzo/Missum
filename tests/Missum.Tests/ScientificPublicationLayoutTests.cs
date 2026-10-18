@@ -253,11 +253,12 @@ public sealed class ScientificPublicationLayoutTests
             Assert.Contains(destinations, action => action.Destination.PageNumber > contentsPage.Number);
             Assert.True(pdf.TryGetBookmarks(out var bookmarks));
             var chapters = bookmarks.GetNodes().OfType<DocumentBookmarkNode>().ToArray();
-            var first = Assert.Single(chapters, bookmark => bookmark.Title == "1.1 Modell");
-            var second = Assert.Single(chapters, bookmark => bookmark.Title == "1.2 Modell");
+            var first = Assert.Single(chapters, bookmark => bookmark.Title == "1 Modell");
+            var second = Assert.Single(chapters, bookmark => bookmark.Title == "2 Modell");
             Assert.True(second.PageNumber > first.PageNumber, "Repeated titles still navigate to their distinct chapters.");
-            Assert.Contains(chapters, bookmark => bookmark.Title == "1.1.1 Prüfung");
-            Assert.Contains(chapters, bookmark => bookmark.Title == "1.2.1 Prüfung");
+            Assert.Contains(chapters, bookmark => bookmark.Title == "1.1 Prüfung");
+            Assert.Contains(chapters, bookmark => bookmark.Title == "2.1 Prüfung");
+            Assert.Contains(chapters, bookmark => bookmark.Title == "4 Quellen");
             Assert.Contains(destinations, action => action.Destination.PageNumber == second.PageNumber);
         }
         finally { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
@@ -287,12 +288,120 @@ public sealed class ScientificPublicationLayoutTests
             using var pdf = PdfDocument.Open(pdfPath);
             var text = string.Join(' ', pdf.GetPages().SelectMany(page => page.GetWords()).Select(word => word.Text));
             Assert.Contains("3 Dimensionen", text);
-            Assert.Contains("1.2.1 Geometrie", text);
-            Assert.Contains("1.2.1.1 Abgrenzung", text);
-            Assert.Contains("Kap. 1.2.1", text);
-            Assert.Contains("Abschn. 1.2.1", text);
+            Assert.Contains("2.1 Geometrie", text);
+            Assert.Contains("2.1.1 Abgrenzung", text);
+            Assert.Contains("Kap. 2.1", text);
+            Assert.Contains("Abschn. 2.1", text);
             Assert.DoesNotContain("2a.1", text);
             Assert.DoesNotContain("1.2.1 2a", text);
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    [Trait("Category", "Live")]
+    public async Task DirectManuscriptNumbersTopicsAndBibliographyHierarchyWithoutChangingNumericSubjects()
+    {
+        if (Environment.GetEnvironmentVariable("MISSUM_PUBLICATION_LAYOUT_LIVE") != "1") return;
+        var root = Path.Combine(Path.GetTempPath(), "missum-publication-bibliography", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var source = Path.Combine(root, "Publikation.md");
+            const string manuscript = """
+                # 3 Dimensionen
+
+                ## Zusammenfassung
+                Eine kurze Übersicht.
+
+                ## **1.** Grundlagen
+                Siehe Abschnitt 12.2 für den Datensatz. Die Energie beträgt 1.5 eV.
+
+                ### 1.1 Ansatz
+                Die Voraussetzungen bleiben ausdrücklich festgehalten.
+
+                $$x=1.$$
+
+                ![Erster Plot](FIGUREPATH)
+
+                #### 1.1.1 Geltung
+                Der Beweis gilt im angegebenen Bereich.
+
+                ##### 1.1.1.1 Voraussetzung
+                Eine weitere Voraussetzung.
+
+                ###### 1.1.1.1.1 Folgerung
+                Eine ausdrücklich begrenzte Folgerung.
+
+                ### 1.5 eV
+                Auch unter dem alten Kapitel 1 bleibt dieser Zahlenwert erhalten.
+
+                ## 1. Wiederholte Nummer
+                Doppelte alte Nummern bleiben als Verweise unverändert: Abschnitt 1.
+
+                $$y=2.$$
+
+                ![Zweiter Plot](FIGUREPATH)
+
+                #### Direkter Unterpunkt
+                Ein übersprungener Markdown-Level erzeugt keine Phantomkapitel.
+
+                ### 1.1 Wiederverwendete Unterkapitelnummer
+                Eine falsche alte Elternnummer ändert die Gliederung nicht.
+
+                ## 3 Dimensionen
+                Die Zahl gehört zum Titel.
+
+                $$z=3.\tag{A}$$
+
+                ### 1.5 eV
+                Dieser Zahlenwert ist keine Abschnittsnummer.
+
+                ## 12. Literatur und Daten
+                ### 12.1 Fachliteratur
+                - **[Bohm1952a]** D. Bohm, *Hidden Variables I*. [DOI](https://doi.org/10.1103/PhysRev.85.166).
+
+                ### 12.2 Forschungsdaten
+                - **[HensenData2015]** B. Hensen et al. Offene Ereignisdaten. [Datensatz](https://doi.org/10.4121/uuid:6e19e9b2-4a2d-40b5-8dd3-a660bf3c0a31).
+                """;
+            var image = Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
+            var imageName = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(image)).ToLowerInvariant() + ".png";
+            Directory.CreateDirectory(Path.Combine(root, "figures"));
+            await File.WriteAllBytesAsync(Path.Combine(root, "figures", imageName), image);
+            var authored = manuscript.Replace("FIGUREPATH", "figures/" + imageName, StringComparison.Ordinal);
+            await File.WriteAllTextAsync(source, authored);
+            using var exporter = new DocumentPdfExporter(NullLogger<DocumentPdfExporter>.Instance);
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+            var path = await exporter.EnsureCurrentAsync(source, sourceChanged: true, scientificPublication: true, cancellationToken: timeout.Token);
+            Assert.NotNull(path);
+            using var pdf = PdfDocument.Open(path);
+            Assert.True(pdf.TryGetBookmarks(out var bookmarks));
+            var chapters = bookmarks.GetNodes().OfType<DocumentBookmarkNode>().ToArray();
+            string[] expected = ["1 Grundlagen", "1.1 Ansatz", "1.1.1 Geltung", "1.1.1.1 Voraussetzung", "1.1.1.1.1 Folgerung", "1.2 1.5 eV", "2 Wiederholte Nummer",
+                "2.1 Direkter Unterpunkt", "2.2 Wiederverwendete Unterkapitelnummer", "3 3 Dimensionen", "3.1 1.5 eV", "4 Literatur und Daten",
+                "4.1 Fachliteratur", "4.2 Forschungsdaten"];
+            foreach (var caption in expected) Assert.Single(chapters, bookmark => bookmark.Title == caption);
+            Assert.DoesNotContain(chapters, bookmark => bookmark.Title.StartsWith("1 3 Dimensionen", StringComparison.Ordinal));
+            var contents = pdf.GetPages().Single(page => page.GetWords().Any(word => word.Text == "Inhaltsverzeichnis"));
+            var links = contents.GetAnnotations().Select(annotation => annotation.Action).OfType<GoToAction>().ToArray();
+            Assert.Equal(expected.Length + 1, links.Length); // Unnumbered abstract remains navigable.
+            foreach (var chapter in chapters.Where(bookmark => expected.Contains(bookmark.Title)))
+                Assert.Contains(links, link => link.Destination.PageNumber == chapter.PageNumber);
+            var text = string.Join(' ', pdf.GetPages().SelectMany(page => page.GetWords()).Select(word => word.Text));
+            Assert.Contains("Abschnitt 4.2", text);
+            Assert.Contains("Abschnitt 1.", text); // Ambiguous old numbering must not silently redirect.
+            Assert.Contains("[Bohm1952a]", text);
+            Assert.Contains("[HensenData2015]", text);
+            Assert.Contains("(1.1)", text);
+            Assert.Contains("(2.1)", text);
+            Assert.Contains("(A)", text);
+            Assert.Contains("Abbildung 1.1", text);
+            Assert.Contains("Abbildung 2.1", text);
+            var externalLinks = pdf.GetPages().SelectMany(page => page.GetAnnotations()).Select(annotation => annotation.Action)
+                .OfType<UriAction>().Select(action => action.Uri).ToArray();
+            Assert.Contains("https://doi.org/10.1103/PhysRev.85.166", externalLinks);
+            Assert.Contains("https://doi.org/10.4121/uuid:6e19e9b2-4a2d-40b5-8dd3-a660bf3c0a31", externalLinks);
+            Assert.Equal(authored, await File.ReadAllTextAsync(source));
         }
         finally { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
     }

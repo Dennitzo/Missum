@@ -240,7 +240,8 @@ public sealed partial class ScientificPublicationService : IDisposable, IScienti
             markdown = snapshot.WorkingState is { } state && HasCanonicalSections(state)
                 ? FormatCanonicalPublication(state, snapshot.Works, snapshot.Results, snapshot.TrustedChecks)
                 : FormatPublication(project, snapshot.Results, snapshot.Works, snapshot.Evidence, snapshot.Report, snapshot.Manuscript);
-        else markdown = "# " + OneLine(string.IsNullOrWhiteSpace(workspace.Title) ? "Publikation" : workspace.Title) + "\n\n";
+        else markdown = "# " + OneLine(string.IsNullOrWhiteSpace(workspace.Title) ? "Publikation" : workspace.Title)
+            + "\n\n## Literatur und Daten\n\n### Fachliteratur\n\n### Forschungsdaten\n\n";
         source = Path.Combine(workspace.Directory, "Publikation.md");
         var pendingSource = Path.Combine(workspace.Directory, ".publication-source-" + Guid.NewGuid().ToString("N") + ".tmp");
         try
@@ -466,7 +467,7 @@ public sealed partial class ScientificPublicationService : IDisposable, IScienti
         text.Append(verified).Append(" von ").Append(results.Verifications.Count).AppendLine(" gespeicherten Prüfungen sind als erfolgreich bestätigt. Numerische Simulationen können die angegebenen Gleichungen anhand ihrer Berechnungsdaten prüfen; dies bestätigt nicht automatisch physikalische Modellannahmen.").AppendLine();
         if (works.Count == 0) text.AppendLine("Für diesen Stand sind noch keine Originalquellen gespeichert.").AppendLine();
 
-        text.AppendLine("## Literatur und Quellen").AppendLine();
+        text.AppendLine("## Literatur und Daten").AppendLine().AppendLine("### Fachliteratur").AppendLine();
         for (var index = 0; index < works.Count; index++)
         {
             var work = works[index];
@@ -672,7 +673,7 @@ public sealed partial class ScientificPublicationService : IDisposable, IScienti
     private static string Fingerprint(string text) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
     // Renderer-only changes refresh the current edition without changing
     // the scientific manuscript, object revisions or publication revision.
-    private static string PublicationFingerprint(string text) => Fingerprint("scientific-publication-v11-mathematical-proof-exposition-linked-table-of-contents\n" + text);
+    private static string PublicationFingerprint(string text) => Fingerprint("scientific-publication-v12-hierarchical-topics-literature-data\n" + text);
 
     private static async Task<string> PublicationFileHashAsync(string path, CancellationToken token)
     {

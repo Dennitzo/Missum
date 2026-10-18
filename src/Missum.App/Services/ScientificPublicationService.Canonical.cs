@@ -53,7 +53,7 @@ public sealed partial class ScientificPublicationService
         }
         if (works.Count > 0)
         {
-            text.AppendLine("## Literatur und Quellen").AppendLine();
+            text.AppendLine("## Literatur und Daten").AppendLine().AppendLine("### Fachliteratur").AppendLine();
             foreach (var work in works)
             {
                 text.Append("- **").Append(EscapeLabel(work.Title)).Append("**. ");

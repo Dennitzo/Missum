@@ -14,6 +14,10 @@ public sealed partial class MissumAiAssistantService
         var relative = Path.GetRelativePath(session.CodingWorkspacePath, path).Replace('\\', '/');
         return prompt + "\n\nPublikation dieses Projekts: " + relative
             + ". Diese direkt bearbeitbare Markdown-Datei ist der aktuelle Projektstand; Missum setzt daraus automatisch die PDF im vorhandenen Layout mit Inhaltsverzeichnis. "
+            + "Gliedere Hauptthemen mit ##, Unterthemen mit ### und weitere Ebenen entsprechend; Missum nummeriert Überschriften und Inhaltsverzeichnis gemeinsam als 1, 1.1, 1.2, 2 usw. "
+            + "Der Dokumenttitel mit # bleibt unnummeriert; eigene Nummern oder ein manuelles Inhaltsverzeichnis sind nicht nötig. "
+            + "Führe verwendete Literatur und Datengrundlagen am Ende unter ## Literatur und Daten, gegliedert in ### Fachliteratur und ### Forschungsdaten. "
+            + "Erhalte eindeutige Zitierschlüssel und verlinke die tatsächlich verwendeten Quellen, Datensätze oder Projektdateien mit knappen bibliografischen Angaben; erfinde keine Einträge. "
             + "Abschnitte können mit den normalen Projektwerkzeugen ergänzt, geändert oder gelöscht werden. "
             + "Plots können beim jeweiligen Thema als Markdown-Abbildung mit relativen Dateipfaden und Erläuterung eingebettet werden. "
             + "Veraltete Projektplots und Skripte dürfen passend zum Auftrag mit den normalen Projektwerkzeugen bearbeitet oder entfernt werden. "

@@ -260,6 +260,14 @@ if ($ScientificPublication) {
       color: #008fbd !important;
       overflow-wrap: anywhere; hyphens: auto; break-after: avoid-page;
     }
+    .scientific-publication .message-content h4,
+    .scientific-publication .message-content h5,
+    .scientific-publication .message-content h6 {
+      margin: 3mm 0 1.8mm;
+      font: 700 9pt/1.25 Arial, sans-serif !important;
+      color: #111 !important;
+      overflow-wrap: anywhere; hyphens: auto; break-after: avoid-page;
+    }
     .scientific-publication .message-content p { margin-bottom: 2mm; orphans: 3; widows: 3; text-align: justify; }
     .scientific-publication .message-content li { margin-bottom: 1mm; }
     .scientific-publication .message-content a { color: #008fbd !important; overflow-wrap: anywhere; }
@@ -300,6 +308,8 @@ if ($ScientificPublication) {
     .scientific-publication .publication-toc li { margin: 0 0 1.6mm !important; padding-left: calc(var(--toc-depth) * 3.5mm); break-inside: avoid; }
     .scientific-publication .publication-toc a { display: block; color: #006f94 !important; text-decoration: none !important; line-height: 1.35; overflow-wrap: anywhere; }
     .scientific-publication .publication-toc .publication-toc-chapter { font-weight: 700; }
+    .scientific-publication .publication-reference-entry { text-align: left; overflow-wrap: anywhere; break-inside: avoid; }
+    .scientific-publication .publication-reference-entry p { text-align: left; }
 '@
 }
 
@@ -409,46 +419,64 @@ $html = @"
     if (document.body.classList.contains('scientific-publication')) {
       const title = documentContent.querySelector(':scope > h1');
       const headingText = title ? title.textContent.trim() : 'Wissenschaftliche Untersuchung';
-      const chapter = '1';
       const chapterText = headingText;
       const knownNumberedTitles = new Set(JSON.parse(decodeUtf8('$outlineBase64')));
-      if (title) title.prepend(document.createTextNode(chapter + '  '));
       const runningHeader = document.createElement('style');
-      runningHeader.textContent = '@page { @top-center { content: ' + JSON.stringify(chapter + '  ' + chapterText) +
+      runningHeader.textContent = '@page { @top-center { content: ' + JSON.stringify(chapterText) +
         '; white-space: nowrap; } @left-middle { content: ' + JSON.stringify(chapterText) +
         '; writing-mode: vertical-rl; background: #008fbd; color: white; width: 14mm; height: 110mm; margin-right: 10mm; padding-top: 3mm; padding-bottom: 3mm; text-align: center; vertical-align: middle; font: 700 9pt Arial, sans-serif; } }';
       document.head.append(runningHeader);
       if (title && title.nextElementSibling && title.nextElementSibling.tagName === 'P') {
         title.nextElementSibling.classList.add('publication-metadata');
       }
-      let sectionNumber = 0;
-      let numberedSection = false;
-      const subordinateNumbers = [0, 0, 0, 0];
+      let numberedSection = true;
+      let referencesSection = false;
+      const headingStack = [];
+      const headingCounters = [];
       const headingNumbers = new Map();
       const ambiguousHeadingNumbers = new Set();
-      let sourceSectionNumber = null;
       for (const heading of documentContent.querySelectorAll('h2, h3, h4, h5, h6')) {
         heading.dataset.missumOriginalHeading = heading.textContent.trim();
         const level = Number(heading.tagName.slice(1));
-        const originalNumber = heading.dataset.missumOriginalHeading.match(/^\s*(\d+[a-z]?(?:\.\d+[a-z]?)*)(?:[.)])?\s+/)?.[1];
-        const removableNumber = level === 2 ? knownNumberedTitles.has(heading.dataset.missumOriginalHeading)
-          : sourceSectionNumber && originalNumber?.startsWith(sourceSectionNumber + '.');
-        const firstText = document.createTreeWalker(heading, NodeFilter.SHOW_TEXT).nextNode();
-        if (firstText && removableNumber) firstText.textContent = firstText.textContent.replace(/^\s*\d+[a-z]?(?:\.\d+[a-z]?)*[.)]?\s+/, '');
+        while (headingStack.length && headingStack[headingStack.length - 1].level >= level) headingStack.pop();
+        const prefix = heading.dataset.missumOriginalHeading.match(/^\s*(\d+[a-z]?(?:\.\d+[a-z]?)*)([.)])?\s+/);
+        const originalNumber = prefix?.[1];
+        const numericSubject = prefix && !prefix[2] && /^(?:(?:[kMGTmunpμµ]?eV|[kMGTmunpμµ]?Hz|[kMGTmunpμµ]?W|[kMGTmunpμµ]?V|[kMGTmunpμµ]?A|[kMGTmunpμµ]?J|[kMGTmunpμµ]?s|[kMGTmunpμµ]?m|K|Pa|kg)\b|[%°])/u.test(heading.dataset.missumOriginalHeading.slice(prefix[0].length));
+        // A full stop/parenthesis is explicit numbering. Bare numeric titles
+        // remain meaningful text ("3 Dimensionen", "1.5 eV") unless legacy
+        // metadata or a subordinate multi-part label identifies numbering.
+        // Stale/repeated parent prefixes must not survive as duplicate numbers.
+        const removableNumber = prefix && (knownNumberedTitles.has(heading.dataset.missumOriginalHeading)
+          || Boolean(prefix[2]) || (!numericSubject && level > 2 && originalNumber.includes('.')));
+        if (removableNumber) {
+          let remaining = prefix[0].length;
+          const textNodes = document.createTreeWalker(heading, NodeFilter.SHOW_TEXT);
+          let textNode;
+          while (remaining && (textNode = textNodes.nextNode())) {
+            const count = Math.min(remaining, textNode.textContent.length);
+            textNode.textContent = textNode.textContent.slice(count);
+            remaining -= count;
+          }
+        }
         if (level === 2) {
-          sourceSectionNumber = removableNumber ? originalNumber : null;
-          numberedSection = !/^(Zusammenfassung|Abstract|Literatur|Quellen|Erg.nzende Originalquellen)/i.test(heading.textContent.trim());
-          subordinateNumbers.fill(0);
-          if (numberedSection) sectionNumber += 1;
+          numberedSection = !/^(Zusammenfassung|Abstract|Inhaltsverzeichnis)$/i.test(heading.textContent.trim());
+          referencesSection = /^(Literatur(?: und Daten)?|Quellen|Erg.nzende Originalquellen|References|Bibliography)(?:$|\s*[:–—-])/i.test(heading.textContent.trim());
+        }
+        if (referencesSection) {
+          heading.classList.add('publication-references-heading');
+          for (let element = heading.nextElementSibling; element && !/^H[1-6]$/.test(element.tagName); element = element.nextElementSibling) {
+            element.querySelectorAll('li').forEach(entry => entry.classList.add('publication-reference-entry'));
+          }
         }
         if (!numberedSection) continue;
-        if (level > 2) {
-          for (let index = 0; index < level - 3; index++) if (subordinateNumbers[index] === 0) subordinateNumbers[index] = 1;
-          subordinateNumbers[level - 3] += 1;
-          subordinateNumbers.fill(0, level - 2);
-        }
+        const depth = headingStack.length;
+        headingCounters[depth] = (headingCounters[depth] || 0) + 1;
+        headingCounters.length = depth + 1;
+        headingStack.push({ level });
+        heading.dataset.missumOutlineDepth = String(depth);
+        heading.dataset.missumMainTopic = String(headingCounters[0]);
         const number = document.createElement('span');
-        const newNumber = chapter + '.' + sectionNumber + (level > 2 ? '.' + subordinateNumbers.slice(0, level - 2).join('.') : '');
+        const newNumber = headingCounters.join('.');
         number.textContent = newNumber + '  ';
         const oldNumber = removableNumber ? originalNumber : null;
         if (oldNumber) {
@@ -468,18 +496,33 @@ $html = @"
           (match, prefix, oldNumber) => headingNumbers.has(oldNumber) && !ambiguousHeadingNumbers.has(oldNumber)
             ? prefix + headingNumbers.get(oldNumber) : match);
       }
-      let equationNumber = 0;
+      const numberedHeadings = Array.from(documentContent.querySelectorAll('[data-missum-main-topic]'));
+      const mainTopicFor = element => {
+        let topic = '';
+        for (const heading of numberedHeadings) {
+          if (!(heading.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING)) break;
+          topic = heading.dataset.missumMainTopic;
+        }
+        return topic;
+      };
+      const nextTopicNumber = (counters, element) => {
+        const topic = mainTopicFor(element);
+        const value = (counters.get(topic) || 0) + 1;
+        counters.set(topic, value);
+        return topic ? topic + '.' + value : String(value);
+      };
+      const equationNumbers = new Map();
       for (const formula of documentContent.querySelectorAll('.math-selectable.display')) {
-        equationNumber += 1;
+        const equationNumber = nextTopicNumber(equationNumbers, formula);
         const existingTag = formula.querySelector('.tag');
         const number = document.createElement('span');
         number.className = 'equation-number';
-        number.textContent = existingTag ? existingTag.textContent.trim() : '(' + chapter + '.' + equationNumber + ')';
+        number.textContent = existingTag ? existingTag.textContent.trim() : '(' + equationNumber + ')';
         if (existingTag) existingTag.remove();
         formula.append(number);
       }
       const localFigures = JSON.parse(decodeUtf8('$figureBase64'));
-      let figureNumber = 0;
+      const figureNumbers = new Map();
       for (const entry of localFigures) {
         const placeholder = Array.from(documentContent.querySelectorAll('p')).find(item => item.textContent.trim() === entry.token);
         if (!placeholder) continue;
@@ -491,7 +534,7 @@ $html = @"
         image.loading = 'eager';
         const caption = document.createElement('figcaption');
         const label = document.createElement('strong');
-        label.textContent = 'Abbildung ' + chapter + '.' + (++figureNumber) + '  ';
+        label.textContent = 'Abbildung ' + nextTopicNumber(figureNumbers, placeholder) + '  ';
         caption.append(label, document.createTextNode(entry.label));
         figure.append(image, caption);
         placeholder.replaceWith(figure);
@@ -524,7 +567,7 @@ $html = @"
         outlineHeadings.forEach((heading, index) => {
           heading.id = 'missum-publication-section-' + (index + 1);
           const entry = document.createElement('li');
-          entry.style.setProperty('--toc-depth', String(Number(heading.tagName.slice(1)) - 2));
+          entry.style.setProperty('--toc-depth', heading.dataset.missumOutlineDepth || String(Number(heading.tagName.slice(1)) - 2));
           const destination = document.createElement('a');
           destination.href = '#' + heading.id;
           // Keep the displayed KaTeX label rather than mixing its visible text,

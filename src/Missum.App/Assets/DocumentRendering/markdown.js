@@ -969,7 +969,7 @@
         continue;
       }
 
-      const headingMatch = line.match(/^(#{1,4})\s+(.+)$/);
+      const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
       if (headingMatch) {
         appendParagraph(root, paragraph);
         const heading = document.createElement(`h${headingMatch[1].length}`);

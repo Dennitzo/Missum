@@ -57,6 +57,14 @@ function descendants(node, predicate) {
   return [node, ...node.childNodes.flatMap(child => descendants(child, () => true))].filter(predicate);
 }
 
+test("publication headings retain all six structural levels and inline formatting", () => {
+  const { root } = pipeline("# Titel\n\n## Thema\n\n### Unterthema\n\n#### Methode\n\n##### **Voraussetzung**\n\n###### Ergebnis");
+  const headings = descendants(root, node => /^h[1-6]$/.test(node.tagName));
+  assert.deepEqual(headings.map(node => node.tagName), ["h1", "h2", "h3", "h4", "h5", "h6"]);
+  assert.deepEqual(headings.map(node => node.textContent), ["Titel", "Thema", "Unterthema", "Methode", "Voraussetzung", "Ergebnis"]);
+  assert.equal(descendants(headings[4], node => node.tagName === "strong").length, 1);
+});
+
 test("the boxed metric relation typesets and keeps its exact original copy source", async () => {
   const source = String.raw`$$\boxed{\text{Metrik (Krümmung)} \quad \longleftrightarrow \quad \text{Energie-Impuls-Dichte}}$$`;
   const { root, copied, mathCalls } = pipeline(source, true);

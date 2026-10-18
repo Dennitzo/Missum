@@ -51,9 +51,10 @@ public sealed class NativeActionLifecycleTests
     }
 
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task PdfRendererCancellationAndTimeoutWaitForActualProcessTermination(bool cancelCaller)
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    public async Task PdfRendererCancellationAndTimeoutWaitForActualProcessTermination(bool cancelCaller, bool scientificPublication)
     {
         var start = new ProcessStartInfo("powershell.exe") { UseShellExecute = false, CreateNoWindow = true };
         foreach (var argument in new[] { "-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 60" })
@@ -64,7 +65,8 @@ public sealed class NativeActionLifecycleTests
         {
             using var cancellation = new CancellationTokenSource();
             var wait = DocumentPdfExporter.WaitForExportExitAsync(process,
-                cancelCaller ? TimeSpan.FromMinutes(1) : TimeSpan.FromMilliseconds(50), cancellation.Token);
+                cancelCaller ? DocumentPdfExporter.MaximumExportDuration(scientificPublication, false, 0)
+                    : TimeSpan.FromMilliseconds(50), cancellation.Token);
             if (cancelCaller)
             {
                 cancellation.Cancel();
@@ -72,6 +74,34 @@ public sealed class NativeActionLifecycleTests
             }
             else await Assert.ThrowsAsync<TimeoutException>(() => wait);
             Assert.True(process.HasExited);
+        }
+        finally
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData(512)]
+    [InlineData(2 * 1024 * 1024)]
+    public async Task ScientificPublicationWaitsForNaturalRendererExitWithoutADeadline(long sourceLength)
+    {
+        var duration = DocumentPdfExporter.MaximumExportDuration(scientificPublication: true, chatTranscript: false, sourceLength);
+        Assert.Equal(Timeout.InfiniteTimeSpan, duration);
+        var start = new ProcessStartInfo("powershell.exe") { UseShellExecute = false, CreateNoWindow = true };
+        foreach (var argument in new[] { "-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Milliseconds 500; exit 23" })
+            start.ArgumentList.Add(argument);
+        using var process = new Process { StartInfo = start };
+        Assert.True(process.Start());
+        try
+        {
+            await DocumentPdfExporter.WaitForExportExitAsync(process, duration).WaitAsync(TimeSpan.FromSeconds(15));
+            Assert.True(process.HasExited);
+            Assert.Equal(23, process.ExitCode);
         }
         finally
         {

@@ -101,10 +101,9 @@ public sealed partial class DocumentPdfExporter(ILogger<DocumentPdfExporter> log
             var standardError = process.StandardError.ReadToEndAsync(CancellationToken.None);
             try
             {
-                // A complete historic chat can contain megabytes of tool output
-                // and thousands of printed pages. Cancellation still stops its tree.
-                var maximumDuration = chatTranscript && new FileInfo(source).Length > 1024 * 1024
-                    ? TimeSpan.FromMinutes(10) : TimeSpan.FromMinutes(3);
+                // Scientific manuscripts may require arbitrarily long typesetting.
+                // They stop only on completion or explicit caller cancellation.
+                var maximumDuration = MaximumExportDuration(scientificPublication, chatTranscript, new FileInfo(source).Length);
                 await WaitForExportExitAsync(process, maximumDuration, cancellationToken).ConfigureAwait(false);
             }
             catch
@@ -159,11 +158,15 @@ public sealed partial class DocumentPdfExporter(ILogger<DocumentPdfExporter> log
         return detail.Length == 0 ? null : detail.ToString();
     }
 
+    internal static TimeSpan MaximumExportDuration(bool scientificPublication, bool chatTranscript, long sourceLength) =>
+        scientificPublication ? Timeout.InfiniteTimeSpan
+            : chatTranscript && sourceLength > 1024 * 1024 ? TimeSpan.FromMinutes(10) : TimeSpan.FromMinutes(3);
+
     internal static async Task WaitForExportExitAsync(Process process, TimeSpan maximumDuration,
         CancellationToken cancellationToken = default)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(maximumDuration);
+        if (maximumDuration != Timeout.InfiniteTimeSpan) timeout.CancelAfter(maximumDuration);
         try
         {
             await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
