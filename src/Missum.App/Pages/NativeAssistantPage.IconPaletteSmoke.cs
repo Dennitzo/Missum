@@ -237,9 +237,8 @@ public sealed partial class NativeAssistantPage
             fixture["subagents"] = JsonSerializer.SerializeToElement(Array.Empty<object>());
             ApplyEvent("state.snapshot", JsonSerializer.SerializeToElement(fixture));
             RenderMessagesNow();
-            if (SubagentsSection.Visibility != Visibility.Visible || SubagentsPanel.Children.Count != 1
-                || _subagentSummaryButton is not { IsEnabled: true } || _subagentSummaryLabel?.Text != "Noch keine Subagenten")
-                throw new InvalidOperationException("Der Subagentenbereich muss auch ohne Subagenten bedienbar sichtbar bleiben.");
+            if (SubagentsSection.Visibility != Visibility.Collapsed || SubagentsPanel.Children.Count != 0)
+                throw new InvalidOperationException("Der Subagentenbereich muss ohne Aufträge vollständig ausgeblendet sein.");
             OpenSubagentOverview();
             UpdateLayout();
             await WaitForNativePreviewFrameAsync();
@@ -256,7 +255,7 @@ public sealed partial class NativeAssistantPage
             await File.WriteAllTextAsync(System.IO.Path.Combine(App.Current.DataDirectory, "native-icon-palette-validation.json"),
                 JsonSerializer.Serialize(new { passed = true, renderer = "WinUI3", variants = results,
                     collapsedHeaderComplete = true, titleStableAcrossDisclosure = true, tabsBorderless = true,
-                    sourcesMatchWebSearch = true, changesUseMutedColor = true, overlayCloseRemoved = true, emptySubagentsVisible = true,
+                    sourcesMatchWebSearch = true, changesUseMutedColor = true, overlayCloseRemoved = true, emptySubagentsHidden = true,
                     composerToolsMatchSpeech = true, tabIconsUniform = true,
                     settingsPersisted = false, modelRequests = 0, clipboardAccess = false, pointerInput = false }, JsonOptions), _lifetime.Token);
             return variants.Length;

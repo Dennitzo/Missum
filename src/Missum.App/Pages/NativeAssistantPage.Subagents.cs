@@ -418,57 +418,51 @@ public sealed partial class NativeAssistantPage
         var signature = SubagentListSignature(children);
         if (_subagentOverlaySignature == signature) return;
         _subagentOverlaySignature = signature;
-        SubagentsSection.Visibility = Visibility.Visible;
-        EnsureSubagentSummary();
-        _subagentSummaryButton!.IsEnabled = _session != Guid.Empty;
+        SubagentsSection.Visibility = children.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
         if (children.Length == 0)
         {
-            _subagentSummaryIcons!.Children.Clear(); _subagentSummaryAvatars.Clear();
-            _subagentSummaryLabel!.Text = "Noch keine Subagenten";
-            _subagentSummaryLabel.Foreground = ThemeBrush("MissumMutedTextBrush", 160);
-            _subagentSummaryFinished!.Text = "";
-            _subagentSummaryFinished.Visibility = Visibility.Collapsed;
-            AutomationProperties.SetName(_subagentSummaryButton, "Noch keine Subagenten · Übersicht öffnen");
-            ToolTipService.SetToolTip(_subagentSummaryButton, "Subagentenübersicht öffnen");
+            SubagentsPanel.Children.Clear();
+            _subagentSummaryIcons?.Children.Clear(); _subagentSummaryAvatars.Clear();
+            if (_activeSubagentOverviewSession == _session) RenderSubagentOverviewContent();
+            return;
         }
-        else
+        EnsureSubagentSummary();
+        _subagentSummaryButton!.IsEnabled = _session != Guid.Empty;
+        var working = children.Where(child => child.IsRunning).ToArray();
+        var active = working.Length;
+        var inactive = children.Length - active;
+        var caption = active > 0 ? active + (active == 1 ? " arbeitet" : " arbeiten") : inactive + " fertig";
+        var finished = active > 0 && inactive > 0 ? inactive + " fertig" : "";
+        if (_subagentSummaryLabel!.Text != caption) _subagentSummaryLabel.Text = caption;
+        _subagentSummaryLabel.Foreground = active > 0 ? ThemeBrush("MissumTextBrush", 230)
+            : ThemeBrush("MissumMutedTextBrush", 160);
+        if (_subagentSummaryFinished!.Text != finished) _subagentSummaryFinished.Text = finished;
+        _subagentSummaryFinished.Visibility = finished.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+        var representatives = (active > 0 ? working : children).Take(4).ToArray();
+        for (var index = 0; index < representatives.Length; index++)
         {
-            var working = children.Where(child => child.IsRunning).ToArray();
-            var active = working.Length;
-            var inactive = children.Length - active;
-            var caption = active > 0 ? active + (active == 1 ? " arbeitet" : " arbeiten") : inactive + " fertig";
-            var finished = active > 0 && inactive > 0 ? inactive + " fertig" : "";
-            if (_subagentSummaryLabel!.Text != caption) _subagentSummaryLabel.Text = caption;
-            _subagentSummaryLabel.Foreground = active > 0 ? ThemeBrush("MissumTextBrush", 230)
-                : ThemeBrush("MissumMutedTextBrush", 160);
-            if (_subagentSummaryFinished!.Text != finished) _subagentSummaryFinished.Text = finished;
-            _subagentSummaryFinished.Visibility = finished.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
-            var representatives = (active > 0 ? working : children).Take(4).ToArray();
-            for (var index = 0; index < representatives.Length; index++)
+            var child = representatives[index];
+            var variant = child.PlanetIndex;
+            if (!_subagentSummaryAvatars.TryGetValue(variant, out var icon))
+                _subagentSummaryAvatars[variant] = icon = SubagentIcon(child.AgentId, 14, variant);
+            icon.SetAgentId(child.AgentId, variant);
+            if (index >= _subagentSummaryIcons!.Children.Count || !ReferenceEquals(_subagentSummaryIcons.Children[index], icon))
             {
-                var child = representatives[index];
-                var variant = child.PlanetIndex;
-                if (!_subagentSummaryAvatars.TryGetValue(variant, out var icon))
-                    _subagentSummaryAvatars[variant] = icon = SubagentIcon(child.AgentId, 14, variant);
-                icon.SetAgentId(child.AgentId, variant);
-                if (index >= _subagentSummaryIcons!.Children.Count || !ReferenceEquals(_subagentSummaryIcons.Children[index], icon))
-                {
-                    _subagentSummaryIcons.Children.Remove(icon);
-                    _subagentSummaryIcons.Children.Insert(index, icon);
-                }
+                _subagentSummaryIcons.Children.Remove(icon);
+                _subagentSummaryIcons.Children.Insert(index, icon);
             }
-            while (_subagentSummaryIcons!.Children.Count > representatives.Length)
-                _subagentSummaryIcons.Children.RemoveAt(_subagentSummaryIcons.Children.Count - 1);
-            var visiblePlanets = representatives.Select(child => child.PlanetIndex).ToHashSet();
-            foreach (var hidden in _subagentSummaryAvatars.Keys.Where(index => !visiblePlanets.Contains(index)).ToArray())
-                _subagentSummaryAvatars.Remove(hidden);
-            var label = caption + (finished.Length > 0 ? " · " + finished : "");
-            AutomationProperties.SetName(_subagentSummaryButton!, label);
-            var exceptions = children.Where(child => !child.IsRunning && child.Status != "completed")
-                .GroupBy(SubagentStatusLabel).Select(group => group.Count() + " " + group.Key.ToLowerInvariant());
-            ToolTipService.SetToolTip(_subagentSummaryButton!, label + "\nSubagentenübersicht öffnen"
-                + string.Concat(exceptions.Select(detail => "\n" + detail)));
         }
+        while (_subagentSummaryIcons!.Children.Count > representatives.Length)
+            _subagentSummaryIcons.Children.RemoveAt(_subagentSummaryIcons.Children.Count - 1);
+        var visiblePlanets = representatives.Select(child => child.PlanetIndex).ToHashSet();
+        foreach (var hidden in _subagentSummaryAvatars.Keys.Where(index => !visiblePlanets.Contains(index)).ToArray())
+            _subagentSummaryAvatars.Remove(hidden);
+        var label = caption + (finished.Length > 0 ? " · " + finished : "");
+        AutomationProperties.SetName(_subagentSummaryButton!, label);
+        var exceptions = children.Where(child => !child.IsRunning && child.Status != "completed")
+            .GroupBy(SubagentStatusLabel).Select(group => group.Count() + " " + group.Key.ToLowerInvariant());
+        ToolTipService.SetToolTip(_subagentSummaryButton!, label + "\nSubagentenübersicht öffnen"
+            + string.Concat(exceptions.Select(detail => "\n" + detail)));
         if (SubagentsPanel.Children.Count != 1 || !ReferenceEquals(SubagentsPanel.Children[0], _subagentSummaryButton))
         {
             SubagentsPanel.Children.Clear(); SubagentsPanel.Children.Add(_subagentSummaryButton!);

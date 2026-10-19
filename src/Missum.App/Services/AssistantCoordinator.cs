@@ -2355,12 +2355,12 @@ public sealed partial class AssistantCoordinator(
     private static AssistantToolStep DisplayToolStep(AssistantToolStep step) => step with
     {
         DisplayHeader = AssistantToolStepHeaders.Create(step),
-        Detail = step.Tool is "assistant.narration" or "assistant.progress" ? step.Detail : null,
+        Detail = step.Tool is "assistant.narration" or "assistant.progress" or "assistant.steering" ? step.Detail : null,
         InputJson = null, PreviewHtml = null,
         OutputJson = step.Tool is "assistant.continuation" or "subagent" or "subagent.completed"
             && step.OutputJson?.Length <= 32768 ? step.OutputJson : null,
         Explanation = step.Explanation is { Length: > 400 } explanation ? explanation[..400] : step.Explanation,
-        DetailsDeferred = step.Tool is not ("assistant.narration" or "assistant.progress"),
+        DetailsDeferred = step.Tool is not ("assistant.narration" or "assistant.progress" or "assistant.steering"),
     };
 
     private static object ToArtifactDto(ChatArtifact artifact) => ToArtifactDtoWithPosition(artifact, null);

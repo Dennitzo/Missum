@@ -11,7 +11,7 @@ public sealed partial class NativeAssistantPage
 {
     private readonly Dictionary<string, VirtualMessageState> _virtualMessages = new(StringComparer.Ordinal);
     private sealed record NativeSourceAnchor(string MessageId, int Start, string Source);
-    private sealed record LogicalBlock(string Key, string Kind, string Text, int Start, JsonElement Data,
+    internal sealed record LogicalBlock(string Key, string Kind, string Text, int Start, JsonElement Data,
         JsonElement[]? Artifacts = null, int Number = 0);
     private sealed class VirtualMessageState(NativeVirtualizingBlockPanel panel)
     {
@@ -108,7 +108,16 @@ public sealed partial class NativeAssistantPage
                 || !_virtualMessages.TryGetValue(id, out var currentState) || !ReferenceEquals(state, currentState)
                 || !DisplayMessages.TryGetValue(id, out var current)) return;
             if (MessageVersion(current) != version || _conversationSelection?.IsSelecting == true)
-            { _renderedMessageSources.Remove(id); RenderMessages(); return; }
+            {
+                // RenderMessagesNow may already have cached the newer envelope
+                // while this worker was busy. Invalidate its visual signature
+                // too, so that envelope actually schedules its own block build.
+                _renderedMessageSources.Remove(id);
+                _renderedMessageVersions.Remove(id);
+                if (_messageViews.TryGetValue(id, out var pendingView)) _messageViews[id] = ("", pendingView.View);
+                RenderMessages();
+                return;
+            }
             state.Version = version;
             state.Blocks = logical;
             state.Panel.SetRows(logical.Select(block => VirtualRow(id, current, block)).ToArray());
@@ -118,7 +127,7 @@ public sealed partial class NativeAssistantPage
         });
     }
 
-    private static List<LogicalBlock> BuildLogicalBlocks(JsonElement message, string content,
+    internal static List<LogicalBlock> BuildLogicalBlocks(JsonElement message, string content,
         JsonElement[] steps, JsonElement[] artifacts, bool hasOlder, Dictionary<string, NativeTextBlockIndex> indices)
     {
         var result = new List<LogicalBlock>();
@@ -170,6 +179,11 @@ public sealed partial class NativeAssistantPage
                     && (tool != "assistant.continuation" || S(step, "status") == "completed"))
                 {
                     if (tool == "assistant.narration") Text("narration:" + stepId, S(step, "detail"), -1);
+                    else if (tool == "assistant.steering")
+                    {
+                        if (!string.IsNullOrWhiteSpace(S(step, "detail")))
+                            result.Add(new("steering:" + stepId, "steering", S(step, "detail"), next, step));
+                    }
                     else result.Add(new("tool:" + stepId, tool is "subagent" or "subagent.completed" ? "subagent" : "tool",
                         "", 0, step, Number: tool == "assistant.reasoning" ? number : ++number));
                 }
@@ -208,8 +222,8 @@ public sealed partial class NativeAssistantPage
 
     private NativeVirtualizingBlockPanel.Row VirtualRow(string messageId, JsonElement message, LogicalBlock block)
     {
-        object version = block.Kind is "text" ? block.Text : block.Kind is "tool" or "subagent" ? block.Data : MessageVersion(message);
-        var estimate = block.Kind switch { "text" => Math.Max(38, block.Text.Length / 85d * 26 + 12), "artifacts" => 360, _ => 44 };
+        object version = block.Kind is "text" or "steering" ? block.Text : block.Kind is "tool" or "subagent" ? block.Data : MessageVersion(message);
+        var estimate = block.Kind switch { "text" or "steering" => Math.Max(38, block.Text.Length / 85d * 26 + 12), "artifacts" => 360, _ => 44 };
         return new(block.Key, version, estimate,
             () => CreateVirtualBlock(messageId, message, block), view => UpdateVirtualBlock(view, messageId, message, block));
     }
@@ -228,6 +242,7 @@ public sealed partial class NativeAssistantPage
                 view = new ContentControl { Content = NativeVirtualizingTextView.CreateSourceBlock(block.Text, anchor),
                     Tag = anchor, HorizontalContentAlignment = HorizontalAlignment.Stretch };
                 break;
+            case "steering": view = CreateSteeringPromptView(); break;
             case "artifacts": view = new NativeArtifactLinks(block.Artifacts ?? [], Guid.TryParse(id, out var guid) ? guid : null); break;
             case "subagent":
                 var lifecycle = new SubagentLifecycleView(PlanetIdentities.GetOrAssign);
@@ -295,6 +310,7 @@ public sealed partial class NativeAssistantPage
                 text.Tag = anchor;
                 NativeVirtualizingTextView.UpdateSourceBlock(text, block.Text, anchor);
                 break;
+            case Border prompt when block.Kind == "steering": ((TextBlock)prompt.Child).Text = block.Text; break;
             case ToolStepView tool: tool.Update(block.Data, block.Number); break;
             case SubagentLifecycleView child: child.Update(block.Data, FindSubagentForStep(block.Data)); break;
             case NativeArtifactLinks artifacts: artifacts.UpdateArtifacts(block.Artifacts ?? []); break;
@@ -304,7 +320,7 @@ public sealed partial class NativeAssistantPage
                 var history = _messageBlocks.GetValueOrDefault(id)?.GetValueOrDefault("tool:" + S(reasoning, "id"));
                 thinking.UpdateReasoning(S(reasoning, "id"), S(reasoning, "detail"), history);
                 thinking.HasBlockingTool = MessageSteps(message).Any(step => S(step, "status") is "running" or "pending"
-                    && S(step, "tool") is not ("assistant.reasoning" or "assistant.progress" or "assistant.narration"));
+                    && S(step, "tool") is not ("assistant.reasoning" or "assistant.progress" or "assistant.narration" or "assistant.steering"));
                 break;
             case StackPanel header when block.Kind == "header": UpdateMessageHeader(header, message); break;
             default: if (block.Kind == "footer") UpdateMessageActions(id, message); break;

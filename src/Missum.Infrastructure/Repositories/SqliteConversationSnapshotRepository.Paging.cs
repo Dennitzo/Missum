@@ -17,7 +17,7 @@ public sealed partial class SqliteConversationSnapshotRepository
             'updatedAt',json_extract(s.value,'$.updatedAt'),'agentId',json_extract(s.value,'$.agentId'),
             'displayHeader',json_extract(s.value,'$.displayHeader'),
             'explanation',substr(json_extract(s.value,'$.explanation'),1,400),
-            'detail',CASE WHEN json_extract(s.value,'$.tool') IN ('assistant.narration','assistant.progress')
+            'detail',CASE WHEN json_extract(s.value,'$.tool') IN ('assistant.narration','assistant.progress','assistant.steering')
                 THEN json_extract(s.value,'$.detail') ELSE NULL END,
             'outputJson',CASE WHEN json_extract(s.value,'$.tool') = 'assistant.continuation'
                 AND json_valid(json_extract(s.value,'$.outputJson')) THEN json_object(
@@ -43,7 +43,7 @@ public sealed partial class SqliteConversationSnapshotRepository
                     'attemptStartedAt',COALESCE(json_extract(s.value,'$.outputJson')->>'$.attemptStartedAt',
                         json_extract(s.value,'$.outputJson')->>'$.assistantMessage.createdAt'),
                     'subagentStorageKey',json_extract(s.value,'$.outputJson')->>'$.subagentStorageKey')||'' ELSE NULL END,
-            'detailsDeferred',json(CASE WHEN json_extract(s.value,'$.tool') IN ('assistant.narration','assistant.progress')
+            'detailsDeferred',json(CASE WHEN json_extract(s.value,'$.tool') IN ('assistant.narration','assistant.progress','assistant.steering')
                 THEN 'false' ELSE 'true' END)
         )) FROM json_each(m.tool_steps_json) s))
         """;
@@ -164,7 +164,10 @@ public sealed partial class SqliteConversationSnapshotRepository
     private static async Task RefreshToolStepHeadersAsync(SqliteConnection connection, SqliteTransaction transaction,
         Guid messageId, bool normalized, List<(long Ordinal, AssistantToolStep Step)> rows, CancellationToken token)
     {
-        var missing = rows.Where(row => row.Step.DisplayHeader?.Version != AssistantToolStepHeaders.CurrentVersion).ToArray();
+        var missing = rows.Where(row => row.Step.DisplayHeader?.Version != AssistantToolStepHeaders.CurrentVersion
+            // A steering prompt is conversation text, not an expandable tool body. Older compact
+            // headers omitted it even when their display-header version was already current.
+            || row.Step.Tool == "assistant.steering" && (row.Step.DetailsDeferred || row.Step.Detail is null)).ToArray();
         if (missing.Length == 0) return;
 
         // Upgrade only the visible page's disposable projection. Historical tool bodies remain unchanged,

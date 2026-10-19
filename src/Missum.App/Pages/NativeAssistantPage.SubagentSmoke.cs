@@ -205,7 +205,8 @@ public sealed partial class NativeAssistantPage
             foreach (var state in overlayStates)
             {
                 childState.Status = state.State; childState.IsRunning = state.Running; RenderSubagentOverlay();
-                if (!ReferenceEquals(summaryButton, VerifySubagentSummarySmoke(state.Running ? "1 arbeitet" : "1 fertig"))
+                if (SubagentsSection.Visibility != Visibility.Visible
+                    || !ReferenceEquals(summaryButton, VerifySubagentSummarySmoke(state.Running ? "1 arbeitet" : "1 fertig"))
                     || !summaryIcons.SequenceEqual(SubagentSummarySmokeIcons(summaryButton)))
                     throw new InvalidOperationException("Subagent status updates must preserve the compact summary button and icon controls.");
                 if (!state.Running && state.State != "completed"
@@ -727,17 +728,18 @@ public sealed partial class NativeAssistantPage
             var foreign = Guid.NewGuid();
             _session = foreign; SyncSessionTabs(); RenderSubagentOverlay();
             if (_activeSubagentOverviewSession is not null || _subagentOverviewHost.Visibility != Visibility.Collapsed
-                || overviewTab.Parent == SessionTabsPanel || SubagentsSection.Visibility != Visibility.Visible
-                || SubagentsPanel.Children.Count != 1 || _subagentSummaryLabel?.Text != "Noch keine Subagenten")
+                || overviewTab.Parent == SessionTabsPanel || SubagentsSection.Visibility != Visibility.Collapsed
+                || SubagentsPanel.Children.Count != 0)
                 throw new InvalidOperationException("A subagent overview must never leak into another session.");
             OpenSubagentOverview(); UpdateLayout();
             if (_activeSubagentOverviewSession != foreign || SubagentOverviewRows().Length != 0
                 || _subagentOverviewHost.Content is not ScrollViewer { Content: StackPanel emptyOverview }
                 || !emptyOverview.Children.OfType<TextBlock>().Any(text => text.Text == "Noch keine Subagenten in dieser Sitzung"))
-                throw new InvalidOperationException("The persistent empty subagent summary must open an empty overview for its own session.");
+                throw new InvalidOperationException("An already open subagent overview must support its own empty session without showing an empty overlay section.");
             _subagentOverviewTabs.Remove(foreign);
             _session = owner; SyncSessionTabs(); RenderSubagentOverlay();
-            if (overviewTab.Parent != SessionTabsPanel)
+            if (overviewTab.Parent != SessionTabsPanel || SubagentsSection.Visibility != Visibility.Visible
+                || SubagentsPanel.Children.Count != 1)
                 throw new InvalidOperationException("Returning to a session must restore its open overview tab.");
             OpenSubagentOverview();
             if (SubagentOverviewRows().Length != 4) throw new InvalidOperationException("The restored overview lost its children.");

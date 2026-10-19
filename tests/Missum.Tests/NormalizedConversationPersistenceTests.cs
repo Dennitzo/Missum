@@ -9,6 +9,78 @@ namespace Missum.Tests;
 
 public sealed class NormalizedConversationPersistenceTests
 {
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task SteeringPromptsRemainVisibleInThinPagesAndRepairOldHeadersLazily(bool legacy, bool oldCache)
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var chats = environment.Get<IChatRepository>();
+        var snapshots = environment.Get<IConversationSnapshotRepository>();
+        var session = await chats.CreateSessionAsync("Steering prompt paging");
+        var message = await chats.AddMessageAsync(session.Id, ChatRole.Assistant, "Original answer", MessageStatus.Streaming);
+        var steps = Enumerable.Range(0, 70).Select(index => index is 4 or 65
+            ? new AssistantToolStep("steering-" + index, "assistant.steering", "completed",
+                "Bitte den Ansatz " + index + " mit vollständigem Kontext prüfen.",
+                InputJson: "{\"privateInput\":\"not needed for rendering\"}", ContentOffset: 8)
+            : ReadStep(index)).ToArray();
+        if (legacy)
+        {
+            await SetLegacyAsync(environment, message.Id, steps);
+            if (oldCache)
+                await ExecuteAsync(environment, "INSERT INTO chat_message_ui_headers(message_id,headers_json) VALUES($id,$value);", message.Id,
+                    JsonSerializer.Serialize(steps.Select(step => step with
+                    {
+                        Detail = null, InputJson = null, OutputJson = null, DetailsDeferred = true,
+                        DisplayHeader = AssistantToolStepHeaders.Create(step),
+                    }), JsonSerializerOptions.Web));
+        }
+        else
+        {
+            foreach (var step in steps) await chats.SaveToolStepDeltaAsync(message.Id, step);
+            if (oldCache)
+                await ExecuteAsync(environment, """
+                    UPDATE chat_tool_steps SET header_json=json_set(header_json,'$.detail',NULL,'$.detailsDeferred',json('true'))
+                    WHERE message_id=$id AND tool_name='assistant.steering';
+                    """, message.Id);
+        }
+        var historySql = legacy ? "SELECT tool_steps_json FROM chat_messages WHERE id=$id;"
+            : "SELECT json_group_array(json(step_json)) FROM (SELECT step_json FROM chat_tool_steps WHERE message_id=$id ORDER BY ordinal);";
+        var originalHistory = await ScalarAsync(environment, historySql, message.Id);
+        var originalMessage = await chats.GetMessageTextAsync(message.Id);
+        var originalSession = await chats.GetSessionAsync(session.Id);
+
+        var page = (await snapshots.GetPageAsync(session.Id))!;
+        var headers = Assert.Single(page.Conversation.Messages).ToolSteps!;
+        Assert.Equal(64, headers.Count);
+        var visiblePrompt = Assert.Single(headers, step => step.Tool == "assistant.steering");
+        Assert.Equal(steps[65].Detail, visiblePrompt.Detail);
+        Assert.False(visiblePrompt.DetailsDeferred);
+        Assert.Null(visiblePrompt.InputJson);
+        Assert.Null(visiblePrompt.OutputJson);
+        Assert.All(headers.Where(step => step.Tool != "assistant.steering"), step =>
+        {
+            Assert.Null(step.Detail);
+            Assert.True(step.DetailsDeferred);
+        });
+        var oldPromptDetailSql = legacy
+            ? "SELECT json_extract(step.value,'$.detail') FROM chat_message_ui_headers h,json_each(h.headers_json) step WHERE h.message_id=$id AND json_extract(step.value,'$.id')='steering-4';"
+            : "SELECT json_extract(header_json,'$.detail') FROM chat_tool_steps WHERE message_id=$id AND step_id='steering-4';";
+        if (oldCache) Assert.True(string.IsNullOrEmpty(await ScalarAsync(environment, oldPromptDetailSql, message.Id)));
+
+        var older = (await snapshots.GetToolStepsPageAsync(session.Id, message.Id, 2,
+            page.ToolStepWindows![message.Id].BeforeOrdinal))!;
+        var previousPrompt = older.Steps.Single(step => step.Tool == "assistant.steering");
+        Assert.Equal(steps[4].Detail, previousPrompt.Detail);
+        Assert.False(previousPrompt.DetailsDeferred);
+        Assert.Equal(steps[4].Detail, await ScalarAsync(environment, oldPromptDetailSql, message.Id));
+        Assert.Equal(originalHistory, await ScalarAsync(environment, historySql, message.Id));
+        Assert.Equal(JsonSerializer.Serialize(originalMessage), JsonSerializer.Serialize(await chats.GetMessageTextAsync(message.Id)));
+        Assert.Equal(originalSession, await chats.GetSessionAsync(session.Id));
+    }
+
     [Fact]
     public async Task NewToolHeadersRetainDisplaySummaryWithoutLoadingDetails()
     {

@@ -440,15 +440,27 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         foreach (var (id, pending) in _pendingUserMessages.ToArray())
         {
             if (S(pending, "sessionId") != _session.ToString()) continue;
-            if ((S(pending, "steeringInputId") is { Length: > 0 } inputId && _messages.Values.Any(message => MessageSteps(message).Any(step => S(step, "id") == "steering-" + inputId)))
-                || _messages.Values.Any(message => !S(message, "id").StartsWith("pending:", StringComparison.Ordinal) && S(message, "role") == "user"
+            // An acknowledgement without its display text cannot replace the
+            // optimistic prompt. Keep it until the actual conversation row arrives.
+            var confirmed = S(pending, "steeringInputId").Length > 0
+                ? _messages.Values.Any(message => S(message, "sessionId") == S(pending, "sessionId")
+                    && MessageSteps(message).Any(step => HasVisibleSteeringPrompt(pending, step)))
+                : _messages.Values.Any(message => !S(message, "id").StartsWith("pending:", StringComparison.Ordinal) && S(message, "role") == "user"
                 && S(message, "sessionId") == S(pending, "sessionId")
                 && Missum.Core.Chat.ChatContentSanitizer.Sanitize(MessageContent(message)) == Missum.Core.Chat.ChatContentSanitizer.Sanitize(S(pending, "content"))
-                && MessageCreatedAt(message) >= MessageCreatedAt(pending)))
+                && MessageCreatedAt(message) >= MessageCreatedAt(pending));
+            if (confirmed)
             { _pendingUserMessages.Remove(id); _messages.Remove(id); }
             else _messages[id] = pending;
         }
     }
+
+    internal static bool HasVisibleSteeringPrompt(JsonElement pending, JsonElement step) =>
+        S(pending, "steeringInputId") is { Length: > 0 } inputId
+        && S(step, "tool") == "assistant.steering" && S(step, "id") == "steering-" + inputId
+        && !string.IsNullOrWhiteSpace(S(step, "detail"))
+        && Missum.Core.Chat.ChatContentSanitizer.Sanitize(S(step, "detail"))
+            == Missum.Core.Chat.ChatContentSanitizer.Sanitize(S(pending, "content"));
 
     private string AddPendingUserMessage(Guid session, string prompt, string? steeringInputId = null)
     {

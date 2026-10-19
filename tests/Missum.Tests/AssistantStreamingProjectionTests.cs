@@ -11,6 +11,33 @@ namespace Missum.Tests;
 public sealed class AssistantStreamingProjectionTests
 {
     [Fact]
+    public async Task LiveSteeringPromptIsInlineConversationTextBeforeItsDurableCommit()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        var chats = environment.Get<IChatRepository>();
+        var snapshots = environment.Get<IConversationSnapshotRepository>();
+        var session = await chats.CreateSessionAsync("Visible steering", ChatMode.ClaudeScience);
+        var message = await chats.AddMessageAsync(session.Id, ChatRole.Assistant, "Bisherige Antwort", MessageStatus.Streaming);
+        var step = new AssistantToolStep("steering-input", "assistant.steering", "running",
+            "Bitte zuerst den quantitativen Vergleich prüfen.", ContentOffset: message.Content.Length,
+            InputJson: "{\"inputId\":\"input\",\"sequence\":1}");
+        var coordinator = CreateCoordinator(environment, settings, snapshots, environment.Get<IChatArtifactRepository>());
+        JsonElement displayed = default;
+        await coordinator.EmitMissumAiUpdateAsync(new(MissumAiAssistantUpdateKind.Delta, message with { ToolSteps = [step] }, ToolStep: step),
+            (type, payload, _) =>
+            {
+                if (type == "chat.delta") displayed = JsonSerializer.SerializeToElement(payload, JsonSerializerOptions.Web).GetProperty("toolStep");
+                return Task.CompletedTask;
+            }, "steer-live");
+        Assert.Equal(step.Detail, displayed.GetProperty("detail").GetString());
+        Assert.False(displayed.TryGetProperty("detailsDeferred", out var deferred) && deferred.GetBoolean());
+        Assert.Equal(JsonValueKind.Null, displayed.GetProperty("inputJson").ValueKind);
+        Assert.Null(await snapshots.GetToolStepAsync(session.Id, message.Id, step.Id));
+    }
+
+    [Fact]
     public async Task ExpandedLiveStepCanBeReadReentrantlyBeforeItsWriteBehindCommit()
     {
         await using var environment = await TestEnvironment.CreateAsync();

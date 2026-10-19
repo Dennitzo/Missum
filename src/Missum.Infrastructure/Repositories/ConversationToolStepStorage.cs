@@ -98,7 +98,7 @@ internal static class ConversationToolStepStorage
 
     internal static AssistantToolStep Header(AssistantToolStep step)
     {
-        var narration = step.Tool is "assistant.narration" or "assistant.progress";
+        var narration = step.Tool is "assistant.narration" or "assistant.progress" or "assistant.steering";
         return step with
         {
             DisplayHeader = AssistantToolStepHeaders.Create(step),
