@@ -215,6 +215,7 @@ public sealed partial class NativeAssistantPage
                 VerifyIconBrush(InspectorToggleIcon.Stroke, "navigation");
                 foreach (var sourceButton in SourcesPanel.Children.OfType<Button>())
                     VerifyIconBrush(((Grid)sourceButton.Content).Children.OfType<FontIcon>().Single().Foreground, "web");
+                VerifySourcesSummarySmoke();
                 foreach (var tabIcon in Descendants(SessionTabsPanel).OfType<FontIcon>())
                     VerifyIconBrush(tabIcon.Foreground, "navigation");
                 if (ActualTheme != (variant.Theme == AppTheme.Light ? ElementTheme.Light : ElementTheme.Dark))

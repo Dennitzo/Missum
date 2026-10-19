@@ -2,6 +2,8 @@
 using Missum.App.Controls;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation.Peers;
+using Microsoft.UI.Xaml.Automation.Provider;
 
 namespace Missum.App.Pages;
 
@@ -21,6 +23,7 @@ public sealed partial class NativeAssistantPage
         if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_RESPONSIVENESS") == "sources")
         {
             await VerifySourceAutoloadSmokeAsync();
+            await VerifySourcesSmokeAsync(_snapshot.Clone());
             return await VerifyIconPaletteSmokeAsync();
         }
         var original = _snapshot.Clone();
@@ -265,6 +268,31 @@ public sealed partial class NativeAssistantPage
         _rendering = false;
     }
 
+    private void VerifySourcesSummarySmoke(int? expected = null)
+    {
+        var count = expected ?? SourceCount(_sessionSources.GetValueOrDefault(_session, []));
+        var row = SourcesSummaryButton.Content as Grid;
+        if (SourcesPanel.Children.Count != 1 || !ReferenceEquals(SourcesPanel.Children[0], SourcesSummaryButton)
+            || row is null || row.Children.OfType<TextBlock>().Count() != 2
+            || !row.Children.OfType<TextBlock>().Any(label => label.Text == "Quellen")
+            || SourcesSummaryCount.Text != count.ToString("N0", System.Globalization.CultureInfo.CurrentCulture)
+            || !ReferenceEquals(SourcesSummaryCount.Foreground, NativeThemeBrushes.Text)
+            || Grid.GetColumn(SourcesSummaryCount) != 2
+            || SourcesSummaryCount.HorizontalAlignment != HorizontalAlignment.Right
+            || SourcesSummaryIcon.Glyph != "\uE774" || SourcesSummaryIcon.Opacity != 1
+            || SourcesSummaryButton.Visibility != Visibility.Visible || !SourcesSummaryButton.IsEnabled)
+            throw new InvalidOperationException("The output overlay must show only its accessible Quellen summary with a right-aligned primary-color count.");
+        VerifyIconBrush(SourcesSummaryIcon.Foreground, "web");
+        if (Descendants(Inspector).OfType<TextBlock>().Any(label => label.Text is "Alle anzeigen" or "Noch keine Quellen")
+            || Descendants(Inspector).OfType<TextBlock>().Count(label => label.Text == "Quellen") != 1)
+            throw new InvalidOperationException("The output overlay must not duplicate the source heading, previews or all-sources link.");
+        if (SourcesPanel.Parent is not StackPanel sections || !ReferenceEquals(ChangesSummaryButton.Parent, sections)
+            || !ReferenceEquals(SubagentsSection.Parent, sections)
+            || sections.Children.IndexOf(SourcesPanel) != sections.Children.IndexOf(ChangesSummaryButton) + 1
+            || sections.Children.IndexOf(SubagentsSection) != sections.Children.IndexOf(SourcesPanel) + 1)
+            throw new InvalidOperationException("The source summary must follow Änderungen directly and precede Subagenten.");
+    }
+
     private async Task VerifySourcesSmokeAsync(JsonElement original)
     {
         var owner = Guid.NewGuid(); var now = DateTimeOffset.UtcNow;
@@ -281,27 +309,18 @@ public sealed partial class NativeAssistantPage
                     url = "https://example.org/source-" + index, thumbnailUrl = "https://example.org/preview.png" } } }),
                 updatedAt = now.AddSeconds(index) }).ToArray() } });
         ApplyEvent("state.snapshot", JsonSerializer.SerializeToElement(snapshot)); RenderMessagesNow();
-        if (SourcesPanel.Children.Count != 2 || _sessionSources[owner].Length != 4 || !_sessionSources[owner][0].Title.EndsWith('3')
+        if (_sessionSources[owner].Length != 4 || !_sessionSources[owner][0].Title.EndsWith('3')
             || !_sessionSources[owner].Select(action => action.Id).SequenceEqual(Enumerable.Range(0, 4).Reverse().Select(index => "search-" + index)))
-            throw new InvalidOperationException("Sources must show only the latest web action and an all-sources action, while retaining the complete ordered history.");
-        var latestSource = _sessionSources[owner][0];
-        // Inspect our labels rather than the FontIcon's internal glyph TextBlock.
-        var sourceLabels = ((Grid)((Button)SourcesPanel.Children[0]).Content).Children.OfType<StackPanel>().Single()
-            .Children.OfType<TextBlock>().ToArray();
-        if (sourceLabels.Length != 2 || sourceLabels[0].Text != SourcePageTitle(latestSource, latestSource.Urls[0])
-            || sourceLabels[1].Text != latestSource.Urls[0]
-            || !ReferenceEquals(sourceLabels[0].Foreground, NativeThemeBrushes.Text)
-            || !ReferenceEquals(sourceLabels[1].Foreground, NativeThemeBrushes.MutedText)
-            || sourceLabels[1].FontSize >= sourceLabels[0].FontSize)
-            throw new InvalidOperationException("Web sources must display the page title above a quieter, smaller URL.");
-        var allSources = (Button)SourcesPanel.Children[^1];
-        var allRow = (Grid)allSources.Content;
-        var allIcon = allRow.Children.OfType<FontIcon>().Single();
-        if (allRow.Children.OfType<TextBlock>().Single().Opacity >= 1 || allIcon.Glyph != "\uE71B" || allIcon.Opacity != 1
-            || Microsoft.UI.Xaml.Automation.AutomationProperties.GetName(allSources) != "Alle Quellen anzeigen")
-            throw new InvalidOperationException("The all-sources action must use an accent link symbol with a muted label.");
-        VerifyIconBrush(allIcon.Foreground, "web");
-        VerifyIconBrush(((Grid)((Button)SourcesPanel.Children[0]).Content).Children.OfType<FontIcon>().Single().Foreground, "source");
+            throw new InvalidOperationException("The source summary must retain the complete ordered source history for its overview tab.");
+        VerifySourcesSummarySmoke(actualWebResult is null ? 4 : null);
+        var attachment = JsonSerializer.SerializeToElement(new { id = "source-count-document", fileName = "Datensatz.csv" });
+        if (SourceCount([
+                new("count-search", "Websuche", ["https://example.org/shared", "https://example.org/second"], now),
+                new("count-fetch", "Webseite", ["https://EXAMPLE.org/shared"], now),
+                new("attachment:source-count-document", "Datensatz.csv", [], now, attachment),
+                new("attachment:source-count-document", "Datensatz.csv", [], now, attachment)
+            ]) != 3)
+            throw new InvalidOperationException("The compact source count must deduplicate repeated URLs and attachments.");
         VerifyIconBrush(((Grid)InspectorProjectRow.Content).Children.OfType<FontIcon>().Single().Foreground, "folder");
         if (((Grid)ChangesSummaryButton.Content).Children.OfType<Microsoft.UI.Xaml.Shapes.Path>().Single().Stroke
             is not Microsoft.UI.Xaml.Media.SolidColorBrush changesBrush || changesBrush.Color != NativeThemeBrushes.MutedText.Color)
@@ -327,13 +346,15 @@ public sealed partial class NativeAssistantPage
         Inspector.Visibility = inspectorVisibility;
         for (var iteration = 0; iteration < 4; iteration++)
         {
-            OpenSourcesTab(); UpdateLayout(); await Task.Delay(30);
+            if (new ButtonAutomationPeer(SourcesSummaryButton).GetPattern(PatternInterface.Invoke) is not IInvokeProvider openSources)
+                throw new InvalidOperationException("The source summary is not a keyboard-accessible native button.");
+            openSources.Invoke(); UpdateLayout(); await Task.Delay(30);
             if (_sourcesHost.Visibility != Microsoft.UI.Xaml.Visibility.Visible
                 || _sourcesHost.Content is not ScrollViewer { Content: StackPanel sourceBody }
                 || sourceBody.Children.OfType<StackPanel>().Count() != _sessionSources[owner].Length
                 || !sourceBody.Children.OfType<StackPanel>().Select(group => group.Children.OfType<TextBlock>().Single().Text)
                     .SequenceEqual(_sessionSources[owner].Select(action => action.Title)))
-                throw new InvalidOperationException("The sources tab must open the complete ordered source history, independently of the single overlay entry: "
+                throw new InvalidOperationException("The source summary must open the complete ordered source history: "
                     + JsonSerializer.Serialize(new { iteration, owner, currentSession = _session, activeSourcesSession = _activeSourcesSession,
                         visibility = _sourcesHost.Visibility.ToString(), contentType = _sourcesHost.Content?.GetType().Name,
                         expected = _sessionSources[owner].Select(action => action.Title),
@@ -349,6 +370,11 @@ public sealed partial class NativeAssistantPage
         ApplyEvent("state.snapshot", original);
         if (_activeSourcesSession is not null || _sourcesHost.Visibility != Microsoft.UI.Xaml.Visibility.Collapsed || _sourcesTabContainer?.Parent == SessionTabsPanel)
             throw new InvalidOperationException("Sources leaked across sessions.");
+        await File.WriteAllTextAsync(Path.Combine(App.Current.DataDirectory, "native-sources-summary-validation.json"),
+            JsonSerializer.Serialize(new { passed = true, compactSummaryOnly = true, uniqueUrlAndAttachmentCount = true,
+                primaryTextCount = true, webSearchGlobeAndColor = true, sourcesAfterChangesBeforeSubagents = true,
+                noIndividualSourcePreviews = true, noAllSourcesCaption = true, keyboardClickOpensSources = true,
+                completeHistoryPreserved = true, sessionIsolated = true, repeatedTabNavigation = 4 }), _lifetime.Token);
     }
 
     private static void VerifyIconBrush(Microsoft.UI.Xaml.Media.Brush brush, string key)

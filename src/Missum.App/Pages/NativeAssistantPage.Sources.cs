@@ -164,25 +164,20 @@ public sealed partial class NativeAssistantPage
     private void RenderWebSources()
     {
         var sources = WebSourceActions(); _sessionSources[_session] = sources;
-        foreach (var item in sources.Take(1)) SourcesPanel.Children.Add(SourceActionButton(item));
-        if (sources.Length > 0 || _messages.Count > 0)
-            SourcesPanel.Children.Add(AllOutputsButton("Alle Quellen anzeigen", OpenSourcesTab));
+        var count = SourceCount(sources);
+        SourcesSummaryCount.Text = count.ToString("N0", System.Globalization.CultureInfo.CurrentCulture);
+        SourcesSummaryButton.IsEnabled = _session != Guid.Empty;
+        var description = count == 1 ? "1 Quelle · Quellenübersicht öffnen" : $"{count:N0} Quellen · Quellenübersicht öffnen";
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(SourcesSummaryButton, description);
+        ToolTipService.SetToolTip(SourcesSummaryButton, description);
         if (_activeSourcesSession == _session) RenderSourcesContent();
     }
 
-    private static Button AllOutputsButton(string name, Action open)
-    {
-        var all = SidebarButton("\uE71B", "Alle anzeigen"); all.Padding = new(0, 6, 0, 6);
-        all.Foreground = ThemeBrush("MissumMutedTextBrush", 145);
-        var row = (Grid)all.Content;
-        row.Children.OfType<TextBlock>().Single().Opacity = .75;
-        var icon = row.Children.OfType<FontIcon>().Single();
-        icon.Foreground = Missum.App.Controls.NativeIconPalette.BrushFor("source");
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(all, name);
-        ToolTipService.SetToolTip(all, name);
-        all.Click += (_, _) => open();
-        return all;
-    }
+    private static int SourceCount(IEnumerable<SourceAction> sources) =>
+        sources.SelectMany(source => source.Urls).Distinct(StringComparer.OrdinalIgnoreCase).Count()
+        + sources.Where(source => source.Attachment is not null).Select(source => source.Id).Distinct(StringComparer.Ordinal).Count();
+
+    private void OnSourcesSummaryClick(object sender, RoutedEventArgs e) => OpenSourcesTab();
 
     private void OpenSourcesTab()
     {

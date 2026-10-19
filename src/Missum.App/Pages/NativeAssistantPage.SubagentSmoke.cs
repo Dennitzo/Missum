@@ -165,8 +165,9 @@ public sealed partial class NativeAssistantPage
             }
             VerifyLifecycle(lifecycle, childState, "hat die Arbeit begonnen");
             if (WebSourceActions().Count(action => action.Id == "child-source" && action.Urls.Contains(childSourceUrl, StringComparer.Ordinal)) != 1
-                || SourcesPanel.Children.Count == 0 || ActiveSubagent is not null)
-                throw new InvalidOperationException("A child-only fetched source must appear in the owner's overlay while the parent chat stays active.");
+                || SourceCount(_sessionSources.GetValueOrDefault(session, [])) == 0 || ActiveSubagent is not null)
+                throw new InvalidOperationException("A child-only fetched source must contribute to the owner's source count while the parent chat stays active.");
+            VerifySourcesSummarySmoke();
             var foreign = child.Deserialize<Dictionary<string, JsonElement>>(JsonOptions)!;
             foreign["sessionId"] = JsonSerializer.SerializeToElement(Guid.NewGuid());
             foreign["agentId"] = JsonSerializer.SerializeToElement("foreign-source-agent");
@@ -262,9 +263,9 @@ public sealed partial class NativeAssistantPage
                 throw new InvalidOperationException("Rehydrating a live child ignored its persisted closed-tab state.");
             VerifyParentStillStreaming();
             Inspector.Visibility = Visibility.Visible; UpdateLayout();
-            if (SubagentsHeading.TransformToVisual(Inspector).TransformPoint(new(0, 0)).Y
-                >= SourcesHeading.TransformToVisual(Inspector).TransformPoint(new(0, 0)).Y)
-                throw new InvalidOperationException("The Subagenten heading must appear above Quellen in Ausgaben.");
+            if (SourcesSummaryButton.TransformToVisual(Inspector).TransformPoint(new(0, 0)).Y
+                >= SubagentsHeading.TransformToVisual(Inspector).TransformPoint(new(0, 0)).Y)
+                throw new InvalidOperationException("The Quellen summary must appear above Subagenten in Ausgaben.");
             await SaveMathPreviewAsync(Inspector, "native-subagents-outputs-preview.png");
             await InvokeLifecycleAsync(lifecycle, agentId); RenderMessagesNow(); UpdateLayout();
             VerifyOwnerTabInfrastructure(childState);
@@ -459,7 +460,7 @@ public sealed partial class NativeAssistantPage
             }
             await File.WriteAllTextAsync(Path.Combine(App.Current.DataDirectory, "native-subagent-validation.json"),
                 JsonSerializer.Serialize(new { renderer = "WinUI3", passed = true, ownerChatMode, parentStable = true, childUsesNativeRenderer = true,
-                    overlayAboveSources = true, closableAndReopenable = true, parentDraftPreserved = true,
+                    sourcesAboveSubagents = true, closableAndReopenable = true, parentDraftPreserved = true,
                     parentRunRemainedActive = true, chatCursorAbsent = true,
                     childModelIdentityPreserved = true,
                     compactLifecycleRow = true, lifecycleStartEntryPreserved = true, lifecycleCompletionPostedOnce = true, lifecycleClickOpensChild = true,
@@ -469,7 +470,7 @@ public sealed partial class NativeAssistantPage
                     uniquePlanetIcons = true, planetIdentityConsistent = true,
                     historicalTabsStayClosed = true, closedRunningTabSurvivesRehydration = true,
                     summaryClickOpensOverview = true, noSubagentAllLink = true,
-                    latestSourceOnly = true, completeSubagentOverview = true,
+                    compactSourceCountOnly = true, completeSubagentOverview = true,
                     completeSourcesOverview = true, overviewSessionIsolated = true, overviewClosableAndReopenable = true,
                     subagentRecencyStable = true, overviewNativeKeyboardAccessible = true, overviewTabFullyVisible = true,
                     overviewBackgroundUpdatesPreserveTabScroll = true,
@@ -609,15 +610,15 @@ public sealed partial class NativeAssistantPage
             Inspector.Visibility = Visibility.Visible; UpdateLayout();
             var newest = addedIds[^1];
             if (SessionSubagents().Length != 4 || SessionSubagents()[0].AgentId != newest
-                || SubagentsPanel.Children.Count != 1 || SourcesPanel.Children.Count != 2
+                || SubagentsPanel.Children.Count != 1 || SourcesPanel.Children.Count != 1
                 || AutomationProperties.GetName((Button)SubagentsPanel.Children[0]) != "3 arbeiten · 1 fertig"
-                || !AutomationProperties.GetName((Button)SourcesPanel.Children[0]).StartsWith("Fachquelle 4 ·", StringComparison.Ordinal))
-                throw new InvalidOperationException("Outputs must contain the active subagent count and the latest source with its complete-overview link.");
+                || !_sessionSources[owner].Any(action => action.PageTitles?.Values.Contains("Fachquelle 4", StringComparer.Ordinal) == true))
+                throw new InvalidOperationException("Outputs must contain the active subagent summary and compact source count while retaining all source metadata.");
+            VerifySourcesSummarySmoke();
             var summary = VerifySubagentSummarySmoke("3 arbeiten", "1 fertig");
             var summaryIcons = SubagentSummarySmokeIcons(summary);
-            var allSources = (Button)SourcesPanel.Children[1];
-            if (AutomationProperties.GetName(allSources) != "Alle Quellen anzeigen")
-                throw new InvalidOperationException("Sources must retain their complete-overview affordance independently of the compact subagent summary.");
+            if (!ReferenceEquals(SourcesPanel.Children[0], SourcesSummaryButton))
+                throw new InvalidOperationException("The compact source count must retain its own complete-overview button independently of the subagent summary.");
             var tokenUpdate = _subagents[newest].Snapshot.Deserialize<Dictionary<string, JsonElement>>(JsonOptions)!;
             tokenUpdate["generatedTokens"] = JsonSerializer.SerializeToElement(2048);
             tokenUpdate["generationUpdatedAt"] = JsonSerializer.SerializeToElement(now.AddMinutes(1));
@@ -699,6 +700,7 @@ public sealed partial class NativeAssistantPage
             // A parent tool receipt must invalidate the owner-wide source cache
             // even when the child transcript has not changed at all.
             var sourceSignature = _sourcesSignature;
+            var sourceCount = SourceCount(_sessionSources.GetValueOrDefault(owner, []));
             var parentWithNewSource = _messages[parentMessage].Deserialize<Dictionary<string, JsonElement>>(JsonOptions)!;
             var newestParentSource = JsonSerializer.SerializeToElement(new
             {
@@ -708,10 +710,10 @@ public sealed partial class NativeAssistantPage
             parentWithNewSource["toolSteps"] = JsonSerializer.SerializeToElement(MessageSteps(_messages[parentMessage]).Append(newestParentSource));
             _messages[parentMessage] = JsonSerializer.SerializeToElement(parentWithNewSource, JsonOptions);
             RenderMessagesNow(); UpdateLayout();
-            if (ActiveSubagent?.AgentId != newest || _sourcesSignature == sourceSignature || SourcesPanel.Children.Count != 2
-                || !AutomationProperties.GetName((Button)SourcesPanel.Children[0]).StartsWith("Neue Hauptagent-Quelle ·", StringComparison.Ordinal)
+            if (ActiveSubagent?.AgentId != newest || _sourcesSignature == sourceSignature || SourcesPanel.Children.Count != 1
                 || !_sessionSources[owner].Any(action => action.Id == "overview-parent-source-after-navigation"))
-                throw new InvalidOperationException("A parent web action must refresh the latest source while a child tab stays active.");
+                throw new InvalidOperationException("A parent web action must refresh the compact source count while a child tab stays active.");
+            VerifySourcesSummarySmoke(sourceCount + 1);
             OpenSubagentOverview(); UpdateLayout();
             if (ActiveSubagent is not null || Composer.Text != draft)
                 throw new InvalidOperationException("Opening the overview from a child must restore the parent composer.");

@@ -653,10 +653,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             + string.Join("|", Items(data, "documents").Concat(Items(data, "attachments")).Select(item => S(item, "id")));
         if (_sourcesSignature == signature) return;
         _sourcesSignature = signature;
-        SourcesPanel.Children.Clear();
         RenderWebSources();
-        SourcesEmpty.Visibility = SourcesPanel.Children.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        SourcesPanel.Visibility = SourcesPanel.Children.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
     }
 
     private string SourceMessageSignature(JsonElement message)
