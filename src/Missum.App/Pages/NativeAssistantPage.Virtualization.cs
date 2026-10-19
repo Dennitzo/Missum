@@ -24,7 +24,7 @@ public sealed partial class NativeAssistantPage
         internal IReadOnlyList<LogicalBlock> Blocks { get; set; } = [];
     }
 
-    private bool UpdateVirtualMessageBlocks(string id, JsonElement message, StackPanel body)
+    private bool UpdateVirtualMessageBlocks(string id, JsonElement message, StackPanel body, StackPanel footer)
     {
         var content = MessageContent(message);
         var steps = MessageSteps(message);
@@ -40,7 +40,6 @@ public sealed partial class NativeAssistantPage
                 disclosureStates.Remove("thinkingIndicator");
                 disclosureStates["tool:" + previousThinking.ReasoningId] = previousThinking.IsExpanded;
             }
-            body.Children.Clear();
             _messageBlocks[id] = new(StringComparer.Ordinal);
             var panel = new NativeVirtualizingBlockPanel
             {
@@ -68,11 +67,17 @@ public sealed partial class NativeAssistantPage
                 }
                 else { blocks[key] = view; _conversationSelection?.TrackSelectionWithin(view); }
             };
-            body.Children.Add(panel);
             _virtualMessages[id] = state = new(panel);
             foreach (var (key, expanded) in disclosureStates) state.ExpandedSteps[key] = expanded;
         }
-        if (!body.Children.Contains(state.Panel)) { body.Children.Clear(); body.Children.Add(state.Panel); }
+        if (!body.Children.Contains(state.Panel))
+        {
+            // The footer is outside the recycling window. Replace only message
+            // content so its buttons never unload/reparent during this transition.
+            foreach (var child in body.Children.Where(child => !ReferenceEquals(child, footer)).ToArray())
+                body.Children.Remove(child);
+            body.Children.Insert(0, state.Panel);
+        }
         var version = MessageVersion(message);
         if (state.Version == version)
         {
@@ -205,7 +210,6 @@ public sealed partial class NativeAssistantPage
             if (IsResumableAssistantStatus(message)) result.Add(new("continuation", "continuation", "", 0, default));
             if (S(message, "status") is "streaming" or "pending") result.Add(new("thinkingIndicator", "thinking", "", 0, default));
         }
-        result.Add(new("footer", "footer", "", 0, default));
         var activeTextKeys = result.Where(block => block.Kind == "text")
             .Select(block => block.Key[..block.Key.LastIndexOf(':')]).ToHashSet(StringComparer.Ordinal);
         foreach (var stale in indices.Keys.Where(key => !activeTextKeys.Contains(key)).ToArray()) indices.Remove(stale);
@@ -304,7 +308,7 @@ public sealed partial class NativeAssistantPage
                 _thinkingIndicators[id] = thinking;
                 view = thinking;
                 break;
-            default: view = MessageActionsFor(id, message); break;
+            default: throw new InvalidOperationException("Unbekannter virtueller Nachrichtenblock: " + block.Kind);
         }
         UpdateVirtualBlock(view, id, message, block);
         return view;
@@ -335,7 +339,6 @@ public sealed partial class NativeAssistantPage
                     && S(step, "tool") is not ("assistant.reasoning" or "assistant.progress" or "assistant.narration" or "assistant.steering"));
                 break;
             case StackPanel header when block.Kind == "header": UpdateMessageHeader(header, message); break;
-            default: if (block.Kind == "footer") UpdateMessageActions(id, message); break;
         }
     }
 

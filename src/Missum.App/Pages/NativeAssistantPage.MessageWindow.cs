@@ -65,10 +65,11 @@ public sealed partial class NativeAssistantPage
 
     private bool LoadMessageBlocksOnUpwardScroll()
     {
+        if (LoadPromptTimelineGapNearViewport()) return true;
         var offset = ConversationScroll.VerticalOffset;
         var upward = offset < _lastConversationOffset - .5;
         _lastConversationOffset = offset;
-        if (!upward || _messageWindowLoading || _scrollNewSessionToLatest) return false;
+        if (!upward || _messageWindowLoading || _scrollNewSessionToLatest || HasPromptTimelineTarget) return false;
         foreach (var (id, blocks) in _messageBlocks)
         {
             if (!DisplayMessages.ContainsKey(id) || !blocks.TryGetValue("earlierBlocks", out var button)) continue;

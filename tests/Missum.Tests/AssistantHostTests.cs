@@ -23,6 +23,37 @@ public sealed class AssistantHostTests
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
     [Fact]
+    public async Task PromptTimelineReadsPassHostProtocolAndStayClientScoped()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var chats = fixture.Environment.Get<IChatRepository>();
+        var session = await chats.CreateSessionAsync("Timeline host route");
+        var messages = new List<ChatMessage>();
+        for (var index = 0; index < 40; index++)
+            messages.Add(await chats.AddMessageAsync(session.Id, index % 2 == 0 ? ChatRole.User : ChatRole.Assistant,
+                "Message " + index, MessageStatus.Completed));
+        var owner = new Events(); var peer = new Events();
+        using var subscription = fixture.Host.Subscribe("timeline-peer", peer.Emit);
+        foreach (var type in new[] { "conversation.prompts", "conversation.promptPage" })
+        {
+            Assert.True(AssistantProtocol.IsIncomingTypeAllowed(type));
+            Assert.True(AssistantProtocol.IsOutgoingTypeAllowed(type));
+            Assert.True(AssistantProtocol.IsClientScopedOutgoingType(type));
+        }
+        await fixture.Host.HandleAsync("desktop", Envelope("conversation.prompts", new { sessionId = session.Id }), owner.Emit);
+        await fixture.Host.HandleAsync("desktop", Envelope("conversation.promptPage", new
+            { sessionId = session.Id, promptId = messages[2].Id, navigationIntent = 17 }), owner.Emit);
+        Assert.DoesNotContain(owner.Items, item => item.Type == "host.error");
+        var indexEvent = Assert.Single(owner.Items, item => item.Type == "conversation.prompts").Payload;
+        Assert.Equal(20, indexEvent.GetProperty("prompts").GetArrayLength());
+        var pageEvent = Assert.Single(owner.Items, item => item.Type == "conversation.promptPage").Payload;
+        Assert.Equal(17, pageEvent.GetProperty("navigationIntent").GetInt64());
+        Assert.Equal(24, pageEvent.GetProperty("messages").GetArrayLength());
+        Assert.Contains(pageEvent.GetProperty("messages").EnumerateArray(), message => message.GetProperty("id").GetGuid() == messages[2].Id);
+        Assert.Empty(peer.Items);
+    }
+
+    [Fact]
     public async Task BrowserReasoningChoicePersistsOnPcRefreshesMatchingNativeAndPreservesFrozenRuns()
     {
         await using var fixture = await Fixture.CreateAsync(reasoning: true);

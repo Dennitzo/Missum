@@ -86,6 +86,10 @@ public interface IConversationSnapshotRepository
     Task<ConversationSnapshot?> GetAsync(Guid sessionId, CancellationToken cancellationToken = default);
     Task<ConversationPage?> GetPageAsync(Guid sessionId, int pageSize = 24, ConversationCursor? before = null,
         CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<ConversationPrompt>> GetPromptsAsync(Guid sessionId, CancellationToken cancellationToken = default) =>
+        Task.FromResult<IReadOnlyList<ConversationPrompt>>([]);
+    Task<ConversationPage?> GetPromptPageAsync(Guid sessionId, Guid promptId, CancellationToken cancellationToken = default) =>
+        Task.FromResult<ConversationPage?>(null);
     Task<AssistantToolStep?> GetToolStepAsync(Guid sessionId, Guid messageId, string stepId,
         CancellationToken cancellationToken = default);
     async Task<AssistantToolStep?> GetSubagentReceiptAsync(Guid sessionId, Guid messageId, string agentId,

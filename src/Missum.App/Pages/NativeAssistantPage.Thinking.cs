@@ -81,6 +81,7 @@ public sealed partial class NativeAssistantPage
         var now = DateTimeOffset.UtcNow;
         var visible = IsLoaded && BodyGrid.Visibility == Visibility.Visible;
         var follow = visible && ShouldFollowConversationTail;
+        ConversationViewportAnchor? viewportAnchor = null;
         var changed = false;
         foreach (var (id, view) in _thinkingIndicators)
         {
@@ -92,24 +93,23 @@ public sealed partial class NativeAssistantPage
             var show = processing ? active && inConversation && !view.HasBlockingTool
                 : _thinkingStates.TryGetValue(id, out var state)
                     && state.ShouldShow(id, active, view.HasBlockingTool, inConversation, now);
-            view.SetThinkingVisible(show && !processing);
             var wasVisible = view.Visibility == Visibility.Visible;
+            var phaseHeightChanged = show && view.IsExpanded && view.IsProcessing != processing;
+            if (!follow && (show != wasVisible || phaseHeightChanged))
+                viewportAnchor ??= CaptureConversationViewportAnchor();
+            view.SetThinkingVisible(show && !processing);
             // Reuse the token snapshot captured by the once-per-second header tick
             // so visibility changes do not bypass the thinking label's throttling.
             var tokens = _messageBlocks.TryGetValue(id, out var blocks) && blocks.TryGetValue("header", out var header)
                 && header.Tag is double displayedTokens ? displayedTokens : DisplayContextUsed;
             if (show && (refreshTokens || !wasVisible || view.IsProcessing != processing))
                 view.UpdatePhase(phase, tokens);
+            if (phaseHeightChanged) changed = true;
             if (show == wasVisible) continue;
             view.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
             changed = true;
         }
-        if (changed && follow)
-        {
-            ConversationContent.UpdateLayout();
-            ConversationScroll.ChangeView(null, ConversationScroll.ScrollableHeight, null, true);
-            SyncOuterScroll();
-        }
+        if (changed) QueueConversationLayoutProjection(follow, viewportAnchor);
     }
 
     private sealed class ThinkingIndicatorView : Grid

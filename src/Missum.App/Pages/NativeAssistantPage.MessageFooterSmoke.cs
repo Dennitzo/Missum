@@ -38,6 +38,22 @@ public sealed partial class NativeAssistantPage
         var copies = new List<string>();
         var commands = new List<(string Action, string? Message)>();
         var currentPlayback = Guid.NewGuid();
+        StackPanel? monitoredFooter = null;
+        var footerLoads = 0;
+        var footerUnloads = 0;
+        var footerLifecycleTrace = new List<string>();
+        void ObserveFooterLifecycle(string kind, object sender, RoutedEventArgs args)
+        {
+            var ownSender = ReferenceEquals(sender, monitoredFooter);
+            var ownSource = args.OriginalSource is null || ReferenceEquals(args.OriginalSource, monitoredFooter);
+            if (footerLifecycleTrace.Count < 16)
+                footerLifecycleTrace.Add($"{kind}:sender={ownSender};source={args.OriginalSource?.GetType().Name ?? "null"};ownSource={ownSource}");
+            if (!ownSender || !ownSource) return;
+            if (kind == "loaded") footerLoads++;
+            else footerUnloads++;
+        }
+        RoutedEventHandler onFooterLoaded = (sender, args) => ObserveFooterLifecycle("loaded", sender, args);
+        RoutedEventHandler onFooterUnloaded = (sender, args) => ObserveFooterLifecycle("unloaded", sender, args);
         void Device(bool active, bool paused) => _messageSpeechMicrophoneSmokeSnapshot = new(
             false, false, active, active, paused, paused ? "Vorlesen pausiert" : active ? "Vorlesen läuft" : "Bereit",
             active ? at : null, null, "", "Supertonic-3 F5", null);
@@ -103,6 +119,60 @@ public sealed partial class NativeAssistantPage
             var copy = footer.Copy;
             var read = footer.Read;
             var pause = footer.Pause;
+            var footerBody = MessageBody(_messageViews[id].View);
+            var footerRoot = footerBody.XamlRoot;
+            bool FooterHasVisualBinding() => footerRoot is not null && ReferenceEquals(panel.XamlRoot, footerRoot)
+                && panel.ActualHeight >= 28 && panel.ActualWidth > 0 && ReferenceEquals(panel.Parent, footerBody);
+            // An initial IsLoaded flag can toggle during attachment even while
+            // the measured footer and its parent remain in the same XamlRoot.
+            // Use the actual visual binding, after the initial layout/UI turn,
+            // as the baseline. The first unpaired Loaded may arrive later;
+            // any Unloaded or subsequent Loaded still indicates a reattach.
+            LayoutRoot.UpdateLayout();
+            var loadedBaseline = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (!DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
+                () => loadedBaseline.TrySetResult(true)))
+                throw new InvalidOperationException("Die Footer-Ladebasis konnte nicht im UI-Dispatcher vorbereitet werden.");
+            await loadedBaseline.Task.WaitAsync(_lifetime.Token);
+            var stableVisualPasses = 0;
+            await WaitForPagingSmokeAsync(() =>
+            {
+                LayoutRoot.UpdateLayout();
+                stableVisualPasses = FooterHasVisualBinding() ? stableVisualPasses + 1 : 0;
+                return stableVisualPasses >= 3;
+            }, "Der Nachrichten-Footer wurde nicht stabil im nativen Fenster angeordnet.");
+            footerLoads = footerUnloads = 0;
+            monitoredFooter = panel;
+            panel.Loaded += onFooterLoaded;
+            panel.Unloaded += onFooterUnloaded;
+            void AssertStableFooter(string phase)
+            {
+                if (!ReferenceEquals(panel, _messageActionViews[id].Panel) || !ReferenceEquals(copy, footer.Copy)
+                    || !ReferenceEquals(read, footer.Read) || !ReferenceEquals(pause, footer.Pause)
+                    || !ReferenceEquals(footerBody, MessageBody(_messageViews[id].View))
+                    || !ReferenceEquals(panel.Parent, footerBody) || !ReferenceEquals(footerBody.Children.LastOrDefault(), panel)
+                    || !FooterHasVisualBinding() || footerLoads > 1 || footerUnloads != 0)
+                    throw new InvalidOperationException("Der Nachrichten-Footer hat beim Streaming oder Recycling seine Controls, seinen Parent oder seine Ladebindung verloren: "
+                        + JsonSerializer.Serialize(new
+                        {
+                            phase, owner, currentSession = _session, messageId = id,
+                            panelRetained = ReferenceEquals(panel, _messageActionViews[id].Panel),
+                            copyRetained = ReferenceEquals(copy, footer.Copy), readRetained = ReferenceEquals(read, footer.Read),
+                            pauseRetained = ReferenceEquals(pause, footer.Pause),
+                            bodyRetained = ReferenceEquals(footerBody, MessageBody(_messageViews[id].View)),
+                            parentMatches = ReferenceEquals(panel.Parent, footerBody), parentType = panel.Parent?.GetType().Name,
+                            lastChildMatches = ReferenceEquals(footerBody.Children.LastOrDefault(), panel),
+                            footerIndex = footerBody.Children.IndexOf(panel), children = footerBody.Children.Count,
+                            loaded = panel.IsLoaded, footerLoads, footerUnloads, footerLifecycleTrace,
+                            actualHeight = panel.ActualHeight, actualWidth = panel.ActualWidth,
+                            visualRootMatches = ReferenceEquals(panel.XamlRoot, footerRoot),
+                            visibility = panel.Visibility.ToString(), copyEnabled = copy.IsEnabled, readEnabled = read.IsEnabled,
+                            pauseEnabled = pause.IsEnabled, textLength = footer.Text.Length,
+                            bodyLoaded = footerBody.IsLoaded, bubbleLoaded = _messageViews[id].View.IsLoaded,
+                            virtualized = _virtualMessages.ContainsKey(id),
+                        }, JsonOptions));
+            }
+            AssertStableFooter("initial-loaded-footer");
             if (panel.Visibility != Visibility.Visible || copy.IsEnabled || read.IsEnabled)
                 throw new InvalidOperationException("Ein leerer Streaming-Footer muss sichtbar sein, ohne noch fehlenden Text vorlesen oder kopieren zu können.");
             const string firstText = "Die Antwort erscheint bereits während des AI-Laufs.";
@@ -116,6 +186,7 @@ public sealed partial class NativeAssistantPage
                     || panel.Visibility != Visibility.Visible || !copy.IsEnabled || !read.IsEnabled
                     || footer.Text != text || panel.Parent != MessageBody(_messageViews[id].View))
                     throw new InvalidOperationException("Ein Textdelta hat den sichtbaren Nachrichten-Footer ersetzt oder seine Aktionen deaktiviert.");
+                AssertStableFooter("normal-text-delta");
                 ((IInvokeProvider)new ButtonAutomationPeer(copy).GetPattern(PatternInterface.Invoke)).Invoke();
                 if (copies.LastOrDefault() != text)
                     throw new InvalidOperationException("Kopieren im Streaming-Footer verwendet nicht den aktuell angezeigten Antwortstand.");
@@ -183,6 +254,53 @@ public sealed partial class NativeAssistantPage
             await Invoke(otherFooter.Read, 8);
             if (commands[^1] != ("stop", other) || !_running || S(DisplayMessages[id], "status") != "streaming")
                 throw new InvalidOperationException("Automatisches Vorlesen stoppen hat die aktive AI-Antwort verändert.");
+
+            // Insert a new content block before the same footer, then cross the
+            // real virtualization threshold and recycle both ends of the content.
+            ApplyEvent("chat.delta", JsonSerializer.SerializeToElement(new { sessionId = owner, messageId,
+                toolStep = new { id = "footer-read", tool = "coding.read", status = "completed", contentOffset = latestText.Length,
+                    outputJson = "{\"path\":\"example.py\",\"content\":\"x = 2\"}" } }));
+            RenderMessagesNow(); UpdateLayout(); AssertStableFooter("normal-tool-inserted");
+            var largeText = latestText + "\n\n" + @"Die Gleichung lautet \(F = m \cdot a\)." + "\n\n"
+                + string.Join("\n\n", Enumerable.Range(0, 240).Select(index =>
+                    $"Abschnitt {index}: Dieser Absatz prüft den stabilen Nachrichtenfooter außerhalb der recycelten Inhaltsblöcke."));
+            _scrollNewSessionToLatest = true;
+            ApplyEvent("chat.delta", JsonSerializer.SerializeToElement(new { sessionId = owner, messageId,
+                contentReplace = largeText, updatedAt = DateTimeOffset.UtcNow }));
+            RenderMessagesNow();
+            await WaitForPagingSmokeAsync(() => _virtualMessages.TryGetValue(id, out var virtualized)
+                && !virtualized.Preparing && virtualized.Version == MessageVersion(DisplayMessages[id]) && virtualized.Panel.IsLoaded,
+                "Die Streaming-Nachricht wurde nicht als virtuelles Inhaltsfenster geladen.");
+            OnScrollToBottom(this, new RoutedEventArgs()); RefreshVirtualConversationViewport();
+            await WaitForPagingSmokeAsync(() => _messageBlocks[id].ContainsKey("thinkingIndicator"),
+                "Das virtuelle Nachrichtenende wurde im Footer-Smoke nicht realisiert.");
+            AssertStableFooter("virtualization-transition");
+            _scrollNewSessionToLatest = false;
+            ConversationScroll.ChangeView(null, 0, null, true); RefreshVirtualConversationViewport();
+            await WaitForPagingSmokeAsync(() => _messageBlocks[id].ContainsKey("header")
+                && !_messageBlocks[id].ContainsKey("thinkingIndicator"),
+                "Das virtuelle Nachrichtenende wurde beim Hochscrollen nicht recycelt.");
+            AssertStableFooter("virtual-content-head");
+            _scrollNewSessionToLatest = true;
+            OnScrollToBottom(this, new RoutedEventArgs()); RefreshVirtualConversationViewport();
+            await WaitForPagingSmokeAsync(() => _messageBlocks[id].ContainsKey("thinkingIndicator"),
+                "Das virtuelle Nachrichtenende wurde nach dem Recycling nicht wieder geladen.");
+            var streamedTail = " Ein weiterer Satz erscheint nach dem Recycling.";
+            ApplyEvent("chat.delta", JsonSerializer.SerializeToElement(new { sessionId = owner, messageId,
+                contentAppend = streamedTail, updatedAt = DateTimeOffset.UtcNow }));
+            RenderMessagesNow();
+            await WaitForPagingSmokeAsync(() => !_virtualMessages[id].Preparing
+                && _virtualMessages[id].Version == MessageVersion(DisplayMessages[id]),
+                "Der nächste Streaming-Abschnitt wurde nach dem Recycling nicht übernommen.");
+            AssertStableFooter("virtual-content-tail-streaming");
+            var virtualState = _virtualMessages[id];
+            if (virtualState.Blocks.Any(block => block.Kind == "footer") || virtualState.Panel.RealizedCount > 256
+                || footerBody.Children.Count != 2 || !ReferenceEquals(footerBody.Children[0], virtualState.Panel)
+                || footer.Text != largeText + streamedTail)
+                throw new InvalidOperationException("Der Footer gehört weiterhin zum Recyclingfenster oder sein Textstand ist veraltet.");
+            ((IInvokeProvider)new ButtonAutomationPeer(copy).GetPattern(PatternInterface.Invoke)).Invoke();
+            if (copies.LastOrDefault() != largeText + streamedTail)
+                throw new InvalidOperationException("Der stabile virtuelle Nachrichten-Footer kopiert den Text einschließlich LaTeX nicht vollständig.");
             await File.WriteAllTextAsync(Path.Combine(App.Current.DataDirectory, "native-message-footer-streaming-validation.json"),
                 JsonSerializer.Serialize(new
                 {
@@ -191,11 +309,20 @@ public sealed partial class NativeAssistantPage
                     manualReadDuringStreaming = true, pauseResumeStop = true, automaticPlaybackControlled = true,
                     queueControlIdsWithoutHighlights = true, stoppedPlaybackEventsIgnored = true,
                     otherClientIgnored = true, controlsBelongToCorrectMessage = true, aiRunRemainsActive = true,
+                    stableParentAcrossVirtualization = true, footerOutsideRecyclingWindow = true, footerLoads, footerUnloads,
+                    delayedInitialLoadedAllowed = true, footerLifecycleTrace,
+                    footerSurvivesContentRecycling = true, virtualCopyPreservesLatex = true,
+                    realizedContentBlocks = virtualState.Panel.RealizedCount,
                     clipboardModified = false, audioDeviceStarted = false, aiRequests = 0,
                 }), _lifetime.Token);
         }
         finally
         {
+            if (monitoredFooter is not null)
+            {
+                monitoredFooter.Loaded -= onFooterLoaded;
+                monitoredFooter.Unloaded -= onFooterUnloaded;
+            }
             _messageCopySmokeAdapter = previousCopy; _messageSpeechSmokeAdapter = previousSpeech;
             _messageSpeechMicrophoneSmokeSnapshot = previousMicrophone;
             _messageSpeechSessionId = previousSession; _messageSpeechMessageId = previousMessage;

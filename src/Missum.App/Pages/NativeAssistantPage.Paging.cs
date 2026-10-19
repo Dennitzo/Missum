@@ -29,7 +29,7 @@ public sealed partial class NativeAssistantPage
     private async Task LoadEarlierMessagesAsync()
     {
         if (_disposed || _historyLoading || !_historyHasMore || _historyBefore.ValueKind != JsonValueKind.Object
-            || ActiveSubagent is not null || _conversationSelection?.IsSelecting == true) return;
+            || ActiveSubagent is not null || HasPromptTimelineTarget || _conversationSelection?.IsSelecting == true) return;
         _historyLoading = true;
         var generation = _historyGeneration;
         try { await CommandAsync("conversation.page", new { sessionId = _session, before = _historyBefore }); }
@@ -54,8 +54,11 @@ public sealed partial class NativeAssistantPage
 
     private bool ApplyPagedHistoryEvent(string type, JsonElement data)
     {
-        if (type is not ("conversation.page" or "conversation.blocks.page" or "subagent.blocks.page" or "tool.details")) return false;
+        if (type is not ("conversation.prompts" or "conversation.promptPage" or "conversation.page" or "conversation.blocks.page" or "subagent.blocks.page" or "tool.details")) return false;
         if (S(data, "sessionId") != _session.ToString()) return true;
+        if (type == "conversation.prompts") { ApplyPromptTimelineIndex(data); return true; }
+        if (type == "conversation.promptPage" && (!HasPromptTimelineTarget || S(data, "promptId") != _promptNavigation!.Id
+            || !long.TryParse(S(data, "navigationIntent"), out var intent) || intent != _promptNavigation.Intent)) return true;
         if (type is "conversation.blocks.page" or "subagent.blocks.page")
         {
             var id = S(data, "messageId");
@@ -71,25 +74,38 @@ public sealed partial class NativeAssistantPage
             }
             return true;
         }
-        if (type == "conversation.page")
+        if (type is "conversation.page" or "conversation.promptPage")
         {
             // Anchor the actual visible control, so late image/math layout does not jump the viewport.
             FrameworkElement? anchor = null;
             double oldY = 0;
-            foreach (var element in MessagesPanel.Children.OfType<FrameworkElement>())
+            foreach (var element in MessagesPanel.Children.OfType<FrameworkElement>().Where(_ => !HasPromptTimelineTarget))
             {
                 var y = element.TransformToVisual(ConversationContent).TransformPoint(new Windows.Foundation.Point()).Y;
                 if (y + element.ActualHeight >= ConversationScroll.VerticalOffset)
                 { anchor = element; oldY = y; break; }
             }
             var offset = ConversationScroll.VerticalOffset;
-            foreach (var message in Items(data, "messages"))
+            var incomingPage = Items(data, "messages").ToArray();
+            var previousOldest = _messages.Values.Select(PromptMessageCursor).Where(cursor => cursor is not null).Cast<Missum.Core.Models.ConversationCursor>()
+                .OrderBy(cursor => cursor.CreatedAt).ThenBy(cursor => cursor.Id.ToString("D"), StringComparer.Ordinal).FirstOrDefault();
+            var previousHasMore = _historyHasMore;
+            ObservePromptTimelinePage(data, incomingPage, type == "conversation.promptPage");
+            foreach (var message in incomingPage)
             {
                 var id = S(message, "id");
                 if (!_messages.ContainsKey(id)) _messages[id] = message.Clone();
             }
             ObserveToolStepWindows(data);
             ApplyHistoryPageCursor(data);
+            if (_messages.Count > 0)
+            {
+                var first = _messages.Values.OrderBy(MessageCreatedAt).ThenBy(message => S(message, "id"), StringComparer.Ordinal).First();
+                _historyBefore = JsonSerializer.SerializeToElement(new { createdAt = MessageCreatedAt(first), id = S(first, "id") });
+                if (previousOldest is not null && incomingPage.Length > 0 && ComparePromptCursor(PromptMessageCursor(first)!, previousOldest) >= 0)
+                    _historyHasMore = previousHasMore;
+                if (int.TryParse(S(data, "totalMessages"), out var total) && _messages.Count >= total) _historyHasMore = false;
+            }
             foreach (var child in Items(data, "subagents")) ObserveSubagentSnapshot(child);
             _scrollNewSessionToLatest = false;
             RenderMessagesNow();

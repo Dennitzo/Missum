@@ -63,7 +63,12 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         {
             ReadFromMenuFactory = CreateReadFromMenu,
             UiProjectionCallback = (phase, projection) => RunUiCallback(phase, projection),
-            SelectionChangedCallback = () => _messagesDirty = true,
+            SelectionChangedCallback = () =>
+            {
+                _messagesDirty = true;
+                if (_conversationSelection?.IsSelecting == true && CanFollowConversationTail)
+                    OnToolDisclosureInteraction();
+            },
             CopyFailed = message => ShowError(message),
         };
         ResetChangesSummary();
@@ -81,14 +86,16 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         {
             if (_scrollNewSessionToLatest) QueueSessionScrollToLatest();
         };
+        // Observe wheel intent before the outer ScrollViewer's default handler.
+        // Hover, copying, and tiny touchpad fragments do not leave follow mode.
+        ConversationContent.AddHandler(UIElement.PointerWheelChangedEvent,
+            new PointerEventHandler(OnConversationPointerWheelChanged), true);
         ConversationScroll.AddHandler(UIElement.PointerWheelChangedEvent,
-            new PointerEventHandler((_, _) => _scrollNewSessionToLatest = false), true);
-        ConversationScroll.AddHandler(UIElement.PointerPressedEvent,
-            new PointerEventHandler((_, _) => _scrollNewSessionToLatest = false), true);
+            new PointerEventHandler(OnConversationScrollSurfaceWheelChanged), true);
         ConversationScroll.AddHandler(UIElement.PreviewKeyDownEvent,
-            new Microsoft.UI.Xaml.Input.KeyEventHandler((_, _) => _scrollNewSessionToLatest = false), true);
+            new Microsoft.UI.Xaml.Input.KeyEventHandler(OnConversationScrollKeyDown), true);
         OuterChatScrollBar.AddHandler(UIElement.PointerPressedEvent,
-            new PointerEventHandler((_, _) => _scrollNewSessionToLatest = false), true);
+            new PointerEventHandler((_, _) => OnToolDisclosureInteraction()), true);
         _coordinator = App.Current.GetService<AssistantCoordinator>();
         _assistantHost = App.Current.GetService<AssistantHost>();
         _hostSubscription = _assistantHost.Subscribe("desktop", (type, payload, id) => EmitAsync(type, payload, id));
@@ -218,7 +225,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             try
             {
                 if (_disposed) return;
-                if (type is "conversation.page" or "conversation.blocks.page" or "subagent.blocks.page" or "tool.details" && !_navigationState.IsCurrent(generation)) return;
+                if (type is "conversation.page" or "conversation.promptPage" or "conversation.blocks.page" or "subagent.blocks.page" or "tool.details" && !_navigationState.IsCurrent(generation)) return;
                 if (NativeNavigationState.IsFullSnapshot(type)
                     && (!_navigationState.CanApplySnapshot(generation,
                         Guid.TryParse(S(json, "activeSessionId"), out var activeSession) ? activeSession : Guid.Empty,
@@ -483,6 +490,9 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     private readonly Dictionary<string, (JsonElement Source, string Signature)> _sourceMessageSignatures = new(StringComparer.Ordinal);
     private void ResetConversationViews()
     {
+        CancelPromptTimelineNavigation();
+        _autoScrollGesture.Reset();
+        _pendingConversationViewportAnchor = null;
         _readingToolConversation = null;
         _conversationScrollIntent++;
         _toolDetailGeneration++;
@@ -522,7 +532,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             _sessionScrollQueued = false;
             if (_disposed || session != _session || owner != ConversationViewKey
                 || scrollIntent != _conversationScrollIntent || !_scrollNewSessionToLatest || !CanFollowConversationTail) return;
-            OnScrollToBottom(this, new RoutedEventArgs());
+            ScrollConversationToLatest();
         }));
     }
 
@@ -539,6 +549,8 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         }
         RenderSources(_snapshot);
         var follow = ShouldFollowConversationTail;
+        if (follow) _scrollNewSessionToLatest = true;
+        var viewportAnchor = follow ? null : CaptureConversationViewportAnchor();
         var index = 0;
         foreach (var stale in _messageViews.Keys.Where(id => !IsKnownConversationMessage(id)).ToArray())
         { MessagesPanel.Children.Remove(_messageViews[stale].View); _messageViews.Remove(stale); _renderedMessageSources.Remove(stale); _messageBlocks.Remove(stale); _messageActionViews.Remove(stale); _thinkingIndicators.Remove(stale); _thinkingStates.Remove(stale); }
@@ -604,24 +616,27 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             _renderedMessageSources[id] = message;
             _renderedMessageVersions[id] = MessageVersion(message);
         }
-        if (deferLayout) QueueConversationLayoutProjection(follow);
+        if (deferLayout) QueueConversationLayoutProjection(follow, viewportAnchor);
         else
         {
             ConversationContent.UpdateLayout();
             RenderPromptTimeline(layoutCurrent: true);
-            if (follow) ConversationScroll.ChangeView(null, ConversationScroll.ScrollableHeight, null, true);
+            if (follow) ScrollConversationToLatest();
+            else RestoreConversationViewportAnchor(viewportAnchor);
             QueueSessionScrollToLatest();
             SyncOuterScroll();
         }
     }
 
     private bool _conversationLayoutProjectionQueued;
-    private void QueueConversationLayoutProjection(bool follow)
+    private ConversationViewportAnchor? _pendingConversationViewportAnchor;
+    private void QueueConversationLayoutProjection(bool follow, ConversationViewportAnchor? viewportAnchor = null)
     {
+        if (follow) _scrollNewSessionToLatest = true;
+        _pendingConversationViewportAnchor ??= viewportAnchor;
         if (_conversationLayoutProjectionQueued) return;
         _conversationLayoutProjectionQueued = true;
         var owner = ConversationViewKey;
-        var offset = ConversationScroll.VerticalOffset;
         var scrollIntent = _conversationScrollIntent;
         // Streaming must not synchronously force measure/arrange of the entire
         // scientific conversation. Use the completed framework layout instead.
@@ -629,15 +644,17 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         {
             ConversationContent.LayoutUpdated -= Project;
             _conversationLayoutProjectionQueued = false;
+            var anchor = _pendingConversationViewportAnchor;
+            _pendingConversationViewportAnchor = null;
             if (_disposed || owner != ConversationViewKey) return;
             RunUiCallback("Conversation.LayoutProjection", () =>
             {
                 RefreshVirtualConversationViewport();
                 RenderPromptTimeline(layoutCurrent: true);
-                if (follow && CanFollowConversationTail && scrollIntent == _conversationScrollIntent
-                    && !_messageWindowLoading && _conversationSelection?.IsSelecting != true
-                    && Math.Abs(ConversationScroll.VerticalOffset - offset) < 1)
-                    ConversationScroll.ChangeView(null, ConversationScroll.ScrollableHeight, null, true);
+                if (ShouldFollowConversationTail && scrollIntent == _conversationScrollIntent
+                    && !_messageWindowLoading && _conversationSelection?.IsSelecting != true)
+                    ScrollConversationToLatest();
+                else RestoreConversationViewportAnchor(anchor);
                 QueueSessionScrollToLatest();
                 SyncOuterScroll();
             });
@@ -755,6 +772,12 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             SyncOuterScroll();
             RefreshVirtualConversationViewport();
             UpdatePromptTimelineSelection();
+            if (_resumeTailOnManualScroll && ConversationScroll.ScrollableHeight - ConversationScroll.VerticalOffset <= 2
+                && _conversationSelection?.IsSelecting != true)
+            { _readingToolConversation = null; _scrollNewSessionToLatest = true; _resumeTailOnManualScroll = false; }
+            if (!e.IsIntermediate) _resumeTailOnManualScroll = false;
+            if (ShouldFollowConversationTail && ConversationScroll.ScrollableHeight - ConversationScroll.VerticalOffset > 1)
+                QueueSessionScrollToLatest();
             if (!e.IsIntermediate && !LoadMessageBlocksOnUpwardScroll() && ConversationScroll.VerticalOffset < 240 && !_scrollNewSessionToLatest)
                 _ = LoadEarlierMessagesAsync();
         });
@@ -777,14 +800,17 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     private void OnOuterScrollChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
     {
         if (_syncingScroll) return;
-        _scrollNewSessionToLatest = false;
-        _conversationScrollIntent++;
-        if (e.NewValue > e.OldValue && e.NewValue >= ConversationScroll.ScrollableHeight - 1) _readingToolConversation = null;
+        OnToolDisclosureInteraction();
+        if (e.NewValue > e.OldValue && e.NewValue >= ConversationScroll.ScrollableHeight - 1)
+        { _readingToolConversation = null; _scrollNewSessionToLatest = true; }
         ConversationScroll.ChangeView(null, e.NewValue, null, true);
     }
     private void OnScrollToBottom(object sender, RoutedEventArgs e)
     {
         _readingToolConversation = null;
+        _scrollNewSessionToLatest = true;
+        _autoScrollGesture.Reset();
+        _resumeTailOnManualScroll = false;
         _conversationScrollIntent++;
         ConversationContent.UpdateLayout();
         ConversationScroll.ChangeView(null, ConversationScroll.ScrollableHeight, null, true);
@@ -798,13 +824,15 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         // consume their own scrolling; blank inspector/header surfaces scroll chat.
         var point = e.GetCurrentPoint(AssistantFrame);
         if (point.Properties.IsHorizontalMouseWheel || point.Properties.MouseWheelDelta == 0) return;
-        _scrollNewSessionToLatest = false;
-        _conversationScrollIntent++;
         var modifiers = e.KeyModifiers;
         if (modifiers.HasFlag(VirtualKeyModifiers.Control) || modifiers.HasFlag(VirtualKeyModifiers.Shift)) return;
         var scroll = ReviewScroll.Visibility == Visibility.Visible ? ReviewScroll : ConversationScroll;
         for (var source = e.OriginalSource as DependencyObject; source is not null && source != AssistantFrame; source = VisualTreeHelper.GetParent(source))
             if (source == scroll || source == Composer || source == OuterChatScrollBar || source == ComposerChipsScroll) return;
+        if (scroll == ConversationScroll && TryHandleFollowingWheel(point.Properties.MouseWheelDelta * 1.2))
+        { e.Handled = true; return; }
+        if (scroll == ConversationScroll)
+        { OnToolDisclosureInteraction(); _resumeTailOnManualScroll = point.Properties.MouseWheelDelta < 0; }
         var offset = Math.Clamp(scroll.VerticalOffset - point.Properties.MouseWheelDelta * 1.2, 0, scroll.ScrollableHeight);
         if (Math.Abs(offset - scroll.VerticalOffset) < .1) return;
         scroll.ChangeView(null, offset, null, true);
@@ -1242,6 +1270,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     }
     public void Dispose()
     {
+        CancelPromptTimelineNavigation();
         if (_disposed) return;
         if (_captionSubscribed) App.Current.GetService<SystemAudioCaptionService>().Changed -= OnNativeCaptionChanged;
         _ = StopNativeDictationAsync();

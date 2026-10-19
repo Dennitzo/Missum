@@ -53,7 +53,11 @@ public sealed partial class NativeAssistantPage
 
     private void UpdateMessageBlocks(string messageId, JsonElement message, StackPanel panel)
     {
-        if (UpdateVirtualMessageBlocks(messageId, message, panel)) return;
+        // The message owns its footer, independently of mutable/recycled content.
+        // Keep its visual parent and controls throughout streaming and virtualization.
+        var messageActions = MessageActionsFor(messageId, message);
+        if (!panel.Children.Contains(messageActions)) panel.Children.Add(messageActions);
+        if (UpdateVirtualMessageBlocks(messageId, message, panel, messageActions)) return;
         if (!_messageBlocks.TryGetValue(messageId, out var blocks)) _messageBlocks[messageId] = blocks = new(StringComparer.Ordinal);
         var desired = new List<FrameworkElement>();
         var content = MessageContent(message);
@@ -275,9 +279,9 @@ public sealed partial class NativeAssistantPage
             desired.Add(indicator);
         }
         else { _thinkingIndicators.Remove(messageId); _thinkingStates.Remove(messageId); _modelPhases.Remove(messageId); }
-        if (MessageActionsFor(messageId, message) is { } messageActions) desired.Add(messageActions);
         var desiredSet = desired.ToHashSet();
-        foreach (var old in panel.Children.OfType<FrameworkElement>().Where(child => !desiredSet.Contains(child)).ToArray()) panel.Children.Remove(old);
+        foreach (var old in panel.Children.OfType<FrameworkElement>()
+            .Where(child => !ReferenceEquals(child, messageActions) && !desiredSet.Contains(child)).ToArray()) panel.Children.Remove(old);
         for (var i = 0; i < desired.Count; i++)
         {
             if (i < panel.Children.Count && ReferenceEquals(panel.Children[i], desired[i])) continue;

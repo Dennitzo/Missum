@@ -9,17 +9,29 @@ public sealed partial class AssistantCoordinator
         Func<string, object, string?, Task> emit, CancellationToken token)
     {
         if (await HandleSourceReadAsync(envelope, emit, token).ConfigureAwait(false)) return true;
-        if (envelope.Type == "conversation.page")
+        if (envelope.Type == "conversation.prompts")
+        {
+            var sessionId = GetRequiredGuid(envelope.Payload, "sessionId");
+            var prompts = await Task.Run(() => conversationSnapshots.GetPromptsAsync(sessionId, token), token).ConfigureAwait(false);
+            await emit("conversation.prompts", new { sessionId, prompts }, envelope.RequestId).ConfigureAwait(false);
+            return true;
+        }
+        if (envelope.Type is "conversation.page" or "conversation.promptPage")
         {
             var sessionId = GetRequiredGuid(envelope.Payload, "sessionId");
             var before = envelope.Payload.TryGetProperty("before", out var cursor) && cursor.ValueKind == JsonValueKind.Object
                 ? cursor.Deserialize<ConversationCursor>(JsonSerializerOptions.Web) : null;
-            var page = await Task.Run(() => conversationSnapshots.GetPageAsync(sessionId, before: before, cancellationToken: token), token).ConfigureAwait(false)
+            var targeted = envelope.Type == "conversation.promptPage";
+            var promptId = targeted ? GetRequiredGuid(envelope.Payload, "promptId") : Guid.Empty;
+            var navigationIntent = envelope.Payload.TryGetProperty("navigationIntent", out var intent) && intent.TryGetInt64(out var parsedIntent) ? parsedIntent : 0;
+            var timelineGap = envelope.Payload.TryGetProperty("timelineGap", out var gap) && gap.ValueKind == JsonValueKind.String ? gap.GetString() : null;
+            var page = await Task.Run(() => targeted ? conversationSnapshots.GetPromptPageAsync(sessionId, promptId, token)
+                    : conversationSnapshots.GetPageAsync(sessionId, before: before, cancellationToken: token), token).ConfigureAwait(false)
                 ?? throw new InvalidOperationException("Die Sitzung ist nicht mehr vorhanden.");
             var auxiliary = await PrepareDisplayedPageAsync(page, token).ConfigureAwait(false);
-            await emit("conversation.page", new
+            await emit(envelope.Type, new
             {
-                sessionId, page.HasMore, page.Before, page.TotalMessages, toolStepWindows = page.ToolStepWindows,
+                sessionId, promptId, navigationIntent, timelineGap, page.HasMore, page.Before, page.TotalMessages, toolStepWindows = page.ToolStepWindows,
                 messages = page.Conversation.Messages.Select(message => ToMessageDto(message,
                     page.Conversation.Artifacts.GetValueOrDefault(message.Id), page.ToolStepWindows?.GetValueOrDefault(message.Id))),
                 auxiliaryMessages = auxiliary.Select(message => new { id = message.Id, toolSteps = message.ToolSteps ?? [] }),

@@ -13,6 +13,21 @@ public sealed partial class NativeAssistantPage
     // Returning to A must not reuse a footer still parented to A's discarded bubble.
     private async Task<int> VerifyMessageNavigationSmokeAsync()
     {
+        if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_RESPONSIVENESS") == "scrolling")
+        {
+            var scrollingSnapshot = _snapshot.Clone();
+            var priorScrollingFixture = _selectionInputSmokeActive;
+            _selectionInputSmokeActive = true;
+            try
+            {
+                await VerifyConversationAutoScrollSmokeAsync(scrollingSnapshot);
+                await VerifyStreamingMessageFooterSmokeAsync(scrollingSnapshot);
+                await VerifyThinkingIndicatorSmokeAsync(scrollingSnapshot);
+                await VerifyPromptTimelineLazyNavigationSmokeAsync(scrollingSnapshot);
+            }
+            finally { _selectionInputSmokeActive = priorScrollingFixture; }
+            return 0;
+        }
         if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_RESPONSIVENESS") == "expansion")
         {
             await VerifyToolExpansionDefaultsSmokeAsync(_snapshot.Clone());
