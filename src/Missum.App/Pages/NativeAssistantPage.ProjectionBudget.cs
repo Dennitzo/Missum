@@ -68,7 +68,9 @@ public sealed partial class NativeAssistantPage
         if (_virtualMessages.Remove(id, out var virtualized)) virtualized.Generation++;
         _liveMessageProjections.Remove(id); _renderedMessageVersions.Remove(id);
         _renderedMessageSources.Remove(id); _sourceMessageSignatures.Remove(id);
-        _messageBlocks.Remove(id); _messageActionViews.Remove(id);
+        _messageBlocks.Remove(id);
+        foreach (var actionId in _messageActionViews.Where(pair => pair.Value.OwnerMessageId == id).Select(pair => pair.Key).ToArray())
+            _messageActionViews.Remove(actionId);
         _thinkingIndicators.Remove(id); _thinkingStates.Remove(id); _modelPhases.Remove(id);
         _toolStepWindows.Remove(id);
         _messageAuxiliarySteps.Remove(id);

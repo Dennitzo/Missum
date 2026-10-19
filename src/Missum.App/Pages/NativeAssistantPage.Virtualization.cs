@@ -55,6 +55,7 @@ public sealed partial class NativeAssistantPage
                 if (!_messageBlocks.TryGetValue(id, out var blocks)) return;
                 if (view is null)
                 {
+                    if (blocks.TryGetValue(key, out var recycled)) ReleaseSteeringPromptActions(id, recycled);
                     if (key == "thinkingIndicator" && blocks.TryGetValue(key, out var previous)
                         && _thinkingIndicators.TryGetValue(id, out var indicator) && ReferenceEquals(previous, indicator))
                         _thinkingIndicators.Remove(id);
@@ -223,7 +224,8 @@ public sealed partial class NativeAssistantPage
     private NativeVirtualizingBlockPanel.Row VirtualRow(string messageId, JsonElement message, LogicalBlock block)
     {
         object version = block.Kind is "text" or "steering" ? block.Text : block.Kind is "tool" or "subagent" ? block.Data : MessageVersion(message);
-        var estimate = block.Kind switch { "text" or "steering" => Math.Max(38, block.Text.Length / 85d * 26 + 12), "artifacts" => 360, _ => 44 };
+        var estimate = block.Kind switch { "text" => Math.Max(38, block.Text.Length / 85d * 26 + 12),
+            "steering" => Math.Max(38, block.Text.Length / 85d * 26 + 12) + 36, "artifacts" => 360, _ => 44 };
         return new(block.Key, version, estimate,
             () => CreateVirtualBlock(messageId, message, block), view => UpdateVirtualBlock(view, messageId, message, block));
     }
@@ -242,7 +244,7 @@ public sealed partial class NativeAssistantPage
                 view = new ContentControl { Content = NativeVirtualizingTextView.CreateSourceBlock(block.Text, anchor),
                     Tag = anchor, HorizontalContentAlignment = HorizontalAlignment.Stretch };
                 break;
-            case "steering": view = CreateSteeringPromptView(); break;
+            case "steering": view = CreateSteeringPromptView(id, message, block.Data); break;
             case "artifacts": view = new NativeArtifactLinks(block.Artifacts ?? [], Guid.TryParse(id, out var guid) ? guid : null); break;
             case "subagent":
                 var lifecycle = new SubagentLifecycleView(PlanetIdentities.GetOrAssign);
@@ -310,7 +312,7 @@ public sealed partial class NativeAssistantPage
                 text.Tag = anchor;
                 NativeVirtualizingTextView.UpdateSourceBlock(text, block.Text, anchor);
                 break;
-            case Border prompt when block.Kind == "steering": ((TextBlock)prompt.Child).Text = block.Text; break;
+            case Border prompt when block.Kind == "steering": UpdateSteeringPromptView(prompt, id, message, block.Data); break;
             case ToolStepView tool: tool.Update(block.Data, block.Number); break;
             case SubagentLifecycleView child: child.Update(block.Data, FindSubagentForStep(block.Data)); break;
             case NativeArtifactLinks artifacts: artifacts.UpdateArtifacts(block.Artifacts ?? []); break;

@@ -1,8 +1,12 @@
 using System.Text.Json;
+using Missum.App.Services;
 using Missum.Core.Contracts;
 using Missum.Core.Models;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Automation.Peers;
+using Microsoft.UI.Xaml.Automation.Provider;
 
 namespace Missum.App.Pages;
 
@@ -56,6 +60,7 @@ public sealed partial class NativeAssistantPage
                     throw new InvalidOperationException("Stored steering could not be refreshed.");
                 RenderMessagesNow();
                 await WaitForSteeringBubbleAsync(assistant.Id.ToString(), "steering-" + inputId, prompt);
+                await VerifySteeringFooterSmokeAsync(assistant.Id, "steering-" + inputId, prompt);
                 if (_pendingUserMessages.ContainsKey(pending) || _messages.ContainsKey(pending))
                     throw new InvalidOperationException("Stored steering did not replace its pending prompt exactly once.");
                 if (_virtualMessages.ContainsKey(assistant.Id.ToString()) != large)
@@ -64,12 +69,27 @@ public sealed partial class NativeAssistantPage
                 await CommandAsync("session.open", new { sessionId = session.Id });
                 RenderMessagesNow();
                 await WaitForSteeringBubbleAsync(assistant.Id.ToString(), "steering-" + inputId, prompt);
+                await VerifySteeringFooterSmokeAsync(assistant.Id, "steering-" + inputId, prompt);
+                if (large)
+                {
+                    _scrollNewSessionToLatest = false;
+                    ConversationScroll.ChangeView(null, 0, null, true);
+                    await Task.Delay(80, _lifetime.Token);
+                    _virtualMessages[assistant.Id.ToString()].Panel.RefreshViewport();
+                    var footerId = MissumAiAssistantService.SteeringPromptMessageId(assistant.Id, "steering-" + inputId).ToString("D");
+                    if (_messageActionViews.ContainsKey(footerId))
+                        throw new InvalidOperationException("An offscreen steering footer retained its recycled visual controls.");
+                    await WaitForSteeringBubbleAsync(assistant.Id.ToString(), "steering-" + inputId, prompt);
+                    await VerifySteeringFooterSmokeAsync(assistant.Id, "steering-" + inputId, prompt);
+                }
                 await SaveMathPreviewAsync(LayoutRoot, large ? "native-steering-virtual.png" : "native-steering-short.png");
             }
             await File.WriteAllTextAsync(Path.Combine(directory, "native-steering-prompt-validation.json"), JsonSerializer.Serialize(new
             {
                 processId = Environment.ProcessId, pendingRetainedUntilText = true, compactDatabaseReload = true,
                 shortMessageBubble = true, virtualMessageBubble = true, sessionReload = true, emptySubagentsHidden = true,
+                copyExactPrompt = true, readExactPrompt = true, independentSpeechIdentity = true, pauseResumeStop = true,
+                recycledFooterRestored = true,
             }), _lifetime.Token);
         }
         finally
@@ -89,7 +109,7 @@ public sealed partial class NativeAssistantPage
             OnScrollToBottom(this, new RoutedEventArgs());
             if (_messageBlocks.TryGetValue(messageId, out var blocks)
                 && blocks.TryGetValue("steering:" + stepId, out var view)
-                && view is Border { Child: TextBlock text } && text.Text == prompt)
+                && view is Border { Child: StackPanel body } && body.Children[0] is TextBlock text && text.Text == prompt)
                 return;
             await Task.Delay(50, _lifetime.Token);
         }
@@ -102,5 +122,82 @@ public sealed partial class NativeAssistantPage
                 blocks = pair.Value.Blocks.Select(block => block.Key), pair.Value.Panel.RealizedCount }),
         }), _lifetime.Token);
         throw new InvalidOperationException("The stored steering prompt was not rendered as a user bubble.");
+    }
+
+    private async Task VerifySteeringFooterSmokeAsync(Guid ownerId, string stepId, string prompt)
+    {
+        var id = MissumAiAssistantService.SteeringPromptMessageId(ownerId, stepId).ToString("D");
+        if (!_messageActionViews.TryGetValue(id, out var footer) || footer.OwnerMessageId != ownerId.ToString("D")
+            || footer.SteeringStepId != stepId || footer.IsAssistant || footer.IsStreaming || footer.Text != prompt
+            || footer.Panel.Parent is not StackPanel body || body.Children[0] is not TextBlock text || text.Text != prompt
+            || !footer.Copy.IsEnabled || !footer.Read.IsEnabled || footer.Panel.Visibility != Visibility.Visible)
+            throw new InvalidOperationException("A steering prompt lacks its own enabled user-message footer.");
+        RefreshAllMessageActions();
+        if (!_messageActionViews.ContainsKey(id))
+            throw new InvalidOperationException("The inline footer was evicted because its synthetic identity is not a database message.");
+        var previousCopy = _messageCopySmokeAdapter;
+        var previousSpeech = _messageSpeechSmokeAdapter;
+        var previousDevice = _messageSpeechMicrophoneSmokeSnapshot;
+        var previousRunning = _running;
+        var previousSpeaking = _speaking;
+        var previousSession = _messageSpeechSessionId;
+        var previousMessage = _messageSpeechMessageId;
+        var previousPlayback = _messageSpeechPlaybackId;
+        var previousAutomatic = _messageSpeechAutomatic;
+        var previousStop = _messageSpeechStopRequested;
+        var previousStatus = _messageSpeechStatus;
+        var playback = Guid.NewGuid();
+        string? copied = null;
+        var commands = new List<string>();
+        void Device(bool active, bool paused) => _messageSpeechMicrophoneSmokeSnapshot = new(
+            false, false, active, active, paused, "Isolierte Vorlesesteuerung", null, null, "", "Supertonic-3 F5", null);
+        try
+        {
+            _running = true;
+            _messageCopySmokeAdapter = value => copied = value;
+            _messageSpeechSmokeAdapter = (action, source) =>
+            {
+                if (source != id) throw new InvalidOperationException("A steering footer addressed a different message.");
+                commands.Add(action);
+                var paused = action == "pause" && !MessageFooterMicrophone.IsSpeechPaused;
+                Device(action != "stop", paused);
+                ApplyEvent("speech.status", JsonSerializer.SerializeToElement(new
+                { sessionId = _session, sourceMessageId = id, playbackId = playback, ownerClientId = "desktop", active = action != "stop", automatic = false }));
+                return Task.CompletedTask;
+            };
+            Device(false, false);
+            ((IInvokeProvider)new ButtonAutomationPeer(footer.Copy).GetPattern(PatternInterface.Invoke)).Invoke();
+            if (copied != prompt) throw new InvalidOperationException("The steering footer copied assistant text instead of the prompt.");
+            async Task Invoke(Button button)
+            {
+                ((IInvokeProvider)new ButtonAutomationPeer(button).GetPattern(PatternInterface.Invoke)).Invoke();
+                await Task.Delay(30, _lifetime.Token);
+                if (!_running || !_messageActionViews.ContainsKey(id))
+                    throw new InvalidOperationException("A steering speech action stopped generation or removed the footer.");
+            }
+            await Invoke(footer.Read);
+            if (!IsMessageSpeechSource(footer) || footer.Pause.Visibility != Visibility.Visible || !footer.Pause.IsEnabled
+                || AutomationProperties.GetName(footer.Read) != "Vorlesen beenden"
+                || IsMessageSpeechSource(_messageActionViews[ownerId.ToString("D")]))
+                throw new InvalidOperationException("Steering speech controls were assigned to the containing assistant answer.");
+            await Invoke(footer.Pause);
+            if (AutomationProperties.GetName(footer.Pause) != "Vorlesen fortsetzen")
+                throw new InvalidOperationException("Steering speech cannot be resumed after pausing.");
+            await Invoke(footer.Pause);
+            await Invoke(footer.Read);
+            if (_speaking || footer.Pause.Visibility != Visibility.Collapsed || string.Join(',', commands) != "start,pause,pause,stop")
+                throw new InvalidOperationException("The steering footer did not complete its independent speech controls.");
+        }
+        finally
+        {
+            _messageCopySmokeAdapter = previousCopy;
+            _messageSpeechSmokeAdapter = previousSpeech;
+            _messageSpeechMicrophoneSmokeSnapshot = previousDevice;
+            _running = previousRunning; _speaking = previousSpeaking;
+            _messageSpeechSessionId = previousSession; _messageSpeechMessageId = previousMessage;
+            _messageSpeechPlaybackId = previousPlayback; _messageSpeechAutomatic = previousAutomatic;
+            _messageSpeechStopRequested = previousStop; _messageSpeechStatus = previousStatus;
+            RefreshAllMessageActions();
+        }
     }
 }

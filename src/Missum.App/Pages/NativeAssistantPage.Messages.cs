@@ -185,8 +185,8 @@ public sealed partial class NativeAssistantPage
                 if (string.IsNullOrWhiteSpace(detail)) { ArtifactsAfterStep(id); continue; }
                 var steeringKey = "steering:" + id;
                 if (!blocks.TryGetValue(steeringKey, out var steeringView))
-                    blocks[steeringKey] = steeringView = CreateSteeringPromptView();
-                ((TextBlock)((Border)steeringView).Child).Text = detail;
+                    blocks[steeringKey] = steeringView = CreateSteeringPromptView(messageId, message, step);
+                UpdateSteeringPromptView((Border)steeringView, messageId, message, step);
                 desired.Add(steeringView);
                 ArtifactsAfterStep(id);
                 continue;
@@ -282,16 +282,13 @@ public sealed partial class NativeAssistantPage
             if (i < panel.Children.Count && ReferenceEquals(panel.Children[i], desired[i])) continue;
             panel.Children.Remove(desired[i]); panel.Children.Insert(i, desired[i]);
         }
-        foreach (var stale in blocks.Where(pair => !desiredSet.Contains(pair.Value)).Select(pair => pair.Key).ToArray()) blocks.Remove(stale);
+        foreach (var stale in blocks.Where(pair => !desiredSet.Contains(pair.Value)).Select(pair => pair.Key).ToArray())
+        {
+            ReleaseSteeringPromptActions(messageId, blocks[stale]);
+            blocks.Remove(stale);
+        }
         RefreshThinkingIndicators();
     }
-
-    private static Border CreateSteeringPromptView() => new()
-    {
-        HorizontalAlignment = HorizontalAlignment.Right,
-        Padding = new(16, 12, 16, 12), CornerRadius = new(18), Background = ThemeBrush("MissumLayerStrongBrush", 45),
-        Child = new TextBlock { TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true, FontSize = 16 },
-    };
 
     private static JsonElement[] VisibleNativeMessageArtifacts(JsonElement[] artifacts)
     {

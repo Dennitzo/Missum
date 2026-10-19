@@ -164,6 +164,9 @@ public sealed partial class NativeAssistantPage
         if (!Guid.TryParse(view.MessageId, out var messageId)) { ShowMessageActionError("Die gespeicherte Nachricht hat keine gültige ID."); return; }
         if (_messageSpeechSmokeAdapter is { } smoke && IsMessageFooterSmoke)
         { await smoke("start", view.MessageId); return; }
+        // A virtual footer can leave the viewport while preceding audio stops.
+        // The clicked source survives recycling and navigation independently.
+        var source = new MessageSpeechSource(view.OwnerMessageId, view.SteeringStepId, view.Text, view.IsStreaming);
         _messageSpeechActionBusy = true;
         _messageSpeechStopRequested = false;
         RefreshAllMessageActions();
@@ -187,7 +190,7 @@ public sealed partial class NativeAssistantPage
             _speaking = true;
             var request = ++_messageSpeechRequest;
             RefreshAllMessageActions();
-            _messageSpeechTask = ReadPersistedMessageAsync(service, view.SessionId, messageId, request, cancellation, excerpt, expectedUpdatedAt);
+            _messageSpeechTask = ReadPersistedMessageAsync(service, view.SessionId, messageId, request, cancellation, source, excerpt, expectedUpdatedAt);
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested || _messageSpeechStopRequested) { }
         catch (Exception exception) when (exception is not OutOfMemoryException) { ShowMessageActionError(exception.Message); }
@@ -199,15 +202,14 @@ public sealed partial class NativeAssistantPage
     }
 
     private async Task ReadPersistedMessageAsync(MissumAiAssistantService service, Guid sessionId, Guid messageId,
-        long request, CancellationTokenSource cancellation, string? excerpt = null, DateTimeOffset? expectedUpdatedAt = null)
+        long request, CancellationTokenSource cancellation, MessageSpeechSource source,
+        string? excerpt = null, DateTimeOffset? expectedUpdatedAt = null)
     {
         try
         {
             // Supplying the stored message ID makes the service validate and load its persisted text.
             var childMessage = _subagents.Values.Any(child => child.SessionId == sessionId && child.Messages.ContainsKey(messageId.ToString()));
-            var explicitText = _messageActionViews.TryGetValue(messageId.ToString(), out var sourceView)
-                && (childMessage || sourceView.IsStreaming) ? excerpt ?? sourceView.Text : null;
-            await service.SpeakAsync(sessionId, explicitText: explicitText, sourceMessageId: childMessage ? null : messageId,
+            await SpeakMessageActionSourceAsync(service, source, sessionId, messageId, childMessage, excerpt, expectedUpdatedAt,
                 update => DispatchMessageActionAsync(() =>
                 {
                     if (request != _messageSpeechRequest || IsStoppedMessageSpeechPlayback(update.PlaybackId)
@@ -230,7 +232,7 @@ public sealed partial class NativeAssistantPage
                     if (progress.State == SpeechPlaybackState.Paused) _messageSpeechStatus = "Vorlesen pausiert";
                     RefreshAllMessageActions();
                 }),
-                cancellationToken: cancellation.Token, messageExcerpt: childMessage ? null : excerpt, expectedMessageUpdatedAt: childMessage ? null : expectedUpdatedAt);
+                cancellation.Token);
         }
         catch (OperationCanceledException) { }
         catch (Exception exception) when (exception is not OutOfMemoryException)
@@ -248,6 +250,19 @@ public sealed partial class NativeAssistantPage
             if (ReferenceEquals(_messageSpeechCancellation, cancellation)) _messageSpeechCancellation = null;
             cancellation.Dispose();
         }
+    }
+
+    private static Task SpeakMessageActionSourceAsync(MissumAiAssistantService service, MessageSpeechSource source,
+        Guid sessionId, Guid messageId, bool childMessage, string? excerpt, DateTimeOffset? expectedUpdatedAt,
+        Func<MissumAiSpeechUpdate, Task> update, Func<SpeechPlaybackProgress, Task> progress, CancellationToken cancellationToken)
+    {
+        if (source.SteeringStepId is { } stepId)
+            return service.SpeakSteeringPromptAsync(sessionId, Guid.Parse(source.OwnerMessageId), stepId, source.Text,
+                update, progress, cancellationToken);
+        var explicitText = childMessage || source.IsStreaming ? excerpt ?? source.Text : null;
+        return service.SpeakAsync(sessionId, explicitText, childMessage ? null : messageId, update, progress,
+            cancellationToken: cancellationToken, messageExcerpt: childMessage ? null : excerpt,
+            expectedMessageUpdatedAt: childMessage ? null : expectedUpdatedAt);
     }
 
     private async Task StopMessageSpeechAsync()
@@ -358,7 +373,8 @@ public sealed partial class NativeAssistantPage
     private void RefreshAllMessageActions()
     {
         if (_disposed || _messageActionsDisposed) return;
-        foreach (var stale in _messageActionViews.Where(pair => pair.Value.SessionId != _session || !IsKnownConversationMessage(pair.Key)).Select(pair => pair.Key).ToArray())
+        foreach (var stale in _messageActionViews.Where(pair => pair.Value.SessionId != _session
+            || !IsKnownConversationMessage(pair.Value.OwnerMessageId)).Select(pair => pair.Key).ToArray())
             _messageActionViews.Remove(stale);
         foreach (var view in _messageActionViews.Values) RefreshMessageActionView(view);
         SetRunning();
@@ -461,9 +477,14 @@ public sealed partial class NativeAssistantPage
     private readonly record struct MessageActionRenderState(bool HasText, bool IsStreaming, bool CanRead,
         bool Active, bool Busy, bool CanPause, bool IsPaused, bool Automatic, string Status);
 
+    private sealed record MessageSpeechSource(string OwnerMessageId, string? SteeringStepId, string Text, bool IsStreaming);
+
     private sealed class MessageActionView(string messageId)
     {
         public string MessageId { get; } = messageId;
+        public string OwnerMessageId { get; set; } = messageId;
+        public string? SteeringStepId { get; set; }
+        public Panel? SteeringHost { get; set; }
         public Guid SessionId { get; set; }
         public string Text { get; set; } = "";
         public bool IsAssistant { get; set; }

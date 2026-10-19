@@ -10,6 +10,87 @@ namespace Missum.Tests;
 public sealed class SpeechFooterBackendTests
 {
     [Fact]
+    public void SteeringFooterIdentityMatchesHistoryAndSeparatesSiblingPrompts()
+    {
+        var parentId = Guid.Parse("12345678-1234-5678-9abc-def012345678");
+        const string stepId = "steering-user-directed-1";
+        var identity = MissumAiAssistantService.SteeringPromptMessageId(parentId, stepId);
+        // Existing expanded history identities must survive the footer change.
+        Assert.Equal(Guid.Parse("b0e8c20e-f78d-39de-9e08-6106e960deaf"), identity);
+        Assert.Equal(identity, MissumAiAssistantService.SteeringPromptMessageId(parentId, stepId));
+        Assert.NotEqual(identity, MissumAiAssistantService.SteeringPromptMessageId(parentId, "steering-user-directed-2"));
+        Assert.NotEqual(identity, MissumAiAssistantService.SteeringPromptMessageId(Guid.NewGuid(), stepId));
+        var parent = Message(ChatRole.Assistant, MessageStatus.Streaming, "Übergeordnete AI-Antwort.") with
+        {
+            Id = parentId,
+            ToolSteps = [new(stepId, "assistant.steering", "completed", "Neue Richtung.", ContentOffset: 0)],
+        };
+        var prompt = Assert.Single(MissumAiAssistantService.ExpandSteeringHistory([parent]), message => message.Role == ChatRole.User);
+        Assert.Equal(identity, prompt.Id);
+    }
+
+    [Fact]
+    public async Task SteeringSpeechUsesOnlyVisiblePromptAndStartsUnpausedBeforeDatabaseCommit()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        await settings.UpdateAsync(value => value with { MissumAiServerUrl = "http://isolated.invalid:8080" });
+        var requests = new ConcurrentQueue<string>();
+        using var connection = new MissumAiConnectionService(settings, NullLogger<MissumAiConnectionService>.Instance,
+            () => new ForbiddenHttpHandler(requests));
+        using var microphone = new MicrophoneTranscriptionService(connection, settings, NullLogger<MicrophoneTranscriptionService>.Instance);
+        var recent = new RecentActivityService(settings, new ShellViewModel(), NullLogger<RecentActivityService>.Instance);
+        // Deliberately unavailable repositories: the accepted live prompt may not
+        // yet be committed, and a document reference must remain literal text.
+        using var service = new MissumAiAssistantService(connection, null!, null!, null!, null!, null!, null!,
+            null!, null!, null!, null!, null!, microphone, settings, recent, NullLogger<MissumAiAssistantService>.Instance);
+        var sessionId = Guid.NewGuid();
+        var parentId = Guid.NewGuid();
+        const string stepId = "steering-accepted-before-persistence";
+        const string text = "Bitte lies das Dokument aus dem Anhang vor und beachte meine neue Richtung.";
+        var identity = MissumAiAssistantService.SteeringPromptMessageId(parentId, stepId);
+        var updates = new List<MissumAiSpeechUpdate>();
+        var progress = new List<SpeechPlaybackProgress>();
+        using var previousSpeech = microphone.BeginSpeechSession(resetPause: true);
+        Assert.True((await microphone.ToggleSpeechPauseAsync()).IsSpeechPaused);
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        await service.SpeakSteeringPromptAsync(sessionId, parentId, stepId, text,
+            update => { updates.Add(update); return Task.CompletedTask; },
+            playback =>
+            {
+                progress.Add(playback);
+                if (playback.State == SpeechPlaybackState.Buffering)
+                {
+                    Assert.False(microphone.Current.IsSpeechPaused);
+                    Assert.Equal(text, Assert.Single(playback.SourceUnits!).Text);
+                    // Stop after source resolution, before synthesis or playback.
+                    cancellation.Cancel();
+                }
+                return Task.CompletedTask;
+            }, cancellation.Token);
+
+        Assert.Contains(progress, playback => playback.State == SpeechPlaybackState.Buffering);
+        Assert.Contains(progress, playback => playback.State == SpeechPlaybackState.Cancelled);
+        Assert.All(progress, playback =>
+        {
+            Assert.Equal(sessionId, playback.SessionId);
+            Assert.Equal(identity, playback.SourceMessageId);
+            Assert.NotEqual(parentId, playback.SourceMessageId);
+        });
+        Assert.All(updates, update =>
+        {
+            Assert.Equal(sessionId, update.SessionId);
+            Assert.Equal(identity, update.SourceMessageId);
+            Assert.False(update.IsAutomatic);
+        });
+        Assert.Contains(updates, update => !update.IsActive && update.Status == "Abgebrochen");
+        Assert.False(service.IsSpeaking);
+        Assert.Empty(requests);
+    }
+
+    [Fact]
     public async Task AutomaticQueuePublishesStableFooterIdentityBeforeAudioAndRetainsItWhenStopped()
     {
         await using var environment = await TestEnvironment.CreateAsync();

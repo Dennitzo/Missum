@@ -8,6 +8,32 @@ namespace Missum.App.Services;
 
 public sealed partial class MissumAiAssistantService
 {
+    internal static Guid SteeringPromptMessageId(Guid parentId, string stepId)
+    {
+        if (parentId == Guid.Empty) throw new ArgumentException("Die Umlenkung benötigt eine Nachricht.", nameof(parentId));
+        ArgumentException.ThrowIfNullOrWhiteSpace(stepId);
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(parentId.ToString("D") + "/" + stepId));
+        return new Guid(hash.AsSpan(0, 16));
+    }
+
+    internal Task SpeakSteeringPromptAsync(Guid sessionId, Guid parentMessageId, string stepId, string text,
+        Func<MissumAiSpeechUpdate, Task> update, Func<SpeechPlaybackProgress, Task>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (sessionId == Guid.Empty) throw new ArgumentException("Die Umlenkung benötigt eine Sitzung.", nameof(sessionId));
+        ArgumentException.ThrowIfNullOrWhiteSpace(text);
+        ArgumentNullException.ThrowIfNull(update);
+        var promptId = SteeringPromptMessageId(parentMessageId, stepId);
+        CancelAutomaticSpeech();
+        // The UI owns the accepted immutable prompt snapshot, which can precede
+        // its database commit. Never interpret it as a document request or load
+        // the containing assistant message as the speech source.
+        return SpeakCoreAsync(sessionId, text, promptId,
+            status => update(status with { SessionId = sessionId, SourceMessageId = promptId }), progress,
+            null, null, new(text, "Nutzernachricht", null, promptId, MessageContentProfile.General),
+            cancellationToken, resetPauseForDirectSource: true);
+    }
+
     public async Task<RunSteeringAccepted> SteerAsync(Guid sessionId, string prompt, string inputId,
         string? expectedRunId = null, CancellationToken cancellationToken = default)
     {
@@ -80,8 +106,7 @@ public sealed partial class MissumAiAssistantService
 
             ChatMessage Segment(string text, ChatRole role, string suffix)
             {
-                var hash = SHA256.HashData(Encoding.UTF8.GetBytes(message.Id.ToString("D") + "/" + suffix));
-                return message with { Id = new Guid(hash.AsSpan(0, 16)), Content = text, Role = role,
+                return message with { Id = SteeringPromptMessageId(message.Id, suffix), Content = text, Role = role,
                     Status = role == ChatRole.User ? MessageStatus.Completed : message.Status,
                     ToolSteps = [], ContextSummary = null, ToolExecution = null,
                     CreatedAt = message.CreatedAt.AddTicks(ordinal++) };

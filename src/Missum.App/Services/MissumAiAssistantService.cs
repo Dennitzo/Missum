@@ -735,7 +735,8 @@ public sealed partial class MissumAiAssistantService(
         DateTimeOffset? expectedMessageUpdatedAt,
         SpeechSource? directSource,
         CancellationToken cancellationToken,
-        string? messageExcerpt = null)
+        string? messageExcerpt = null,
+        bool resetPauseForDirectSource = false)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         ArgumentNullException.ThrowIfNull(update);
@@ -751,7 +752,7 @@ public sealed partial class MissumAiAssistantService(
         IDisposable? speechSession = null;
         try
         {
-            speechSession = microphone.BeginSpeechSession(resetPause: directSource is null);
+            speechSession = microphone.BeginSpeechSession(resetPause: directSource is null || resetPauseForDirectSource);
             await update(new(
                 true,
                 "Vorlesen wird vorbereitet",
