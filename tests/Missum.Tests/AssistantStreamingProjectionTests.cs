@@ -10,6 +10,74 @@ namespace Missum.Tests;
 
 public sealed class AssistantStreamingProjectionTests
 {
+    [Theory]
+    [InlineData(MissumAiAssistantUpdateKind.Delta)]
+    [InlineData(MissumAiAssistantUpdateKind.Status)]
+    public async Task LiveSourceMetadataArrivesBeforeCommitWithoutLoadingToolBodies(MissumAiAssistantUpdateKind kind)
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        var chats = environment.Get<IChatRepository>();
+        var snapshots = environment.Get<IConversationSnapshotRepository>();
+        var session = await chats.CreateSessionAsync("First live source", ChatMode.ClaudeScience);
+        var message = await chats.AddMessageAsync(session.Id, ChatRole.Assistant, "", MessageStatus.Streaming);
+        var step = new AssistantToolStep("first-source", "web.search", "completed", new string('x', 100_000),
+            InputJson: "{\"query\":\"Originalquelle\"}", OutputJson: JsonSerializer.Serialize(new
+            {
+                nested = JsonSerializer.Serialize(new { results = new[] { new { title = "Originalbeleg", url = "https://example.org/paper",
+                    thumbnailUrl = "https://example.org/thumb", iconUrl = "https://example.org/icon" } } }), body = new string('x', 100_000),
+            }), UpdatedAt: DateTimeOffset.UtcNow);
+        var coordinator = CreateCoordinator(environment, settings, snapshots, environment.Get<IChatArtifactRepository>());
+        JsonElement displayed = default;
+        await coordinator.EmitMissumAiUpdateAsync(new(kind, message with { ToolSteps = [step] }, ToolStep: step), async (type, payload, _) =>
+        {
+            Assert.Equal(kind == MissumAiAssistantUpdateKind.Delta ? "chat.delta" : "status.changed", type);
+            displayed = JsonSerializer.SerializeToElement(payload, JsonSerializerOptions.Web);
+            Assert.Null(await snapshots.GetToolStepAsync(session.Id, message.Id, step.Id));
+            Assert.Empty(await snapshots.GetSourcesAsync(session.Id));
+        }, "source-before-commit");
+        var source = Assert.Single(displayed.GetProperty("sourceUpdates").EnumerateArray());
+        Assert.Equal(step.Id, source.GetProperty("id").GetString());
+        Assert.Equal("Originalbeleg", source.GetProperty("title").GetString());
+        Assert.Equal("https://example.org/paper", source.GetProperty("url").GetString());
+        Assert.Equal(JsonValueKind.Null, displayed.GetProperty("toolStep").GetProperty("inputJson").ValueKind);
+        Assert.Equal(JsonValueKind.Null, displayed.GetProperty("toolStep").GetProperty("outputJson").ValueKind);
+        Assert.True(displayed.GetRawText().Length < 4000);
+        Assert.Same(AssistantCoordinator.LiveSourcesFor(step), AssistantCoordinator.LiveSourcesFor(step));
+        Assert.Null(AssistantCoordinator.LiveSourcesFor(new("not-source", "coding.read", "completed", OutputJson: step.OutputJson)));
+    }
+
+    [Fact]
+    public async Task ChildSourcesSurviveThinDisplayWindowWithoutOpeningItsTranscript()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        var chats = environment.Get<IChatRepository>();
+        var session = await chats.CreateSessionAsync("Child sources", ChatMode.ClaudeScience);
+        var parent = await chats.AddMessageAsync(session.Id, ChatRole.Assistant, "", MessageStatus.Streaming);
+        var at = DateTimeOffset.UtcNow;
+        var child = SubagentChatState.Create(new("parent", "child", "source-agent", "Originalbeleg lesen", "model",
+            Missum.Ai.Contracts.RunState.Running), session.Id, at);
+        var sourceStep = new AssistantToolStep("early-child-source", "web.fetch", "completed",
+            OutputJson: "{\"title\":\"Früher Beleg\",\"url\":\"https://example.org/child\"}", UpdatedAt: at);
+        child = child with { AssistantMessage = child.AssistantMessage with { ToolSteps = new[] { sourceStep }
+            .Concat(Enumerable.Range(0, 80).Select(index => new AssistantToolStep("later-" + index, "coding.read", "completed"))).ToArray() } };
+        var coordinator = CreateCoordinator(environment, settings, environment.Get<IConversationSnapshotRepository>(), environment.Get<IChatArtifactRepository>());
+        JsonElement snapshot = default;
+        await coordinator.EmitMissumAiUpdateAsync(new(MissumAiAssistantUpdateKind.SubagentChanged, parent, Subagent: child),
+            (type, payload, _) =>
+            {
+                if (type == "subagent.snapshot") snapshot = JsonSerializer.SerializeToElement(payload, JsonSerializerOptions.Web);
+                return Task.CompletedTask;
+            }, "child-source");
+        Assert.Equal("https://example.org/child", Assert.Single(snapshot.GetProperty("sourceUpdates").EnumerateArray()).GetProperty("url").GetString());
+        Assert.DoesNotContain(snapshot.GetProperty("messages")[1].GetProperty("toolSteps").EnumerateArray(),
+            step => step.GetProperty("id").GetString() == sourceStep.Id);
+        Assert.Empty(await environment.Get<IConversationSnapshotRepository>().GetSourcesAsync(session.Id));
+    }
+
     [Fact]
     public async Task LiveSteeringPromptIsInlineConversationTextBeforeItsDurableCommit()
     {

@@ -13,6 +13,11 @@ public sealed partial class NativeAssistantPage
     // Returning to A must not reuse a footer still parented to A's discarded bubble.
     private async Task<int> VerifyMessageNavigationSmokeAsync()
     {
+        if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_RESPONSIVENESS") == "expansion")
+        {
+            await VerifyToolExpansionDefaultsSmokeAsync(_snapshot.Clone());
+            return 0;
+        }
         if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_RESPONSIVENESS") == "steering")
         {
             await VerifySteeringPromptSmokeAsync(_snapshot.Clone());
@@ -280,7 +285,9 @@ public sealed partial class NativeAssistantPage
             || Grid.GetColumn(SourcesSummaryCount) != 2
             || SourcesSummaryCount.HorizontalAlignment != HorizontalAlignment.Right
             || SourcesSummaryIcon.Glyph != "\uE774" || SourcesSummaryIcon.Opacity != 1
-            || SourcesSummaryButton.Visibility != Visibility.Visible || !SourcesSummaryButton.IsEnabled)
+            || SourcesPanel.Visibility != (count > 0 ? Visibility.Visible : Visibility.Collapsed)
+            || SourcesSummaryButton.Visibility != Visibility.Visible
+            || SourcesSummaryButton.IsEnabled != (count > 0 && _session != Guid.Empty))
             throw new InvalidOperationException("The output overlay must show only its accessible Quellen summary with a right-aligned primary-color count.");
         VerifyIconBrush(SourcesSummaryIcon.Foreground, "web");
         if (Descendants(Inspector).OfType<TextBlock>().Any(label => label.Text is "Alle anzeigen" or "Noch keine Quellen")

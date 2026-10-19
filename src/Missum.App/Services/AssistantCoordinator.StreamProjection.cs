@@ -33,6 +33,7 @@ public sealed partial class AssistantCoordinator
                 messageId = update.Message.Id, sessionId = update.Message.SessionId,
                 contentAppend = appended, contentReplace = replacement,
                 toolStep = LiveDisplayToolStep(update.ToolStep), toolStepOrdinal = StreamStepOrdinal(update), toolStepCount = update.Message.ToolSteps?.Count,
+                sourceUpdates = LiveSourcesFor(update.ToolStep),
                 revision = projection.Revision,
                 streamGeneration = projection.Generation,
                 updatedAt = update.Message.UpdatedAt,

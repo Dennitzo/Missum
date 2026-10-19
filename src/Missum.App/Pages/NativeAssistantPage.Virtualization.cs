@@ -35,6 +35,11 @@ public sealed partial class NativeAssistantPage
             var disclosureStates = _messageBlocks.TryGetValue(id, out var previousBlocks)
                 ? previousBlocks.Where(pair => pair.Value is ToolStepView or ThinkingIndicatorView).ToDictionary(pair => pair.Key,
                     pair => pair.Value is ToolStepView tool ? tool.IsExpanded : ((ThinkingIndicatorView)pair.Value).IsExpanded, StringComparer.Ordinal) : [];
+            if (previousBlocks?.GetValueOrDefault("thinkingIndicator") is ThinkingIndicatorView { ReasoningId.Length: > 0 } previousThinking)
+            {
+                disclosureStates.Remove("thinkingIndicator");
+                disclosureStates["tool:" + previousThinking.ReasoningId] = previousThinking.IsExpanded;
+            }
             body.Children.Clear();
             _messageBlocks[id] = new(StringComparer.Ordinal);
             var panel = new NativeVirtualizingBlockPanel
@@ -281,7 +286,9 @@ public sealed partial class NativeAssistantPage
                 break;
             case "thinking":
                 var thinkingState = _virtualMessages[id];
-                var thinkingExpanded = thinkingState.ExpandedSteps.GetValueOrDefault(block.Key, _settings.Current.CodingToolStepsExpanded);
+                var latestReasoningId = S(MessageSteps(message).LastOrDefault(step => S(step, "tool") == "assistant.reasoning"), "id");
+                var expansionKey = latestReasoningId.Length > 0 ? "tool:" + latestReasoningId : block.Key;
+                var thinkingExpanded = thinkingState.ExpandedSteps.GetValueOrDefault(expansionKey, _settings.Current.CodingToolStepsExpanded);
                 var thinking = new ThinkingIndicatorView(thinkingExpanded)
                 {
                     DisclosureInvoked = OnToolDisclosureInteraction,
@@ -291,8 +298,8 @@ public sealed partial class NativeAssistantPage
                 };
                 thinking.ExpansionChanged += value =>
                 {
-                    thinkingState.ExpandedSteps[block.Key] = value;
-                    if (thinking.ReasoningId.Length > 0) thinkingState.ExpandedSteps["tool:" + thinking.ReasoningId] = value;
+                    var key = thinking.ReasoningId.Length > 0 ? "tool:" + thinking.ReasoningId : block.Key;
+                    thinkingState.ExpandedSteps[key] = value;
                 };
                 _thinkingIndicators[id] = thinking;
                 view = thinking;
@@ -320,7 +327,10 @@ public sealed partial class NativeAssistantPage
             case ThinkingIndicatorView thinking:
                 var reasoning = MessageSteps(message).LastOrDefault(step => S(step, "tool") == "assistant.reasoning");
                 var history = _messageBlocks.GetValueOrDefault(id)?.GetValueOrDefault("tool:" + S(reasoning, "id"));
-                thinking.UpdateReasoning(S(reasoning, "id"), S(reasoning, "detail"), history);
+                var reasoningId = S(reasoning, "id");
+                var scopedExpansion = _virtualMessages[id].ExpandedSteps.GetValueOrDefault(
+                    reasoningId.Length > 0 ? "tool:" + reasoningId : "thinkingIndicator", _settings.Current.CodingToolStepsExpanded);
+                thinking.UpdateReasoning(reasoningId, S(reasoning, "detail"), history, scopedExpansion);
                 thinking.HasBlockingTool = MessageSteps(message).Any(step => S(step, "status") is "running" or "pending"
                     && S(step, "tool") is not ("assistant.reasoning" or "assistant.progress" or "assistant.narration" or "assistant.steering"));
                 break;

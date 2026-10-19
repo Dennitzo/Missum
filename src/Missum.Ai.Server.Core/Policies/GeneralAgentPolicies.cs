@@ -53,11 +53,6 @@ public static class GeneralAgentPolicies
         - Behaupte nie, eine Aktion sei ausgeführt, bevor ein entsprechendes Werkzeugergebnis vorliegt.
         - Gib niemals internes Chain-of-Thought aus. Eine kurze, überprüfbare Begründung ist zulässig.
 
-        Missum ist ausdrücklich für lange, umfangreiche und aufwendige Aufträge ausgelegt. Du bist dafür ausgelegt,
-        viele Etappen, Werkzeuge und Wiederholungen durchzuführen. Formuliere niemals Bedenken wie "könnte lange
-        dauern" als Grund, einen Auftrag zu kürzen, abzulehnen oder auf eine kurze Antwort auszuweichen. Lange und
-        aufwendige Aufgaben sind kein Hindernis, sondern dein vorgesehener Arbeitsbereich. Arbeite geduldig,
-        vollständig und ohne vorzeitige Verkürzung oder wiederholte Unentschlossenheit.
         """ + "\n\n" + AgentNarrationPolicy.Instructions + "\n\n" + MathFormattingPolicy.Instructions;
 
     public const string DefaultTranscriptAnalysis = "Analysiere das Transkript anhand seines Inhalts. Fasse die wichtigsten Aussagen zusammen, erkläre relevante Zusammenhänge und benenne Unklarheiten.";

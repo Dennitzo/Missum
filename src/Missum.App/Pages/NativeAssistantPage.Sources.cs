@@ -11,6 +11,9 @@ public sealed partial class NativeAssistantPage
         JsonElement? Attachment = null, IReadOnlyDictionary<string, string>? PageTitles = null);
     private readonly Dictionary<Guid, SourceAction[]> _sessionSources = [];
     private readonly Dictionary<Guid, SourceAction[]> _indexedSources = [];
+    // Compact live metadata is independent of paged messages and an older
+    // SQLite read may not replace a source received before its write commit.
+    private readonly Dictionary<Guid, Dictionary<string, SourceAction>> _liveSources = [];
     private readonly HashSet<Guid> _sourceIndexLoading = [];
     private readonly Dictionary<Guid, long> _sourceIndexRevisions = [];
     private readonly HashSet<Guid> _sourceTabs = [];
@@ -45,6 +48,7 @@ public sealed partial class NativeAssistantPage
     private SourceAction[] WebSourceActions()
     {
         var actions = new List<SourceAction>(_indexedSources.GetValueOrDefault(_session, []));
+        if (_liveSources.TryGetValue(_session, out var live)) actions.AddRange(live.Values);
         foreach (var message in OwnerSourceMessages())
         foreach (var step in MessageSteps(message))
         {
@@ -165,8 +169,9 @@ public sealed partial class NativeAssistantPage
     {
         var sources = WebSourceActions(); _sessionSources[_session] = sources;
         var count = SourceCount(sources);
+        SourcesPanel.Visibility = count > 0 ? Visibility.Visible : Visibility.Collapsed;
         SourcesSummaryCount.Text = count.ToString("N0", System.Globalization.CultureInfo.CurrentCulture);
-        SourcesSummaryButton.IsEnabled = _session != Guid.Empty;
+        SourcesSummaryButton.IsEnabled = count > 0 && _session != Guid.Empty;
         var description = count == 1 ? "1 Quelle · Quellenübersicht öffnen" : $"{count:N0} Quellen · Quellenübersicht öffnen";
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(SourcesSummaryButton, description);
         ToolTipService.SetToolTip(SourcesSummaryButton, description);
@@ -221,9 +226,44 @@ public sealed partial class NativeAssistantPage
 
     private bool ApplySourcesEvent(string type, JsonElement data)
     {
-        if (type != "sources.snapshot") return false;
+        if (type != "sources.snapshot")
+        {
+            if (type is "chat.delta" or "status.changed") ObserveLiveSourceMetadata(data);
+            return false;
+        }
         if (!Guid.TryParse(S(data, "sessionId"), out var sessionId)) return true;
-        _indexedSources[sessionId] = Items(data, "sources").GroupBy(item => S(item, "id"), StringComparer.Ordinal)
+        _indexedSources[sessionId] = ReadSourceActions(Items(data, "sources"));
+        if (sessionId == _session)
+        {
+            _sourcesSignature = _sourcesContentSignature = null;
+            RenderSources(_snapshot);
+        }
+        return true;
+    }
+
+    private void ObserveLiveSourceMetadata(JsonElement data)
+    {
+        if (!Guid.TryParse(S(data, "sessionId"), out var sessionId)) return;
+        var incoming = ReadSourceActions(Items(data, "sourceUpdates"));
+        if (incoming.Length == 0) return;
+        if (!_liveSources.TryGetValue(sessionId, out var sources)) _liveSources[sessionId] = sources = new(StringComparer.Ordinal);
+        var changed = false;
+        foreach (var source in incoming)
+        {
+            if (sources.TryGetValue(source.Id, out var previous)
+                && (previous.Time > source.Time || previous.Time == source.Time && previous.Title == source.Title
+                    && previous.Urls.SequenceEqual(source.Urls, StringComparer.OrdinalIgnoreCase)
+                    && previous.Urls.All(url => SourcePageTitle(previous, url) == SourcePageTitle(source, url)))) continue;
+            sources[source.Id] = source;
+            changed = true;
+        }
+        if (!changed || sessionId != _session) return;
+        _sourcesSignature = _sourcesContentSignature = null;
+        RenderSources(_snapshot);
+    }
+
+    private static SourceAction[] ReadSourceActions(IEnumerable<JsonElement> rows) =>
+        rows.GroupBy(item => S(item, "id"), StringComparer.Ordinal)
             .Select(group =>
             {
                 var urls = group.Select(item => S(item, "url")).Where(url => Uri.TryCreate(url, UriKind.Absolute, out var uri)
@@ -238,13 +278,6 @@ public sealed partial class NativeAssistantPage
                         .GroupBy(item => S(item, "url"), StringComparer.OrdinalIgnoreCase)
                         .ToDictionary(page => page.Key, page => S(page.Last(), "title"), StringComparer.OrdinalIgnoreCase));
             }).Where(action => action.Urls.Length > 0).ToArray();
-        if (sessionId == _session)
-        {
-            _sourcesSignature = _sourcesContentSignature = null;
-            RenderSources(_snapshot);
-        }
-        return true;
-    }
 
     private void RenderSourcesContent()
     {

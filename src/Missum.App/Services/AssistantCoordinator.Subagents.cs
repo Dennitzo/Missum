@@ -14,6 +14,10 @@ public sealed partial class AssistantCoordinator
 
     private object ToSubagentDto(SubagentChatState state)
     {
+        var sourceUpdates = (state.PreviousMessages ?? []).Concat([state.AssistantMessage])
+            .SelectMany(message => message.ToolSteps ?? []).SelectMany(step => LiveSourcesFor(step) ?? [])
+            .GroupBy(source => source.Id + ":" + source.Url, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.Last()).ToArray();
         state = state.ForDisplay();
         return new
         {
@@ -23,6 +27,7 @@ public sealed partial class AssistantCoordinator
         canStop = !state.IsLegacyDeepResearch,
         canResume = !state.IsLegacyDeepResearch,
         state.GpuIndex,
+        sourceUpdates,
         state.TranscriptDeferred, state.ParentMessageId,
         planetIndex = _browserPlanetIdentities.Value.GetOrAssign(state.AgentId),
         messages = (state.PreviousMessages ?? []).Select(message => ToMessageDto(message,

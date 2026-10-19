@@ -170,19 +170,30 @@ public sealed partial class NativeAssistantPage
             SetExpanded(initiallyExpanded);
         }
 
-        internal void UpdateReasoning(string id, string text, FrameworkElement? historyView)
+        internal void UpdateReasoning(string id, string text, FrameworkElement? historyView, bool expansionDefault)
         {
             if (!ReferenceEquals(_historyView, historyView) && _historyView is not null) _historyView.Visibility = Visibility.Visible;
             var historyChanged = !ReferenceEquals(_historyView, historyView);
             _historyView = historyView;
-            // The live row is one disclosure throughout the view. A provider's
-            // next reasoning receipt must not undo a manual fold choice.
-            if (id != _reasoningId) { _reasoningId = id; ExpansionChanged?.Invoke(IsExpanded); }
-            if (historyChanged && historyView is ToolStepView history)
-                history.SetExpanded(IsExpanded, forceDetails: false);
-            if (_reasoningText == text) return;
+            var textChanged = _reasoningText != text;
             _reasoningText = text;
-            if (IsExpanded) RenderReasoning();
+            // The live row is reused, but a disclosure belongs to one reasoning
+            // receipt. Keep a manual choice across its deltas, never transfer it
+            // into the next model turn or a newly generated tool step.
+            if (id != _reasoningId)
+            {
+                _reasoningId = id;
+                SetExpanded(historyView is ToolStepView next ? next.IsExpanded : expansionDefault);
+                // The identity may change without changing the boolean. Persist
+                // the new owner as well when the live row is virtualized.
+                ExpansionChanged?.Invoke(IsExpanded);
+            }
+            else
+            {
+                if (historyChanged && historyView is ToolStepView history)
+                    history.SetExpanded(IsExpanded, forceDetails: false);
+                if (textChanged && IsExpanded) RenderReasoning();
+            }
         }
 
         internal void SetThinkingVisible(bool visible)

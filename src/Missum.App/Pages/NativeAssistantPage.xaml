@@ -161,7 +161,7 @@
         <Grid ColumnSpacing="10"><Grid.ColumnDefinitions><ColumnDefinition Width="16"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions><FontIcon Glyph="&#xE8B7;" FontSize="16" Foreground="{ThemeResource MissumIconFolderBrush}"/><TextBlock Grid.Column="1" x:Name="WorkspaceText" Text="Kein Projekt ausgewählt" FontSize="14" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/></Grid>
        </Button>
        <Button x:Name="ChangesSummaryButton" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Background="Transparent" BorderThickness="0" CornerRadius="4" Padding="0,6" MinHeight="32" Click="OnChangesSummaryClick" AutomationProperties.Name="Dateiänderungen überprüfen"/>
-       <StackPanel x:Name="SourcesPanel">
+       <StackPanel x:Name="SourcesPanel" Visibility="Collapsed">
         <Button x:Name="SourcesSummaryButton" IsEnabled="False" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Background="Transparent" BorderThickness="0" CornerRadius="4" Padding="0,6" MinHeight="32" Click="OnSourcesSummaryClick" AutomationProperties.Name="Quellenübersicht öffnen">
          <Grid ColumnSpacing="10">
           <Grid.ColumnDefinitions><ColumnDefinition Width="16"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>

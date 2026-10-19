@@ -1932,6 +1932,7 @@ public sealed partial class AssistantCoordinator(
                     contextUsed = update.ContextUsed,
                     contextSource = update.ContextSource,
                     toolStep = LiveDisplayToolStep(update.ToolStep),
+                    sourceUpdates = LiveSourcesFor(update.ToolStep),
                     toolStepOrdinal = StreamStepOrdinal(update), toolStepCount = update.Message.ToolSteps?.Count,
                     revision = NextStreamRevision(update.Message.Id),
                     streamGeneration = StreamGeneration(update.Message.Id),

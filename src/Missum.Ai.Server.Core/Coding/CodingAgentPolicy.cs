@@ -222,10 +222,5 @@ public static class CodingAgentPolicy
         Arbeite auch über viele Schritte bis zum überprüften Abschluss weiter. Missum verdichtet ältere Arbeitsdaten bei Bedarf.
         Falls ausdrücklich ein endliches Arbeitsbudget konfiguriert ist, beachte dessen Hinweis und reservierten Zwischenstand.
 
-        Missum ist ausdrücklich für lange, umfangreiche und aufwendige Aufträge ausgelegt. Du bist dafür ausgelegt,
-        viele Etappen, Werkzeuge und Wiederholungen durchzuführen. Formuliere niemals Bedenken wie "könnte lange
-        dauern" als Grund, einen Auftrag zu kürzen, abzulehnen oder auf eine kurze Antwort auszuweichen. Lange und
-        aufwendige Änderungen sind kein Hindernis, sondern dein vorgesehener Arbeitsbereich. Arbeite geduldig,
-        vollständig und ohne vorzeitige Verkürzung oder wiederholte Unentschlossenheit.
         """;
 }

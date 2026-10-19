@@ -55,7 +55,73 @@ public sealed class AgentNarrationPolicyTests
         Assert.Contains("offene Punkte oder Grenzen ausdrücklich", policy, StringComparison.Ordinal);
         Assert.Contains("geplante Prüfungen sind keine erfolgten Prüfungen", policy, StringComparison.Ordinal);
         Assert.Contains("statt einer aufgeblähten Checkliste", policy, StringComparison.Ordinal);
-        Assert.True(policy.Length < 2800, $"Shared narration contains {policy.Length} characters.");
+        Assert.True(policy.Length < 4300, $"Shared agent guidance contains {policy.Length} characters.");
+    }
+
+    [Theory]
+    [InlineData(RunMode.General, false, null)]
+    [InlineData(RunMode.Coding, false, null)]
+    [InlineData(RunMode.Coding, true, null)]
+    [InlineData(RunMode.General, false, "compact-v1")]
+    [InlineData(RunMode.Coding, false, "compact-v1")]
+    [InlineData(RunMode.Coding, true, "compact-v1")]
+    public void StagedReadingAndWorkReachMainAndChildAgentsWithoutChangingTheirTask(
+        RunMode mode, bool science, string? contextProfile)
+    {
+        const string task = "Prüfe die vorhandenen Gleichungen und verbessere die Publikation.";
+        var main = new RunRequest(MissumAiProtocol.Version, mode, [new("user", [new("text", task)])],
+            DeepResearch: science, ResearchOptions: science ? new(ProjectId: "research-stages", ProtocolVersion: 2) : null);
+        var child = main with { Subagent = new("parent-run", "child-agent", "Teilaufgabe", "session-stages") };
+
+        foreach (var request in new[] { main, child })
+        {
+            var messages = RunProcessor.CreateInitialMessages(request, mode == RunMode.Coding ? "coding" : "general", [], contextProfile);
+            var policy = Assert.Single(messages, message => message.Role == "system").Content!;
+            Assert.Equal(2, policy.Split(AgentNarrationPolicy.StagedWorkInstructions, StringSplitOptions.None).Length);
+            Assert.Equal(2, policy.Split(AgentNarrationPolicy.ComplexWorkInstructions, StringSplitOptions.None).Length);
+            Assert.Equal(task, Assert.Single(messages, message => message.Role == "user").Content);
+            Assert.Equal(2, messages.Count);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void NewRunAddsMissingSharedRulesWithoutDuplicatingLegacyNarration(bool stagedReadingAlreadyPresent)
+    {
+        var legacyNarration = AgentNarrationPolicy.Instructions[
+            (AgentNarrationPolicy.StagedWorkInstructions.Length + AgentNarrationPolicy.ComplexWorkInstructions.Length + 4)..];
+        var storedRules = stagedReadingAlreadyPresent
+            ? AgentNarrationPolicy.StagedWorkInstructions + "\n\n" + legacyNarration : legacyNarration;
+        var originalSystem = new LmChatMessage("system", "Gespeicherter Projektanfang.\n\n" + storedRules);
+        var previous = new LmChatMessage("assistant", "Bisheriges Ergebnis.");
+        var tool = new LmChatMessage("tool", "Unveränderte Berechnung.", ToolCallId: "calculation");
+        List<LmChatMessage> messages = [originalSystem, previous, tool,
+            new("user", AgentNarrationPolicy.StagedWorkInstructions)];
+
+        AgentNarrationPolicy.EnsureInstructions(messages);
+        var upgraded = messages.ToArray();
+        AgentNarrationPolicy.EnsureInstructions(messages);
+
+        Assert.Equal(upgraded, messages);
+        Assert.StartsWith(originalSystem.Content!, messages[0].Content, StringComparison.Ordinal);
+        Assert.Equal(2, messages[0].Content!.Split(AgentNarrationPolicy.StagedWorkInstructions, StringSplitOptions.None).Length);
+        Assert.Equal(2, messages[0].Content!.Split(AgentNarrationPolicy.ComplexWorkInstructions, StringSplitOptions.None).Length);
+        Assert.Equal(2, messages[0].Content!.Split(legacyNarration, StringSplitOptions.None).Length);
+        Assert.Same(previous, messages[1]);
+        Assert.Same(tool, messages[2]);
+    }
+
+    [Fact]
+    public void ComplexWorkGuidancePreservesMethodChoiceHonestLimitsAndRecoveryInsteadOfEndlessRetries()
+    {
+        var policy = AgentNarrationPolicy.ComplexWorkInstructions;
+        Assert.Contains("ausdrücklich gewünscht", policy, StringComparison.Ordinal);
+        Assert.Contains("nicht allein wegen ihres Aufwands", policy, StringComparison.Ordinal);
+        Assert.Contains("Vorgehen und Aufwand selbst", policy, StringComparison.Ordinal);
+        Assert.Contains("andere sinnvolle Wege", policy, StringComparison.Ordinal);
+        Assert.Contains("Werkzeug- oder Ressourcengrenzen", policy, StringComparison.Ordinal);
+        Assert.Contains("ohne passende Belege", policy, StringComparison.Ordinal);
     }
 
     [Theory]

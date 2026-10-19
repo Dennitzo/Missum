@@ -5,7 +5,30 @@ namespace Missum.Ai.Server.Core.Policies;
 /// <summary>One shared narration contract for ordinary user-facing agent runs.</summary>
 public static class AgentNarrationPolicy
 {
-    public const string Instructions = """
+    public const string StagedWorkInstructions = """
+        Etappenweise arbeiten und lesen: Verschaffe dir zuerst den nötigen Überblick über Ziel und Abhängigkeiten.
+        Bearbeite umfangreiche Aufträge Schritt für Schritt in fachlich zusammenhängenden Etappen, statt alle
+        Teilaufgaben in einem einzigen Schritt zu bearbeiten. Lies dafür gezielt die benötigten Abschnitte,
+        verarbeite ihre Erkenntnisse und prüfe das Teilergebnis, bevor du die nächste Etappe angehst. Lade nicht
+        vorsorglich den gesamten Projektinhalt. Zusammengehörige Änderungen und unabhängige bekannte Leseziele
+        dürfen gebündelt werden. Wähle Umfang und Reihenfolge passend zur Aufgabe; einfache Fragen brauchen
+        keinen künstlichen Etappenplan. Arbeite im selben Lauf bis zum vollständigen Abschluss weiter.
+        """;
+
+    public const string ComplexWorkInstructions = """
+        Komplexe, komplizierte, umfangreiche und lange dauernde Arbeit ist ausdrücklich gewünscht.
+        Beginne geeignete Lösungs- und Prüfwege und verfolge sie geduldig; verwerfe eine sinnvolle Methode
+        nicht allein wegen ihres Aufwands oder ihrer erwarteten Dauer. Verkürze deshalb weder den Auftrag
+        noch die fachlich nötige Prüfung und ersetze die Umsetzung nicht durch bloße Ankündigungen.
+        Wähle Vorgehen und Aufwand selbst passend zum Nutzerziel. Bei ausbleibendem Fortschritt untersuche
+        die Ursache und ziehe andere sinnvolle Wege in Betracht, statt unveränderte Fehlversuche endlos
+        zu wiederholen. Benenne tatsächliche Werkzeug- oder Ressourcengrenzen und fachliche Unsicherheiten
+        ehrlich; behaupte ohne passende Belege weder Erfolg noch einen vollständigen Beweis.
+        """;
+
+    public const string Instructions = StagedWorkInstructions + "\n\n" + ComplexWorkInstructions + "\n\n" + NarrationInstructions;
+
+    private const string NarrationInstructions = """
         Sichtbare Arbeitsbegleitung: Schreibe vor der ersten Arbeitsaktion oder dem ersten Werkzeugaufruf
         eine auftragsbezogene Einleitung in ein bis zwei Sätzen: konkretes Thema, Ziel und nächster Schritt.
         Formuliere sie selbst auch beim Fortsetzen; keine generische Start- oder Fortsetzungsfloskel. Erkläre zwischen
@@ -37,10 +60,15 @@ public static class AgentNarrationPolicy
     internal static void EnsureInstructions(List<LmChatMessage> messages)
     {
         ArgumentNullException.ThrowIfNull(messages);
-        if (messages.Any(message => message.Role == "system"
-            && message.Content?.Contains(Instructions, StringComparison.Ordinal) == true)) return;
-        var index = messages.FindIndex(message => message.Role == "system");
-        if (index < 0) messages.Insert(0, new LmChatMessage("system", Instructions));
-        else messages[index] = messages[index] with { Content = messages[index].Content + "\n\n" + Instructions };
+        // A resumed session can already contain the narration contract. Add only
+        // the missing shared rule at the new run boundary; leave its history intact.
+        foreach (var instruction in new[] { StagedWorkInstructions, ComplexWorkInstructions, NarrationInstructions })
+        {
+            if (messages.Any(message => message.Role == "system"
+                && message.Content?.Contains(instruction, StringComparison.Ordinal) == true)) continue;
+            var index = messages.FindIndex(message => message.Role == "system");
+            if (index < 0) messages.Insert(0, new LmChatMessage("system", instruction));
+            else messages[index] = messages[index] with { Content = messages[index].Content + "\n\n" + instruction };
+        }
     }
 }

@@ -269,7 +269,8 @@ public sealed partial class NativeAssistantPage
             var indicator = (ThinkingIndicatorView)thinking;
             indicator.IsMessageActive = true;
             indicator.HasBlockingTool = hasBlockingTool || liveStatus.Length > 0;
-            indicator.UpdateReasoning(S(latestReasoning, "id"), S(latestReasoning, "detail"), latestReasoningView);
+            indicator.UpdateReasoning(S(latestReasoning, "id"), S(latestReasoning, "detail"), latestReasoningView,
+                _settings.Current.CodingToolStepsExpanded);
             _thinkingIndicators[messageId] = indicator;
             desired.Add(indicator);
         }

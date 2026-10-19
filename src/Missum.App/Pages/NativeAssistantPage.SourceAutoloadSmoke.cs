@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Missum.Core.Contracts;
 using Missum.Core.Models;
+using Missum.App.Services;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 
@@ -29,7 +30,9 @@ public sealed partial class NativeAssistantPage
                 await chats.AddMessageAsync(owner.Id, ChatRole.User, "Späterer Beitrag " + index, MessageStatus.Completed,
                     cancellationToken: _lifetime.Token);
             var empty = await chats.CreateSessionAsync("Andere Sitzung ohne Quellen", _lifetime.Token);
-            return (owner.Id, MessageId: answer.Id, Empty: empty.Id);
+            var emptyAnswer = await chats.AddMessageAsync(empty.Id, ChatRole.Assistant, "", MessageStatus.Streaming,
+                cancellationToken: _lifetime.Token);
+            return (owner.Id, MessageId: answer.Id, Empty: empty.Id, EmptyMessage: emptyAnswer.Id);
         }, _lifetime.Token);
         bool HasSource(string title) => _sessionSources.GetValueOrDefault(_session, [])
             .Any(source => source.PageTitles?.Values.Contains(title, StringComparer.Ordinal) == true);
@@ -67,10 +70,35 @@ public sealed partial class NativeAssistantPage
             if (HasSource("Verspätete Quelle") || HasSource("Neu geladene Quelle"))
                 throw new InvalidOperationException("Eine verspätete Antwort hat Quellen in der falschen Sitzung angezeigt.");
             VerifySourcesSummarySmoke(0);
+            // A live result precedes write-behind and its displayed receipt has
+            // no URLs. Its compact metadata must reveal the hidden summary now.
+            var liveMessage = (await chats.GetMessageAsync(fixture.EmptyMessage, _lifetime.Token))!;
+            var liveStep = new AssistantToolStep("first-live-source", "web.search", "completed",
+                OutputJson: "{\"results\":[{\"title\":\"Erster Livebeleg\",\"url\":\"https://example.org/live\"}]}",
+                UpdatedAt: DateTimeOffset.UtcNow);
+            await App.Current.GetService<AssistantCoordinator>().EmitMissumAiUpdateAsync(
+                new(MissumAiAssistantUpdateKind.Delta, liveMessage with { ToolSteps = [liveStep] }, ToolStep: liveStep),
+                (type, payload, request) => EmitAsync(type, payload, request), "live-source-smoke");
+            VerifySourcesSummarySmoke(1);
+            if (!HasSource("Erster Livebeleg") || _sourceTabs.Contains(fixture.Empty)
+                || await App.Current.GetService<IConversationSnapshotRepository>().GetToolStepAsync(fixture.Empty, fixture.EmptyMessage, liveStep.Id, _lifetime.Token) is not null)
+                throw new InvalidOperationException("Die erste Livequelle benötigt einen Tab oder einen vorherigen Datenbank-Commit.");
+            ApplyEvent("sources.snapshot", JsonSerializer.SerializeToElement(new { sessionId = fixture.Empty, sources = Array.Empty<object>() }));
+            VerifySourcesSummarySmoke(1);
+            var liveId = fixture.EmptyMessage.ToString();
+            var liveProjection = ProjectionFor(_messages[liveId]);
+            for (var index = 0; index < 300; index++)
+                liveProjection.PutStep(JsonSerializer.SerializeToElement(new { id = "later-" + index, tool = "coding.read", status = "completed", detailsDeferred = true }));
+            if (!liveProjection.TrimHead(128).HasValue || MessageSteps(_messages[liveId]).Any(step => S(step, "id") == liveStep.Id))
+                throw new InvalidOperationException("Die Quellprüfung hat den ursprünglichen Werkzeugblock nicht aus dem Lazy-Fenster verdrängt.");
+            _sourceMessageSignatures.Remove(liveId); _sourcesSignature = null; RenderSources(_snapshot);
+            VerifySourcesSummarySmoke(1);
             await File.WriteAllTextAsync(Path.Combine(App.Current.DataDirectory, "native-source-autoload-validation.json"),
                 JsonSerializer.Serialize(new { passed = true, historicalSourceWithoutTab = true, reconnectUpdated = true,
                     unchangedSnapshotSkipped = true, historyNotHydrated = true, lateReplyIsolated = true,
-                    compactSummaryOnly = true, initialCount = 1, reconnectedCount = 2, otherSessionCount = 0, modelRequests = 0 }), _lifetime.Token);
+                    compactSummaryOnly = true, zeroSourcesHidden = true, populatedSourcesVisible = true,
+                    firstLiveSourceBeforeCommit = true, liveSourceSurvivesLateSnapshot = true, liveSourceSurvivesThinWindow = true,
+                    initialCount = 1, reconnectedCount = 2, otherSessionCount = 0, modelRequests = 0 }), _lifetime.Token);
         }
         finally
         {

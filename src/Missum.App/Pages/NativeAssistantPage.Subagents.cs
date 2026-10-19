@@ -187,6 +187,7 @@ public sealed partial class NativeAssistantPage
         foreach (var previousRun in Items(snapshot, "previousRunIds"))
             if (previousRun.ValueKind == JsonValueKind.String && previousRun.GetString() is { Length: > 0 } previousRunId)
                 child.PreviousRunIds.Add(previousRunId);
+        ObserveLiveSourceMetadata(snapshot);
         child.ProjectionRevision = projectionRevision;
         child.TranscriptRevision = transcriptRevision;
         if (!retainHydratedTranscript || preserveResearchTranscript) child.Snapshot = snapshot.Clone();
