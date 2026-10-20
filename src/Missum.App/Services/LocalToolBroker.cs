@@ -134,7 +134,8 @@ public sealed partial class LocalToolBroker(
 
             if (coding || scientific)
             {
-                if (evidenceStore is not null && (evidenceStore.SessionId != sessionId || evidenceStore.RootRunId != proposal.RunId))
+                if (evidenceStore is not null && (evidenceStore.SessionId != sessionId
+                    || (evidenceStore.RootRunId != proposal.RunId && researchActorAgentId is null)))
                     throw new UnauthorizedAccessException("Der Werkzeugbelegspeicher gehört nicht zu dieser Sitzung und diesem Lauf.");
                 if (scientific)
                 {

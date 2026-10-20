@@ -180,6 +180,26 @@ public sealed class CodingRunEvidenceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task SubagentProposalSharesParentEvidenceStoreSessionButRejectsForeignSession()
+    {
+        var parent = new CodingRunEvidenceStore(Data, _session, "run-parent");
+        var broker = new LocalToolBroker(null!, null!, null!, null!);
+        var child = Proposal("coding.searchRunEvidence", new { query = "text" }) with { RunId = "run-agent" };
+
+        var accepted = await broker.ExecuteForAgentAsync(child, _session, null, Workspace,
+            evidenceStore: parent, researchActorAgentId: "agent");
+        Assert.Equal("completed", accepted.Status);
+
+        var rejected = await broker.ExecuteForAgentAsync(child, Guid.NewGuid(), null, Workspace,
+            evidenceStore: parent, researchActorAgentId: "agent");
+        Assert.Equal("failed", rejected.Status);
+
+        var foreignRun = await broker.ExecuteForAgentAsync(child, _session, null, Workspace,
+            evidenceStore: parent);
+        Assert.Equal("failed", foreignRun.Status);
+    }
+
+    [Fact]
     public async Task HistoricalLookupRejectsCopiedScopeAndHonorsCancellation()
     {
         var previous = new CodingRunEvidenceStore(Data, _session, "run-previous");
