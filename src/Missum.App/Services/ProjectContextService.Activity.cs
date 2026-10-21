@@ -26,7 +26,7 @@ public sealed partial class ProjectContextService
         if (owner is null || owner.Status is MessageStatus.Pending or MessageStatus.Streaming) return;
         var now = DateTimeOffset.UtcNow;
         var step = await _chats.SaveBackgroundToolStepAsync(owner.Id, new(id, "context.projectCompact", status,
-            Detail: detail, Explanation: "Projektkontext komprimieren", ContentOffset: owner.Content.Length,
+            Detail: detail, Explanation: status == "completed" ? "Projektkontextkomprimierung abgeschlossen" : "Projektkontext komprimieren", ContentOffset: owner.Content.Length,
             StartedAt: started, CompletedAt: status == "running" ? null : now, UpdatedAt: now), CancellationToken.None).ConfigureAwait(false);
         if (CompactionChanged is not { } changed) return;
         foreach (Func<Guid, Guid, AssistantToolStep, Task> observer in changed.GetInvocationList())

@@ -84,7 +84,8 @@ public sealed record AssistantToolStep(
         {
             InputJson = previous.InputJson ?? incoming.InputJson,
             OutputJson = incoming.OutputJson ?? previous.OutputJson,
-            Explanation = previous.Explanation ?? incoming.Explanation,
+            Explanation = incoming.Tool is "context.compact" or "context.projectCompact"
+                ? incoming.Explanation ?? previous.Explanation : previous.Explanation ?? incoming.Explanation,
             ContentOffset = incoming.ContentOffset ?? previous.ContentOffset,
             StartedAt = previous.StartedAt ?? incoming.StartedAt,
             CompletedAt = incoming.Status == "running" ? null : incoming.CompletedAt ?? previous.CompletedAt,

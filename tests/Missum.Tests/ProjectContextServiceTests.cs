@@ -299,6 +299,7 @@ public sealed class ProjectContextServiceTests
         var activity = Assert.Single(saved.ToolSteps!);
         Assert.Equal("context.projectCompact", activity.Tool);
         Assert.Equal("completed", activity.Status);
+        Assert.Equal("Projektkontextkomprimierung abgeschlossen", activity.Explanation);
         Assert.Equal(message.Revision, saved.Revision);
         Assert.Equal(message.UpdatedAt, saved.UpdatedAt);
         Assert.Equal(message.Content, saved.Content);
