@@ -38,7 +38,10 @@ public sealed class ModelRouter
         var model = ResolveRuntimeModel(status.Models, selected, HasExplicitModelSelection(request))
             ?? throw new InvalidOperationException(
                 $"The selected {selected.Role} model '{selected.ModelId}' is not available.");
-        return selected with { ModelId = model.Id, ContextLength = Math.Max(2_048, model.ContextTokens) };
+        var context = request.Limits?.MaximumContextTokens is >= 2048
+            ? Math.Min(request.Limits.MaximumContextTokens.Value, model.MaximumContextTokens ?? model.ContextTokens)
+            : model.ContextTokens;
+        return selected with { ModelId = model.Id, ContextLength = Math.Max(2_048, context) };
     }
 
     public ModelSelection Select(RunRequest request) => request.Mode == RunMode.Coding

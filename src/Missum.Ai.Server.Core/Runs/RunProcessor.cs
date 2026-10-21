@@ -1252,7 +1252,8 @@ public sealed partial class RunProcessor : BackgroundService
                                 projectCache: request.Subagent is null && checkpoint.ProjectContext is { } frozenContext
                                     && checkpoint.CacheEpoch is { } epoch
                                     ? new ProjectCacheBinding(frozenContext, epoch,
-                                        request.CodingOptions?.WorkspacePath ?? request.WorkspacePath ?? string.Empty) : null).ConfigureAwait(false);
+                                        request.CodingOptions?.WorkspacePath ?? request.WorkspacePath ?? string.Empty) : null,
+                                compactAtThreshold: true).ConfigureAwait(false);
                             break;
                         }
                         catch (NativeContextBudgetException overflow) when ((isCoding || preserveSessionPromptPrefix)

@@ -11,6 +11,34 @@ namespace Missum.Ai.Server.Tests;
 public sealed class NativeContextBudgetRegressionTests
 {
     [Theory]
+    [InlineData(1_000_000, 899_999, false)]
+    [InlineData(1_000_000, 900_000, true)]
+    [InlineData(1_000_000, 960_000, true)]
+    [InlineData(258_000, 232_199, false)]
+    [InlineData(258_000, 232_200, true)]
+    public async Task ExactThresholdIsEnforcedBeforeInferenceEvenWhenTheCharacterEstimateIsSmall(int contextLength, int tokens, bool compact)
+    {
+        using var handler = new ExactBudgetHandler { InputTokens = tokens, LoadedContext = contextLength };
+        using var client = new ModelRuntimeClient(new HttpClient(handler),
+            Options.Create(new MissumAiServerOptions { ModelRuntimeUri = new Uri("http://native.test:8081") }),
+            NullLogger<ModelRuntimeClient>.Instance);
+        var inference = client.CompleteChatWithCacheOwnershipAsync(ExactBudgetHandler.ModelId,
+            [new("user", "Verlauf fortsetzen")], [], null, null, compactAtThreshold: true);
+        if (compact)
+        {
+            var error = await Assert.ThrowsAsync<NativeContextBudgetException>(() => inference);
+            Assert.Equal(Missum.Ai.Contracts.ContextCompactionPolicy.InputTokenBudget(contextLength), error.BudgetTokens);
+            Assert.Equal(0, handler.GenerationAttempts);
+            Assert.Single(handler.TokenCountingBodies);
+        }
+        else
+        {
+            Assert.Equal("Fortgesetzt.", (await inference).Content);
+            Assert.Equal(1, handler.GenerationAttempts);
+        }
+    }
+
+    [Theory]
     [InlineData(262_144, 262_305)] // Observed Bohmsche Mechanik request.
     [InlineData(262_144, 262_144)]
     [InlineData(262_144, 262_143)] // One final boundary token still leaves no output.
@@ -79,6 +107,7 @@ public sealed class NativeContextBudgetRegressionTests
     {
         internal const string ModelId = "coding/future-budget-model~test";
         internal int InputTokens { get; set; }
+        internal int LoadedContext { get; init; } = 262_144;
         internal int GenerationAttempts { get; private set; }
         internal List<string> TokenCountingBodies { get; } = [];
         internal List<string> GenerationBodies { get; } = [];
@@ -93,7 +122,7 @@ public sealed class NativeContextBudgetRegressionTests
                 {
                     data = new[] { new { id = ModelId, meta = new { n_ctx_train = 1_048_576 }, status = new { value = "loaded" } } },
                 }));
-            if (path == "/props") return Json("{\"default_generation_settings\":{\"n_ctx\":262144}}");
+            if (path == "/props") return Json(JsonSerializer.Serialize(new { default_generation_settings = new { n_ctx = LoadedContext } }));
             var body = request.Content is null ? "" : await request.Content.ReadAsStringAsync(cancellationToken);
             if (path.StartsWith("/sessions/", StringComparison.Ordinal))
             {

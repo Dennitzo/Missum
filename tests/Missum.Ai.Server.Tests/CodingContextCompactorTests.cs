@@ -6,6 +6,23 @@ namespace Missum.Ai.Server.Tests;
 
 public sealed class CodingContextCompactorTests
 {
+    [Theory]
+    [InlineData(1_000_000, 960_000)]
+    [InlineData(258_000, 240_000)]
+    public void LargeInheritedContextsCompactAtThePercentageBoundaryAndRetainTaskAndJournal(int contextLength, int approximateTokens)
+    {
+        LmChatMessage[] source = [new("system", "Policy"), new("user", "Earlier task"),
+            new("assistant", new string('x', approximateTokens * 3)), new("user", "Continue exact verification")];
+        var original = source.ToArray();
+        var plan = CodingContextCompactor.Plan(source, contextLength);
+        Assert.NotNull(plan);
+        var result = CodingContextCompactor.Complete(plan, "Retained findings; next perform exact verification.");
+        Assert.Contains(result, message => ReferenceEquals(message, source[^1]));
+        Assert.True(Missum.Ai.Server.Core.Runs.ContextPlanner.EstimateTokens(result)
+            < Missum.Ai.Contracts.ContextCompactionPolicy.InputTokenBudget(contextLength));
+        Assert.Equal(original, source);
+    }
+
     [Fact]
     public void ManySmallMessagesDoNotTriggerPrematureCompaction()
     {

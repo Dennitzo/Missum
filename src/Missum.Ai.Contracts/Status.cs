@@ -72,7 +72,8 @@ public sealed record ModelRuntimeStatus(
     IReadOnlyList<string>? ReasoningEfforts = null,
     string? DefaultReasoningEffort = null,
     string? Architecture = null,
-    string? Quantization = null);
+    string? Quantization = null,
+    int? MaximumContextTokens = null);
 
 public sealed record GpuStatusSnapshot(
     bool Available,

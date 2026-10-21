@@ -5,7 +5,8 @@ using Missum.Core.Models;
 namespace Missum.App.Services;
 
 public sealed record ComposerReasoningOptions(string ModelId, string Role, string? Selected,
-    IReadOnlyList<string> Levels, string? DefaultLevel, bool Available, string? Detail = null);
+    IReadOnlyList<string> Levels, string? DefaultLevel, bool Available, string? Detail = null,
+    int MaximumContextTokens = 0, int SelectedContextTokens = 0);
 
 public sealed partial class MissumAiAssistantService
 {
@@ -38,14 +39,16 @@ public sealed partial class MissumAiAssistantService
         return new(modelId, role, selected, levels,
             modelDefault is not null && levels.Contains(modelDefault) ? modelDefault : null, selected is not null,
             !snapshot.ProviderReachable ? "Modellinformationen momentan nicht erreichbar."
-                : levels.Length == 0 ? "Das Modell bietet keine wählbaren Reasoning-Stufen." : null);
+                : levels.Length == 0 ? "Das Modell bietet keine wählbaren Reasoning-Stufen." : null,
+            model?.MaximumContextTokens ?? model?.ContextTokens ?? ModelContextProfiles.ResolveMaximum(modelId, role),
+            ModelContextSelection.Resolve(current, modelId, model?.MaximumContextTokens ?? model?.ContextTokens ?? ModelContextProfiles.ResolveMaximum(modelId, role)));
     }
 
     public async Task<ComposerReasoningOptions> GetReasoningOptionsAsync(string modelId, string role, CancellationToken cancellationToken)
     {
         using var client = await connection.CreateClientAsync(cancellationToken).ConfigureAwait(false);
         var snapshot = await client.GetModelStatusAsync(cancellationToken).ConfigureAwait(false);
-        foreach (var model in snapshot.Models) ModelContextProfiles.RegisterMaximum(model.Id, model.ContextTokens);
+        foreach (var model in snapshot.Models) ModelContextProfiles.RegisterMaximum(model.Id, model.MaximumContextTokens ?? model.ContextTokens);
         return ResolveComposerReasoning(CurrentSettings, modelId, role, snapshot);
     }
 

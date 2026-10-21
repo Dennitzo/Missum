@@ -32,6 +32,11 @@ public sealed class DocumentContextPreparationService(IDocumentIngestor document
     private const int MaximumCandidateCharacters = 600_000;
     private static readonly JsonSerializerOptions JsonOptions = MissumAiProtocol.CreateJsonOptions();
 
+    public Task<DocumentRunContext?> PrepareAsync(MissumAiClient client, Guid sessionId, Guid assistantMessageId,
+        string prompt, string modelId, int minimumHistoryReserveTokens, Func<DocumentContextProgress, Task> progress,
+        CancellationToken cancellationToken = default) => PrepareAsync(client, sessionId, assistantMessageId, prompt,
+            modelId, minimumHistoryReserveTokens, progress, 0, cancellationToken);
+
     public async Task<DocumentRunContext?> PrepareAsync(
         MissumAiClient client,
         Guid sessionId,
@@ -40,6 +45,7 @@ public sealed class DocumentContextPreparationService(IDocumentIngestor document
         string modelId,
         int minimumHistoryReserveTokens,
         Func<DocumentContextProgress, Task> progress,
+        int contextLimit,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(client);
@@ -75,7 +81,8 @@ public sealed class DocumentContextPreparationService(IDocumentIngestor document
             }
             throw new InvalidOperationException($"Das ausgewählte General-AI-Modell '{modelId}' ist nicht verfügbar.");
         }
-        var contextLength = Math.Max(2_048, selectedModel.ContextTokens);
+        var maximumContext = selectedModel.MaximumContextTokens ?? selectedModel.ContextTokens;
+        var contextLength = Math.Max(2_048, contextLimit >= 2048 ? Math.Min(contextLimit, maximumContext) : maximumContext);
 
         var pages = new List<DocumentPage>();
         foreach (var document in readyDocuments)
@@ -88,7 +95,7 @@ public sealed class DocumentContextPreparationService(IDocumentIngestor document
         var corpusRevision = CreateCorpusRevision(readyDocuments);
         var fullText = BuildPageBlocks(pages);
         var fullDocumentTokens = EstimateTokens(fullText);
-        var safetyTokens = Math.Min(8_192, Math.Max(2_048, contextLength / 16));
+        var safetyTokens = contextLength - ContextCompactionPolicy.InputTokenBudget(contextLength);
         const int outputTokens = 8_192;
         const int envelopeAndToolReserve = 6_144;
         var minimumHistoryReserve = Math.Clamp(minimumHistoryReserveTokens, 1_024, 16_384);
@@ -730,7 +737,7 @@ public sealed class DocumentContextPreparationService(IDocumentIngestor document
     {
         const int outputTokens = 8_192;
         const int policyReserveTokens = 6_144;
-        var safetyTokens = Math.Min(8_192, Math.Max(2_048, contextLength / 16));
+        var safetyTokens = contextLength - ContextCompactionPolicy.InputTokenBudget(contextLength);
         var promptAndInstructionTokens = EstimateTokens(prompt) + 1_024;
         var availableTokens = Math.Max(
             16_384,

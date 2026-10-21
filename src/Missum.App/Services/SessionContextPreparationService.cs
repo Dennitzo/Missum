@@ -653,14 +653,14 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
             throw new InvalidOperationException(
                 $"Das ausgewählte General-AI-Modell '{selectedModelId}' ist nicht verfügbar.");
         }
-        return (model.Id, Math.Max(2_048, knownContextLength ?? model.ContextTokens));
+        return (model.Id, Math.Max(2_048, knownContextLength ?? model.MaximumContextTokens ?? model.ContextTokens));
     }
 
     private static int CalculateHistoryBudget(int contextLength, string prompt)
     {
         const int outputTokens = 8_192;
         const int envelopeAndToolReserve = 6_144;
-        var safetyTokens = Math.Min(8_192, Math.Max(2_048, contextLength / 16));
+        var safetyTokens = contextLength - ContextCompactionPolicy.InputTokenBudget(contextLength);
         var promptTokens = EstimateTokens(prompt) + 256;
         var available = Math.Max(
             1_024,
@@ -681,7 +681,7 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
     {
         const int maximumOutputTokens = 8_192;
         const int policyReserveTokens = 6_144;
-        var safetyTokens = Math.Min(8_192, Math.Max(2_048, contextLength / 16));
+        var safetyTokens = contextLength - ContextCompactionPolicy.InputTokenBudget(contextLength);
         var inputTokens = Math.Max(
             8_192,
             contextLength - maximumOutputTokens - policyReserveTokens - safetyTokens);

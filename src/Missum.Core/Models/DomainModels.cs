@@ -309,6 +309,7 @@ public sealed record AppSettings
     // uses the gateway's highest supported model-specific reasoning default.
     public string ReasoningEffort { get; init; } = "auto";
     public Dictionary<string, string> ReasoningEffortsByModel { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, int> ContextLimitsByModel { get; init; } = new(StringComparer.OrdinalIgnoreCase);
     public AppTheme Theme { get; init; } = AppTheme.Dark;
     public string AccentColor { get; init; } = DefaultAccentColor;
     public string BackgroundColor { get; init; } = DefaultBackgroundColor;

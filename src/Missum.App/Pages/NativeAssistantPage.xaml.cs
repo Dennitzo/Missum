@@ -1066,7 +1066,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             // flight. Never repaint an older selection over that notification.
             var savedEffort = MissumAiAssistantService.StoredReasoning(_settings.Current, modelId, role);
             if (savedEffort is not null && options.Levels.Contains(savedEffort)) options = options with { Selected = savedEffort };
-            if (!_running) UpdateContext(JsonSerializer.SerializeToElement(new { contextLimit = Missum.Ai.Contracts.ModelContextProfiles.ResolveMaximum(modelId, role) }));
+            if (!_running) UpdateContext(JsonSerializer.SerializeToElement(new { contextLimit = options.SelectedContextTokens }));
             _reasoning = options;
             RefreshComposerModelDisplay();
         }
@@ -1165,6 +1165,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             flyout.Closed += async (_, _) => { if (selected != options.Selected && selected is not null) await CommandAsync("reasoning.set", new { modelId = options.ModelId, role = options.Role, effort = selected }); };
         }
         else { panel.Children.Add(new TextBlock { Text = options?.Detail ?? "Modell auswählen", FontSize = 13, TextWrapping = TextWrapping.Wrap, Foreground = ThemeBrush("MissumMutedTextBrush", 150) }); }
+        AddContextLimitSlider(panel, flyout, options);
         flyout.Content = panel; NativeDropdownChevron.Bind(flyout, ModelButton); flyout.ShowAt(ModelButton);
     }
     private async void OnSelectModel(object sender, RoutedEventArgs e)

@@ -19,6 +19,19 @@ public sealed class ModelRuntimeClientTests
     private static readonly string[] RequiredOperation = ["operation"];
 
     [Fact]
+    public async Task GenerationRetainsTheExplicitContextAllocationInsteadOfSendingZero()
+    {
+        var handler = new NativeRuntimeHandler { ManagedGpuRuntime = true };
+        using var client = CreateClient(new HttpClient(handler));
+        await client.EnsureModelLoadedAsync(NativeGeneralId, 8192);
+        await client.CompleteChatAsync(NativeGeneralId, [new("user", "Hallo")], []);
+        Assert.Equal(8192, handler.LoadBodies[0].GetProperty("contextLength").GetInt32());
+        Assert.All(handler.LoadBodies.Skip(1), body => Assert.True(
+            !body.TryGetProperty("contextLength", out var limit) || limit.ValueKind == JsonValueKind.Null));
+        Assert.Single(handler.ChatBodies);
+    }
+
+    [Fact]
     public async Task SessionOwnershipIsRegisteredBeforeGenerationIncludingTheDelegatingParent()
     {
         var handler = new NativeRuntimeHandler();
@@ -1284,6 +1297,7 @@ public sealed class ModelRuntimeClientTests
         public List<string> ModelOperations { get; } = [];
         public List<string> RequestPaths { get; } = [];
         public List<JsonElement> CacheBodies { get; } = [];
+        public List<JsonElement> LoadBodies { get; } = [];
         public int ChatAttempts { get; private set; }
         public int TokenCountingAttempts { get; private set; }
         public Func<string, CancellationToken, Task>? OnCacheRequest { get; init; }
@@ -1353,6 +1367,10 @@ public sealed class ModelRuntimeClientTests
                     return new HttpResponseMessage(HttpStatusCode.InternalServerError) { Content = new StringContent("Unload the previous model before selecting GPU placement") };
                 using var operation = JsonDocument.Parse(body);
                 var requestedModel = operation.RootElement.GetProperty("model").GetString();
+                LoadBodies.Add(operation.RootElement.Clone());
+                if (operation.RootElement.TryGetProperty("contextLength", out var limit) && limit.ValueKind == JsonValueKind.Number
+                    && limit.GetInt32() < 2048)
+                    return new HttpResponseMessage(HttpStatusCode.BadRequest) { Content = new StringContent("Invalid context limit") };
                 _loadedKey = requestedModel;
                 ModelOperations.Add($"load:{requestedModel}");
                 if (transientLoadChannelFailure)

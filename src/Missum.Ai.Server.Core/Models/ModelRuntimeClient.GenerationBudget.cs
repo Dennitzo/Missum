@@ -17,6 +17,7 @@ public sealed partial class ModelRuntimeClient
         int contextLength,
         int? maximumOutputTokens,
         Func<ModelRuntimeProgress, CancellationToken, ValueTask>? progress,
+        bool compactAtThreshold,
         CancellationToken cancellationToken)
     {
         if (progress is not null)
@@ -32,6 +33,9 @@ public sealed partial class ModelRuntimeClient
             || !count.TryGetInt32(out var inputTokens) || inputTokens < 1)
             throw new JsonException("Der native Tokenzähler lieferte keine gültige Promptlänge.");
 
+        var compactionBudget = ContextCompactionPolicy.InputTokenBudget(contextLength);
+        if (compactAtThreshold && inputTokens >= compactionBudget)
+            throw new NativeContextBudgetException(inputTokens, contextLength, compactionBudget);
         var outputTokens = ResolveMaximumOutputTokens(contextLength, inputTokens, maximumOutputTokens);
         if (progress is not null)
             // Keep the already measured full target before dispatching native

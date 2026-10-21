@@ -13,6 +13,25 @@ spec.loader.exec_module(catalog)
 
 
 class GpuPlacementTests(unittest.TestCase):
+    def test_explicit_context_keeps_both_gpu_fitting_and_reuses_padded_allocation(self):
+        manager, state, calls = self.successful_manager()
+        with patch.object(catalog, "gpu_inventory", return_value=[]):
+            manager.load(self.model["id"], 8192)
+            policy = manager.policies[self.model["id"]]
+            self.assertEqual(policy["context"], 8192)
+            self.assertEqual(policy["fitContext"], 8192)
+            self.assertEqual(policy["gpuLayers"], "auto")
+            self.assertEqual(policy["split"], "layer")
+            self.assertEqual(policy["contextMaximum"], 32768)
+            fingerprint = manager.session_fingerprint(self.model["id"])
+            self.assertTrue(manager.load(self.model["id"], 8192)["reused"])
+            self.assertEqual(fingerprint, manager.session_fingerprint(self.model["id"]))
+            self.assertEqual(1, sum(path == "models/load" for path, _ in calls))
+            self.assertIn("fit-ctx = 8192", manager.preset.read_text())
+            for invalid in (1000, 32769, True, "8192"):
+                with self.assertRaises(ValueError):
+                    manager.load(self.model["id"], invalid)
+
     def test_unknown_future_model_uses_its_own_maximum_in_every_loading_policy(self):
         model = dict(context=2_000_000, role="general")
         for placement in (None, "CUDA0"):

@@ -172,18 +172,20 @@ public sealed partial class ModelRuntimeClient : IDisposable
                     // after app/gateway restart without evicting either KV slot.
                     try
                     {
-                        await LoadRuntimeModelWithControlRetryAsync(selected.Id, managedGpuPlacement: true, timeout.Token).ConfigureAwait(false);
+                        await LoadRuntimeModelWithControlRetryAsync(selected.Id, managedGpuPlacement: true, timeout.Token, contextLength).ConfigureAwait(false);
                         InvalidateStatus();
                     }
                     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-                    catch (Exception exception) when (exception is HttpRequestException or IOException or OperationCanceledException)
+                    catch (Exception exception) when ((contextLength <= 0 || contextLength == selected.LoadedContextLength)
+                        && exception is HttpRequestException or IOException or OperationCanceledException)
                     {
                         // An optional replica/control failure must not discard
                         // the usable resident primary or abort its ordinary run.
                         LogSubagentPreloadUnavailable(_logger, selected.Id, exception);
                     }
                 }
-                return new ModelPreparation(selected.Id, WasAlreadyLoaded: true, selected.LoadedContextLength);
+                var resident = (await GetRuntimeModelsAsync(timeout.Token).ConfigureAwait(false)).FirstOrDefault(item => item.Id == selected.Id);
+                return new ModelPreparation(selected.Id, WasAlreadyLoaded: true, resident?.LoadedContextLength ?? selected.LoadedContextLength);
             }
             var unloadingModels = runtimeModels.Where(model => model.Id != selected.Id
                 && model.State is "loaded" or "loading" or "sleeping"
@@ -202,11 +204,11 @@ public sealed partial class ModelRuntimeClient : IDisposable
                     // An exclusive media/embedding tool or a supervisor restart
                     // can evict both slots. Restore the same primary first;
                     // the secondary load then rechecks its actual VRAM policy.
-                    await LoadRuntimeModelWithControlRetryAsync(primary.Id, primary.ManagedGpuPlacement, timeout.Token).ConfigureAwait(false);
+                    await LoadRuntimeModelWithControlRetryAsync(primary.Id, primary.ManagedGpuPlacement, timeout.Token, contextLength).ConfigureAwait(false);
                     await WaitForNativeModelLoadedAsync(primary.Id, timeout.Token).ConfigureAwait(false);
                 }
             }
-            try { await LoadRuntimeModelAsync(selected.Id, timeout.Token, selected.ManagedGpuPlacement).ConfigureAwait(false); }
+            try { await LoadRuntimeModelAsync(selected.Id, timeout.Token, selected.ManagedGpuPlacement, contextLength).ConfigureAwait(false); }
             catch (Exception exception) when (IsTransientInferenceFailure(exception) && !timeout.IsCancellationRequested)
             {
                 // A dropped load response can follow a successful native allocation. Reconcile once before retrying anything.
@@ -216,7 +218,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
                 // companion allocation. Reconcile the idempotent pair operation
                 // before declaring startup complete from the primary alone.
                 if (selected.ManagedGpuPlacement && !selected.IsSubagent)
-                    await LoadRuntimeModelAsync(selected.Id, timeout.Token, managedGpuPlacement: true).ConfigureAwait(false);
+                    await LoadRuntimeModelAsync(selected.Id, timeout.Token, managedGpuPlacement: true, contextLength).ConfigureAwait(false);
             }
             while (true)
             {
@@ -316,6 +318,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
         JsonElement? responseSchema = null,
         string? runtimeInstanceId = null,
         ProjectCacheBinding? projectCache = null,
+        bool compactAtThreshold = false,
         CancellationToken cancellationToken = default)
     {
         ValidateToolChoice(tools, requireToolCall, requiredToolName);
@@ -420,7 +423,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
                 context,
                 maximumOutputTokens,
                 timeout.Token,
-                inferenceDispatched: () => inferenceIncomplete = true).ConfigureAwait(false);
+                inferenceDispatched: () => inferenceIncomplete = true, compactAtThreshold: compactAtThreshold).ConfigureAwait(false);
             inferenceIncomplete = false;
             if (nativeProgress is not null)
             {
@@ -770,25 +773,26 @@ public sealed partial class ModelRuntimeClient : IDisposable
     }
 
     private async Task LoadRuntimeModelWithControlRetryAsync(string modelId, bool managedGpuPlacement,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, int? contextLength = null)
     {
-        try { await LoadRuntimeModelAsync(modelId, cancellationToken, managedGpuPlacement).ConfigureAwait(false); }
+        try { await LoadRuntimeModelAsync(modelId, cancellationToken, managedGpuPlacement, contextLength).ConfigureAwait(false); }
         catch (Exception exception) when (managedGpuPlacement && IsTransientInferenceFailure(exception)
             && !cancellationToken.IsCancellationRequested)
         {
             // A resident primary or restored child can also lose the response
             // between the two allocations. One idempotent reconciliation keeps
             // resident KV slots intact and finishes the admitted companion.
-            await LoadRuntimeModelAsync(modelId, cancellationToken, managedGpuPlacement).ConfigureAwait(false);
+            await LoadRuntimeModelAsync(modelId, cancellationToken, managedGpuPlacement, contextLength).ConfigureAwait(false);
         }
     }
 
-    private async Task LoadRuntimeModelAsync(string modelId, CancellationToken cancellationToken, bool managedGpuPlacement = false)
+    private async Task LoadRuntimeModelAsync(string modelId, CancellationToken cancellationToken, bool managedGpuPlacement = false, int? contextLength = null)
     {
         var path = managedGpuPlacement
             ? new UriBuilder(_options.ModelRuntimeUri) { Port = _options.ModelRuntimeUri.Port + 1, Path = "/models/load", Query = "" }.Uri.AbsoluteUri
             : "models/load";
-        using var response = await SendJsonAsync(HttpMethod.Post, path, new { model = modelId }, cancellationToken,
+        using var response = await SendJsonAsync(HttpMethod.Post, path,
+            new { model = modelId, contextLength = contextLength is > 0 ? contextLength : null }, cancellationToken,
             bufferContent: managedGpuPlacement).ConfigureAwait(false);
     }
 
@@ -877,7 +881,8 @@ public sealed partial class ModelRuntimeClient : IDisposable
         int? maximumOutputTokens,
         CancellationToken cancellationToken,
         string? completionEndpoint = null,
-        Action? inferenceDispatched = null)
+        Action? inferenceDispatched = null,
+        bool compactAtThreshold = false)
     {
         Exception? last = null;
         string? protocolRepairTool = null;
@@ -893,7 +898,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
                     : CreateToolProtocolRepairBody(body, protocolRepairTool);
                 var countingClock = Stopwatch.StartNew();
                 Dictionary<string, object?> requestBody;
-                try { requestBody = await ApplyTokenBudgetAsync(unbudgetedBody, contextLength, maximumOutputTokens, nativeProgress, cancellationToken).ConfigureAwait(false); }
+                try { requestBody = await ApplyTokenBudgetAsync(unbudgetedBody, contextLength, maximumOutputTokens, nativeProgress, compactAtThreshold, cancellationToken).ConfigureAwait(false); }
                 finally { tokenCountingMilliseconds += countingClock.Elapsed.TotalMilliseconds; }
                 requestPhase = "generation";
                 var requestClock = Stopwatch.StartNew();
@@ -2202,7 +2207,8 @@ public sealed partial class ModelRuntimeClient : IDisposable
             reasoning.SupportedEfforts,
             reasoning.DefaultEffort,
             model.Architecture,
-            model.Quantization);
+            model.Quantization,
+            model.MaximumContextLength);
     }
 
     private void RememberRuntimeModels(IEnumerable<RuntimeModel> models)

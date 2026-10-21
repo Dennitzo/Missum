@@ -73,15 +73,17 @@ public sealed class ModelContextLengthException(
 /// loaded slot. It may be recovered only by an explicit context-planning step,
 /// never by retrying the same request or silently changing the model window.
 /// </summary>
-public sealed class NativeContextBudgetException(int inputTokens, int contextLength)
+public sealed class NativeContextBudgetException(int inputTokens, int contextLength, int? inputBudget = null)
     : InvalidOperationException(
-        $"Der exakt tokenisierte Prompt benötigt {inputTokens:N0} Token; im geladenen Kontext von {contextLength:N0} Token bleibt kein Platz für eine Antwort. Der Arbeitskontext muss vor der nächsten Modellanfrage verdichtet werden.")
+        inputBudget is { } threshold
+            ? $"Der exakt tokenisierte Prompt benötigt {inputTokens:N0} Token und erreicht die Komprimierungsschwelle von {threshold:N0} bei {contextLength:N0} Kontexttoken. Der Arbeitskontext muss vor der nächsten Modellanfrage verdichtet werden."
+            : $"Der exakt tokenisierte Prompt benötigt {inputTokens:N0} Token; im geladenen Kontext von {contextLength:N0} Token bleibt kein Platz für eine Antwort. Der Arbeitskontext muss vor der nächsten Modellanfrage verdichtet werden.")
 {
     public int InputTokens { get; } = inputTokens;
     public int ContextLength { get; } = contextLength;
     public int MinimumOutputTokens { get; } = 1;
     // llama.cpp also needs its final context boundary token.
-    public int BudgetTokens => Math.Max(0, ContextLength - MinimumOutputTokens - 1);
+    public int BudgetTokens => inputBudget ?? Math.Max(0, ContextLength - MinimumOutputTokens - 1);
 }
 
 public sealed class ModelGenerationTerminatedException(

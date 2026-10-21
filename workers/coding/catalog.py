@@ -30,7 +30,7 @@ from session_cache import NativeSessionCache, PreparationProgress, PreparationTi
 
 SHARD = re.compile(r"^(.*)-([0-9]{5})-of-([0-9]{5})\.gguf$", re.IGNORECASE)
 NON_TEXT = re.compile(r"(?:^|[-_./])(?:mmproj|ggml-vocab|embedding|embed|asr|whisper|clip|vae|diffusion)(?:[-_./]|$)", re.IGNORECASE)
-NON_TEXT_ARCHITECTURES = ("bert", "nomic-bert", "jina-bert", "embedding", "t5", "clip", "mclip", "wavtokenizer", "whisper")
+NON_TEXT_ARCHITECTURES = ("bert", "nomic-bert", "jina-bert", "embedding", "t5", "clip", "mclip", "wavtokenizer", "whisper", "dflash")
 EMBEDDING_ARCHITECTURES = ("bert", "nomic-bert", "jina-bert", "embedding")
 _METADATA_CACHE = {}
 SCALAR_SIZES = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
@@ -480,6 +480,8 @@ def write_presets(root, target, placements=None, managed_gpu=False, fit_target="
         lines += [f"split-mode = {policy['split']}", f"fit = {policy['fit']}", f"n-gpu-layers = {policy['gpuLayers']}"]
         if policy["context"] is not None:
             lines += [f"ctx-size = {policy['context']}"]
+        if policy.get("fitContext"):
+            lines += [f"fit-ctx = {policy['fitContext']}"]
         if policy.get("mmprojDevice") and model.get("projector") and not placement:
             lines += [f"mmproj-device = {policy['mmprojDevice']}"]
         for setting, argument in (("batchSize", "batch-size"), ("ubatchSize", "ubatch-size")):
@@ -1170,12 +1172,14 @@ class GpuLoadManager:
             return dict(allowed=False, reason=reason, modelId=model_id, instanceId=replica,
                         gpuIndex=1, loaded=False, reused=False)
 
-    def load(self, model_id):
+    def load(self, model_id, context_length=None):
         with self.lock:
             models = self.refresh()
             model = next((item for item in models if item["id"] == model_id), None)
             if model is None:
                 raise ValueError("Model is not in the local catalog")
+            if context_length is not None and (type(context_length) is not int or not 2048 <= context_length <= model["context"]):
+                raise ValueError("Context limit must be between 2048 and the GGUF model maximum")
             current = self.router("v1/models")["data"]
             active = [item for item in current if item.get("status", {}).get("value") in ("loaded", "loading", "sleeping")]
             replica = model.get("instance") == "subagent"
@@ -1183,6 +1187,26 @@ class GpuLoadManager:
             if any(item["id"] not in (base, base + "@subagent") for item in active):
                 raise ValueError("Unload the previous model before selecting GPU placement")
             existing = next((item for item in active if item["id"] == model_id), None)
+            if existing and context_length is not None and not replica and existing.get("status", {}).get("value") in ("loaded", "sleeping"):
+                props = self.router("props?model=" + urllib.parse.quote(model_id, safe=""))
+                actual_context = props.get("default_generation_settings", {}).get("n_ctx", 0)
+                requested_context = self.policies.get(model_id, {}).get("context")
+                # llama may pad n_ctx to an attention block (258000 -> 258048).
+                # Repeated turns must retain the same allocation and KV prefix.
+                if requested_context != context_length or actual_context < context_length:
+                    if any(slot.get("is_processing") for slot in self.sessions._slots(model_id)):
+                        raise ValueError("Cannot change context while the model is processing")
+                    self.sessions.save(model_id, None)
+                    for item in active:
+                        if item["id"] in (base, base + "@subagent"):
+                            self.router("models/unload", {"model": item["id"]})
+                    deadline = time.monotonic() + 60
+                    while any(item.get("status", {}).get("value") in ("loaded", "loading", "sleeping")
+                              and item["id"] in (base, base + "@subagent") for item in self.router("v1/models")["data"]):
+                        if time.monotonic() > deadline:
+                            raise TimeoutError("Previous model context is still unloading")
+                        time.sleep(.1)
+                    existing = None
             if existing:
                 # Never rewrite the placement of an instance already loading.
                 # The pair is ready only after the parent has its actual n_ctx.
@@ -1213,6 +1237,12 @@ class GpuLoadManager:
             forced_policy = None
             for attempt in range(3):
                 policy = forced_policy or self.resolve_load_policy(model, device)
+                if context_length is not None and not replica:
+                    policy = dict(policy, context=context_length, contextPolicy="user-limit")
+                    # Fit GPU layers into available VRAM while retaining the
+                    # explicitly requested KV window. CPU-backed weights stay mmap'ed.
+                    if not device:
+                        policy.update(fit="on", gpuLayers="auto", split="layer", fitContext=context_length)
                 if replica:
                     # Both instances use the same physical KV dimensions and
                     # template. A child never spills onto its parent's device.
@@ -1325,7 +1355,7 @@ def start_gpu_control(manager, host, port):
                         body.get("childSessionCacheKey"), body.get("prefill"),
                         body.get("childSessionId"), body.get("parentSessionId"), self.client_disconnected)
                 else:
-                    result = manager.load(body["model"])
+                    result = manager.load(body["model"], body.get("contextLength"))
                 status = 200
             except Exception as error:
                 result, status = {"error": str(error)}, 500

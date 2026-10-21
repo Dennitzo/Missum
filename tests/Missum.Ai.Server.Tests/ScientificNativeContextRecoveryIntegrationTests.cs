@@ -15,13 +15,17 @@ public sealed class ScientificNativeContextRecoveryIntegrationTests
     private const string ModelId = "coding/ScienceNativeContext-Fixture~recovery";
     private const string TaskText = "Prüfe den Doppelspalt quantitativ weiter und bewahre die bisherigen Befunde.";
 
-    [Fact]
-    public async Task NativeOverflowCompactsSavedScienceContextBeforeFirstGenerationWithoutReexecutingTools()
+    [Theory]
+    [InlineData(262_144, 262_305)]
+    [InlineData(1_000_000, 960_000)]
+    [InlineData(1_000_000, 900_000)]
+    [InlineData(258_000, 232_200)]
+    public async Task NativeOverflowCompactsSavedScienceContextBeforeFirstGenerationWithoutReexecutingTools(int contextLength, int exactTokens)
     {
         using var context = new TestServerContext();
         context.Options.ModelRuntimeUri = new("http://native.test:19090");
         context.Options.GeneralModelId = ModelId;
-        using var native = new NativeHandler();
+        using var native = new NativeHandler(contextLength, exactTokens);
         using var http = new HttpClient(native);
         using var runtime = new ModelRuntimeClient(http, context.WrappedOptions, NullLogger<ModelRuntimeClient>.Instance);
         var services = new ServiceCollection();
@@ -34,13 +38,13 @@ public sealed class ScientificNativeContextRecoveryIntegrationTests
             [new("user", [new("text", TaskText)])],
             ClientCapabilities: ["coding", "workspace"], AllowedServerTools: [],
             SessionId: "bohm-native-context", PreferredGeneralModelId: ModelId, PreferredCodingModelId: ModelId,
-            Limits: new(MaximumContextTokens: 262_144),
+            Limits: new(MaximumContextTokens: contextLength),
             CodingOptions: new(WorkspacePath: context.Root));
         var run = (await repository.CreateAsync(request, null)).Snapshot.RunId;
         var messages = History();
         var sourceJson = JsonSerializer.Serialize(messages);
         var estimated = ContextPlanner.EstimateTokens(messages);
-        Assert.InRange(estimated, 10_000, ContextPlanner.ComputeInputTokenBudget(262_144, null) - 1);
+        Assert.InRange(estimated, 10_000, ContextPlanner.ComputeInputTokenBudget(contextLength, null) - 1);
         await repository.SaveCheckpointAsync(run, new AgentRunCheckpoint(messages, 20, 20, 200_000, 10_000,
             PreserveSessionPromptPrefix: true, ResearchManagedByAgent: true));
         var transcript = await repository.AppendEventAsync(run, "fixture.originalTranscript", new { messages });
@@ -58,10 +62,10 @@ public sealed class ScientificNativeContextRecoveryIntegrationTests
             var events = await repository.GetEventsAfterAsync(run, 0);
             var compacted = Assert.Single(events, item => item.Type == RunEventTypes.ContextChanged
                 && item.Data.GetProperty("wasCompacted").GetBoolean());
-            Assert.Equal(262_144, compacted.Data.GetProperty("contextLimit").GetInt32());
+            Assert.Equal(contextLength, compacted.Data.GetProperty("contextLimit").GetInt32());
             var digits = string.Concat((compacted.Data.GetProperty("detail").GetString() ?? "").Where(char.IsDigit));
-            Assert.Contains("262305", digits, StringComparison.Ordinal);
-            Assert.Contains("262144", digits, StringComparison.Ordinal);
+            Assert.Contains(exactTokens.ToString(System.Globalization.CultureInfo.InvariantCulture), digits, StringComparison.Ordinal);
+            Assert.Contains(contextLength.ToString(System.Globalization.CultureInfo.InvariantCulture), digits, StringComparison.Ordinal);
             Assert.True(compacted.Data.GetProperty("estimatedInputTokens").GetInt32() < estimated);
             Assert.Equal(2, native.TokenCounts);
             Assert.Equal(1, native.Generations);
@@ -136,7 +140,7 @@ public sealed class ScientificNativeContextRecoveryIntegrationTests
         Assert.Equal(calls.Order(), receipts.Order());
     }
 
-    private sealed class NativeHandler : HttpMessageHandler
+    private sealed class NativeHandler(int contextLength, int exactTokens) : HttpMessageHandler
     {
         private static readonly string[] ModelTags = ["missum-context-train:1048576"];
         internal int TokenCounts { get; private set; }
@@ -151,14 +155,14 @@ public sealed class ScientificNativeContextRecoveryIntegrationTests
             {
                 new { id = ModelId, tags = ModelTags, status = new { value = "loaded" } },
             } });
-            if (path == "/props") return Json(new { default_generation_settings = new { n_ctx = 262_144 } });
+            if (path == "/props") return Json(new { default_generation_settings = new { n_ctx = contextLength } });
             if (path is "/sessions/prepare" or "/sessions/save") return Json(new { status = "resident" });
             if (path == "/v1/chat/completions/input_tokens")
             {
                 TokenCounts++;
                 var body = await request.Content!.ReadAsStringAsync(cancellationToken);
                 PromptLengths.Add(body.Length);
-                return Json(new { input_tokens = TokenCounts == 1 ? 262_305 : 100_000 });
+                return Json(new { input_tokens = TokenCounts == 1 ? exactTokens : 100_000 });
             }
             if (path == "/v1/chat/completions")
             {

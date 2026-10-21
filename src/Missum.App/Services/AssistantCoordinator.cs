@@ -324,7 +324,7 @@ public sealed partial class AssistantCoordinator(
         // the native model runtime, which may be offline or loading a model.
         var isCodingSession = IsCodingAgentSession(session.ChatMode);
         var selectedModel = isCodingSession ? CurrentSettings.SelectedModel : CurrentSettings.SelectedModel;
-        var contextLimit = ModelContextProfiles.ResolveMaximum(selectedModel, isCodingSession ? "coding" : "general");
+        var contextLimit = ModelContextSelection.Resolve(settings.Current, selectedModel ?? "", ModelContextProfiles.ResolveMaximum(selectedModel, isCodingSession ? "coding" : "general"));
         // Opening a view must never assemble, truncate or warm the model context.
         // Only real generation metrics describe the server's complete context.
         var context = new ContextBuildResult([], 0, false, "Der Kontextverbrauch wird beim AI-Lauf ermittelt.");

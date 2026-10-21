@@ -192,6 +192,7 @@ internal static class AssistantClientExecutionScope
         Current.Value = new(previous?.Store, previous?.ClientId ?? "desktop", submitted with
         {
             ReasoningEffortsByModel = new(submitted.ReasoningEffortsByModel, StringComparer.OrdinalIgnoreCase),
+            ContextLimitsByModel = new(submitted.ContextLimitsByModel, StringComparer.OrdinalIgnoreCase),
         });
         return new Restore(previous);
     }

@@ -12,6 +12,27 @@ namespace Missum.Tests;
 
 public sealed class ReasoningSelectionTests
 {
+    [Fact]
+    public async Task ContextSelectionRetainsPerModelLimitAndReportsTrainingMaximumSeparatelyFromLoadedWindow()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        using var store = new JsonSettingsStore(new MissumInfrastructureOptions { DataDirectory = environment.Directory });
+        using (var settings = new SettingsCoordinator(store))
+        {
+            await settings.InitializeAsync();
+            await settings.UpdateAsync(current => current with { ContextLimitsByModel = new() { ["model-a"] = 258000, ["model-b"] = 8192 } });
+        }
+        using var reloadedStore = new JsonSettingsStore(new MissumInfrastructureOptions { DataDirectory = environment.Directory });
+        var loaded = await reloadedStore.LoadAsync();
+        var options = MissumAiAssistantService.ResolveComposerReasoning(loaded, "MODEL-A", "coding",
+            Snapshot(new ModelRuntimeStatus("MODEL-A", "coding", true, true, "loaded", 258048, MaximumContextTokens: 1048576)));
+        Assert.Equal(1048576, options.MaximumContextTokens);
+        Assert.Equal(258000, options.SelectedContextTokens);
+        Assert.Equal(8192, ModelContextSelection.Resolve(loaded, "model-b", 131072));
+        Assert.Equal(4096, ModelContextSelection.Resolve(loaded, "model-a", 4096));
+        Assert.Equal(131072, ModelContextSelection.Resolve(loaded, "new-model", 131072));
+    }
+
     [Theory]
     [InlineData("auto", "high")]
     [InlineData(" AUTO ", "high")]

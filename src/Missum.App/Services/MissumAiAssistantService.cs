@@ -214,7 +214,7 @@ public sealed partial class MissumAiAssistantService(
                 _activeCancellation.Token).ConfigureAwait(false);
             var assistant = turn.AssistantMessage;
             var initialModel = UsesCodingAgent(action) ? CurrentSettings.SelectedModel : CurrentSettings.SelectedModel;
-            var contextLimit = ModelContextProfiles.ResolveMaximum(initialModel, UsesCodingAgent(action) ? "coding" : "general");
+            var contextLimit = ModelContextSelection.Resolve(CurrentSettings, initialModel ?? "", ModelContextProfiles.ResolveMaximum(initialModel, UsesCodingAgent(action) ? "coding" : "general"));
             await update(new(
                 MissumAiAssistantUpdateKind.Started,
                 assistant,
@@ -3214,6 +3214,8 @@ public sealed partial class MissumAiAssistantService(
             var availableCodingModel = codingCatalog.Models.FirstOrDefault(model => model.Downloaded
                 && string.Equals(model.Id, codingModel, StringComparison.OrdinalIgnoreCase))
                 ?? throw new InvalidOperationException("Das ausgewählte Coding-AI-Modell ist nicht verfügbar.");
+            availableCodingModel = availableCodingModel with { ContextTokens = ModelContextSelection.Resolve(CurrentSettings, codingModel,
+                availableCodingModel.MaximumContextTokens ?? availableCodingModel.ContextTokens) };
             var sharedProjectContext = await PrepareSharedProjectContextAsync(codingSession, availableCodingModel.ContextTokens,
                 codingModel, "coding", serverCapabilities.SupportsProjectContext, cancellationToken).ConfigureAwait(false);
             var codingPrompt = originalPrompt;
@@ -3302,6 +3304,7 @@ public sealed partial class MissumAiAssistantService(
                     Model: progress.Model)).ConfigureAwait(false);
                 await update(new(MissumAiAssistantUpdateKind.DocumentsChanged, assistant)).ConfigureAwait(false);
             },
+            contextLimit: CurrentSettings.ContextLimitsByModel.GetValueOrDefault(selectedModel),
             cancellationToken).ConfigureAwait(false);
 
         var sessionContext = await sessionContexts.PrepareAsync(
@@ -3311,7 +3314,7 @@ public sealed partial class MissumAiAssistantService(
             contextBudgetPrompt,
             selectedModel,
             contextProfile,
-            knownContextLength: documentContext?.ContextLength,
+            knownContextLength: documentContext?.ContextLength ?? (CurrentSettings.ContextLimitsByModel.TryGetValue(selectedModel, out var requestedContext) ? requestedContext : null),
             knownHistoryBudgetCharacters: documentContext is null ? null
                 : Math.Max(1_024, documentContext.HistoryBudgetCharacters),
             async progress => await update(new(

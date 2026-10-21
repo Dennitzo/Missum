@@ -147,10 +147,9 @@ public static class ContextPlanner
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(contextLength, 2_048);
         if (maximumOutputTokens is { } explicitLimit) ArgumentOutOfRangeException.ThrowIfNegative(explicitLimit);
-        var safetyTokens = Math.Min(8_192, Math.Max(2_048, contextLength / 16));
-        // Automatic output consumes the remaining context after exact native token counting.
-        // Do not reserve the whole window for output and evict the user's input.
-        return Math.Max(1_024, contextLength - safetyTokens);
+        // Percentage headroom also covers million-token contexts. This boundary
+        // does not change the allocated model window or native KV dimensions.
+        return Missum.Ai.Contracts.ContextCompactionPolicy.InputTokenBudget(contextLength);
     }
 
     public static int EstimateTokens(IReadOnlyList<LmChatMessage> messages)

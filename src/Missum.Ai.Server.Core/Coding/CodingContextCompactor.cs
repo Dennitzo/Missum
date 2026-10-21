@@ -30,8 +30,8 @@ internal static class CodingContextCompactor
         CodingWorkingState? workingState = null, bool includeWorkingStateInBudget = true)
     {
         var budget = ContextPlanner.ComputeInputTokenBudget(contextLength, null);
-        // The input budget already reserves space for generation and protocol overhead.
-        // Starting a new run must not discard a still-fitting conversation at 80%.
+        // Retain the evaluated prefix below the shared 90% boundary. Compact
+        // deliberately between turns, leaving room for large tool receipts.
         var prompt = workingState is null || !includeWorkingStateInBudget
             ? messages : messages.Append(CodingEvidenceContext.Build(workingState)).ToArray();
         if (ContextPlanner.EstimateTokens(prompt) < budget) return null;
