@@ -15,4 +15,4 @@ public sealed record ContextCacheResetResult(string Epoch, bool Changed, string 
 public sealed record ProjectContextSummarizeRequest(string ProjectKey, string ModelId, string Role,
     string PreviousText, IReadOnlyList<string> Contributions, int MaximumTokens = 4096);
 
-public sealed record ProjectContextSummarizeResult(string ProjectKey, string Text);
+public sealed record ProjectContextSummarizeResult(string ProjectKey, string Text, bool Interrupted = false);

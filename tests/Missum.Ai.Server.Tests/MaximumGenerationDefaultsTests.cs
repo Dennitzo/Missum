@@ -13,6 +13,31 @@ namespace Missum.Ai.Server.Tests;
 public sealed class MaximumGenerationDefaultsTests
 {
     [Theory]
+    [InlineData(700, false)]
+    [InlineData(9000, true)]
+    public async Task VisionPlaceholderFailureUsesRealImagePrefillAndStillEnforcesItsMeasuredBudget(int tokens, bool exceedsWindow)
+    {
+        const string model = "vision/deepseek41~test";
+        using var handler = new BudgetHandler(model, 8192, tokens) { FailPlaceholderCount = true };
+        using var client = CreateClient(new HttpClient(handler));
+        var path = Path.Combine(Path.GetTempPath(), "vision-placeholder-" + Guid.NewGuid().ToString("N") + ".png");
+        await File.WriteAllBytesAsync(path, Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII="));
+        try
+        {
+            if (exceedsWindow) await Assert.ThrowsAsync<NativeContextBudgetException>(() => client.AnalyzeImagesAsync(model, "Prüfe das Bild", [path]));
+            else Assert.Equal("OK", await client.AnalyzeImagesAsync(model, "Prüfe das Bild", [path]));
+            Assert.Single(handler.CountBodies);
+            var probe = handler.ChatBodies[0];
+            Assert.False(probe.GetProperty("stream").GetBoolean());
+            Assert.Equal(1, probe.GetProperty("max_tokens").GetInt32());
+            Assert.Equal(handler.CountBodies[0].GetProperty("messages").GetRawText(), probe.GetProperty("messages").GetRawText());
+            Assert.Equal(exceedsWindow ? 1 : 2, handler.ChatBodies.Count);
+            if (!exceedsWindow) Assert.Equal(2048, handler.ChatBodies[1].GetProperty("max_tokens").GetInt32());
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Theory]
     [InlineData("coding/gpt-oss-120b~test", "general", "high", 131_072)]
     [InlineData("coding/gpt-oss-20b~test", "coding", "high", 131_072)]
     [InlineData("coding/Qwen3.8-27B~test", "coding", "xhigh", 262_144)]
@@ -204,6 +229,7 @@ public sealed class MaximumGenerationDefaultsTests
         public List<JsonElement> CountBodies { get; } = [];
         public List<JsonElement> ChatBodies { get; } = [];
         public bool HoldCount { get; init; }
+        public bool FailPlaceholderCount { get; init; }
         public TaskCompletionSource CountEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -223,6 +249,8 @@ public sealed class MaximumGenerationDefaultsTests
                 CountBodies.Add(document.RootElement.Clone());
                 CountEntered.TrySetResult();
                 if (HoldCount) await Task.Delay(Timeout.Infinite, cancellationToken);
+                if (FailPlaceholderCount) return new HttpResponseMessage(HttpStatusCode.InternalServerError)
+                    { Content = new StringContent("{\"error\":{\"message\":\"Failed to tokenize prompt\"}}") };
                 return Json(new { input_tokens = inputTokens });
             }
             Assert.Equal("/v1/chat/completions", path);

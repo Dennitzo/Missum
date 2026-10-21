@@ -3,6 +3,7 @@ using Missum.Ai.Server.Core.Models;
 using Missum.Ai.Server.Core.Runs;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
+using System.Text.Json;
 
 namespace Missum.Ai.Server.Core.Gateway;
 
@@ -97,17 +98,28 @@ internal static partial class GatewayEndpoints
                     + string.Join("\n\n", request.Contributions)),
             ];
             _ = ContextPlanner.Prepare(messages, selected.ContextTokens, request.MaximumTokens, allowLossyCompaction: false);
+            context.Response.ContentType = "application/json";
+            context.Response.Headers["X-Missum-Context-Started"] = "true";
+            await context.Response.StartAsync(cancellation.Token).ConfigureAwait(false);
+            // Leading JSON whitespace is valid and forces buffered proxies to
+            // deliver the accepted headers while model work is still running.
+            await context.Response.WriteAsync(" ", cancellation.Token).ConfigureAwait(false);
+            await context.Response.Body.FlushAsync(cancellation.Token).ConfigureAwait(false);
             var result = await runtime.CompleteChatAsync(request.ModelId, messages, [], request.MaximumTokens,
                 modelRole: request.Role, reasoningEffort: runtime.ResolveMediaReasoningEffort(request.ModelId, request.Role, "none"),
                 requiredContextLength: selected.ContextTokens, cancellationToken: cancellation.Token).ConfigureAwait(false);
             if (string.IsNullOrWhiteSpace(result.Content) || result.ToolCalls.Count != 0 || result.Content.Length > 65_536)
                 throw new InvalidDataException("Die Projektverdichtung lieferte keinen gültigen begrenzten Text.");
-            await WriteJsonAsync(context, new ProjectContextSummarizeResult(request.ProjectKey, result.Content.Trim())).ConfigureAwait(false);
+            await JsonSerializer.SerializeAsync(context.Response.Body, new ProjectContextSummarizeResult(request.ProjectKey, result.Content.Trim()),
+                JsonOptions, context.RequestAborted).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (!context.RequestAborted.IsCancellationRequested)
         {
             // A new user run preempts this disposable background calculation.
-            context.Response.StatusCode = StatusCodes.Status409Conflict;
+            if (context.Response.HasStarted)
+                await JsonSerializer.SerializeAsync(context.Response.Body, new ProjectContextSummarizeResult(request.ProjectKey, "", Interrupted: true),
+                    JsonOptions, context.RequestAborted).ConfigureAwait(false);
+            else context.Response.StatusCode = StatusCodes.Status409Conflict;
         }
         finally { work.End(cancellation); }
     }

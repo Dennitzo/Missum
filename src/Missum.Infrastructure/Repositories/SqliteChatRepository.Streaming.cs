@@ -7,6 +7,30 @@ namespace Missum.Infrastructure.Repositories;
 
 public sealed partial class SqliteChatRepository
 {
+    public Task<AssistantToolStep> SaveBackgroundToolStepAsync(Guid messageId, AssistantToolStep toolStep, CancellationToken cancellationToken = default)
+    {
+        ValidateToolStep(toolStep);
+        return database.WriteAsync(async (connection, transaction, cancellation) =>
+        {
+            await ConversationToolStepStorage.EnsureNormalizedAsync(connection, transaction, messageId, cancellation).ConfigureAwait(false);
+            var result = await ConversationToolStepStorage.UpsertChangeAsync(connection, transaction, messageId, toolStep, cancellation).ConfigureAwait(false);
+            if (result.Changed)
+            {
+                await using var command = connection.CreateCommand();
+                command.Transaction = transaction;
+                // A background receipt changes presentation, never the source report
+                // revision/date. Otherwise project indexing summarizes its own receipts forever.
+                command.CommandText = """
+                    UPDATE chat_sessions SET conversation_revision=conversation_revision+1
+                    WHERE id=(SELECT session_id FROM chat_messages WHERE id=$message);
+                    DELETE FROM chat_message_ui_headers WHERE message_id=$message;
+                    """;
+                command.Parameters.AddWithValue("$message", messageId.ToString("D"));
+                await command.ExecuteNonQueryAsync(cancellation).ConfigureAwait(false);
+            }
+            return result.Step;
+        }, cancellationToken);
+    }
     public Task NormalizeToolStepsAsync(Guid messageId, CancellationToken cancellationToken = default) =>
         database.WriteAsync((connection, transaction, token) =>
             ConversationToolStepStorage.EnsureNormalizedAsync(connection, transaction, messageId, token), cancellationToken);

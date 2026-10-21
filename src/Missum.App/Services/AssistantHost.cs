@@ -18,7 +18,7 @@ public sealed class AssistantHost : IAsyncDisposable
     private static readonly HashSet<string> SharedEvents = new(StringComparer.Ordinal)
     {
         "chat.queued", "queue.changed", "chat.started", "chat.delta", "chat.completed", "chat.cancelled", "chat.failed",
-        "conversation.messageCommitted", "coding.changes", "status.changed", "subagent.snapshot",
+        "conversation.messageCommitted", "conversation.toolStepChanged", "coding.changes", "status.changed", "subagent.snapshot",
     };
     private readonly IServiceProvider _services;
     private readonly SettingsCoordinator _settings;
@@ -60,6 +60,8 @@ public sealed class AssistantHost : IAsyncDisposable
             var settingsService = _services.GetRequiredService<AssistantSettingsService>();
             settingsService.Changed += OnSettingsChanged;
             settingsService.RestoreHandler = RestoreBackupAsync;
+            if (_services.GetService<Missum.Core.Memory.IProjectContextService>() is ProjectContextService projectContext)
+                projectContext.CompactionChanged += OnProjectCompactionChangedAsync;
         }
         return Task.CompletedTask;
     }
@@ -71,6 +73,12 @@ public sealed class AssistantHost : IAsyncDisposable
         return new Subscription(() => ((ICollection<KeyValuePair<string, Func<string, object, string?, Task>?>>)_clients)
             .Remove(new(clientId, receive)));
     }
+
+    private Task OnProjectCompactionChangedAsync(Guid sessionId, Guid messageId, AssistantToolStep step) =>
+        PublishAsync("desktop", "conversation.toolStepChanged", new
+        {
+            sessionId, messageId, toolStep = step with { DisplayHeader = AssistantToolStepHeaders.Create(step) },
+        }, null);
 
     public async Task SaveDraftAsync(string clientId, Guid sessionId, string draft, CancellationToken token = default)
     {
@@ -368,6 +376,8 @@ public sealed class AssistantHost : IAsyncDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         _services.GetRequiredService<AssistantSettingsService>().Changed -= OnSettingsChanged;
+        if (_services.GetService<Missum.Core.Memory.IProjectContextService>() is ProjectContextService projectContext)
+            projectContext.CompactionChanged -= OnProjectCompactionChangedAsync;
         await _lifetime.CancelAsync().ConfigureAwait(false);
         _lifetime.Dispose();
     }

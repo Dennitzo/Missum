@@ -398,9 +398,19 @@ public sealed partial record SubagentChatState(
             case RunEventTypes.ContextChanged:
                 var context = item.Data.Deserialize<ContextChangedEvent>(JsonOptions);
                 next = next with { ContextUsed = context?.EstimatedInputTokens ?? ContextUsed, ContextLimit = context?.ContextLimit ?? ContextLimit };
+                if (context?.WasCompacted == true)
+                {
+                    var prior = message.ToolSteps?.LastOrDefault(step => step.Tool == "context.compact" && step.Status == "running");
+                    message = AddStep(message, new(prior?.Id ?? $"context-compaction:{RunId}:{item.Id}", "context.compact", "completed",
+                        context.Detail, ContentOffset: prior?.ContentOffset ?? message.Content.Length, StartedAt: prior?.StartedAt ?? item.CreatedAt,
+                        CompletedAt: item.CreatedAt, UpdatedAt: item.CreatedAt));
+                }
                 break;
             case RunEventTypes.ModelGeneration:
                 var generation = item.Data.Deserialize<ModelGenerationEvent>(JsonOptions);
+                if (generation?.State == "codingCompacting" && message.ToolSteps?.Any(step => step.Tool == "context.compact" && step.Status == "running") != true)
+                    message = AddStep(message, new($"context-compaction:{RunId}:{item.Id}", "context.compact", "running",
+                        "Der Arbeitskontext wird verdichtet.", ContentOffset: message.Content.Length, StartedAt: item.CreatedAt, UpdatedAt: item.CreatedAt));
                 next = next with { GeneratedTokens = generation?.GeneratedTokens ?? GeneratedTokens, GenerationState = generation?.State,
                     GenerationUpdatedAt = item.CreatedAt, RunStatus = generation?.State == "promptProcessing" ? "Kontext wird verarbeitet" : "Modell generiert",
                     ContextUsed = generation?.CurrentTokens ?? ContextUsed,

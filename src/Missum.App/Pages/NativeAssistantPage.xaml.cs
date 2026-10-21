@@ -335,6 +335,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         }
         var eventSession = S(data, "sessionId", S(data, "activeSessionId"));
         if (eventSession.Length > 0 && !string.Equals(eventSession, _session.ToString(), StringComparison.OrdinalIgnoreCase)) return;
+        if (type == "conversation.toolStepChanged") { ApplyNativeMessageDelta(data); return; }
         UpdateContext(data);
         ObserveThinkingProgress(data);
         if (type == "reasoning.snapshot" && S(data, "role") + ":" + S(data, "modelId") == _reasoningModel) { _reasoning = data.Deserialize<ComposerReasoningOptions>(JsonOptions); RefreshComposerModelDisplay(); }

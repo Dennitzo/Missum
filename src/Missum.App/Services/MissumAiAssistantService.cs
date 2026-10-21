@@ -1345,7 +1345,7 @@ public sealed partial class MissumAiAssistantService(
                     historyBeforePrompt,
                     uploaded,
                     assistant,
-                    update,
+                    async progress => { assistant = progress.Message; await update(progress).ConfigureAwait(false); },
                     cancellationToken).ConfigureAwait(false);
                 accepted = await client.CreateRunAsync(request, idempotencyKey, cancellationToken).ConfigureAwait(false);
                 if (localRun.WorkspacePath is { } workspace)
@@ -1663,6 +1663,7 @@ public sealed partial class MissumAiAssistantService(
         await using var stream = new ConversationStreamBuffer(chats, runs, assistant, localRun);
         stream.Start();
         assistant = assistant with { ToolSteps = stream.ToolSteps };
+        var activeCompactionStepId = stream.ToolSteps.LastOrDefault(step => step.Tool == "context.compact" && step.Status == "running")?.Id;
         Task<IReadOnlyList<AssistantToolStep>> SaveToolStepAsync(Guid owner, AssistantToolStep step, CancellationToken token)
         {
             token.ThrowIfCancellationRequested();
@@ -2223,6 +2224,12 @@ public sealed partial class MissumAiAssistantService(
                         var generation = item.Data.Deserialize<ModelGenerationEvent>(JsonOptions);
                         if (generation is not null)
                         {
+                            if (generation.State == "codingCompacting" && activeCompactionStepId is null)
+                            {
+                                activeCompactionStepId = $"context-compaction:{item.RunId}:{item.Id}";
+                                await RecordToolStepAsync(activeCompactionStepId, "context.compact", "running",
+                                    "Der Arbeitskontext wird für die Fortsetzung verdichtet.", eventAt: item.CreatedAt).ConfigureAwait(false);
+                            }
                             await update(new(
                                 MissumAiAssistantUpdateKind.Status,
                                 assistant,
@@ -2261,6 +2268,14 @@ public sealed partial class MissumAiAssistantService(
                         var context = item.Data.Deserialize<ContextChangedEvent>(JsonOptions);
                         if (context is not null)
                         {
+                            if (context.WasCompacted)
+                            {
+                                await RecordToolStepAsync(activeCompactionStepId ?? $"context-compaction:{item.RunId}:{item.Id}",
+                                    "context.compact", "completed", context.Detail ?? "Der Arbeitskontext wurde verdichtet.",
+                                    outputJson: JsonSerializer.Serialize(new { context.EstimatedInputTokens, context.ContextLimit, context.InputTokenBudget }, JsonOptions),
+                                    eventAt: item.CreatedAt).ConfigureAwait(false);
+                                activeCompactionStepId = null;
+                            }
                             activeContextLimit = context.ContextLimit;
                             modelTokenProgress.HasMeasuredContext = false;
                             modelTokenProgress.SessionContextTokens = context.EstimatedInputTokens;
@@ -3326,6 +3341,15 @@ public sealed partial class MissumAiAssistantService(
                 ContextLimit: documentContext?.ContextLength,
                 ContextWasCompacted: true)).ConfigureAwait(false),
             cancellationToken).ConfigureAwait(false);
+        if (sessionContext.Descriptor.PreparedByAi && !sessionContext.CacheHit)
+        {
+            var now = DateTimeOffset.UtcNow;
+            var step = await chats.SaveToolStepDeltaAsync(assistant.Id, new("history-compaction:" + assistant.Id.ToString("N"),
+                "context.compact", "completed", "Älterer Sitzungsverlauf wurde als fortsetzbarer Arbeitsstand verdichtet.",
+                ContentOffset: assistant.Content.Length, StartedAt: now, CompletedAt: now, UpdatedAt: now), cancellationToken).ConfigureAwait(false);
+            assistant = assistant with { ToolSteps = (assistant.ToolSteps ?? []).Where(item => item.Id != step.Id).Append(step).ToArray() };
+            await update(new(MissumAiAssistantUpdateKind.Status, assistant, Status: "Kontext komprimiert", ToolStep: step)).ConfigureAwait(false);
+        }
         var messages = sessionContext.Messages.ToList();
 
         var hasAudiobookHistory = historyBeforePrompt.Any(static message =>

@@ -13,7 +13,7 @@ using Microsoft.Extensions.Logging;
 namespace Missum.App.Services;
 
 /// <summary>Project knowledge is independent of display paging and disposable native KV state.</summary>
-public sealed class ProjectContextService : IProjectContextService, IAsyncDisposable
+public sealed partial class ProjectContextService : IProjectContextService, IAsyncDisposable
 {
     private sealed record Work(string Workspace, int ContextTokens, string ModelId, string Role);
     private sealed record Watermark(DateTimeOffset? Through, Guid? MessageId, string MetadataHash);
@@ -39,7 +39,14 @@ public sealed class ProjectContextService : IProjectContextService, IAsyncDispos
         {
             using var client = await connection.CreateClientAsync(null, ensureProfileNativeRuntime: false, token).ConfigureAwait(false);
             return await client.SummarizeProjectContextAsync(request, token).ConfigureAwait(false);
-        }, logger, startMaintenance: true) { }
+        }, logger, startMaintenance: true)
+    {
+        _summarizeWithProgress = async (request, started, token) =>
+        {
+            using var client = await connection.CreateClientAsync(null, ensureProfileNativeRuntime: false, token).ConfigureAwait(false);
+            return await client.SummarizeProjectContextAsync(request, started, token).ConfigureAwait(false);
+        };
+    }
 
     internal ProjectContextService(IProjectContextStore store, IChatRepository chats, IProjectMemoryStore memory,
         Func<ProjectContextSummarizeRequest, CancellationToken, Task<ProjectContextSummarizeResult>> summarize,
@@ -138,6 +145,7 @@ public sealed class ProjectContextService : IProjectContextService, IAsyncDispos
         var original = await _chats.GetMessageTextAsync(message.Id, cancellationToken).ConfigureAwait(false);
         if (original is null || original.SessionId != message.SessionId || !Indexable(original)
             || !await OwnsAsync(scope, original.SessionId, cancellationToken).ConfigureAwait(false)) return;
+        _activityOwners[scope.ProjectKey] = original.Id;
         var goal = await _chats.GetFirstUserMessageAsync(original.SessionId, cancellationToken).ConfigureAwait(false);
         var contribution = Contribution(scope, original, goal?.Content, 12000);
         var text = contribution.Text;
@@ -435,15 +443,49 @@ public sealed class ProjectContextService : IProjectContextService, IAsyncDispos
         if (items.Count == 0 && watermark?.MetadataHash == metadataHash) return true;
         var reportBytes = reportsBudget / Math.Max(1, items.Count);
         var contributions = items.Select(item => SummaryExcerpt(item.Text, reportBytes)).Prepend(metadataText).ToArray();
-        var result = await _summarize(new(key, work.ModelId, work.Role, previousText,
-            contributions, outputTokens), token).ConfigureAwait(false);
-        if (result.ProjectKey != key || string.IsNullOrWhiteSpace(result.Text)) return false;
+        var request = new ProjectContextSummarizeRequest(key, work.ModelId, work.Role, previousText, contributions, outputTokens);
+        var owner = await ActivityOwnerAsync(key, work, items, token).ConfigureAwait(false);
+        var activityId = "project-compaction-" + Guid.NewGuid().ToString("N");
+        var startedAt = DateTimeOffset.UtcNow;
+        var activityStarted = false;
+        async Task Started()
+        {
+            activityStarted = true;
+            await PersistCompactionAsync(owner, activityId, "running", "Projektwissen für weitere Sitzungen wird verdichtet.", startedAt).ConfigureAwait(false);
+        }
+        ProjectContextSummarizeResult result;
+        try
+        {
+            if (_summarizeWithProgress is { } summarize) result = await summarize(request, Started, token).ConfigureAwait(false);
+            else { await Started().ConfigureAwait(false); result = await _summarize(request, token).ConfigureAwait(false); }
+        }
+        catch (Exception error)
+        {
+            if (activityStarted) await PersistCompactionAsync(owner, activityId, error is OperationCanceledException ? "interrupted" : "failed",
+                error is OperationCanceledException ? "Projektverdichtung unterbrochen; der bisherige Kontext bleibt erhalten." : error.Message, startedAt).ConfigureAwait(false);
+            throw;
+        }
+        if (result.Interrupted)
+        {
+            if (activityStarted) await PersistCompactionAsync(owner, activityId, "interrupted", "Ein neuer Nutzerauftrag hat Vorrang. Projektverdichtung wird später fortgesetzt.", startedAt).ConfigureAwait(false);
+            return false;
+        }
+        if (result.ProjectKey != key || string.IsNullOrWhiteSpace(result.Text))
+        {
+            if (activityStarted) await PersistCompactionAsync(owner, activityId, "failed", "Die Projektverdichtung lieferte keinen gültigen Arbeitsstand.", startedAt).ConfigureAwait(false);
+            return false;
+        }
         var text = SummaryExcerpt(result.Text, TokenBudget(work.ContextTokens));
         var last = items.Count > 0 ? items[^1] : null;
         var cursor = JsonSerializer.Serialize(new Watermark(last?.UpdatedAt ?? watermark?.Through,
             last?.MessageId ?? watermark?.MessageId, metadataHash));
         var updated = new ProjectContextSnapshot(key, snapshot.Generation + 1, Hash(text), text, cursor, DateTimeOffset.UtcNow);
-        if (!await _store.PublishAsync(updated, snapshot.Generation, token).ConfigureAwait(false)) return false;
+        if (!await _store.PublishAsync(updated, snapshot.Generation, token).ConfigureAwait(false))
+        {
+            if (activityStarted) await PersistCompactionAsync(owner, activityId, "interrupted", "Neuere Projektdaten wurden gespeichert; die Verdichtung wird erneut eingeplant.", startedAt).ConfigureAwait(false);
+            return false;
+        }
+        if (activityStarted) await PersistCompactionAsync(owner, activityId, "completed", "Projektwissen für weitere Sitzungen wurde verdichtet und gespeichert.", startedAt).ConfigureAwait(false);
         return items.Count < pageSize;
     }
 

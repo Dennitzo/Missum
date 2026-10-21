@@ -7,6 +7,9 @@ namespace Missum.Ai.Server.Core.Models;
 
 public sealed partial class ModelRuntimeClient
 {
+    private static readonly Action<ILogger, string, int, Exception?> LogVisionCountingFallback =
+        LoggerMessage.Define<string, int>(LogLevel.Information, new EventId(4118, "VisionTokenCountingFallback"),
+            "Native vision count for {ModelId}: placeholder tokenizer unavailable; real-image prefill measured {InputTokens} prompt tokens; single probe token discarded.");
     private static readonly Action<ILogger, string, int, int, int, string, Exception?> LogModelRequestBudget =
         LoggerMessage.Define<string, int, int, int, string>(LogLevel.Information,
             new EventId(4104, "ModelRequestBudget"),
@@ -18,20 +21,14 @@ public sealed partial class ModelRuntimeClient
         int? maximumOutputTokens,
         Func<ModelRuntimeProgress, CancellationToken, ValueTask>? progress,
         bool compactAtThreshold,
+        bool allowMultimodalCountingFallback,
         CancellationToken cancellationToken)
     {
         if (progress is not null)
             await progress(new ModelRuntimeProgress("tokenCounting"), cancellationToken).ConfigureAwait(false);
         // Native llama applies the identical chat template, tools, reasoning
         // kwargs and multimodal preprocessing without running model generation.
-        using var response = await SendJsonAsync(HttpMethod.Post,
-            "v1/chat/completions/input_tokens", body, cancellationToken).ConfigureAwait(false);
-        using var document = await JsonDocument.ParseAsync(
-            await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false),
-            cancellationToken: cancellationToken).ConfigureAwait(false);
-        if (!document.RootElement.TryGetProperty("input_tokens", out var count)
-            || !count.TryGetInt32(out var inputTokens) || inputTokens < 1)
-            throw new JsonException("Der native Tokenzähler lieferte keine gültige Promptlänge.");
+        var inputTokens = await CountNativeInputAsync(body, allowMultimodalCountingFallback, cancellationToken).ConfigureAwait(false);
 
         var compactionBudget = ContextCompactionPolicy.InputTokenBudget(contextLength);
         if (compactAtThreshold && inputTokens >= compactionBudget)
@@ -57,6 +54,39 @@ public sealed partial class ModelRuntimeClient
         LogModelRequestBudget(_logger, body["model"]?.ToString() ?? "", inputTokens,
             contextLength, outputTokens, effort ?? "none", null);
         return request;
+    }
+
+    private async Task<int> CountNativeInputAsync(IReadOnlyDictionary<string, object?> body,
+        bool allowMultimodalCountingFallback, CancellationToken token)
+    {
+        try
+        {
+            using var response = await SendJsonAsync(HttpMethod.Post, "v1/chat/completions/input_tokens", body, token).ConfigureAwait(false);
+            using var document = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(token).ConfigureAwait(false), cancellationToken: token).ConfigureAwait(false);
+            if (document.RootElement.TryGetProperty("input_tokens", out var count) && count.TryGetInt32(out var tokens) && tokens > 0) return tokens;
+            throw new JsonException("Der native Tokenzähler lieferte keine gültige Promptlänge.");
+        }
+        catch (HttpRequestException error) when (allowMultimodalCountingFallback
+            && error.Message.Contains("Failed to tokenize prompt", StringComparison.OrdinalIgnoreCase))
+        {
+            // Some mtmd preprocessors (DeepSeek 4.1) cannot tokenize placeholder
+            // images. Real image preprocessing works. Only this stateless vision
+            // path may prefill the exact same request; discard its single token.
+            // Never estimate image tokens or bypass the subsequent budget check.
+            var probe = new Dictionary<string, object?>(body, StringComparer.Ordinal)
+            { ["stream"] = false, ["return_progress"] = false, ["max_tokens"] = 1, ["cache_prompt"] = true };
+            probe.Remove("stream_options");
+            using var response = await SendJsonAsync(HttpMethod.Post, "v1/chat/completions", probe, token).ConfigureAwait(false);
+            using var document = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(token).ConfigureAwait(false), cancellationToken: token).ConfigureAwait(false);
+            if (document.RootElement.TryGetProperty("usage", out var usage)
+                && usage.TryGetProperty("prompt_tokens", out var count) && count.TryGetInt32(out var tokens) && tokens > 0
+                && usage.TryGetProperty("completion_tokens", out var output) && output.TryGetInt32(out var generated) && generated is >= 0 and <= 1)
+            {
+                LogVisionCountingFallback(_logger, body["model"]?.ToString() ?? "", tokens, null);
+                return tokens;
+            }
+            throw new JsonException("Der Vision-Zählvorlauf lieferte keine gültige Promptlänge.");
+        }
     }
 
     internal static int ResolveMaximumOutputTokens(int contextLength, int inputTokens, int? requestedMaximum)

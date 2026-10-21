@@ -66,6 +66,8 @@ public interface IChatRepository
     Task UpdateMessageWithToolStepsAsync(Guid messageId, string content, MessageStatus status, IReadOnlyList<AssistantToolStep> toolSteps, CancellationToken cancellationToken = default);
     Task SetMessageContextSummaryAsync(Guid messageId, string contextSummary, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<AssistantToolStep>> SaveToolStepAsync(Guid messageId, AssistantToolStep toolStep, CancellationToken cancellationToken = default);
+    Task<AssistantToolStep> SaveBackgroundToolStepAsync(Guid messageId, AssistantToolStep toolStep, CancellationToken cancellationToken = default) =>
+        SaveToolStepDeltaAsync(messageId, toolStep, cancellationToken);
     async Task<AssistantToolStep> SaveToolStepDeltaAsync(Guid messageId, AssistantToolStep toolStep,
         CancellationToken cancellationToken = default) =>
         (await SaveToolStepAsync(messageId, toolStep, cancellationToken).ConfigureAwait(false)).First(step => step.Id == toolStep.Id);

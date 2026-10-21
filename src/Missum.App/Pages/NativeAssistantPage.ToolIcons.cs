@@ -20,7 +20,7 @@ public sealed partial class NativeAssistantPage
     private static string ToolStepIconKey(string tool) => tool switch
     {
         "subagent" or "subagent.completed" or "subagent.spawn" or "subagent.wait" => "subagent",
-        "assistant.reasoning" or "assistant.progress" => "research",
+        "assistant.reasoning" or "assistant.progress" or "context.compact" or "context.projectCompact" => "research",
         "assistant.continuation" => "success",
         "coding.updatePlan" => "plan",
         "math.formalProof" => "lean",

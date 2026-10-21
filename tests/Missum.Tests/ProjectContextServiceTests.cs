@@ -265,11 +265,21 @@ public sealed class ProjectContextServiceTests
         var message = await chats.AddMessageAsync(session.Id, ChatRole.Assistant, "Offene Hypothese ohne experimentellen Beleg.", MessageStatus.Completed);
         ProjectContextSummarizeRequest? received = null;
         const string semantic = "Die Hypothese bleibt offen. Ein experimenteller Beleg fehlt; die Originalnachricht dokumentiert diese Grenze.";
+        var activities = new List<AssistantToolStep>();
+        var summaryCalls = 0;
         await using var service = new ProjectContextService(store, chats, memory, (request, _) =>
         {
+            summaryCalls++;
             received = request;
             return Task.FromResult(new ProjectContextSummarizeResult(request.ProjectKey, semantic));
         }, NullLogger<ProjectContextService>.Instance);
+        service.CompactionChanged += (ownerSession, ownerMessage, step) =>
+        {
+            Assert.Equal(session.Id, ownerSession);
+            Assert.Equal(message.Id, ownerMessage);
+            activities.Add(step);
+            return Task.CompletedTask;
+        };
         await service.GetAsync(workspace, 1_048_576, "selected-model", "coding");
         Assert.Null(received);
         Assert.True(await service.RefreshProjectAsync(workspace, 1_048_576, "selected-model", "coding"));
@@ -281,6 +291,19 @@ public sealed class ProjectContextServiceTests
         var stored = await store.GetAsync(ProjectMemoryScope.FromWorkspace(workspace).ProjectKey);
         Assert.Equal(semantic, stored!.Text);
         Assert.NotNull(stored.SourceWatermark);
+        Assert.Equal("running", activities[0].Status);
+        Assert.Equal("completed", activities[1].Status);
+        Assert.Equal(2, activities.Count);
+        Assert.Single(activities.Select(step => step.Id).Distinct());
+        var saved = (await chats.ListMessagesAsync(session.Id)).Single();
+        var activity = Assert.Single(saved.ToolSteps!);
+        Assert.Equal("context.projectCompact", activity.Tool);
+        Assert.Equal("completed", activity.Status);
+        Assert.Equal(message.Revision, saved.Revision);
+        Assert.Equal(message.UpdatedAt, saved.UpdatedAt);
+        Assert.Equal(message.Content, saved.Content);
+        Assert.True(await service.RefreshProjectAsync(workspace, 1_048_576, "selected-model", "coding"));
+        Assert.Equal(1, summaryCalls); // The persisted receipt must not requeue itself as new project knowledge.
     }
 
     [Fact]

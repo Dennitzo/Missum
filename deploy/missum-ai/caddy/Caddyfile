@@ -25,6 +25,8 @@
   respond @preflight 204
 
   reverse_proxy gateway:8080 {
+    # Forward accepted background-work headers before its final JSON body.
+    flush_interval -1
     transport http {
       versions 1.1
       dial_timeout 5s

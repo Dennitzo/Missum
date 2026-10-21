@@ -24,6 +24,17 @@ public sealed class MissumAiClient : IDisposable
         CancellationToken cancellationToken = default) =>
         PostAsync<ProjectContextSummarizeRequest, ProjectContextSummarizeResult>("v1/project-context/summarize", request, cancellationToken);
 
+    public async Task<ProjectContextSummarizeResult> SummarizeProjectContextAsync(ProjectContextSummarizeRequest request,
+        Func<Task> started, CancellationToken cancellationToken = default)
+    {
+        using var message = new HttpRequestMessage(HttpMethod.Post, "v1/project-context/summarize")
+        { Content = JsonContent.Create(request, options: _jsonOptions) };
+        using var response = await _httpClient.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+        if (response.IsSuccessStatusCode && response.Headers.Contains("X-Missum-Context-Started"))
+            await started().ConfigureAwait(false);
+        return await ReadRequiredAsync<ProjectContextSummarizeResult>(response, cancellationToken).ConfigureAwait(false);
+    }
+
     public Task<ContextCacheResetResult> ResetContextCacheAsync(ContextCacheResetRequest request,
         CancellationToken cancellationToken = default) =>
         PostAsync<ContextCacheResetRequest, ContextCacheResetResult>("v1/context/cache/reset", request, cancellationToken);

@@ -7,6 +7,32 @@ namespace Missum.Ai.Server.Tests;
 
 public sealed class MissumAiClientTests
 {
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ProjectCompactionStartsOnlyAfterTheGatewayAcceptsItsIdleWork(bool accepted)
+    {
+        using var http = new HttpClient(new ProjectSummaryHandler(accepted)) { BaseAddress = new Uri("http://gateway.test/") };
+        using var client = new MissumAiClient(http);
+        var started = false;
+        var work = client.SummarizeProjectContextAsync(new("project", "model", "coding", "previous", ["new"]),
+            () => { started = true; return Task.CompletedTask; });
+        if (accepted) Assert.Equal("merged", (await work).Text);
+        else await Assert.ThrowsAsync<MissumAiApiException>(() => work);
+        Assert.Equal(accepted, started);
+    }
+
+    private sealed class ProjectSummaryHandler(bool accepted) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var response = new HttpResponseMessage(accepted ? HttpStatusCode.OK : HttpStatusCode.Conflict)
+            { Content = new StringContent(accepted ? "{\"projectKey\":\"project\",\"text\":\"merged\"}" : "{\"detail\":\"busy\"}", Encoding.UTF8, "application/json") };
+            if (accepted) response.Headers.Add("X-Missum-Context-Started", "true");
+            return Task.FromResult(response);
+        }
+    }
+
     [Fact]
     public async Task ReadinessServiceUnavailableReturnsItsDiagnosticSnapshot()
     {

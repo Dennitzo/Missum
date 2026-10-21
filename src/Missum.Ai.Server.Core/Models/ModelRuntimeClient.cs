@@ -658,7 +658,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
         var result = await CompleteStreamingChatWithBoundedRetryAsync(body,
             new Dictionary<string, string>(StringComparer.Ordinal), ObserveVisionProgressAsync,
             structuredToolOnly: false, preparation.ContextLength, maximumOutputTokens,
-            timeout.Token).ConfigureAwait(false);
+            timeout.Token, allowMultimodalCountingFallback: true).ConfigureAwait(false);
         return result;
         }
         catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
@@ -882,7 +882,8 @@ public sealed partial class ModelRuntimeClient : IDisposable
         CancellationToken cancellationToken,
         string? completionEndpoint = null,
         Action? inferenceDispatched = null,
-        bool compactAtThreshold = false)
+        bool compactAtThreshold = false,
+        bool allowMultimodalCountingFallback = false)
     {
         Exception? last = null;
         string? protocolRepairTool = null;
@@ -898,7 +899,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
                     : CreateToolProtocolRepairBody(body, protocolRepairTool);
                 var countingClock = Stopwatch.StartNew();
                 Dictionary<string, object?> requestBody;
-                try { requestBody = await ApplyTokenBudgetAsync(unbudgetedBody, contextLength, maximumOutputTokens, nativeProgress, compactAtThreshold, cancellationToken).ConfigureAwait(false); }
+                try { requestBody = await ApplyTokenBudgetAsync(unbudgetedBody, contextLength, maximumOutputTokens, nativeProgress, compactAtThreshold, allowMultimodalCountingFallback, cancellationToken).ConfigureAwait(false); }
                 finally { tokenCountingMilliseconds += countingClock.Elapsed.TotalMilliseconds; }
                 requestPhase = "generation";
                 var requestClock = Stopwatch.StartNew();
