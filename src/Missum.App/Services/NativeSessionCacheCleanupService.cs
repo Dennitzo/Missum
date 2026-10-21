@@ -239,7 +239,7 @@ public sealed class NativeSessionCacheCleanupService
     {
         var workspace = (workspacePath ?? "").Trim().Replace('\\', '/').TrimEnd('/').ToUpperInvariant();
         var scope = JsonSerializer.Serialize(new[] { sessionId, role.Trim().ToLowerInvariant(), workspace });
-        return "missum-session-v2-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(scope))).ToLowerInvariant();
+        return "missum-session-v3-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(scope))).ToLowerInvariant();
     }
 
     private static string CanonicalKey(string key) => key.StartsWith("missum-session-v2-", StringComparison.Ordinal)

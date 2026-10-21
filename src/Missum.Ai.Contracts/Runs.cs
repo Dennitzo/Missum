@@ -64,7 +64,7 @@ public sealed record RunRequest(
     [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] DeepResearchOptions? ResearchOptions = null,
     [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] SubagentRunContext? Subagent = null,
     [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] string? ContextProfileVersion = null,
-    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] ProjectContextRef? ProjectContext = null);
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] string? WorkflowProfile = null);
 
 /// <summary>Gateway-created branch of an existing run. Permissions and model selection are inherited.</summary>
 public sealed record SubagentRunContext(
@@ -366,6 +366,7 @@ public sealed record RunCompletedEvent(
     string? ModelId,
     long InputTokens,
     long OutputTokens,
-    IReadOnlyList<string>? ArtifactIds = null);
+    IReadOnlyList<string>? ArtifactIds = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] string? ScientificOutcome = null);
 
 public sealed record RunFailedEvent(string ErrorCode, string Message, bool Retryable);

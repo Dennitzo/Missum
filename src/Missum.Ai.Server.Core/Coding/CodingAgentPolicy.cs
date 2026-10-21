@@ -117,10 +117,11 @@ public static class CodingAgentPolicy
         lies vor weiteren Änderungen erneut. Fehlersignaturen gelten nur für den dazugehörigen unveränderten Zustand.
         """;
 
-    public static string ForWorkingState(bool enabled) =>
-        (enabled ? SystemPrompt + "\n\n" + WorkingStatePrompt : SystemPrompt) + "\n\n" + ReasoningLanguagePrompt
-        + "\n\n" + StagedExecutionAndNarrationPrompt + "\n\n" + WorkspaceDependenciesPrompt
-        + "\n\n" + ScientificResearchPrompt + "\n\n" + AgentNarrationPolicy.Instructions + "\n\n" + MathFormattingPolicy.Instructions;
+    public static string ForWorkingState(bool enabled, bool science = false) =>
+        (enabled && !science ? SystemPrompt + "\n\n" + WorkingStatePrompt : SystemPrompt) + "\n\n" + ReasoningLanguagePrompt
+        + "\n\n" + (science ? StagedExecutionAndNarrationPrompt[StagedExecutionAndNarrationPrompt.IndexOf("Vorlesbare Begleittexte:", StringComparison.Ordinal)..] : StagedExecutionAndNarrationPrompt)
+        + "\n\n" + WorkspaceDependenciesPrompt
+        + (science ? "" : "\n\n" + ScientificResearchPrompt) + "\n\n" + AgentNarrationPolicy.Instructions + "\n\n" + MathFormattingPolicy.Instructions;
 
     internal static void EnsureCurrentInstructions(List<LmChatMessage> messages)
     {

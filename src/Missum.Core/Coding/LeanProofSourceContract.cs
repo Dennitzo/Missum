@@ -19,7 +19,7 @@ public static class LeanProofSourceContract
         // Inspect comments and strings too. A partial lexer must not pretend to
         // understand arbitrary Lean syntax or allow escaped compiler commands.
         if (source.Contains('#', StringComparison.Ordinal) || source.Contains('«') || source.Contains('»')) throw new InvalidDataException(
-            "Die formale Prüfung akzeptiert deklarative Lean-Quellen ohne #-Direktiven.");
+            "Missums Quellprüfung wurde vor der Lean-Kernelprüfung abgebrochen: Entferne jedes #-Zeichen, auch Markdown-Überschriften in Kommentaren. Füge KEIN #check, #eval oder #print hinzu. Verwende theorem/lemma mit einem vollständigen Beweis und normale Kommentare ohne #. Auch « und » sind in diesem Prüfprofil ausgeschlossen.");
         // Only installed, audited standard-library modules may be imported. Project-local
         // imports could hide admissions or axioms behind a successful compiler exit code.
         source = ImportLine.Replace(source, match =>

@@ -8,7 +8,7 @@ public sealed partial class MissumAiAssistantService
         try
         {
             var serverRunIds = await StopPersistedRunsLocallyAsync(runs, chats,
-                applicationShutdown: true, cancellationToken: cancellationToken, capture: CaptureSharedProjectContextAsync).ConfigureAwait(false);
+                applicationShutdown: true, cancellationToken: cancellationToken).ConfigureAwait(false);
             _startupServerRunIds.UnionWith(serverRunIds);
             foreach (var serverRunId in serverRunIds)
                 if (await runs.GetByServerRunIdAsync(serverRunId, cancellationToken).ConfigureAwait(false) is { } run)

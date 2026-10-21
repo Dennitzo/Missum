@@ -22,9 +22,8 @@ public sealed class ApplicationShutdownRunCleanupTests
         var run = await runs.CreateAsync(new MissumAiRunRecord(Guid.NewGuid(), session.Id, message.Id,
             action, "shutdown-test", "server-job", 8765, "waitingForClient", "local-model", null, now, now));
 
-        var captured = new List<ChatMessage>();
         var cancelled = await MissumAiAssistantService.StopPersistedRunsLocallyAsync(runs, chats,
-            applicationShutdown: true, capture: terminal => { captured.Add(terminal); return Task.CompletedTask; });
+            applicationShutdown: true);
 
         Assert.Equal(["server-job"], cancelled);
         Assert.Empty(await runs.ListResumableAsync());
@@ -36,11 +35,6 @@ public sealed class ApplicationShutdownRunCleanupTests
         Assert.Equal(message.Content, storedMessage.Content);
         Assert.Equal(MessageStatus.Cancelled, storedMessage.Status);
         Assert.Contains("Beenden von Missum", storedMessage.Error);
-        var contribution = Assert.Single(captured);
-        Assert.Equal(storedMessage.Id, contribution.Id);
-        Assert.Equal(storedMessage.Revision, contribution.Revision);
-        Assert.Equal(MessageStatus.Cancelled, contribution.Status);
-        Assert.Equal(message.Content, contribution.Content);
         Assert.Empty(await MissumAiAssistantService.StopPersistedRunsLocallyAsync(runs, chats,
             applicationShutdown: true));
     }

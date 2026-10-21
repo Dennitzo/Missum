@@ -49,6 +49,16 @@ public sealed class MissumAiDatabase : IDisposable
             if (previousVersion > CurrentSchemaVersion)
                 throw new InvalidDataException("The gateway database was created by a newer Missum version.");
             await using var command = connection.CreateCommand();
+            command.CommandText = "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='session_context_heads');";
+            if (Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0)
+            {
+                await using var backup = new SqliteConnection(new SqliteConnectionStringBuilder
+                {
+                    DataSource = _options.DatabasePath + ".pre-session-only-" + Guid.NewGuid().ToString("N") + ".bak",
+                }.ToString());
+                await backup.OpenAsync(cancellationToken).ConfigureAwait(false);
+                connection.BackupDatabase(backup);
+            }
             // WAL belongs to the database, not an individual connection. Do
             // not ask every concurrent status reader to change journal mode.
             command.CommandText = "PRAGMA journal_mode=WAL;\n" + Schema;
@@ -231,20 +241,8 @@ public sealed class MissumAiDatabase : IDisposable
             checkpoint_json TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS runtime_context_state (
-            singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
-            cache_epoch TEXT NOT NULL
-        );
-        INSERT OR IGNORE INTO runtime_context_state(singleton, cache_epoch) VALUES(1, 'project-context-v1');
-        CREATE TABLE IF NOT EXISTS session_context_heads (
-            session_id TEXT NOT NULL,
-            workspace_key TEXT NOT NULL COLLATE NOCASE,
-            role TEXT NOT NULL,
-            project_key TEXT NOT NULL,
-            cache_epoch TEXT NOT NULL,
-            run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
-            PRIMARY KEY(session_id, workspace_key, role)
-        );
+        DROP TABLE IF EXISTS session_context_heads;
+        DROP TABLE IF EXISTS runtime_context_state;
 
         CREATE TABLE IF NOT EXISTS run_checkpoints (
             run_id TEXT PRIMARY KEY,

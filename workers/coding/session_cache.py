@@ -23,45 +23,10 @@ import uuid
 INTERRUPTED_SAVE_IDLE_SECONDS = 90.0
 PREPARATION_IDLE_SECONDS = 300.0
 PREPARATION_MAXIMUM_SECONDS = 2 * 60 * 60.0
-PROJECT_CONTEXT_END = "\n\nMISSUM_SHARED_PROJECT_CONTEXT_END_V1"
 # Native versions 3 and 4 retain the same leading token payload layout. Their
 # KV tensors differ and remain bound to the native binary/model fingerprint;
 # accepting this header for bounded inspection does not make KV interchangeable.
 NATIVE_SEQUENCE_TOKEN_LAYOUT_VERSIONS = (3, 4)
-
-
-def canonical_project_token_prefix(prefix_tokens, actual_tokens, prefix_rendered, actual_rendered, project_content, detokenize):
-    """Clip only trailing template framing, never project data, at a native BPE boundary.
-
-    Consecutive user turns can be joined by a template. A trailing standalone
-    newline then becomes part of another BPE token. Cache the exact common token
-    prefix only when detokenization proves that every project-content character
-    remains before the clipped suffix. The full inference is never shortened.
-    """
-    common = 0
-    for left, right in zip(prefix_tokens, actual_tokens):
-        if left != right:
-            break
-        common += 1
-    if common == len(prefix_tokens) and len(actual_tokens) > common:
-        return prefix_tokens
-    if common <= 0 or len(prefix_tokens) - common > 64 or len(actual_tokens) <= common:
-        raise ValueError("Project prefix differs from the actual inference token prefix")
-    if not isinstance(project_content, str) or not project_content.strip():
-        raise ValueError("Project prefix has no text content to validate against actual inference")
-    marker = project_content.rfind(PROJECT_CONTEXT_END)
-    retained_content = (project_content[:marker] if marker >= 0 else project_content).rstrip()
-    position = prefix_rendered.rfind(retained_content)
-    if position < 0:
-        raise ValueError("Project prefix text cannot be verified in the actual inference template")
-    content_end = position + len(retained_content)
-    shared = prefix_tokens[:common]
-    rendered_shared = detokenize(shared)
-    if (not isinstance(rendered_shared, str) or len(rendered_shared) < content_end
-            or rendered_shared[:content_end] != prefix_rendered[:content_end]
-            or actual_rendered[:content_end] != prefix_rendered[:content_end]):
-        raise ValueError("Project prefix would omit content or change tools in the actual inference")
-    return shared
 
 
 class PreparationCancelledError(RuntimeError):
@@ -637,7 +602,7 @@ class NativeSessionCache:
         if cancelled and cancelled():
             raise PreparationCancelledError("Subagent preparation was cancelled by its caller")
 
-    def _prefill_fork(self, source_model, target, temporary, prefill, cancelled=None, preparation=None, canonical_tokens=None):
+    def _prefill_fork(self, source_model, target, temporary, prefill, cancelled=None, preparation=None):
         """Evaluate a canonical branch on the source's live rollback checkpoints.
 
         Legacy llama slot files contain only the final recurrent state; newer
@@ -657,10 +622,6 @@ class NativeSessionCache:
         if (not isinstance(tokens, list) or not 1 <= len(tokens) <= 1_048_576
                 or any(type(token) is not int or token < 0 for token in tokens)):
             raise ValueError("Native tokenizer did not return a bounded text prefix")
-        if canonical_tokens is not None:
-            if not canonical_tokens or tokens[:len(canonical_tokens)] != canonical_tokens:
-                raise ValueError("Canonical project tokens are not the exact native text prefix")
-            tokens = canonical_tokens
         first_prompt = self.router("apply-template", dict(body, add_generation_prompt=True), timeout=120).get("prompt")
         if not isinstance(first_prompt, str) or not first_prompt:
             raise ValueError("Native template did not return the first inference prompt")
@@ -897,107 +858,6 @@ class NativeSessionCache:
                     temporary.unlink(missing_ok=True)
                 except OSError:
                     pass  # A timed-out native save may briefly retain its file.
-
-    def prepare_project(self, model, key, project_key, epoch, prefix_hash, prefill,
-                        first_inference, session_id=None, parent_session_id=None, cancelled=None):
-        """Seed independent session snapshots from an immutable exact project prefix.
-
-        The manager holds the model/slot lock. Shared knowledge is not mutable
-        dialogue: only its canonical token prefix can be copied between branches.
-        """
-        temporary = None
-        preparation = {"started": False}
-        previous = self.resident.get(model)
-        try:
-            self._check_preparation_cancelled(cancelled)
-            if (not isinstance(project_key, str) or not 1 <= len(project_key) <= 4096
-                    or not isinstance(epoch, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", epoch)
-                    or not isinstance(prefix_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", prefix_hash)
-                    or not key or not isinstance(prefill, dict) or not isinstance(first_inference, dict)):
-                raise ValueError("Invalid project cache preparation")
-            identity = self._identity(model, key)
-            self._remember(model, key, identity, session_id, parent_session_id)
-            branch = self.directory / (identity + ".bin")
-            if ((previous and previous["identity"] == identity) or branch.is_file()):
-                return self.prepare(model, key, session_id, parent_session_id)
-            if previous:
-                saved = self._save(model)
-                if saved["status"] not in ("saved", "unchanged"):
-                    raise RuntimeError(saved.get("detail", "Cannot preserve previous session"))
-            self._idle_slot(model)
-            # Validate against the actual complete first request. In particular,
-            # templates that merge consecutive user turns cannot reuse a merely
-            # similar independently rendered text prefix.
-            def tokenize(body):
-                rendered = self.router("apply-template", dict(body, model=model), timeout=120).get("prompt")
-                if not isinstance(rendered, str) or not rendered:
-                    raise ValueError("Native project template returned no prompt")
-                tokens = self.router("tokenize", dict(model=model, content=rendered,
-                    add_special=True, parse_special=True), timeout=120).get("tokens")
-                if (not isinstance(tokens, list) or not 0 < len(tokens) <= 1_048_576
-                        or any(type(token) is not int or token < 0 for token in tokens)):
-                    raise ValueError("Invalid native project token vector")
-                return rendered, tokens
-            prefix_rendered, original_prefix_tokens = tokenize(dict(prefill, add_generation_prompt=False))
-            actual_rendered, actual_tokens = tokenize(dict(first_inference, add_generation_prompt=True))
-            prefix_messages = prefill.get("messages", [])
-            project_content = prefix_messages[-1].get("content") if prefix_messages else None
-            prefix_tokens = canonical_project_token_prefix(original_prefix_tokens, actual_tokens, prefix_rendered, actual_rendered,
-                project_content, lambda vector: self.router("detokenize", dict(model=model, tokens=vector), timeout=120).get("content"))
-            base_key = "missum-project-base-v1-" + hashlib.sha256(json.dumps(
-                [project_key, epoch, prefix_hash], separators=(",", ":")).encode()).hexdigest()
-            base_identity = self._identity(model, base_key)
-            self._remember(model, base_key, base_identity)
-            for owner, kind in ((base_identity, "projectBase"), (identity, "sessionBranch")):
-                self.owners[owner].update(projectKey=project_key, cacheEpoch=epoch, kind=kind)
-            self._write_ownership()
-            base = self.directory / (base_identity + ".bin")
-            metrics = {}
-            if base.is_file():
-                try:
-                    if self._snapshot_tokens(base) != prefix_tokens:
-                        raise ValueError("Stored project base token vector is incompatible")
-                except (OSError, ValueError, struct.error):
-                    # Optimization files can be truncated by an interrupted
-                    # filesystem write. Rebuild only this immutable base; no
-                    # session history or another branch is touched.
-                    base.unlink(missing_ok=True)
-                    base.with_suffix(".json").unlink(missing_ok=True)
-            if not base.is_file():
-                temporary = self.directory / (base_identity + "." + uuid.uuid4().hex + ".pending")
-                self.resident.pop(model, None)
-                metrics = self._prefill_fork(model, base, temporary, prefill, cancelled, preparation, canonical_tokens=prefix_tokens)
-                if self._snapshot_tokens(base) != prefix_tokens:
-                    raise ValueError("Prepared project base is not the requested prefix")
-                temporary = None
-            self._check_preparation_cancelled(cancelled)
-            self._prune(required=base.stat().st_size, protected=[base.name, branch.name])
-            temporary = self.directory / (identity + "." + uuid.uuid4().hex + ".pending")
-            shutil.copyfile(base, temporary)
-            temporary.replace(branch)
-            temporary = None
-            branch.with_suffix(".json").write_text(json.dumps(dict(self.owners[identity],
-                bytes=branch.stat().st_size, tokens=len(prefix_tokens))), encoding="utf-8")
-            self.resident.pop(model, None)
-            result = self.prepare(model, key, session_id, parent_session_id)
-            if result["status"] not in ("restored", "resident"):
-                raise RuntimeError(result.get("detail", "Project branch could not be restored"))
-            self.save_progress[identity] = dict(time=time.monotonic(), new_tokens=0)
-            return self._record(model, "project-prepare", dict(result, status="forked",
-                projectPrefixTokens=len(prefix_tokens), trimmedProjectFramingTokens=len(original_prefix_tokens) - len(prefix_tokens), **metrics))
-        except Exception as error:
-            if preparation["started"]:
-                # Cancellation has closed the native stream; drain before another
-                # request can acquire the slot. A saved previous branch survives.
-                try:
-                    self._idle_slot(model, timeout=INTERRUPTED_SAVE_IDLE_SECONDS)
-                except Exception:
-                    pass
-                self.resident.pop(model, None)
-            return self._record(model, "project-prepare", dict(status="unavailable", detail=str(error)[:500]))
-        finally:
-            if temporary:
-                temporary.unlink(missing_ok=True)
 
     def reset_epoch(self, epoch, loaded_models=None):
         """Discard optimization files while retaining real session tombstones/history."""

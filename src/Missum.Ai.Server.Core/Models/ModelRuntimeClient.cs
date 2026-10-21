@@ -317,7 +317,6 @@ public sealed partial class ModelRuntimeClient : IDisposable
         string? sessionCacheKey = null,
         JsonElement? responseSchema = null,
         string? runtimeInstanceId = null,
-        ProjectCacheBinding? projectCache = null,
         bool compactAtThreshold = false,
         CancellationToken cancellationToken = default)
     {
@@ -391,9 +390,6 @@ public sealed partial class ModelRuntimeClient : IDisposable
                     : "auto";
             }
 
-            if (projectCache is null || string.IsNullOrEmpty(sessionCacheKey)
-                || !await PrepareProjectSessionCacheAsync(preparation.InstanceId, sessionCacheKey, sessionCacheOwnerId,
-                    sessionCacheParentOwnerId, projectCache, messages, body, cancellationToken).ConfigureAwait(false))
                 await UpdateSessionCacheAsync("prepare", preparation.InstanceId, sessionCacheKey,
                     sessionId: sessionCacheOwnerId, parentSessionId: sessionCacheParentOwnerId,
                     cancellationToken: cancellationToken).ConfigureAwait(false);

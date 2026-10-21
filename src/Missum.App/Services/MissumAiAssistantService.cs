@@ -1,10 +1,9 @@
-﻿using Missum.Ai.Client;
+using Missum.Ai.Client;
 using Missum.Ai.Contracts;
 using Missum.Core.Contracts;
 using Missum.Core.Chat;
 using Missum.Core.Coding;
 using Missum.Core.Extensions;
-using Missum.Core.Memory;
 using Missum.Core.Models;
 using Missum.Core.Research;
 using Microsoft.Extensions.Logging;
@@ -107,13 +106,11 @@ public sealed partial class MissumAiAssistantService(
     SettingsCoordinator settings,
     RecentActivityService recentActivity,
     ILogger<MissumAiAssistantService> logger,
-    IProjectMemoryStore? projectMemory = null,
     IExtensionActionCatalog? extensionActions = null,
     IScientificResearchRepository? scientificResearch = null,
     IResearchSandboxService? researchSandbox = null,
     ScientificPresentationCoordinator? sciencePresentation = null,
-    ScientificPublicationService? sciencePublications = null,
-    IProjectContextService? projectContexts = null) : IDisposable
+    ScientificPublicationService? sciencePublications = null) : IDisposable
 {
     private const int MaximumPromptRetries = 3;
     private static readonly JsonSerializerOptions JsonOptions = MissumAiProtocol.CreateJsonOptions();
@@ -122,10 +119,6 @@ public sealed partial class MissumAiAssistantService(
         LogLevel.Information,
         new EventId(5300, nameof(RunDiagnostic)),
         "Missum AI Client run {RunId}: {State}.");
-    private static readonly Action<ILogger, string, Exception?> ProjectMemoryUnavailable = LoggerMessage.Define<string>(
-        LogLevel.Warning,
-        new EventId(5301, nameof(ProjectMemoryUnavailable)),
-        "Projektgedächtnis konnte für Sitzung {SessionId} nicht verarbeitet werden.");
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly SemaphoreSlim _speechGate = new(1, 1);
     private readonly SemaphoreSlim _startupCleanupGate = new(1, 1);
@@ -240,14 +233,6 @@ public sealed partial class MissumAiAssistantService(
                         update,
                         _activeCancellation.Token).ConfigureAwait(false),
                 };
-                if (completed.Status == MessageStatus.Completed)
-                {
-                    await CaptureProjectMemoryAsync(
-                        session,
-                        turn.UserMessage.Content,
-                        completed.Content,
-                        CancellationToken.None).ConfigureAwait(false);
-                }
                 return completed;
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested && Volatile.Read(ref _explicitCancellation) == 0)
@@ -260,7 +245,6 @@ public sealed partial class MissumAiAssistantService(
                     ?? assistant;
                 await chats.UpdateMessageAsync(current.Id, current.Content, MessageStatus.Cancelled, cancellationToken: CancellationToken.None).ConfigureAwait(false);
                 var cancelled = current with { Status = MessageStatus.Cancelled, UpdatedAt = DateTimeOffset.UtcNow };
-                await CaptureSharedProjectContextAsync(session, cancelled).ConfigureAwait(false);
                 await update(new(MissumAiAssistantUpdateKind.Cancelled, cancelled, Status: "Abgebrochen")).ConfigureAwait(false);
                 return cancelled;
             }
@@ -274,7 +258,6 @@ public sealed partial class MissumAiAssistantService(
                 await chats.UpdateMessageAsync(assistant.Id, visible, MessageStatus.Failed, exception.Message, CancellationToken.None).ConfigureAwait(false);
                 var failed = await chats.GetMessageAsync(assistant.Id, CancellationToken.None).ConfigureAwait(false)
                     ?? current with { Content = visible, Status = MessageStatus.Failed, Error = exception.Message };
-                await CaptureSharedProjectContextAsync(session, failed).ConfigureAwait(false);
                 await update(new(MissumAiAssistantUpdateKind.Failed, failed, Error: exception.Message, Status: "Fehlgeschlagen")).ConfigureAwait(false);
                 return failed;
             }
@@ -317,7 +300,6 @@ public sealed partial class MissumAiAssistantService(
                     await runs.UpdateAsync(run.Id, run.ServerRunId, run.LastEventId, "cancelled",
                         run.SelectedModel, "client.run_already_cancelled", CancellationToken.None).ConfigureAwait(false);
                     await CancelPersistedServerRunsAsync([run.ServerRunId], cancellationToken: _activeCancellation.Token).ConfigureAwait(false);
-                    await CaptureSharedProjectContextAsync(message).ConfigureAwait(false);
                     continue;
                 }
                 _activeServerRunId = run.ServerRunId;
@@ -339,7 +321,6 @@ public sealed partial class MissumAiAssistantService(
                             CancellationToken.None).ConfigureAwait(false);
                         await CancelPersistedServerRunsAsync([run.ServerRunId], cancellationToken: _activeCancellation.Token).ConfigureAwait(false);
                         var failed = await chats.GetMessageAsync(message.Id, CancellationToken.None).ConfigureAwait(false) ?? message;
-                        await CaptureSharedProjectContextAsync(failed).ConfigureAwait(false);
                         await update(new(MissumAiAssistantUpdateKind.Failed, failed, Error: exception.Message, Status: "Projektordner fehlt")).ConfigureAwait(false);
                         continue;
                     }
@@ -359,7 +340,6 @@ public sealed partial class MissumAiAssistantService(
                     var current = await chats.GetMessageAsync(message.Id, CancellationToken.None).ConfigureAwait(false) ?? message;
                     await chats.UpdateMessageAsync(current.Id, current.Content, MessageStatus.Cancelled,
                         cancellationToken: CancellationToken.None).ConfigureAwait(false);
-                    await CaptureSharedProjectContextAsync(current with { Status = MessageStatus.Cancelled }).ConfigureAwait(false);
                     await update(new(MissumAiAssistantUpdateKind.Cancelled,
                         current with { Status = MessageStatus.Cancelled, UpdatedAt = DateTimeOffset.UtcNow }, Status: "Abgebrochen")).ConfigureAwait(false);
                 }
@@ -370,7 +350,6 @@ public sealed partial class MissumAiAssistantService(
                     await chats.UpdateMessageAsync(current.Id, visible, MessageStatus.Failed, exception.Message,
                         CancellationToken.None).ConfigureAwait(false);
                     var failed = await chats.GetMessageAsync(current.Id, CancellationToken.None).ConfigureAwait(false) ?? current;
-                    await CaptureSharedProjectContextAsync(failed).ConfigureAwait(false);
                     await update(new(MissumAiAssistantUpdateKind.Failed, failed, Error: exception.Message, Status: "Fehlgeschlagen")).ConfigureAwait(false);
                 }
             }
@@ -405,7 +384,7 @@ public sealed partial class MissumAiAssistantService(
             var serverRunIds = await StopPersistedRunsLocallyAsync(
                 runs,
                 chats,
-                cancellationToken: cancellationToken, capture: CaptureSharedProjectContextAsync).ConfigureAwait(false);
+                cancellationToken: cancellationToken).ConfigureAwait(false);
             _startupServerRunIds.UnionWith(serverRunIds);
             foreach (var serverRunId in serverRunIds)
                 if (await runs.GetByServerRunIdAsync(serverRunId, cancellationToken).ConfigureAwait(false) is { } stoppedRun)
@@ -445,7 +424,6 @@ public sealed partial class MissumAiAssistantService(
         IMissumAiRunRepository runRepository,
         IChatRepository chatRepository,
         bool applicationShutdown = false,
-        Func<ChatMessage, Task>? capture = null,
         CancellationToken cancellationToken = default)
     {
         var staleRuns = await runRepository.ListResumableAsync(cancellationToken).ConfigureAwait(false);
@@ -478,8 +456,6 @@ public sealed partial class MissumAiAssistantService(
                     MessageStatus.Cancelled,
                     applicationShutdown ? "Der AI-Lauf wurde beim Beenden von Missum gestoppt." : "Der AI-Lauf wurde beim Clientstart gestoppt.",
                     CancellationToken.None).ConfigureAwait(false);
-                if (capture is not null && await chatRepository.GetMessageTextAsync(message.Id, CancellationToken.None).ConfigureAwait(false) is { } committed)
-                    await capture(committed).ConfigureAwait(false);
             }
 
             if (!string.IsNullOrWhiteSpace(run.ServerRunId))
@@ -1939,7 +1915,6 @@ public sealed partial class MissumAiAssistantService(
             var session = await GetExecutionSessionAsync(
                 assistant.SessionId,
                 CancellationToken.None).ConfigureAwait(false);
-            await CaptureSharedProjectContextAsync(session, final).ConfigureAwait(false);
             await recentActivity.RecordAsync(
                 $"AI-Sitzung „{session?.Title ?? "Neue Sitzung"}“ bearbeitet",
                 CancellationToken.None).ConfigureAwait(false);
@@ -3199,9 +3174,6 @@ public sealed partial class MissumAiAssistantService(
         }
         var serverCapabilities = await client.GetCapabilitiesAsync(cancellationToken).ConfigureAwait(false);
         var compactContext = serverCapabilities.ContextProfiles?.Contains("compact-v1", StringComparer.Ordinal) == true;
-        var projectMemoryContext = await BuildProjectMemoryContextAsync(
-            codingSession,
-            cancellationToken).ConfigureAwait(false);
         var action = trigger?.Trigger.Action;
         var extensionClientTools = ResolveExtensionClientTools(trigger);
         if (extensionClientTools is { Count: > 0 })
@@ -3231,19 +3203,11 @@ public sealed partial class MissumAiAssistantService(
                 ?? throw new InvalidOperationException("Das ausgewählte Coding-AI-Modell ist nicht verfügbar.");
             availableCodingModel = availableCodingModel with { ContextTokens = ModelContextSelection.Resolve(CurrentSettings, codingModel,
                 availableCodingModel.MaximumContextTokens ?? availableCodingModel.ContextTokens) };
-            var sharedProjectContext = await PrepareSharedProjectContextAsync(codingSession, availableCodingModel.ContextTokens,
-                codingModel, "coding", serverCapabilities.SupportsProjectContext, cancellationToken).ConfigureAwait(false);
             var codingPrompt = originalPrompt;
             if (isScienceSession)
                 codingPrompt = await BuildPublicationWorkspacePromptAsync(codingSession, codingPrompt, cancellationToken).ConfigureAwait(false);
             if (action == PromptTriggerAction.PlanMode)
                 codingPrompt = BuildPlanModePrompt(codingPrompt, _activeCodingWorkspace);
-            if (sharedProjectContext is null && !string.IsNullOrWhiteSpace(projectMemoryContext))
-            {
-                codingPrompt = projectMemoryContext
-                    + "\n\nAKTUELLER BENUTZERAUFTRAG\n"
-                    + codingPrompt;
-            }
             var attachedDocuments = await documents.ListAsync(sessionId, cancellationToken).ConfigureAwait(false);
             if (attachedDocuments.Count > 0)
                 codingPrompt += "\n\n" + BuildCodingDocumentCatalog(attachedDocuments);
@@ -3264,7 +3228,6 @@ public sealed partial class MissumAiAssistantService(
                 codingMessages,
                 UploadIds: uploaded.Select(item => item.Upload.UploadId).ToArray(),
                 ClientCapabilities: codingConfiguration.Capabilities.Concat(WorkspaceClientCapabilities).Concat(researchSandbox is not null ? LeanClientCapabilities : Array.Empty<string>())
-                    .Concat(sharedProjectContext is not null ? ["project.history"] : Array.Empty<string>())
                     .Concat(serverCapabilities.ServerTools.Contains("subagent.spawn", StringComparer.Ordinal) ? ["subagents"] : Array.Empty<string>()).Distinct().ToArray(),
                 Limits: CreateChatRunLimits(availableCodingModel.ContextTokens),
                 SessionId: sessionId.ToString("D"),
@@ -3277,11 +3240,10 @@ public sealed partial class MissumAiAssistantService(
                 } : codingConfiguration.Options,
                 ReasoningEffort: await ResolveRequestedReasoningAsync(client, codingModel, "coding", cancellationToken).ConfigureAwait(false),
                 DeepResearch: !isScienceSession && trigger?.DeepResearch == true,
+                WorkflowProfile: isScienceSession ? "claude-science-v1" : null,
                 ClientTools: extensionClientTools,
                 ResearchOptions: researchOptions,
-                ContextProfileVersion: compactContext ? "compact-v1" : null,
-                ProjectContext: sharedProjectContext is null ? null : new(sharedProjectContext.ProjectKey,
-                    sharedProjectContext.Generation, sharedProjectContext.ContentHash, sharedProjectContext.Text, sharedProjectContext.SourceWatermark));
+                ContextProfileVersion: compactContext ? "compact-v1" : null);
         }
         var contextProfile = audiobook
             ? SessionContextProfile.Audiobook
@@ -3357,19 +3319,11 @@ public sealed partial class MissumAiAssistantService(
             && message.ContentProfile == MessageContentProfile.Audiobook
             && !string.IsNullOrWhiteSpace(message.Content)
             && message.Status is MessageStatus.Completed or MessageStatus.Cancelled or MessageStatus.Interrupted);
-        var sharedGeneralProjectContext = await PrepareSharedProjectContextAsync(codingSession, sessionContext.ContextLength,
-            selectedModel, "general", serverCapabilities.SupportsProjectContext, cancellationToken).ConfigureAwait(false);
         var transformed = TransformPrompt(
             originalPrompt,
             trigger,
             hasDocumentContext: documentContext is not null,
             hasAudiobookHistory);
-        if (sharedGeneralProjectContext is null && !string.IsNullOrWhiteSpace(projectMemoryContext))
-        {
-            transformed = projectMemoryContext
-                + "\n\nAKTUELLER BENUTZERAUFTRAG\n"
-                + transformed;
-        }
         var latestParts = new List<ContentPart> { new("text", Text: transformed) };
         foreach (var item in uploaded)
         {
@@ -3391,7 +3345,6 @@ public sealed partial class MissumAiAssistantService(
         };
         if (!audiobook && serverCapabilities.ServerTools.Contains("subagent.spawn", StringComparer.Ordinal))
             capabilities.Add("subagents");
-        if (sharedGeneralProjectContext is not null) capabilities.Add("project.history");
         if (!string.IsNullOrWhiteSpace(codingSession.CodingWorkspacePath) && Directory.Exists(codingSession.CodingWorkspacePath))
             capabilities.UnionWith(["coding", "coding.evidence", "coding.process", "workspace", "workspace.open"]);
         if (!audiobook && researchSandbox is not null && !string.IsNullOrWhiteSpace(codingSession.CodingWorkspacePath)
@@ -3429,79 +3382,7 @@ public sealed partial class MissumAiAssistantService(
             DeepResearch: trigger?.DeepResearch == true,
             ClientTools: extensionClientTools,
             ResearchOptions: generalResearchOptions,
-            ContextProfileVersion: compactContext ? "compact-v1" : null,
-            ProjectContext: sharedGeneralProjectContext is null ? null : new(sharedGeneralProjectContext.ProjectKey,
-                sharedGeneralProjectContext.Generation, sharedGeneralProjectContext.ContentHash, sharedGeneralProjectContext.Text, sharedGeneralProjectContext.SourceWatermark));
-    }
-
-    private async Task<string> BuildProjectMemoryContextAsync(
-        ChatSession session,
-        CancellationToken cancellationToken)
-    {
-        if (projectMemory is null) return string.Empty;
-        try
-        {
-            var scope = await ResolveProjectMemoryScopeAsync(session, cancellationToken).ConfigureAwait(false);
-            if (scope is null) return string.Empty;
-            var entries = await projectMemory.ListAsync(scope, cancellationToken: cancellationToken).ConfigureAwait(false);
-            return ProjectMemoryContextFormatter.Format(entries);
-        }
-        catch (Exception exception) when (exception is not OutOfMemoryException
-            && !cancellationToken.IsCancellationRequested)
-        {
-            ProjectMemoryUnavailable(logger, session.Id.ToString("D"), exception);
-            return string.Empty;
-        }
-    }
-
-    private async Task CaptureProjectMemoryAsync(
-        ChatSession session,
-        string userText,
-        string assistantText,
-        CancellationToken cancellationToken)
-    {
-        if (projectMemory is null) return;
-        try
-        {
-            var scope = await ResolveProjectMemoryScopeAsync(session, cancellationToken).ConfigureAwait(false);
-            if (scope is null) return;
-            var candidates = ProjectMemoryAutoCapturePolicy.FindCandidates(
-                scope,
-                userText,
-                assistantText,
-                $"session/{session.Id:D}");
-            foreach (var candidate in candidates)
-            {
-                _ = await projectMemory.CreateIfAutoCaptureEnabledAsync(
-                    candidate,
-                    cancellationToken).ConfigureAwait(false);
-            }
-        }
-        catch (Exception exception) when (exception is not OutOfMemoryException
-            && !cancellationToken.IsCancellationRequested)
-        {
-            // A completed AI response remains completed even when the optional
-            // shared memory database is temporarily unavailable.
-            ProjectMemoryUnavailable(logger, session.Id.ToString("D"), exception);
-        }
-    }
-
-    private async Task<ProjectMemoryScope?> ResolveProjectMemoryScopeAsync(
-        ChatSession session,
-        CancellationToken cancellationToken)
-    {
-        if (!string.IsNullOrWhiteSpace(session.CodingWorkspacePath))
-        {
-            return ProjectMemoryScope.FromWorkspace(session.CodingWorkspacePath);
-        }
-        if (session.SessionGroupId is not { } groupId) return null;
-        var group = (await chats.ListSessionGroupsAsync(session.ChatMode, cancellationToken).ConfigureAwait(false))
-            .FirstOrDefault(item => item.Id == groupId);
-        return !string.IsNullOrWhiteSpace(group?.WorkspacePath)
-            ? ProjectMemoryScope.FromWorkspace(group.WorkspacePath, group.Id.ToString("D"))
-            : group is null
-                ? null
-                : ProjectMemoryScope.FromProjectId(group.Id.ToString("D"));
+            ContextProfileVersion: compactContext ? "compact-v1" : null);
     }
 
     internal static string? ResolvePreferredModel(AppSettings current) =>

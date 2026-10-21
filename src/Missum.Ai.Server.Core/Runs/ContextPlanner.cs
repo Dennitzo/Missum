@@ -38,7 +38,6 @@ public static class ContextPlanner
             && !IsRuntimeContext(message)
             && !IsNativeRuntimeInstruction(message)
             && !ModelRuntimeClient.IsLanguageReminder(message)
-            && !ProjectContextPolicy.IsBase(message) && !ProjectContextPolicy.IsUpdate(message)
             && message.Content?.StartsWith(CodingEvidenceContext.Marker, StringComparison.Ordinal) != true
             && message.Content?.StartsWith(CodingSessionContext.StateMarker, StringComparison.Ordinal) != true
             && message.Content?.StartsWith(CodingContextCompactor.MemoryMarker, StringComparison.Ordinal) != true);
@@ -48,7 +47,6 @@ public static class ContextPlanner
             for (var index = 0; index < messages.Length && EstimateTokens(messages) > budget; index++)
             {
                 if (index == latestUserIndex || index == latestRuntimeIndex
-                    || ProjectContextPolicy.IsBase(messages[index]) || ProjectContextPolicy.IsUpdate(messages[index])
                     || string.Equals(messages[index].Role, "system", StringComparison.OrdinalIgnoreCase)
                     || string.Equals(messages[index].Role, "tool", StringComparison.OrdinalIgnoreCase))
                 {
@@ -87,7 +85,6 @@ public static class ContextPlanner
                     Index = index,
                     Length = (message.Content?.Length ?? 0) + (message.ReasoningContent?.Length ?? 0),
                     Protected = freshReadIds.Contains(message.ToolCallId ?? string.Empty) || index == latestUserIndex
-                        || ProjectContextPolicy.IsBase(message) || ProjectContextPolicy.IsUpdate(message)
                         || index == latestRuntimeIndex
                         || string.Equals(message.Role, "system", StringComparison.OrdinalIgnoreCase),
                 })

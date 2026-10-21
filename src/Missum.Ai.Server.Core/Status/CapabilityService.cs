@@ -70,7 +70,6 @@ public sealed class CapabilityService
             ClientToolNames.CodingUndo,
             ClientToolNames.CodingSearchHistory,
             ClientToolNames.CodingSearchKnowledge,
-            ClientToolNames.ProjectHistory,
             ClientToolNames.CodingRenderHtml,
             WorkspaceTools.ImageInput, WorkspaceTools.Open,
             ClientToolNames.DocumentRead,
@@ -111,7 +110,7 @@ public sealed class CapabilityService
             new("builtin.speech", "1.0.0", "active", ["speech.synthesize"]),
             new("builtin.context", "1.0.0", "active", ["math.evaluate", "context.embed", "context.retrieve"]),
             new("builtin.coding", "1.0.0", "active", ["coding.updatePlan"]),
-        ], ContextProfiles: _options.EnableCompactContextProfile ? [ToolContextProfiles.Current] : [], SupportsProjectContext: true);
+        ], ContextProfiles: _options.EnableCompactContextProfile ? [ToolContextProfiles.Current] : []);
 
     private static ModelCapability CreateModelCapability(
         string modelId,

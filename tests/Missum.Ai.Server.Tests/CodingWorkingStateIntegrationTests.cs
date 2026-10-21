@@ -1316,6 +1316,66 @@ public sealed class CodingWorkingStateIntegrationTests
         Assert.Equal(2, systemText.Split(CodingAgentPolicy.ReasoningLanguagePrompt, StringSplitOptions.None).Length);
     }
 
+    [Fact]
+    public async Task ScientificRunCanFinishOpenWithoutClaimingScientificSuccessOrLosingItsState()
+    {
+        using var harness = new Harness();
+        var request = Request("Untersuche die Hypothese.") with
+        { WorkflowProfile = ScienceSkill.Profile, CodingOptions = new(WorkspacePath: "C:/science") };
+        var run = (await harness.Repository.CreateAsync(request, null)).Snapshot.RunId;
+        await harness.DriveUntilCompletedAsync(run);
+        var events = await harness.Repository.GetEventsAfterAsync(run, 0);
+        var completed = Assert.Single(events, item => item.Type == RunEventTypes.RunCompleted);
+        Assert.Equal("open", completed.Data.GetProperty("scientificOutcome").GetString());
+        Assert.Contains(events, item => item.Type == RunEventTypes.TextDelta && item.Data.GetProperty("delta").GetString()!.Contains("Teilabschluss", StringComparison.Ordinal));
+        Assert.Contains(harness.Handler.Requests, request => request.GetProperty("messages").GetRawText().Contains(ScienceSkill.Marker.Trim(), StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ScienceClosureRefreshesActualFileHashAcrossSuspensionWithoutAnotherModelTurn(bool changedExternally)
+    {
+        using var harness = new Harness();
+        var request = Request("Prüfe die gespeicherte Quelle.") with
+        { WorkflowProfile = ScienceSkill.Profile, SessionId = Guid.NewGuid().ToString(), CodingOptions = new(WorkspacePath: "C:/science") };
+        var run = (await harness.Repository.CreateAsync(request, null)).Snapshot.RunId;
+        harness.Handler.CompletionOverride = async (round, _) =>
+        {
+            if (round == 1) return harness.Handler.ToolBatchResponse([new("plan", "coding.updatePlan", JsonSerializer.Deserialize<JsonElement>("""
+                {"steps":[{"id":"s","title":"Quelle prüfen","status":"in_progress"}],"scienceStages":[{"id":"s","question":"Was belegt die Quelle?","strategy":"Originaldatei lesen","checks":[{"id":"source","kind":"source","required":true}]}]}
+                """))]);
+            if (round == 2) return harness.Handler.ReadResponse("read");
+            if (round == 3)
+            {
+                var evidence = (await harness.Repository.GetCheckpointAsync(run, CancellationToken.None))!.WorkingState!.Evidence.Single(item => item.Tool == "coding.read").Id;
+                return harness.Handler.ToolBatchResponse([new("close", "coding.updatePlan", JsonSerializer.SerializeToElement(new
+                {
+                    steps = new[] { new { id = "s", title = "Quelle prüfen", status = "completed", evidenceIds = new[] { evidence } } },
+                    scienceStages = new[] { new { id = "s", outcome = "clarified", checks = new[] { new { id = "source", kind = "source", required = true, evidenceIds = new[] { evidence } } } } },
+                }))]);
+            }
+            return harness.Handler.CompleteResponse();
+        };
+        var proposals = 0; var verifiedSuspension = false;
+        for (var i = 0; i < 8; i++)
+        {
+            await harness.TickAsync(run);
+            if ((await harness.Repository.GetAsync(run))!.State == RunState.Completed) break;
+            var checkpoint = (await harness.Repository.GetCheckpointAsync(run))!;
+            Assert.NotNull(checkpoint.PendingProposalId);
+            verifiedSuspension |= checkpoint.ScienceVerificationPending;
+            var sha = proposals++ == 1 && changedExternally ? new string('b', 64) : new string('a', 64);
+            await harness.Repository.SaveClientToolResultAsync(run, new(checkpoint.PendingProposalId!, "completed",
+                JsonSerializer.SerializeToElement(new { success = true, path = "source.cs", sha256 = sha, content = "Original source" })));
+        }
+        Assert.True(verifiedSuspension);
+        Assert.Equal(2, proposals);
+        Assert.Equal(4, harness.Handler.Requests.Count);
+        var events = await harness.Repository.GetEventsAfterAsync(run, 0);
+        Assert.Equal(changedExternally ? "open" : "clarified", Assert.Single(events, item => item.Type == RunEventTypes.RunCompleted).Data.GetProperty("scientificOutcome").GetString());
+    }
+
     private sealed class Harness : IDisposable
     {
         internal TestServerContext Context { get; } = new();

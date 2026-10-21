@@ -8,7 +8,7 @@ namespace Missum.Infrastructure.Storage;
 
 public sealed class SqliteDatabase : IMissumDatabase, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 56;
+    public const int CurrentSchemaVersion = 57;
     private static readonly Action<ILogger, string, Exception?> DatabaseInitialized = LoggerMessage.Define<string>(
         LogLevel.Information, new EventId(1000, nameof(DatabaseInitialized)), "SQLite-Datenbank {DatabasePath} wurde initialisiert.");
     private static readonly Action<ILogger, string?, Exception?> IntegrityCheckFailed = LoggerMessage.Define<string?>(
@@ -110,6 +110,7 @@ public sealed class SqliteDatabase : IMissumDatabase, IAsyncDisposable
             await ApplyMigrationFiftyFourAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationFiftyFiveAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationFiftySixAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplySessionOnlyContextMigrationAsync(connection, cancellationToken).ConfigureAwait(false);
             // A full scan belongs to migrations/recovery and explicit diagnostics, not every ordinary launch.
             if (previousVersion != CurrentSchemaVersion
                 || previousSchema != await ReadSchemaCookieAsync(connection, cancellationToken).ConfigureAwait(false))
@@ -2667,6 +2668,47 @@ public sealed class SqliteDatabase : IMissumDatabase, IAsyncDisposable
             """;
         command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToDb());
         await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+    }
+
+    private async Task ApplySessionOnlyContextMigrationAsync(SqliteConnection connection, CancellationToken token)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=57);";
+        if (Convert.ToInt64(await command.ExecuteScalarAsync(token).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0) return;
+        command.CommandText = "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='project_context_snapshots');";
+        if (Convert.ToInt64(await command.ExecuteScalarAsync(token).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0)
+        {
+            var directory = Path.Combine(_options.DataDirectory, "DatabaseBackups");
+            Directory.CreateDirectory(directory);
+            await using var backup = new SqliteConnection(new SqliteConnectionStringBuilder
+            {
+                DataSource = Path.Combine(directory, "Missum.pre-session-only-" + Guid.NewGuid().ToString("N") + ".bak"),
+            }.ToString());
+            await backup.OpenAsync(token).ConfigureAwait(false);
+            connection.BackupDatabase(backup);
+        }
+        await using var transaction = connection.BeginTransaction();
+        command.Transaction = transaction;
+        command.CommandText = """
+            DROP TRIGGER IF EXISTS project_context_fts_insert;
+            DROP TRIGGER IF EXISTS project_context_fts_delete;
+            DROP TRIGGER IF EXISTS project_context_fts_update;
+            DROP TABLE IF EXISTS project_context_fts;
+            DROP TABLE IF EXISTS project_context_contributions;
+            DROP TABLE IF EXISTS project_context_index_progress;
+            DROP TABLE IF EXISTS project_context_snapshots;
+            DELETE FROM session_context_preparations;
+            DELETE FROM chat_message_ui_headers WHERE message_id IN
+                (SELECT message_id FROM chat_tool_steps WHERE tool_name='context.projectCompact');
+            DELETE FROM chat_tool_steps WHERE tool_name='context.projectCompact';
+            UPDATE chat_messages SET tool_steps_json=(SELECT json_group_array(json(value)) FROM json_each(tool_steps_json)
+                WHERE json_extract(value,'$.tool')<>'context.projectCompact')
+                WHERE tool_steps_json LIKE '%context.projectCompact%';
+            INSERT INTO schema_migrations(version,applied_at) VALUES(57,$now);
+            """;
+        command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToDb());
+        await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+        await transaction.CommitAsync(token).ConfigureAwait(false);
     }
 
     private static async Task ApplyMarkerMigrationAsync(SqliteConnection connection, int version, CancellationToken cancellationToken)

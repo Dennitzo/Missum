@@ -1,4 +1,4 @@
-﻿using Missum.App.Services;
+using Missum.App.Services;
 using Missum.App.Services.Extensions;
 using Missum.App.ViewModels;
 using Missum.Ai.Contracts;
@@ -98,8 +98,6 @@ public partial class App : Application
                 services.AddSingleton(RuntimeProfile);
                 services.AddMissumInfrastructure(options => options.DataDirectory = DataDirectory);
                 services.AddProjectMemory();
-                services.AddSingleton<IProjectContextStore, SqliteProjectContextStore>();
-                services.AddSingleton<IProjectContextService, ProjectContextService>();
                 services.AddSingleton<IAextSignatureVerifier>(
                     new DirectoryAextSignatureVerifier(Path.Combine(DataDirectory, "Extensions", "trusted-keys")));
                 services.AddAssistantExtensionFoundation(new(Path.Combine(DataDirectory, "Extensions")));

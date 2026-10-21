@@ -20,14 +20,14 @@ public sealed partial class NativeAssistantPage
     private static string ToolStepIconKey(string tool) => tool switch
     {
         "subagent" or "subagent.completed" or "subagent.spawn" or "subagent.wait" => "subagent",
-        "assistant.reasoning" or "assistant.progress" or "context.compact" or "context.projectCompact" => "research",
+        "assistant.reasoning" or "assistant.progress" or "context.compact" => "research",
         "assistant.continuation" => "success",
         "coding.updatePlan" => "plan",
         "math.formalProof" => "lean",
         "web.deepResearch" or "research.deep" => "research",
         "media.analyze" or "media.inspect" => "image",
         "context.embed" or "context.retrieve" => "research",
-        "project.history" or "workspace.open" => "project",
+        "workspace.open" => "project",
         "speech.translate" => "translate",
         _ when tool.StartsWith("research.code.", StringComparison.OrdinalIgnoreCase) => "code",
         _ when tool.StartsWith("coding.", StringComparison.OrdinalIgnoreCase) => "code",

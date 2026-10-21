@@ -20,25 +20,6 @@ public sealed class MissumAiClient : IDisposable
 
     public Uri? BaseAddress => _httpClient.BaseAddress;
 
-    public Task<ProjectContextSummarizeResult> SummarizeProjectContextAsync(ProjectContextSummarizeRequest request,
-        CancellationToken cancellationToken = default) =>
-        PostAsync<ProjectContextSummarizeRequest, ProjectContextSummarizeResult>("v1/project-context/summarize", request, cancellationToken);
-
-    public async Task<ProjectContextSummarizeResult> SummarizeProjectContextAsync(ProjectContextSummarizeRequest request,
-        Func<Task> started, CancellationToken cancellationToken = default)
-    {
-        using var message = new HttpRequestMessage(HttpMethod.Post, "v1/project-context/summarize")
-        { Content = JsonContent.Create(request, options: _jsonOptions) };
-        using var response = await _httpClient.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
-        if (response.IsSuccessStatusCode && response.Headers.Contains("X-Missum-Context-Started"))
-            await started().ConfigureAwait(false);
-        return await ReadRequiredAsync<ProjectContextSummarizeResult>(response, cancellationToken).ConfigureAwait(false);
-    }
-
-    public Task<ContextCacheResetResult> ResetContextCacheAsync(ContextCacheResetRequest request,
-        CancellationToken cancellationToken = default) =>
-        PostAsync<ContextCacheResetRequest, ContextCacheResetResult>("v1/context/cache/reset", request, cancellationToken);
-
     public MissumAiClient(HttpClient httpClient, string? clientId = null, bool ownsHttpClient = false, TimeSpan? streamIdleTimeout = null)
     {
         _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));

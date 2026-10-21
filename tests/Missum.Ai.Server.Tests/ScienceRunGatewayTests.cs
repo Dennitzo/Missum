@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Gateway;
 using Missum.Ai.Server.Core.Runs;
@@ -62,7 +62,7 @@ public sealed class ScienceRunGatewayTests
         {
             Repository = new RunRepository(_context.Database, new RunEventNotifier());
             _services = new ServiceCollection().AddLogging().AddRouting()
-                .AddSingleton(Repository).AddSingleton<RunWorkChannel>().AddSingleton<ProjectContextSummaryWork>()
+                .AddSingleton(Repository).AddSingleton<RunWorkChannel>()
                 .AddSingleton(new ServerRuntimeState(_context.WrappedOptions)).BuildServiceProvider();
             var routes = new RouteBuilder(_services);
             GatewayEndpoints.Map(routes);

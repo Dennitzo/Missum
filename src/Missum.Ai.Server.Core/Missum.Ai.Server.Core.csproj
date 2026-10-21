@@ -5,6 +5,9 @@
     <AssemblyName>Missum.Ai.Server.Core</AssemblyName>
   </PropertyGroup>
   <ItemGroup>
+    <EmbeddedResource Include="Skills/claude-science/*.md" LogicalName="Missum.Science.%(Filename)%(Extension)" />
+  </ItemGroup>
+  <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
   <ItemGroup>

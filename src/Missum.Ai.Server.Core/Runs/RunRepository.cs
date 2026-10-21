@@ -821,21 +821,7 @@ public sealed partial class RunRepository
             WHERE c.run_id = $run AND (
                 (r.mode = 'Coding' AND json_extract(r.request_json, '$.codingOptions.workspacePath') IS NOT NULL)
                 OR (r.mode IN ('Auto','General') AND json_extract(r.request_json, '$.sessionId') IS NOT NULL))
-                AND $epoch IS NULL
             ON CONFLICT(run_id) DO UPDATE SET checkpoint_json = excluded.checkpoint_json;
-            INSERT INTO session_context_heads(session_id, workspace_key, role, project_key, cache_epoch, run_id)
-            SELECT json_extract(r.request_json, '$.sessionId'),
-                replace(rtrim(COALESCE(json_extract(r.request_json, '$.codingOptions.workspacePath'), json_extract(r.request_json, '$.workspacePath'), ''), '/\'), '\', '/'),
-                CASE WHEN r.mode='Coding' THEN 'coding' ELSE 'general' END,
-                $project, $epoch, $run
-            FROM runs r WHERE r.run_id=$run AND $epoch IS NOT NULL
-                AND $project IS NOT NULL
-                AND json_extract(r.request_json, '$.sessionId') IS NOT NULL
-                AND r.state IN ('Queued','Running','WaitingForClient','Interrupted')
-            ON CONFLICT(session_id, workspace_key, role) DO UPDATE SET project_key=excluded.project_key,
-                cache_epoch=excluded.cache_epoch, run_id=excluded.run_id
-            WHERE (SELECT created_at FROM runs WHERE run_id=excluded.run_id)
-                >= (SELECT created_at FROM runs WHERE run_id=session_context_heads.run_id);
             INSERT INTO run_events(run_id, event_type, data_json, created_at)
             SELECT $run, 'run.steering.applied', json_object('inputId', input_id, 'sequence', sequence,
                 'sessionId', session_id, 'text', text, 'visibleTextOffset', $offset), $updated
@@ -852,8 +838,6 @@ public sealed partial class RunRepository
         command.Parameters.AddWithValue("$updated", MissumAiDatabase.FormatTimestamp(DateTimeOffset.UtcNow));
         command.Parameters.AddWithValue("$steering", checkpoint.AppliedSteeringSequence);
         command.Parameters.AddWithValue("$offset", visibleSteeringOffset);
-        command.Parameters.AddWithValue("$epoch", (object?)checkpoint.CacheEpoch ?? DBNull.Value);
-        command.Parameters.AddWithValue("$project", (object?)checkpoint.ProjectContext?.ProjectKey ?? DBNull.Value);
         _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         _notifier.Notify(runId);
@@ -870,7 +854,7 @@ public sealed partial class RunRepository
         var json = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) as string;
         return json is null
             ? null
-            : JsonSerializer.Deserialize<AgentRunCheckpoint>(json, _checkpointJsonOptions);
+            : DeserializeSessionCheckpoint(json);
     }
 
     internal async Task<AgentRunCheckpoint?> GetSessionContextAsync(
@@ -882,14 +866,6 @@ public sealed partial class RunRepository
     {
         if (request.Mode != RunMode.Coding || request.CodingOptions?.ContinueSessionContext != true
             || string.IsNullOrWhiteSpace(request.SessionId) || string.IsNullOrWhiteSpace(request.CodingOptions.WorkspacePath)) return null;
-        if (request.ProjectContext is not null)
-        {
-            var head = await GetProjectSessionHeadAsync(currentRunId, request, cancellationToken).ConfigureAwait(false);
-            return head is { WasInterrupted: true } interruptedHead
-                ? (RestoreInterruptedVisibleTail(interruptedHead.Checkpoint,
-                    await GetContinuationEventsAsync(interruptedHead.SourceRunId, 0, cancellationToken).ConfigureAwait(false)),
-                    interruptedHead.SourceRunId, true) : head;
-        }
         await using var connection = await _database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
@@ -910,7 +886,7 @@ public sealed partial class RunRepository
         {
             if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false)) return null;
             previousRun = reader.GetString(0);
-            checkpoint = JsonSerializer.Deserialize<AgentRunCheckpoint>(reader.GetString(1), _checkpointJsonOptions);
+            checkpoint = DeserializeSessionCheckpoint(reader.GetString(1));
             interrupted = reader.GetString(2) != "Completed";
         }
         if (checkpoint is null) return null;
@@ -933,16 +909,11 @@ public sealed partial class RunRepository
             LEFT JOIN run_checkpoints live ON live.run_id=r.run_id
             WHERE r.run_id != $run AND r.mode IN ('Auto','General') AND r.state IN ('Completed','Failed','Cancelled','Interrupted')
                 AND json_extract(r.request_json, '$.sessionId') = $session AND COALESCE(c.checkpoint_json, live.checkpoint_json) IS NOT NULL
-                AND ($project = '' OR r.run_id=(SELECT run_id FROM session_context_heads WHERE session_id=$session
-                    AND workspace_key=$workspace COLLATE NOCASE AND role='general' AND project_key=$project
-                    AND cache_epoch=(SELECT cache_epoch FROM runtime_context_state WHERE singleton=1)))
                 AND r.created_at < (SELECT created_at FROM runs WHERE run_id = $run)
             ORDER BY r.created_at DESC LIMIT 1;
             """;
         command.Parameters.AddWithValue("$run", currentRunId);
         command.Parameters.AddWithValue("$session", request.SessionId);
-        command.Parameters.AddWithValue("$project", request.ProjectContext?.ProjectKey ?? string.Empty);
-        command.Parameters.AddWithValue("$workspace", ProjectContextPolicy.NormalizeWorkspace(request.WorkspacePath));
         string previousRun;
         AgentRunCheckpoint? checkpoint;
         RunRequest? previousRequest;
@@ -951,7 +922,7 @@ public sealed partial class RunRepository
         {
             if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false)) return null;
             previousRun = reader.GetString(0);
-            checkpoint = JsonSerializer.Deserialize<AgentRunCheckpoint>(reader.GetString(1), _checkpointJsonOptions);
+            checkpoint = DeserializeSessionCheckpoint(reader.GetString(1));
             previousRequest = DeserializeRequest(reader.GetString(2), _database.JsonOptions);
             interrupted = reader.GetString(3) != "Completed";
         }
@@ -1080,6 +1051,16 @@ public sealed partial class RunRepository
             ? RunMode.General
             : Enum.Parse<RunMode>(value, ignoreCase: false);
 
+    private AgentRunCheckpoint? DeserializeSessionCheckpoint(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        // Old checkpoints can contain knowledge from other sessions, including
+        // already condensed summaries. Rebuild from this session's chat history.
+        if (!document.RootElement.TryGetProperty("contextScope", out var scope)
+            || scope.GetString() != "session-v3") return null;
+        return JsonSerializer.Deserialize<AgentRunCheckpoint>(json, _checkpointJsonOptions);
+    }
+
     private static RunRequest? DeserializeRequest(string json, JsonSerializerOptions options)
     {
         try
@@ -1090,7 +1071,7 @@ public sealed partial class RunRepository
         {
             var root = JsonNode.Parse(json)?.AsObject();
             if (root is null) throw;
-            var changed = false;
+            var changed = root.Remove("projectContext");
             if (string.Equals(root["mode"]?.GetValue<string>(), "code", StringComparison.OrdinalIgnoreCase))
             {
                 root["mode"] = "general";
@@ -1106,7 +1087,8 @@ public sealed partial class RunRepository
             }
             if (root["clientCapabilities"] is JsonArray capabilities)
                 for (var index = capabilities.Count - 1; index >= 0; index--)
-                    if (string.Equals(capabilities[index]?.GetValue<string>(), "coding.agents", StringComparison.OrdinalIgnoreCase))
+                    if (string.Equals(capabilities[index]?.GetValue<string>(), "coding.agents", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(capabilities[index]?.GetValue<string>(), "project.history", StringComparison.OrdinalIgnoreCase))
                     { capabilities.RemoveAt(index); changed = true; }
             if (!changed) throw;
             return JsonSerializer.Deserialize<RunRequest>(root.ToJsonString(), options);

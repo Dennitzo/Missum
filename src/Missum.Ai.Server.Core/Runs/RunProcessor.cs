@@ -1,4 +1,4 @@
-﻿using Missum.Ai.Contracts;
+using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Coding;
 using Missum.Ai.Server.Core.Models;
 using Missum.Ai.Server.Core.Policies;
@@ -247,8 +247,6 @@ public sealed partial class RunProcessor : BackgroundService
             ? StagedWebResearchPipeline.RemoveFromMainAgentTools(effectiveTools)
             : effectiveTools;
 
-        var cacheEpoch = request.ProjectContext is null ? null
-            : await _repository.GetContextCacheEpochAsync(cancellationToken).ConfigureAwait(false);
         var checkpoint = await _repository.GetCheckpointAsync(runId, cancellationToken).ConfigureAwait(false);
         if (checkpoint is not null)
             checkpoint = OpenProjectWorkflow.UpgradeLegacyCheckpoint(checkpoint, request, selection.Role, selection.ModelId, availableTools);
@@ -271,13 +269,13 @@ public sealed partial class RunProcessor : BackgroundService
             if (isCoding && await _repository.GetCodingSessionContextWithSourceAsync(runId, request, cancellationToken).ConfigureAwait(false) is { } codingPrevious)
             {
                 var previous = codingPrevious.Checkpoint;
+                if ((previous.WorkingState?.Science is not null) != ScienceSkill.Enabled(request))
+                    previous = previous with { PreserveSessionPromptPrefix = false, ContextTools = null, ToolCatalogSignature = null };
                 checkpoint = checkpoint with
                 {
-                    Messages = CodingSessionContext.Continue(previous, checkpoint.Messages),
-                    WorkingState = CodingSessionContext.ContinueWorkingState(previous, ExtractOriginalTask(request)) ?? checkpoint.WorkingState,
+                    Messages = CodingSessionContext.Continue(previous, checkpoint.Messages, ScienceSkill.Enabled(request)),
+                    WorkingState = CodingSessionContext.ContinueWorkingState(previous, ExtractOriginalTask(request), ScienceSkill.Enabled(request)) ?? checkpoint.WorkingState,
                     PreserveSessionPromptPrefix = previous.PreserveSessionPromptPrefix,
-                    ProjectContext = previous.ProjectContext,
-                    CacheEpoch = previous.CacheEpoch,
                     ContextProfileVersion = previous.PreserveSessionPromptPrefix ? previous.ContextProfileVersion : contextProfileVersion,
                     ContextTools = previous.PreserveSessionPromptPrefix ? previous.ContextTools : null,
                     ToolCatalogSignature = previous.PreserveSessionPromptPrefix ? previous.ToolCatalogSignature : null,
@@ -291,7 +289,6 @@ public sealed partial class RunProcessor : BackgroundService
                 && GeneralSessionContext.TryContinue(generalPrevious, request, checkpoint.Messages, out var continued))
             {
                 checkpoint = checkpoint with { Messages = continued, PreserveSessionPromptPrefix = true,
-                    ProjectContext = generalPrevious.Checkpoint.ProjectContext, CacheEpoch = generalPrevious.Checkpoint.CacheEpoch,
                     ContextProfileVersion = generalPrevious.Checkpoint.ContextProfileVersion,
                     ContextTools = generalPrevious.Checkpoint.ContextTools,
                     ToolCatalogSignature = generalPrevious.Checkpoint.ToolCatalogSignature,
@@ -380,12 +377,11 @@ public sealed partial class RunProcessor : BackgroundService
                 new ModelSelectedEvent(selection.ModelId, selection.Role),
                 cancellationToken).ConfigureAwait(false);
             _runtime.WriteLog("Information", "run.model.selected", $"Run {runId}: Modellrolle {selection.Role} gewählt.");
-            checkpoint = ProjectContextPolicy.Bind(checkpoint, request.ProjectContext, cacheEpoch);
             await _repository.SaveCheckpointAsync(runId, checkpoint, cancellationToken).ConfigureAwait(false);
         }
 
         var messages = checkpoint.Messages.ToList();
-        if (!checkpoint.PreserveSessionPromptPrefix && !compactContext && isCoding && request.Subagent is null)
+        if (!ScienceSkill.Enabled(request) && !checkpoint.PreserveSessionPromptPrefix && !compactContext && isCoding && request.Subagent is null)
             CodingAgentPolicy.EnsureCurrentInstructions(messages);
         if (!checkpoint.PreserveSessionPromptPrefix && !compactContext && useStableSubagentToolCatalog && request.Subagent is null)
         {
@@ -423,9 +419,12 @@ public sealed partial class RunProcessor : BackgroundService
             ? CodingTextReconciler.Project(await _repository.GetVisibleTextEventsAsync(runId, 0, cancellationToken).ConfigureAwait(false)).Length : 0);
         var streamingTurnStartEventId = checkpoint.StreamingTurnStartEventId;
         var workingState = checkpoint.WorkingState ?? (isCoding ? CodingWorkingState.Create(ExtractOriginalTask(request)) : null);
+        if (ScienceSkill.Enabled(request) && workingState is not null && workingState.Science is null)
+            workingState = workingState with { Science = new(ScienceSkill.Profile, []) };
         var activeCallRound = checkpoint.ActiveCallRound;
         var preserveSessionPromptPrefix = checkpoint.PreserveSessionPromptPrefix;
         var workingStatePromptIncluded = checkpoint.WorkingStatePromptIncluded;
+        var scienceVerificationPending = checkpoint.ScienceVerificationPending;
         var appliedSteeringSequence = checkpoint.AppliedSteeringSequence;
         var appliedModelSelectionEventId = checkpoint.AppliedModelSelectionEventId;
         var deepResearchCompleted = checkpoint.DeepResearchCompleted;
@@ -653,7 +652,7 @@ public sealed partial class RunProcessor : BackgroundService
                         continue;
                     }
 
-                    if (!string.IsNullOrWhiteSpace(pendingProposalId))
+                    if (!string.IsNullOrWhiteSpace(pendingProposalId) && !scienceVerificationPending)
                     {
                         if (!string.Equals(pendingToolCallId, call.Id, StringComparison.Ordinal))
                         {
@@ -678,6 +677,7 @@ public sealed partial class RunProcessor : BackgroundService
                             ToolCallId: call.Id));
                         if (workingState is not null)
                             workingState = CodingWorkingStateReducer.ObserveToolResult(workingState, WithOperationIdentity(runId, "main", activeCallRound ?? roundCount, nextToolIndex, call), SerializeClientToolResult(clientResult));
+                        ScienceSkill.AttachEvidence(messages, workingState, call.Id, WithOperationIdentity(runId, "main", activeCallRound ?? roundCount, nextToolIndex, call).Id);
                         if (call.Name == ClientToolNames.CodingRenderHtml) htmlRenderUsed = true;
                         pendingProposalId = null;
                         pendingToolCallId = null;
@@ -710,6 +710,11 @@ public sealed partial class RunProcessor : BackgroundService
                         {
                             try
                             {
+                                if (workingState?.Science is not null)
+                                    workingState = await RefreshScienceInputsAsync(runId, operationId, call.Arguments, workingState,
+                                        async current => { workingState = current; await SaveCheckpointAsync().ConfigureAwait(false); },
+                                        async id => { pendingProposalId = id; pendingToolCallId = id is null ? null : call.Id;
+                                            scienceVerificationPending = id is not null; await SaveCheckpointAsync().ConfigureAwait(false); }, cancellationToken).ConfigureAwait(false);
                                 workingState = CodingWorkingStateReducer.ApplyPlanUpdate(workingState ?? CodingWorkingState.Create(ExtractOriginalTask(request)), call.Arguments);
                                 result = workingState.ConsecutivePlanNoOps > 0
                                     ? CodingPlanProgressGuard.NoOpReceipt(workingState, availableTools)
@@ -721,8 +726,15 @@ public sealed partial class RunProcessor : BackgroundService
                                     workingState = workingState with { Failures = workingState.Failures
                                         .Where(static failure => failure.Tool != CodingWorkingStateTools.PlanTool).ToArray() };
                             }
+                            catch (RunSteeringBoundaryException)
+                            {
+                                pendingProposalId = null; pendingToolCallId = null; scienceVerificationPending = false;
+                                await SaveCheckpointAsync().ConfigureAwait(false);
+                                continue;
+                            }
                             catch (ArgumentException exception)
                             {
+                                if (scienceVerificationPending) { pendingProposalId = null; pendingToolCallId = null; scienceVerificationPending = false; }
                                 result = new(JsonSerializer.SerializeToElement(new { success = false, errorCode = "agent.invalid_state_action", error = exception.Message }), [],
                                     Succeeded: false, ErrorCode: "agent.invalid_state_action", ErrorMessage: exception.Message);
                             }
@@ -789,6 +801,9 @@ public sealed partial class RunProcessor : BackgroundService
                         if (workingState is not null && (tool.Name != CodingWorkingStateTools.PlanTool
                             || result.ErrorCode == "agent.invalid_state_action"))
                             workingState = CodingWorkingStateReducer.ObserveToolResult(workingState, WithOperationIdentity(runId, "main", activeCallRound ?? roundCount, nextToolIndex, call), result.Result.GetRawText());
+                        if (workingState?.Science is not null && tool.Name == SubagentToolNames.Wait && result.Succeeded)
+                            workingState = ScienceStagePolicy.ImportDelegatedEvidence(workingState, result.Result);
+                        if (tool.Name != CodingWorkingStateTools.PlanTool) ScienceSkill.AttachEvidence(messages, workingState, call.Id, WithOperationIdentity(runId, "main", activeCallRound ?? roundCount, nextToolIndex, call).Id);
                         nextToolIndex++;
                         if (request.DeepResearch && !researchManagedByAgent && tool.Name == CodingDeepResearchPipeline.ToolName
                             && result.ErrorCode != "run.steered")
@@ -1103,11 +1118,6 @@ public sealed partial class RunProcessor : BackgroundService
                         catch (OperationCanceledException) when (compactingCancellation.IsCancellationRequested) { }
                     }
                     messages = CodingContextCompactor.Complete(compaction, condensed.Content).ToList();
-                    if (request.ProjectContext is { } latestProject && checkpoint.ProjectContext is not null)
-                    {
-                        messages = ProjectContextPolicy.Rebase(messages, latestProject);
-                        checkpoint = checkpoint with { ProjectContext = latestProject };
-                    }
                     workingStatePromptIncluded = false;
                     inputTokens += condensed.InputTokens;
                     outputTokens += condensed.OutputTokens;
@@ -1131,6 +1141,7 @@ public sealed partial class RunProcessor : BackgroundService
                 }
                 try
                 {
+                    ScienceSkill.AppendModules(messages, workingState);
                     var planningMessages = WithWorkingState(messages, workingState, workingStatePromptIncluded);
                     contextPlan = ContextPlanner.Prepare(
                         planningMessages,
@@ -1249,10 +1260,6 @@ public sealed partial class RunProcessor : BackgroundService
                                     : BuildRunSessionCacheKey(request, runId, selection.Role),
                                 nativeProgress: nativeProgress,
                                 runtimeInstanceId: request.Subagent?.RuntimeInstanceId,
-                                projectCache: request.Subagent is null && checkpoint.ProjectContext is { } frozenContext
-                                    && checkpoint.CacheEpoch is { } epoch
-                                    ? new ProjectCacheBinding(frozenContext, epoch,
-                                        request.CodingOptions?.WorkspacePath ?? request.WorkspacePath ?? string.Empty) : null,
                                 compactAtThreshold: true).ConfigureAwait(false);
                             break;
                         }
@@ -1403,7 +1410,10 @@ public sealed partial class RunProcessor : BackgroundService
                     + "wiederhole oder überprüfe die abgeschlossenen Teilaufgaben nicht:\n"
                     + JsonSerializer.Serialize(delegatedResults, MissumAiProtocol.CreateJsonOptions())));
                 foreach (var delegated in delegatedResults)
+                {
+                    if (workingState?.Science is not null) workingState = ScienceStagePolicy.ImportDelegatedEvidence(workingState, delegated);
                     _ = AppendSubagentResultAcceptanceInstruction(messages, delegated, request);
+                }
                 streamingTurnStartEventId = null;
                 await SaveCheckpointAsync().ConfigureAwait(false);
                 await MarkSubagentResultsConsumedAsync(runId, delegatedResults, cancellationToken).ConfigureAwait(false);
@@ -1640,7 +1650,7 @@ public sealed partial class RunProcessor : BackgroundService
                 UseStableSubagentToolCatalog: useStableSubagentToolCatalog,
                 ResearchManagedByAgent: researchManagedByAgent,
                 ContextProfileVersion: contextProfileVersion, ToolCatalogSignature: toolCatalogSignature,
-                ContextTools: contextTools, CacheEpoch: checkpoint.CacheEpoch, ProjectContext: checkpoint.ProjectContext),
+                ContextTools: contextTools, ScienceVerificationPending: scienceVerificationPending),
             cancellationToken);
 
         async Task ApplyModelSelectionAsync()
@@ -1670,7 +1680,10 @@ public sealed partial class RunProcessor : BackgroundService
                         + "Vor dem Modellwechsel abgeschlossene delegierte Ergebnisse direkt übernehmen:\n"
                         + JsonSerializer.Serialize(delegatedForModelSwitch, MissumAiProtocol.CreateJsonOptions())));
                     foreach (var delegated in delegatedForModelSwitch)
+                    {
+                        if (workingState?.Science is not null) workingState = ScienceStagePolicy.ImportDelegatedEvidence(workingState, delegated);
                         _ = AppendSubagentResultAcceptanceInstruction(messages, delegated, request);
+                    }
                 }
             }
             candidate = candidate with { Limits = (candidate.Limits ?? new()) with { MaximumContextTokens = next.ContextLength } };
@@ -1717,6 +1730,7 @@ public sealed partial class RunProcessor : BackgroundService
                 foreach (var abandoned in activeCalls.Skip(nextToolIndex))
                     messages.Add(new LmChatMessage("tool", "{\"status\":\"not_executed\",\"errorCode\":\"run.steered\",\"message\":\"Neue Nutzereingabe: noch nicht gestarteten Aufruf verworfen.\"}", ToolCallId: abandoned.Id));
             activeCalls = null;
+            pendingProposalId = null; pendingToolCallId = null; scienceVerificationPending = false;
             nextToolIndex = 0;
             activeCallRound = null;
             selectedToolName = null;
@@ -1752,6 +1766,17 @@ public sealed partial class RunProcessor : BackgroundService
 
         async Task<bool> CompleteRunAsync(string content, bool textWasStreamed)
         {
+            if (workingState?.Science is not null)
+            {
+                workingState = ScienceStagePolicy.Revalidate(workingState, requireFreshReads: true);
+                if (ScienceSkill.ResultOutcome(workingState) == "open")
+                {
+                    var pending = workingState.Plan.Where(step => step.Status != "completed").Select(step => step.Title).ToArray();
+                    var note = "\n\nTeilabschluss mit offenen Punkten: " + (pending.Length > 0 ? string.Join("; ", pending) : "Die fachliche Prüfung ist noch nicht vollständig belegt.");
+                    content += note;
+                    if (textWasStreamed) await PublishVisibleDeltaAsync(new TextDeltaEvent(note), cancellationToken).ConfigureAwait(false);
+                }
+            }
             var finalResponse = ParseFinalResponse(content, request);
             if (!textWasStreamed)
             {
@@ -1776,7 +1801,7 @@ public sealed partial class RunProcessor : BackgroundService
                     finalResponse.SessionTitle,
                     selection.ModelId,
                     inputTokens,
-                    outputTokens),
+                    outputTokens, ScientificOutcome: workingState?.Science is null ? null : ScienceSkill.ResultOutcome(workingState)),
                 cancellationToken).ConfigureAwait(false);
             if (finalized) _runtime.WriteLog("Information", "run.completed", $"Run {runId} erfolgreich beendet.");
             return finalized;
@@ -2257,11 +2282,12 @@ public sealed partial class RunProcessor : BackgroundService
             new("system", contextProfileVersion == ToolContextProfiles.Current
                 ? CompactAgentContextPolicy.Build(request, effectiveTools)
                 : (request.Mode == RunMode.Coding
-                ? CodingAgentPolicy.ForWorkingState(true)
+                ? CodingAgentPolicy.ForWorkingState(true, ScienceSkill.Enabled(request))
                 : GeneralAgentPolicies.ForConversation(role, request, effectiveTools, researchManagedByAgent))
                 + (effectiveTools.Contains(SubagentToolNames.Spawn, StringComparer.Ordinal)
                     ? "\n\n" + SubagentAgentPolicy.Manager : "")),
         };
+        if (ScienceSkill.Enabled(request)) messages.Add(new("system", ScienceSkill.Instructions));
         if (effectiveTools.Contains(ClientToolNames.MathFormalProof, StringComparer.Ordinal))
             messages[0] = messages[0] with { Content = messages[0].Content + "\n\n" + LeanAgentPolicy.Instructions };
         foreach (var message in request.Messages)

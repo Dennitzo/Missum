@@ -26,6 +26,8 @@ public static class CodingEvidenceContext
         }
         Add("next", new { state.Phase, state.NextStep, state.EnvironmentRevision });
         foreach (var item in state.AcceptanceCriteria) Add("acceptance", item);
+        if (state.Science is not null)
+            foreach (var stage in state.Science.Stages.OrderByDescending(stage => state.Plan.Any(step => step.Id == stage.Id && step.Status == "in_progress"))) Add("scienceStage", stage);
         foreach (var item in state.Plan.OrderBy(static item => item.Status == "completed" ? 1 : 0)) Add("plan", item);
         foreach (var item in state.Facts) Add("evidenced_fact", item);
         foreach (var item in state.RejectedHypotheses) Add("rejected_hypothesis", item);

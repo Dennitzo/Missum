@@ -1,4 +1,4 @@
-﻿using Missum.Ai.Client;
+using Missum.Ai.Client;
 using Missum.Ai.Contracts;
 using Missum.Core.Coding;
 using Missum.Core.Extensions;
@@ -208,7 +208,6 @@ public sealed partial class MissumAiAssistantService
             foreach (var preparation in (current.ToolSteps ?? []).Where(step => step.Tool == ContinuationStepTool && step.Status == "running"))
                 await chats.SaveToolStepAsync(current.Id, CompleteOpenToolStep(preparation, "cancelled", null), CancellationToken.None).ConfigureAwait(false);
             current = await chats.GetMessageAsync(current.Id, CancellationToken.None).ConfigureAwait(false) ?? current;
-            await CaptureSharedProjectContextAsync(current).ConfigureAwait(false);
             await update(new(MissumAiAssistantUpdateKind.Cancelled, current, Status: "Abgebrochen")).ConfigureAwait(false);
             return current;
         }
@@ -223,14 +222,12 @@ public sealed partial class MissumAiAssistantService
                 foreach (var preparation in (current.ToolSteps ?? []).Where(step => step.Tool == ContinuationStepTool && step.Status == "running"))
                     await chats.SaveToolStepAsync(current.Id, CompleteOpenToolStep(preparation, "failed", null), CancellationToken.None).ConfigureAwait(false);
                 current = await chats.GetMessageAsync(current.Id, CancellationToken.None).ConfigureAwait(false) ?? current;
-                await CaptureSharedProjectContextAsync(current).ConfigureAwait(false);
                 await update(new(MissumAiAssistantUpdateKind.Failed, current,
                     Status: "Fortsetzen fehlgeschlagen", Error: exception.Message)).ConfigureAwait(false);
                 throw;
             }
             await chats.UpdateMessageAsync(current.Id, current.Content, MessageStatus.Failed, exception.Message, CancellationToken.None).ConfigureAwait(false);
             current = await chats.GetMessageAsync(current.Id, CancellationToken.None).ConfigureAwait(false) ?? current;
-            await CaptureSharedProjectContextAsync(current).ConfigureAwait(false);
             await update(new(MissumAiAssistantUpdateKind.Failed, current, Status: "Fortsetzen fehlgeschlagen", Error: exception.Message)).ConfigureAwait(false);
             return current;
         }

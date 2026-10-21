@@ -1,4 +1,4 @@
-﻿using Missum.Ai.Contracts;
+using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Coding;
 using Missum.Ai.Server.Core.Models;
 using Missum.Ai.Server.Core.Policies;
@@ -78,8 +78,7 @@ public sealed partial class RunProcessor
 
     internal static string BuildRunSessionCacheKey(RunRequest request, string runId, string role) =>
         ModelRuntimeClient.BuildSessionCacheKey(request.SessionId ?? runId, role,
-            request.Mode == RunMode.Coding ? request.CodingOptions?.WorkspacePath : request.WorkspacePath,
-            request.ProjectContext?.ProjectKey);
+            request.Mode == RunMode.Coding ? request.CodingOptions?.WorkspacePath : request.WorkspacePath);
 
     internal static GpuLeaseMode SubagentLeaseMode(SubagentRunContext? relation) =>
         relation is null || relation.GpuIndex == 0 ? GpuLeaseMode.Shared : GpuLeaseMode.CodingSecondary;
@@ -224,8 +223,7 @@ public sealed partial class RunProcessor
                 SelectedReasoningEffort: childRequest.ReasoningEffort, UseStableSubagentToolCatalog: true,
                 ContextProfileVersion: childContextProfile, ContextTools: childTools,
                 ToolCatalogSignature: childContextProfile is not null ? ToolContextProfiles.Signature(childTools, selection.ModelId) : null,
-                ResearchStateStamp: parentCheckpoint?.ResearchStateStamp,
-                CacheEpoch: parentCheckpoint?.CacheEpoch, ProjectContext: parentCheckpoint?.ProjectContext);
+                ResearchStateStamp: parentCheckpoint?.ResearchStateStamp);
             var child = await _repository.CreateSubagentAsync(childRequest, checkpoint, operationId, cancellationToken).ConfigureAwait(false);
             await EnsureSubagentStartedAsync(child, childRequest, cancellationToken).ConfigureAwait(false);
             await _repository.AppendEventAsync(child.RunId, "subagent.contextForked", new
@@ -422,9 +420,13 @@ public sealed partial class RunProcessor
             runId = childRunId, agentId = relation.AgentId, task = relation.AssignedTask,
             result = text, artifactIds, completionEvidence, errorCode = child.ErrorCode,
             state = child.State.ToString().ToLowerInvariant(),
+            scientificOutcome = ScienceSkill.Enabled(request)
+                ? events.LastOrDefault(item => item.Type == RunEventTypes.RunCompleted)?.Data.Deserialize<RunCompletedEvent>(MissumAiProtocol.CreateJsonOptions())?.ScientificOutcome : null,
             isRunning = false,
             instruction = child.State == RunState.Completed
-                ? "Übernimm das abgeschlossene Ergebnis und die bereits ausgeführten Dateiänderungen direkt. Wiederhole oder überprüfe die zugewiesene abgeschlossene Teilaufgabe nicht. Verarbeite nur ausdrücklich offene Punkte weiter."
+                ? ScienceSkill.Enabled(request)
+                    ? "Der Teilauftrag ist technisch beendet. Übernimm seine tatsächlichen Belege ohne unnötige Wiederholung, prüfe die fachliche Zuordnung und beachte scientificOutcome sowie offene Punkte. Ein technischer Abschluss beweist keine fachliche Vollständigkeit."
+                    : "Übernimm das abgeschlossene Ergebnis und die bereits ausgeführten Dateiänderungen direkt. Wiederhole oder überprüfe die zugewiesene abgeschlossene Teilaufgabe nicht. Verarbeite nur ausdrücklich offene Punkte weiter."
                 : "Die Teilaufgabe ist abgebrochen und arbeitet nicht mehr. Bewahre belegte Teilergebnisse und setze nur offene Arbeit mit subagent.spawn/resumeRunId fort.",
         }, MissumAiProtocol.CreateJsonOptions()), [], Succeeded: child.State == RunState.Completed,
             ErrorCode: child.State == RunState.Completed ? null : child.ErrorCode ?? "subagent.failed");
@@ -509,7 +511,9 @@ public sealed partial class RunProcessor
             && message.Content?.StartsWith(marker, StringComparison.Ordinal) == true)) return false;
         var compact = messages.FirstOrDefault()?.Role == "system"
             && messages[0].Content?.StartsWith(CompactAgentContextPolicy.Marker, StringComparison.Ordinal) == true;
-        messages.Add(new LmChatMessage("system", marker + (compact
+        messages.Add(new LmChatMessage("system", marker + (request is not null && ScienceSkill.Enabled(request)
+            ? "Integriere die tatsächlichen delegierten Belege und ihre fachliche Zuordnung. Erfolgreiche unveränderte Prüfungen nicht erneut ausführen; offene Fragen und fehlende Nachweise bleiben offen."
+            : compact
             ? "Übernimm das quittierte Ergebnis für deine weitere Arbeit; abgeschlossene Teilaufgaben nicht erneut ausführen."
             : SubagentAgentPolicy.CompletedWork)));
         return true;

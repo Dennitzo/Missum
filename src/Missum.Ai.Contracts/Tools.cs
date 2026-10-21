@@ -46,7 +46,6 @@ public static class ClientToolNames
     public const string CodingUndo = "coding.undo";
     public const string CodingSearchHistory = "coding.searchHistory";
     public const string CodingSearchKnowledge = "coding.searchKnowledge";
-    public const string ProjectHistory = "project.history";
     public const string CodingRenderHtml = "coding.renderHtml";
     public const string CodingReadOutput = "coding.readOutput";
     public const string CodingSearchRunEvidence = "coding.searchRunEvidence";

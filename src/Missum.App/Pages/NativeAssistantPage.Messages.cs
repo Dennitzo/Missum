@@ -447,7 +447,6 @@ public sealed partial class NativeAssistantPage
                 "research.model" => "Recherche bearbeiten", "research.operation" => "Rechercheauftrag",
                 "math.formalProof" => "Lean-Beweis prüfen", "assistant.progress" => "Fortschritt",
                 "context.compact" => S(step, "status") == "completed" ? "Kontextkomprimierung abgeschlossen" : "Kontext komprimieren",
-                "context.projectCompact" => S(step, "status") == "completed" ? "Projektkontextkomprimierung abgeschlossen" : "Projektkontext komprimieren",
                 "assistant.continuation" => S(step, "status") switch
                 {
                     "completed" => "Lauf fortgesetzt", "failed" or "denied" => "Fortsetzen fehlgeschlagen",

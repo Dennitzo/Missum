@@ -92,8 +92,6 @@ public sealed class StorageCleanupServiceTests
                 UPDATE runs SET state = $state, updated_at = $old WHERE run_id = $run;
                 INSERT INTO run_checkpoints(run_id,checkpoint_json,updated_at) VALUES($run,'{"messages":[]}', $old);
                 INSERT INTO coding_session_contexts(run_id,checkpoint_json) VALUES($run,'{"messages":[]}');
-                INSERT INTO session_context_heads(session_id,workspace_key,role,project_key,cache_epoch,run_id)
-                    VALUES('retained-session','C:/Project','general','retained-project','project-context-v1',$run);
                 INSERT INTO client_tool_proposals(proposal_id,run_id,name,proposal_json,expires_at,created_at)
                     VALUES('retained-proposal',$run,'coding.read','{}',$old,$old);
                 INSERT INTO client_tool_results(proposal_id,run_id,result_json,created_at)
@@ -119,7 +117,7 @@ public sealed class StorageCleanupServiceTests
         await cleanup.CleanupExpiredAsync();
 
         await using var verify = await context.Database.OpenConnectionAsync();
-        foreach (var table in new[] { "runs", "run_events", "run_checkpoints", "coding_session_contexts", "session_context_heads",
+        foreach (var table in new[] { "runs", "run_events", "run_checkpoints", "coding_session_contexts",
             "client_tool_proposals", "client_tool_results", "run_steering_inputs", "run_provider_retries", "artifacts" })
         {
             await using var count = verify.CreateCommand();

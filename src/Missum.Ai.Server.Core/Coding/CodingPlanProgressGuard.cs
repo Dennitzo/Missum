@@ -13,7 +13,8 @@ internal static class CodingPlanProgressGuard
     internal static bool HasChanged(CodingWorkingState before, CodingWorkingState after) =>
         before.Phase != after.Phase || before.NextStep != after.NextStep
         || !SamePlan(before.Plan, after.Plan) || !SamePlan(before.AcceptanceCriteria, after.AcceptanceCriteria)
-        || !SameFacts(before.Facts, after.Facts) || !SameFacts(before.RejectedHypotheses, after.RejectedHypotheses);
+        || !SameFacts(before.Facts, after.Facts) || !SameFacts(before.RejectedHypotheses, after.RejectedHypotheses)
+        || System.Text.Json.JsonSerializer.Serialize(before.Science) != System.Text.Json.JsonSerializer.Serialize(after.Science);
 
     internal static AgentToolSpec[] OfferedTools(IReadOnlyList<AgentToolSpec> available, CodingWorkingState? state) =>
         available.Where(tool => state is not { ConsecutivePlanNoOps: >= 2 } || tool.Name != CodingWorkingStateTools.PlanTool).ToArray();

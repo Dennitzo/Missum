@@ -26,37 +26,23 @@ public sealed partial class NativeAssistantPage
         RenderMessagesNow();
         UpdateLayout();
         if (!_messageBlocks[messageId].TryGetValue("tool:normal-compaction", out var normalControl)) throw new InvalidOperationException("Komprimierungsschritt fehlt.");
-        ApplyEvent("conversation.toolStepChanged", JsonSerializer.SerializeToElement(new
-        {
-            sessionId = _session, messageId,
-            toolStep = new { id = "project-compaction", tool = "context.projectCompact", status = "running", detail = "Projektwissen wird verdichtet.", contentOffset = 27, updatedAt = at },
-        }));
         RenderMessagesNow(); UpdateLayout();
         var runningLabels = Descendants(_messageViews[messageId].View).OfType<TextBlock>().Select(text => text.Text).ToArray();
-        if (!runningLabels.Any(text => text.StartsWith("Kontext komprimieren", StringComparison.Ordinal))
-            || !runningLabels.Any(text => text.StartsWith("Projektkontext komprimieren", StringComparison.Ordinal)))
+        if (!runningLabels.Any(text => text.StartsWith("Kontext komprimieren", StringComparison.Ordinal)))
             throw new InvalidOperationException("Laufende Komprimierungstitel fehlen.");
-        var projectControl = _messageBlocks[messageId]["tool:project-compaction"];
         ApplyEvent("conversation.toolStepChanged", JsonSerializer.SerializeToElement(new
         {
             sessionId = _session, messageId,
             toolStep = new { id = "normal-compaction", tool = "context.compact", status = "completed", detail = "Arbeitskontext verdichtet.", contentOffset = 0, updatedAt = at.AddSeconds(1) },
         }));
-        ApplyEvent("conversation.toolStepChanged", JsonSerializer.SerializeToElement(new
-        {
-            sessionId = _session, messageId,
-            toolStep = new { id = "project-compaction", tool = "context.projectCompact", status = "completed", detail = "Projektwissen gespeichert.", contentOffset = 27, updatedAt = at.AddSeconds(1) },
-        }));
         RenderMessagesNow(); UpdateLayout();
         var labels = Descendants(_messageViews[messageId].View).OfType<TextBlock>().Select(text => text.Text).ToArray();
-        if (_running || !labels.Contains("Kontextkomprimierung abgeschlossen") || !labels.Contains("Projektkontextkomprimierung abgeschlossen")
-            || !ReferenceEquals(normalControl, _messageBlocks[messageId]["tool:normal-compaction"])
-            || !ReferenceEquals(projectControl, _messageBlocks[messageId]["tool:project-compaction"])
-            || MessageSteps(_messages[messageId]).Count(step => S(step, "tool") == "context.projectCompact") != 1)
+        if (_running || !labels.Contains("Kontextkomprimierung abgeschlossen")
+            || !ReferenceEquals(normalControl, _messageBlocks[messageId]["tool:normal-compaction"]))
             throw new InvalidOperationException("Hintergrundkomprimierung muss dauerhaft ohne aktiven AI-Lauf angezeigt werden.");
         await SaveMathPreviewAsync(_messageViews[messageId].View, "native-compaction-preview.png");
         await File.WriteAllTextAsync(Path.Combine(App.Current.DataDirectory, "native-compaction-validation.json"),
-            JsonSerializer.Serialize(new { passed = true, completedRunReceipt = true, idleProjectReceipt = true, duplicates = 0, markedRunActive = _running }));
+            JsonSerializer.Serialize(new { passed = true, completedRunReceipt = true, duplicates = 0, markedRunActive = _running }));
         ApplyEvent("session.changed", original);
         _selectionInputSmokeActive = false;
     }

@@ -94,6 +94,7 @@ public sealed class LongRunningScienceClientTests
             Assert.Equal(RunMode.Coding, request.Mode);
             Assert.False(request.DeepResearch);
             Assert.Null(request.ResearchOptions);
+            Assert.Equal("claude-science-v1", request.WorkflowProfile);
             Assert.Equal(Model, request.PreferredCodingModelId);
             Assert.DoesNotContain(request.ClientCapabilities!, capability => capability.StartsWith("research.", StringComparison.Ordinal));
             Assert.DoesNotContain(request.Messages, message => message.Content.Any(part => part.Text?.Contains("research.update", StringComparison.Ordinal) == true));
@@ -105,8 +106,9 @@ public sealed class LongRunningScienceClientTests
                 part.Text?.Contains("## Literatur und Daten", StringComparison.Ordinal) == true
                 && part.Text.Contains("### Forschungsdaten", StringComparison.Ordinal)
                 && part.Text.Contains("1, 1.1, 1.2, 2", StringComparison.Ordinal)
-                && part.Text.Contains("Websuche, Lean und Simulationen sind Möglichkeiten", StringComparison.Ordinal)));
+                && part.Text.Contains("aktive Science-Skill", StringComparison.Ordinal)));
         }
+        else Assert.Null(request.WorkflowProfile);
         if (continuing)
             Assert.Contains(request.Messages, message => message.Content.Any(part => part.Text?.Contains(original, StringComparison.Ordinal) == true));
 

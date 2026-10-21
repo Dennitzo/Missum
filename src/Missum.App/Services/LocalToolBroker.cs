@@ -1,4 +1,4 @@
-﻿using System.Buffers;
+using System.Buffers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -23,8 +23,7 @@ public sealed partial class LocalToolBroker(
     IChatRepository chats,
     IExtensionActionCatalog? extensionActions = null,
     IExtensionRuntimeService? extensionRuntime = null,
-    Missum.Core.Research.IResearchSandboxService? researchSandbox = null,
-    Missum.Core.Memory.IProjectContextService? projectContexts = null)
+    Missum.Core.Research.IResearchSandboxService? researchSandbox = null)
 {
     private const int MaximumResultCharacters = 4 * 1024 * 1024;
     private static readonly JsonSerializerOptions JsonOptions = MissumAiProtocol.CreateJsonOptions();
@@ -76,32 +75,7 @@ public sealed partial class LocalToolBroker(
                     cancellationToken).ConfigureAwait(false);
                 return Result(proposal, "completed", Bounded(extensionResult));
             }
-            if (proposal.Name == ClientToolNames.ProjectHistory)
-            {
-                if (projectContexts is null) throw new InvalidOperationException("Der Projektkontext ist nicht verfügbar.");
-                // Resolve scope from the persisted session, never from tool arguments or a supplied path.
-                var workspace = await ResolveWorkspaceRootAsync(sessionId, null, cancellationToken).ConfigureAwait(false)
-                    ?? throw new InvalidOperationException("Die Sitzung gehört zu keinem Projektordner.");
-                if (proposal.Arguments.GetProperty("operation").GetString() == "read")
-                {
-                    var source = await projectContexts.ReadAsync(workspace,
-                        Guid.Parse(proposal.Arguments.GetProperty("messageId").GetString()!), cancellationToken).ConfigureAwait(false);
-                    var offset = proposal.Arguments.TryGetProperty("offset", out var start) ? start.GetInt32() : 0;
-                    var maximum = proposal.Arguments.TryGetProperty("maximumCharacters", out var size) ? size.GetInt32() : 16000;
-                    var text = source?.Text ?? "";
-                    var end = Math.Min(text.Length, (long)offset + maximum);
-                    var excerpt = offset >= text.Length ? "" : text.Substring(offset, (int)end - offset);
-                    return Result(proposal, "completed", new { found = source is not null,
-                        source = source is null ? null : new { source.ProjectKey, source.SessionId, source.MessageId,
-                            source.MessageRevision, source.UpdatedAt, text = excerpt }, offset,
-                        nextOffset = end < text.Length ? (int?)end : null, totalCharacters = text.Length,
-                        isUntrusted = true });
-                }
-                var matches = await projectContexts.SearchAsync(workspace, proposal.Arguments.GetProperty("query").GetString()!,
-                    proposal.Arguments.TryGetProperty("limit", out var limit) ? limit.GetInt32() : 5, cancellationToken).ConfigureAwait(false);
-                return Result(proposal, "completed", new { matches = matches.Select(source => new { source.ProjectKey,
-                    source.SessionId, source.MessageId, source.MessageRevision, source.UpdatedAt, source.Text }), isUntrusted = true });
-            }
+
             if (WorkspaceTools.IsLocal(proposal.Name))
             {
                 var workspaceResult = await new WorkspaceToolService(connection).ExecuteAsync(
@@ -392,7 +366,7 @@ public sealed partial class LocalToolBroker(
         {
             "coding.list" or "coding.search" or "coding.read" or "coding.gitDiff"
                 or "coding.searchHistory" or "coding.searchKnowledge" or "coding.renderHtml"
-                or "coding.readOutput" or "coding.searchRunEvidence" or ClientToolNames.ProjectHistory => ToolRiskClass.ReadOnly,
+                or "coding.readOutput" or "coding.searchRunEvidence" => ToolRiskClass.ReadOnly,
             "coding.write" or "coding.edit" or "coding.undo" => ToolRiskClass.LocalMutation,
             "coding.command" or WorkspaceTools.Open => ToolRiskClass.Process,
             ClientToolNames.MathSymbolic or ClientToolNames.MathNumeric or ClientToolNames.MathSmt
@@ -430,17 +404,6 @@ public sealed partial class LocalToolBroker(
         }
         switch (proposal.Name)
         {
-            case ClientToolNames.ProjectHistory:
-                ValidateProperties(arguments, ["operation"], ["operation", "query", "messageId", "limit", "offset", "maximumCharacters"]);
-                var historyOperation = ValidateString(arguments, "operation", 1, 10);
-                if (historyOperation is not ("search" or "read")) throw new InvalidDataException("Die Projektverlaufsoperation ist ungültig.");
-                ValidateOptionalInteger(arguments, "limit", 1, 10);
-                ValidateOptionalInteger(arguments, "offset", 0, 8_388_608);
-                ValidateOptionalInteger(arguments, "maximumCharacters", 1000, 40000);
-                if (historyOperation == "search") ValidateString(arguments, "query", 1, 4000);
-                else if (!Guid.TryParse(ValidateString(arguments, "messageId", 36, 36), out _))
-                    throw new InvalidDataException("Die Nachrichtenkennung ist ungültig.");
-                break;
             case "coding.readOutput":
                 ValidateProperties(arguments, ["evidenceId"], ["evidenceId", "stream", "offset", "maximumCharacters"]);
                 var evidenceId = ValidateString(arguments, "evidenceId", 35, 35);

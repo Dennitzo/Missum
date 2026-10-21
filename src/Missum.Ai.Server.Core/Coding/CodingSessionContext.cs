@@ -8,7 +8,7 @@ internal static class CodingSessionContext
 {
     internal const string StateMarker = "MISSUM_CODING_PREVIOUS_WORKING_STATE\n";
 
-    internal static IReadOnlyList<LmChatMessage> Continue(AgentRunCheckpoint previous, IReadOnlyList<LmChatMessage> initial)
+    internal static IReadOnlyList<LmChatMessage> Continue(AgentRunCheckpoint previous, IReadOnlyList<LmChatMessage> initial, bool science = false)
     {
         // An evaluated conversation owns its exact system prefix as well. Rebuilding
         // equivalent policy sections in another order invalidates all native KV tokens.
@@ -35,7 +35,8 @@ internal static class CodingSessionContext
                 + "Nicht abgeschlossene Aufrufe haben einen unbekannten Ausgang und dürfen nicht blind wiederholt werden. "
                 + "Der folgende neue Nutzerauftrag ist maßgeblich.\n" + CodingEvidenceContext.Build(state).Content));
         result.Add(new LmChatMessage("user", "MISSUM_CODING_RUN_PLAN_SCOPE\n"
-            + "Aktueller Lauf: steps und acceptanceCriteria starten leer. Plan-IDs und Planbestätigungen oben gehören zum vorherigen Lauf. "
+            + (science && RestoreWorkingState(previous) is { } prior && PreserveSciencePlan(prior) ? "Science-Fortsetzung: Der gespeicherte Etappenplan derselben Sitzung bleibt gültig. Verwende dessen IDs; prüfe offene und veraltete Belege. "
+                : "Aktueller Lauf: steps und acceptanceCriteria starten leer. Plan-IDs und Planbestätigungen oben gehören zum vorherigen Lauf. ")
             + "Wenn der aktuelle Auftrag einen Plan benötigt, sende pro übermitteltem Eintrag id, title und status; "
             + "bei Updates den Originaltitel unverändert beibehalten und nur geänderte Einträge senden. "
             + "steps und acceptanceCriteria können gemeinsam in einem Aufruf angelegt oder geändert werden. "
@@ -75,10 +76,23 @@ internal static class CodingSessionContext
         return state;
     }
 
-    internal static CodingWorkingState? ContinueWorkingState(AgentRunCheckpoint previous, string task) =>
-        RestoreWorkingState(previous) is { } state ? state with
+    internal static CodingWorkingState? ContinueWorkingState(AgentRunCheckpoint previous, string task, bool science = false)
+    {
+        if (RestoreWorkingState(previous) is not { } state) return null;
+        var retain = science && PreserveSciencePlan(state);
+        var scienceState = science ? state.Science : null;
+        if (!retain && scienceState is not null) scienceState = scienceState with { Stages = [] };
+        return state with
         {
-            OriginalTask = task, Plan = [], AcceptanceCriteria = [], NextStep = null, Phase = "planning", ConsecutivePlanNoOps = 0,
+            OriginalTask = task, Plan = retain ? state.Plan : [],
+            AcceptanceCriteria = retain ? state.AcceptanceCriteria : [], Science = scienceState,
+            NextStep = null, Phase = "planning", ConsecutivePlanNoOps = 0,
             Failures = state.Failures.Where(static failure => failure.Tool != CodingWorkingStateTools.PlanTool).ToArray(),
-        } : null;
+        };
+    }
+
+    // Unfinished stages survive continuation. A fully settled plan stays in its
+    // historical checkpoint; the next task must not exhaust the 16-stage budget
+    // or inherit the previous task's immutable titles and required checks.
+    private static bool PreserveSciencePlan(CodingWorkingState state) => state.Science is not null && ScienceSkill.ResultOutcome(state) == "open";
 }

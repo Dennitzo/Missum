@@ -38,7 +38,6 @@ internal static class CodingContextCompactor
         var currentRequestIndex = -1;
         for (var index = messages.Count - 1; index >= 0; index--)
             if (messages[index].Role == "user" && messages[index].Content?.StartsWith(MemoryMarker, StringComparison.Ordinal) != true
-                && !ProjectContextPolicy.IsBase(messages[index]) && !ProjectContextPolicy.IsUpdate(messages[index])
                 && !ContextPlanner.IsRuntimeContext(messages[index])
                 && !ContextPlanner.IsNativeRuntimeInstruction(messages[index])
                 && !ModelRuntimeClient.IsLanguageReminder(messages[index])
@@ -83,7 +82,7 @@ internal static class CodingContextCompactor
             if (InstructionIdentity(messages[index]) is { } identity) latestInstructions[identity] = index;
         }
         var archive = messages.Take(cut).Where((message, index) => message.Role != "system" && index != currentRequestIndex
-            && !ContextPlanner.IsRuntimeContext(message) && InstructionIdentity(message) is null && !ProjectContextPolicy.IsBase(message)
+            && !ContextPlanner.IsRuntimeContext(message) && InstructionIdentity(message) is null
             && !ModelRuntimeClient.IsLanguageReminder(message)
             && message.Content?.StartsWith(CodingEvidenceContext.Marker, StringComparison.Ordinal) != true).ToArray();
         if (archive.Length == 0) return null;
@@ -103,7 +102,7 @@ internal static class CodingContextCompactor
         // Only the leading policy belongs before the conversation. Dynamic
         // budget/repair instructions must keep their chronological position;
         // moving them forward would rewrite the cached native system prefix.
-        var initialSystemCount = messages.TakeWhile(message => message.Role == "system" || ProjectContextPolicy.IsBase(message)).Count();
+        var initialSystemCount = messages.TakeWhile(message => message.Role == "system").Count();
         var preservedContext = latestInstructions.Values.Append(latestRuntimeIndex)
             .Where(index => index >= initialSystemCount && index < cut).Distinct().Order().Select(index => messages[index]).ToArray();
         return new CodingCompactionPlan(
@@ -135,6 +134,9 @@ internal static class CodingContextCompactor
         var content = message.Content;
         if (ContextPlanner.IsNativeRuntimeInstruction(message)) content = content![nativePrefix.Length..];
         else if (message.Role != "system") return null;
+        if (content?.StartsWith(ScienceSkill.Marker, StringComparison.Ordinal) == true) return ScienceSkill.Marker;
+        if (content?.StartsWith("MISSUM_SCIENCE_FOCUS_V1\n", StringComparison.Ordinal) == true) return "MISSUM_SCIENCE_FOCUS_V1";
+        if (content?.StartsWith("MISSUM_SCIENCE_SKILL_MODULE_V1:", StringComparison.Ordinal) == true) return content.Split('\n', 2)[0];
         if (content?.StartsWith(CodingRunBudget.PromptMarker, StringComparison.Ordinal) == true) return CodingRunBudget.PromptMarker;
         if (content == CodingCompletionGuard.RepairPrompt) return nameof(CodingCompletionGuard);
         if (content == RunProcessor.EmptyResponseRepairPrompt) return nameof(RunProcessor.EmptyResponseRepairPrompt);

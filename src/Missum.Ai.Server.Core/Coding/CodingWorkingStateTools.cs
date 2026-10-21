@@ -68,6 +68,11 @@ internal static class CodingWorkingStateTools
             receipt["storedAcceptanceCriterionIds"] = state.AcceptanceCriteria.Select(static item => item.Id).ToArray();
         }
         if (arguments.TryGetProperty("nextStep", out _)) receipt["nextStep"] = state.NextStep;
+        if (state.Science is not null)
+        {
+            receipt["scienceStages"] = JsonSerializer.SerializeToElement(state.Science.Stages, Missum.Ai.Contracts.MissumAiProtocol.CreateJsonOptions());
+            receipt["storedSteps"] = JsonSerializer.SerializeToElement(state.Plan, Missum.Ai.Contracts.MissumAiProtocol.CreateJsonOptions());
+        }
         AddChangedItems("steps", "updatedSteps", state.Plan);
         AddChangedItems("acceptanceCriteria", "updatedAcceptanceCriteria", state.AcceptanceCriteria);
         if (arguments.TryGetProperty("facts", out var facts)) receipt["factsReceived"] = facts.GetArrayLength();

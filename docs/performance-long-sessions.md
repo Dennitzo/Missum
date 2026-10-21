@@ -1,4 +1,4 @@
-﻿# Long-session performance
+# Long-session performance
 
 ## Display and model context are independent
 
@@ -46,32 +46,25 @@ commit together; 250 ms write-behind never advances a cursor past its durable
 content. Tool boundaries and terminal states flush immediately. Recovery reads
 the frozen execution receipt of the resumed message separately from text history.
 
-Project knowledge is lazy and scoped by the canonical workspace. Initial bootstrap
-reads at most twelve recent session pages of 32 text records; background backfill
-and catch-up use persisted cursors and at most two pages per maintenance tick.
-Full original text has a separate project FTS index; bounded source-labelled
-head/tail excerpts feed idle summaries. Live session ownership is checked again
-when a search result or original message is read. The readonly `project.history`
-tool pages original text without injecting full old transcripts into each prompt.
+### Session-only model context (2026-10-21)
 
-Knowledge uses at most eight percent of the usable model budget, capped at 8,192
-tokens. This does not cap the model window. Idle semantic consolidation uses the
-already loaded selected model, with user-run admission cancelling that work. New
-knowledge creates a new internal snapshot; active sessions preserve the evaluated
-prefix and append updates until ordinary context compaction adopts the new base.
+Automatic project snapshots, cross-session history search, idle project summaries
+and shared KV prefixes have been removed. A new session starts with only its own
+conversation, current task and explicitly supplied workspace information. Project
+files and publication views remain available through the normal tools.
 
-The server's context heads bind the project, workspace, role and cache epoch.
-Native compatibility includes the actual inference token prefix, template,
-tokenizer, model, runtime and KV geometry. DeepSeek's final framing token may merge
-with the next user turn: an explicit end marker allows only verified framing to
-be clipped while retaining the complete original project text. The immutable base
-is copied into independent session branches. A changed prefix falls back to normal
-evaluation. Periodic KV saves require both 120 seconds and 8,192 added tokens;
-completion, stop, unload and ownership handoff still force persistence.
+The `missum-session-v3` cache namespace binds session ID, role and canonical
+workspace; native compatibility additionally validates model, runtime, template
+and KV geometry. Subagents retain independent branches of their parent run.
+There is no mutable shared project cache. Checkpoints without `contextScope:
+session-v3` are not restored, because their summaries may contain cross-session
+knowledge. The original chat history remains authoritative and is re-prepared
+on first continuation. Ordinary session compaction and the model-specific window
+remain unchanged. Checkpoint throttling (120 seconds and 8,192 new tokens), stop,
+completion, unload and owner handoff persistence remain active.
 
-The one-time epoch migration is idle-only and shares the run-admission gate.
-Database backups precede migration. It retires optimization state without session
-deletion or tombstones; original journals and historical checkpoints remain.
+The measurements below document the earlier project-context implementation and
+are historical; they do not establish the current session-only cache behavior.
 
 ## Measured checks on 2026-10-17
 

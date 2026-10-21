@@ -223,6 +223,14 @@ public sealed class ScientificResearchToolExecutorTests : IAsyncLifetime
     public void LeanRejectsUntrustedImportsAndProofTrustBypasses(string source) =>
         Assert.Throws<InvalidDataException>(() => LeanProofSourceContract.Validate(source));
 
+    [Fact]
+    public void LeanHashRejectionExplainsRemovalRatherThanAddingCompilerDirectives()
+    {
+        var error = Assert.Throws<InvalidDataException>(() => LeanProofSourceContract.Validate("import Mathlib\n/- # Heading -/\ntheorem identity (n : Nat) : n = n := by rfl"));
+        Assert.Contains("Entferne jedes #-Zeichen", error.Message);
+        Assert.Contains("Füge KEIN #check", error.Message);
+    }
+
     private Task<JsonElement> Execute(string name, object arguments) =>
         _executor.ExecuteAsync(name, JsonSerializer.SerializeToElement(arguments));
 

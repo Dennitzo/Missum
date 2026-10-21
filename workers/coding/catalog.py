@@ -847,12 +847,6 @@ class GpuLoadManager:
         with self.lock:
             return self.sessions.save(model, key, prompt_tokens, force, new_tokens)
 
-    def project_session_prepare(self, body, cancelled=None):
-        with self.lock:
-            return self.sessions.prepare_project(body["model"], body["sessionKey"], body["projectKey"],
-                body["cacheEpoch"], body["prefixHash"], body["prefill"], body["firstInference"],
-                body.get("sessionId"), body.get("parentSessionId"), cancelled)
-
     def session_reset_epoch(self, epoch):
         with self.lock:
             # Resident unowned/stateless native requests also make a reset busy.
@@ -1328,9 +1322,9 @@ def start_gpu_control(manager, host, port):
             try:
                 length = int(self.headers.get("Content-Length", "0"))
                 if self.path not in ("/models/load", "/sessions/prepare", "/sessions/save", "/sessions/fork", "/sessions/delete",
-                                     "/sessions/project-prepare", "/sessions/reset-epoch",
+                                     "/sessions/reset-epoch",
                                      "/agents/status", "/agents/prepare") or not 0 < length <= (
-                                         16 * 1024**2 if self.path in ("/agents/prepare", "/sessions/project-prepare") else 1024**2 if self.path == "/sessions/delete" else 8192):
+                                         16 * 1024**2 if self.path == "/agents/prepare" else 1024**2 if self.path == "/sessions/delete" else 8192):
                     raise ValueError("Invalid GPU control request")
                 body = json.loads(self.rfile.read(length))
                 if self.path.startswith("/sessions/"):
@@ -1340,8 +1334,6 @@ def start_gpu_control(manager, host, port):
                     elif self.path == "/sessions/save":
                         result = manager.session_save(body["model"], body.get("sessionKey"), body.get("promptTokens"),
                             body.get("force", True), body.get("newTokens"))
-                    elif self.path == "/sessions/project-prepare":
-                        result = manager.project_session_prepare(body, self.client_disconnected)
                     elif self.path == "/sessions/reset-epoch":
                         result = manager.session_reset_epoch(body["epoch"])
                     elif self.path == "/sessions/delete":

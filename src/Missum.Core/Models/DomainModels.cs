@@ -1,4 +1,4 @@
-﻿namespace Missum.Core.Models;
+namespace Missum.Core.Models;
 
 public enum ChatRole { System, User, Assistant }
 public enum MessageStatus { Pending, Streaming, Completed, Cancelled, Failed, Interrupted }
@@ -84,7 +84,7 @@ public sealed record AssistantToolStep(
         {
             InputJson = previous.InputJson ?? incoming.InputJson,
             OutputJson = incoming.OutputJson ?? previous.OutputJson,
-            Explanation = incoming.Tool is "context.compact" or "context.projectCompact"
+            Explanation = incoming.Tool is "context.compact"
                 ? incoming.Explanation ?? previous.Explanation : previous.Explanation ?? incoming.Explanation,
             ContentOffset = incoming.ContentOffset ?? previous.ContentOffset,
             StartedAt = previous.StartedAt ?? incoming.StartedAt,

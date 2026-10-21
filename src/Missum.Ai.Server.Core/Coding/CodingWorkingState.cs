@@ -3,6 +3,7 @@ using System.Buffers;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Missum.Ai.Server.Core.Coding;
 
@@ -10,7 +11,10 @@ public sealed record CodingPlanItem(string Id, string Title, string Status, IRea
 public sealed record CodingStateFact(string Text, IReadOnlyList<string> EvidenceIds);
 public sealed record CodingToolEvidence(string Id, string Tool, bool Success, string? Path, string? Sha256,
     int? ExitCode, string Summary, long Sequence, string? OutputEvidenceId = null,
-    string? SourceRunId = null, bool Historical = false);
+    string? SourceRunId = null, bool Historical = false,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyDictionary<string, string>? FileHashes = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] bool FormalVerified = false,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? VerificationPath = null);
 public sealed record CodingActiveFile(string Path, string? Sha256, int StartLine, string Snippet,
     bool Truncated, bool NeedsRead, string EvidenceId, long Sequence, string? OutputEvidenceId = null);
 public sealed record CodingFailureSignature(string Signature, string Tool, string ArgumentHash, string Error,
@@ -32,7 +36,8 @@ public sealed record CodingWorkingState(
     long EnvironmentRevision,
     long Sequence,
     string? EnvironmentFingerprint = null,
-    int ConsecutivePlanNoOps = 0)
+    int ConsecutivePlanNoOps = 0,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ScienceState? Science = null)
 {
     public static CodingWorkingState Create(string originalTask)
     {
@@ -81,6 +86,7 @@ public static class CodingWorkingStateReducer
         var historical = call.Name == "coding.readOutput" && Boolean(result, "historical");
         var evidence = new CodingToolEvidence(call.Id, call.Name, success, path, sha, exit, summary, sequence, outputEvidenceId,
             sourceRunId, historical);
+        if (state.Science is not null) evidence = ScienceStagePolicy.BindReceipt(state, evidence, outer);
         var files = state.ActiveFiles.ToList();
         var environment = state.EnvironmentFingerprint;
         var environmentChanged = false;
@@ -131,7 +137,7 @@ public static class CodingWorkingStateReducer
             failures.RemoveAll(item => item.Signature == signature);
             failures.Add(new(signature, call.Name, argumentHash, error, Math.Min(int.MaxValue - 1, previous?.Count ?? 0) + 1, epoch, call.Id));
         }
-        return state with
+        var observed = state with
         {
             Evidence = KeepEvidence(state, state.Evidence.Append(evidence)),
             Tests = processRan ? state.Tests.Append(evidence).TakeLast(16).ToArray() : state.Tests,
@@ -141,12 +147,26 @@ public static class CodingWorkingStateReducer
             ConsecutivePlanNoOps = call.Name == CodingWorkingStateTools.PlanTool ? state.ConsecutivePlanNoOps : 0,
             Phase = failed ? "error_recovery" : success ? mutation ? "editing" : state.Phase == "error_recovery" ? "exploration" : state.Phase : state.Phase,
         };
+        if (state.Science is null) return observed;
+        var knownFiles = new Dictionary<string, ScienceFile>(state.Science.Files ?? new Dictionary<string, ScienceFile>(), StringComparer.OrdinalIgnoreCase);
+        if (processMayHaveRun)
+            foreach (var name in knownFiles.Keys.ToArray()) knownFiles[name] = knownFiles[name] with { NeedsRead = true };
+        foreach (var file in files)
+        {
+            knownFiles.Remove(file.Path);
+            knownFiles[file.Path] = new(file.Sha256, file.NeedsRead);
+        }
+        var pinnedPaths = state.Science.Stages.SelectMany(stage => stage.Checks).SelectMany(check => check.Paths).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        knownFiles = knownFiles.Where(pair => pinnedPaths.Contains(pair.Key))
+            .Concat(knownFiles.Where(pair => !pinnedPaths.Contains(pair.Key)).TakeLast(256)).ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
+        observed = observed with { Science = state.Science with { Files = knownFiles } };
+        return ScienceStagePolicy.Revalidate(observed);
     }
 
-    public static CodingWorkingState ApplyPlanUpdate(CodingWorkingState state, JsonElement arguments)
+    public static CodingWorkingState ApplyPlanUpdate(CodingWorkingState state, JsonElement arguments, bool verifyScienceReceipts = true)
     {
         if (arguments.ValueKind != JsonValueKind.Object) throw new ArgumentException("updatePlan benötigt ein Argumentobjekt.");
-        var allowed = new HashSet<string>(StringComparer.Ordinal) { "steps", "acceptanceCriteria", "facts", "rejectedHypotheses", "nextStep", "phase", "explanation" };
+        var allowed = new HashSet<string>(StringComparer.Ordinal) { "steps", "acceptanceCriteria", "facts", "rejectedHypotheses", "nextStep", "phase", "explanation", "scienceStages" };
         if (arguments.EnumerateObject().Any(property => !allowed.Contains(property.Name))) throw new ArgumentException("Unbekanntes updatePlan-Feld.");
         CodingWorkingStateTools.Validate(arguments);
         ValidateNewPlanItems(state, arguments);
@@ -163,6 +183,7 @@ public static class CodingWorkingStateReducer
         if (arguments.TryGetProperty("explanation", out _)) _ = RequireText(arguments, "explanation", 2000);
         var updated = state with { Plan = plan, AcceptanceCriteria = criteria, Facts = facts, RejectedHypotheses = rejected,
             NextStep = next, Phase = phase, Sequence = state.Sequence + 1, ConsecutivePlanNoOps = 0 };
+        updated = ScienceStagePolicy.Apply(state, updated, arguments, verifyScienceReceipts);
         return CodingPlanProgressGuard.HasChanged(state, updated) ? updated
             : state with { ConsecutivePlanNoOps = Math.Clamp(state.ConsecutivePlanNoOps, 0, CodingPlanProgressGuard.MaximumNoOps - 1) + 1 };
     }
@@ -272,7 +293,7 @@ public static class CodingWorkingStateReducer
         return result;
     }
 
-    private static CodingToolEvidence? ResolveEvidence(CodingWorkingState state, string? evidenceId)
+    internal static CodingToolEvidence? ResolveEvidence(CodingWorkingState state, string? evidenceId)
     {
         if (evidenceId is null) return null;
         var canonical = state.Evidence.FirstOrDefault(value => value.Id == evidenceId);
@@ -285,10 +306,11 @@ public static class CodingWorkingStateReducer
         return candidates.Length == 1 ? candidates[0] : null;
     }
 
-    private static CodingToolEvidence[] KeepEvidence(CodingWorkingState state, IEnumerable<CodingToolEvidence> evidence)
+    internal static CodingToolEvidence[] KeepEvidence(CodingWorkingState state, IEnumerable<CodingToolEvidence> evidence)
     {
         var retainedIds = state.Plan.Concat(state.AcceptanceCriteria).SelectMany(static item => item.EvidenceIds)
             .Concat(state.Facts.Concat(state.RejectedHypotheses).SelectMany(static item => item.EvidenceIds)).ToHashSet(StringComparer.Ordinal);
+        foreach (var id in state.Science?.Stages.SelectMany(stage => stage.Checks).SelectMany(check => check.EvidenceIds) ?? []) retainedIds.Add(id);
         var all = evidence.ToArray();
         var pinned = all.Where(item => retainedIds.Contains(item.Id)).ToArray();
         return pinned.Concat(all.Where(item => !retainedIds.Contains(item.Id)).TakeLast(Math.Max(0, MaximumEvidence - pinned.Length)))

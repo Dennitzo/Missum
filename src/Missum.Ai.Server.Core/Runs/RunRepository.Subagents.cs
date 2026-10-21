@@ -185,7 +185,7 @@ public sealed partial class RunRepository
             state = Enum.Parse<RunState>(reader.GetString(1));
             agentId = reader.GetString(2);
         }
-        var checkpoint = JsonSerializer.Deserialize<AgentRunCheckpoint>(checkpointJson, _checkpointJsonOptions);
+        var checkpoint = DeserializeSessionCheckpoint(checkpointJson);
         var identity = "\"runId\":" + JsonSerializer.Serialize(childRunId, _database.JsonOptions);
         if (checkpoint?.Messages.Any(message =>
             (message.Role == "tool" || message.Role == "user" && message.Content?.StartsWith(SubagentToolNames.ResultContextMarker, StringComparison.Ordinal) == true)

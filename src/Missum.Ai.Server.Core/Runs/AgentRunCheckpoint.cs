@@ -43,5 +43,5 @@ public sealed record AgentRunCheckpoint(
     string? ToolCatalogSignature = null,
     IReadOnlyList<LmToolDefinition>? ContextTools = null,
     string? ResearchStateStamp = null,
-    string? CacheEpoch = null,
-    Missum.Ai.Contracts.ProjectContextRef? ProjectContext = null);
+    string ContextScope = "session-v3",
+    bool ScienceVerificationPending = false);
