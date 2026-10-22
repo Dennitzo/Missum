@@ -41,8 +41,30 @@ public sealed partial class NativeAssistantPage
             || !ReferenceEquals(normalControl, _messageBlocks[messageId]["tool:normal-compaction"]))
             throw new InvalidOperationException("Hintergrundkomprimierung muss dauerhaft ohne aktiven AI-Lauf angezeigt werden.");
         await SaveMathPreviewAsync(_messageViews[messageId].View, "native-compaction-preview.png");
+        foreach (var (state, label) in new[] { ("cancelled", "Kontextkomprimierung abgebrochen"),
+            ("failed", "Kontextkomprimierung fehlgeschlagen") })
+        {
+            var stepId = "compaction-" + state;
+            ApplyEvent("conversation.toolStepChanged", JsonSerializer.SerializeToElement(new
+            {
+                sessionId = _session, messageId,
+                toolStep = new { id = stepId, tool = "context.compact", status = "running", contentOffset = 0,
+                    updatedAt = at.AddSeconds(2) },
+            }));
+            RenderMessagesNow(); UpdateLayout();
+            ApplyEvent("conversation.toolStepChanged", JsonSerializer.SerializeToElement(new
+            {
+                sessionId = _session, messageId,
+                toolStep = new { id = stepId, tool = "context.compact", status = state,
+                    contentOffset = 0, updatedAt = at.AddSeconds(3) },
+            }));
+            RenderMessagesNow(); UpdateLayout();
+            if (!Descendants(_messageViews[messageId].View).OfType<TextBlock>().Any(text => text.Text == label))
+                throw new InvalidOperationException("Fehlgeschlagene oder abgebrochene Komprimierung bleibt als laufend sichtbar.");
+        }
         await File.WriteAllTextAsync(Path.Combine(App.Current.DataDirectory, "native-compaction-validation.json"),
-            JsonSerializer.Serialize(new { passed = true, completedRunReceipt = true, duplicates = 0, markedRunActive = _running }));
+            JsonSerializer.Serialize(new { passed = true, completedRunReceipt = true, abortedReceipt = true,
+                failedReceipt = true, duplicates = 0, markedRunActive = _running }));
         ApplyEvent("session.changed", original);
         _selectionInputSmokeActive = false;
     }

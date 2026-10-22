@@ -69,6 +69,15 @@ public sealed partial class ModelRuntimeClient
         return profile.DefaultEffort;
     }
 
+    internal string? ResolveCompactionReasoningEffort(string modelId, string role)
+    {
+        // Summarize established receipts, rather than solving the research task
+        // again with its (potentially very high) reasoning setting.
+        var profile = ResolveRuntimeReasoningProfile(modelId, role);
+        return profile.Supports("none") ? "none"
+            : LowestReasoningLevels.FirstOrDefault(profile.Supports) ?? profile.DefaultEffort;
+    }
+
     internal static ModelReasoningProfile? ReadReasoningMetadata(JsonElement data)
     {
         var tags = data.TryGetProperty("tags", out var tagData) && tagData.ValueKind == JsonValueKind.Array

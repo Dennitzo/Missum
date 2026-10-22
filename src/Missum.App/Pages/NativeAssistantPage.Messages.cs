@@ -446,7 +446,13 @@ public sealed partial class NativeAssistantPage
                 "research.skeptic" => "Ergebnisse kritisch prüfen", "research.verify" => "Belege bewerten",
                 "research.model" => "Recherche bearbeiten", "research.operation" => "Rechercheauftrag",
                 "math.formalProof" => "Lean-Beweis prüfen", "assistant.progress" => "Fortschritt",
-                "context.compact" => S(step, "status") == "completed" ? "Kontextkomprimierung abgeschlossen" : "Kontext komprimieren",
+                "context.compact" => S(step, "status") switch
+                {
+                    "completed" => "Kontextkomprimierung abgeschlossen",
+                    "cancelled" or "interrupted" => "Kontextkomprimierung abgebrochen",
+                    "failed" or "denied" => "Kontextkomprimierung fehlgeschlagen",
+                    _ => "Kontext komprimieren",
+                },
                 "assistant.continuation" => S(step, "status") switch
                 {
                     "completed" => "Lauf fortgesetzt", "failed" or "denied" => "Fortsetzen fehlgeschlagen",
@@ -580,7 +586,8 @@ public sealed partial class NativeAssistantPage
                 _title.Text = ResearchTaskLabel(child.Title);
             }
             if (_running) _title.Text += " …";
-            if (S(_step, "status") is "failed" or "denied" or "cancelled" or "interrupted") _title.Text += " · " + _status.Text;
+            if (S(_step, "tool") != "context.compact"
+                && S(_step, "status") is "failed" or "denied" or "cancelled" or "interrupted") _title.Text += " · " + _status.Text;
             _counts.Visibility = _fileMutation && _hasCounts ? Visibility.Visible : Visibility.Collapsed;
             _title.FontWeight = Microsoft.UI.Text.FontWeights.Normal;
             _title.Foreground = ThemeBrush("MissumMutedTextBrush", 160);

@@ -9,6 +9,19 @@ namespace Missum.Tests;
 
 public sealed class CodingToolStepTests
 {
+    [Theory]
+    [InlineData("cancelled", "cancelled")]
+    [InlineData("interrupted", "interrupted")]
+    [InlineData("failed", "failed")]
+    [InlineData("completed", "interrupted")]
+    public void MissingCompactionResultCannotBeReportedAsSuccessful(string terminal, string expected)
+    {
+        var step = new AssistantToolStep("compact", "context.compact", "running", "Kontext wird verdichtet.");
+        var result = MissumAiAssistantService.CompleteOpenToolStep(step, terminal, null);
+        Assert.Equal(expected, result.Status);
+        Assert.Contains("kein neuer komprimierter Kontext", result.Detail);
+        Assert.NotNull(result.CompletedAt);
+    }
     private static readonly string[] PowerShellArguments = ["-NoProfile", "-File", "probe.ps1"];
 
     [Fact]

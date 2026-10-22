@@ -27,6 +27,7 @@ internal static partial class GatewayEndpoints
         endpoints.MapGet("/v1/capabilities", WriteCapabilitiesAsync);
         endpoints.MapGet("/v1/models/status", WriteModelStatusAsync);
         endpoints.MapGet("/v1/models/coding", WriteCodingModelStatusAsync);
+        endpoints.MapPost("/v1/models/prepare", PrepareModelAsync);
         endpoints.MapGet("/v1/gpu/status", WriteGpuStatusAsync);
         endpoints.MapGet("/v1/services/status", WriteServiceStatusAsync);
         endpoints.MapPost("/v1/context/embeddings", CreateEmbeddingsAsync);
@@ -106,6 +107,23 @@ internal static partial class GatewayEndpoints
     {
         var gpu = context.RequestServices.GetRequiredService<GpuStatusService>();
         await WriteJsonAsync(context, await gpu.GetStatusAsync(context.RequestAborted).ConfigureAwait(false)).ConfigureAwait(false);
+    }
+
+    private static async Task PrepareModelAsync(HttpContext context)
+    {
+        var request = await ReadJsonAsync<ModelPreparationRequest>(context).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(request.ModelId) || request.ModelId.Length > 512
+            || request.ContextLength < 0 || request.ContextLength is > 0 and < 2048)
+            throw new ArgumentException("Ein installiertes Modell und ein gültiges Kontextlimit sind erforderlich.");
+        var scheduler = context.RequestServices.GetRequiredService<GpuLeaseScheduler>();
+        // Use the ordinary exclusive allocation lane: preparation must not evict
+        // a model that is currently serving another client or a subagent.
+        await using var lease = await scheduler.AcquireAsync("llm-prepare", null, context.RequestAborted).ConfigureAwait(false);
+        var workers = context.RequestServices.GetRequiredService<WorkerOrchestrator>();
+        var prepared = await workers.PrepareLmModelWithStatusAsync(request.ModelId, request.ContextLength,
+            null, context.RequestAborted).ConfigureAwait(false);
+        await WriteJsonAsync(context, new ModelPreparationResponse(prepared.InstanceId, prepared.ContextLength,
+            prepared.WasAlreadyLoaded)).ConfigureAwait(false);
     }
 
     private static async Task WriteServiceStatusAsync(HttpContext context)

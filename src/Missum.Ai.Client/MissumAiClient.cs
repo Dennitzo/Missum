@@ -63,6 +63,10 @@ public sealed class MissumAiClient : IDisposable
     public Task<CodingModelCatalogResponse> GetCodingModelsAsync(CancellationToken cancellationToken = default) =>
         GetAsync<CodingModelCatalogResponse>("v1/models/coding", cancellationToken);
 
+    public Task<ModelPreparationResponse> PrepareModelAsync(ModelPreparationRequest request,
+        CancellationToken cancellationToken = default) =>
+        PostAsync<ModelPreparationRequest, ModelPreparationResponse>("v1/models/prepare", request, cancellationToken);
+
     public Task<GpuStatusSnapshot> GetGpuStatusAsync(CancellationToken cancellationToken = default) =>
         GetAsync<GpuStatusSnapshot>("v1/gpu/status", cancellationToken);
 

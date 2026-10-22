@@ -142,17 +142,55 @@ public sealed class ScienceSkillTests
     {
         var state = Plan(Start(), "publication");
         state = Observe(state, "actual-edit", "coding.edit", "{\"path\":\"work/check.py\"}", "{\"success\":true,\"path\":\"work/check.py\",\"sha256\":\"" + Hash + "\"}");
-        state = Read(state, "read-only", Hash);
+        state = Observe(state, "read-only", "web.fetch", "{}", "{\"success\":true}");
         var error = Assert.Throws<ArgumentException>(() => Complete(state, "read-only", "publication", paths: true));
         Assert.Contains("Ersetze evidenceIds", error.Message);
         Assert.Contains("actual-edit", error.Message);
-        Assert.Contains("coding.read", error.Message);
+        Assert.Contains("web.fetch", error.Message);
         Assert.Contains("coding.edit", error.Message);
         var pendingError = Assert.Throws<ArgumentException>(() => CodingWorkingStateReducer.ApplyPlanUpdate(state, J("""
             {"phase":"review","scienceStages":[{"id":"a","checks":[{"id":"check","kind":"publication","required":true,"evidenceIds":["read-only"],"paths":["work/check.py"]}]}]}
             """)));
         Assert.Contains("actual-edit", pendingError.Message);
         Assert.Empty(state.Science!.Stages[0].Checks[0].EvidenceIds);
+    }
+
+    [Fact]
+    public void SequentialPublicationEditsAndCurrentReadCanCloseTheSameStage()
+    {
+        var state = Plan(Start(), "publication");
+        state = Observe(state, "old-edit", "coding.edit", "{\"path\":\"work/check.py\"}",
+            "{\"success\":true,\"path\":\"work/check.py\",\"sha256\":\"" + new string('b', 64) + "\"}");
+        state = Observe(state, "final-edit", "coding.edit", "{\"path\":\"work/check.py\"}",
+            "{\"success\":true,\"path\":\"work/check.py\",\"sha256\":\"" + Hash + "\"}");
+        state = Read(state, "review", Hash);
+        var update = J("""
+            {"steps":[{"id":"a","title":"A prüfen","status":"completed","evidenceIds":["old-edit","final-edit"]}],
+             "scienceStages":[{"id":"a","outcome":"clarified","checks":[{"id":"check","kind":"publication","required":true,
+              "evidenceIds":["old-edit","final-edit","review"],"paths":["work/check.py"]}]}]}
+            """);
+        var completed = CodingWorkingStateReducer.ApplyPlanUpdate(state, update);
+        Assert.Equal("clarified", ScienceSkill.ResultOutcome(completed));
+        Assert.Equal("pending", Read(completed, "later-change", new('c', 64)).Plan[0].Status);
+        Assert.Equal("clarified", ScienceSkill.ResultOutcome(Complete(state, "review", "publication", paths: true)));
+        var error = Assert.Throws<ArgumentException>(() => Complete(state, "old-edit", "publication", paths: true));
+        Assert.Contains("aktuellen Publikationsstand", error.Message);
+        Assert.Contains("final-edit", error.Message);
+        Assert.Contains("review", error.Message);
+    }
+
+    [Fact]
+    public void PublicationReviewCannotBorrowAnotherFilesHashOrSkipFreshConfirmation()
+    {
+        var state = Plan(Start(), "publication");
+        state = Observe(state, "edit", "coding.edit", "{\"path\":\"work/check.py\"}",
+            "{\"success\":true,\"path\":\"work/check.py\",\"sha256\":\"" + Hash + "\"}");
+        Assert.Throws<ArgumentException>(() => Complete(state, "edit", "publication", paths: true));
+        state = Read(state, "review", Hash);
+        state = Observe(state, "unrelated-read", "coding.read", "{\"path\":\"other.md\"}",
+            "{\"success\":true,\"path\":\"other.md\",\"sha256\":\"" + Hash + "\"}");
+        Assert.Throws<ArgumentException>(() => Complete(state, "unrelated-read", "publication", paths: true));
+        Assert.Equal("clarified", ScienceSkill.ResultOutcome(Complete(state, "review", "publication", paths: true)));
     }
 
     [Fact]

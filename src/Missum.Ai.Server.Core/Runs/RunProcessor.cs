@@ -895,7 +895,13 @@ public sealed partial class RunProcessor : BackgroundService
                     await SaveCheckpointAsync().ConfigureAwait(false);
                 }
             }
-            var effort = _modelRuntime.ResolveReasoningEffort(selection.ModelId, selection.Role, request.ReasoningEffort);
+            // Historical-session preparation is an internal summary, just like
+            // rolling compaction. Do not inherit the main model's (possibly
+            // maximum) thinking default while rephrasing established history.
+            string? ResolveTurnReasoningEffort() => request.ConversationProfile == ConversationProfile.ContextPreparation
+                ? _modelRuntime.ResolveCompactionReasoningEffort(selection.ModelId, selection.Role)
+                : _modelRuntime.ResolveReasoningEffort(selection.ModelId, selection.Role, request.ReasoningEffort);
+            var effort = ResolveTurnReasoningEffort();
             var selectableTools = compactContext || useStableSubagentToolCatalog ? availableTools.ToArray() : budgetSummary ? [] : isCoding
                 ? CodingPlanProgressGuard.OfferedTools(availableTools, workingState) : availableTools.ToArray();
             var modelTools = contextTools ?? CreateModelToolDefinitions(selectableTools, selectedToolName, isCoding || useStableSubagentToolCatalog);
@@ -1002,17 +1008,21 @@ public sealed partial class RunProcessor : BackgroundService
             {
                 queueMilliseconds = queueWatch.Elapsed.TotalMilliseconds;
                 using var loadingHeartbeatCancellation = CancellationTokenSource.CreateLinkedTokenSource(steeringCall.Token);
-                var loadingHeartbeat = isCoding
-                    ? PublishCodingHeartbeatAsync(runId, roundCount + 1, loadingHeartbeatCancellation.Token, "codingLoading")
-                    : Task.CompletedTask;
+                var loadingHeartbeat = Task.CompletedTask;
                 ModelPreparation preparation;
                 try
                 {
-                    Func<CancellationToken, Task> loadingStarted = async token => await _repository.AppendEventAsync(
+                    Func<CancellationToken, Task> loadingStarted = async token =>
+                    {
+                        await _repository.AppendEventAsync(
                             runId,
                             RunEventTypes.ModelLoading,
                             new ModelLoadingEvent(selection.ModelId, "loading", contextLength, contextLength),
                             token).ConfigureAwait(false);
+                        if (isCoding)
+                            loadingHeartbeat = PublishCodingHeartbeatAsync(runId, roundCount + 1,
+                                loadingHeartbeatCancellation.Token, "codingLoading");
+                    };
                     preparation = request.Subagent is null
                         ? await _workers.PrepareLmModelWithStatusAsync(selection.ModelId, contextLength, loadingStarted,
                             steeringCall.Token).ConfigureAwait(false)
@@ -1071,14 +1081,14 @@ public sealed partial class RunProcessor : BackgroundService
                     await SaveCheckpointAsync().ConfigureAwait(false);
                 }
                 ContextPlan contextPlan;
-                effort = _modelRuntime.ResolveReasoningEffort(selection.ModelId, selection.Role, request.ReasoningEffort);
+                effort = ResolveTurnReasoningEffort();
                 if (isCoding && !budgetSummary && CodingContextCompactor.Plan(messages, contextLength, workingState,
                     includeWorkingStateInBudget: !workingStatePromptIncluded) is { } compaction)
                 {
                     using var compactingCancellation = CancellationTokenSource.CreateLinkedTokenSource(steeringCall.Token);
                     var compactingHeartbeat = PublishCodingHeartbeatAsync(runId, roundCount + 1, compactingCancellation.Token, "codingCompacting");
                     LmChatResult condensed;
-                    var summaryEffort = effort;
+                    var summaryEffort = _modelRuntime.ResolveCompactionReasoningEffort(selection.ModelId, selection.Role);
                     var firstCompactionReasoningFragment = true;
                     var compactionReasoningPublished = false;
                     try

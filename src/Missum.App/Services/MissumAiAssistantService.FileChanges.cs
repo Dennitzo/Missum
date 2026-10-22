@@ -30,6 +30,9 @@ public sealed partial class MissumAiAssistantService
         if (run.WorkspacePath is not { } workspace) return;
         if (!UsesCodingAgent(run.Action)
             && (await chats.GetSessionAsync(run.SessionId, cancellationToken).ConfigureAwait(false))?.ChatMode != ChatMode.ClaudeScience) return;
+        if (!resume)
+            await update(new(MissumAiAssistantUpdateKind.Status, message, Status: "Projekt wird vorbereitet",
+                Detail: "Projektdateien werden für die Änderungsübersicht erfasst.")).ConfigureAwait(false);
         var directory = CodingChangesMonitor.RunStorageDirectory(settings.DataDirectory, run.SessionId, run.AssistantMessageId, run.Id);
         var monitor = new CodingChangesMonitor(workspace, directory, run.SessionId, run.AssistantMessageId, run.Id,
             summary => update(new(MissumAiAssistantUpdateKind.FileChangesChanged, message, ChangesSummary: summary)),

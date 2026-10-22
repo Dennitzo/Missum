@@ -121,6 +121,10 @@ internal static class ScienceStagePolicy
             }
             if (receipt!.Sequence <= stage.ReopenedAtSequence) Fail($"Etappe {stage.Id}: {check.Id} benötigt einen neuen Nachweis nach dem Rücksprung.");
             if (check.Kind is "numeric" or "plot" or "publication" && check.Paths.Count == 0) Fail($"Prüfung {check.Id}: paths muss die tatsächlich geprüften Eingabedateien beziehungsweise die Publikation nennen.");
+            // Publication edits form a sequence of document versions. Earlier
+            // edits remain provenance, while a current edit or explicit review
+            // must cover each document. Numeric/proof receipts stay conjunctive.
+            if (check.Kind == "publication") continue;
             var paths = check.Paths.Concat(receipt.VerificationPath is { } proofPath ? [proofPath] : Array.Empty<string>())
                 .Concat(receipt.Tool is "coding.read" or "math.formalProof" && receipt.Path is { } sourcePath ? [sourcePath] : Array.Empty<string>()).Distinct(StringComparer.OrdinalIgnoreCase);
             foreach (var path in paths)
@@ -133,6 +137,24 @@ internal static class ScienceStagePolicy
                     Fail($"Etappe {stage.Id}: {check.Id}, Datei {path} ist ungeprüft/verändert. Datei gezielt lesen und die passende Prüfung für den aktuellen Stand nachweisen.");
             }
         }
+        if (check.Kind == "publication")
+            foreach (var path in check.Paths)
+            {
+                var current = state.Science?.Files?.FirstOrDefault(pair => CodingWorkingStateReducer.SamePath(pair.Key, path)).Value;
+                if (current is null || current.Sha256 is null || requireFreshReads && current.NeedsRead)
+                    Fail($"Etappe {stage.Id}: {check.Id}, Datei {path} benötigt eine aktuelle Lesebestätigung.");
+                bool CoversCurrentFile(CodingToolEvidence evidence) => evidence.Path is { } ownPath
+                    && CodingWorkingStateReducer.SamePath(ownPath, path)
+                    && string.Equals(current.Sha256, evidence.Sha256
+                        ?? evidence.FileHashes?.FirstOrDefault(pair => CodingWorkingStateReducer.SamePath(pair.Key, path)).Value,
+                        StringComparison.OrdinalIgnoreCase);
+                if (check.EvidenceIds.Select(id => CodingWorkingStateReducer.ResolveEvidence(state, id)!).Any(CoversCurrentFile)) continue;
+                var candidates = state.Evidence.Where(item => item.Success && Matches("publication", item)
+                    && item.Sequence > stage.ReopenedAtSequence && CoversCurrentFile(item)).TakeLast(3).Select(item => item.Id).ToArray();
+                Fail($"Etappe {stage.Id}: {check.Id}, Datei {path}: Die angegebenen Belege betreffen keinen aktuellen Publikationsstand. "
+                    + (candidates.Length > 0 ? "Verwende die aktuelle Beleg-ID in evidenceIds: " + string.Join(", ", candidates)
+                        : "Publikation gezielt lesen oder bearbeiten und die Beleg-ID dieses aktuellen Dateistands verwenden."));
+            }
     }
 
     private static bool Matches(string kind, CodingToolEvidence receipt) => kind switch
@@ -142,7 +164,7 @@ internal static class ScienceStagePolicy
         "analytic" => receipt.Tool is "math.evaluate" || receipt.Tool == "coding.command" && receipt.ExitCode == 0 || receipt.Tool == "math.formalProof" && receipt.FormalVerified,
         "source" => receipt.Tool is "web.fetch" or "coding.read" or "documents.readPages",
         "plot" => receipt.Tool == "coding.command" && receipt.ExitCode == 0 || receipt.Tool == "image.generate",
-        "publication" => receipt.Tool is "coding.edit" or "coding.write" or "document.create",
+        "publication" => receipt.Tool is "coding.edit" or "coding.write" or "document.create" or "coding.read",
         _ => false,
     };
 

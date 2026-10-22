@@ -25,6 +25,8 @@ public sealed partial class MissumAiAssistantService
         ChatMessage? assistant = null;
         var started = false;
         var runCompletion = BeginActiveRun(sessionId, null, cancellationToken);
+        using var preparationCancellation = CancellationTokenSource.CreateLinkedTokenSource(_activeCancellation.Token);
+        var modelPreparation = Task.CompletedTask;
         try
         {
             var token = _activeCancellation.Token;
@@ -103,6 +105,9 @@ public sealed partial class MissumAiAssistantService
                 if (recoveredRequest.SessionId != sessionId.ToString("D"))
                     throw new InvalidDataException("Der vorbereitete Fortsetzungsauftrag gehört zu einer anderen Sitzung.");
             }
+            modelPreparation = PrepareSubmittedModelAsync(_activeRunAction, preparationCancellation.Token,
+                recoveredRequest?.PreferredCodingModelId ?? recoveredRequest?.PreferredGeneralModelId,
+                recoveredRequest?.Limits?.MaximumContextTokens, gatewayReady: true);
             var attachmentsForRun = await attachments.ListAsync(sessionId, token).ConfigureAwait(false);
             var uploaded = await UploadAttachmentsAsync(client, attachmentsForRun, update, assistant, token).ConfigureAwait(false);
             var retainUploads = false;
@@ -233,6 +238,8 @@ public sealed partial class MissumAiAssistantService
         }
         finally
         {
+            await preparationCancellation.CancelAsync().ConfigureAwait(false);
+            await modelPreparation.ConfigureAwait(false);
             await FinishActiveRunAsync(runCompletion).ConfigureAwait(false);
         }
     }

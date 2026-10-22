@@ -34,7 +34,7 @@ public sealed partial class RunProcessor
             var proposal = await _repository.GetToolProposalAsync(id, runId, token).ConfigureAwait(false);
             if (proposal is null)
             {
-                proposal = new(id, runId, ClientToolNames.CodingRead, JsonSerializer.SerializeToElement(new { path, startLine = 1, endLine = 1 }),
+                proposal = new(id, runId, ClientToolNames.CodingRead, JsonSerializer.SerializeToElement(new { path, startLine = 1, maximumLines = 1 }),
                     ToolRiskClass.ReadOnly, "Science-Prüfung: aktuellen Dateistand bestätigen · " + path, DateTimeOffset.MaxValue);
                 await _repository.SaveToolProposalAsync(proposal, token).ConfigureAwait(false);
             }

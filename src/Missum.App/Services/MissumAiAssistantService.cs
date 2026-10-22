@@ -184,6 +184,8 @@ public sealed partial class MissumAiAssistantService(
             throw new InvalidOperationException("Es läuft bereits ein Missum-AI-Auftrag.");
         }
         var runCompletion = BeginActiveRun(sessionId, trigger?.Trigger.Action, cancellationToken);
+        using var preparationCancellation = CancellationTokenSource.CreateLinkedTokenSource(_activeCancellation.Token);
+        var modelPreparation = Task.CompletedTask;
         _activeSubmittedSession = submittedSession;
         try
         {
@@ -191,6 +193,10 @@ public sealed partial class MissumAiAssistantService(
                 ?? throw new InvalidOperationException("Die AI-Sitzung wurde nicht gefunden.");
             var action = trigger?.Trigger.Action;
             _activeRunAction = action;
+            // Loading weights must not wait for history, attachment uploads or
+            // the durable Git baseline (which can take minutes in large projects).
+            // This prepares resources only; no model generation or tools run yet.
+            modelPreparation = PrepareSubmittedModelAsync(action, preparationCancellation.Token);
             var historyBeforePrompt = await LoadModelHistoryAsync(sessionId, _activeCancellation.Token).ConfigureAwait(false);
             var sessionAttachments = await attachments.ListAsync(sessionId, _activeCancellation.Token).ConfigureAwait(false);
             var contentProfile = action == PromptTriggerAction.Audiobook
@@ -264,6 +270,8 @@ public sealed partial class MissumAiAssistantService(
         }
         finally
         {
+            await preparationCancellation.CancelAsync().ConfigureAwait(false);
+            await modelPreparation.ConfigureAwait(false);
             await FinishActiveRunAsync(runCompletion).ConfigureAwait(false);
         }
     }
@@ -2213,7 +2221,7 @@ public sealed partial class MissumAiAssistantService(
                                     "codingLoading" => "Coding-Modell wird geladen",
                                     "promptProcessing" => "Kontext wird verarbeitet",
                                     "codingWaiting" => "Modell generiert",
-                                    "codingCompacting" => "Projektkontext wird verdichtet",
+                                    "codingCompacting" => "Sitzungskontext wird verdichtet",
                                     "providerRetryWaiting" => "Lokales Modell vorübergehend nicht erreichbar",
                                     "responseRecovery" => "Modellantwort wird vervollständigt",
                                     "deepResearchInterpretation" => "Deep Research: Problem verstehen",
@@ -2718,14 +2726,17 @@ public sealed partial class MissumAiAssistantService(
     internal static AssistantToolStep CompleteOpenToolStep(AssistantToolStep step, string status, CodingCommandProgress? lastProgress) =>
         step with
         {
-            Status = status,
+            Status = step.Tool == "context.compact" && status == "completed" ? "interrupted" : status,
             OutputJson = CompleteToolOutput(step, status, lastProgress),
             CompletedAt = step.CompletedAt ?? DateTimeOffset.UtcNow,
             UpdatedAt = NextToolStepUpdate(step),
             Detail = step.Tool == ClientToolNames.CodingCommand && lastProgress is not null
                 ? (step.Detail is { Length: > 0 } detail ? detail + "\n\n" : string.Empty)
                     + FormatCommandPartialOutput(lastProgress)
-                : step.Detail,
+                : step.Tool == "context.compact"
+                    ? status == "failed" ? "Die Kontextkomprimierung ist fehlgeschlagen. Es wurde kein neuer komprimierter Kontext übernommen."
+                        : "Die Kontextkomprimierung wurde abgebrochen. Es wurde kein neuer komprimierter Kontext übernommen."
+                    : step.Detail,
         };
 
     private static string FormatCommandPartialOutput(CodingCommandProgress progress) =>
@@ -3284,34 +3295,19 @@ public sealed partial class MissumAiAssistantService(
             contextLimit: CurrentSettings.ContextLimitsByModel.GetValueOrDefault(selectedModel),
             cancellationToken).ConfigureAwait(false);
 
-        var sessionContext = await sessionContexts.PrepareAsync(
+        var (sessionContext, preparedAssistant) = await PrepareSessionHistoryAsync(
             client,
             sessionId,
             historyBeforePrompt,
             contextBudgetPrompt,
             selectedModel,
             contextProfile,
-            knownContextLength: documentContext?.ContextLength ?? (CurrentSettings.ContextLimitsByModel.TryGetValue(selectedModel, out var requestedContext) ? requestedContext : null),
-            knownHistoryBudgetCharacters: documentContext is null ? null
+            documentContext?.ContextLength ?? (CurrentSettings.ContextLimitsByModel.TryGetValue(selectedModel, out var requestedContext) ? requestedContext : null),
+            documentContext is null ? null
                 : Math.Max(1_024, documentContext.HistoryBudgetCharacters),
-            async progress => await update(new(
-                MissumAiAssistantUpdateKind.Status,
-                assistant,
-                Status: progress.Status,
-                Detail: progress.Detail,
-                Model: selectedModel,
-                ContextLimit: documentContext?.ContextLength,
-                ContextWasCompacted: true)).ConfigureAwait(false),
+            assistant, update,
             cancellationToken).ConfigureAwait(false);
-        if (sessionContext.Descriptor.PreparedByAi && !sessionContext.CacheHit)
-        {
-            var now = DateTimeOffset.UtcNow;
-            var step = await chats.SaveToolStepDeltaAsync(assistant.Id, new("history-compaction:" + assistant.Id.ToString("N"),
-                "context.compact", "completed", "Älterer Sitzungsverlauf wurde als fortsetzbarer Arbeitsstand verdichtet.",
-                ContentOffset: assistant.Content.Length, StartedAt: now, CompletedAt: now, UpdatedAt: now), cancellationToken).ConfigureAwait(false);
-            assistant = assistant with { ToolSteps = (assistant.ToolSteps ?? []).Where(item => item.Id != step.Id).Append(step).ToArray() };
-            await update(new(MissumAiAssistantUpdateKind.Status, assistant, Status: "Kontext komprimiert", ToolStep: step)).ConfigureAwait(false);
-        }
+        assistant = preparedAssistant;
         var messages = sessionContext.Messages.ToList();
 
         var hasAudiobookHistory = historyBeforePrompt.Any(static message =>

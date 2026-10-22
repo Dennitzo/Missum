@@ -17,6 +17,33 @@ public sealed class ClientContinuationTests
     private const string Partial = "Bereits erarbeitete Herleitung.";
     private static readonly JsonSerializerOptions Json = MissumAiProtocol.CreateJsonOptions();
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ModelLoadingOverlapsLocalPreparationAndIsCancelledWithTheSubmission(bool continuing)
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var seeded = await SeedAsync(environment, MessageStatus.Cancelled, ChatMode.Coding);
+        var handler = new ContinuationHandler(RunState.Cancelled) { HoldPreparation = true };
+        using var host = await Host.CreateAsync(environment, handler);
+        await host.Settings.UpdateAsync(current => current with { SelectedModel = "fixture/selected",
+            ContextLimitsByModel = new Dictionary<string, int> { ["fixture/selected"] = 65536 } });
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var final = continuing
+            ? await host.Service.ResumeMessageAsync(seeded.Session.Id, seeded.Message.Id, _ => Task.CompletedTask, timeout.Token)
+            : await host.Service.SendAsync(seeded.Session.Id, "Prüfe die Datei.",
+                AssistantCoordinator.CreateToolMatch("coding", "Prüfe die Datei."), _ => Task.CompletedTask, timeout.Token);
+        Assert.Equal(MessageStatus.Completed, final.Status);
+        Assert.True(handler.PreparationStartedBeforeRun);
+        Assert.True(handler.PreparationCancelled);
+        var prepared = Assert.Single(handler.Preparations);
+        Assert.Equal("fixture/selected", prepared.ModelId);
+        Assert.Equal(65536, prepared.ContextLength);
+        // A real baseline still exists before the actual gateway run starts.
+        Assert.NotEmpty(Directory.EnumerateFiles(Path.Combine(host.Settings.DataDirectory, "Cache", "CodingChanges"),
+            "git-baseline.json", SearchOption.AllDirectories));
+    }
+
     [Fact]
     public void MetadataOnlyDeltaCannotTrimRetainedAnswerOrBreakSubsequentStreaming()
     {
@@ -668,6 +695,10 @@ public sealed class ClientContinuationTests
 
     private sealed class ContinuationHandler(RunState oldState) : HttpMessageHandler
     {
+        internal bool HoldPreparation { get; init; }
+        internal List<ModelPreparationRequest> Preparations { get; } = [];
+        internal bool PreparationCancelled { get; private set; }
+        internal bool PreparationStartedBeforeRun { get; private set; }
         internal List<RunRequest> Requests { get; } = [];
         internal List<string> RawRequests { get; } = [];
         internal List<string> IdempotencyKeys { get; } = [];
@@ -691,6 +722,16 @@ public sealed class ClientContinuationTests
         {
             var path = request.RequestUri!.AbsolutePath;
             var now = DateTimeOffset.UtcNow;
+            if (path == "/v1/models/prepare")
+            {
+                Preparations.Add(JsonSerializer.Deserialize<ModelPreparationRequest>(await request.Content!.ReadAsStringAsync(token), Json)!);
+                if (HoldPreparation)
+                {
+                    try { await Task.Delay(Timeout.InfiniteTimeSpan, token); }
+                    catch (OperationCanceledException) { PreparationCancelled = true; throw; }
+                }
+                return Response(new ModelPreparationResponse("fixture/selected", 65536, false));
+            }
             if (path == "/v1/health/live")
             {
                 HealthProbeCount++;
@@ -723,6 +764,7 @@ public sealed class ClientContinuationTests
             }
             if (path == "/v1/runs" && request.Method == HttpMethod.Post)
             {
+                PreparationStartedBeforeRun = Preparations.Count > 0 && !PreparationCancelled;
                 var raw = await request.Content!.ReadAsStringAsync(token);
                 RawRequests.Add(raw);
                 Requests.Add(JsonSerializer.Deserialize<RunRequest>(raw, Json)!);

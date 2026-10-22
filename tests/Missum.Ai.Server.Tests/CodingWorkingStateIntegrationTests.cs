@@ -21,6 +21,20 @@ public sealed class CodingWorkingStateIntegrationTests
     private static readonly string[] ForbiddenArguments = ["delete"];
     private static readonly string[] WebTools = ["web.search", "web.fetch"];
     private static readonly string[] PlanRecoveryTestArguments = ["-m", "unittest", "-v"];
+
+    [Fact]
+    public async Task ResidentCodingTurnsDoNotAnnounceModelLoadingDuringReasoning()
+    {
+        using var harness = new Harness();
+        harness.Handler.EmitReasoning = true;
+        var run = await harness.CreateAsync();
+        await harness.DriveUntilCompletedAsync(run);
+        var events = await harness.Repository.GetEventsAfterAsync(run, 0);
+        Assert.DoesNotContain(events, item => item.Type == RunEventTypes.ModelLoading);
+        Assert.DoesNotContain(events, item => item.Type == RunEventTypes.ModelGeneration
+            && item.Data.GetProperty("state").GetString() == "codingLoading");
+        Assert.Contains(events, item => item.Type == RunEventTypes.ReasoningDelta);
+    }
     private static RunRequest Request(string text = "Implementiere die Aufgabe mit zwei unabhängigen lesenden Prüfungen.") => new(
         MissumAiProtocol.Version, RunMode.Coding, [new("user", [new("text", text)])], ClientCapabilities: Capabilities,
         AllowedServerTools: WebTools, PreferredCodingModelId: NativeHandler.ModelId,
@@ -664,10 +678,39 @@ public sealed class CodingWorkingStateIntegrationTests
     }
 
     [Theory]
-    [InlineData(-1, "xhigh")]
-    [InlineData(0, "xhigh")]
-    [InlineData(1, "xhigh")]
-    public async Task CompactionEnteringTheReservedClosureUpgradesAdaptiveReasoningToMaximum(int failureRevision, string summaryEffort)
+    [InlineData(ConversationProfile.ContextPreparation, null, "none")]
+    [InlineData(ConversationProfile.ContextPreparation, "xhigh", "none")]
+    [InlineData(ConversationProfile.General, "xhigh", "xhigh")]
+    public async Task HistoricalContextPreparationUsesMinimalThinkingWithoutChangingTheRequestedPreference(
+        ConversationProfile profile, string? requestedEffort, string expectedEffort)
+    {
+        using var harness = new Harness();
+        harness.Handler.AdaptiveScenario = true;
+        var request = Request("Verdichte die vorhandenen Ergebnisse und offenen Aufgaben.") with
+        {
+            Mode = RunMode.General,
+            PreferredGeneralModelId = NativeHandler.ModelId,
+            PreferredCodingModelId = null,
+            CodingOptions = null,
+            ClientCapabilities = [],
+            AllowedServerTools = [],
+            ConversationProfile = profile,
+            ReasoningEffort = requestedEffort,
+        };
+        var run = (await harness.Repository.CreateAsync(request, null)).Snapshot.RunId;
+
+        await harness.DriveUntilCompletedAsync(run);
+
+        Assert.Equal(expectedEffort, Assert.Single(harness.Handler.Efforts));
+        Assert.Equal(requestedEffort, (await harness.Repository.GetRequestAsync(run))!.ReasoningEffort);
+        Assert.Equal(RunState.Completed, (await harness.Repository.GetAsync(run))!.State);
+    }
+
+    [Theory]
+    [InlineData(-1, "none")]
+    [InlineData(0, "none")]
+    [InlineData(1, "none")]
+    public async Task CompactionUsesMinimalReasoningWhileTheResearchTurnRetainsMaximum(int failureRevision, string summaryEffort)
     {
         using var harness = new Harness();
         harness.Context.Options.CodingMaximumModelRounds = 3;
@@ -1365,6 +1408,12 @@ public sealed class CodingWorkingStateIntegrationTests
             var checkpoint = (await harness.Repository.GetCheckpointAsync(run))!;
             Assert.NotNull(checkpoint.PendingProposalId);
             verifiedSuspension |= checkpoint.ScienceVerificationPending;
+            if (checkpoint.ScienceVerificationPending)
+            {
+                var proposal = (await harness.Repository.GetToolProposalAsync(checkpoint.PendingProposalId!, run))!;
+                Assert.Equal(1, proposal.Arguments.GetProperty("maximumLines").GetInt32());
+                Assert.False(proposal.Arguments.TryGetProperty("endLine", out _));
+            }
             var sha = proposals++ == 1 && changedExternally ? new string('b', 64) : new string('a', 64);
             await harness.Repository.SaveClientToolResultAsync(run, new(checkpoint.PendingProposalId!, "completed",
                 JsonSerializer.SerializeToElement(new { success = true, path = "source.cs", sha256 = sha, content = "Original source" })));
@@ -1454,7 +1503,8 @@ public sealed class CodingWorkingStateIntegrationTests
                     return await CompletionOverride(Requests.Count, cancellationToken);
                 if (AdaptiveScenario)
                 {
-                    var effort = body.RootElement.GetProperty("chat_template_kwargs").GetProperty("reasoning_effort").GetString();
+                    var effort = body.RootElement.GetProperty("chat_template_kwargs").TryGetProperty("reasoning_effort", out var requestedEffort)
+                        ? requestedEffort.GetString() : "none";
                     Efforts.Add(effort);
                     if (effort == "medium")
                     {

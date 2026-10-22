@@ -18,6 +18,16 @@ public sealed class ModelRuntimeClientTests
     private static readonly string[] RequiredName = ["name"];
     private static readonly string[] RequiredOperation = ["operation"];
 
+    [Theory]
+    [InlineData(NativeQwenId, "none")]
+    [InlineData(NativeGeneralId, "low")]
+    [InlineData(NativeCoderId, "none")]
+    public void CompactionUsesOnlyTheLowestSupportedReasoningLevel(string model, string expected)
+    {
+        using var client = CreateClient(new HttpClient(new NativeRuntimeHandler()));
+        Assert.Equal(expected, client.ResolveCompactionReasoningEffort(model, "coding"));
+    }
+
     [Fact]
     public async Task GenerationRetainsTheExplicitContextAllocationInsteadOfSendingZero()
     {
