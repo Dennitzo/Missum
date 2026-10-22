@@ -11,7 +11,7 @@ public static class CodingLoopGuard
     private static readonly string[] ReceiptMetadataFields =
     [
         "status", "success", "errorCode", "exitCode", "timedOut", "outcomeUnknown", "applied",
-        "sha256", "originalSha256", "evidenceId", "stream", "offset", "nextOffset", "hasMore",
+        "evidenceId", "stream", "offset", "nextOffset", "hasMore",
         "storedCharacters", "storedBytes", "truncated", "tool", "provider", "isFallback", "found",
         "path", "nextLine", "startLine", "endLine", "totalLines",
     ];

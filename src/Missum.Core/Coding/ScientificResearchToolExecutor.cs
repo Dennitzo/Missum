@@ -29,7 +29,7 @@ public sealed class ScientificResearchToolExecutor(
             ClientToolNames.MathNumeric => new[] { "projectId", "expression", "precision", "timeoutSeconds" },
             ClientToolNames.MathSmt => new[] { "projectId", "source", "timeoutSeconds" },
             ClientToolNames.MathFormalProof => new[] { "projectId", "operation", "source", "path", "useMathlib", "timeoutSeconds" },
-            ClientToolNames.ResearchCodeWrite => new[] { "projectId", "path", "content", "expectedSha256" },
+            ClientToolNames.ResearchCodeWrite => new[] { "projectId", "path", "content" },
             ClientToolNames.ResearchCodeExecute => new[] { "projectId", "experimentId", "executable", "arguments", "workingDirectory", "randomSeed", "timeoutSeconds" },
             ClientToolNames.ResearchCodeTest => new[] { "projectId", "experimentId", "executable", "arguments", "workingDirectory", "timeoutSeconds" },
             ClientToolNames.ResearchCodeBenchmark => new[] { "projectId", "experimentId", "executable", "arguments", "workingDirectory", "repetitions", "timeoutSeconds" },
@@ -205,12 +205,6 @@ public sealed class ScientificResearchToolExecutor(
         var target = WorkspaceFilePath.Resolve(projectRoot, relative);
         var content = RequiredString(args, "content", 64_000, allowEmpty: true);
         var before = File.Exists(target) ? await File.ReadAllBytesAsync(target, cancellationToken).ConfigureAwait(false) : null;
-        var expected = OptionalString(args, "expectedSha256");
-        if (before is not null && (expected is null || !Hash(before).Equals(expected, StringComparison.OrdinalIgnoreCase)))
-            throw new InvalidOperationException("Die Forschungsdatei wurde verändert oder expectedSha256 fehlt. Lies den aktuellen Stand erneut.");
-        if (before is null && expected is not null)
-            throw new InvalidOperationException("expectedSha256 wurde für eine neue Forschungsdatei angegeben.");
-
         var bytes = Encoding.UTF8.GetBytes(content);
         var changeSetId = $"cs-{Guid.NewGuid():N}";
         var changeRoot = Path.Combine(projectRoot, ".state", "changesets", changeSetId);
@@ -222,7 +216,7 @@ public sealed class ScientificResearchToolExecutor(
             before is null ? null : Hash(before), Hash(bytes), DateTimeOffset.UtcNow);
         await WriteJsonAsync(Path.Combine(changeRoot, "manifest.json"), manifest, cancellationToken).ConfigureAwait(false);
         return Serialize(new { success = true, projectId, changeSetId, path = manifest.Path, created = manifest.Created,
-            beforeSha256 = manifest.BeforeSha256, afterSha256 = manifest.AfterSha256, verificationStatus = "HashVerified" });
+            verificationStatus = "Written" });
     }
 
     private static async Task<JsonElement> RestoreAsync(string projectId, string projectRoot, JsonElement args, CancellationToken cancellationToken)

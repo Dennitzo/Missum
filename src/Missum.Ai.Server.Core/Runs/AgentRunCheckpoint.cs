@@ -3,6 +3,7 @@ using Missum.Ai.Server.Core.Coding;
 
 namespace Missum.Ai.Server.Core.Runs;
 
+[System.Text.Json.Serialization.JsonUnmappedMemberHandling(System.Text.Json.Serialization.JsonUnmappedMemberHandling.Skip)]
 public sealed record AgentRunCheckpoint(
     IReadOnlyList<LmChatMessage> Messages,
     long RoundCount,
@@ -43,5 +44,4 @@ public sealed record AgentRunCheckpoint(
     string? ToolCatalogSignature = null,
     IReadOnlyList<LmToolDefinition>? ContextTools = null,
     string? ResearchStateStamp = null,
-    string ContextScope = "session-v3",
-    bool ScienceVerificationPending = false);
+    string ContextScope = "session-v3");

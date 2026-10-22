@@ -64,7 +64,7 @@ public sealed class CodingAgentLiveTests(ITestOutputHelper output)
                 [new RunMessage("user", [new ContentPart("text",
                     "Repariere die Funktion add in calculator.py. Sie muss zwei Zahlen addieren. "
                     + "Lies calculator.py und test_calculator.py mit coding.read. Ändere ausschließlich calculator.py "
-                    + "mit coding.edit und dem gelesenen sha256. Führe danach coding.command mit executable="
+                    + "direkt mit coding.edit. Führe danach coding.command mit executable="
                     + JsonSerializer.Serialize(python) + " und arguments=[\"-m\",\"unittest\",\"-v\"] aus. "
                     + "Die Tests dürfen nicht verändert werden. Berichte das tatsächliche Testergebnis kurz. "
                     + "Alle Änderungen und der genannte Testaufruf sind für diesen temporären Testordner autorisiert.")])],
@@ -184,7 +184,6 @@ public sealed class CodingAgentLiveTests(ITestOutputHelper output)
         var submitted = new HashSet<string>(StringComparer.Ordinal);
         var progress = new HashSet<string>(StringComparer.Ordinal);
         var response = new StringBuilder();
-        string? lastReadHash = null;
         RunFailedEvent? failure = null;
         try
         {
@@ -246,8 +245,6 @@ public sealed class CodingAgentLiveTests(ITestOutputHelper output)
                             }
                             if (proposal.Name == ClientToolNames.CodingEdit)
                             {
-                                Assert.NotNull(lastReadHash);
-                                Assert.Equal(lastReadHash, proposal.Arguments.GetProperty("expectedSha256").GetString(), ignoreCase: true);
                                 Assert.Equal(initialText, (await File.ReadAllTextAsync(targetPath, timeout.Token)).ReplaceLineEndings("\n"));
                             }
                             var value = await executor.ExecuteAsync(proposal.Name, proposal.Arguments, timeout.Token);
@@ -257,8 +254,6 @@ public sealed class CodingAgentLiveTests(ITestOutputHelper output)
                                 Assert.True(value.GetProperty("created").GetBoolean());
                                 Assert.Equal(initialText, (await File.ReadAllTextAsync(targetPath, timeout.Token)).ReplaceLineEndings("\n"));
                             }
-                            if (proposal.Name == ClientToolNames.CodingRead && IsFileFixtureTarget(proposal.Arguments))
-                                lastReadHash = value.GetProperty("sha256").GetString();
                             result = new ClientToolResult(proposal.ProposalId, "completed", value);
                             var raw = value.GetRawText();
                             output.WriteLine($"Tool {proposed.Count}: {proposal.Name}; input={proposal.Arguments.GetRawText()}; result={raw[..Math.Min(raw.Length, 1_200)]}");

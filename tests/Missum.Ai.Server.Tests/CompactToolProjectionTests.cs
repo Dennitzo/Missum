@@ -1,4 +1,4 @@
-﻿using Missum.Ai.Contracts;
+using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Coding;
 using Missum.Ai.Server.Core.Models;
 using Missum.Ai.Server.Core.Policies;
@@ -136,7 +136,7 @@ public sealed class CompactToolProjectionTests
         var edit = transport.EnumerateArray().Single(item => item.GetProperty("function").GetProperty("name").GetString()
             == ModelRuntimeClient.ToTransportToolName(ClientToolNames.CodingEdit)).GetProperty("function").GetProperty("parameters");
         Assert.False(edit.GetProperty("additionalProperties").GetBoolean());
-        Assert.True(edit.GetProperty("properties").TryGetProperty("expectedSha256", out _));
+        Assert.False(edit.GetProperty("properties").TryGetProperty("expectedSha256", out _));
     }
 
     [Fact]
@@ -181,9 +181,9 @@ public sealed class CompactToolProjectionTests
         };
         var prepared = ModelRuntimeClient.PrepareLanguageBoundMessages(messages);
         Assert.Equal("system", prepared[0].Role);
-        Assert.Contains(CodingAgentPolicy.ReasoningLanguagePrompt, prepared[0].Content, StringComparison.Ordinal);
+        Assert.Contains(CodingAgentPolicy.ResponseLanguagePrompt, prepared[0].Content, StringComparison.Ordinal);
         Assert.Contains(ModelRuntimeClient.DirectUserInstructionPolicy, prepared[0].Content, StringComparison.Ordinal);
-        Assert.True(ModelRuntimeClient.IsLanguageReminder(prepared[^1]));
+        Assert.DoesNotContain(prepared, ModelRuntimeClient.IsLanguageReminder);
         Assert.Contains(prepared, message => message.Role == role && message.Content == messages[0].Content);
     }
 }

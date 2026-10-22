@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Encodings.Web;
@@ -65,7 +64,6 @@ public sealed class LocalCodingToolExecutor
             success = !result.TryGetProperty("success", out var success) || success.ValueKind != JsonValueKind.False,
             truncated = true,
             originalCharacters = raw.Length,
-            sha256 = result.TryGetProperty("sha256", out var hash) ? hash.GetString() : null,
             preview = raw[..1_200],
             message = "Ausgabe am JSON-Größenlimit gekürzt. Fordere einen kleineren Ausschnitt an.",
         });
@@ -171,7 +169,7 @@ public sealed class LocalCodingToolExecutor
         }
         return Serialize(new
         {
-            path = Relative(path), sha256 = Hash(bytes), totalLines = lines.Length,
+            path = Relative(path), totalLines = lines.Length,
             startLine = start, nextLine = next < lines.Length ? (int?)next + 1 : null,
             truncated = next < lines.Length, content = content.ToString(),
         });
@@ -183,21 +181,16 @@ public sealed class LocalCodingToolExecutor
         var path = ResolvePath(RequiredString(args, "path", 1, 1_024), mutation: true);
         var exists = File.Exists(path);
         var original = exists ? await ReadTextFileAsync(path, cancellationToken).ConfigureAwait(false) : null;
-        var expected = OptionalString(args, "expectedSha256");
-        if (exists && (expected is null || !string.Equals(expected, Hash(original!), StringComparison.OrdinalIgnoreCase)))
-            throw new InvalidOperationException("Die Datei wurde verändert oder expectedSha256 fehlt. Lies die aktuelle Datei vor der Änderung erneut.");
-        if (!exists && (edit || expected is not null))
+        if (!exists && edit)
             throw new FileNotFoundException("Die erwartete vorhandene Datei existiert nicht.", path);
         var text = edit ? ApplyEdits(Decode(original!), args) : RequiredString(args, "content", 0, MaximumWriteContentCharacters);
         var bytes = Encode(text, original);
         if (bytes.Length > MaximumFileBytes) throw new InvalidDataException("Die Änderung überschreitet das Dateigrößenlimit.");
         var relative = Relative(path);
         var diff = CodingUnifiedDiff.Create(relative, original, bytes, cancellationToken);
-        var originalHash = original is null ? null : Hash(original);
-        var updatedHash = Hash(bytes);
         JsonElement Receipt(string phase, string diffText, bool diffTruncated, string? progressError = null) => Serialize(new
         {
-            success = phase == "applied", phase, path = relative, sha256 = updatedHash, originalSha256 = originalHash,
+            success = phase == "applied", phase, path = relative,
             bytes = bytes.Length, created = !exists, applied = phase == "applied", diff = diffText,
             diffTruncated, addedLines = diff.AddedLines, removedLines = diff.RemovedLines, progressError,
         });
@@ -213,8 +206,6 @@ public sealed class LocalCodingToolExecutor
         {
             await File.WriteAllBytesAsync(temporary, bytes, cancellationToken).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
-            if (exists && (!File.Exists(path) || !string.Equals(Hash(await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false)), expected, StringComparison.OrdinalIgnoreCase)))
-                throw new InvalidOperationException("Die Datei wurde während der Änderung extern verändert; die Änderung wurde verworfen.");
             _ = ResolvePath(relative, mutation: true);
             File.Move(temporary, path, overwrite: exists);
         }
@@ -238,7 +229,7 @@ public sealed class LocalCodingToolExecutor
         var receipt = Receipt("applied", diff.Text, diff.Truncated, progressError);
         _evidence?.SetResult(receipt);
         // Full bounded UI output was delivered above. Keep the model receipt within its existing
-        // JSON budget, with hashes and applied state intact, and explicitly mark omitted diff data.
+        // JSON budget, with applied state intact, and explicitly mark omitted diff data.
         return receipt.GetRawText().Length <= MaximumOutputCharacters ? receipt
             : Receipt("applied", string.Empty, true, progressError);
     }
@@ -277,7 +268,7 @@ public sealed class LocalCodingToolExecutor
             oldText = NormalizeNewlines(oldText, "\n");
             var index = normalized.IndexOf(oldText, StringComparison.Ordinal);
             if (index < 0)
-                throw new InvalidOperationException($"coding.edit.text_not_found: Ersetzung {replacements.Count + 1}: oldText wurde nicht gefunden. Es wurde nichts geändert. Suche mit coding.search nach einer kurzen eindeutigen Textstelle, lies deren Umgebung mit coding.read und übernimm den tatsächlichen Text ohne Zeilennummern. Verwende den aktuellen sha256 und kleinere Ersetzungen. Wiederhole nicht dieselben Argumente.");
+                throw new InvalidOperationException($"coding.edit.text_not_found: Ersetzung {replacements.Count + 1}: oldText wurde nicht gefunden. Es wurde nichts geändert. Suche mit coding.search nach einer kurzen eindeutigen Textstelle und übernimm den tatsächlichen Text ohne Zeilennummern. Verwende kleinere Ersetzungen. Wiederhole nicht dieselben Argumente.");
             var duplicate = normalized.IndexOf(oldText, index + 1, StringComparison.Ordinal);
             if (duplicate >= 0)
                 throw new InvalidOperationException($"coding.edit.ambiguous_match: Ersetzung {replacements.Count + 1}: oldText kommt mehrfach vor (Zeilen {1 + normalized.AsSpan(0, index).Count('\n')} und {1 + normalized.AsSpan(0, duplicate).Count('\n')}). Es wurde nichts geändert. Lies diese Bereiche und ergänze eindeutige benachbarte Zeilen in oldText.");
@@ -711,7 +702,6 @@ public sealed class LocalCodingToolExecutor
     }
     private static string NormalizeNewlines(string text, string? newline) => newline is null ? text
         : text.Replace("\r\n", "\n", StringComparison.Ordinal).Replace("\n", newline, StringComparison.Ordinal);
-    private static string Hash(byte[] bytes) => Convert.ToHexStringLower(SHA256.HashData(bytes));
     private static JsonElement Serialize<T>(T value) => JsonSerializer.SerializeToElement(value, JsonOptions);
     private string Relative(string path) => string.Equals(path, _root, _pathComparison) || path.StartsWith(_rootPrefix, _pathComparison)
         ? Path.GetRelativePath(_root, path).Replace(Path.DirectorySeparatorChar, '/')

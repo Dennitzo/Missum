@@ -9,13 +9,14 @@ namespace Missum.Ai.Server.Core.Coding;
 
 public sealed record CodingPlanItem(string Id, string Title, string Status, IReadOnlyList<string> EvidenceIds);
 public sealed record CodingStateFact(string Text, IReadOnlyList<string> EvidenceIds);
-public sealed record CodingToolEvidence(string Id, string Tool, bool Success, string? Path, string? Sha256,
+[System.Text.Json.Serialization.JsonUnmappedMemberHandling(System.Text.Json.Serialization.JsonUnmappedMemberHandling.Skip)]
+public sealed record CodingToolEvidence(string Id, string Tool, bool Success, string? Path,
     int? ExitCode, string Summary, long Sequence, string? OutputEvidenceId = null,
     string? SourceRunId = null, bool Historical = false,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyDictionary<string, string>? FileHashes = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] bool FormalVerified = false,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? VerificationPath = null);
-public sealed record CodingActiveFile(string Path, string? Sha256, int StartLine, string Snippet,
+[System.Text.Json.Serialization.JsonUnmappedMemberHandling(System.Text.Json.Serialization.JsonUnmappedMemberHandling.Skip)]
+public sealed record CodingActiveFile(string Path, int StartLine, string Snippet,
     bool Truncated, bool NeedsRead, string EvidenceId, long Sequence, string? OutputEvidenceId = null);
 public sealed record CodingFailureSignature(string Signature, string Tool, string ArgumentHash, string Error,
     int Count, long EnvironmentRevision, string EvidenceId);
@@ -67,8 +68,6 @@ public static class CodingWorkingStateReducer
         var failed = IsFailedResult(outer);
         var path = Text(result, "path") ?? Text(call.Arguments, "path");
         if (path is not null) path = Bound(path.Replace('\\', '/'), 1024);
-        var sha = Text(result, "sha256");
-        if (sha is not null && (sha.Length != 64 || sha.Any(static value => !char.IsAsciiHexDigit(value)))) sha = null;
         var exit = Integer(result, "exitCode");
         var outputEvidenceId = Text(result, "evidenceId") ?? Text(outer, "evidenceId");
         if (outputEvidenceId is null && result.ValueKind == JsonValueKind.Object && result.TryGetProperty("evidence", out var outputReference))
@@ -84,7 +83,7 @@ public static class CodingWorkingStateReducer
         // may be much longer than the working-state excerpt and is still historical.
         var sourceRunId = call.Name == "coding.readOutput" ? Text(result, "sourceRunId") : null;
         var historical = call.Name == "coding.readOutput" && Boolean(result, "historical");
-        var evidence = new CodingToolEvidence(call.Id, call.Name, success, path, sha, exit, summary, sequence, outputEvidenceId,
+        var evidence = new CodingToolEvidence(call.Id, call.Name, success, path, exit, summary, sequence, outputEvidenceId,
             sourceRunId, historical);
         if (state.Science is not null) evidence = ScienceStagePolicy.BindReceipt(state, evidence, outer);
         var files = state.ActiveFiles.ToList();
@@ -97,7 +96,10 @@ public static class CodingWorkingStateReducer
             environment = fingerprint;
         }
         var previousFile = path is null ? null : files.FirstOrDefault(item => SamePath(item.Path, path));
-        var contentChanged = sha is not null && previousFile?.Sha256 is { } previousSha && !string.Equals(sha, previousSha, StringComparison.OrdinalIgnoreCase);
+        var observedContent = Text(result, "content");
+        var contentChanged = call.Name == "coding.read" && observedContent is not null && previousFile is { NeedsRead: false }
+            && previousFile.StartLine == (Integer(result, "startLine") ?? Integer(call.Arguments, "startLine") ?? 1)
+            && previousFile.Snippet != observedContent[..Math.Min(observedContent.Length, 2400)];
         var mutation = success && call.Name is "coding.write" or "coding.edit";
         var processRan = call.Name == "coding.command" && exit is not null;
         // Failed/aborted processes can already have changed the project even
@@ -124,7 +126,7 @@ public static class CodingWorkingStateReducer
         {
             files.RemoveAll(item => SamePath(item.Path, path));
             var content = mutation ? string.Empty : Text(result, "content") ?? string.Empty;
-            files.Add(new(path, sha, Integer(result, "startLine") ?? Integer(call.Arguments, "startLine") ?? 1,
+            files.Add(new(path, Integer(result, "startLine") ?? Integer(call.Arguments, "startLine") ?? 1,
                 content[..Math.Min(content.Length, 2400)], content.Length > 2400 || Boolean(result, "truncated"), mutation, call.Id, sequence, outputEvidenceId));
         }
         if (failed)
@@ -148,18 +150,6 @@ public static class CodingWorkingStateReducer
             Phase = failed ? "error_recovery" : success ? mutation ? "editing" : state.Phase == "error_recovery" ? "exploration" : state.Phase : state.Phase,
         };
         if (state.Science is null) return observed;
-        var knownFiles = new Dictionary<string, ScienceFile>(state.Science.Files ?? new Dictionary<string, ScienceFile>(), StringComparer.OrdinalIgnoreCase);
-        if (processMayHaveRun)
-            foreach (var name in knownFiles.Keys.ToArray()) knownFiles[name] = knownFiles[name] with { NeedsRead = true };
-        foreach (var file in files)
-        {
-            knownFiles.Remove(file.Path);
-            knownFiles[file.Path] = new(file.Sha256, file.NeedsRead);
-        }
-        var pinnedPaths = state.Science.Stages.SelectMany(stage => stage.Checks).SelectMany(check => check.Paths).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        knownFiles = knownFiles.Where(pair => pinnedPaths.Contains(pair.Key))
-            .Concat(knownFiles.Where(pair => !pinnedPaths.Contains(pair.Key)).TakeLast(256)).ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
-        observed = observed with { Science = state.Science with { Files = knownFiles } };
         return ScienceStagePolicy.Revalidate(observed);
     }
 
@@ -325,7 +315,7 @@ public static class CodingWorkingStateReducer
         if (result.TryGetProperty("result", out var nested) && nested.ValueKind == JsonValueKind.Object && IsSuccessfulResult(nested)) return true;
         return status is "completed" or "success" || Boolean(result, "success") || Integer(result, "exitCode") == 0
             || result.TryGetProperty("content", out _) || result.TryGetProperty("entries", out _) || result.TryGetProperty("matches", out _)
-            || result.TryGetProperty("results", out _) || result.TryGetProperty("sha256", out _);
+            || result.TryGetProperty("results", out _);
     }
 
     internal static bool IsFailedResult(JsonElement result) => result.ValueKind == JsonValueKind.Object

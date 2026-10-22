@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text.Json;
@@ -108,7 +108,6 @@ public sealed partial class ResearchSandboxService(AssistantRuntimeProfile profi
         string projectId,
         string relativePath,
         string content,
-        string? expectedSha256 = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(content);
@@ -123,8 +122,6 @@ public sealed partial class ResearchSandboxService(AssistantRuntimeProfile profi
             Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
             var exists = File.Exists(destination);
             var beforeHash = exists ? await FileHashAsync(destination, cancellationToken).ConfigureAwait(false) : null;
-            if (expectedSha256 is not null && !string.Equals(expectedSha256, beforeHash, StringComparison.OrdinalIgnoreCase))
-                throw new IOException("Die Sandboxdatei wurde seit dem erwarteten Stand geändert; es wurde nichts überschrieben.");
             var changeSetId = Guid.NewGuid().ToString("N");
             var contentBytes = System.Text.Encoding.UTF8.GetBytes(content);
             var temp = destination + "." + changeSetId + ".tmp";

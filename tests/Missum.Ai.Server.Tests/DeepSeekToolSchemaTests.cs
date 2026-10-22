@@ -26,16 +26,16 @@ public sealed class DeepSeekToolSchemaTests
         Assert.Throws<ArgumentException>(() => catalog.Validate(spec, JsonSerializer.SerializeToElement(new { })));
         Assert.Throws<ArgumentException>(() => catalog.Validate(spec, JsonSerializer.SerializeToElement(new
         {
-            path = "file.txt", expectedSha256 = new string('a', 64), oldText = "old", newText = "new",
+            path = "file.txt", oldText = "old", newText = "new",
             edits = new[] { new { oldText = "old", newText = "new" } },
         })));
         catalog.Validate(spec, JsonSerializer.SerializeToElement(new
         {
-            path = "file.txt", expectedSha256 = new string('a', 64), oldText = "old", newText = "new",
+            path = "file.txt", oldText = "old", newText = "new",
         }));
         catalog.Validate(spec, JsonSerializer.SerializeToElement(new
         {
-            path = "file.txt", expectedSha256 = new string('a', 64),
+            path = "file.txt",
             edits = new[] { new { oldText = "old", newText = "new" } },
         }));
     }

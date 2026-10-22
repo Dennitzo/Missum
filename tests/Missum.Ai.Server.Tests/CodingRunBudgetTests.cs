@@ -1,4 +1,4 @@
-﻿using Missum.Ai.Contracts;
+using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Coding;
 using Missum.Ai.Server.Core.Configuration;
 using Missum.Ai.Server.Core.Data;
@@ -861,7 +861,7 @@ public sealed class CodingRunBudgetTests
         // system message. Identify the whole unchanged summary task, not its
         // previous wire placement relative to that shared language policy.
         private static readonly string SummaryTask = CodingContextCompactor.SummaryInstruction
-            .Replace(CodingAgentPolicy.ReasoningLanguagePrompt, "", StringComparison.Ordinal).Trim();
+            .Replace(CodingAgentPolicy.ResponseLanguagePrompt, "", StringComparison.Ordinal).Trim();
         public int ChatCalls { get; private set; }
         public int Requests { get; private set; }
         public bool FailTokenCounting { get; set; }

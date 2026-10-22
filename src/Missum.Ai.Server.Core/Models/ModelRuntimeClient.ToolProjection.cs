@@ -1,4 +1,4 @@
-﻿using System.Buffers;
+using System.Buffers;
 using System.Text.Json;
 
 namespace Missum.Ai.Server.Core.Models;
@@ -100,7 +100,6 @@ public sealed partial class ModelRuntimeClient
         ("document.create", "sectionId") => "Stabile ID; XLSX: Blatt, PPTX: Folie.",
         ("document.create", "heading") => "Abschnittstitel, Blatt- oder Folienname.",
         ("document.create", "content") => "Nur Abschnittsdelta als Markdown; XLSX-Zahlen invariant, interne Formeln erlaubt; PPTX kurz.",
-        ("document.create", "expectedSha256") => "Bei Bearbeitung: zuletzt gelesener SHA-256.",
         ("coding.updatePlan", "title") => "Immer erforderlich; gespeicherten Originaltitel exakt unverändert mitsenden, Kriterien niemals umdeuten.",
         ("coding.updatePlan", "status") => "Immer erforderlich. Neu completed braucht erfolgreiche evidenceIds.",
         _ => null,
@@ -125,8 +124,8 @@ public sealed partial class ModelRuntimeClient
         "coding.list" => "Projektdateien begrenzt auflisten; Build/Git/Abhängigkeiten werden übersprungen.",
         "coding.search" => "Exakte Textphrase im Projekt mit Datei/Zeile suchen.",
         "coding.read" => "Vollständige Datei mit Zeilennummern und SHA-256 lesen. Ausschnitt nur mit startLine/maximumLines; frischer Inhalt wird nicht still gekürzt.",
-        "coding.write" => "UTF-8-Datei erstellen; größere Projekte aufteilen. Bestehende Datei nur mit aktuellem expectedSha256 aus coding.read überschreiben.",
-        "coding.edit" => "Atomar exakten Text ersetzen: oldText/newText ODER edits. Fundstellen eindeutig/nicht überlappend; aktueller expectedSha256. Fehler verändert keine Datei.",
+        "coding.write" => "UTF-8-Datei erstellen; größere Projekte aufteilen. Bestehende Datei direkt überschreiben; kein vorheriger Leseaufruf erforderlich.",
+        "coding.edit" => "Atomar exakten Text ersetzen: oldText/newText ODER edits. Fundstellen eindeutig/nicht überlappend; kein vorheriger Leseaufruf erforderlich. Fehler verändert keine Datei.",
         "coding.command" => "Programm mit getrennten Argumenten ausführen. timeoutSeconds=0: unbegrenzt; Stop beendet Kinder. Abhängigkeiten nur workspace-lokal installieren (Python .venv), nie global/--user. cwd ist keine Sandbox.",
         "coding.gitDiff" => "Git-Status und Diff inklusive staged Änderungen lesen.",
         "coding.undo" => "Getätigte staged/unstaged Projektänderungen zurücksetzen; path grenzt Dateien ein.",
@@ -141,7 +140,7 @@ public sealed partial class ModelRuntimeClient
         "math.smt" => "Z3-Python-Skript lokal prüfen; Skript gibt JSON-Ergebnis aus. Tatsächlichen Solverbeleg und fehlende Toolchain unterscheiden.",
         "math.formalProof" => "Lean4/Mathlib projektlokal: operation initialize|check; source oder path prüfen. Keine sorry/admit/erfundenen Axiome. Nur KernelAccepted belegt die Aussage unter ihren expliziten Annahmen. Compilerdiagnosen korrigieren, erneut prüfen.",
         "document.read" => "Sitzungsdokument erst list/outline, dann relevante Abschnitte/Suche/continuation lesen.",
-        "document.create" => "Dokument mit stabilen sectionIds abschnittsweise erstellen/bearbeiten; nur Abschnittsdelta plus aktuellen Hash. Missum rendert PDF deterministisch.",
+        "document.create" => "Dokument mit stabilen sectionIds direkt abschnittsweise erstellen/bearbeiten; nur Abschnittsdelta. Missum rendert PDF deterministisch.",
         "documents.list" => "Aufbereitete Sitzungsdokumente mit Dateiname/Seitenzahl auflisten.",
         "documents.search" => "Lokalen Sitzungs-Dokumentindex mit Originalbelegen/Dateiname/Seite durchsuchen.",
         "documents.readPages" => "Konkreten Seitenbereich eines Sitzungsdokuments als Originalbeleg lesen.",

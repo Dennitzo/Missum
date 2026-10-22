@@ -25,12 +25,10 @@ ausgelassene Felder bleiben erhalten. Neue Etappen benötigen question und strat
 Ein Check enthält id, kind (source, analytic, lean, numeric, plot oder publication), required (Boolean),
 optional evidenceIds und paths (relative tatsächlich geprüfte Dateien). Deklariere Pflichtprüfungen früh.
 Belege erst nach tatsächlicher Prüfung zuordnen; initial darf evidenceIds fehlen. Bei belegtem Check
-nenne die echten Werkzeug-IDs. Missum bestätigt gebundene Dateistände vor Etappenfreigaben gezielt selbst;
-zusätzliche manuelle Leseaufrufe allein für diese Hashbestätigung sind nicht nötig.
-Für numeric und plot nennt paths das ausgeführte Skript und seine relevanten Eingabedateien; für publication
-die tatsächlich bearbeitete Markdown-Datei. Skripte vor der Ausführung mit coding.write/edit anlegen,
-damit die Prüfung an ihren Eingabestand gebunden werden kann. Inline erstellte unbekannte Skripte sind kein
-dateigebundener Nachweis. Lean bindet seine geprüfte Quelldatei automatisch.
+nenne die echten Werkzeug-IDs. Dateien dürfen direkt bearbeitet und überschrieben werden;
+ein vorheriger Leseaufruf oder eine Hashbestätigung ist nicht erforderlich. paths kann die zugehörigen
+Skripte, Daten oder die Publikation zur Orientierung nennen. Der Planabschluss verwendet tatsächliche
+Werkzeugergebnisse, ohne Dateien automatisch erneut einzulesen.
 Fehlermeldungen nennen fehlende Details; korrigiere nur diese, keine erfundenen IDs oder leeren Wiederholungen.
 Beispiel: steps=[{id:"s1",title:"Identität prüfen",status:"in_progress"}],
 scienceStages=[{id:"s1",question:"Gilt die Identität unter den Voraussetzungen?",strategy:"Herleitung und symbolische Gegenprobe",

@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using Missum.App.Controls;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml;
@@ -13,6 +13,11 @@ public sealed partial class NativeAssistantPage
     // Returning to A must not reuse a footer still parented to A's discarded bubble.
     private async Task<int> VerifyMessageNavigationSmokeAsync()
     {
+        if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_RESPONSIVENESS") == "static-thinking")
+        {
+            await VerifyThinkingIndicatorSmokeAsync(_snapshot.Clone());
+            return 0;
+        }
         if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_RESPONSIVENESS") == "compaction")
         {
             await VerifyCompactionReceiptSmokeAsync();

@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using Missum.App.Controls;
 using Missum.App.Services;
 using Microsoft.UI.Xaml;
@@ -132,7 +132,6 @@ public sealed partial class NativeAssistantPage
             state.Version = version;
             state.Blocks = logical;
             state.Panel.SetRows(logical.Select(block => VirtualRow(id, current, block)).ToArray());
-            ObserveVirtualThinking(id, current, steps);
             _conversationSelection?.TrackSelectionWithin(state.Panel);
             QueueConversationLayoutProjection(ShouldFollowConversationTail);
         });
@@ -180,9 +179,13 @@ public sealed partial class NativeAssistantPage
                 Text("text:" + offset, content[offset..next], offset);
                 offset = next;
             }
-            foreach (var step in OrderNativeArtifactSteps(steps))
+            var eligible = OrderNativeArtifactSteps(steps).Where(step => !IsDeepResearchReceipt(step)
+                && !IsAcceptedSubagentManagementStep(step, receipts) && !IsAcceptedDeepResearchStep(step, receipts)
+                && (S(step, "tool") != "assistant.continuation" || S(step, "status") == "completed"));
+            foreach (var activity in NativeActivityProjection.Build(eligible, S(message, "status") is "streaming" or "pending", content.Length))
             {
-                var next = TryNativeStepOffset(step, out var position) ? Math.Clamp(position, offset, content.Length) : offset;
+                var step = activity.Step;
+                var next = activity.Offset is { } position ? Math.Clamp(position, offset, content.Length) : offset;
                 TextUntil(next);
                 var stepId = S(step, "id");
                 var tool = S(step, "tool");
@@ -195,8 +198,8 @@ public sealed partial class NativeAssistantPage
                         if (!string.IsNullOrWhiteSpace(S(step, "detail")))
                             result.Add(new("steering:" + stepId, "steering", S(step, "detail"), next, step));
                     }
-                    else result.Add(new("tool:" + stepId, tool is "subagent" or "subagent.completed" ? "subagent" : "tool",
-                        "", 0, step, Number: tool == "assistant.reasoning" ? number : ++number));
+                    else result.Add(new(activity.Key, tool is "subagent" or "subagent.completed" ? "subagent" : "tool",
+                        "", 0, step, Number: tool == "assistant.activity" ? number : ++number));
                 }
                 if (artifactGroups.Remove(stepId, out var images))
                     result.Add(new("artifacts:step:" + stepId, "artifacts", "", 0, default, images));
@@ -208,7 +211,6 @@ public sealed partial class NativeAssistantPage
             if (orphaned.Length > 0) result.Add(new("artifacts", "artifacts", "", 0, default, orphaned));
             if (S(message, "error") is { Length: > 0 } error && error != content) Text("error", error, -1);
             if (IsResumableAssistantStatus(message)) result.Add(new("continuation", "continuation", "", 0, default));
-            if (S(message, "status") is "streaming" or "pending") result.Add(new("thinkingIndicator", "thinking", "", 0, default));
         }
         var activeTextKeys = result.Where(block => block.Kind == "text")
             .Select(block => block.Key[..block.Key.LastIndexOf(':')]).ToHashSet(StringComparer.Ordinal);
@@ -239,7 +241,7 @@ public sealed partial class NativeAssistantPage
             () => CreateVirtualBlock(messageId, message, block), view => UpdateVirtualBlock(view, messageId, message, block));
     }
 
-    private FrameworkElement CreateVirtualBlock(string id, JsonElement message, LogicalBlock block)
+    private FrameworkElement CreateVirtualBlock(string id, JsonElement message, LogicalBlock block, bool wrap = true)
     {
         FrameworkElement view;
         switch (block.Kind)
@@ -288,34 +290,21 @@ public sealed partial class NativeAssistantPage
                 continuation.ContinueButton.Click += async (_, _) => await ContinueAssistantMessageAsync(id);
                 view = continuation;
                 break;
-            case "thinking":
-                var thinkingState = _virtualMessages[id];
-                var latestReasoningId = S(MessageSteps(message).LastOrDefault(step => S(step, "tool") == "assistant.reasoning"), "id");
-                var expansionKey = latestReasoningId.Length > 0 ? "tool:" + latestReasoningId : block.Key;
-                var thinkingExpanded = thinkingState.ExpandedSteps.GetValueOrDefault(expansionKey, _settings.Current.CodingToolStepsExpanded);
-                var thinking = new ThinkingIndicatorView(thinkingExpanded)
-                {
-                    DisclosureInvoked = OnToolDisclosureInteraction,
-                    IsMessageActive = true, ScrollOwner = ConversationScroll,
-                    PinSelection = () => _conversationSelection?.IsSelecting == true,
-                    Project = projection => RunUiCallback("Thinking.VirtualLargeReasoning", projection),
-                };
-                thinking.ExpansionChanged += value =>
-                {
-                    var key = thinking.ReasoningId.Length > 0 ? "tool:" + thinking.ReasoningId : block.Key;
-                    thinkingState.ExpandedSteps[key] = value;
-                };
-                _thinkingIndicators[id] = thinking;
-                view = thinking;
-                break;
             default: throw new InvalidOperationException("Unbekannter virtueller Nachrichtenblock: " + block.Kind);
         }
         UpdateVirtualBlock(view, id, message, block);
-        return view;
+        return wrap && block.Key.StartsWith("activity:", StringComparison.Ordinal) ? new ActivitySlotView { Content = view } : view;
     }
 
     private void UpdateVirtualBlock(FrameworkElement view, string id, JsonElement message, LogicalBlock block)
     {
+        if (view is ActivitySlotView slot)
+        {
+            var sameKind = block.Kind == "tool" && slot.Content is ToolStepView || block.Kind == "subagent" && slot.Content is SubagentLifecycleView;
+            if (!sameKind) slot.Content = CreateVirtualBlock(id, message, block, wrap: false);
+            else UpdateVirtualBlock((FrameworkElement)slot.Content, id, message, block);
+            return;
+        }
         switch (view)
         {
             case ContentControl text when block.Kind == "text":
@@ -324,35 +313,18 @@ public sealed partial class NativeAssistantPage
                 NativeVirtualizingTextView.UpdateSourceBlock(text, block.Text, anchor);
                 break;
             case Border prompt when block.Kind == "steering": UpdateSteeringPromptView(prompt, id, message, block.Data); break;
-            case ToolStepView tool: tool.Update(block.Data, block.Number); break;
+            case ToolStepView tool:
+                tool.LoadDetails = () => LoadToolStepDetailsAsync(id, S(block.Data, "id"));
+                tool.OpenResearch = () => OpenDeepResearchTabAsync(id, S(block.Data, "id"));
+                tool.CanOpenResearch = () => FindDeepResearchView(id, S(block.Data, "id")) is not null;
+                tool.ResearchIdentity = () => ResearchIdentity(id, S(block.Data, "id"));
+                tool.DefaultExpanded = _settings.Current.CodingToolStepsExpanded;
+                tool.Update(block.Data, block.Number); break;
             case SubagentLifecycleView child: child.Update(block.Data, FindSubagentForStep(block.Data)); break;
             case NativeArtifactLinks artifacts: artifacts.UpdateArtifacts(block.Artifacts ?? []); break;
             case ContinuationToolStepView continuation: UpdateContinuationStep(id, message, continuation); break;
-            case ThinkingIndicatorView thinking:
-                var reasoning = MessageSteps(message).LastOrDefault(step => S(step, "tool") == "assistant.reasoning");
-                var history = _messageBlocks.GetValueOrDefault(id)?.GetValueOrDefault("tool:" + S(reasoning, "id"));
-                var reasoningId = S(reasoning, "id");
-                var scopedExpansion = _virtualMessages[id].ExpandedSteps.GetValueOrDefault(
-                    reasoningId.Length > 0 ? "tool:" + reasoningId : "thinkingIndicator", _settings.Current.CodingToolStepsExpanded);
-                thinking.UpdateReasoning(reasoningId, S(reasoning, "detail"), history, scopedExpansion);
-                thinking.HasBlockingTool = MessageSteps(message).Any(step => S(step, "status") is "running" or "pending"
-                    && S(step, "tool") is not ("assistant.reasoning" or "assistant.progress" or "assistant.narration" or "assistant.steering"));
-                break;
             case StackPanel header when block.Kind == "header": UpdateMessageHeader(header, message); break;
         }
-    }
-
-    private void ObserveVirtualThinking(string id, JsonElement message, JsonElement[] steps)
-    {
-        if (S(message, "status") is not ("streaming" or "pending"))
-        { _thinkingIndicators.Remove(id); _thinkingStates.Remove(id); _modelPhases.Remove(id); return; }
-        var reasoning = steps.LastOrDefault(step => S(step, "tool") == "assistant.reasoning");
-        if (!_thinkingStates.TryGetValue(id, out var state)) _thinkingStates[id] = state = new();
-        if (S(reasoning, "status") is "running" or "pending"
-            && DateTimeOffset.TryParse(S(reasoning, "updatedAt"), out var updated))
-            state.ObserveReasoning(id, S(reasoning, "id"), S(reasoning, "detail"), updated);
-        state.ObserveContent(id, MessageContent(message), DateTimeOffset.UtcNow);
-        RefreshThinkingIndicators();
     }
 
     private void RefreshVirtualConversationViewport()

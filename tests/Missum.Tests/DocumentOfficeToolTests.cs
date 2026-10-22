@@ -35,8 +35,8 @@ public sealed class DocumentOfficeToolTests
         var service = Service(environment, exporter);
         var first = Json(await service.CreateAsync(Arguments("create", "Bericht." + format, format, "kosten", "Kosten", InitialTable), session.Id, message.Id, CancellationToken.None));
         var documentId = first.GetProperty("documentId").GetGuid().ToString("D");
-        var appended = Json(await service.CreateAsync(Arguments("appendSection", documentId, format, "fazit", "Fazit", "Zweites Kapitel bleibt erhalten.", first.GetProperty("sha256").GetString()), session.Id, message.Id, CancellationToken.None));
-        var updated = Json(await service.CreateAsync(Arguments("replaceSection", documentId, format, "kosten", "Kosten", UpdatedTable, appended.GetProperty("sha256").GetString()), session.Id, message.Id, CancellationToken.None));
+        var appended = Json(await service.CreateAsync(Arguments("appendSection", documentId, format, "fazit", "Fazit", "Zweites Kapitel bleibt erhalten.", null), session.Id, message.Id, CancellationToken.None));
+        var updated = Json(await service.CreateAsync(Arguments("replaceSection", documentId, format, "kosten", "Kosten", UpdatedTable, null), session.Id, message.Id, CancellationToken.None));
 
         Assert.Equal(3L, updated.GetProperty("revision").GetInt64());
         Assert.Equal("Bericht." + format, updated.GetProperty("fileName").GetString());
@@ -84,7 +84,7 @@ public sealed class DocumentOfficeToolTests
             scope = "session", mode = "read", reference = artifactId.ToString("D"), maximumCharacters = 4000,
         }), session.Id, CancellationToken.None));
         Assert.Contains("Energie korrigiert", artifactRead.GetRawText(), StringComparison.Ordinal);
-        await Assert.ThrowsAsync<IOException>(() => service.CreateAsync(Arguments("replaceSection", documentId, format, "kosten", "Kosten", InitialTable, first.GetProperty("sha256").GetString()), session.Id, message.Id, CancellationToken.None));
+        Assert.False(updated.TryGetProperty("sha256", out _));
 
         var otherSession = await chats.CreateSessionAsync("Importiert");
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.ReadAsync(JsonSerializer.SerializeToElement(new

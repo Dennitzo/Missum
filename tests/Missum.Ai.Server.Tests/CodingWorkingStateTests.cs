@@ -359,7 +359,7 @@ public sealed class CodingWorkingStateTests
         var arguments = Assert.Single(result[0].ToolCalls!).Arguments;
         Assert.True(arguments.GetProperty("_missumCompletedArguments").GetBoolean());
         Assert.False(arguments.TryGetProperty("_goCompletedArguments", out _));
-        Assert.Equal(CodingWorkingStateReducer.ArgumentHash(call.Arguments), arguments.GetProperty("argumentsSha256").GetString());
+        Assert.False(arguments.TryGetProperty("argumentsSha256", out _));
     }
 
     [Theory]
@@ -431,7 +431,6 @@ public sealed class CodingWorkingStateTests
         var file = Assert.Single(state.ActiveFiles);
         Assert.True(file.NeedsRead);
         Assert.Empty(file.Snippet);
-        Assert.Equal(new string('a', 64), file.Sha256);
         Assert.Equal(revision, state.EnvironmentRevision);
         Assert.Empty(state.Tests);
         Assert.False(state.Evidence[^1].Success);
@@ -449,7 +448,6 @@ public sealed class CodingWorkingStateTests
         var file = Assert.Single(state.ActiveFiles);
         Assert.False(file.NeedsRead);
         Assert.Equal("before", file.Snippet);
-        Assert.Equal(new string('a', 64), file.Sha256);
     }
 
     [Fact]

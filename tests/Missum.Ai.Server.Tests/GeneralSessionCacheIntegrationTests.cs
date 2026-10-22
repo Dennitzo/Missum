@@ -271,9 +271,9 @@ public sealed class GeneralSessionCacheIntegrationTests
         {
             Assert.True(request.Body.GetProperty("cache_prompt").GetBoolean());
             Assert.Equal("system", request.Body.GetProperty("messages")[0].GetProperty("role").GetString());
-            Assert.Contains(CodingAgentPolicy.ReasoningLanguagePrompt,
+            Assert.Contains(CodingAgentPolicy.ResponseLanguagePrompt,
                 request.Body.GetProperty("messages")[0].GetProperty("content").GetString(), StringComparison.Ordinal);
-            Assert.Contains("ausschließlich auf Deutsch", request.Body.GetProperty("messages").EnumerateArray().Last().GetProperty("content").GetString(), StringComparison.Ordinal);
+            Assert.DoesNotContain(request.Body.GetProperty("messages").EnumerateArray(), message => message.GetProperty("content").ValueKind == JsonValueKind.String && message.GetProperty("content").GetString()!.StartsWith("Missum-Laufanweisung zur Sprache:", StringComparison.Ordinal));
             var before = native.Operations[request.OperationIndex - 1];
             var after = native.Operations[request.OperationIndex + 1];
             Assert.Equal("/sessions/prepare", before.Path);

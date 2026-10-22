@@ -14,7 +14,7 @@ public sealed partial class ModelRuntimeClient
 
     internal static string VisionSystemInstructions(string prompt)
     {
-        var instructions = CodingAgentPolicy.ReasoningLanguagePrompt + "\n\n" + Policies.GeneralAgentPolicies.VisionAnalysisSystemPrompt;
+        var instructions = CodingAgentPolicy.ResponseLanguagePrompt + "\n\n" + Policies.GeneralAgentPolicies.VisionAnalysisSystemPrompt;
         if (IsScientificPlotRequest(prompt)) instructions += "\n\n" + Policies.GeneralAgentPolicies.ScientificPlotVisionInstructions;
         return instructions;
     }

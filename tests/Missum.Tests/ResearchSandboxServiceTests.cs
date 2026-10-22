@@ -1,4 +1,4 @@
-﻿using Missum.App.Services;
+using Missum.App.Services;
 using Missum.Core.Contracts;
 using Missum.Core.Models;
 
@@ -65,8 +65,8 @@ public sealed class ResearchSandboxServiceTests : IDisposable
     public async Task EditsUseOneProjectTreeAndRetainOnlyHashMetadata()
     {
         var layout = await _service.EnsureProjectAsync("research-project-2");
-        var first = await _service.WriteTextAsync("research-project-2", "analysis.py", "print('before')");
-        var second = await _service.WriteTextAsync("research-project-2", "analysis.py", "print('after')", first.AfterSha256);
+        await _service.WriteTextAsync("research-project-2", "analysis.py", "print('before')");
+        var second = await _service.WriteTextAsync("research-project-2", "analysis.py", "print('after')");
 
         Assert.Equal("print('after')", await File.ReadAllTextAsync(Path.Combine(layout.WorkPath, "analysis.py")));
         Assert.Empty(Directory.EnumerateFileSystemEntries(layout.SnapshotsPath));
@@ -75,9 +75,8 @@ public sealed class ResearchSandboxServiceTests : IDisposable
         Assert.Contains("ohne Dateirevisionen", unavailable.Message, StringComparison.Ordinal);
 
         await File.WriteAllTextAsync(Path.Combine(layout.WorkPath, "analysis.py"), "print('manual')");
-        var exception = await Assert.ThrowsAsync<IOException>(() => _service.WriteTextAsync("research-project-2", "analysis.py", "print('model')", second.AfterSha256));
-        Assert.Contains("nichts überschrieben", exception.Message);
-        Assert.Equal("print('manual')", await File.ReadAllTextAsync(Path.Combine(layout.WorkPath, "analysis.py")));
+        await _service.WriteTextAsync("research-project-2", "analysis.py", "print('model')");
+        Assert.Equal("print('model')", await File.ReadAllTextAsync(Path.Combine(layout.WorkPath, "analysis.py")));
         Assert.Empty(Directory.EnumerateFileSystemEntries(layout.SnapshotsPath));
     }
 

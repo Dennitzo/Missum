@@ -1,4 +1,4 @@
-﻿using Missum.Ai.Contracts;
+using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Runs;
 using System.Text.Json;
 
@@ -14,12 +14,12 @@ public static class CodingToolCatalog
             """{"path":{"type":"string"},"maximumEntries":{"type":"integer","minimum":1,"maximum":200}}""", []),
         Create(ClientToolNames.CodingSearch, "Suche eine exakte Textphrase im Projekt; liefere begrenzte Treffer mit Datei und Zeile.", ToolRiskClass.ReadOnly,
             """{"query":{"type":"string","minLength":1,"maxLength":512},"path":{"type":"string"},"maximumResults":{"type":"integer","minimum":1,"maximum":50}}""", ["query"]),
-        Create(ClientToolNames.CodingRead, "Lies die vollständige Textdatei mit Zeilennummern und sha256 ohne automatische Kürzung. Nur wenn ausdrücklich ein Ausschnitt benötigt wird, startLine und/oder maximumLines angeben. Ohne maximumLines wird bis zum Dateiende gelesen. Kontextverdichtung erhält den frischen Dateiinhalt; eine Datei, die allein nicht in den Modellkontext passt, erzeugt einen ausdrücklichen Fehler statt stiller Kürzung.", ToolRiskClass.ReadOnly,
+        Create(ClientToolNames.CodingRead, "Lies die vollständige Textdatei mit Zeilennummern ohne automatische Kürzung. Nur wenn ausdrücklich ein Ausschnitt benötigt wird, startLine und/oder maximumLines angeben. Ohne maximumLines wird bis zum Dateiende gelesen. Kontextverdichtung erhält den frischen Dateiinhalt; eine Datei, die allein nicht in den Modellkontext passt, erzeugt einen ausdrücklichen Fehler statt stiller Kürzung.", ToolRiskClass.ReadOnly,
             """{"path":{"type":"string"},"startLine":{"type":"integer","minimum":1,"maximum":2147483647},"maximumLines":{"type":"integer","minimum":1,"maximum":2147483647}}""", ["path"]),
-        Create(ClientToolNames.CodingWrite, "Erstelle eine UTF-8-Datei mit höchstens 64000 Zeichen Inhalt. Größere Projekte in kleinere Module oder Dateien aufteilen. Bestehende Dateien nur mit aktuellem expectedSha256 aus coding.read überschreiben.", ToolRiskClass.LocalMutation,
-            """{"path":{"type":"string"},"content":{"type":"string","maxLength":64000},"expectedSha256":{"type":"string","pattern":"^[a-fA-F0-9]{64}$"}}""", ["path", "content"]),
-        Create(ClientToolNames.CodingEdit, "Ersetze exakten Text atomar: entweder oldText/newText für eine Änderung ODER edits mit 1–100 Änderungen. Alle Fundstellen müssen im selben ursprünglichen Dateiinhalt eindeutig und nicht überlappend sein. oldText/newText je höchstens16000 Zeichen, zusammen über alle Änderungen höchstens32000. Ein Fehler oder Hash-Konflikt verändert keine Datei.", ToolRiskClass.LocalMutation,
-            """{"path":{"type":"string"},"oldText":{"type":"string","minLength":1,"maxLength":16000},"newText":{"type":"string","maxLength":16000},"edits":{"type":"array","minItems":1,"maxItems":100,"items":{"type":"object","properties":{"oldText":{"type":"string","minLength":1,"maxLength":16000},"newText":{"type":"string","maxLength":16000}},"required":["oldText","newText"],"additionalProperties":false}},"expectedSha256":{"type":"string","pattern":"^[a-fA-F0-9]{64}$"}}""", ["path", "expectedSha256"]),
+        Create(ClientToolNames.CodingWrite, "Erstelle eine UTF-8-Datei mit höchstens 64000 Zeichen Inhalt. Größere Projekte in kleinere Module oder Dateien aufteilen. Bestehende Dateien dürfen direkt überschrieben werden; ein vorheriger Leseaufruf ist nicht erforderlich.", ToolRiskClass.LocalMutation,
+            """{"path":{"type":"string"},"content":{"type":"string","maxLength":64000}}""", ["path", "content"]),
+        Create(ClientToolNames.CodingEdit, "Ersetze exakten Text atomar: entweder oldText/newText für eine Änderung ODER edits mit 1–100 Änderungen. Alle Fundstellen müssen im selben ursprünglichen Dateiinhalt eindeutig und nicht überlappend sein. oldText/newText je höchstens16000 Zeichen, zusammen über alle Änderungen höchstens32000. Ein Fehler verändert keine Datei.", ToolRiskClass.LocalMutation,
+            """{"path":{"type":"string"},"oldText":{"type":"string","minLength":1,"maxLength":16000},"newText":{"type":"string","maxLength":16000},"edits":{"type":"array","minItems":1,"maxItems":100,"items":{"type":"object","properties":{"oldText":{"type":"string","minLength":1,"maxLength":16000},"newText":{"type":"string","maxLength":16000}},"required":["oldText","newText"],"additionalProperties":false}}}""", ["path"]),
         Create(ClientToolNames.CodingCommand, "Starte automatisch ein Programm für Build/Tests/Diagnose oder längere Aufgaben. Getrennte Argumente und begrenzte Ausgabe. timeoutSeconds=0 oder fehlend bedeutet unbegrenzte Prozessdauer; positive Werte setzen optional ein Zeitlimit. Stop beendet Prozess und Kinder. Benötigte Abhängigkeiten dürfen ohne Rückfrage ausschließlich im aktuellen Workspace installiert werden (Python: lokale .venv, deren python -m pip; keine globalen oder --user Installationen). cwd ist keine Sandbox.", ToolRiskClass.Process,
             """{"executable":{"type":"string","minLength":1,"maxLength":1024},"arguments":{"type":"array","items":{"type":"string","maxLength":4000},"maxItems":64},"workingDirectory":{"type":"string"},"timeoutSeconds":{"type":"integer","minimum":0,"default":0,"maximum":2147483647}}""", ["executable", "arguments"]),
         Create(ClientToolNames.CodingGitDiff, "Lies git status und den aktuellen Git-Diff einschließlich staged Änderungen; beendet sich nach 30 Sekunden.", ToolRiskClass.ReadOnly,
@@ -61,10 +61,6 @@ public static class CodingToolCatalog
                 case "edits": ValidateEditBatch(property.Value); break;
                 case "content": Text(property.Value, property.Name, 0, MaximumWriteContentCharacters); break;
                 case "newText": Text(property.Value, property.Name, 0, 16_000); break;
-                case "expectedSha256":
-                    Text(property.Value, property.Name, 64, 64);
-                    if (!property.Value.GetString()!.All(Uri.IsHexDigit)) throw new ArgumentException("expectedSha256 must be a SHA-256 hex value.");
-                    break;
                 case "evidenceId":
                     Text(property.Value, property.Name, 35, 35);
                     if (!property.Value.GetString()!.StartsWith("ev-", StringComparison.Ordinal) || !property.Value.GetString()![3..].All(Uri.IsHexDigit))

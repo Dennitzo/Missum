@@ -1,4 +1,4 @@
-﻿using Missum.Ai.Contracts;
+using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Runs;
 using System.Text.Json;
 
@@ -133,7 +133,7 @@ public sealed class AgentToolCatalogTests
         var read = catalog.Resolve(ClientToolNames.DocumentRead, tools);
         var create = catalog.Resolve(ClientToolNames.DocumentCreate, tools);
         using var readWindow = JsonDocument.Parse("""{"scope":"session","mode":"read","reference":"00000000-0000-0000-0000-000000000001","startUnit":2,"maximumUnits":3,"maximumCharacters":12000}""");
-        using var append = JsonDocument.Parse("""{"operation":"appendSection","reference":"00000000-0000-0000-0000-000000000001","format":"pdf","sectionId":"kapitel-2","heading":"Kapitel 2","content":"Text","expectedSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}""");
+        using var append = JsonDocument.Parse("""{"operation":"appendSection","reference":"00000000-0000-0000-0000-000000000001","format":"pdf","sectionId":"kapitel-2","heading":"Kapitel 2","content":"Text"}""");
         using var unbounded = JsonDocument.Parse("""{"scope":"session","mode":"read","reference":"00000000-0000-0000-0000-000000000001","maximumCharacters":40001}""");
         using var staleEdit = JsonDocument.Parse("""{"operation":"replaceSection","reference":"00000000-0000-0000-0000-000000000001","format":"pdf","sectionId":"kapitel-2","content":"Text"}""");
         using var workspaceRead = JsonDocument.Parse("""{"scope":"workspace","mode":"read","reference":"notes.txt"}""");
@@ -141,7 +141,7 @@ public sealed class AgentToolCatalogTests
         catalog.Validate(read, readWindow.RootElement);
         catalog.Validate(create, append.RootElement);
         Assert.Throws<ArgumentException>(() => catalog.Validate(read, unbounded.RootElement));
-        Assert.Throws<ArgumentException>(() => catalog.Validate(create, staleEdit.RootElement));
+        catalog.Validate(create, staleEdit.RootElement);
         Assert.Throws<ArgumentException>(() => catalog.Validate(read, workspaceRead.RootElement));
     }
 
@@ -149,7 +149,7 @@ public sealed class AgentToolCatalogTests
     [InlineData("docx")]
     [InlineData("xlsx")]
     [InlineData("pptx")]
-    public void NativeOfficeFormatsAreAcceptedForCreationAndHashGuardedChanges(string format)
+    public void NativeOfficeFormatsAreAcceptedForDirectChangesWithoutHashes(string format)
     {
         var catalog = new AgentToolCatalog();
         var tool = catalog.Resolve(ClientToolNames.DocumentCreate, catalog.GetAvailableTools(CreateRequest(["documentIo"])));
@@ -161,13 +161,13 @@ public sealed class AgentToolCatalogTests
         catalog.Validate(tool, JsonSerializer.SerializeToElement(new
         {
             operation = "replaceSection", reference = "00000000-0000-0000-0000-000000000001", format,
-            sectionId = "kosten", content = "Aktualisiert", expectedSha256 = new string('a', 64),
+            sectionId = "kosten", content = "Aktualisiert",
         }));
-        Assert.Throws<ArgumentException>(() => catalog.Validate(tool, JsonSerializer.SerializeToElement(new
+        catalog.Validate(tool, JsonSerializer.SerializeToElement(new
         {
             operation = "replaceSection", reference = "00000000-0000-0000-0000-000000000001", format,
             sectionId = "kosten", content = "Ohne Versionsschutz",
-        })));
+        }));
     }
 
     [Fact]

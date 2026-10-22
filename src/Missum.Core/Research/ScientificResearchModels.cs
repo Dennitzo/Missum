@@ -204,7 +204,7 @@ public interface IResearchSandboxService
     Task<ResearchSandboxLayout> EnsureProjectAsync(string projectId, CancellationToken cancellationToken = default);
     Task<ResearchSandboxRuntimeStatus> PrepareRuntimeAsync(CancellationToken cancellationToken = default);
     Task<ResearchSandboxFileChange> WriteTextAsync(string projectId, string relativePath, string content,
-        string? expectedSha256 = null, CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default);
     Task RestoreChangeSetAsync(string projectId, string changeSetId, CancellationToken cancellationToken = default);
     Task<ResearchSandboxRunResult> RunPythonAsync(string projectId, string relativeScriptPath,
         IReadOnlyList<string>? arguments = null, int timeoutSeconds = 7200, string? relativeWorkingDirectory = null,

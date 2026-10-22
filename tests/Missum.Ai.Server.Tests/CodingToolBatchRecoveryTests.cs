@@ -30,7 +30,7 @@ public sealed class CodingToolBatchRecoveryTests
     {
         var valid = JsonSerializer.SerializeToElement(new
         {
-            path = "a.txt", expectedSha256 = new string('a', 64), oldText = "old", newText = "new",
+            path = "a.txt", oldText = "old", newText = "new",
         });
         LmToolCall[] calls = [new("first", "coding.edit", valid), new("second", "coding.edit", valid),
             new("missing-all", "coding.edit", JsonSerializer.SerializeToElement(new { })),

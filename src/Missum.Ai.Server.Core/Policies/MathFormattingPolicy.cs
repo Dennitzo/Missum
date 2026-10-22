@@ -5,11 +5,11 @@ public static class MathFormattingPolicy
 {
     public const string Instructions = """
         Mathematische Darstellung im Chat:
-        - Gilt in sämtlichen Modi, auch im sichtbaren Reasoning-/Analysekanal im Denkprozess,
-          in Zwischenmeldungen und Werkzeugschritt-Erklärungen.
+        - Gilt in sämtlichen Modi, in sichtbaren Antworten,
+          Zwischenmeldungen und Werkzeugschritt-Erklärungen.
         - Nutze für Formeln den gemeinsamen LaTeX-/KaTeX-Kern: inline $...$ oder \(...\), abgesetzt
           $$...$$ oder \[...\]. Setze längere Herleitungen in eigene Formelblöcke mit Leerzeilen davor und danach.
-        - Umrahme jeden mathematischen Ausdruck, auch kurze Gleichungen und Formeln mitten im Denktext:
+        - Umrahme jeden mathematischen Ausdruck, auch kurze Gleichungen und Formeln mitten im Antworttext:
           etwa $a_{i}=b^{2}$. Keine nackten Formelzeilen oder LaTeX-Befehle im Fließtext.
         - Nutze LaTeX für Potenzen, Indizes, Brüche und Einheiten; keine Unicode-Hoch-/Tiefstellungen oder
           ASCII-/Unicode-Mischungen. Code, Dateipfade und wörtliche Quelldaten bleiben unverändert.

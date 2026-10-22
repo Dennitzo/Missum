@@ -91,7 +91,7 @@ public sealed class CodingSessionContextTests
         {
             Sequence = 224,
             Evidence = Enumerable.Range(0, 224).Select(i => new CodingToolEvidence("call-" + i,
-                "coding.read", true, "source.cs", null, null, new string('x', 1600), i)).ToArray(),
+                "coding.read", true, "source.cs", null, new string('x', 1600), i)).ToArray(),
             Facts = [new("Verified finding", ["call-1"])],
         };
         var legacy = new LmChatMessage("user", CodingSessionContext.StateMarker + "Historical data\n" + JsonSerializer.Serialize(state));

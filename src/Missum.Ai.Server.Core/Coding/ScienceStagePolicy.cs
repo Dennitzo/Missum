@@ -93,18 +93,18 @@ internal static class ScienceStagePolicy
                 // closure; that produced misleading review/update loops.
                 if (verifyReceipts)
                     foreach (var check in stage.Checks.Where(check => check.EvidenceIds.Count > 0))
-                        ValidateCheck(updated, stage, check, requireFreshReads: false);
+                        ValidateCheck(updated, stage, check);
                 continue;
             }
             if (stage.Outcome == "open" || stage.Blockers.Count > 0) Fail($"Etappe {stage.Id}: offene/blockierte Etappe nicht als completed melden; pending mit blockers verwenden.");
             if (verifyReceipts)
                 foreach (var check in stage.Checks.Where(check => check.Required || check.EvidenceIds.Count > 0))
-                    ValidateCheck(updated, stage, check, requireFreshReads: !before.Plan.Any(old => old.Id == stage.Id && old.Status == "completed"));
+                    ValidateCheck(updated, stage, check);
         }
         return updated;
     }
 
-    internal static void ValidateCheck(CodingWorkingState state, ScienceStage stage, ScienceCheck check, bool requireFreshReads = true)
+    internal static void ValidateCheck(CodingWorkingState state, ScienceStage stage, ScienceCheck check)
     {
         if (check.EvidenceIds.Count == 0) Fail($"Etappe {stage.Id}: Pflichtprüfung {check.Id} hat keine evidenceIds.");
         foreach (var id in check.EvidenceIds)
@@ -120,41 +120,10 @@ internal static class ScienceStagePolicy
                         : "Kein passender erfolgreicher Beleg vorhanden; die gewählte Prüfung tatsächlich ausführen und ihre Beleg-ID verwenden."));
             }
             if (receipt!.Sequence <= stage.ReopenedAtSequence) Fail($"Etappe {stage.Id}: {check.Id} benötigt einen neuen Nachweis nach dem Rücksprung.");
-            if (check.Kind is "numeric" or "plot" or "publication" && check.Paths.Count == 0) Fail($"Prüfung {check.Id}: paths muss die tatsächlich geprüften Eingabedateien beziehungsweise die Publikation nennen.");
-            // Publication edits form a sequence of document versions. Earlier
-            // edits remain provenance, while a current edit or explicit review
-            // must cover each document. Numeric/proof receipts stay conjunctive.
-            if (check.Kind == "publication") continue;
-            var paths = check.Paths.Concat(receipt.VerificationPath is { } proofPath ? [proofPath] : Array.Empty<string>())
-                .Concat(receipt.Tool is "coding.read" or "math.formalProof" && receipt.Path is { } sourcePath ? [sourcePath] : Array.Empty<string>()).Distinct(StringComparer.OrdinalIgnoreCase);
-            foreach (var path in paths)
-            {
-                var current = state.Science?.Files?.FirstOrDefault(pair => CodingWorkingStateReducer.SamePath(pair.Key, path)).Value;
-                var hashes = receipt!.FileHashes;
-                var bound = hashes?.FirstOrDefault(pair => CodingWorkingStateReducer.SamePath(pair.Key, path)).Value;
-                if (!requireFreshReads && current is null) continue;
-                if (current is null || requireFreshReads && current.NeedsRead || bound is null || !string.Equals(current.Sha256, bound, StringComparison.OrdinalIgnoreCase))
-                    Fail($"Etappe {stage.Id}: {check.Id}, Datei {path} ist ungeprüft/verändert. Datei gezielt lesen und die passende Prüfung für den aktuellen Stand nachweisen.");
-            }
+            if (check.Kind == "publication" && check.Paths.Count > 0
+                && (receipt.Path is null || !check.Paths.Any(path => CodingWorkingStateReducer.SamePath(path, receipt.Path))))
+                Fail($"Etappe {stage.Id}: {check.Id}, Beleg {id} gehört nicht zur angegebenen Publikation.");
         }
-        if (check.Kind == "publication")
-            foreach (var path in check.Paths)
-            {
-                var current = state.Science?.Files?.FirstOrDefault(pair => CodingWorkingStateReducer.SamePath(pair.Key, path)).Value;
-                if (current is null || current.Sha256 is null || requireFreshReads && current.NeedsRead)
-                    Fail($"Etappe {stage.Id}: {check.Id}, Datei {path} benötigt eine aktuelle Lesebestätigung.");
-                bool CoversCurrentFile(CodingToolEvidence evidence) => evidence.Path is { } ownPath
-                    && CodingWorkingStateReducer.SamePath(ownPath, path)
-                    && string.Equals(current.Sha256, evidence.Sha256
-                        ?? evidence.FileHashes?.FirstOrDefault(pair => CodingWorkingStateReducer.SamePath(pair.Key, path)).Value,
-                        StringComparison.OrdinalIgnoreCase);
-                if (check.EvidenceIds.Select(id => CodingWorkingStateReducer.ResolveEvidence(state, id)!).Any(CoversCurrentFile)) continue;
-                var candidates = state.Evidence.Where(item => item.Success && Matches("publication", item)
-                    && item.Sequence > stage.ReopenedAtSequence && CoversCurrentFile(item)).TakeLast(3).Select(item => item.Id).ToArray();
-                Fail($"Etappe {stage.Id}: {check.Id}, Datei {path}: Die angegebenen Belege betreffen keinen aktuellen Publikationsstand. "
-                    + (candidates.Length > 0 ? "Verwende die aktuelle Beleg-ID in evidenceIds: " + string.Join(", ", candidates)
-                        : "Publikation gezielt lesen oder bearbeiten und die Beleg-ID dieses aktuellen Dateistands verwenden."));
-            }
     }
 
     private static bool Matches(string kind, CodingToolEvidence receipt) => kind switch
@@ -168,14 +137,14 @@ internal static class ScienceStagePolicy
         _ => false,
     };
 
-    internal static CodingWorkingState Revalidate(CodingWorkingState state, bool requireFreshReads = false)
+    internal static CodingWorkingState Revalidate(CodingWorkingState state)
     {
         if (state.Science is null) return state;
         var invalid = new HashSet<string>();
         foreach (var stage in state.Science.Stages.Where(stage => state.Plan.Any(step => step.Id == stage.Id && step.Status == "completed")))
             foreach (var check in stage.Checks.Where(check => check.Required || check.EvidenceIds.Count > 0))
             {
-                try { ValidateCheck(state, stage, check, requireFreshReads); }
+                try { ValidateCheck(state, stage, check); }
                 catch (ArgumentException) { invalid.Add(stage.Id); }
             }
         bool grew;
@@ -191,19 +160,11 @@ internal static class ScienceStagePolicy
 
     internal static CodingToolEvidence BindReceipt(CodingWorkingState state, CodingToolEvidence receipt, JsonElement result)
     {
-        var paths = state.Science?.Stages.Where(stage => state.Plan.Any(step => step.Id == stage.Id && step.Status == "in_progress"))
-            .SelectMany(stage => stage.Checks).SelectMany(check => check.Paths).ToHashSet(StringComparer.OrdinalIgnoreCase) ?? [];
-        foreach (var file in state.ActiveFiles) paths.Add(file.Path);
-        var hashes = state.Science?.Files?.Where(pair => pair.Value.Sha256 is not null && paths.Contains(pair.Key)).ToDictionary(pair => pair.Key, pair => pair.Value.Sha256!, StringComparer.OrdinalIgnoreCase)
-            ?? state.ActiveFiles.Where(file => file.Sha256 is not null).ToDictionary(file => file.Path, file => file.Sha256!, StringComparer.OrdinalIgnoreCase);
         var proof = FindProof(result);
         var verified = proof.ValueKind == JsonValueKind.Object && TextOrNull(proof, "formalVerification") == "KernelAccepted" && TextOrNull(proof, "axiomAudit") == "passed";
         var proofPath = verified ? ResolveProofPath(result, proof) : null;
-        if (proofPath is { } path && TextOrNull(proof, "sourceFileSha256") is { Length: 64 } sha)
-            hashes[path] = sha;
-        if (receipt.Path is { } ownPath && receipt.Sha256 is { } ownSha) hashes[ownPath] = ownSha;
-        return receipt with { FileHashes = hashes, FormalVerified = receipt.Tool == "math.formalProof" && verified
-            && proofPath is not null && TextOrNull(proof, "sourceFileSha256") is { Length: 64 }, VerificationPath = proofPath };
+        return receipt with { FormalVerified = receipt.Tool == "math.formalProof" && verified,
+            VerificationPath = proofPath };
     }
 
     internal static CodingWorkingState ImportDelegatedEvidence(CodingWorkingState state, JsonElement trustedResult)
@@ -225,9 +186,8 @@ internal static class ScienceStagePolicy
         var additions = child.Evidence.Where(item => item.Success && !existing.Contains(item.Id)).Select(item => item with
         { SourceRunId = run.GetString(), Historical = true, Sequence = state.Sequence + 1 }).ToArray();
         if (additions.Length == 0) return state;
-        var files = new Dictionary<string, ScienceFile>(state.Science.Files ?? new Dictionary<string, ScienceFile>(), StringComparer.OrdinalIgnoreCase);
-        foreach (var pair in child.Science!.Files ?? new Dictionary<string, ScienceFile>()) files[pair.Key] = pair.Value with { NeedsRead = true };
-        return state with { Evidence = CodingWorkingStateReducer.KeepEvidence(state, state.Evidence.Concat(additions)), Sequence = state.Sequence + 1, Science = state.Science with { Files = files } };
+        return state with { Evidence = CodingWorkingStateReducer.KeepEvidence(state, state.Evidence.Concat(additions)), Sequence = state.Sequence + 1 };
+
     }
     private static JsonElement FindProof(JsonElement value, int depth = 0)
     {
@@ -243,15 +203,6 @@ internal static class ScienceStagePolicy
         if (source is null || depth > 6) return source;
         if (result.ValueKind == JsonValueKind.Object)
         {
-            // The sandbox reports source relative to /sandbox/work; its typed
-            // input hash manifest uses workspace-relative work/lean/... paths.
-            if (result.TryGetProperty("inputHashes", out var inputs) && inputs.ValueKind == JsonValueKind.Object)
-                foreach (var input in inputs.EnumerateObject())
-                {
-                    var path = input.Name.Replace('\\', '/');
-                    if ((path.Equals(source, StringComparison.OrdinalIgnoreCase) || path.EndsWith("/" + source, StringComparison.OrdinalIgnoreCase))
-                        && input.Value.ValueKind == JsonValueKind.String && input.Value.GetString() == TextOrNull(proof, "sourceFileSha256")) return path;
-                }
             foreach (var name in new[] { "result", "data" })
                 if (result.TryGetProperty(name, out var nested)) return ResolveProofPath(nested, proof, depth + 1);
         }

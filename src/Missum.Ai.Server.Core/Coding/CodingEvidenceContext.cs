@@ -31,12 +31,13 @@ public static class CodingEvidenceContext
         foreach (var item in state.Plan.OrderBy(static item => item.Status == "completed" ? 1 : 0)) Add("plan", item);
         foreach (var item in state.Facts) Add("evidenced_fact", item);
         foreach (var item in state.RejectedHypotheses) Add("rejected_hypothesis", item);
-        foreach (var item in state.Failures.Where(item => item.EnvironmentRevision == state.EnvironmentRevision)) Add("failure", item);
+        foreach (var item in state.Failures.Where(item => item.EnvironmentRevision == state.EnvironmentRevision)) Add("failure", new { item.Tool, item.Error, item.Count, item.EvidenceId });
         // A successful command is evidence of that process, not automatically a passed test suite.
         foreach (var item in state.Tests.TakeLast(4)) Add("executed_process", item);
         foreach (var file in state.ActiveFiles.OrderByDescending(file => state.NextStep?.Contains(file.Path, StringComparison.OrdinalIgnoreCase) == true)
             .ThenByDescending(static file => file.Sequence))
-            Add("active_file", file with { Snippet = SelectSnippet(file, file.StartLine) });
+            Add("active_file", new { file.Path, file.StartLine, Snippet = SelectSnippet(file, file.StartLine),
+                file.Truncated, file.EvidenceId, file.Sequence, file.OutputEvidenceId });
         foreach (var item in state.Evidence.TakeLast(6)) Add("receipt", item);
         if (omitted) output.AppendLine(omissionNotice);
         return new LmChatMessage("user", output.ToString());
@@ -101,7 +102,6 @@ public static class CodingEvidenceContext
             [CompletedArgumentsMarker] = true,
             ["toolCallId"] = call.Id,
             ["originalCharacters"] = call.Arguments.GetRawText().Length,
-            ["argumentsSha256"] = CodingWorkingStateReducer.ArgumentHash(call.Arguments),
             ["notice"] = "Abgeschlossener Aufruf: gekürzte historische Argumente, nicht erneut ausführen. Originalargumente und Ergebnis stehen im Laufjournal.",
         };
         if (call.Arguments.ValueKind == JsonValueKind.Object)

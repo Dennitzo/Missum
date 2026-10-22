@@ -85,7 +85,7 @@ public static class ScienceSkill
         var receipt = CodingWorkingStateReducer.ResolveEvidence(state, evidenceId ?? callId);
         if (receipt is null) return;
         var metadata = JsonSerializer.Serialize(new { receipt.Id, receipt.Tool, receipt.Success, receipt.FormalVerified,
-            receipt.FileHashes, delegatedEvidence = state.Evidence.Where(item => item.Historical && item.SourceRunId is not null).TakeLast(12) }, MissumAiProtocol.CreateJsonOptions());
+            delegatedEvidence = state.Evidence.Where(item => item.Historical && item.SourceRunId is not null).TakeLast(12) }, MissumAiProtocol.CreateJsonOptions());
         // Only this newly appended, unevaluated result is annotated; existing KV prefixes stay byte-stable.
         try
         {
@@ -109,5 +109,5 @@ public static class ScienceSkill
 public sealed record ScienceCheck(string Id, string Kind, bool Required, IReadOnlyList<string> EvidenceIds, IReadOnlyList<string> Paths);
 public sealed record ScienceStage(string Id, string Question, string Strategy, IReadOnlyList<string> DependsOn,
     IReadOnlyList<ScienceCheck> Checks, IReadOnlyList<string> OpenQuestions, IReadOnlyList<string> Blockers, string Outcome = "open", long ReopenedAtSequence = 0);
-public sealed record ScienceFile(string? Sha256, bool NeedsRead);
-public sealed record ScienceState(string Profile, IReadOnlyList<ScienceStage> Stages, IReadOnlyDictionary<string, ScienceFile>? Files = null);
+[System.Text.Json.Serialization.JsonUnmappedMemberHandling(System.Text.Json.Serialization.JsonUnmappedMemberHandling.Skip)]
+public sealed record ScienceState(string Profile, IReadOnlyList<ScienceStage> Stages);

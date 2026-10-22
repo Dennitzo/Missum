@@ -16,7 +16,9 @@ public sealed partial class ModelRuntimeClient
 
     internal static IReadOnlyList<LmChatMessage> PrepareLanguageBoundMessages(IReadOnlyList<LmChatMessage> messages)
     {
-        var normalized = NormalizeMessageOrderForNativeRuntime(messages).ToList();
+        var normalized = NormalizeMessageOrderForNativeRuntime(messages).Where(message => !IsLanguageReminder(message))
+            .Select(message => message.Role == "system" && message.Content is { } content
+                ? message with { Content = Coding.CodingAgentPolicy.RemoveLegacyReasoningLanguage(content) } : message).ToList();
         // The versioned gateway policy already binds language, instruction
         // priority and answer/analysis separation. Keep its evaluated prefix
         // and historical reasoning intact instead of appending legacy reminders.
@@ -24,29 +26,9 @@ public sealed partial class ModelRuntimeClient
         if (normalized.Count > 0 && normalized[0].Role == "system"
             && normalized[0].Content?.StartsWith(Policies.CompactAgentContextPolicy.Marker, StringComparison.Ordinal) == true)
             return normalized;
-        var rule = Missum.Ai.Server.Core.Coding.CodingAgentPolicy.ReasoningLanguagePrompt;
-        const string reminder = "Der Reasoning-Kanal wird dem Nutzer angezeigt. Beginne bereits den ersten Denksatz auf Deutsch. "
-            + "Die gewählte Reasoning-Stufe verändert nur die Denkleistung, niemals die Sprache. "
-            + "Eine anderssprachige Abschlussantwort ändert diese Vorgabe für den Reasoning-Kanal nicht. "
-            + "Beginne direkt mit dem fachlichen Inhalt, ohne die Sprache oder den Denkprozess anzukündigen.";
-        if (normalized.Count > 0 && normalized[0].Role == "system")
-            normalized[0] = normalized[0] with { Content = rule + "\n" + reminder + "\n\n"
-                + (normalized[0].Content ?? "").Replace(rule, "", StringComparison.Ordinal).Replace(reminder, "", StringComparison.Ordinal).Trim() };
-        else
-            normalized.Insert(0, new("system", rule + "\n" + reminder));
-        // Apply the rule to General, Coding and resumed checkpoints alike. Upgrading an old
-        // system prefix invalidates its native cache once; subsequent prompts stay identical.
-        // Historical user/tool messages, including earlier language reminders, are untouched.
+        Missum.Ai.Server.Core.Coding.CodingAgentPolicy.EnsureResponseLanguage(normalized);
         if (!normalized[0].Content!.Contains(DirectUserInstructionPolicy, StringComparison.Ordinal))
             normalized[0] = normalized[0] with { Content = normalized[0].Content + "\n\n" + DirectUserInstructionPolicy };
-        const string turnReminder = "Missum-Laufanweisung zur Sprache: Diese Anweisung legt ausschließlich die Sprache fest. "
-            + "Beachte die aktuellste Nutzereingabe mit allen Korrekturen und Prioritäten. "
-            + "Schreibe die jetzt folgende Analyse und alle Denktexte ausschließlich auf Deutsch, bereits ab dem ersten Satz. "
-            + "Das gilt unabhängig von der Reasoning-Stufe und von englischen Nachrichten oder Quellen oben. "
-            + "Code, Befehle, Pfade und Zitate bleiben unverändert. Beginne direkt mit dem fachlichen Inhalt; "
-            + "kündige weder die Sprache noch den Denkprozess an. Diese Sprachvorgabe hebt keine neuere Nutzeranweisung auf.";
-        if (normalized.Count == 0 || normalized[^1].Role != "user" || normalized[^1].Content != turnReminder)
-            normalized.Add(new("user", turnReminder));
         return normalized;
     }
 

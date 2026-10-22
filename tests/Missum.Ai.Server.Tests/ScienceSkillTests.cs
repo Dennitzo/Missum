@@ -45,11 +45,46 @@ public sealed class ScienceSkillTests
         Assert.Throws<ArgumentException>(() => RunRequestValidator.Validate(request with { WorkflowProfile = "unknown" }));
         var ordinaryState = CodingWorkingState.Create("Normaler Auftrag");
         Assert.False(JsonSerializer.SerializeToElement(ordinaryState).TryGetProperty("Science", out _));
-        var ordinaryReceipt = new CodingToolEvidence("read", "coding.read", true, "a.txt", null, null, "Text", 1);
+        var ordinaryReceipt = new CodingToolEvidence("read", "coding.read", true, "a.txt", null, "Text", 1);
         var ordinaryJson = JsonSerializer.SerializeToElement(ordinaryReceipt);
         Assert.False(ordinaryJson.TryGetProperty("FileHashes", out _));
         Assert.False(ordinaryJson.TryGetProperty("FormalVerified", out _));
         Assert.False(ordinaryJson.TryGetProperty("VerificationPath", out _));
+    }
+
+    [Fact]
+    public void LegacyHashBindingsAreDiscardedWithoutLosingPlanOrEvidence()
+    {
+        const string legacy = """
+            {"originalTask":"Continue","plan":[],"acceptanceCriteria":[],"facts":[],"rejectedHypotheses":[],
+             "evidence":[{"id":"read","tool":"coding.read","success":true,"path":"Publikation.md","sha256":"old",
+                          "summary":"Read","sequence":1,"fileHashes":{"Publikation.md":"old"}}],
+             "tests":[],"activeFiles":[],"failures":[],"nextStep":"Finish","phase":"review","environmentRevision":0,"sequence":1,
+             "science":{"profile":"claude-science-v1","stages":[],"files":{"Publikation.md":{"sha256":"old","needsRead":true}}}}
+            """;
+        var state = JsonSerializer.Deserialize<CodingWorkingState>(legacy, MissumAiProtocol.CreateJsonOptions())!;
+        Assert.Equal("read", Assert.Single(state.Evidence).Id);
+        Assert.DoesNotContain("sha256", CodingEvidenceContext.Build(state).Content!, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("fileHashes", JsonSerializer.Serialize(state), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("coding.write", "{\"path\":\"a.txt\",\"content\":\"new\"}")]
+    [InlineData("coding.edit", "{\"path\":\"a.txt\",\"oldText\":\"old\",\"newText\":\"new\"}")]
+    public void MutationSchemasExposeNoHashAndAcceptDirectEdits(string toolName, string arguments)
+    {
+        var tool = CodingToolCatalog.CreateTools().Single(item => item.Name == toolName);
+        Assert.False(tool.Schema.GetProperty("properties").TryGetProperty("expectedSha256", out _));
+        new AgentToolCatalog().Validate(tool, J(arguments));
+    }
+
+    [Theory]
+    [InlineData("coding.write", "{\"path\":\"a.txt\",\"content\":\"new\",\"expectedSha256\":\"old\"}")]
+    [InlineData("coding.edit", "{\"path\":\"a.txt\",\"oldText\":\"old\",\"newText\":\"new\",\"expectedSha256\":\"old\"}")]
+    public void RemovedHashArgumentsAreNotAcceptedAsFallback(string name, string arguments)
+    {
+        var tool = CodingToolCatalog.CreateTools().Single(item => item.Name == name);
+        Assert.Throws<ArgumentException>(() => new AgentToolCatalog().Validate(tool, J(arguments)));
     }
 
     [Fact]
@@ -103,23 +138,23 @@ public sealed class ScienceSkillTests
     }
 
     [Fact]
-    public void NumericEvidenceBindsFilesAndChangedInputsReopenDependentStagesOnly()
+    public void NumericEvidenceDoesNotRequireHashBoundReadsOrAutomaticallyReopenStages()
     {
         var state = Plan(Start(), "numeric");
         state = Read(state, "input", Hash);
         state = Observe(state, "calc", "coding.command", "{}", "{\"success\":true,\"exitCode\":0,\"stdout\":\"independent reference agrees\"}");
-        Assert.Throws<ArgumentException>(() => Complete(state, kind: "numeric", paths: true));
+        Assert.Equal("completed", Complete(state, kind: "numeric", paths: true).Plan[0].Status);
         state = Read(state, "after", Hash);
         state = Complete(state, kind: "numeric", paths: true);
         state = CodingWorkingStateReducer.ApplyPlanUpdate(state, J("""
             {"steps":[{"id":"b","title":"Folgerung","status":"completed","evidenceIds":["calc"]},{"id":"c","title":"Unabhängig","status":"completed","evidenceIds":["calc"]}],"scienceStages":[{"id":"b","question":"Folgt B?","strategy":"Folgerung","dependsOn":["a"],"outcome":"clarified"},{"id":"c","question":"Gilt C?","strategy":"Unabhängig","outcome":"clarified"}]}
             """));
         var changed = Read(state, "changed", new('b', 64));
-        Assert.Equal("pending", changed.Plan.Single(step => step.Id == "a").Status);
-        Assert.Equal("pending", changed.Plan.Single(step => step.Id == "b").Status);
+        Assert.Equal("completed", changed.Plan.Single(step => step.Id == "a").Status);
+        Assert.Equal("completed", changed.Plan.Single(step => step.Id == "b").Status);
         Assert.Equal("completed", changed.Plan.Single(step => step.Id == "c").Status);
-        Assert.Empty(changed.Science!.Stages.Single(stage => stage.Id == "a").Checks.Single().EvidenceIds);
-        Assert.Throws<ArgumentException>(() => Complete(changed, kind: "numeric", paths: true));
+        Assert.NotEmpty(changed.Science!.Stages.Single(stage => stage.Id == "a").Checks.Single().EvidenceIds);
+        Assert.Equal("clarified", ScienceSkill.ResultOutcome(Complete(changed, kind: "numeric", paths: true)));
     }
 
     [Fact]
@@ -131,7 +166,7 @@ public sealed class ScienceSkillTests
         state = Observe(state, "fake", "coding.command", "{}", "{\"success\":true,\"exitCode\":0,\"formalVerification\":\"KernelAccepted\",\"axiomAudit\":\"passed\",\"sourceFileSha256\":\"" + Hash + "\"}");
         Assert.Throws<ArgumentException>(() => Complete(state, "fake", "lean"));
         state = Observe(state, "proof", "math.formalProof", "{}", "{\"status\":\"completed\",\"result\":{\"success\":true,\"formalVerification\":\"KernelAccepted\",\"axiomAudit\":\"passed\",\"source\":\"work/check.py\",\"sourceFileSha256\":\"" + Hash + "\"}}");
-        Assert.Throws<ArgumentException>(() => Complete(state, "proof", "lean"));
+        Assert.Equal("clarified", ScienceSkill.ResultOutcome(Complete(state, "proof", "lean")));
         state = Read(state, "proof-read", Hash);
         state = Complete(state, "proof", "lean");
         Assert.Equal("clarified", ScienceSkill.ResultOutcome(state));
@@ -171,21 +206,18 @@ public sealed class ScienceSkillTests
             """);
         var completed = CodingWorkingStateReducer.ApplyPlanUpdate(state, update);
         Assert.Equal("clarified", ScienceSkill.ResultOutcome(completed));
-        Assert.Equal("pending", Read(completed, "later-change", new('c', 64)).Plan[0].Status);
+        Assert.Equal("completed", Read(completed, "later-change", new('c', 64)).Plan[0].Status);
         Assert.Equal("clarified", ScienceSkill.ResultOutcome(Complete(state, "review", "publication", paths: true)));
-        var error = Assert.Throws<ArgumentException>(() => Complete(state, "old-edit", "publication", paths: true));
-        Assert.Contains("aktuellen Publikationsstand", error.Message);
-        Assert.Contains("final-edit", error.Message);
-        Assert.Contains("review", error.Message);
+        Assert.Equal("clarified", ScienceSkill.ResultOutcome(Complete(state, "old-edit", "publication", paths: true)));
     }
 
     [Fact]
-    public void PublicationReviewCannotBorrowAnotherFilesHashOrSkipFreshConfirmation()
+    public void PublicationReviewNeedsMatchingPathButNoFreshConfirmation()
     {
         var state = Plan(Start(), "publication");
         state = Observe(state, "edit", "coding.edit", "{\"path\":\"work/check.py\"}",
             "{\"success\":true,\"path\":\"work/check.py\",\"sha256\":\"" + Hash + "\"}");
-        Assert.Throws<ArgumentException>(() => Complete(state, "edit", "publication", paths: true));
+        Assert.Equal("clarified", ScienceSkill.ResultOutcome(Complete(state, "edit", "publication", paths: true)));
         state = Read(state, "review", Hash);
         state = Observe(state, "unrelated-read", "coding.read", "{\"path\":\"other.md\"}",
             "{\"success\":true,\"path\":\"other.md\",\"sha256\":\"" + Hash + "\"}");
@@ -194,7 +226,7 @@ public sealed class ScienceSkillTests
     }
 
     [Fact]
-    public void NativeLeanWrapperUsesNestedAuditAndWorkspaceInputManifestPath()
+    public void NativeLeanWrapperUsesNestedAuditAndItsExplicitSourcePath()
     {
         var state = Observe(Plan(Start(), "lean"), "source", "coding.read", "{\"path\":\"Original.lean\"}", "{\"success\":true,\"path\":\"Original.lean\",\"sha256\":\"" + Hash + "\"}");
         state = Observe(state, "proof", "math.formalProof", "{\"path\":\"Original.lean\"}", """
@@ -203,14 +235,14 @@ public sealed class ScienceSkillTests
             """.Replace("HASH", Hash, StringComparison.Ordinal));
         var receipt = Assert.Single(state.Evidence, item => item.Id == "proof");
         Assert.True(receipt.FormalVerified);
-        Assert.Equal("work/lean/Proof.lean", receipt.VerificationPath);
-        Assert.Throws<ArgumentException>(() => Complete(state, "proof", "lean"));
+        Assert.Equal("lean/Proof.lean", receipt.VerificationPath);
+        Assert.Equal("clarified", ScienceSkill.ResultOutcome(Complete(state, "proof", "lean")));
         state = Observe(state, "confirm", "coding.read", "{\"path\":\"work/lean/Proof.lean\"}",
             "{\"success\":true,\"path\":\"work/lean/Proof.lean\",\"sha256\":\"" + Hash + "\",\"content\":\"theorem checked : True := by trivial\"}");
         state = Complete(state, "proof", "lean");
         Assert.Equal("clarified", ScienceSkill.ResultOutcome(state));
         state = Observe(state, "changed-original", "coding.read", "{\"path\":\"Original.lean\"}", "{\"success\":true,\"path\":\"Original.lean\",\"sha256\":\"" + new string('b', 64) + "\"}");
-        Assert.Equal("pending", state.Plan[0].Status);
+        Assert.Equal("completed", state.Plan[0].Status);
     }
 
     [Fact]
@@ -274,12 +306,12 @@ public sealed class ScienceSkillTests
     }
 
     [Fact]
-    public void SourceBasedTaskNeedsNoLeanAndOwnSourceFileIsAutomaticallyBound()
+    public void SourceBasedTaskNeedsNoLeanOrFileHashConfirmation()
     {
         var state = Read(Plan(Start(), "source"), "source", Hash);
         state = Complete(state, "source", "source");
         Assert.Equal("clarified", ScienceSkill.ResultOutcome(state));
-        Assert.Equal("open", ScienceSkill.ResultOutcome(Read(state, "new-source", new('c', 64))));
+        Assert.Equal("clarified", ScienceSkill.ResultOutcome(Read(state, "new-source", new('c', 64))));
     }
 
     [Fact]
@@ -295,7 +327,7 @@ public sealed class ScienceSkillTests
     }
 
     [Fact]
-    public void DelegatedProofUsesTrustedReceiptAndRequiresParentFileConfirmation()
+    public void DelegatedProofUsesTrustedKernelReceiptWithoutParentFileConfirmation()
     {
         var state = Plan(Start(), "lean");
         var result = JsonSerializer.SerializeToElement(new
@@ -308,7 +340,7 @@ public sealed class ScienceSkillTests
             },
         }, MissumAiProtocol.CreateJsonOptions());
         state = ScienceStagePolicy.ImportDelegatedEvidence(state, result);
-        Assert.Throws<ArgumentException>(() => Complete(state, "child-proof", "lean"));
+        Assert.Equal("clarified", ScienceSkill.ResultOutcome(Complete(state, "child-proof", "lean")));
         state = Read(state, "parent-read", Hash);
         Assert.Equal("clarified", ScienceSkill.ResultOutcome(Complete(state, "child-proof", "lean")));
         Assert.Equal(state.Evidence.Count, ScienceStagePolicy.ImportDelegatedEvidence(state, result).Evidence.Count);

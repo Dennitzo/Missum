@@ -50,7 +50,8 @@ public sealed class LocalToolBrokerAutomaticExecutionTests : IAsyncLifetime
         Assert.Equal("completed", written.Status);
         Assert.True(written.Result.GetProperty("applied").GetBoolean());
         Assert.Equal("completed", read.Status);
-        Assert.Equal(written.Result.GetProperty("sha256").GetString(), read.Result.GetProperty("sha256").GetString());
+        Assert.False(written.Result.TryGetProperty("sha256", out _));
+        Assert.False(read.Result.TryGetProperty("sha256", out _));
         Assert.Equal("Tatsächlich gespeichert.\n", await File.ReadAllTextAsync(Path.Combine(_root, "automatic.txt")));
     }
 

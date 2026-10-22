@@ -61,7 +61,7 @@ public sealed partial class NativeAssistantPage
         _researchNavigationSignature = signature;
         // Historical headers may already exist when their child projection is
         // restored. Keep them navigable without rebuilding the parent answer.
-        foreach (var tool in _messageBlocks.Values.SelectMany(blocks => blocks.Values).OfType<ToolStepView>())
+        foreach (var tool in _messageBlocks.Values.SelectMany(blocks => blocks.Values).Select(view => view is ActivitySlotView slot ? slot.Content : view).OfType<ToolStepView>().Distinct())
             tool.RefreshResearchNavigation();
     }
 }

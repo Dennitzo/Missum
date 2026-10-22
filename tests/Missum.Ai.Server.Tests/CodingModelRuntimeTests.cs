@@ -141,7 +141,7 @@ public sealed class CodingModelRuntimeTests
                     var data = new List<string>();
                     var arguments = Enumerable.Range(0, 2).Select(index => JsonSerializer.Serialize(new
                     {
-                        path = $"file-{index}.txt", expectedSha256 = new string('a', 64), oldText = "Grüße\n\"old\"", newText = "new\n",
+                        path = $"file-{index}.txt", oldText = "Grüße\n\"old\"", newText = "new\n",
                     })).ToArray();
                     for (var offset = 0; offset < arguments[0].Length; offset += 7)
                         for (var index = 0; index < 2; index++)

@@ -24,7 +24,7 @@ internal static class CodingContextCompactor
         Fehler, offene Aufgaben und den konkreten nächsten Schritt. Trenne Absichten strikt von bestätigten Werkzeugergebnissen.
         Bewahre wichtige frühere Zusammenfassungen. Vermeide unveränderte Dateiinhalte, ausführliche Logs und Wiederholungen.
         Antworte nur mit der Arbeitszusammenfassung, möglichst unter 6000 Zeichen. Führe keine Werkzeuge aus.
-        """ + "\n\n" + CodingAgentPolicy.ReasoningLanguagePrompt;
+        """ + "\n\n" + CodingAgentPolicy.ResponseLanguagePrompt;
 
     internal static CodingCompactionPlan? Plan(IReadOnlyList<LmChatMessage> messages, int contextLength,
         CodingWorkingState? workingState = null, bool includeWorkingStateInBudget = true)

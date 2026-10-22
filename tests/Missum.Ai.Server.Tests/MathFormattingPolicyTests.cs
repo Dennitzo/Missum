@@ -102,7 +102,7 @@ public sealed class MathFormattingPolicyTests
     private static void AssertVisibleReasoningNotation(string policy)
     {
         Assert.Contains("in sämtlichen Modi", policy, StringComparison.Ordinal);
-        Assert.Contains("sichtbaren Reasoning-/Analysekanal im Denkprozess", policy, StringComparison.Ordinal);
+        Assert.Contains("sichtbaren Antworten", policy, StringComparison.Ordinal);
         Assert.Contains("Umrahme jeden mathematischen Ausdruck", policy, StringComparison.Ordinal);
         Assert.Contains("Keine nackten Formelzeilen", policy, StringComparison.Ordinal);
         Assert.Contains("keine Unicode-Hoch-/Tiefstellungen", policy, StringComparison.Ordinal);

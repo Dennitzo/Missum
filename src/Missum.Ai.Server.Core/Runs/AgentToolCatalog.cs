@@ -319,11 +319,6 @@ public sealed partial class AgentToolCatalog
                 RequireString(value, "sectionId", 1, 128);
                 RequireString(value, "content", 0, 120_000);
                 OptionalString(value, "heading", 1, 500);
-                OptionalString(value, "expectedSha256", 64, 64);
-                if (documentOperation != "create" && !value.TryGetProperty("expectedSha256", out _))
-                {
-                    throw new ArgumentException("document.create edits require expectedSha256.");
-                }
                 break;
             case ClientToolNames.DocumentsList:
                 break;
@@ -440,7 +435,7 @@ public sealed partial class AgentToolCatalog
         """);
 
     private static JsonElement DocumentCreateSchema() => Parse("""
-        {"type":"object","properties":{"operation":{"type":"string","enum":["create","appendSection","replaceSection"]},"reference":{"type":"string","description":"Beim Erstellen ein Dateiname, beim Bearbeiten die documentId des Sitzungsdokuments. Importierte Binärdateien sind nur lesbar."},"format":{"type":"string","enum":["markdown","text","docx","pdf","xlsx","pptx"]},"sectionId":{"type":"string","description":"Stabile eindeutige Abschnitts-ID. XLSX: ein Arbeitsblatt je Abschnitt. PPTX: eine Folie je Abschnitt."},"heading":{"type":"string","description":"Abschnittstitel, XLSX-Blattname oder PPTX-Folientitel."},"content":{"type":"string","description":"Nur der neue oder geänderte Abschnitt als Markdown. Tabellen als Markdown-Tabelle oder tabgetrennte Zeilen. XLSX: Zahlen in invariantem Format, =Formeln werden erhalten und beim Öffnen neu berechnet; externe Datenformeln sind nicht erlaubt. PPTX: kurze Textabsätze, Listen oder eine Tabelle pro Folie; große Inhalte in mehrere Abschnitte aufteilen. Nie das gesamte bestehende Dokument erneut."},"expectedSha256":{"type":"string","description":"Für Bearbeitungen verpflichtender SHA-256 aus document.read oder document.create."}},"required":["operation","reference","format","sectionId","content"],"additionalProperties":false}
+        {"type":"object","properties":{"operation":{"type":"string","enum":["create","appendSection","replaceSection"]},"reference":{"type":"string","description":"Beim Erstellen ein Dateiname, beim Bearbeiten die documentId des Sitzungsdokuments. Importierte Binärdateien sind nur lesbar."},"format":{"type":"string","enum":["markdown","text","docx","pdf","xlsx","pptx"]},"sectionId":{"type":"string","description":"Stabile eindeutige Abschnitts-ID. XLSX: ein Arbeitsblatt je Abschnitt. PPTX: eine Folie je Abschnitt."},"heading":{"type":"string","description":"Abschnittstitel, XLSX-Blattname oder PPTX-Folientitel."},"content":{"type":"string","description":"Nur der neue oder geänderte Abschnitt als Markdown. Tabellen als Markdown-Tabelle oder tabgetrennte Zeilen. XLSX: Zahlen in invariantem Format, =Formeln werden erhalten und beim Öffnen neu berechnet; externe Datenformeln sind nicht erlaubt. PPTX: kurze Textabsätze, Listen oder eine Tabelle pro Folie; große Inhalte in mehrere Abschnitte aufteilen. Nie das gesamte bestehende Dokument erneut."}},"required":["operation","reference","format","sectionId","content"],"additionalProperties":false}
         """);
 
     private static JsonElement ImageSchema() => Parse("""

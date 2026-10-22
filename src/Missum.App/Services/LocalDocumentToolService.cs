@@ -92,7 +92,6 @@ public sealed partial class LocalDocumentToolService(
         var sectionId = RequiredString(arguments, "sectionId");
         var heading = OptionalString(arguments, "heading");
         var content = RequiredString(arguments, "content", allowEmpty: true);
-        var expectedSha256 = OptionalString(arguments, "expectedSha256");
         if (SectionMarkerRegex().IsMatch(content) || (heading is not null && SectionMarkerRegex().IsMatch(heading)))
         {
             throw new InvalidDataException("Dokumentinhalt darf keine internen Missum-Abschnittsmarker enthalten.");
@@ -107,7 +106,6 @@ public sealed partial class LocalDocumentToolService(
             sectionId,
             heading,
             content,
-            expectedSha256,
             cancellationToken).ConfigureAwait(false);
     }
 
@@ -130,16 +128,14 @@ public sealed partial class LocalDocumentToolService(
                 item.Id.ToString("D"),
                 "artifact",
                 item.FileName,
-                Path.GetExtension(item.FileName).TrimStart('.').ToLowerInvariant(),
-                item.Sha256));
+                Path.GetExtension(item.FileName).TrimStart('.').ToLowerInvariant()));
         var items = generated.Select(static item => new DocumentListItem(
-                item.Id.ToString("D"), "generated", item.FileName, item.Format, item.Sha256, item.Revision))
+                item.Id.ToString("D"), "generated", item.FileName, item.Format, item.Revision))
             .Concat(attached.Select(static item => new DocumentListItem(
                 item.Id.ToString("D"),
                 "attached",
                 item.FileName,
                 Path.GetExtension(item.FileName).TrimStart('.').ToLowerInvariant(),
-                item.Sha256,
                 PageCount: item.PageCount,
                 Status: item.PreparationStatus.ToString().ToLowerInvariant())))
             .Concat(artifactItems)
@@ -252,7 +248,6 @@ public sealed partial class LocalDocumentToolService(
         string sectionId,
         string? heading,
         string content,
-        string? expectedSha256,
         CancellationToken cancellationToken)
     {
         GeneratedDocument document;
@@ -285,7 +280,6 @@ public sealed partial class LocalDocumentToolService(
             {
                 throw new InvalidDataException("Das Ausgabeformat eines vorhandenen Dokuments kann nicht während einer Abschnittsänderung gewechselt werden.");
             }
-            RequireExpectedHash(document.Sha256, expectedSha256);
             expectedRevision = document.Revision;
             var mutation = ApplySectionMutation(document.SourceMarkdown, operation, sectionId, heading, content);
             var updatedSource = mutation.Source;
@@ -316,7 +310,6 @@ public sealed partial class LocalDocumentToolService(
             document.FileName,
             document.Format,
             document.Revision,
-            document.Sha256,
             sectionId,
             changed,
             artifact.Length,
@@ -455,7 +448,6 @@ public sealed partial class LocalDocumentToolService(
             source.Reference,
             source.FileName,
             source.Format,
-            source.Sha256,
             unitCount = units.Count,
             units = selected,
             truncated = startUnit - 1 + selected.Length < units.Count,
@@ -511,7 +503,6 @@ public sealed partial class LocalDocumentToolService(
             source.Reference,
             source.FileName,
             source.Format,
-            source.Sha256,
             units = result,
             complete,
             continuation = nextUnit is null ? null : new { startUnit = nextUnit, characterOffset = nextOffset },
@@ -567,7 +558,6 @@ public sealed partial class LocalDocumentToolService(
             source.Reference,
             source.FileName,
             source.Format,
-            source.Sha256,
             query,
             results = result,
             truncated = result.Count < candidates.Length,
@@ -761,18 +751,6 @@ public sealed partial class LocalDocumentToolService(
         .Select(static line => InlineMarkdownRegex().Replace(line, string.Empty)))
         .Trim();
 
-    private static void RequireExpectedHash(string actual, string? expected)
-    {
-        if (string.IsNullOrWhiteSpace(expected))
-        {
-            throw new InvalidDataException("Zum Bearbeiten ist expectedSha256 aus dem letzten document.read/create-Ergebnis erforderlich.");
-        }
-        if (!string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new IOException("Das Dokument wurde seit dem Lesen geändert. Lies den aktuellen Stand erneut.");
-        }
-    }
-
     private static string RequiredString(JsonElement arguments, string name, bool allowEmpty = false)
     {
         if (!arguments.TryGetProperty(name, out var value) || value.ValueKind != JsonValueKind.String)
@@ -830,7 +808,6 @@ public sealed partial class LocalDocumentToolService(
         string Source,
         string FileName,
         string Format,
-        string Sha256,
         long? Revision = null,
         int? PageCount = null,
         string? Status = null);

@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Missum.App.Controls;
@@ -62,7 +61,6 @@ public sealed partial class NativeAssistantPage
         var desired = new List<FrameworkElement>();
         var content = MessageContent(message);
         var assistant = S(message, "role") == "assistant";
-        var visibleAnswer = new StringBuilder(content.TrimEnd());
         if (assistant)
         {
             if (!blocks.TryGetValue("header", out var header))
@@ -83,28 +81,13 @@ public sealed partial class NativeAssistantPage
             desired.Add(userText);
             content = "";
         }
-        var liveStatus = S(message, "liveStatus");
-        if (assistant && liveStatus.Length > 0)
-        {
-            if (!blocks.TryGetValue("liveStatus", out var statusView))
-            {
-                var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
-                row.Children.Add(new ProgressRing { Width = 15, Height = 15, IsActive = true, Foreground = NativeIconPalette.BrushFor("navigation") });
-                row.Children.Add(new TextBlock { FontSize = 14, Foreground = ThemeBrush("MissumMutedTextBrush", 160) });
-                blocks["liveStatus"] = statusView = row;
-            }
-            ((TextBlock)((StackPanel)statusView).Children[1]).Text = liveStatus;
-            desired.Add(statusView);
-        }
-
         var offset = 0;
         var sequence = 0;
         var toolNumber = 0;
-        var hasBlockingTool = false;
         void Text(string key, string value)
         {
             if (string.IsNullOrEmpty(value)) return;
-            if (!blocks.TryGetValue(key, out var element)) blocks[key] = element = new NativeStreamingMarkdown(value);
+            if (!blocks.TryGetValue(key, out var element) || element is not ToolStepView) blocks[key] = element = new NativeStreamingMarkdown(value);
             else ((NativeStreamingMarkdown)element).UpdateText(value);
             desired.Add(element);
         }
@@ -131,12 +114,8 @@ public sealed partial class NativeAssistantPage
             if (renderedArtifactSteps.Add(id) && stepArtifacts.TryGetValue(id, out var items))
                 ArtifactLinks("artifacts:step:" + id, items);
         }
-        var reasoningOwner = ActiveSubagent?.AgentId ?? "";
-        var latestReasoning = messageSteps.LastOrDefault(step => S(step, "tool") == "assistant.reasoning"
-            && NativeThinkingIndicatorState.IsOwnedStep(S(step, "agentId"), reasoningOwner));
-        FrameworkElement? latestReasoningView = null;
         var subagentReceipts = messageSteps.Where(step => S(step, "tool") is "subagent" or "subagent.completed").ToArray();
-        var positionedSteps = stepArtifacts.Count > 0 ? OrderNativeArtifactSteps(messageSteps) : messageSteps;
+        var positionedSteps = OrderNativeArtifactSteps(messageSteps);
         var firstStep = MessageStepStart(messageId, positionedSteps);
         if (firstStep > 0)
         {
@@ -152,9 +131,14 @@ public sealed partial class NativeAssistantPage
             if (firstStep < positionedSteps.Length && TryNativeStepOffset(positionedSteps[firstStep], out var startOffset))
                 offset = Math.Clamp(startOffset, 0, content.Length);
         }
-        foreach (var step in positionedSteps.Skip(firstStep))
+        var eligible = positionedSteps.Skip(firstStep).Where(step => !IsDeepResearchReceipt(step)
+            && !IsAcceptedSubagentManagementStep(step, subagentReceipts) && !IsAcceptedDeepResearchStep(step, subagentReceipts)
+            && (S(step, "tool") != "assistant.continuation" || S(step, "status") == "completed"));
+        var projected = assistant ? NativeActivityProjection.Build(eligible, S(message, "status") is "streaming" or "pending", content.Length) : [];
+        foreach (var activity in projected)
         {
-            var next = TryNativeStepOffset(step, out var n) ? Math.Clamp(n, offset, content.Length) : offset;
+            var step = activity.Step;
+            var next = activity.Offset is { } n ? Math.Clamp(n, offset, content.Length) : offset;
             Text("text:" + offset, content[offset..next]); offset = next;
             var id = S(step, "id", "step:" + sequence++);
             var tool = S(step, "tool");
@@ -165,7 +149,7 @@ public sealed partial class NativeAssistantPage
             { ArtifactsAfterStep(id); continue; }
             if (tool is "subagent" or "subagent.completed")
             {
-                var lifecycleKey = "tool:" + id;
+                var lifecycleKey = activity.Key;
                 if (!blocks.TryGetValue(lifecycleKey, out var lifecycle) || lifecycle is not SubagentLifecycleView)
                 {
                     var view = new SubagentLifecycleView(PlanetIdentities.GetOrAssign);
@@ -176,13 +160,10 @@ public sealed partial class NativeAssistantPage
                     blocks[lifecycleKey] = lifecycle = view;
                 }
                 ((SubagentLifecycleView)lifecycle).Update(step, FindSubagentForStep(step));
-                desired.Add(lifecycle);
+                desired.Add(ActivityContainer(messageId, lifecycleKey, lifecycle));
                 ArtifactsAfterStep(id);
                 continue;
             }
-            if (S(step, "status") is "running" or "pending" && NativeThinkingIndicatorState.IsOwnedStep(S(step, "agentId"), reasoningOwner)
-                && tool is not ("assistant.reasoning" or "assistant.progress" or "assistant.narration" or "assistant.steering"))
-                hasBlockingTool = true;
             var detail = S(step, "detail", S(step, "explanation"));
             if (tool == "assistant.steering")
             {
@@ -198,15 +179,14 @@ public sealed partial class NativeAssistantPage
             if (tool == "assistant.narration")
             {
                 Text("narration:" + id, detail);
-                if (!string.IsNullOrWhiteSpace(detail)) visibleAnswer.Append('\0').Append(id).Append('\0').Append(detail.TrimEnd());
                 ArtifactsAfterStep(id);
                 continue;
             }
             // The preparation receipt stores an idempotent request before the
             // server accepts it. Only an accepted continuation is a visible step.
             if (tool == "assistant.continuation" && S(step, "status") != "completed") { ArtifactsAfterStep(id); continue; }
-            var key = "tool:" + id;
-            if (!blocks.TryGetValue(key, out var element))
+            var key = activity.Key;
+            if (!blocks.TryGetValue(key, out var element) || element is not ToolStepView)
             {
                 var view = new ToolStepView(_settings.Current.CodingToolStepsExpanded)
                 {
@@ -224,27 +204,17 @@ public sealed partial class NativeAssistantPage
                 };
                 blocks[key] = element = view;
             }
-            ((ToolStepView)element).Update(step, tool == "assistant.reasoning" ? toolNumber : ++toolNumber);
-            if (tool == "assistant.reasoning") element.Visibility = Visibility.Visible;
-            if (latestReasoning.ValueKind == JsonValueKind.Object && S(latestReasoning, "id") == id) latestReasoningView = element;
-            desired.Add(element);
+            var toolView = (ToolStepView)element;
+            toolView.LoadDetails = () => LoadToolStepDetailsAsync(messageId, id);
+            toolView.OpenResearch = () => OpenDeepResearchTabAsync(messageId, id);
+            toolView.CanOpenResearch = () => FindDeepResearchView(messageId, id) is not null;
+            toolView.ResearchIdentity = () => ResearchIdentity(messageId, id);
+            toolView.DefaultExpanded = _settings.Current.CodingToolStepsExpanded;
+            toolView.Update(step, tool == "assistant.activity" ? toolNumber : ++toolNumber);
+            desired.Add(ActivityContainer(messageId, key, element));
             ArtifactsAfterStep(id);
         }
         Text("text:" + offset, content[offset..]);
-        if (assistant && latestReasoning.ValueKind == JsonValueKind.Object && S(latestReasoning, "status") is "running" or "pending"
-            && DateTimeOffset.TryParse(S(latestReasoning, "updatedAt"), out var reasoningUpdatedAt))
-        {
-            if (!_thinkingStates.TryGetValue(messageId, out var reasoningState))
-                _thinkingStates[messageId] = reasoningState = new NativeThinkingIndicatorState();
-            reasoningState.ObserveReasoning(messageId, S(latestReasoning, "id"), S(latestReasoning, "detail"), reasoningUpdatedAt);
-            if (!string.IsNullOrWhiteSpace(S(latestReasoning, "detail")))
-                _modelPhases[messageId] = (_modelPhases.GetValueOrDefault(messageId) ?? new NativeModelPhasePresentation())
-                    .ObserveReasoning(reasoningUpdatedAt);
-        }
-        if (assistant && _thinkingStates.TryGetValue(messageId, out var thinkingState)
-            && thinkingState.ObserveContent(messageId, visibleAnswer.ToString(), DateTimeOffset.UtcNow))
-            _modelPhases[messageId] = (_modelPhases.GetValueOrDefault(messageId) ?? new NativeModelPhasePresentation())
-                .ObserveContent(DateTimeOffset.UtcNow);
         if (S(message, "error") is { Length: > 0 } error && error != content) Text("error", error);
         // Unassociated files keep their existing footer placement. In
         // particular, anchored images are never repeated in that collection.
@@ -260,26 +230,11 @@ public sealed partial class NativeAssistantPage
             UpdateContinuationStep(messageId, message, (ContinuationToolStepView)continuation);
             desired.Add(continuation);
         }
-        var streaming = assistant && S(message, "status") is "streaming" or "pending";
-        if (streaming)
-        {
-            if (!blocks.TryGetValue("thinkingIndicator", out var thinking))
-                blocks["thinkingIndicator"] = thinking = new ThinkingIndicatorView(_settings.Current.CodingToolStepsExpanded)
-                {
-                    ScrollOwner = ConversationScroll, PinSelection = () => _conversationSelection?.IsSelecting == true,
-                    Project = projection => RunUiCallback("Thinking.LargeReasoning", projection),
-                    DisclosureInvoked = OnToolDisclosureInteraction,
-                };
-            var indicator = (ThinkingIndicatorView)thinking;
-            indicator.IsMessageActive = true;
-            indicator.HasBlockingTool = hasBlockingTool || liveStatus.Length > 0;
-            indicator.UpdateReasoning(S(latestReasoning, "id"), S(latestReasoning, "detail"), latestReasoningView,
-                _settings.Current.CodingToolStepsExpanded);
-            _thinkingIndicators[messageId] = indicator;
-            desired.Add(indicator);
-        }
-        else { _thinkingIndicators.Remove(messageId); _thinkingStates.Remove(messageId); _modelPhases.Remove(messageId); }
+        _thinkingIndicators.Remove(messageId);
+        _thinkingStates.Remove(messageId);
+        _modelPhases.Remove(messageId);
         var desiredSet = desired.ToHashSet();
+        foreach (var slot in desired.OfType<ActivitySlotView>()) if (slot.Content is FrameworkElement inner) desiredSet.Add(inner);
         foreach (var old in panel.Children.OfType<FrameworkElement>()
             .Where(child => !ReferenceEquals(child, messageActions) && !desiredSet.Contains(child)).ToArray()) panel.Children.Remove(old);
         for (var i = 0; i < desired.Count; i++)
@@ -293,6 +248,22 @@ public sealed partial class NativeAssistantPage
             blocks.Remove(stale);
         }
         RefreshThinkingIndicators();
+    }
+
+    private sealed class ActivitySlotView : ContentControl
+    {
+        public ActivitySlotView() { HorizontalContentAlignment = HorizontalAlignment.Stretch; MinHeight = 32; }
+    }
+
+    private ActivitySlotView ActivityContainer(string messageId, string key, FrameworkElement content)
+    {
+        var containerKey = "slot:" + key;
+        var blocks = _messageBlocks[messageId];
+        if (!blocks.TryGetValue(containerKey, out var existing) || existing is not ActivitySlotView)
+            blocks[containerKey] = existing = new ActivitySlotView();
+        var slot = (ActivitySlotView)existing;
+        if (!ReferenceEquals(slot.Content, content)) slot.Content = content;
+        return slot;
     }
 
     private static JsonElement[] VisibleNativeMessageArtifacts(JsonElement[] artifacts)
@@ -359,7 +330,8 @@ public sealed partial class NativeAssistantPage
         private JsonElement _step;
         private string _diff = "";
         private bool _detailsDirty;
-        private readonly bool _initiallyExpanded;
+        private bool _initiallyExpanded;
+        internal bool DefaultExpanded { get => _initiallyExpanded; set => _initiallyExpanded = value; }
         internal bool IsExpanded => _details.Visibility == Visibility.Visible;
         private bool _reasoning;
         private readonly StackPanel _details = new() { Spacing = 8, Visibility = Visibility.Collapsed };
@@ -371,6 +343,34 @@ public sealed partial class NativeAssistantPage
         private bool _fileMutation;
         private bool _running;
         private bool _hasCounts;
+        private bool _activity;
+        internal bool IsActivity => _activity;
+        internal string ActivityLabel => _thinkingLabel.Text;
+        internal bool HasActivityDisclosure => _toggle.Visibility == Visibility.Visible;
+        private readonly TextBlock _thinkingLabel = new() { Text = "Denke nach", FontSize = 14,
+            Foreground = ThemeBrush("MissumMutedTextBrush", 160), VerticalAlignment = VerticalAlignment.Center };
+        private readonly StackPanel _activityHeader = new() { Orientation = Orientation.Horizontal, Spacing = 8,
+            Margin = new(6, 5, 6, 5), Visibility = Visibility.Collapsed };
+        private Microsoft.UI.Xaml.Media.Animation.Storyboard? _shimmer;
+        private void UpdateShimmer()
+        {
+            _shimmer?.Stop();
+            _thinkingLabel.Opacity = 1;
+            if (!_activity || !_running || !IsLoaded || !_detailsInViewport) return;
+            _shimmer ??= CreateShimmer();
+            _shimmer.Begin();
+        }
+        private Microsoft.UI.Xaml.Media.Animation.Storyboard CreateShimmer()
+        {
+            var animation = new Microsoft.UI.Xaml.Media.Animation.DoubleAnimation { From = .42, To = 1,
+                Duration = TimeSpan.FromSeconds(1.25), AutoReverse = true,
+                RepeatBehavior = Microsoft.UI.Xaml.Media.Animation.RepeatBehavior.Forever, EnableDependentAnimation = false };
+            Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTarget(animation, _thinkingLabel);
+            Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTargetProperty(animation, "Opacity");
+            var story = new Microsoft.UI.Xaml.Media.Animation.Storyboard();
+            story.Children.Add(animation);
+            return story;
+        }
 
         public ToolStepView(bool initiallyExpanded = false)
         {
@@ -398,20 +398,27 @@ public sealed partial class NativeAssistantPage
             };
             var content = new StackPanel { Spacing = 10 };
             _details.Margin = new(24, 0, 0, 4);
+            _activityHeader.Children.Add(new FontIcon { Glyph = ToolIconGlyph("research"), FontSize = 14,
+                Foreground = ToolGlyphBrush("research", "assistant.reasoning"), VerticalAlignment = VerticalAlignment.Center });
+            _activityHeader.Children.Add(_thinkingLabel);
+            content.Children.Add(_activityHeader);
             content.Children.Add(_toggle); content.Children.Add(_details);
+            Loaded += (_, _) => UpdateShimmer();
+            Unloaded += (_, _) => { _shimmer?.Stop(); _thinkingLabel.Opacity = 1; };
             Children.Add(content);
             EffectiveViewportChanged += (sender, args) =>
             {
                 var viewport = args.EffectiveViewport;
                 _detailsInViewport = viewport.Width > 0 && viewport.Height > 0
                     && viewport.Right > 0 && viewport.Bottom > 0 && viewport.X < ActualWidth && viewport.Y < ActualHeight;
+                UpdateShimmer();
                 if (_detailsInViewport && IsExpanded && IsTrue(_step, "detailsDeferred")) _ = LoadDetailsAsync();
             };
         }
 
         internal void SetExpanded(bool expanded, bool forceDetails = true)
         {
-            if (IsResearchNavigation) { _details.Visibility = Visibility.Collapsed; UpdateHeader(); return; }
+            if (_activity || IsResearchNavigation) { _details.Visibility = Visibility.Collapsed; UpdateHeader(); return; }
             var changed = IsExpanded != expanded;
             _details.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
             if (expanded && IsTrue(_step, "detailsDeferred")) _ = LoadDetailsAsync(force: forceDetails);
@@ -424,12 +431,25 @@ public sealed partial class NativeAssistantPage
         public void Update(JsonElement step, int number = 1)
         {
             if (_step.Equals(step)) return;
-            var firstUpdate = !_hasStep;
+            var firstUpdate = !_hasStep || S(_step, "id") != S(step, "id");
             // Stable receipt identity is sufficient: a changed JsonElement must
             // be projected even if it has no timestamp or its text length stays
             // the same. Never duplicate a megabyte reasoning/output as raw JSON.
             _hasStep = true;
-            _step = step.Clone();
+            var wasActivity = _activity;
+            _activity = S(step, "tool") is "assistant.activity" or "assistant.reasoning" or "assistant.progress" or "context.compact";
+            _running = S(step, "status") is "running" or "pending";
+            _activityHeader.Visibility = _activity ? Visibility.Visible : Visibility.Collapsed;
+            _toggle.Visibility = _activity ? Visibility.Collapsed : Visibility.Visible;
+            UpdateShimmer();
+            _step = step;
+            if (_activity)
+            {
+                _details.Visibility = Visibility.Collapsed;
+                _details.Children.Clear();
+                return;
+            }
+            if (wasActivity) firstUpdate = true;
             _detailsDirty = true;
             var tool = S(step, "tool");
             _fileMutation = tool is "coding.write" or "coding.edit" or "coding.undo";

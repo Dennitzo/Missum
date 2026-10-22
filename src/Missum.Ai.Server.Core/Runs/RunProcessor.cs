@@ -424,7 +424,6 @@ public sealed partial class RunProcessor : BackgroundService
         var activeCallRound = checkpoint.ActiveCallRound;
         var preserveSessionPromptPrefix = checkpoint.PreserveSessionPromptPrefix;
         var workingStatePromptIncluded = checkpoint.WorkingStatePromptIncluded;
-        var scienceVerificationPending = checkpoint.ScienceVerificationPending;
         var appliedSteeringSequence = checkpoint.AppliedSteeringSequence;
         var appliedModelSelectionEventId = checkpoint.AppliedModelSelectionEventId;
         var deepResearchCompleted = checkpoint.DeepResearchCompleted;
@@ -652,7 +651,7 @@ public sealed partial class RunProcessor : BackgroundService
                         continue;
                     }
 
-                    if (!string.IsNullOrWhiteSpace(pendingProposalId) && !scienceVerificationPending)
+                    if (!string.IsNullOrWhiteSpace(pendingProposalId))
                     {
                         if (!string.Equals(pendingToolCallId, call.Id, StringComparison.Ordinal))
                         {
@@ -710,11 +709,6 @@ public sealed partial class RunProcessor : BackgroundService
                         {
                             try
                             {
-                                if (workingState?.Science is not null)
-                                    workingState = await RefreshScienceInputsAsync(runId, operationId, call.Arguments, workingState,
-                                        async current => { workingState = current; await SaveCheckpointAsync().ConfigureAwait(false); },
-                                        async id => { pendingProposalId = id; pendingToolCallId = id is null ? null : call.Id;
-                                            scienceVerificationPending = id is not null; await SaveCheckpointAsync().ConfigureAwait(false); }, cancellationToken).ConfigureAwait(false);
                                 workingState = CodingWorkingStateReducer.ApplyPlanUpdate(workingState ?? CodingWorkingState.Create(ExtractOriginalTask(request)), call.Arguments);
                                 result = workingState.ConsecutivePlanNoOps > 0
                                     ? CodingPlanProgressGuard.NoOpReceipt(workingState, availableTools)
@@ -728,13 +722,12 @@ public sealed partial class RunProcessor : BackgroundService
                             }
                             catch (RunSteeringBoundaryException)
                             {
-                                pendingProposalId = null; pendingToolCallId = null; scienceVerificationPending = false;
+                                pendingProposalId = null; pendingToolCallId = null;
                                 await SaveCheckpointAsync().ConfigureAwait(false);
                                 continue;
                             }
                             catch (ArgumentException exception)
                             {
-                                if (scienceVerificationPending) { pendingProposalId = null; pendingToolCallId = null; scienceVerificationPending = false; }
                                 result = new(JsonSerializer.SerializeToElement(new { success = false, errorCode = "agent.invalid_state_action", error = exception.Message }), [],
                                     Succeeded: false, ErrorCode: "agent.invalid_state_action", ErrorMessage: exception.Message);
                             }
@@ -1587,7 +1580,7 @@ public sealed partial class RunProcessor : BackgroundService
                             $"Der letzte Werkzeugturn enthielt {batch.RejectedDuplicates.Count} zusätzliche identische ungültige Aufrufe. "
                             + "Diese wurden nicht ausgeführt und sind mit Originalargumenten im Laufjournal gespeichert. "
                             + "Pro unterschiedlichem ungültigem Aufruf folgt ein Fehlerbeleg. Korrigiere die dort genannten Pflichtfelder; "
-                            + "wiederhole keine leeren Aufrufe und erfinde keine Dateiinhalte oder Hashes."));
+                            + "wiederhole keine leeren Aufrufe und erfinde keine Dateiinhalte."));
                         acceptedCalls = batch.Calls;
                         response = response with { ToolCalls = [.. batch.Calls, .. deniedCalls] };
                     }
@@ -1660,7 +1653,7 @@ public sealed partial class RunProcessor : BackgroundService
                 UseStableSubagentToolCatalog: useStableSubagentToolCatalog,
                 ResearchManagedByAgent: researchManagedByAgent,
                 ContextProfileVersion: contextProfileVersion, ToolCatalogSignature: toolCatalogSignature,
-                ContextTools: contextTools, ScienceVerificationPending: scienceVerificationPending),
+                ContextTools: contextTools),
             cancellationToken);
 
         async Task ApplyModelSelectionAsync()
@@ -1740,7 +1733,7 @@ public sealed partial class RunProcessor : BackgroundService
                 foreach (var abandoned in activeCalls.Skip(nextToolIndex))
                     messages.Add(new LmChatMessage("tool", "{\"status\":\"not_executed\",\"errorCode\":\"run.steered\",\"message\":\"Neue Nutzereingabe: noch nicht gestarteten Aufruf verworfen.\"}", ToolCallId: abandoned.Id));
             activeCalls = null;
-            pendingProposalId = null; pendingToolCallId = null; scienceVerificationPending = false;
+            pendingProposalId = null; pendingToolCallId = null;
             nextToolIndex = 0;
             activeCallRound = null;
             selectedToolName = null;
@@ -1778,7 +1771,7 @@ public sealed partial class RunProcessor : BackgroundService
         {
             if (workingState?.Science is not null)
             {
-                workingState = ScienceStagePolicy.Revalidate(workingState, requireFreshReads: true);
+                workingState = ScienceStagePolicy.Revalidate(workingState);
                 if (ScienceSkill.ResultOutcome(workingState) == "open")
                 {
                     var pending = workingState.Plan.Where(step => step.Status != "completed").Select(step => step.Title).ToArray();

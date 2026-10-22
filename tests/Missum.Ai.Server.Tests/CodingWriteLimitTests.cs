@@ -35,11 +35,11 @@ public sealed class CodingWriteLimitTests
         Assert.Equal(16_000, tool.Schema.GetProperty("properties").GetProperty("newText").GetProperty("maxLength").GetInt32());
         Assert.Throws<ArgumentException>(() => catalog.Validate(tool, JsonSerializer.SerializeToElement(new
         {
-            path = "scene.py", expectedSha256 = new string('a', 64), oldText = "old", newText = new string('x', 16_001),
+            path = "scene.py", oldText = "old", newText = new string('x', 16_001),
         })));
         Assert.Throws<ArgumentException>(() => catalog.Validate(tool, JsonSerializer.SerializeToElement(new
         {
-            path = "scene.py", expectedSha256 = new string('a', 64),
+            path = "scene.py",
             edits = new[] { new { oldText = new string('a', 16_000), newText = new string('b', 16_000) }, new { oldText = "x", newText = "y" } },
         })));
     }

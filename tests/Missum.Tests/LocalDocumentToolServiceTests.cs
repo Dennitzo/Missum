@@ -36,7 +36,6 @@ public sealed class LocalDocumentToolServiceTests
             CancellationToken.None);
         var createdJson = JsonSerializer.SerializeToElement(created, JsonOptions);
         var documentId = createdJson.GetProperty("documentId").GetGuid();
-        var firstSha = createdJson.GetProperty("sha256").GetString()!;
 
         var secondMessage = await chats.AddMessageAsync(session.Id, ChatRole.Assistant, string.Empty, MessageStatus.Streaming);
         var appended = await service.CreateAsync(
@@ -48,7 +47,6 @@ public sealed class LocalDocumentToolServiceTests
                 sectionId = "mechanik.beispiel",
                 heading = "Beispiel",
                 content = "Ein Körper bewegt sich gleichförmig.",
-                expectedSha256 = firstSha,
             }),
             session.Id,
             secondMessage.Id,
@@ -56,7 +54,7 @@ public sealed class LocalDocumentToolServiceTests
         var appendedJson = JsonSerializer.SerializeToElement(appended, JsonOptions);
 
         Assert.Equal(2, appendedJson.GetProperty("revision").GetInt64());
-        Assert.NotEqual(firstSha, appendedJson.GetProperty("sha256").GetString());
+        Assert.False(appendedJson.TryGetProperty("sha256", out _));
         Assert.Single(await environment.Get<IChatArtifactRepository>().ListForMessageAsync(firstMessage.Id));
         Assert.Single(await environment.Get<IChatArtifactRepository>().ListForMessageAsync(secondMessage.Id));
 

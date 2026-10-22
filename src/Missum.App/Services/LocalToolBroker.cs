@@ -463,7 +463,7 @@ public sealed partial class LocalToolBroker(
                 ValidateProperties(
                     arguments,
                     ["operation", "reference", "format", "sectionId", "content"],
-                    ["operation", "reference", "format", "sectionId", "heading", "content", "expectedSha256"]);
+                    ["operation", "reference", "format", "sectionId", "heading", "content"]);
                 var operation = ValidateString(arguments, "operation", 1, 32);
                 if (operation is not ("create" or "appendSection" or "replaceSection"))
                 {
@@ -478,11 +478,6 @@ public sealed partial class LocalToolBroker(
                 ValidateString(arguments, "sectionId", 1, 128);
                 ValidateOptionalString(arguments, "heading", 1, 500);
                 ValidateString(arguments, "content", 0, 120_000);
-                ValidateOptionalString(arguments, "expectedSha256", 64, 64);
-                if (operation != "create" && !arguments.TryGetProperty("expectedSha256", out _))
-                {
-                    throw new InvalidDataException("document.create-Bearbeitungen benötigen expectedSha256.");
-                }
                 break;
             case ClientToolNames.DocumentsList:
                 ValidateProperties(arguments, [], []);

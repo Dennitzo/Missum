@@ -1,4 +1,4 @@
-﻿using Missum.Ai.Contracts;
+using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Coding;
 using Missum.Ai.Server.Core.Models;
 using Missum.Ai.Server.Core.Policies;
@@ -199,7 +199,7 @@ public sealed class AgentNarrationPolicyTests
     [Fact]
     public void ExistingCheckpointUpgradeDoesNotInjectTheNewNarrationIntoItsPinnedPrefix()
     {
-        List<LmChatMessage> messages = [new("system", CodingAgentPolicy.ReasoningLanguagePrompt
+        List<LmChatMessage> messages = [new("system", CodingAgentPolicy.ResponseLanguagePrompt
             + CodingAgentPolicy.StagedExecutionAndNarrationPrompt + CodingAgentPolicy.WorkspaceDependenciesPrompt
             + CodingAgentPolicy.ScientificResearchPrompt + MathFormattingPolicy.Instructions), new("user", "Fortsetzen")];
         var before = messages.ToArray();

@@ -26,7 +26,7 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
         var path = Path.Combine(_root, "mixed.cs");
         await File.WriteAllTextAsync(path, "prefix\nalpha\r\nbeta\ngamma\r\nsuffix\n", new UTF8Encoding(true));
         var read = await Execute("coding.read", new { path = "mixed.cs" });
-        await Execute("coding.edit", new { path = "mixed.cs", expectedSha256 = read.GetProperty("sha256").GetString(),
+        await Execute("coding.edit", new { path = "mixed.cs",
             oldText = "alpha" + suppliedNewline + "beta" + suppliedNewline + "gamma", newText = "changed\nblock" });
         var bytes = await File.ReadAllBytesAsync(path);
         Assert.True(bytes.AsSpan().StartsWith(Encoding.UTF8.Preamble));
@@ -43,11 +43,11 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
         await File.WriteAllTextAsync(path, original);
         var read = await Execute("coding.read", new { path = "conflict.txt" });
         var failure = await Assert.ThrowsAsync<InvalidOperationException>(() => Execute("coding.edit",
-            new { path = "conflict.txt", expectedSha256 = read.GetProperty("sha256").GetString(), oldText, newText = "changed" }));
+            new { path = "conflict.txt", oldText, newText = "changed" }));
         Assert.Contains(error, failure.Message);
         Assert.Equal(original, await File.ReadAllTextAsync(path));
         var refreshed = await Execute("coding.read", new { path = "conflict.txt" });
-        await Execute("coding.edit", new { path = "conflict.txt", expectedSha256 = refreshed.GetProperty("sha256").GetString(),
+        await Execute("coding.edit", new { path = "conflict.txt",
             oldText = "other\nsame\nline", newText = "other\nrecovered" });
         Assert.Equal("same\r\nline\nother\nrecovered\n", await File.ReadAllTextAsync(path));
     }
@@ -80,7 +80,7 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
         var all = await Execute("coding.read", new { path = "large.cs" });
         Assert.False(all.GetProperty("truncated").GetBoolean());
         Assert.Contains("700: " + lines[699], all.GetProperty("content").GetString());
-        Assert.Equal(first.GetProperty("sha256").GetString(), all.GetProperty("sha256").GetString());
+        Assert.False(all.TryGetProperty("sha256", out _));
     }
 
     [Fact]
@@ -158,7 +158,7 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
         await File.WriteAllBytesAsync(Path.Combine(_root, "hunks.txt"), original);
         var result = await Execute("coding.edit", new
         {
-            path = "hunks.txt", expectedSha256 = Convert.ToHexStringLower(SHA256.HashData(original)),
+            path = "hunks.txt",
             edits = new[]
             {
                 new { oldText = "line 05", newText = "inserted one\ninserted two" },
@@ -198,7 +198,7 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task ExternalChangeAfterPreviewDiscardsPatchAndNeverPublishesApplied()
+    public async Task ExternalChangeAfterPreviewDoesNotRequireAnotherHashConfirmation()
     {
         var path = Path.Combine(_root, "conflict-preview.txt");
         await File.WriteAllTextAsync(path, "original\n");
@@ -209,12 +209,13 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
             events.Add(JsonSerializer.Deserialize<JsonElement>(progress.OutputJson!).GetProperty("phase").GetString()!);
             await File.WriteAllTextAsync(path, "external update\n");
         });
-        await Assert.ThrowsAsync<InvalidOperationException>(() => executor.ExecuteAsync("coding.edit", JsonSerializer.SerializeToElement(new
+        await executor.ExecuteAsync("coding.edit", JsonSerializer.SerializeToElement(new
         {
-            path = "conflict-preview.txt", expectedSha256 = hash, oldText = "original", newText = "proposed",
-        })));
-        Assert.Equal("preview", Assert.Single(events));
-        Assert.Equal("external update\n", await File.ReadAllTextAsync(path));
+            path = "conflict-preview.txt", oldText = "original", newText = "proposed",
+        }));
+        Assert.Equal(2, events.Count);
+        Assert.Equal("preview", events[0]);
+        Assert.Equal("applied", events[1]);
         Assert.Empty(Directory.EnumerateFiles(_root, ".missum-coding-*.tmp"));
     }
 
@@ -251,7 +252,7 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
         Assert.InRange(result.GetRawText().Length, 1, LocalCodingToolExecutor.MaximumOutputCharacters);
         Assert.True(result.GetProperty("diffTruncated").GetBoolean());
         Assert.True(result.GetProperty("applied").GetBoolean());
-        Assert.Equal(applied.GetProperty("sha256").GetString(), result.GetProperty("sha256").GetString());
+        Assert.False(result.TryGetProperty("sha256", out _));
         await VerifyDiffAppliesAsync("long.txt", null, Encoding.UTF8.GetBytes(content), applied.GetProperty("diff").GetString()!);
     }
 
@@ -270,7 +271,7 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
         });
         var result = await executor.ExecuteAsync("coding.write", JsonSerializer.SerializeToElement(new
         {
-            path = "different.txt", content, expectedSha256 = Convert.ToHexStringLower(SHA256.HashData(original)),
+            path = "different.txt", content,
         }));
         Assert.True(result.GetProperty("success").GetBoolean());
         Assert.NotNull(patch);
@@ -282,11 +283,11 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
     public async Task NoOpEditReportsEmptyActualDiff()
     {
         var written = await Execute("coding.write", new { path = "same.txt", content = "same\n" });
-        var edited = await Execute("coding.edit", new { path = "same.txt", oldText = "same", newText = "same", expectedSha256 = written.GetProperty("sha256").GetString() });
+        var edited = await Execute("coding.edit", new { path = "same.txt", oldText = "same", newText = "same", });
         Assert.Equal(string.Empty, edited.GetProperty("diff").GetString());
         Assert.Equal(0, edited.GetProperty("addedLines").GetInt32());
         Assert.Equal(0, edited.GetProperty("removedLines").GetInt32());
-        Assert.Equal(written.GetProperty("sha256").GetString(), edited.GetProperty("sha256").GetString());
+        Assert.False(edited.TryGetProperty("sha256", out _));
     }
 
     [Fact]
@@ -303,7 +304,7 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
         });
         var result = await executor.ExecuteAsync("coding.write", JsonSerializer.SerializeToElement(new
         {
-            path = "oversized.txt", content = "replacement\n", expectedSha256 = Convert.ToHexStringLower(SHA256.HashData(original)),
+            path = "oversized.txt", content = "replacement\n",
         }));
         Assert.True(result.GetProperty("success").GetBoolean());
         Assert.True(applied.GetProperty("diffTruncated").GetBoolean());
@@ -327,16 +328,15 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task ReadEditAndStaleHashPreserveExternalChanges()
+    public async Task ReadEditAndWriteDoNotRequireHashes()
     {
         await Execute("coding.write", new { path = "sample.cs", content = "before\nafter\n" });
         var read = await Execute("coding.read", new { path = "sample.cs", startLine = 1, maximumLines = 1 });
         Assert.Equal(2, read.GetProperty("nextLine").GetInt32());
-        var hash = read.GetProperty("sha256").GetString();
-        await Execute("coding.edit", new { path = "sample.cs", oldText = "before", newText = "changed", expectedSha256 = hash });
+        await Execute("coding.edit", new { path = "sample.cs", oldText = "before", newText = "changed" });
         Assert.Equal("changed\nafter\n", await File.ReadAllTextAsync(Path.Combine(_root, "sample.cs")));
-        await Assert.ThrowsAsync<InvalidOperationException>(() => Execute("coding.write", new { path = "sample.cs", content = "overwrite", expectedSha256 = hash }));
-        Assert.Equal("changed\nafter\n", await File.ReadAllTextAsync(Path.Combine(_root, "sample.cs")));
+        await Execute("coding.write", new { path = "sample.cs", content = "overwrite" });
+        Assert.Equal("overwrite", await File.ReadAllTextAsync(Path.Combine(_root, "sample.cs")));
     }
 
     [Fact]
@@ -351,15 +351,15 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
         var match = Assert.Single(searched.GetProperty("matches").EnumerateArray());
         Assert.Equal(2, match.GetProperty("line").GetInt32());
         var read = await Execute("coding.read", new { path = relative });
-        Assert.Equal(written.GetProperty("sha256").GetString(), read.GetProperty("sha256").GetString());
+        Assert.False(read.TryGetProperty("sha256", out _));
         Assert.Contains("2: value = 1", read.GetProperty("content").GetString()!, StringComparison.Ordinal);
         var edited = await Execute("coding.edit", new
         {
-            path = relative, oldText = "value = 1", newText = "value = 2", expectedSha256 = read.GetProperty("sha256").GetString(),
+            path = relative, oldText = "value = 1", newText = "value = 2",
         });
         var verified = await Execute("coding.read", new { path = relative });
-        Assert.Equal(edited.GetProperty("sha256").GetString(), verified.GetProperty("sha256").GetString());
-        Assert.NotEqual(read.GetProperty("sha256").GetString(), verified.GetProperty("sha256").GetString());
+        Assert.False(verified.TryGetProperty("sha256", out _));
+        Assert.False(verified.TryGetProperty("sha256", out _));
         Assert.Contains("2: value = 2", verified.GetProperty("content").GetString()!, StringComparison.Ordinal);
         var command = await Execute("coding.command", new
         {
@@ -368,7 +368,7 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
         });
         Assert.True(command.GetProperty("success").GetBoolean(), command.GetRawText());
         Assert.Equal("FILE_VERIFIED", command.GetProperty("stdout").GetString());
-        Assert.Equal(Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(Path.Combine(_root, relative)))), verified.GetProperty("sha256").GetString());
+        Assert.False(verified.TryGetProperty("sha256", out _));
     }
 
     [Theory]
@@ -386,7 +386,7 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
         await Execute("coding.edit", new
         {
             path = "multiline.txt", oldText = "begin\n  old one\n  old two\nend", newText = "begin\n  replacement café\nend",
-            expectedSha256 = read.GetProperty("sha256").GetString(),
+
         });
         var expected = Encoding.UTF8.GetBytes($"prefix{newline}begin{newline}  replacement café{newline}end{newline}suffix{newline}");
         if (withBom) expected = [.. Encoding.UTF8.Preamble, .. expected];
@@ -396,27 +396,16 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task StaleHashCanBeCorrectedByRereadingWithoutLosingExternalChanges()
+    public async Task EditUsesCurrentContentsWithoutRequiringAnotherRead()
     {
         const string relative = "conflict.txt";
         await Execute("coding.write", new { path = relative, content = "keep\nvalue = old\n" });
-        var stale = await Execute("coding.read", new { path = relative });
         var path = Path.Combine(_root, relative);
-        var external = Encoding.UTF8.GetBytes("external addition\nkeep\nvalue = old\n");
-        await File.WriteAllBytesAsync(path, external);
-        await Assert.ThrowsAsync<InvalidOperationException>(() => Execute("coding.edit", new
-        {
-            path = relative, oldText = "value = old", newText = "value = new", expectedSha256 = stale.GetProperty("sha256").GetString(),
-        }));
-        Assert.Equal(external, await File.ReadAllBytesAsync(path));
-        Assert.Empty(Directory.EnumerateFiles(_root, ".missum-coding-*.tmp", SearchOption.AllDirectories));
-        var current = await Execute("coding.read", new { path = relative });
-        var updated = await Execute("coding.edit", new
-        {
-            path = relative, oldText = "value = old", newText = "value = new", expectedSha256 = current.GetProperty("sha256").GetString(),
-        });
+        await File.WriteAllTextAsync(path, "external addition\nkeep\nvalue = old\n");
+        var updated = await Execute("coding.edit", new { path = relative, oldText = "value = old", newText = "value = new" });
         Assert.Equal("external addition\nkeep\nvalue = new\n", await File.ReadAllTextAsync(path));
-        Assert.Equal(updated.GetProperty("sha256").GetString(), (await Execute("coding.read", new { path = relative })).GetProperty("sha256").GetString());
+        Assert.False(updated.TryGetProperty("sha256", out _));
+        Assert.Empty(Directory.EnumerateFiles(_root, ".missum-coding-*.tmp", SearchOption.AllDirectories));
     }
 
     [Fact]
@@ -424,23 +413,20 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
     {
         await Execute("coding.write", new { path = "overlap.txt", content = "ababa tail" });
         var read = await Execute("coding.read", new { path = "overlap.txt" });
-        var hash = read.GetProperty("sha256").GetString();
-        await Assert.ThrowsAsync<InvalidOperationException>(() => Execute("coding.edit", new { path = "overlap.txt", oldText = "aba", newText = "wrong", expectedSha256 = hash }));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Execute("coding.edit", new { path = "overlap.txt", oldText = "aba", newText = "wrong" }));
         Assert.Equal("ababa tail", await File.ReadAllTextAsync(Path.Combine(_root, "overlap.txt")));
-        await Execute("coding.edit", new { path = "overlap.txt", oldText = "ababa ", newText = "", expectedSha256 = hash });
+        await Execute("coding.edit", new { path = "overlap.txt", oldText = "ababa ", newText = "" });
         Assert.Equal("tail", await File.ReadAllTextAsync(Path.Combine(_root, "overlap.txt")));
     }
 
     [Fact]
-    public async Task WholeFileOverwriteRequiresCurrentHashAndReturnsUpdatedHash()
+    public async Task WholeFileOverwriteNeedsNoReadAndReturnsNoHash()
     {
         await Execute("coding.write", new { path = "replace.txt", content = "original" });
-        await Assert.ThrowsAsync<InvalidOperationException>(() => Execute("coding.write", new { path = "replace.txt", content = "unapproved overwrite" }));
-        var current = await Execute("coding.read", new { path = "replace.txt" });
-        var written = await Execute("coding.write", new { path = "replace.txt", content = "entirely replaced\n", expectedSha256 = current.GetProperty("sha256").GetString() });
+        var written = await Execute("coding.write", new { path = "replace.txt", content = "entirely replaced\n", });
         Assert.False(written.GetProperty("created").GetBoolean());
         Assert.Equal("entirely replaced\n", await File.ReadAllTextAsync(Path.Combine(_root, "replace.txt")));
-        Assert.Equal(written.GetProperty("sha256").GetString(), (await Execute("coding.read", new { path = "replace.txt" })).GetProperty("sha256").GetString());
+        Assert.False(written.TryGetProperty("sha256", out _));
     }
 
     [Theory]
@@ -455,7 +441,7 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
         var read = await Execute("coding.read", new { path = "batch.txt" });
         var edited = await Execute("coding.edit", new
         {
-            path = "batch.txt", expectedSha256 = read.GetProperty("sha256").GetString(),
+            path = "batch.txt",
             edits = new[]
             {
                 new { oldText = "gamma\ndelta", newText = "result café" },
@@ -468,8 +454,8 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
         var expected = Encoding.UTF8.GetBytes($"expanded prefix{newline}gamma{newline}delta{newline}new line{newline}separator{newline}result café{newline}{newline}");
         if (withBom) expected = [.. Encoding.UTF8.Preamble, .. expected];
         Assert.Equal(expected, await File.ReadAllBytesAsync(path));
-        Assert.Equal(Convert.ToHexStringLower(SHA256.HashData(expected)), edited.GetProperty("sha256").GetString());
-        Assert.Equal(edited.GetProperty("sha256").GetString(), (await Execute("coding.read", new { path = "batch.txt" })).GetProperty("sha256").GetString());
+        Assert.False(edited.TryGetProperty("sha256", out _));
+        Assert.False(edited.TryGetProperty("sha256", out _));
         Assert.Empty(Directory.EnumerateFiles(_root, ".missum-coding-*.tmp"));
     }
 
@@ -485,7 +471,7 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
         var created = await Execute("coding.write", new { path = "batch-invalid.txt", content = original });
         await Assert.ThrowsAsync<InvalidOperationException>(() => Execute("coding.edit", new
         {
-            path = "batch-invalid.txt", expectedSha256 = created.GetProperty("sha256").GetString(),
+            path = "batch-invalid.txt",
             edits = new[] { new { oldText = first, newText = "introduced" }, new { oldText = second, newText = "replacement" } },
         }));
         Assert.Equal(Encoding.UTF8.GetBytes(original), await File.ReadAllBytesAsync(Path.Combine(_root, "batch-invalid.txt")));
@@ -493,20 +479,12 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task StaleBatchHashRejectsAllEditsAndRereadRetainsExternalChanges()
+    public async Task BatchEditsNeedNoHashAndPreserveUnrelatedCurrentContents()
     {
-        var created = await Execute("coding.write", new { path = "batch-stale.txt", content = "first\nsecond\n" });
         var path = Path.Combine(_root, "batch-stale.txt");
-        var external = Encoding.UTF8.GetBytes("external addition\nfirst\nsecond\n");
-        await File.WriteAllBytesAsync(path, external);
+        await File.WriteAllTextAsync(path, "external addition\nfirst\nsecond\n");
         var edits = new[] { new { oldText = "first", newText = "updated first" }, new { oldText = "second", newText = "updated second" } };
-        await Assert.ThrowsAsync<InvalidOperationException>(() => Execute("coding.edit", new
-        {
-            path = "batch-stale.txt", expectedSha256 = created.GetProperty("sha256").GetString(), edits,
-        }));
-        Assert.Equal(external, await File.ReadAllBytesAsync(path));
-        var current = await Execute("coding.read", new { path = "batch-stale.txt" });
-        await Execute("coding.edit", new { path = "batch-stale.txt", expectedSha256 = current.GetProperty("sha256").GetString(), edits });
+        await Execute("coding.edit", new { path = "batch-stale.txt", edits });
         Assert.Equal("external addition\nupdated first\nupdated second\n", await File.ReadAllTextAsync(path));
         Assert.Empty(Directory.EnumerateFiles(_root, ".missum-coding-*.tmp"));
     }
@@ -521,14 +499,14 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
         var validEdit = new { oldText = "ab", newText = "updated" };
         object[] invalidArguments =
         [
-            new { path = "batch-limits.txt", expectedSha256 = hash, edits = Array.Empty<object>() },
-            new { path = "batch-limits.txt", expectedSha256 = hash, edits = Enumerable.Repeat(validEdit, 101).ToArray() },
-            new { path = "batch-limits.txt", expectedSha256 = hash, edits = new[] { validEdit }, oldText = "ab", newText = "updated" },
-            new { path = "batch-limits.txt", expectedSha256 = hash, edits = new[] { validEdit }, oldText = (string?)null },
-            new { path = "batch-limits.txt", expectedSha256 = hash, edits = new[] { new { oldText = "", newText = "updated" } } },
-            new { path = "batch-limits.txt", expectedSha256 = hash, edits = new[] { new { oldText = "ab", newText = new string('x', 16_001) } } },
-            new { path = "batch-limits.txt", expectedSha256 = hash, edits = new[] { new { oldText = "ab", newText = "updated", extra = true } } },
-            new { path = "batch-limits.txt", expectedSha256 = hash, edits = new[]
+            new { path = "batch-limits.txt", edits = Array.Empty<object>() },
+            new { path = "batch-limits.txt", edits = Enumerable.Repeat(validEdit, 101).ToArray() },
+            new { path = "batch-limits.txt", edits = new[] { validEdit }, oldText = "ab", newText = "updated" },
+            new { path = "batch-limits.txt", edits = new[] { validEdit }, oldText = (string?)null },
+            new { path = "batch-limits.txt", edits = new[] { new { oldText = "", newText = "updated" } } },
+            new { path = "batch-limits.txt", edits = new[] { new { oldText = "ab", newText = new string('x', 16_001) } } },
+            new { path = "batch-limits.txt", edits = new[] { new { oldText = "ab", newText = "updated", extra = true } } },
+            new { path = "batch-limits.txt", edits = new[]
             {
                 new { oldText = new string('a', 16_000), newText = "x" },
                 new { oldText = new string('b', 16_000), newText = "y" },
@@ -551,7 +529,7 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
         await Git("add", "--all");
         await Git("-c", "user.name=Missum Coding Tests", "-c", "user.email=coding-tests@example.invalid", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=NUL", "commit", "--quiet", "-m", "fixture");
         var read = await Execute("coding.read", new { path = "target[1].txt" });
-        await Execute("coding.edit", new { path = "target[1].txt", oldText = "target before", newText = "target after", expectedSha256 = read.GetProperty("sha256").GetString() });
+        await Execute("coding.edit", new { path = "target[1].txt", oldText = "target before", newText = "target after", });
         await File.WriteAllTextAsync(Path.Combine(_root, "target1.txt"), "sibling after\n");
         var result = await Execute("coding.gitDiff", new { path = "target[1].txt" });
         Assert.True(result.GetProperty("success").GetBoolean(), result.GetRawText());
@@ -567,7 +545,7 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
         await Execute("coding.write", new { path = "first.txt", content = "staged initial\n" });
         await Git("add", "first.txt");
         var read = await Execute("coding.read", new { path = "first.txt" });
-        await Execute("coding.edit", new { path = "first.txt", oldText = "staged initial", newText = "working update", expectedSha256 = read.GetProperty("sha256").GetString() });
+        await Execute("coding.edit", new { path = "first.txt", oldText = "staged initial", newText = "working update", });
         var result = await Execute("coding.gitDiff", new { });
         Assert.True(result.GetProperty("success").GetBoolean(), result.GetRawText());
         Assert.Contains("+staged initial", result.GetProperty("stagedDiff").GetProperty("stdout").GetString()!, StringComparison.Ordinal);
@@ -581,7 +559,7 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => Execute("coding.write", new { path = ".git/config", content = "no" }));
         await Execute("coding.write", new { path = "a.txt", content = "same same" });
         var read = await Execute("coding.read", new { path = "a.txt" });
-        await Assert.ThrowsAsync<InvalidOperationException>(() => Execute("coding.edit", new { path = "a.txt", oldText = "same", newText = "different", expectedSha256 = read.GetProperty("sha256").GetString() }));
+        Assert.False(read.TryGetProperty("sha256", out _));
         Assert.Equal("same same", await File.ReadAllTextAsync(Path.Combine(_root, "a.txt")));
     }
 

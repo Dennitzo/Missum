@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -258,7 +258,7 @@ public sealed class ScientificPublicationImagesTests : IDisposable
         public Task<ResearchSandboxLayout> EnsureProjectAsync(string projectId, CancellationToken cancellationToken = default) => Task.FromResult(Layout);
         public Task<ResearchSandboxRuntimeStatus> PrepareRuntimeAsync(CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task<ResearchSandboxFileChange> WriteTextAsync(string projectId, string relativePath, string content,
-            string? expectedSha256 = null, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+            CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task RestoreChangeSetAsync(string projectId, string changeSetId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task<ResearchSandboxRunResult> RunPythonAsync(string projectId, string relativeScriptPath,
             IReadOnlyList<string>? arguments = null, int timeoutSeconds = 7200, string? relativeWorkingDirectory = null,

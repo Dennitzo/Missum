@@ -1,4 +1,4 @@
-﻿using Missum.Ai.Contracts;
+using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Coding;
 using Missum.Ai.Server.Core.Gateway;
 using Missum.Ai.Server.Core.Models;
@@ -613,7 +613,7 @@ public sealed class CodingWorkingStateIntegrationTests
                 history.Add(new("system", checkpointKind == "updated"
                     ? CodingAgentPolicy.ForWorkingState(true) : "Legacy coding policy. Preserve existing rules."));
             // Even a complete quotation in user data must not suppress the actual system instruction.
-            history.Add(new("user", "Source identifier: parse_value; path: src/Parser.cs\n" + CodingAgentPolicy.ReasoningLanguagePrompt));
+            history.Add(new("user", "Source identifier: parse_value; path: src/Parser.cs\n" + CodingAgentPolicy.ResponseLanguagePrompt));
             await harness.Repository.SaveCheckpointAsync(run, new(history, 0, 0, 0, 0));
         }
         await harness.DriveUntilCompletedAsync(run);
@@ -641,7 +641,7 @@ public sealed class CodingWorkingStateIntegrationTests
         await harness.TickAsync(run);
         var second = (await harness.Repository.GetCheckpointAsync(run))!;
         var system = Assert.Single(second.Messages, message => message.Role == "system").Content!;
-        Assert.Equal("Legacy policy\n\n" + CodingAgentPolicy.ReasoningLanguagePrompt
+        Assert.Equal("Legacy policy\n\n" + CodingAgentPolicy.ResponseLanguagePrompt
             + "\n\n" + CodingAgentPolicy.StagedExecutionAndNarrationPrompt
             + "\n\n" + CodingAgentPolicy.WorkspaceDependenciesPrompt
             + "\n\n" + CodingAgentPolicy.ScientificResearchPrompt
@@ -732,7 +732,7 @@ public sealed class CodingWorkingStateIntegrationTests
         Assert.Equal(summaryEffort, harness.Handler.Efforts[0]);
         Assert.Equal("xhigh", harness.Handler.Efforts[1]);
         Assert.All(harness.Handler.Requests, AssertGermanReasoningInstruction);
-        Assert.Contains(CodingContextCompactor.SummaryInstruction.Replace(CodingAgentPolicy.ReasoningLanguagePrompt, "", StringComparison.Ordinal).Trim(),
+        Assert.Contains(CodingContextCompactor.SummaryInstruction.Replace(CodingAgentPolicy.ResponseLanguagePrompt, "", StringComparison.Ordinal).Trim(),
             harness.Handler.Requests[0].GetProperty("messages")[0].GetProperty("content").GetString());
         var metrics = (await harness.Repository.GetEventsAfterAsync(run, 0)).Where(item => item.Type == RunEventTypes.CodingMetrics).ToArray();
         Assert.Equal(2, metrics.Length);
@@ -759,7 +759,7 @@ public sealed class CodingWorkingStateIntegrationTests
         var run = await harness.CreateAsync("Apply and verify the change.");
         var edit = new LmToolCall("edit-once", "coding.edit", JsonSerializer.SerializeToElement(new
         {
-            path = "source.cs", expectedSha256 = new string('a', 64),
+            path = "source.cs",
             edits = new[] { new { oldText = "old", newText = "new" } },
         }));
         await harness.Repository.SaveCheckpointAsync(run, new(
@@ -1089,7 +1089,7 @@ public sealed class CodingWorkingStateIntegrationTests
         {
             Sequence = 224,
             Evidence = Enumerable.Range(0, 224).Select(i => new CodingToolEvidence("historic-" + i,
-                "coding.read", true, "source.cs", null, null, new string('x', 1600), i)).ToArray(),
+                "coding.read", true, "source.cs", null, new string('x', 1600), i)).ToArray(),
             Facts = [new("Confirmed project architecture", ["historic-1"])],
         };
         await harness.Repository.SaveCheckpointAsync(first, new(
@@ -1355,8 +1355,8 @@ public sealed class CodingWorkingStateIntegrationTests
         var systemText = string.Join("\n", request.GetProperty("messages").EnumerateArray()
             .Where(message => message.GetProperty("role").GetString() == "system")
             .Select(message => message.GetProperty("content").GetString()));
-        Assert.Contains(CodingAgentPolicy.ReasoningLanguagePrompt, systemText, StringComparison.Ordinal);
-        Assert.Equal(2, systemText.Split(CodingAgentPolicy.ReasoningLanguagePrompt, StringSplitOptions.None).Length);
+        Assert.Contains(CodingAgentPolicy.ResponseLanguagePrompt, systemText, StringComparison.Ordinal);
+        Assert.Equal(2, systemText.Split(CodingAgentPolicy.ResponseLanguagePrompt, StringSplitOptions.None).Length);
     }
 
     [Fact]
@@ -1377,7 +1377,7 @@ public sealed class CodingWorkingStateIntegrationTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task ScienceClosureRefreshesActualFileHashAcrossSuspensionWithoutAnotherModelTurn(bool changedExternally)
+    public async Task ScienceClosureDoesNotIssueAdditionalFileReadsOrHashChecks(bool changedExternally)
     {
         using var harness = new Harness();
         var request = Request("Prüfe die gespeicherte Quelle.") with
@@ -1400,29 +1400,21 @@ public sealed class CodingWorkingStateIntegrationTests
             }
             return harness.Handler.CompleteResponse();
         };
-        var proposals = 0; var verifiedSuspension = false;
+        var proposals = 0;
         for (var i = 0; i < 8; i++)
         {
             await harness.TickAsync(run);
             if ((await harness.Repository.GetAsync(run))!.State == RunState.Completed) break;
             var checkpoint = (await harness.Repository.GetCheckpointAsync(run))!;
             Assert.NotNull(checkpoint.PendingProposalId);
-            verifiedSuspension |= checkpoint.ScienceVerificationPending;
-            if (checkpoint.ScienceVerificationPending)
-            {
-                var proposal = (await harness.Repository.GetToolProposalAsync(checkpoint.PendingProposalId!, run))!;
-                Assert.Equal(1, proposal.Arguments.GetProperty("maximumLines").GetInt32());
-                Assert.False(proposal.Arguments.TryGetProperty("endLine", out _));
-            }
             var sha = proposals++ == 1 && changedExternally ? new string('b', 64) : new string('a', 64);
             await harness.Repository.SaveClientToolResultAsync(run, new(checkpoint.PendingProposalId!, "completed",
                 JsonSerializer.SerializeToElement(new { success = true, path = "source.cs", sha256 = sha, content = "Original source" })));
         }
-        Assert.True(verifiedSuspension);
-        Assert.Equal(2, proposals);
+        Assert.Equal(1, proposals);
         Assert.Equal(4, harness.Handler.Requests.Count);
         var events = await harness.Repository.GetEventsAfterAsync(run, 0);
-        Assert.Equal(changedExternally ? "open" : "clarified", Assert.Single(events, item => item.Type == RunEventTypes.RunCompleted).Data.GetProperty("scientificOutcome").GetString());
+        Assert.Equal("clarified", Assert.Single(events, item => item.Type == RunEventTypes.RunCompleted).Data.GetProperty("scientificOutcome").GetString());
     }
 
     private sealed class Harness : IDisposable
@@ -1563,7 +1555,7 @@ public sealed class CodingWorkingStateIntegrationTests
             id, type = "function", function = new
             {
                 name = ModelRuntimeClient.ToTransportToolName("coding.edit"),
-                arguments = JsonSerializer.Serialize(new { path = "source.cs", expectedSha256 = new string('a', 64), oldText, newText = "replacement" }),
+                arguments = JsonSerializer.Serialize(new { path = "source.cs", oldText, newText = "replacement" }),
             },
         });
         internal static HttpResponseMessage EmptyResponse(bool reasoning, bool streaming = false)
