@@ -901,15 +901,14 @@ public sealed partial class RunProcessor : BackgroundService
             // A turn following assistant.selectTool has exactly one purpose: emit the
             // selected structured call. Some local models narrate that intent
             // before (or instead of) returning JSON. Keep this protocol-only
-            // turn out of the visible answer. The separate provider reasoning channel
-            // remains visible without exposing tool arguments as prose.
+            // turn out of the visible answer. Provider reasoning remains private to
+            // the model context; the client receives phase transitions only.
             // Early delegation is ordinary scientific work: its introduction must
             // stream like other tool turns. Only the internal selector is prose-free.
             var suppressRequiredToolTurn = selectedToolName is not null;
             var liveTextGate = new IncrementalVisibleTextGate(enabled: !suppressRequiredToolTurn);
             CodingTextReconciler? codingText = null;
-            var firstReasoningFragment = true;
-            var reasoningPublished = false;
+            var reasoningActivity = new ReasoningActivityTransport();
             var interruptedContent = new StringBuilder();
             var interruptedReasoning = new StringBuilder();
             var exactNativeTailRecovered = false;
@@ -927,17 +926,21 @@ public sealed partial class RunProcessor : BackgroundService
                         }
                         return;
                     }
+                    // A short last text fragment must not wait behind a long
+                    // private reasoning phase or tool-argument serialization.
+                    if (progress.State is "reasoningDelta" or "toolCallGeneration" or "toolSelected"
+                        && liveTextGate.Flush() is { Length: > 0 } pendingVisibleDelta)
+                        await PublishVisibleDeltaAsync(codingText is null ? new TextDeltaEvent(pendingVisibleDelta)
+                            : codingText.Push(pendingVisibleDelta), token).ConfigureAwait(false);
+                    if (reasoningActivity.Observe(progress) is { } reasoningPhase)
+                        await _repository.AppendEventAsync(runId, RunEventTypes.ModelGeneration,
+                            reasoningPhase, token).ConfigureAwait(false);
                     if (progress.State == "reasoningDelta")
                     {
+                        // Retain the exact internal channel for cancellation recovery,
+                        // without writing or transmitting growing reasoning receipts.
                         if (!string.IsNullOrEmpty(progress.ReasoningDelta))
-                        {
                             interruptedReasoning.Append(progress.ReasoningDelta);
-                            await _repository.AppendEventAsync(runId, RunEventTypes.ReasoningDelta,
-                                new ReasoningDeltaEvent(progress.ReasoningDelta, (int)Math.Min(roundCount + 1, int.MaxValue),
-                                    ReplaceFrom: firstReasoningFragment ? 0 : null, State: "running"), token).ConfigureAwait(false);
-                            firstReasoningFragment = false;
-                            reasoningPublished = true;
-                        }
                         return;
                     }
                     if (string.Equals(progress.State, "contentDelta", StringComparison.Ordinal)
@@ -957,7 +960,6 @@ public sealed partial class RunProcessor : BackgroundService
                     {
                         liveTextGate = new IncrementalVisibleTextGate(enabled: !suppressRequiredToolTurn);
                         codingText?.RestartAttempt();
-                        firstReasoningFragment = true;
                         interruptedContent.Clear();
                         interruptedReasoning.Clear();
                         exactNativeTailRecovered = false;
@@ -1082,8 +1084,7 @@ public sealed partial class RunProcessor : BackgroundService
                     var compactingHeartbeat = PublishCodingHeartbeatAsync(runId, roundCount + 1, compactingCancellation.Token, "codingCompacting");
                     LmChatResult condensed;
                     var summaryEffort = _modelRuntime.ResolveCompactionReasoningEffort(selection.ModelId, selection.Role);
-                    var firstCompactionReasoningFragment = true;
-                    var compactionReasoningPublished = false;
+                    var compactionReasoningActivity = new ReasoningActivityTransport();
                     try
                     {
                         condensed = await _modelRuntime.CompleteChatAsync(selection.ModelId, compaction.SummaryRequest, [],
@@ -1091,28 +1092,18 @@ public sealed partial class RunProcessor : BackgroundService
                             requiredContextLength: contextLength,
                             nativeProgress: async (progress, token) =>
                             {
-                                if (progress.State == "reasoningDelta")
-                                {
-                                    if (!string.IsNullOrEmpty(progress.ReasoningDelta))
-                                    {
-                                        await _repository.AppendEventAsync(runId, RunEventTypes.ReasoningDelta,
-                                            new ReasoningDeltaEvent(progress.ReasoningDelta, (int)Math.Min(roundCount + 1, int.MaxValue),
-                                                Phase: "compaction", ReplaceFrom: firstCompactionReasoningFragment ? 0 : null, State: "running"), token).ConfigureAwait(false);
-                                        firstCompactionReasoningFragment = false;
-                                        compactionReasoningPublished = true;
-                                    }
-                                    return;
-                                }
-                                if (progress.State == "generationRetry") firstCompactionReasoningFragment = true;
+                                if (compactionReasoningActivity.Observe(progress) is { } reasoningPhase)
+                                    await _repository.AppendEventAsync(runId, RunEventTypes.ModelGeneration,
+                                        reasoningPhase, token).ConfigureAwait(false);
+                                if (progress.State == "reasoningDelta") return;
                                 await _repository.AppendEventAsync(runId, RunEventTypes.ModelGeneration,
                                     new ModelGenerationEvent("codingCompacting", GeneratedTokens: progress.GeneratedTokens, CurrentTokens: progress.CurrentTokens), token).ConfigureAwait(false);
                             },
                             cancellationToken: steeringCall.Token,
                             runtimeInstanceId: request.Subagent?.RuntimeInstanceId).ConfigureAwait(false);
-                        if (compactionReasoningPublished)
-                            await _repository.AppendEventAsync(runId, RunEventTypes.ReasoningDelta,
-                                new ReasoningDeltaEvent("", (int)Math.Min(roundCount + 1, int.MaxValue), Phase: "compaction",
-                                    ReplaceFrom: firstCompactionReasoningFragment ? 0 : null, State: "completed"), steeringCall.Token).ConfigureAwait(false);
+                        if (compactionReasoningActivity.Complete() is { } completedReasoning)
+                            await _repository.AppendEventAsync(runId, RunEventTypes.ModelGeneration,
+                                completedReasoning, steeringCall.Token).ConfigureAwait(false);
                     }
                     finally
                     {
@@ -1218,9 +1209,6 @@ public sealed partial class RunProcessor : BackgroundService
                     }
                     var priorTurnEvents = await _repository.GetVisibleTextEventsAsync(runId, streamingTurnStartEventId.Value, steeringCall.Token).ConfigureAwait(false);
                     codingText = new(visibleTextLength, CodingTextReconciler.Project(priorTurnEvents, visibleTextLength));
-                    reasoningPublished = await _repository.HasReasoningDeltaAfterAsync(runId,
-                        streamingTurnStartEventId.Value, (int)Math.Min(roundCount + 1, int.MaxValue),
-                        steeringCall.Token).ConfigureAwait(false);
                 }
                 using var heartbeatCancellation = CancellationTokenSource.CreateLinkedTokenSource(steeringCall.Token);
                 var heartbeat = isCoding ? PublishCodingHeartbeatAsync(runId, roundCount + 1, heartbeatCancellation.Token) : Task.CompletedTask;
@@ -1299,11 +1287,9 @@ public sealed partial class RunProcessor : BackgroundService
                         workingStatePromptIncluded = workingState is not null;
                         lastNativeReasoning = response.ReasoningContent;
                     }
-                    if (reasoningPublished)
-                        await _repository.AppendEventAsync(runId, RunEventTypes.ReasoningDelta,
-                            new ReasoningDeltaEvent("", (int)Math.Min(roundCount + 1, int.MaxValue),
-                                ReplaceFrom: firstReasoningFragment ? 0 : null, State: "completed"),
-                            steeringCall.Token).ConfigureAwait(false);
+                    if (reasoningActivity.Complete() is { } completedReasoning)
+                        await _repository.AppendEventAsync(runId, RunEventTypes.ModelGeneration,
+                            completedReasoning, steeringCall.Token).ConfigureAwait(false);
                 }
                 finally
                 {
@@ -1322,9 +1308,9 @@ public sealed partial class RunProcessor : BackgroundService
                     preserveSessionPromptPrefix = true;
                     workingStatePromptIncluded = workingState is not null;
                 }
-                if (reasoningPublished)
-                    await _repository.AppendEventAsync(runId, RunEventTypes.ReasoningDelta,
-                        new ReasoningDeltaEvent("", (int)Math.Min(roundCount + 1, int.MaxValue), State: "steered"), cancellationToken).ConfigureAwait(false);
+                if (reasoningActivity.Complete("steered") is { } completedReasoning)
+                    await _repository.AppendEventAsync(runId, RunEventTypes.ModelGeneration,
+                        completedReasoning, cancellationToken).ConfigureAwait(false);
                 var visible = CodingTextReconciler.Project(await _repository.GetVisibleTextEventsAsync(runId, 0, cancellationToken).ConfigureAwait(false));
                 if (visible.Length > generationVisibleStart)
                     messages.Add(new LmChatMessage("assistant", visible[generationVisibleStart..]));
@@ -1344,10 +1330,9 @@ public sealed partial class RunProcessor : BackgroundService
                         new { turnStartEventId = turnStart, content = interruptedContent.ToString(),
                             reasoningContent = interruptedReasoning.ToString(), exactNativeTailRecovered,
                             failureKind = exception.FailureKind }, CancellationToken.None).ConfigureAwait(false);
-                if (reasoningPublished)
-                    await _repository.AppendEventAsync(runId, RunEventTypes.ReasoningDelta,
-                        new ReasoningDeltaEvent("", (int)Math.Min(roundCount + 1, int.MaxValue), State: "steered"),
-                        CancellationToken.None).ConfigureAwait(false);
+                if (reasoningActivity.Complete("steered") is { } completedReasoning)
+                    await _repository.AppendEventAsync(runId, RunEventTypes.ModelGeneration,
+                        completedReasoning, CancellationToken.None).ConfigureAwait(false);
                 // Der Wiederholungsschutz beendet den Lauf nicht. Die abgebrochene Runde
                 // wird wie eine Nutzer-Umlenkung wiederhergestellt und mit einer klaren
                 // Entscheidungsanweisung fortgesetzt.

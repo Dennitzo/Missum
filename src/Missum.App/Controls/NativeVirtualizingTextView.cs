@@ -65,9 +65,10 @@ internal sealed class NativeVirtualizingTextView : ContentControl
         });
     }
 
-    internal static FrameworkElement CreateSourceBlock(string source, object anchor)
+    internal static FrameworkElement CreateSourceBlock(string source, object anchor, NativeStreamingMarkdown.PreparedSource? prepared = null)
     {
-        if (source.Length <= 16_384) return new NativeStreamingMarkdown(source) { Tag = anchor };
+        if (source.Length <= 16_384) return prepared is not null
+            ? new NativeStreamingMarkdown(prepared) { Tag = anchor } : new NativeStreamingMarkdown(source) { Tag = anchor };
         // A fenced program or malformed/unclosed formula can be one atomic
         // source block. Page that exceptional block rather than instantiate an
         // unbounded native TextBlock; the original source remains copyable.
@@ -78,10 +79,10 @@ internal sealed class NativeVirtualizingTextView : ContentControl
         return card;
     }
 
-    internal static void UpdateSourceBlock(ContentControl host, string source, object anchor)
+    internal static void UpdateSourceBlock(ContentControl host, string source, object anchor, NativeStreamingMarkdown.PreparedSource? prepared = null)
     {
         if (host.Content is NativeStreamingMarkdown markdown && source.Length <= 16_384)
-        { markdown.Tag = anchor; markdown.UpdateText(source); }
-        else host.Content = CreateSourceBlock(source, anchor);
+        { markdown.Tag = anchor; if (prepared is not null) markdown.UpdatePreparedSource(prepared); else markdown.UpdateText(source); }
+        else host.Content = CreateSourceBlock(source, anchor, prepared);
     }
 }

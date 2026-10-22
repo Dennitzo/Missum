@@ -46,6 +46,7 @@ internal sealed class ConversationStreamBuffer(IChatRepository chats, IMissumAiR
     private string _content = message.Content, _serverRunId = run.ServerRunId ?? "", _state = run.State;
     private MessageStatus _status = message.Status;
     private string? _model = run.SelectedModel;
+    private DateTimeOffset _sourceUpdatedAt = message.UpdatedAt;
     private long _eventId = run.LastEventId, _lastFlush = Stopwatch.GetTimestamp();
     private volatile Exception? _backgroundFailure;
 
@@ -69,6 +70,7 @@ internal sealed class ConversationStreamBuffer(IChatRepository chats, IMissumAiR
         {
             var merged = ToolSteps.Merge(step);
             _pending[step.Id] = merged;
+            _sourceUpdatedAt = DateTimeOffset.UtcNow;
         }
         return Task.FromResult<IReadOnlyList<AssistantToolStep>>(ToolSteps);
     }
@@ -78,6 +80,7 @@ internal sealed class ConversationStreamBuffer(IChatRepository chats, IMissumAiR
         lock (_sync)
         {
             _content = content; _status = status;
+            _sourceUpdatedAt = DateTimeOffset.UtcNow;
             if (!ReferenceEquals(steps, ToolSteps))
                 foreach (var step in steps)
                     if (ToolSteps.Find(step.Id) != step) { ToolSteps.Merge(step); _pending[step.Id] = step; }
@@ -91,7 +94,7 @@ internal sealed class ConversationStreamBuffer(IChatRepository chats, IMissumAiR
         {
             _serverRunId = serverRunId; _eventId = eventId; _state = state; _model = model;
             _ready = new(message.Id, _content, _status, _pending.Values.ToArray(), run.Id,
-                _serverRunId, _eventId, _state, _model);
+                _serverRunId, _eventId, _state, _model, SourceUpdatedAt: _sourceUpdatedAt);
         }
         if (force || Stopwatch.GetElapsedTime(_lastFlush) >= TimeSpan.FromMilliseconds(250))
             await FlushAsync().ConfigureAwait(false);
@@ -121,6 +124,7 @@ internal sealed class ConversationStreamBuffer(IChatRepository chats, IMissumAiR
                 _ready = null; _pending.Clear();
                 ToolSteps.Reset(persistedMessage.ToolSteps ?? []);
                 _content = persistedMessage.Content; _status = persistedMessage.Status;
+                _sourceUpdatedAt = persistedMessage.UpdatedAt;
                 _serverRunId = persistedRun.ServerRunId ?? ""; _eventId = persistedRun.LastEventId;
                 _state = persistedRun.State; _model = persistedRun.SelectedModel;
                 _lastFlush = Stopwatch.GetTimestamp();

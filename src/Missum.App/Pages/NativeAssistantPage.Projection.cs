@@ -127,6 +127,7 @@ public sealed partial class NativeAssistantPage
         private readonly Dictionary<string, int> _stepIndices = new(StringComparer.Ordinal);
         private JsonElement[]? _stepValues;
         private readonly Dictionary<string, long> _ordinals = new(StringComparer.Ordinal);
+        private readonly HashSet<string> _provisionalOrdinals = new(StringComparer.Ordinal);
         private long _firstOrdinal;
         internal long TotalSteps { get; private set; }
         internal long FirstOrdinal => _firstOrdinal;
@@ -158,18 +159,20 @@ public sealed partial class NativeAssistantPage
                 : [];
             var previousFirst = _firstOrdinal;
             var previousSteps = _steps.ToDictionary(step => S(step, "id"), StringComparer.Ordinal);
+            var previousOrdinals = new Dictionary<string, long>(_ordinals, StringComparer.Ordinal);
             if (firstOrdinal.HasValue) _firstOrdinal = firstOrdinal.Value;
+            var incomingFirst = _firstOrdinal;
             _content.Clear().Append(S(source, "content"));
             _contentValue = null;
             _steps.Clear(); _stepIndices.Clear(); _stepValues = null;
-            _ordinals.Clear();
-            foreach (var step in preceding) PutStep(step, previousFirst + _steps.Count);
-            var incomingFirst = _firstOrdinal;
+            _ordinals.Clear(); _provisionalOrdinals.Clear();
+            TotalSteps = 0;
+            foreach (var step in preceding) PutStep(step, previousOrdinals[S(step, "id")]);
             var incomingIndex = 0;
             foreach (var step in Items(source, "toolSteps"))
                 PutStep(RetainHydratedStep(step, previousSteps.GetValueOrDefault(S(step, "id"))), incomingFirst + incomingIndex++);
             if (preceding.Length > 0) _firstOrdinal = previousFirst;
-            TotalSteps = incomingFirst + incomingIndex;
+            TotalSteps = Math.Max(TotalSteps, incomingFirst + incomingIndex);
             UpdatedAt = at;
             Version++;
         }
@@ -217,7 +220,11 @@ public sealed partial class NativeAssistantPage
             if (delta.TryGetProperty("toolSteps", out var legacySteps) && legacySteps.ValueKind == JsonValueKind.Array)
             {
                 _steps.Clear(); _stepIndices.Clear();
-                foreach (var step in legacySteps.EnumerateArray()) PutStep(step);
+                _ordinals.Clear(); _provisionalOrdinals.Clear();
+                TotalSteps = 0;
+                var first = _firstOrdinal;
+                var index = 0;
+                foreach (var step in legacySteps.EnumerateArray()) PutStep(step, first + index++);
                 _stepValues = null;
             }
             if (delta.TryGetProperty("toolStep", out var changed) && changed.ValueKind == JsonValueKind.Object)
@@ -233,13 +240,46 @@ public sealed partial class NativeAssistantPage
         internal void PutStep(JsonElement step, long? ordinal = null)
         {
             var id = S(step, "id");
-            if (_stepIndices.TryGetValue(id, out var index)) _steps[index] = step;
-            else { _stepIndices[id] = _steps.Count; _steps.Add(step); }
-            if (ordinal.HasValue) _ordinals[id] = ordinal.Value;
-            else if (!_ordinals.ContainsKey(id)) _ordinals[id] = Math.Max(_firstOrdinal + _steps.Count - 1, TotalSteps);
+            var exists = _stepIndices.TryGetValue(id, out var index);
+            var previousOrdinal = _ordinals.GetValueOrDefault(id, -1);
+            var wasProvisional = _provisionalOrdinals.Contains(id);
+            if (ordinal is >= 0)
+            {
+                _ordinals[id] = ordinal.Value;
+                _provisionalOrdinals.Remove(id);
+            }
+            else if (!exists)
+            {
+                // Old/non-persisted live receipts have no database ordinal yet.
+                // Preserve their arrival order at the tail until an authoritative
+                // ordinal arrives. Detail hydration never assigns a new position.
+                _ordinals[id] = Math.Max(_firstOrdinal + _steps.Count, TotalSteps);
+                _provisionalOrdinals.Add(id);
+            }
+            if (exists && previousOrdinal == _ordinals[id] && wasProvisional == _provisionalOrdinals.Contains(id))
+            {
+                if (_steps[index].Equals(step)) return;
+                _steps[index] = step;
+            }
+            else
+            {
+                if (exists) _steps.RemoveAt(index);
+                var insertion = _steps.Count;
+                while (insertion > 0 && CompareStepPosition(S(_steps[insertion - 1], "id"), id) > 0) insertion--;
+                _steps.Insert(insertion, step);
+                for (var position = exists ? Math.Min(index, insertion) : insertion; position < _steps.Count; position++)
+                    _stepIndices[S(_steps[position], "id")] = position;
+            }
+            if (_steps.Count > 0) _firstOrdinal = _ordinals[S(_steps[0], "id")];
             TotalSteps = Math.Max(TotalSteps, _ordinals[id] + 1);
             _stepValues = null;
             Version++;
+        }
+
+        private int CompareStepPosition(string left, string right)
+        {
+            var ordinal = _ordinals[left].CompareTo(_ordinals[right]);
+            return ordinal != 0 ? ordinal : _provisionalOrdinals.Contains(left).CompareTo(_provisionalOrdinals.Contains(right));
         }
 
         internal long? TrimHead(int keep)
@@ -247,7 +287,7 @@ public sealed partial class NativeAssistantPage
             if (_steps.Count <= keep * 2) return null;
             var removed = _steps.Take(_steps.Count - keep).Select(step => S(step, "id")).ToArray();
             _steps.RemoveRange(0, removed.Length);
-            foreach (var id in removed) _ordinals.Remove(id);
+            foreach (var id in removed) { _ordinals.Remove(id); _provisionalOrdinals.Remove(id); }
             _stepIndices.Clear();
             for (var index = 0; index < _steps.Count; index++) _stepIndices[S(_steps[index], "id")] = index;
             _firstOrdinal = _ordinals.GetValueOrDefault(S(_steps[0], "id"));
@@ -258,15 +298,19 @@ public sealed partial class NativeAssistantPage
 
         internal void Prepend(IEnumerable<JsonElement> earlier)
         {
-            var newSteps = earlier.Where(step => !_stepIndices.ContainsKey(S(step, "id"))).ToArray();
-            if (newSteps.Length == 0) return;
-            _steps.InsertRange(0, newSteps);
-            _firstOrdinal = Math.Max(0, _firstOrdinal - newSteps.Length);
-            for (var index = 0; index < newSteps.Length; index++) _ordinals[S(newSteps[index], "id")] = _firstOrdinal + index;
-            _stepIndices.Clear();
-            for (var index = 0; index < _steps.Count; index++) _stepIndices[S(_steps[index], "id")] = index;
-            _stepValues = null;
-            Version++;
+            var page = earlier.ToArray();
+            if (page.Length == 0) return;
+            var first = Math.Max(0, _firstOrdinal - page.Length);
+            for (var index = 0; index < page.Length; index++)
+                if (_ordinals.TryGetValue(S(page[index], "id"), out var known)) { first = Math.Max(0, known - index); break; }
+            for (var index = 0; index < page.Length; index++)
+            {
+                var step = page[index];
+                // A page can overlap a live receipt or an already hydrated tool.
+                // Its older header establishes chronology, never overwrites details.
+                if (_stepIndices.TryGetValue(S(step, "id"), out var existing)) step = _steps[existing];
+                PutStep(step, first + index);
+            }
         }
     }
 }

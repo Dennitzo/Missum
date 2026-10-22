@@ -28,7 +28,7 @@ public sealed class CodingExperimentSettingsTests
         Assert.False(json.RootElement.TryGetProperty("codingWorkingStateEnabled", out _));
         Assert.False(json.RootElement.TryGetProperty("codingSpecialistMode", out _));
         Assert.Equal("coding/test", settings.Current.SelectedCodingModel);
-        Assert.True(settings.Current.CodingToolStepsExpanded);
+        Assert.False(json.RootElement.TryGetProperty("codingToolStepsExpanded", out _));
         Assert.Null(typeof(SettingsViewModel).GetProperty("CodingWorkingStateEnabled"));
         Assert.Null(typeof(SettingsViewModel).GetProperty("SelectedCodingReasoningOption"));
     }

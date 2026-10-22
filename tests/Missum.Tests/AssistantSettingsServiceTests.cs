@@ -131,7 +131,7 @@ public sealed class AssistantSettingsServiceTests
         await service.HandleAsync(Envelope("settings.update", new { expectedRevision = 0, values = new
         {
             missumAiServerUrl = "http://127.0.0.1:65001/", isAutomaticSpeechEnabled = true,
-            theme = "light", accentColor = "#a970ff", codingToolStepsExpanded = true,
+            theme = "light", accentColor = "#a970ff",
         } }), Capture(events));
 
         Assert.Equal("settings.changed", Assert.Single(events).Type);
@@ -145,7 +145,6 @@ public sealed class AssistantSettingsServiceTests
         using var reopened = new SettingsCoordinator(reopenedStore);
         await reopened.InitializeAsync();
         Assert.True(reopened.Current.IsAutomaticSpeechEnabled);
-        Assert.True(reopened.Current.CodingToolStepsExpanded);
         Assert.Equal("#A970FF", reopened.Current.AccentColor);
         Assert.Equal(1, reopened.Current.PreferencesRevision);
     }

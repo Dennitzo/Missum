@@ -13,6 +13,8 @@ namespace Missum.Ai.Server.Tests;
 
 public sealed class CodingTextReconcilerTests
 {
+    private static readonly string[] RetryReasoningPhases = ["reasoningStarted", "reasoningCompleted", "reasoningStarted", "reasoningCompleted"];
+    private static readonly string[] SingleReasoningPhases = ["reasoningStarted", "reasoningCompleted"];
     [Fact]
     public void ReplayedPrefixAcrossDifferentChunksIsSilentAndOnlyTheNewSuffixIsAppended()
     {
@@ -67,22 +69,21 @@ public sealed class CodingTextReconcilerTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task ReasoningRetryReplacesTheSameRoundWithoutLeakingIntoAnswer(bool diverge)
+    public async Task ReasoningRetryPublishesOnlyPhaseBoundariesWithoutLeakingIntoAnswer(bool diverge)
     {
         using var harness = new Harness(diverge, streamReasoning: true);
         var runId = await harness.CreateRunAsync();
         await harness.Processor.ProcessAsync(runId, CancellationToken.None);
         var events = await harness.Repository.GetEventsAfterAsync(runId, 0);
-        var reasoning = events.Where(item => item.Type == RunEventTypes.ReasoningDelta).ToArray();
-        Assert.Equal(harness.Handler.FinalReasoning, ProjectReasoning(reasoning));
-        Assert.Equal(2, reasoning.Count(item => item.Data.TryGetProperty("replaceFrom", out var replace) && replace.ValueKind == JsonValueKind.Number && replace.GetInt32() == 0));
-        Assert.All(reasoning, item => Assert.Equal(2, item.Data.GetProperty("round").GetInt32()));
-        Assert.Equal("completed", reasoning[^1].Data.GetProperty("state").GetString());
+        Assert.DoesNotContain(events, item => item.Type == RunEventTypes.ReasoningDelta);
+        var phases = ReasoningPhases(events);
+        Assert.Equal(RetryReasoningPhases, phases);
+        Assert.DoesNotContain(events, item => item.Data.GetRawText().Contains("## Prüfplan", StringComparison.Ordinal));
         Assert.Equal(Harness.Previous + harness.Handler.FinalText, CodingTextReconciler.Project(events));
     }
 
     [Fact]
-    public async Task ReasoningRecoveryUsesJournalAndReplacesOnlyTheInterruptedRound()
+    public async Task PrivateReasoningRecoveryKeepsTheVisibleAnswerWithoutReplayingThoughtText()
     {
         using var harness = new Harness(diverge: true, streamReasoning: true);
         harness.Handler.HoldRetry = true;
@@ -92,27 +93,20 @@ public sealed class CodingTextReconcilerTests
         await harness.Handler.RetryEntered.Task.WaitAsync(stop.Token);
         await stop.CancelAsync();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => interrupted);
-        Assert.Equal(NativeHandler.FirstReasoning,
-            ProjectReasoning(await harness.Repository.GetEventsAfterAsync(runId, 0)));
+        Assert.DoesNotContain(await harness.Repository.GetEventsAfterAsync(runId, 0),
+            item => item.Type == RunEventTypes.ReasoningDelta);
         harness.Handler.HoldRetry = false;
         await harness.Processor.ProcessAsync(runId, CancellationToken.None);
         var events = await harness.Repository.GetEventsAfterAsync(runId, 0);
-        Assert.Equal(harness.Handler.FinalReasoning, ProjectReasoning(events));
+        Assert.DoesNotContain(events, item => item.Type == RunEventTypes.ReasoningDelta);
         Assert.Equal(Harness.Previous + harness.Handler.FinalText, CodingTextReconciler.Project(events));
-        Assert.Equal("completed", events.Last(item => item.Type == RunEventTypes.ReasoningDelta).Data.GetProperty("state").GetString());
+        Assert.Equal("reasoningCompleted", ReasoningPhases(events)[^1]);
     }
 
-    private static string ProjectReasoning(IEnumerable<RunEvent> events)
-    {
-        var text = "";
-        foreach (var item in events.Where(item => item.Type == RunEventTypes.ReasoningDelta))
-        {
-            if (item.Data.TryGetProperty("replaceFrom", out var offset) && offset.ValueKind == JsonValueKind.Number)
-                text = text[..offset.GetInt32()];
-            text += item.Data.GetProperty("delta").GetString();
-        }
-        return text;
-    }
+    private static string[] ReasoningPhases(IEnumerable<RunEvent> events) => events
+        .Where(item => item.Type == RunEventTypes.ModelGeneration
+            && item.Data.GetProperty("state").GetString() is "reasoningStarted" or "reasoningCompleted")
+        .Select(item => item.Data.GetProperty("state").GetString()!).ToArray();
 
     [Theory]
     [InlineData(false)]
@@ -147,7 +141,7 @@ public sealed class CodingTextReconcilerTests
     [Theory]
     [InlineData(RunMode.General)]
     [InlineData(RunMode.Coding)]
-    public async Task DurableTextAndReasoningArePublishedWhileTheNativeResponseIsStillOpen(RunMode mode)
+    public async Task VisibleTextStreamsWhilePrivateReasoningOnlyPublishesPhaseTransitions(RunMode mode)
     {
         using var harness = new Harness(diverge: false, streamReasoning: true);
         harness.Handler.HoldFirstTail = true;
@@ -160,16 +154,47 @@ public sealed class CodingTextReconcilerTests
             Assert.False(processing.IsCompleted);
             var live = await harness.Repository.GetEventsAfterAsync(runId, 0);
             Assert.Equal(Harness.Previous + NativeHandler.FirstText, CodingTextReconciler.Project(live));
-            Assert.Equal(NativeHandler.FirstReasoning, ProjectReasoning(live));
+            Assert.DoesNotContain(live, item => item.Type == RunEventTypes.ReasoningDelta);
             Assert.DoesNotContain(live, item => item.Type is RunEventTypes.RunCompleted or "model.turn.metrics");
-            Assert.Equal("running", live.Last(item => item.Type == RunEventTypes.ReasoningDelta).Data.GetProperty("state").GetString());
+            Assert.Equal(SingleReasoningPhases, ReasoningPhases(live));
         }
         finally { harness.Handler.ReleaseFirstTail.TrySetResult(); }
         await processing.WaitAsync(stop.Token);
         var completed = await harness.Repository.GetEventsAfterAsync(runId, 0);
         Assert.Equal(Harness.Previous + harness.Handler.FinalText, CodingTextReconciler.Project(completed));
-        Assert.Equal("completed", completed.Last(item => item.Type == RunEventTypes.ReasoningDelta).Data.GetProperty("state").GetString());
+        Assert.Equal("reasoningCompleted", ReasoningPhases(completed)[^1]);
         Assert.Equal(RunState.Completed, (await harness.Repository.GetAsync(runId))!.State);
+    }
+
+    [Theory]
+    [InlineData(RunMode.General)]
+    [InlineData(RunMode.Coding)]
+    public async Task FinalShortTextIsCommittedBeforeLongToolArgumentsAndItsWaitingPhase(RunMode mode)
+    {
+        using var harness = new Harness(diverge: false);
+        harness.Handler.HoldToolArguments = true;
+        var runId = await harness.CreateRunAsync(mode);
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var processing = harness.Processor.ProcessAsync(runId, stop.Token);
+        try
+        {
+            await harness.Handler.FirstTailRead.Task.WaitAsync(stop.Token);
+            Assert.False(processing.IsCompleted);
+            var live = await harness.Repository.GetEventsAfterAsync(runId, 0);
+            Assert.Equal(Harness.Previous + NativeHandler.FirstText + NativeHandler.ShortTextTail,
+                CodingTextReconciler.Project(live));
+            var phase = Assert.Single(live, item => item.Type == RunEventTypes.ModelGeneration
+                && item.Data.GetProperty("state").GetString() == "toolCallGeneration");
+            Assert.True(live.Last(item => item.Type == RunEventTypes.TextDelta).Id < phase.Id);
+            Assert.DoesNotContain(live, item => item.Type == RunEventTypes.ClientToolProposed);
+            Assert.DoesNotContain(live, item => item.Data.GetRawText().Contains("PRIVATE_ARGUMENT_BODY", StringComparison.Ordinal));
+        }
+        finally
+        {
+            await stop.CancelAsync();
+            harness.Handler.ReleaseFirstTail.TrySetResult();
+        }
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => processing);
     }
 
     private sealed class Harness : IDisposable
@@ -225,6 +250,7 @@ public sealed class CodingTextReconcilerTests
     {
         internal const string ModelId = "coding/RetryFixture-Q4~abc123";
         internal const string FirstText = "Die gelesene Funktion enthält keine Seiteneffekte. Ihre Aufrufstellen verwenden den Rückgabewert ausschließlich zur Anzeige.";
+        internal const string ShortTextTail = " als abgeschlossen.\n";
         internal const string FirstReasoning = "## Prüfplan\n\nZuerst die Datei lesen.\nDann gezielt ändern.";
         private static readonly string[] ModelTags = ["missum-context-train:32768"];
         internal string FinalText { get; } = diverge ? "Die neue Prüfung zeigt einen anderen Zusammenhang. Die Antwort wurde anhand der Datei korrigiert." : FirstText + " Die Prüfung ist jetzt abgeschlossen.";
@@ -232,6 +258,7 @@ public sealed class CodingTextReconcilerTests
         internal int ChatCalls { get; private set; }
         internal bool HoldRetry { get; set; }
         internal bool HoldFirstTail { get; set; }
+        internal bool HoldToolArguments { get; set; }
         internal TaskCompletionSource RetryEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal TaskCompletionSource FirstTailRead { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal TaskCompletionSource ReleaseFirstTail { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -250,6 +277,17 @@ public sealed class CodingTextReconcilerTests
             {
                 RetryEntered.TrySetResult();
                 await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
+            if (HoldToolArguments)
+            {
+                var frames = "data: " + JsonSerializer.Serialize(new { choices = new[] { new { delta = new { content = FirstText } } } })
+                    + "\n\ndata: " + JsonSerializer.Serialize(new { choices = new[] { new { delta = new { content = ShortTextTail } } } })
+                    + "\n\ndata: " + JsonSerializer.Serialize(new { choices = new[] { new { delta = new { tool_calls = new[]
+                    { new { index = 0, id = "call-paused", function = new { name = "coding_read", arguments = "{\"path\":\"PRIVATE_ARGUMENT_BODY" } } } } } } })
+                    + "\n\n";
+                var paused = new StreamContent(new PausedTailStream(frames, "", FirstTailRead, ReleaseFirstTail));
+                paused.Headers.ContentType = new("text/event-stream");
+                return new(HttpStatusCode.OK) { Content = paused };
             }
             var incomplete = ChatCalls == 1;
             var reasoningFrames = "";

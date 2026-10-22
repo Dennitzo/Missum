@@ -1056,6 +1056,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
         var reasoningClock = Stopwatch.StartNew();
         var pendingReasoning = new StringBuilder();
         var reasoningReported = false;
+        var toolGenerationReported = false;
         var lastReportedFragments = 0;
 
         try
@@ -1158,8 +1159,9 @@ public sealed partial class ModelRuntimeClient : IDisposable
                     ProcessedPromptTokens: processed, CachedPromptTokens: cached), cancellationToken).ConfigureAwait(false);
             }
             var contentDelta = accumulator.Add(chunk.RootElement);
-            // Capture every provider fragment, but limit durable UI updates to a
-            // readable cadence. Token-progress throttling must never discard text.
+            // The private channel stays internal for context/recovery and guards.
+            // Its consumer projects only phase changes to the client journal;
+            // token-progress throttling must never discard either text channel.
             if (nativeProgress is not null && accumulator.LastReasoningDelta is { Length: > 0 } reasoningDelta)
             {
                 pendingReasoning.Append(reasoningDelta);
@@ -1177,7 +1179,8 @@ public sealed partial class ModelRuntimeClient : IDisposable
             }
             else reasoningDeadline.CancelAfter(Timeout.InfiniteTimeSpan);
             if (!reasoningReported || reasoningClock.Elapsed >= TimeSpan.FromMilliseconds(180)
-                || !string.IsNullOrEmpty(contentDelta) || accumulator.FinishObserved)
+                || !string.IsNullOrEmpty(contentDelta) || !string.IsNullOrEmpty(accumulator.LastToolDelta)
+                || accumulator.FinishObserved)
                 await FlushReasoningAsync(cancellationToken).ConfigureAwait(false);
             if (!structuredToolOnly && nativeProgress is not null && !string.IsNullOrEmpty(contentDelta))
             {
@@ -1186,6 +1189,21 @@ public sealed partial class ModelRuntimeClient : IDisposable
                         "contentDelta",
                         ContentCharacters: contentDelta.Length,
                         ContentDelta: contentDelta),
+                    cancellationToken).ConfigureAwait(false);
+            }
+            // The first private fragment after public output must report its
+            // phase immediately, even if it follows within the normal batch
+            // interval. Otherwise a silent provider could hide the new phase.
+            if (!string.IsNullOrEmpty(contentDelta) || !string.IsNullOrEmpty(accumulator.LastToolDelta))
+                reasoningReported = false;
+            if (!string.IsNullOrEmpty(contentDelta)) toolGenerationReported = false;
+            if (!toolGenerationReported && nativeProgress is not null
+                && !string.IsNullOrEmpty(accumulator.LastToolDelta))
+            {
+                toolGenerationReported = true;
+                // Report the phase immediately, before the arguments are complete.
+                // Do not expose partial JSON or wait for a toolSelected receipt.
+                await nativeProgress(new ModelRuntimeProgress("toolCallGeneration"),
                     cancellationToken).ConfigureAwait(false);
             }
             if (nativeProgress is null

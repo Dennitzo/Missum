@@ -403,7 +403,7 @@ public sealed partial class SqliteChatRepository(SqliteDatabase database) : ICha
             var stepsChanged = false;
             foreach (var step in toolSteps)
                 stepsChanged |= (await ConversationToolStepStorage.UpsertChangeAsync(connection, transaction, messageId, step, token).ConfigureAwait(false)).Changed;
-            await UpdateStreamMessageAsync(connection, transaction, messageId, content, status, stepsChanged, token).ConfigureAwait(false);
+            await UpdateStreamMessageAsync(connection, transaction, messageId, content, status, stepsChanged, null, token).ConfigureAwait(false);
         }, cancellationToken);
     }
 

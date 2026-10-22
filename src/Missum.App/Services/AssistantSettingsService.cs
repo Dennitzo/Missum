@@ -69,7 +69,6 @@ public sealed class AssistantSettingsService : IDisposable
                 language = current.Language,
                 accentColor = current.AccentColor,
                 backgroundColor = current.BackgroundColor,
-                codingToolStepsExpanded = current.CodingToolStepsExpanded,
             },
             resolvedAppearance = appearance,
             resolvedTheme = appearance?.Theme ?? (current.Theme == AppTheme.System
@@ -419,7 +418,6 @@ public sealed class AssistantSettingsService : IDisposable
         Language = patch.Language ?? current.Language,
         AccentColor = patch.AccentColor ?? current.AccentColor,
         BackgroundColor = patch.BackgroundColor ?? current.BackgroundColor,
-        CodingToolStepsExpanded = patch.CodingToolStepsExpanded ?? current.CodingToolStepsExpanded,
     };
 
     private static string NormalizeColor(string value)
@@ -453,7 +451,6 @@ public sealed class AssistantSettingsService : IDisposable
                 "language" => patch with { Language = StringValue(field.Value, field.Name) },
                 "accentColor" => patch with { AccentColor = StringValue(field.Value, field.Name) },
                 "backgroundColor" => patch with { BackgroundColor = StringValue(field.Value, field.Name) },
-                "codingToolStepsExpanded" => patch with { CodingToolStepsExpanded = BooleanValue(field.Value, field.Name) },
                 _ => throw new ArgumentException($"Nicht bearbeitbare Einstellung: {field.Name}"),
             };
         return patch;
@@ -536,7 +533,6 @@ public sealed record AssistantSettingsPatch
     public string? Language { get; init; }
     public string? AccentColor { get; init; }
     public string? BackgroundColor { get; init; }
-    public bool? CodingToolStepsExpanded { get; init; }
 }
 
 public sealed record AssistantDeletedTrigger(Guid Id, long Revision);

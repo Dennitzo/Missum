@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using Missum.App.Controls;
 
 namespace Missum.App.Pages;
@@ -71,7 +71,7 @@ public sealed partial class NativeAssistantPage
         _messageBlocks.Remove(id);
         foreach (var actionId in _messageActionViews.Where(pair => pair.Value.OwnerMessageId == id).Select(pair => pair.Key).ToArray())
             _messageActionViews.Remove(actionId);
-        _thinkingIndicators.Remove(id); _thinkingStates.Remove(id); _modelPhases.Remove(id);
+        _thinkingIndicators.Remove(id); _thinkingStates.Remove(id); _modelPhases.Remove(id); _chatActivityStates.Remove(id);
         _toolStepWindows.Remove(id);
         _messageAuxiliarySteps.Remove(id);
     }

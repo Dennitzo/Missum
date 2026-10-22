@@ -447,7 +447,7 @@ public sealed class ModelRuntimeClientTests
     [InlineData(NativeQwenId, "general")]
     [InlineData(NativeQwenId, "coding")]
     [InlineData(NativeCoderId, "coding")]
-    public async Task GermanReasoningInstructionAndCacheFlagReachEveryTextModelRole(string model, string role)
+    public async Task GermanAnswerPolicyKeepsUserTextAndCacheFlagWithoutPrivateReasoningReminder(string model, string role)
     {
         var handler = new NativeRuntimeHandler();
         using var client = CreateClient(new HttpClient(handler));
@@ -456,8 +456,10 @@ public sealed class ModelRuntimeClientTests
         var messages = body.RootElement.GetProperty("messages").EnumerateArray().ToArray();
         Assert.Equal("system", messages[0].GetProperty("role").GetString());
         Assert.Contains("Deutsch", messages[0].GetProperty("content").GetString());
-        Assert.Contains("ausschließlich auf Deutsch", messages[^1].GetProperty("content").GetString());
-        Assert.Contains(messages, message => message.GetProperty("content").GetString() == "Explain this English source code.");
+        var userMessage = Assert.Single(messages, message => message.GetProperty("role").GetString() == "user");
+        Assert.Equal("Explain this English source code.", userMessage.GetProperty("content").GetString());
+        Assert.DoesNotContain(messages, message => message.GetProperty("content").GetString()
+            ?.StartsWith("Missum-Laufanweisung zur Sprache:", StringComparison.Ordinal) == true);
         Assert.True(body.RootElement.GetProperty("cache_prompt").GetBoolean());
     }
 
@@ -470,7 +472,8 @@ public sealed class ModelRuntimeClientTests
         var repeated = ModelRuntimeClient.PrepareLanguageBoundMessages(first);
         Assert.Equal(first, repeated);
         Assert.Equal("Original historical reasoning.", repeated.Single(message => message.Role == "assistant").ReasoningContent);
-        Assert.Single(repeated, ModelRuntimeClient.IsLanguageReminder);
+        Assert.DoesNotContain(repeated, ModelRuntimeClient.IsLanguageReminder);
+        Assert.Equal(messages.Skip(1), repeated.Skip(1));
     }
 
     [Fact]
@@ -810,14 +813,15 @@ public sealed class ModelRuntimeClientTests
 
         using var body = JsonDocument.Parse(Assert.Single(handler.ChatBodies));
         var messages = body.RootElement.GetProperty("messages");
-        Assert.Equal(4, messages.GetArrayLength());
+        Assert.Equal(3, messages.GetArrayLength());
         Assert.Equal("system", messages[0].GetProperty("role").GetString());
-        Assert.EndsWith("Policy\n\nRepositorykarte\n\n" + ModelRuntimeClient.DirectUserInstructionPolicy,
-            messages[0].GetProperty("content").GetString());
+        Assert.StartsWith("Policy\n\nRepositorykarte\n\n", messages[0].GetProperty("content").GetString());
+        Assert.EndsWith(ModelRuntimeClient.DirectUserInstructionPolicy, messages[0].GetProperty("content").GetString());
         Assert.Equal("user", messages[1].GetProperty("role").GetString());
         Assert.Equal("Bearbeite den Auftrag.", messages[1].GetProperty("content").GetString());
         Assert.Equal("user", messages[2].GetProperty("role").GetString());
-        Assert.StartsWith("Missum-Laufanweisung:\n", messages[2].GetProperty("content").GetString());
+        Assert.Equal("Missum-Laufanweisung:\nErzeuge jetzt den erforderlichen Tool-Call.",
+            messages[2].GetProperty("content").GetString());
         Assert.DoesNotContain(
             messages.EnumerateArray().Skip(1),
             message => string.Equals(

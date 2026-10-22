@@ -77,6 +77,30 @@ public sealed class ReasoningLoopRuntimeTests
         Assert.Contains("einzelnen Komponenten", string.Concat(fragments));
     }
 
+    [Fact]
+    public async Task NewPrivateReasoningAfterVisibleTextReportsItsFirstFragmentBeforeProviderContinues()
+    {
+        await using var stream = new BlockingTailStream(SseDelta(new { reasoning_content = "Erster Gedanke." })
+            + SseDelta(new { content = "Das Zwischenergebnis ist vollständig." })
+            + SseDelta(new { reasoning_content = "Nächster Gedanke." }));
+        using var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(stream) };
+        response.Content.Headers.ContentType = new("text/event-stream");
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var secondReasoning = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var parsing = ModelRuntimeClient.ParseStreamingChatResponseAsync(response, NoTools, (value, _) =>
+        {
+            if (value.ReasoningDelta == "Nächster Gedanke.") secondReasoning.TrySetResult();
+            return ValueTask.CompletedTask;
+        }, false, 1, Stopwatch.StartNew(), stop.Token);
+        try
+        {
+            await secondReasoning.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.False(parsing.IsCompleted);
+        }
+        finally { await stop.CancelAsync(); }
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => parsing);
+    }
+
     [Theory]
     [InlineData("application/json", "{\"choices\":[")]
     [InlineData("text/event-stream", "")]

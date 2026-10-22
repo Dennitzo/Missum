@@ -1,3 +1,5 @@
+using System.Text.Json;
+using Missum.App.Pages;
 using Missum.App.Services;
 using Missum.Core.Contracts;
 using Missum.Core.Models;
@@ -6,6 +8,47 @@ namespace Missum.Tests;
 
 public sealed class ConversationStreamBufferTests
 {
+    [Fact]
+    public async Task DelayedCommitKeepsItsSourceClockSoSnapshotsDoNotCutOffLiveText()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var chats = environment.Get<IChatRepository>();
+        var runs = environment.Get<IMissumAiRunRepository>();
+        var session = await chats.CreateSessionAsync("Delayed prefix");
+        var message = await chats.AddMessageAsync(session.Id, ChatRole.Assistant, "Anfang", MessageStatus.Streaming);
+        var now = DateTimeOffset.UtcNow;
+        var run = await runs.CreateAsync(new(Guid.NewGuid(), session.Id, message.Id,
+            null, "delayed-prefix", "run-delayed-prefix", 0, "running", null, null, now, now));
+        await using var buffer = new ConversationStreamBuffer(chats, runs, message, run);
+        buffer.SetContent("Anfang bestätigt", MessageStatus.Streaming, buffer.ToolSteps);
+        await buffer.AcknowledgeAsync(run.ServerRunId!, 1, "running", null);
+        var beforeNextFragment = DateTimeOffset.UtcNow;
+        buffer.SetContent("Anfang bestätigt und vollständig.", MessageStatus.Streaming, buffer.ToolSteps);
+        var liveAt = DateTimeOffset.UtcNow;
+        var projection = new NativeAssistantPage.NativeMessageProjection(Dto(message), 0);
+        projection.Apply(JsonSerializer.SerializeToElement(new { contentReplace = "Anfang bestätigt und vollständig.", updatedAt = liveAt }));
+
+        // The captured event is deliberately written after the later fragment
+        // became visible. The durable cursor must still represent event one.
+        await buffer.FlushAsync();
+        var prefix = (await chats.GetMessageAsync(message.Id))!;
+        Assert.Equal("Anfang bestätigt", prefix.Content);
+        Assert.True(prefix.UpdatedAt <= beforeNextFragment);
+        Assert.True(prefix.Revision > message.Revision);
+        projection.Adopt(Dto(prefix));
+        Assert.Equal("Anfang bestätigt und vollständig.", projection.Content);
+
+        buffer.SetContent("Korrigiert.", MessageStatus.Streaming, buffer.ToolSteps);
+        await buffer.AcknowledgeAsync(run.ServerRunId!, 2, "running", null, force: true);
+        var correction = (await chats.GetMessageAsync(message.Id))!;
+        projection.Adopt(Dto(correction));
+        Assert.Equal("Korrigiert.", projection.Content);
+
+        static JsonElement Dto(ChatMessage item) => JsonSerializer.SerializeToElement(new
+        { id = item.Id, content = item.Content, status = "streaming", revision = item.Revision,
+            updatedAt = item.UpdatedAt, toolSteps = Array.Empty<object>() });
+    }
+
     [Fact]
     public async Task DetachmentFlushesOnlyTheLastAppliedEventAndResumeDoesNotDuplicateThePartialNextEvent()
     {

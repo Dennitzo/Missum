@@ -12,11 +12,12 @@ namespace Missum.App.Controls;
 internal sealed class NativeVirtualizingBlockPanel : StackPanel
 {
     internal sealed record Row(string Key, object Version, double EstimatedHeight,
-        Func<FrameworkElement> Create, Action<FrameworkElement>? Update = null);
+        Func<FrameworkElement> Create, Action<FrameworkElement>? Update = null, string? ReplacesKey = null, string? Kind = null);
 
     private readonly Border _before = new() { IsHitTestVisible = false };
     private readonly Border _after = new() { IsHitTestVisible = false };
-    private readonly Dictionary<string, (object Version, FrameworkElement View)> _realized = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (object Version, string? Kind, FrameworkElement View)> _realized = new(StringComparer.Ordinal);
+    private readonly Dictionary<FrameworkElement, string> _viewKeys = [];
     private readonly Dictionary<string, double> _heights = new(StringComparer.Ordinal);
     private IReadOnlyList<Row> _rows = [];
     private double[] _offsets = [0];
@@ -56,6 +57,23 @@ internal sealed class NativeVirtualizingBlockPanel : StackPanel
             var index = FindRow(Math.Max(0, top));
             anchor = _rows[index].Key;
             oldOffset = _offsets[index];
+        }
+        var previousRows = _rows.ToDictionary(row => row.Key, StringComparer.Ordinal);
+        var nextKeys = rows.Select(row => row.Key).ToHashSet(StringComparer.Ordinal);
+        foreach (var row in rows)
+        {
+            if (previousRows.TryGetValue(row.Key, out var previous) && previous.Kind != row.Kind) _heights.Remove(row.Key);
+            if (_realized.ContainsKey(row.Key) || row.ReplacesKey is not { Length: > 0 } replaced
+                || nextKeys.Contains(replaced) || row.Update is null || !_realized.Remove(replaced, out var existing)) continue;
+            var sameKind = previousRows.TryGetValue(replaced, out var replacedRow) && replacedRow.Kind == row.Kind;
+            if (_heights.Remove(replaced, out var height) && sameKind) _heights[row.Key] = height;
+            else _heights.Remove(row.Key);
+            RealizationChanged?.Invoke(replaced, null);
+            _viewKeys[existing.View] = row.Key;
+            row.Update(existing.View);
+            _realized[row.Key] = (row.Version, row.Kind, existing.View);
+            RealizationChanged?.Invoke(row.Key, existing.View);
+            if (anchor == replaced) anchor = row.Key;
         }
         _rows = rows;
         Reindex();
@@ -122,6 +140,7 @@ internal sealed class NativeVirtualizingBlockPanel : StackPanel
                 Children.Remove(view);
                 if (view is IDisposable disposable) disposable.Dispose();
                 _realized.Remove(key);
+                _viewKeys.Remove(view);
                 RealizationChanged?.Invoke(key, null);
             }
             var desired = new List<FrameworkElement> { _before };
@@ -133,16 +152,20 @@ internal sealed class NativeVirtualizingBlockPanel : StackPanel
                 {
                     var view = row.Create();
                     view.Margin = new Thickness(view.Margin.Left, view.Margin.Top, view.Margin.Right, view.Margin.Bottom + 12);
-                    var key = row.Key;
-                    view.SizeChanged += (_, args) => ObserveHeight(key, args.NewSize.Height + view.Margin.Top + view.Margin.Bottom);
-                    entry = (row.Version, view);
+                    view.SizeChanged += (_, args) =>
+                    {
+                        if (_viewKeys.TryGetValue(view, out var key))
+                            ObserveHeight(key, args.NewSize.Height + view.Margin.Top + view.Margin.Bottom);
+                    };
+                    _viewKeys[view] = row.Key;
+                    entry = (row.Version, row.Kind, view);
                     _realized[row.Key] = entry;
                     RealizationChanged?.Invoke(row.Key, view);
                 }
-                else if (!Equals(entry.Version, row.Version))
+                else if (!Equals(entry.Version, row.Version) || entry.Kind != row.Kind)
                 {
                     row.Update?.Invoke(entry.View);
-                    _realized[row.Key] = (row.Version, entry.View);
+                    _realized[row.Key] = (row.Version, row.Kind, entry.View);
                 }
                 desired.Add(entry.View);
             }
@@ -189,7 +212,8 @@ internal sealed class NativeVirtualizingBlockPanel : StackPanel
     {
         if (!double.IsFinite(height) || height <= 0 || Math.Abs(_heights.GetValueOrDefault(key) - height) < 1) return;
         var row = Enumerable.Range(0, _rows.Count).FirstOrDefault(index => _rows[index].Key == key, -1);
-        var previous = row < 0 ? height : _offsets[row + 1] - _offsets[row];
+        if (row < 0) return;
+        var previous = _offsets[row + 1] - _offsets[row];
         var compensate = false;
         if (row >= 0 && FollowLatest?.Invoke() != true && ScrollOwner is { } scroll && IsLoaded)
         {

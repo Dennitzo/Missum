@@ -84,12 +84,14 @@ public sealed partial class NativeAssistantPage
         var offset = 0;
         var sequence = 0;
         var toolNumber = 0;
-        void Text(string key, string value)
+        void Text(string key, string value, bool activitySlot = false, string? replacesKey = null)
         {
-            if (string.IsNullOrEmpty(value)) return;
-            if (!blocks.TryGetValue(key, out var element) || element is not ToolStepView) blocks[key] = element = new NativeStreamingMarkdown(value);
-            else ((NativeStreamingMarkdown)element).UpdateText(value);
-            desired.Add(element);
+            if (string.IsNullOrWhiteSpace(value)) return;
+            if (!blocks.TryGetValue(key, out var element) || element is not NativeStreamingMarkdown)
+                blocks[key] = element = new NativeStreamingMarkdown(NativeStreamingMarkdown.PrepareSource(value));
+            else if (((NativeStreamingMarkdown)element).Source != value)
+                ((NativeStreamingMarkdown)element).UpdatePreparedSource(NativeStreamingMarkdown.PrepareSource(value));
+            desired.Add(activitySlot ? ActivityContainer(messageId, key, element, replacesKey) : element);
         }
         var messageSteps = MessageSteps(message);
         var artifacts = VisibleNativeMessageArtifacts(Items(message, "artifacts"));
@@ -115,7 +117,7 @@ public sealed partial class NativeAssistantPage
                 ArtifactLinks("artifacts:step:" + id, items);
         }
         var subagentReceipts = messageSteps.Where(step => S(step, "tool") is "subagent" or "subagent.completed").ToArray();
-        var positionedSteps = OrderNativeArtifactSteps(messageSteps);
+        var positionedSteps = messageSteps;
         var firstStep = MessageStepStart(messageId, positionedSteps);
         if (firstStep > 0)
         {
@@ -134,7 +136,7 @@ public sealed partial class NativeAssistantPage
         var eligible = positionedSteps.Skip(firstStep).Where(step => !IsDeepResearchReceipt(step)
             && !IsAcceptedSubagentManagementStep(step, subagentReceipts) && !IsAcceptedDeepResearchStep(step, subagentReceipts)
             && (S(step, "tool") != "assistant.continuation" || S(step, "status") == "completed"));
-        var projected = assistant ? NativeActivityProjection.Build(eligible, S(message, "status") is "streaming" or "pending", content.Length) : [];
+        var projected = assistant ? NativeActivityProjection.Build(eligible, S(message, "status") is "streaming" or "pending", content.Length, WaitingForModel(messageId, message)) : [];
         foreach (var activity in projected)
         {
             var step = activity.Step;
@@ -142,6 +144,13 @@ public sealed partial class NativeAssistantPage
             Text("text:" + offset, content[offset..next]); offset = next;
             var id = S(step, "id", "step:" + sequence++);
             var tool = S(step, "tool");
+            if (tool == "assistant.answer")
+            {
+                var end = Math.Clamp(activity.EndOffset ?? offset, offset, content.Length);
+                Text(activity.Key, content[offset..end], activitySlot: true, activity.ReplacesKey);
+                offset = end;
+                continue;
+            }
             if (IsDeepResearchReceipt(step)) { ArtifactsAfterStep(id); continue; }
             // The persisted child receipt owns its lifecycle row. Keep rejected
             // manager calls visible, and coalesce only calls for an accepted child.
@@ -160,7 +169,7 @@ public sealed partial class NativeAssistantPage
                     blocks[lifecycleKey] = lifecycle = view;
                 }
                 ((SubagentLifecycleView)lifecycle).Update(step, FindSubagentForStep(step));
-                desired.Add(ActivityContainer(messageId, lifecycleKey, lifecycle));
+                desired.Add(ActivityContainer(messageId, lifecycleKey, lifecycle, activity.ReplacesKey));
                 ArtifactsAfterStep(id);
                 continue;
             }
@@ -178,7 +187,7 @@ public sealed partial class NativeAssistantPage
             }
             if (tool == "assistant.narration")
             {
-                Text("narration:" + id, detail);
+                Text(activity.Key, detail, activitySlot: true, activity.ReplacesKey);
                 ArtifactsAfterStep(id);
                 continue;
             }
@@ -186,9 +195,17 @@ public sealed partial class NativeAssistantPage
             // server accepts it. Only an accepted continuation is a visible step.
             if (tool == "assistant.continuation" && S(step, "status") != "completed") { ArtifactsAfterStep(id); continue; }
             var key = activity.Key;
+            if (tool == "assistant.continuation")
+            {
+                if (!blocks.TryGetValue(key, out var receipt) || receipt is not ContinuationReceiptView)
+                    blocks[key] = receipt = new ContinuationReceiptView();
+                ((ContinuationReceiptView)receipt).Update(step);
+                desired.Add(ActivityContainer(messageId, key, receipt, activity.ReplacesKey));
+                continue;
+            }
             if (!blocks.TryGetValue(key, out var element) || element is not ToolStepView)
             {
-                var view = new ToolStepView(_settings.Current.CodingToolStepsExpanded)
+                var view = new ToolStepView()
                 {
                     ScrollOwner = ConversationScroll, PinSelection = () => _conversationSelection?.IsSelecting == true,
                     Project = projection => RunUiCallback("ToolStep.LargeReasoning", projection),
@@ -209,9 +226,10 @@ public sealed partial class NativeAssistantPage
             toolView.OpenResearch = () => OpenDeepResearchTabAsync(messageId, id);
             toolView.CanOpenResearch = () => FindDeepResearchView(messageId, id) is not null;
             toolView.ResearchIdentity = () => ResearchIdentity(messageId, id);
-            toolView.DefaultExpanded = _settings.Current.CodingToolStepsExpanded;
+            toolView.DefaultExpanded = false;
+            toolView.OpenDetails = () => OpenToolTabAsync(messageId, id);
             toolView.Update(step, tool == "assistant.activity" ? toolNumber : ++toolNumber);
-            desired.Add(ActivityContainer(messageId, key, element));
+            desired.Add(ActivityContainer(messageId, key, element, activity.ReplacesKey));
             ArtifactsAfterStep(id);
         }
         Text("text:" + offset, content[offset..]);
@@ -255,12 +273,19 @@ public sealed partial class NativeAssistantPage
         public ActivitySlotView() { HorizontalContentAlignment = HorizontalAlignment.Stretch; MinHeight = 32; }
     }
 
-    private ActivitySlotView ActivityContainer(string messageId, string key, FrameworkElement content)
+    private ActivitySlotView ActivityContainer(string messageId, string key, FrameworkElement content, string? replacesKey = null)
     {
         var containerKey = "slot:" + key;
         var blocks = _messageBlocks[messageId];
         if (!blocks.TryGetValue(containerKey, out var existing) || existing is not ActivitySlotView)
-            blocks[containerKey] = existing = new ActivitySlotView();
+        {
+            if (replacesKey is not null && blocks.Remove("slot:" + replacesKey, out var pending) && pending is ActivitySlotView)
+            {
+                blocks.Remove(replacesKey);
+                blocks[containerKey] = existing = pending;
+            }
+            else blocks[containerKey] = existing = new ActivitySlotView();
+        }
         var slot = (ActivitySlotView)existing;
         if (!ReferenceEquals(slot.Content, content)) slot.Content = content;
         return slot;
@@ -314,6 +339,25 @@ public sealed partial class NativeAssistantPage
         private bool _detailsInViewport;
         internal event Action<string>? SubagentRequested;
         internal Func<Task<bool>>? OpenResearch { get; set; }
+        internal Func<Task>? OpenDetails { get; set; }
+        internal string HeaderTitle => _title.Text;
+        private bool _detailsOnly;
+        internal void ShowHeaderOnly(JsonElement step)
+        {
+            _detailsOnly = false;
+            SetExpanded(false);
+            Update(step);
+        }
+        internal void ShowDetailsOnly(JsonElement step)
+        {
+            _detailsOnly = true;
+            Update(step);
+            _toggle.Visibility = _activityHeader.Visibility = Visibility.Collapsed;
+            _details.Margin = new(0);
+            _details.Visibility = Visibility.Visible;
+            if (IsTrue(step, "detailsDeferred")) _ = LoadDetailsAsync(force: true);
+            else RenderDetails();
+        }
         internal Func<bool>? CanOpenResearch { get; set; }
         internal Func<(string AgentId, int PlanetIndex, string Title)?>? ResearchIdentity { get; set; }
         internal Task? NavigationTask { get; private set; }
@@ -394,7 +438,11 @@ public sealed partial class NativeAssistantPage
                     NavigationTask = OpenResearch?.Invoke() ?? Task.FromResult(false);
                     await NavigationTask;
                 }
-                else { DisclosureInvoked?.Invoke(); SetExpanded(_details.Visibility != Visibility.Visible); }
+                else if (OpenDetails is not null)
+                {
+                    NavigationTask = OpenDetails();
+                    await NavigationTask;
+                }
             };
             var content = new StackPanel { Spacing = 10 };
             _details.Margin = new(24, 0, 0, 4);
@@ -440,7 +488,7 @@ public sealed partial class NativeAssistantPage
             _activity = S(step, "tool") is "assistant.activity" or "assistant.reasoning" or "assistant.progress" or "context.compact";
             _running = S(step, "status") is "running" or "pending";
             _activityHeader.Visibility = _activity ? Visibility.Visible : Visibility.Collapsed;
-            _toggle.Visibility = _activity ? Visibility.Collapsed : Visibility.Visible;
+            _toggle.Visibility = _activity || _detailsOnly ? Visibility.Collapsed : Visibility.Visible;
             UpdateShimmer();
             _step = step;
             if (_activity)
@@ -493,7 +541,7 @@ public sealed partial class NativeAssistantPage
                 _filePath = _diff = _summary = ""; _hasCounts = false;
                 UpdateHeader(); return;
             }
-            if (firstUpdate) _details.Visibility = _initiallyExpanded ? Visibility.Visible : Visibility.Collapsed;
+            if (firstUpdate) _details.Visibility = _detailsOnly || _initiallyExpanded ? Visibility.Visible : Visibility.Collapsed;
             if (IsTrue(step, "detailsDeferred"))
             {
                 _filePath = _diff = "";
@@ -571,7 +619,7 @@ public sealed partial class NativeAssistantPage
                 if (!await LoadDetails() && IsExpanded)
                 {
                     _details.Children.Clear();
-                    _details.Children.Add(new TextBlock { Text = "Details konnten nicht geladen werden. Zum Wiederholen erneut aufklappen.", TextWrapping = TextWrapping.Wrap });
+                    _details.Children.Add(new TextBlock { Text = "Details konnten nicht geladen werden. Den Werkzeug-Tab zum Wiederholen erneut öffnen.", TextWrapping = TextWrapping.Wrap });
                 }
             }
             finally
@@ -611,11 +659,11 @@ public sealed partial class NativeAssistantPage
             _counts.Visibility = _fileMutation && _hasCounts ? Visibility.Visible : Visibility.Collapsed;
             _title.FontWeight = Microsoft.UI.Text.FontWeights.Normal;
             _title.Foreground = ThemeBrush("MissumMutedTextBrush", 160);
-            _chevron.Glyph = IsResearchNavigation ? "\uE8A7" : expanded ? "\uE70D" : "\uE76C";
+            _chevron.Glyph = "\uE76C";
             ToolTipService.SetToolTip(_toggle, IsResearchNavigation ? "Aufgabe und Werkzeugschritte im Subagent-Tab öffnen" : _title.Text);
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_toggle,
                 _title.Text + (_counts.Visibility == Visibility.Visible ? " " + _added.Text + " " + _removed.Text : "")
-                + (IsResearchNavigation ? ", Recherchearbeit öffnen" : expanded ? ", ausgeklappt" : ", eingeklappt"));
+                + (IsResearchNavigation ? ", Recherchearbeit öffnen" : ", Werkzeugdetails im Tab öffnen"));
         }
 
         private bool IsResearchNavigation => S(_step, "tool") == "web.deepResearch"
@@ -665,7 +713,7 @@ public sealed partial class NativeAssistantPage
                 return;
             }
             _details.Children.Add(new NativeToolResultView(NativeToolResultFormatter.Receipt(
-                tool, input, output, S(_step, "status"), _filePath, _diff, S(_step, "detail"))));
+                tool, input, output, S(_step, "status"), _filePath, _diff, S(_step, "detail")), embedded: _detailsOnly));
             if (tool is "subagent" or "subagent.spawn" or "subagent.wait")
             {
                 var agentId = S(output, "agentId", S(input, "agentId", S(_step, "agentId")));

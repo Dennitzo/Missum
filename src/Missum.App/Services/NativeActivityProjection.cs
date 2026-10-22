@@ -2,52 +2,65 @@ using System.Text.Json;
 
 namespace Missum.App.Services;
 
-/// <summary>One source-anchored slot survives prefill, reasoning and the following tool.</summary>
+/// <summary>Projects chronological output; only the unfinished tail can show a thinking placeholder.</summary>
 internal static class NativeActivityProjection
 {
-    internal sealed record Entry(string Key, JsonElement Step, int? Offset);
+    internal sealed record Entry(string Key, JsonElement Step, int? Offset, int? EndOffset = null, string? ReplacesKey = null);
     private static readonly JsonElement Active = JsonSerializer.SerializeToElement(new { tool = "assistant.activity", status = "running" });
-    private static readonly JsonElement Inactive = JsonSerializer.SerializeToElement(new { tool = "assistant.activity", status = "completed" });
+    private static readonly JsonElement Answer = JsonSerializer.SerializeToElement(new { tool = "assistant.answer" });
     private static string Text(JsonElement value, string key) => value.ValueKind == JsonValueKind.Object
         && value.TryGetProperty(key, out var field) && field.ValueKind == JsonValueKind.String ? field.GetString() ?? "" : "";
-    internal static IReadOnlyList<Entry> Build(IEnumerable<JsonElement> steps, bool active, int contentLength)
+
+    internal static IReadOnlyList<Entry> Build(IEnumerable<JsonElement> steps, bool active, int contentLength, bool waitingForModel = false)
     {
         var result = new List<Entry>();
         var slot = "activity:start";
-        int? anchor = 0;
-        var pending = -1;
-        var lastWasTool = false;
+        var cursor = 0;
+        var thinking = false;
+        var thinkingOffset = 0;
+        var completedTool = false;
+        void AnswerUntil(int end)
+        {
+            end = Math.Clamp(end, cursor, contentLength);
+            if (end == cursor) return;
+            var start = cursor;
+            var replaced = thinking && thinkingOffset > start ? "activity:after:text:" + start : slot;
+            result.Add(new("source:" + start, Answer, start, end, replaced));
+            slot = "activity:after:text:" + start;
+            cursor = end;
+            thinking = completedTool = false;
+        }
         foreach (var step in steps)
         {
             var tool = Text(step, "tool");
             var id = Text(step, "id");
-            int? offset = step.TryGetProperty("contentOffset", out var position) && position.ValueKind == JsonValueKind.Number && position.TryGetInt32(out var value) && value >= 0 ? value : null;
+            var offset = step.TryGetProperty("contentOffset", out var position) && position.ValueKind == JsonValueKind.Number
+                && position.TryGetInt32(out var value) && value >= 0 ? Math.Clamp(value, cursor, contentLength) : cursor;
             if (tool is "assistant.reasoning" or "assistant.progress" or "context.compact")
             {
-                if (pending < 0)
-                {
-                    pending = result.Count;
-                    result.Add(new(slot, active ? Active : Inactive, anchor ?? offset));
-                }
-                lastWasTool = false;
+                thinking = true;
+                thinkingOffset = offset;
+                completedTool = false;
                 continue;
             }
-            if (tool is "assistant.narration" or "assistant.steering")
+            AnswerUntil(offset);
+            if (tool == "assistant.steering")
             {
                 result.Add(new("tool:" + id, step, offset));
                 continue;
             }
-            var entry = new Entry(slot, step, pending >= 0 ? result[pending].Offset : offset);
-            if (pending >= 0) result[pending] = entry;
-            else result.Add(entry);
-            pending = -1;
+            // A visible AI message consumes the placeholder just like a tool.
+            if (tool == "assistant.narration" && string.IsNullOrWhiteSpace(Text(step, "detail"))) continue;
+            result.Add(new((tool == "assistant.narration" ? "narration:" : "tool:") + id, step, offset, ReplacesKey: slot));
             slot = "activity:after:" + id;
-            anchor = offset ?? anchor ?? 0;
-            lastWasTool = Text(step, "status") is not ("running" or "pending");
+            thinking = false;
+            completedTool = tool != "assistant.narration" && Text(step, "status") is not ("running" or "pending");
         }
-        // Keep the terminal slot after completion too; finishing must not collapse the chat.
-        if (pending < 0 && (lastWasTool || result.Count == 0))
-            result.Add(new(slot, active ? Active : Inactive, anchor ?? 0));
+        var thinkingAtTail = thinking && thinkingOffset >= contentLength;
+        var completedAtTail = completedTool && cursor >= contentLength;
+        AnswerUntil(contentLength);
+        // No completed/historical thinking rows, and never a placeholder before an answer.
+        if (active && (waitingForModel || thinkingAtTail || completedAtTail || result.Count == 0)) result.Add(new(slot, Active, cursor));
         return result;
     }
 }

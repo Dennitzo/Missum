@@ -33,8 +33,7 @@ public sealed partial class AssistantCoordinator
         messages = (state.PreviousMessages ?? []).Select(message => ToMessageDto(message,
             state.PreviousMessageArtifacts?.GetValueOrDefault(message.Id.ToString()), state.ToolStepWindows?.GetValueOrDefault(message.Id)))
             .Concat([ToMessageDto(state.UserMessage, toolWindow: state.ToolStepWindows?.GetValueOrDefault(state.UserMessage.Id)),
-                ToMessageDto(state.AssistantMessage, state.Artifacts, state.ToolStepWindows?.GetValueOrDefault(state.AssistantMessage.Id),
-                    preserveLiveReasoning: state.IsRunning)]).ToArray(),
+                ToMessageDto(state.AssistantMessage, state.Artifacts, state.ToolStepWindows?.GetValueOrDefault(state.AssistantMessage.Id))]).ToArray(),
         toolStepWindows = state.ToolStepWindows,
         state.IsRunning, state.Model, state.ContextUsed, state.ContextLimit,
         state.RunStatus, state.RunDetail, state.GenerationState, state.GeneratedTokens, state.GenerationUpdatedAt,

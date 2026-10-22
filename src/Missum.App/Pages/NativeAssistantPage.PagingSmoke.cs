@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Text.Json;
 using Missum.App.Controls;
 using Missum.App.Services;
@@ -32,7 +32,6 @@ public sealed partial class NativeAssistantPage
 
         var chats = App.Current.GetService<IChatRepository>();
         var originalSession = Guid.Parse(S(original, "activeSessionId"));
-        var originalExpansion = _settings.Current.CodingToolStepsExpanded;
         var fixtureSession = Guid.Empty;
         var previousFixture = _selectionInputSmokeActive;
         _selectionInputSmokeActive = true;
@@ -40,7 +39,6 @@ public sealed partial class NativeAssistantPage
         {
             ApplyEvent("state.snapshot", original);
             RenderMessagesNow();
-            await _settings.UpdateAsync(settings => settings with { CodingToolStepsExpanded = false });
             var fixture = await Task.Run(async () =>
             {
                 var session = await chats.CreateSessionAsync("Isolierter Verlaufstest", ChatMode.General, _lifetime.Token);
@@ -137,9 +135,10 @@ public sealed partial class NativeAssistantPage
             var detailWatch = Stopwatch.StartNew();
             InvokePagingSmokeTool(tool);
             await WaitForPagingSmokeAsync(() => !PagingSmokeFlag(MessageSteps(_messages[fixture.ToolMessageId]).Single(step => S(step, "id") == fixture.Step.Id), "detailsDeferred")
-                && _messageBlocks[fixture.ToolMessageId].TryGetValue("tool:" + fixture.Step.Id, out var current)
-                && current is ToolStepView { IsExpanded: true, IsLoaded: true }
-                && Descendants(current).OfType<NativeToolResultView>().Any(), "Aufklappen hat die Werkzeugdetails nicht geladen und gerendert.");
+                && _activeToolTab is { Details.IsLoaded: true } current
+                && current.StepId == fixture.Step.Id
+                && Descendants(current.Details).OfType<NativeToolResultView>().Any(), "Der Werkzeug-Tab hat die Details nicht geladen und gerendert.");
+            CloseToolTab(_activeToolTab!);
             tool = await PagingSmokeToolInViewportAsync(fixture.ToolMessageId, fixture.Step.Id);
             detailWatch.Stop();
             if (S(MessageSteps(_messages[fixture.ToolMessageId]).Single(step => S(step, "id") == fixture.Step.Id), "outputJson") != fixture.Step.OutputJson)
@@ -154,9 +153,10 @@ public sealed partial class NativeAssistantPage
                 throw new InvalidOperationException("Der Subagent hat eingeklappte Werkzeugdetails vorzeitig geladen.");
             InvokePagingSmokeTool(childTool);
             await WaitForPagingSmokeAsync(() => !PagingSmokeFlag(MessageSteps(child.Messages[childMessageId]).Single(), "detailsDeferred")
-                && _messageBlocks[childMessageId].TryGetValue("tool:child-paging-receipt", out var current)
-                && current is ToolStepView { IsExpanded: true, IsLoaded: true }
-                && Descendants(current).OfType<NativeToolResultView>().Any(), "Der Subagent hat seine Werkzeugdetails nicht nachgeladen.");
+                && _activeToolTab is { Details.IsLoaded: true } current
+                && current.StepId == "child-paging-receipt"
+                && Descendants(current.Details).OfType<NativeToolResultView>().Any(), "Der Subagent hat seine Werkzeugdetails nicht im Tab nachgeladen.");
+            CloseToolTab(_activeToolTab!);
             ShowParentConversation();
             tool = await PagingSmokeToolInViewportAsync(fixture.ToolMessageId, fixture.Step.Id);
             if (tool.IsExpanded) throw new InvalidOperationException("Der Tabwechsel hat die Standard-Einklappung nicht wiederhergestellt.");
@@ -176,8 +176,8 @@ public sealed partial class NativeAssistantPage
                 processId = Environment.ProcessId, initialMessages = 24, afterFirstPage = 48, totalMessages = _messages.Count,
                 scrollAnchorErrorPixels = anchorError, initialLoadMilliseconds = openWatch.Elapsed.TotalMilliseconds,
                 olderPageMilliseconds = pageWatch.Elapsed.TotalMilliseconds, toolDetailsMilliseconds = detailWatch.Elapsed.TotalMilliseconds,
-                initialDetailsDeferred = true, toolDetailsLoadedOnExpand = true, subagentTranscriptLoadedOnOpen = true,
-                subagentToolDetailsLoadedOnExpand = true, disclosureResetOnNavigation = true,
+                initialDetailsDeferred = true, toolDetailsLoadedOnOpen = true, subagentTranscriptLoadedOnOpen = true,
+                subagentToolDetailsLoadedOnOpen = true, disclosureResetOnNavigation = true,
                 durableMessagesUnchanged = true, conversationRevisionUnchanged = true, contextPreparationUnchanged = true,
                 liveModelCacheReuseMeasured = false,
             }, JsonOptions), _lifetime.Token);
@@ -185,7 +185,6 @@ public sealed partial class NativeAssistantPage
         finally
         {
             ShowParentConversation();
-            await _settings.UpdateAsync(settings => settings with { CodingToolStepsExpanded = originalExpansion });
             await CommandAsync("session.open", new { sessionId = originalSession });
             if (fixtureSession != Guid.Empty) await chats.DeleteSessionAsync(fixtureSession, _lifetime.Token);
             ApplyEvent("state.snapshot", original);
@@ -275,7 +274,7 @@ public sealed partial class NativeAssistantPage
     {
         var toggle = Descendants(tool).OfType<Button>().First();
         if (new ButtonAutomationPeer(toggle).GetPattern(PatternInterface.Invoke) is not IInvokeProvider invoke)
-            throw new InvalidOperationException("Der Werkzeugschritt besitzt keinen bedienbaren nativen Aufklappschalter.");
+            throw new InvalidOperationException("Der Werkzeugschritt besitzt keinen bedienbaren nativen Werkzeug-Tab-Aufruf.");
         invoke.Invoke();
     }
 

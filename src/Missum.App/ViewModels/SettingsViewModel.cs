@@ -27,7 +27,6 @@ public sealed partial class SettingsViewModel(
         MissumAiServerUrl != _preferencesBaseline.MissumAiServerUrl
         || IsAutomaticSpeechEnabled != _preferencesBaseline.IsAutomaticSpeechEnabled
         || LiveCaptionLanguage != _preferencesBaseline.LiveCaptionLanguage
-        || CodingToolStepsExpanded != _preferencesBaseline.CodingToolStepsExpanded
         || Theme != _preferencesBaseline.Theme
         || AccentColor != _preferencesBaseline.AccentColor
         || BackgroundColor != _preferencesBaseline.BackgroundColor
@@ -91,9 +90,6 @@ public sealed partial class SettingsViewModel(
     public partial string CodingModelStatus { get; set; } = "Lokale GGUF-Modelle werden beim Aktualisieren erkannt.";
 
     [ObservableProperty]
-    public partial bool CodingToolStepsExpanded { get; set; }
-
-    [ObservableProperty]
     public partial string TriggerSearchText { get; set; } = string.Empty;
 
     [ObservableProperty]
@@ -137,7 +133,6 @@ public sealed partial class SettingsViewModel(
         SelectedGeneralModelItem = EnsureModelItem(Models, SelectedModel);
         SelectedCodingModel = current.SelectedCodingModel;
         SelectedCodingModelItem = EnsureModelItem(CodingModels, SelectedCodingModel);
-        CodingToolStepsExpanded = current.CodingToolStepsExpanded;
         Theme = current.Theme;
         AccentColor = current.AccentColor;
         BackgroundColor = current.BackgroundColor;
@@ -191,7 +186,6 @@ public sealed partial class SettingsViewModel(
             IsAutomaticSpeechEnabled = IsAutomaticSpeechEnabled,
             MissumAiServerUrl = MissumAiServerUrl,
             LiveCaptionLanguage = string.IsNullOrWhiteSpace(LiveCaptionLanguage) ? "auto" : LiveCaptionLanguage.Trim(),
-            CodingToolStepsExpanded = CodingToolStepsExpanded,
             Theme = Theme,
             AccentColor = AccentColor,
             BackgroundColor = BackgroundColor,

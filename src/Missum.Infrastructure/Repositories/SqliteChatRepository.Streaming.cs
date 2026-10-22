@@ -65,7 +65,8 @@ public sealed partial class SqliteChatRepository
             var stepsChanged = false;
             foreach (var step in batch.ToolSteps)
                 stepsChanged |= (await ConversationToolStepStorage.UpsertChangeAsync(connection, transaction, batch.MessageId, step, token).ConfigureAwait(false)).Changed;
-            await UpdateStreamMessageAsync(connection, transaction, batch.MessageId, batch.Content, batch.Status, stepsChanged, token).ConfigureAwait(false);
+            await UpdateStreamMessageAsync(connection, transaction, batch.MessageId, batch.Content, batch.Status, stepsChanged,
+                batch.SourceUpdatedAt, token).ConfigureAwait(false);
             command.CommandText = """
                 UPDATE missum_ai_runs SET last_event_id=$event,state=$state,selected_model=COALESCE($model,selected_model),
                     error_code=CASE WHEN state=$state AND $state IN ('completed','failed','cancelled','interrupted')
@@ -81,7 +82,7 @@ public sealed partial class SqliteChatRepository
     }
 
     private static async Task UpdateStreamMessageAsync(SqliteConnection connection, SqliteTransaction transaction,
-        Guid messageId, string content, MessageStatus status, bool stepsChanged, CancellationToken token)
+        Guid messageId, string content, MessageStatus status, bool stepsChanged, DateTimeOffset? sourceUpdatedAt, CancellationToken token)
     {
         var visible = ChatContentSanitizer.Sanitize(content);
         await using var command = connection.CreateCommand();
@@ -97,12 +98,16 @@ public sealed partial class SqliteChatRepository
             """;
         command.Parameters.AddWithValue("$content", visible);
         command.Parameters.AddWithValue("$status", SqliteMapping.EnumName(status));
-        command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToDb());
+        // The timer can commit an acknowledged prefix after the next live text
+        // fragment was already shown. Its clock must describe that prefix, not
+        // the later disk write; otherwise a snapshot can roll the live UI back.
+        command.Parameters.AddWithValue("$now", (sourceUpdatedAt ?? DateTimeOffset.UtcNow).ToDb());
         command.Parameters.AddWithValue("$steps", stepsChanged ? 1 : 0);
         if (await command.ExecuteScalarAsync(token).ConfigureAwait(false) is not string session) return;
         command.Parameters.AddWithValue("$session", session);
+        command.Parameters.AddWithValue("$sessionNow", DateTimeOffset.UtcNow.ToDb());
         command.CommandText = """
-            UPDATE chat_sessions SET conversation_revision=conversation_revision+1,updated_at=$now WHERE id=$session;
+            UPDATE chat_sessions SET conversation_revision=conversation_revision+1,updated_at=$sessionNow WHERE id=$session;
             DELETE FROM chat_message_ui_headers WHERE message_id=$message AND $steps=1;
             """;
         await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);

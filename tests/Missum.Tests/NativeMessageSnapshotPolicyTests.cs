@@ -62,4 +62,32 @@ public sealed class NativeMessageSnapshotPolicyTests
         Assert.False(retry.PreservePayload);
         Assert.False(retry.PreserveLifecycle);
     }
+
+    [Fact]
+    public void WriteBehindRevisionCannotReplaceAYoungerLivePrefix()
+    {
+        var current = Message("streaming", 10, 0);
+        var projection = new NativeAssistantPage.NativeMessageProjection(current, 0);
+        projection.Apply(JsonSerializer.SerializeToElement(new { contentAppend = " vollständiger Satz.", updatedAt = At.AddSeconds(2) }));
+        var incoming = Message("streaming", 11, 1);
+        var decision = NativeMessageSnapshotPolicy.Compare(current, incoming, At.AddSeconds(2).ToString("O"));
+        Assert.True(decision.PreservePayload);
+        Assert.False(decision.PreserveLifecycle);
+        projection.Adopt(incoming);
+        Assert.Equal("streaming vollständiger Satz.", projection.Content);
+        projection.Apply(JsonSerializer.SerializeToElement(new { contentAppend = " Nächster Schritt.", updatedAt = At.AddSeconds(3) }));
+        Assert.Equal("streaming vollständiger Satz. Nächster Schritt.", projection.Content);
+    }
+
+    [Fact]
+    public void LaterAuthoritativeCorrectionCanReplaceAndShortenStreamingText()
+    {
+        var current = Message("streaming", 10, 0);
+        var projection = new NativeAssistantPage.NativeMessageProjection(current, 0);
+        projection.Apply(JsonSerializer.SerializeToElement(new { contentAppend = " alte lange Formulierung.", updatedAt = At.AddSeconds(1) }));
+        var incoming = JsonSerializer.SerializeToElement(new { id = "message", content = "Korrigiert.", status = "streaming",
+            revision = 11, updatedAt = At.AddSeconds(2), toolSteps = Array.Empty<object>() });
+        projection.Adopt(incoming);
+        Assert.Equal("Korrigiert.", projection.Content);
+    }
 }

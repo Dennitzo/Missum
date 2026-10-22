@@ -15,6 +15,7 @@ namespace Missum.Ai.Server.Tests;
 
 public sealed class CodingWorkingStateIntegrationTests
 {
+    private static readonly string[] CompactionAndMainReasoningPhases = ["reasoningStarted", "reasoningCompleted", "reasoningStarted", "reasoningCompleted"];
     private static readonly string[] PlanItemRequiredFields = ["id", "title", "status"];
 
     private static readonly string[] Capabilities = ["coding", "coding.evidence"];
@@ -33,7 +34,9 @@ public sealed class CodingWorkingStateIntegrationTests
         Assert.DoesNotContain(events, item => item.Type == RunEventTypes.ModelLoading);
         Assert.DoesNotContain(events, item => item.Type == RunEventTypes.ModelGeneration
             && item.Data.GetProperty("state").GetString() == "codingLoading");
-        Assert.Contains(events, item => item.Type == RunEventTypes.ReasoningDelta);
+        Assert.DoesNotContain(events, item => item.Type == RunEventTypes.ReasoningDelta);
+        Assert.Contains(events, item => item.Type == RunEventTypes.ModelGeneration
+            && item.Data.GetProperty("state").GetString() == "reasoningStarted");
     }
     private static RunRequest Request(string text = "Implementiere die Aufgabe mit zwei unabhängigen lesenden Prüfungen.") => new(
         MissumAiProtocol.Version, RunMode.Coding, [new("user", [new("text", text)])], ClientCapabilities: Capabilities,
@@ -739,15 +742,12 @@ public sealed class CodingWorkingStateIntegrationTests
         Assert.Equal("summarization", metrics[0].Data.GetProperty("phase").GetString());
         Assert.True(metrics[0].Data.GetProperty("queueMilliseconds").GetDouble() >= 0);
         Assert.Equal(0, metrics[1].Data.GetProperty("queueMilliseconds").GetDouble());
-        var reasoning = (await harness.Repository.GetEventsAfterAsync(run, 0))
-            .Where(item => item.Type == RunEventTypes.ReasoningDelta).ToArray();
-        Assert.Equal(4, reasoning.Length);
-        Assert.Equal("compaction", reasoning[0].Data.GetProperty("phase").GetString());
-        Assert.Equal(2, reasoning[0].Data.GetProperty("round").GetInt32());
-        Assert.Equal("completed", reasoning[1].Data.GetProperty("state").GetString());
-        Assert.Equal("main", reasoning[2].Data.GetProperty("phase").GetString());
-        Assert.Equal(3, reasoning[2].Data.GetProperty("round").GetInt32());
-        Assert.Equal("completed", reasoning[3].Data.GetProperty("state").GetString());
+        var events = await harness.Repository.GetEventsAfterAsync(run, 0);
+        Assert.DoesNotContain(events, item => item.Type == RunEventTypes.ReasoningDelta);
+        var reasoning = events.Where(item => item.Type == RunEventTypes.ModelGeneration
+            && item.Data.GetProperty("state").GetString() is "reasoningStarted" or "reasoningCompleted")
+            .Select(item => item.Data.GetProperty("state").GetString()).ToArray();
+        Assert.Equal(CompactionAndMainReasoningPhases, reasoning);
     }
 
     [Theory]
@@ -788,8 +788,9 @@ public sealed class CodingWorkingStateIntegrationTests
         Assert.Equal("coding.read", proposals[^1].Data.GetProperty("name").GetString());
         Assert.Contains(checkpoint.Messages, item => item.Role == "tool" && item.Content!.Contains("applied", StringComparison.Ordinal));
         Assert.DoesNotContain(events, item => item.Type == RunEventTypes.TextDelta || item.Type == RunEventTypes.RunFailed);
-        Assert.Contains(events, item => item.Type == RunEventTypes.ReasoningDelta
-            && item.Data.GetProperty("delta").GetString() == NativeHandler.EmptyTurnReasoning);
+        Assert.DoesNotContain(events, item => item.Type == RunEventTypes.ReasoningDelta);
+        Assert.Contains(events, item => item.Type == RunEventTypes.ModelGeneration
+            && item.Data.GetProperty("state").GetString() == "reasoningStarted");
         var retainedReasoning = Assert.Single(harness.Handler.Requests[1].GetProperty("messages").EnumerateArray(),
             item => item.TryGetProperty("reasoning_content", out var value) && value.GetString() == NativeHandler.EmptyTurnReasoning);
         Assert.Equal(string.Empty, retainedReasoning.GetProperty("content").GetString());
@@ -952,8 +953,13 @@ public sealed class CodingWorkingStateIntegrationTests
         var events = await harness.Repository.GetEventsAfterAsync(run, 0);
         var interruption = Assert.Single(events, item => item.Type == RunProcessor.InterruptedTurnEventType);
         Assert.Contains("Bericht erstellen", interruption.Data.GetProperty("reasoningContent").GetString());
-        Assert.Contains(events, item => item.Type == RunEventTypes.ReasoningDelta
-            && item.Data.TryGetProperty("state", out var state) && state.GetString() == "steered");
+        Assert.DoesNotContain(events, item => item.Type == RunEventTypes.ReasoningDelta);
+        Assert.Contains(events, item => item.Type == RunEventTypes.ModelGeneration
+            && item.Data.GetProperty("state").GetString() == "reasoningGuardStopped"
+            && item.Data.GetProperty("failureKind").GetString() == "reasoning_repetition");
+        var generationEvents = events.Where(item => item.Type == RunEventTypes.ModelGeneration).ToArray();
+        Assert.Equal(generationEvents.Count(item => item.Data.GetProperty("state").GetString() == "reasoningStarted"),
+            generationEvents.Count(item => item.Data.GetProperty("state").GetString() == "reasoningCompleted"));
         Assert.Contains(events, item => item.Type == RunEventTypes.TextDelta
             && item.Data.TryGetProperty("delta", out var delta)
             && delta.GetString()!.Contains("klare Entscheidung"));

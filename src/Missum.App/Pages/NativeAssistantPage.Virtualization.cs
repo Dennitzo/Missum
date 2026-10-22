@@ -12,13 +12,16 @@ public sealed partial class NativeAssistantPage
     private readonly Dictionary<string, VirtualMessageState> _virtualMessages = new(StringComparer.Ordinal);
     private sealed record NativeSourceAnchor(string MessageId, int Start, string Source);
     internal sealed record LogicalBlock(string Key, string Kind, string Text, int Start, JsonElement Data,
-        JsonElement[]? Artifacts = null, int Number = 0);
+        JsonElement[]? Artifacts = null, int Number = 0, string? ReplacesKey = null,
+        bool OwnsActivitySlot = false, NativeStreamingMarkdown.PreparedSource? Prepared = null);
     private sealed class VirtualMessageState(NativeVirtualizingBlockPanel panel)
     {
         internal NativeVirtualizingBlockPanel Panel { get; } = panel;
         internal Dictionary<string, NativeTextBlockIndex> TextIndices { get; } = new(StringComparer.Ordinal);
         internal Dictionary<string, bool> ExpandedSteps { get; } = new(StringComparer.Ordinal);
         internal long Version { get; set; } = -1;
+        internal NativeChatRenderInput? Input { get; set; }
+        internal Dictionary<string, NativeStreamingMarkdown.PreparedSource> PreparedSources { get; } = new(StringComparer.Ordinal);
         internal bool Preparing { get; set; }
         internal long Generation { get; set; }
         internal IReadOnlyList<LogicalBlock> Blocks { get; set; } = [];
@@ -31,7 +34,8 @@ public sealed partial class NativeAssistantPage
         var hasOlder = _toolStepWindows.TryGetValue(id, out var window) && S(window, "hasMore") == "True";
         if (!_virtualMessages.TryGetValue(id, out var state))
         {
-            if (content.Length <= 8192 && steps.Length <= 128 && !hasOlder && DisplayMessages.Count <= 48) return false;
+            if (content.Length <= 8192 && steps.Length <= 128 && !hasOlder && DisplayMessages.Count <= 48
+                && !steps.Any(step => S(step, "tool") == "assistant.narration" && S(step, "detail").Length > 8192)) return false;
             var disclosureStates = _messageBlocks.TryGetValue(id, out var previousBlocks)
                 ? previousBlocks.Where(pair => pair.Value is ToolStepView or ThinkingIndicatorView).ToDictionary(pair => pair.Key,
                     pair => pair.Value is ToolStepView tool ? tool.IsExpanded : ((ThinkingIndicatorView)pair.Value).IsExpanded, StringComparer.Ordinal) : [];
@@ -79,27 +83,29 @@ public sealed partial class NativeAssistantPage
             body.Children.Insert(0, state.Panel);
         }
         var version = MessageVersion(message);
-        if (state.Version == version)
+        var input = new NativeChatRenderInput(content, steps, VisibleNativeMessageArtifacts(Items(message, "artifacts")),
+            S(message, "status"), hasOlder, WaitingForModel(id, message), S(message, "error"));
+        if (state.Input?.Equivalent(input) == true)
         {
+            state.Version = version;
             state.Panel.RefreshViewport();
             return true;
         }
         if (state.Preparing) return true;
         state.Preparing = true;
         var generation = ++state.Generation;
-        var artifacts = VisibleNativeMessageArtifacts(Items(message, "artifacts"));
         var owner = ConversationViewKey;
-        _ = PrepareVirtualMessageAsync(id, message, content, steps, artifacts, hasOlder, version, generation, owner, state);
+        _ = PrepareVirtualMessageAsync(id, message, input, version, generation, owner, state);
         return true;
     }
 
-    private async Task PrepareVirtualMessageAsync(string id, JsonElement message, string content, JsonElement[] steps,
-        JsonElement[] artifacts, bool hasOlder, long version, long generation, string owner, VirtualMessageState state)
+    private async Task PrepareVirtualMessageAsync(string id, JsonElement message, NativeChatRenderInput input,
+        long version, long generation, string owner, VirtualMessageState state)
     {
         IReadOnlyList<LogicalBlock> logical;
         try
         {
-            logical = await Task.Run(() => BuildLogicalBlocks(message, content, steps, artifacts, hasOlder, state.TextIndices),
+            logical = await Task.Run(() => BuildLogicalBlocks(message, input.Content, input.Steps, input.Artifacts, input.HasOlder, state.TextIndices, input.Waiting, state.PreparedSources),
                 _lifetime.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { return; }
@@ -118,7 +124,10 @@ public sealed partial class NativeAssistantPage
             if (_disposed || owner != ConversationViewKey || generation != state.Generation
                 || !_virtualMessages.TryGetValue(id, out var currentState) || !ReferenceEquals(state, currentState)
                 || !DisplayMessages.TryGetValue(id, out var current)) return;
-            if (MessageVersion(current) != version || _conversationSelection?.IsSelecting == true)
+            var hasOlder = _toolStepWindows.TryGetValue(id, out var latestWindow) && S(latestWindow, "hasMore") == "True";
+            var latest = new NativeChatRenderInput(MessageContent(current), MessageSteps(current),
+                VisibleNativeMessageArtifacts(Items(current, "artifacts")), S(current, "status"), hasOlder, WaitingForModel(id, current), S(current, "error"));
+            if (!input.CanPublishBefore(latest) || _conversationSelection?.IsSelecting == true)
             {
                 // RenderMessagesNow may already have cached the newer envelope
                 // while this worker was busy. Invalidate its visual signature
@@ -130,27 +139,45 @@ public sealed partial class NativeAssistantPage
                 return;
             }
             state.Version = version;
+            state.Input = input;
             state.Blocks = logical;
             state.Panel.SetRows(logical.Select(block => VirtualRow(id, current, block)).ToArray());
             _conversationSelection?.TrackSelectionWithin(state.Panel);
             QueueConversationLayoutProjection(ShouldFollowConversationTail);
+            if (!input.Equivalent(latest)) InvalidateMessagePresentation(id);
         });
     }
 
     internal static List<LogicalBlock> BuildLogicalBlocks(JsonElement message, string content,
-        JsonElement[] steps, JsonElement[] artifacts, bool hasOlder, Dictionary<string, NativeTextBlockIndex> indices)
+        JsonElement[] steps, JsonElement[] artifacts, bool hasOlder, Dictionary<string, NativeTextBlockIndex> indices,
+        bool waitingForModel = false, Dictionary<string, NativeStreamingMarkdown.PreparedSource>? preparedSources = null)
     {
         var result = new List<LogicalBlock>();
         var assistant = S(message, "role") == "assistant";
         if (assistant) result.Add(new("header", "header", "", 0, default));
         if (hasOlder) result.Add(new("earlierBlocks", "earlier", "Frühere Werkzeugschritte laden", 0, default));
-        void Text(string key, string value, int offset)
+        var usedIndices = new HashSet<string>(StringComparer.Ordinal);
+        void Text(string key, string value, int offset, bool activitySlot = false, string? replacesKey = null)
         {
-            if (value.Length == 0) return;
+            if (string.IsNullOrWhiteSpace(value)) return;
+            usedIndices.Add(key);
             if (!indices.TryGetValue(key, out var index)) indices[key] = index = new();
             index.Update(value);
+            var firstVisibleBlock = true;
             foreach (var block in index.Blocks)
-                result.Add(new(key + ":" + block.Start, "text", block.Source, offset + block.Start, default));
+            {
+                if (string.IsNullOrWhiteSpace(block.Source)) continue;
+                var blockKey = activitySlot && block.Start == 0 ? key : key + ":" + block.Start;
+                NativeStreamingMarkdown.PreparedSource? prepared = null;
+                if (preparedSources is not null && block.Source.Length <= 16384)
+                {
+                    if (!preparedSources.TryGetValue(blockKey, out prepared) || prepared.Source != block.Source)
+                        preparedSources[blockKey] = prepared = NativeStreamingMarkdown.PrepareSource(block.Source);
+                }
+                result.Add(new(blockKey, "text", block.Source, offset + block.Start, default,
+                    ReplacesKey: firstVisibleBlock ? replacesKey : null, OwnsActivitySlot: activitySlot, Prepared: prepared));
+                firstVisibleBlock = false;
+            }
         }
         if (!assistant) Text("userText", content, 0);
         else
@@ -166,40 +193,47 @@ public sealed partial class NativeAssistantPage
             var receipts = steps.Where(step => S(step, "tool") is "subagent" or "subagent.completed").ToArray();
             var offset = 0;
             var number = 0;
-            void TextUntil(int next)
+            void TextUntil(int next, string? activityKey = null, string? replacesKey = null)
             {
                 while (artifactIndex < anchoredArtifacts.Length && anchoredArtifacts[artifactIndex].Offset <= next)
                 {
                     var anchor = anchoredArtifacts[artifactIndex++];
                     var position = Math.Clamp(anchor.Offset!.Value, offset, content.Length);
-                    Text("text:" + offset, content[offset..position], offset);
+                    Text(activityKey ?? "text:" + offset, content[offset..position], offset, activitySlot: activityKey is not null, replacesKey);
+                    if (activityKey is not null) activityKey += ":after:" + position;
                     offset = position;
                     result.Add(new("artifacts:step:" + anchor.Key, "artifacts", "", 0, default, anchor.Images));
                 }
-                Text("text:" + offset, content[offset..next], offset);
+                Text(activityKey ?? "text:" + offset, content[offset..next], offset, activitySlot: activityKey is not null, replacesKey);
                 offset = next;
             }
-            var eligible = OrderNativeArtifactSteps(steps).Where(step => !IsDeepResearchReceipt(step)
+            var eligible = steps.Where(step => !IsDeepResearchReceipt(step)
                 && !IsAcceptedSubagentManagementStep(step, receipts) && !IsAcceptedDeepResearchStep(step, receipts)
                 && (S(step, "tool") != "assistant.continuation" || S(step, "status") == "completed"));
-            foreach (var activity in NativeActivityProjection.Build(eligible, S(message, "status") is "streaming" or "pending", content.Length))
+            foreach (var activity in NativeActivityProjection.Build(eligible, S(message, "status") is "streaming" or "pending", content.Length, waitingForModel))
             {
                 var step = activity.Step;
                 var next = activity.Offset is { } position ? Math.Clamp(position, offset, content.Length) : offset;
                 TextUntil(next);
                 var stepId = S(step, "id");
                 var tool = S(step, "tool");
+                if (tool == "assistant.answer")
+                {
+                    var end = Math.Clamp(activity.EndOffset ?? offset, offset, content.Length);
+                    TextUntil(end, activity.Key, activity.ReplacesKey);
+                    continue;
+                }
                 if (!IsDeepResearchReceipt(step) && !IsAcceptedSubagentManagementStep(step, receipts) && !IsAcceptedDeepResearchStep(step, receipts)
                     && (tool != "assistant.continuation" || S(step, "status") == "completed"))
                 {
-                    if (tool == "assistant.narration") Text("narration:" + stepId, S(step, "detail"), -1);
+                    if (tool == "assistant.narration") Text(activity.Key, S(step, "detail"), -1, activitySlot: true, activity.ReplacesKey);
                     else if (tool == "assistant.steering")
                     {
                         if (!string.IsNullOrWhiteSpace(S(step, "detail")))
                             result.Add(new("steering:" + stepId, "steering", S(step, "detail"), next, step));
                     }
-                    else result.Add(new(activity.Key, tool is "subagent" or "subagent.completed" ? "subagent" : "tool",
-                        "", 0, step, Number: tool == "assistant.activity" ? number : ++number));
+                    else result.Add(new(activity.Key, tool is "subagent" or "subagent.completed" ? "subagent" : tool == "assistant.continuation" ? "continuationReceipt" : "tool",
+                        "", 0, step, Number: tool == "assistant.activity" ? number : ++number, ReplacesKey: activity.ReplacesKey, OwnsActivitySlot: true));
                 }
                 if (artifactGroups.Remove(stepId, out var images))
                     result.Add(new("artifacts:step:" + stepId, "artifacts", "", 0, default, images));
@@ -212,9 +246,12 @@ public sealed partial class NativeAssistantPage
             if (S(message, "error") is { Length: > 0 } error && error != content) Text("error", error, -1);
             if (IsResumableAssistantStatus(message)) result.Add(new("continuation", "continuation", "", 0, default));
         }
-        var activeTextKeys = result.Where(block => block.Kind == "text")
-            .Select(block => block.Key[..block.Key.LastIndexOf(':')]).ToHashSet(StringComparer.Ordinal);
-        foreach (var stale in indices.Keys.Where(key => !activeTextKeys.Contains(key)).ToArray()) indices.Remove(stale);
+        foreach (var stale in indices.Keys.Where(key => !usedIndices.Contains(key)).ToArray()) indices.Remove(stale);
+        if (preparedSources is not null)
+        {
+            var active = result.Select(block => block.Key).ToHashSet(StringComparer.Ordinal);
+            foreach (var stale in preparedSources.Keys.Where(key => !active.Contains(key)).ToArray()) preparedSources.Remove(stale);
+        }
         return result;
     }
 
@@ -234,11 +271,12 @@ public sealed partial class NativeAssistantPage
 
     private NativeVirtualizingBlockPanel.Row VirtualRow(string messageId, JsonElement message, LogicalBlock block)
     {
-        object version = block.Kind is "text" or "steering" ? block.Text : block.Kind is "tool" or "subagent" ? block.Data : MessageVersion(message);
+        object version = block.Kind is "text" or "steering" ? block.Text : block.Kind is "tool" or "subagent" or "continuationReceipt" ? block.Data : MessageVersion(message);
         var estimate = block.Kind switch { "text" => Math.Max(38, block.Text.Length / 85d * 26 + 12),
             "steering" => Math.Max(38, block.Text.Length / 85d * 26 + 12) + 36, "artifacts" => 360, _ => 44 };
         return new(block.Key, version, estimate,
-            () => CreateVirtualBlock(messageId, message, block), view => UpdateVirtualBlock(view, messageId, message, block));
+            () => CreateVirtualBlock(messageId, message, block), view => UpdateVirtualBlock(view, messageId, message, block), block.ReplacesKey,
+            block.Kind == "tool" && S(block.Data, "tool") == "assistant.activity" ? "thinking" : block.Kind);
     }
 
     private FrameworkElement CreateVirtualBlock(string id, JsonElement message, LogicalBlock block, bool wrap = true)
@@ -252,7 +290,7 @@ public sealed partial class NativeAssistantPage
                 break;
             case "text":
                 var anchor = new NativeSourceAnchor(id, block.Start, block.Text);
-                view = new ContentControl { Content = NativeVirtualizingTextView.CreateSourceBlock(block.Text, anchor),
+                view = new ContentControl { Content = NativeVirtualizingTextView.CreateSourceBlock(block.Text, anchor, block.Prepared),
                     Tag = anchor, HorizontalContentAlignment = HorizontalAlignment.Stretch };
                 break;
             case "steering": view = CreateSteeringPromptView(id, message, block.Data); break;
@@ -264,11 +302,10 @@ public sealed partial class NativeAssistantPage
                 break;
             case "tool":
                 var toolState = _virtualMessages[id];
-                var expanded = toolState.ExpandedSteps.TryGetValue(block.Key, out var previousExpansion) ? previousExpansion
-                    : _settings.Current.CodingToolStepsExpanded;
+                var expanded = false;
                 var tool = new ToolStepView(expanded)
                 {
-                    DisclosureInvoked = OnToolDisclosureInteraction,
+                    OpenDetails = () => OpenToolTabAsync(id, S(block.Data, "id")),
                     LoadDetails = () => LoadToolStepDetailsAsync(id, S(block.Data, "id")), ScrollOwner = ConversationScroll,
                     OpenResearch = () => OpenDeepResearchTabAsync(id, S(block.Data, "id")),
                     CanOpenResearch = () => FindDeepResearchView(id, S(block.Data, "id")) is not null,
@@ -279,6 +316,9 @@ public sealed partial class NativeAssistantPage
                 tool.ExpansionChanged += value => toolState.ExpandedSteps[block.Key] = value;
                 tool.SubagentRequested += async agent => { if (_subagents.TryGetValue(agent, out var child)) await ActivateSubagentTabAsync(child); };
                 view = tool;
+                break;
+            case "continuationReceipt":
+                view = new ContinuationReceiptView();
                 break;
             case "earlier":
                 var earlier = new Button { Content = block.Text, HorizontalAlignment = HorizontalAlignment.Left };
@@ -293,14 +333,16 @@ public sealed partial class NativeAssistantPage
             default: throw new InvalidOperationException("Unbekannter virtueller Nachrichtenblock: " + block.Kind);
         }
         UpdateVirtualBlock(view, id, message, block);
-        return wrap && block.Key.StartsWith("activity:", StringComparison.Ordinal) ? new ActivitySlotView { Content = view } : view;
+        return wrap && block.OwnsActivitySlot ? new ActivitySlotView { Content = view } : view;
     }
 
     private void UpdateVirtualBlock(FrameworkElement view, string id, JsonElement message, LogicalBlock block)
     {
         if (view is ActivitySlotView slot)
         {
-            var sameKind = block.Kind == "tool" && slot.Content is ToolStepView || block.Kind == "subagent" && slot.Content is SubagentLifecycleView;
+            var sameKind = block.Kind == "tool" && slot.Content is ToolStepView || block.Kind == "subagent" && slot.Content is SubagentLifecycleView
+                || block.Kind == "text" && slot.Content is ContentControl
+                || block.Kind == "continuationReceipt" && slot.Content is ContinuationReceiptView;
             if (!sameKind) slot.Content = CreateVirtualBlock(id, message, block, wrap: false);
             else UpdateVirtualBlock((FrameworkElement)slot.Content, id, message, block);
             return;
@@ -310,7 +352,7 @@ public sealed partial class NativeAssistantPage
             case ContentControl text when block.Kind == "text":
                 var anchor = new NativeSourceAnchor(id, block.Start, block.Text);
                 text.Tag = anchor;
-                NativeVirtualizingTextView.UpdateSourceBlock(text, block.Text, anchor);
+                NativeVirtualizingTextView.UpdateSourceBlock(text, block.Text, anchor, block.Prepared);
                 break;
             case Border prompt when block.Kind == "steering": UpdateSteeringPromptView(prompt, id, message, block.Data); break;
             case ToolStepView tool:
@@ -318,8 +360,10 @@ public sealed partial class NativeAssistantPage
                 tool.OpenResearch = () => OpenDeepResearchTabAsync(id, S(block.Data, "id"));
                 tool.CanOpenResearch = () => FindDeepResearchView(id, S(block.Data, "id")) is not null;
                 tool.ResearchIdentity = () => ResearchIdentity(id, S(block.Data, "id"));
-                tool.DefaultExpanded = _settings.Current.CodingToolStepsExpanded;
+                tool.DefaultExpanded = false;
+                tool.OpenDetails = () => OpenToolTabAsync(id, S(block.Data, "id"));
                 tool.Update(block.Data, block.Number); break;
+            case ContinuationReceiptView receipt: receipt.Update(block.Data); break;
             case SubagentLifecycleView child: child.Update(block.Data, FindSubagentForStep(block.Data)); break;
             case NativeArtifactLinks artifacts: artifacts.UpdateArtifacts(block.Artifacts ?? []); break;
             case ContinuationToolStepView continuation: UpdateContinuationStep(id, message, continuation); break;

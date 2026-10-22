@@ -217,7 +217,7 @@ public sealed class AssistantClientStateTests
         await settings.UpdateAsync(current => current with
         {
             MissumAiServerUrl = "http://127.0.0.1:65001", SelectedModel = "submitted-model",
-            CodingToolStepsExpanded = true, IsAutomaticSpeechEnabled = true,
+            IsAutomaticSpeechEnabled = true,
             ReasoningEffortsByModel = new(StringComparer.OrdinalIgnoreCase) { ["text:submitted-model"] = "high" },
         });
         using var views = new AssistantClientStateStore(environment.Directory);
@@ -249,7 +249,7 @@ public sealed class AssistantClientStateTests
         using (AssistantClientExecutionScope.Enter(views, clientId))
             await AssistantClientExecutionScope.UpdateAsync(settings, current => current with
             {
-                SelectedModel = "edited-model", CodingToolStepsExpanded = false,
+                SelectedModel = "edited-model",
                 ReasoningEffortsByModel = new(StringComparer.OrdinalIgnoreCase) { ["text:submitted-model"] = "low" },
             }, timeout.Token);
         await settings.UpdateAsync(current => current with { MissumAiServerUrl = "http://127.0.0.1:65002", IsAutomaticSpeechEnabled = false });
@@ -260,7 +260,6 @@ public sealed class AssistantClientStateTests
 
         Assert.Equal("submitted-model", result.snapshot.SelectedModel);
         Assert.Equal("high", MissumAiAssistantService.StoredReasoning(result.snapshot, "submitted-model", "general"));
-        Assert.True(result.snapshot.CodingToolStepsExpanded);
         Assert.True(result.snapshot.IsAutomaticSpeechEnabled);
         Assert.Equal("http://127.0.0.1:65001", result.snapshot.MissumAiServerUrl);
         // Verify the actual HTTP client destination, not only the frozen record.

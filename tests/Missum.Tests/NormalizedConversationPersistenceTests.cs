@@ -333,11 +333,13 @@ public sealed class NormalizedConversationPersistenceTests
             null, "atomic-key", "run-atomic", 0, "running", null, null, now, now));
         var writer = Assert.IsAssignableFrom<IStreamingConversationRepository>(chats);
         var step = new AssistantToolStep("read", "coding.read", "completed", "All code", ContentOffset: 4);
+        var sourceAt = now;
         var batch = new ConversationStreamBatch(message.Id, "After update", MessageStatus.Streaming, [step],
-            run.Id, "run-atomic", 42, "running");
+            run.Id, "run-atomic", 42, "running", SourceUpdatedAt: sourceAt);
         await writer.CommitStreamAsync(batch);
         Assert.Equal(42, (await environment.Get<IMissumAiRunRepository>().GetAsync(run.Id))!.LastEventId);
         Assert.Equal("After update", (await chats.GetMessageAsync(message.Id))!.Content);
+        Assert.Equal(sourceAt, (await chats.GetMessageAsync(message.Id))!.UpdatedAt);
         Assert.Equal(step, Assert.Single((await chats.GetMessageAsync(message.Id))!.ToolSteps!));
         await writer.CommitStreamAsync(batch with { Content = "Older replay", LastEventId = 41 });
         Assert.Equal("After update", (await chats.GetMessageAsync(message.Id))!.Content);

@@ -76,7 +76,6 @@ public sealed class SettingsCoordinator(ISettingsStore store) : IDisposable
         left.MissumAiServerUrl == right.MissumAiServerUrl
         && left.IsAutomaticSpeechEnabled == right.IsAutomaticSpeechEnabled
         && left.LiveCaptionLanguage == right.LiveCaptionLanguage
-        && left.CodingToolStepsExpanded == right.CodingToolStepsExpanded
         && left.Theme == right.Theme
         && left.AccentColor == right.AccentColor
         && left.BackgroundColor == right.BackgroundColor

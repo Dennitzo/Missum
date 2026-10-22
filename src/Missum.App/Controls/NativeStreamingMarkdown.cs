@@ -12,77 +12,165 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
 {
     internal const double BodyFontSize = 16;
     private readonly List<SectionView> _sections = [];
-    private string _text = string.Empty;
-    internal string Source => _text;
+    private readonly PreparationQueue _preparations = new();
+    internal string Source => _preparations.Source;
     internal long RenderRevision { get; private set; }
-    private long _preparationGeneration;
-    internal bool IsPreparing { get; private set; }
-    private string? _reloadPreparation;
+    internal bool IsPreparing => _preparations.HasWork;
+    private string _publishedSource = string.Empty;
+
+    /// <summary>Pure parser output, prepared before publishing a chronological UI block.</summary>
+    internal sealed record PreparedSource(string Source, IReadOnlyList<SectionSpec> Sections);
+
+    internal static PreparedSource PrepareSource(string source)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        try { return new(source, ParseSections(source)); }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException)
+        { return new(source, [new(SectionKind.Paragraph, source, 0, "")]); }
+    }
     internal IReadOnlyList<Grid> RenderedTables => _sections.Where(section => section.Specification.Kind == SectionKind.Table)
         .Select(section => section.Table!.Grid).ToArray();
 
-    public NativeStreamingMarkdown(string text)
+    private NativeStreamingMarkdown()
     {
         Spacing = 9;
-        Unloaded += (_, _) =>
-        {
-            if (!IsPreparing) return;
-            // A pending worker must not create formula controls in a discarded
-            // transcript. A retained control can resume on its next load.
-            _reloadPreparation = _text;
-            _preparationGeneration++;
-            IsPreparing = false;
-        };
+        // Discard pending publications on unload, including a prefix that would
+        // otherwise still match. A retained control restarts only its latest work.
+        Unloaded += (_, _) => _preparations.Suspend();
         Loaded += (_, _) =>
         {
-            if (_reloadPreparation is not { } pending) return;
-            _reloadPreparation = null;
-            _text = "";
-            UpdateText(pending);
+            _preparations.Resume();
+            PreparePending();
         };
+    }
+
+    public NativeStreamingMarkdown(string text) : this()
+    {
         UpdateText(text);
+    }
+
+    internal NativeStreamingMarkdown(PreparedSource prepared) : this()
+    {
+        UpdatePreparedSource(prepared);
+    }
+
+    /// <summary>Publishes already parsed source without starting a second parser on the UI thread.</summary>
+    internal void UpdatePreparedSource(PreparedSource prepared)
+    {
+        ArgumentNullException.ThrowIfNull(prepared);
+        if (Source == prepared.Source && _publishedSource == prepared.Source && !IsPreparing) return;
+        // An explicitly prepared complete block supersedes any older asynchronous
+        // prefix, even when both sources belong to the same append-only stream.
+        _preparations.AdoptPrepared(prepared.Source);
+        if (!_preparations.IsSuspended) ApplyPrepared(prepared);
     }
 
     /// <summary>Updates on the owning UI thread without rebuilding unchanged text or code blocks.</summary>
     public void UpdateText(string text)
     {
         ArgumentNullException.ThrowIfNull(text);
-        if (string.Equals(_text, text, StringComparison.Ordinal)) return;
-        _reloadPreparation = null;
-        _text = text;
-        var generation = ++_preparationGeneration;
-        if (text.Length > 1024)
-        {
-            IsPreparing = true;
-            _ = PrepareSectionsAsync(text, generation);
-            return;
-        }
-        IsPreparing = false;
-        ApplySections(ParseSections(text));
+        if (!_preparations.Request(text)) return;
+        PreparePending();
     }
 
-    private async Task PrepareSectionsAsync(string source, long generation)
+    private void PreparePending()
     {
-        List<SectionSpec> specifications;
-        try { specifications = await Task.Run(() => ParseSections(source)).ConfigureAwait(false); }
-        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException)
-        { specifications = [new(SectionKind.Paragraph, source, 0, "")]; }
+        if (_preparations.IsSuspended) return;
+        if (Source.Length <= 1024 && _preparations.TakeSynchronous() is { } synchronous)
+        {
+            ApplyPrepared(PrepareSource(synchronous.Source));
+            return;
+        }
+        if (_preparations.TryStart() is { } request) _ = PrepareSectionsAsync(request);
+    }
+
+    private async Task PrepareSectionsAsync(PreparationQueue.RequestState request)
+    {
+        var prepared = await Task.Run(() => PrepareSource(request.Source)).ConfigureAwait(false);
         DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
         {
-            if (generation != _preparationGeneration) return;
-            IsPreparing = false;
-            try { ApplySections(specifications); }
-            catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or System.Runtime.InteropServices.COMException)
-            {
-                Children.Clear(); _sections.Clear();
-                Children.Add(new TextBlock { Text = source, TextWrapping = TextWrapping.Wrap,
-                    IsTextSelectionEnabled = true, FontSize = BodyFontSize, Foreground = NativeThemeBrushes.Text });
-                RenderRevision++;
-            }
+            // Continuous token arrivals must not starve completed paragraphs.
+            // Publish this finished prefix, then prepare one coalesced successor.
+            if (_preparations.CanPublish(request)) ApplyPrepared(prepared);
+            _preparations.Complete(request);
+            PreparePending();
         });
     }
 
-    private void ApplySections(List<SectionSpec> specifications)
+    private void ApplyPrepared(PreparedSource prepared)
+    {
+        if (_publishedSource == prepared.Source) return;
+        try { ApplySections(prepared.Sections); }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or System.Runtime.InteropServices.COMException)
+        {
+            Children.Clear(); _sections.Clear();
+            Children.Add(new TextBlock { Text = prepared.Source, TextWrapping = TextWrapping.Wrap,
+                IsTextSelectionEnabled = true, FontSize = BodyFontSize, Foreground = NativeThemeBrushes.Text });
+            RenderRevision++;
+        }
+        _publishedSource = prepared.Source;
+    }
+
+    /// <summary>UI-owned queue: one active parser and at most one latest successor.</summary>
+    internal sealed class PreparationQueue
+    {
+        internal sealed record RequestState(string Source, long Epoch);
+        private long _epoch;
+        private bool _pending;
+        private RequestState? _active;
+        internal string Source { get; private set; } = string.Empty;
+        internal bool IsSuspended { get; private set; }
+        internal bool HasWork => !IsSuspended && (_pending || _active?.Epoch == _epoch);
+
+        internal bool Request(string source)
+        {
+            if (Source == source) return false;
+            if (!source.StartsWith(Source, StringComparison.Ordinal)) _epoch++;
+            Source = source;
+            _pending = true;
+            return true;
+        }
+
+        internal void AdoptPrepared(string source)
+        {
+            _epoch++;
+            Source = source;
+            _pending = IsSuspended;
+        }
+
+        internal RequestState? TryStart()
+        {
+            if (IsSuspended || !_pending || _active is not null) return null;
+            _pending = false;
+            return _active = new(Source, _epoch);
+        }
+
+        internal RequestState? TakeSynchronous()
+        {
+            if (IsSuspended || !_pending) return null;
+            _pending = false;
+            return new(Source, _epoch);
+        }
+
+        internal bool CanPublish(RequestState request) => !IsSuspended && request.Epoch == _epoch
+            && Source.StartsWith(request.Source, StringComparison.Ordinal);
+
+        internal void Complete(RequestState request)
+        {
+            if (ReferenceEquals(_active, request)) _active = null;
+        }
+
+        internal void Suspend()
+        {
+            _pending |= _active?.Epoch == _epoch;
+            _epoch++;
+            IsSuspended = true;
+        }
+
+        internal void Resume() => IsSuspended = false;
+    }
+
+    private void ApplySections(IReadOnlyList<SectionSpec> specifications)
     {
         RenderRevision++;
         var next = new SectionView?[specifications.Count];

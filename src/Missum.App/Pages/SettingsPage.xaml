@@ -120,11 +120,6 @@
               <ComboBoxItem Content="English" Tag="en-US" />
             </ComboBox>
           </StackPanel>
-          <ToggleSwitch
-            Header="Werkzeugschritte automatisch aufklappen"
-            IsOn="{x:Bind ViewModel.CodingToolStepsExpanded, Mode=TwoWay}"
-            OffContent="Standardmäßig eingeklappt"
-            OnContent="Standardmäßig ausgeklappt" />
           <StackPanel Spacing="7">
             <TextBlock FontWeight="SemiBold" Text="Akzentfarbe" />
             <ListView x:Name="AccentColorList" HorizontalAlignment="Stretch" ItemsSource="{x:Bind AccentColors}" SelectionChanged="OnAccentColorChanged" SelectionMode="Single">

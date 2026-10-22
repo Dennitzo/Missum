@@ -224,7 +224,7 @@ public sealed class AssistantStreamingProjectionTests
     [InlineData("subagent", false)]
     [InlineData("deepResearch", false)]
     [InlineData("deepResearch", true)]
-    public async Task LiveSubagentSnapshotsCarryReasoningBeforeCompletionAndKeepTokenTicksStable(string kind, bool externalTranscript)
+    public async Task LiveSubagentSnapshotsKeepReasoningBodiesOutOfDisplayAndPreserveStoredTranscript(string kind, bool externalTranscript)
     {
         await using var environment = await TestEnvironment.CreateAsync();
         using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
@@ -239,30 +239,37 @@ public sealed class AssistantStreamingProjectionTests
         child = child.Apply(Event(1, Missum.Ai.Contracts.RunEventTypes.ReasoningDelta,
             new Missum.Ai.Contracts.ReasoningDeltaEvent(firstText, 1)));
         var first = await Publish();
-        Assert.Equal(firstText, Reasoning(first).GetProperty("detail").GetString());
-        Assert.False(Reasoning(first).TryGetProperty("detailsDeferred", out var firstDeferred) && firstDeferred.GetBoolean());
+        AssertCompactReasoning(first);
+        Assert.Equal(firstText, child.AssistantMessage.ToolSteps![0].Detail);
         Assert.Equal("streaming", first.GetProperty("messages")[1].GetProperty("status").GetString());
 
         child = child.Apply(Event(2, Missum.Ai.Contracts.RunEventTypes.ModelGeneration,
             new Missum.Ai.Contracts.ModelGenerationEvent("tokenProgress", GeneratedTokens: 12)));
         var progress = await Publish();
         Assert.Equal(first.GetProperty("transcriptRevision").GetInt64(), progress.GetProperty("transcriptRevision").GetInt64());
-        Assert.Equal(firstText, Reasoning(progress).GetProperty("detail").GetString());
+        AssertCompactReasoning(progress);
 
         child = child.Apply(Event(3, Missum.Ai.Contracts.RunEventTypes.ReasoningDelta,
             new Missum.Ai.Contracts.ReasoningDeltaEvent(" Eine Einschränkung wird verglichen.", 1)));
         var appended = await Publish();
-        Assert.Equal(firstText + " Eine Einschränkung wird verglichen.", Reasoning(appended).GetProperty("detail").GetString());
+        AssertCompactReasoning(appended);
+        Assert.Equal(firstText + " Eine Einschränkung wird verglichen.", child.AssistantMessage.ToolSteps![0].Detail);
         Assert.True(appended.GetProperty("transcriptRevision").GetInt64() > first.GetProperty("transcriptRevision").GetInt64());
 
         child = child.Apply(Event(4, Missum.Ai.Contracts.RunEventTypes.RunCompleted, new { }));
         var complete = await Publish();
-        Assert.Equal(JsonValueKind.Null, Reasoning(complete).GetProperty("detail").ValueKind);
-        Assert.True(Reasoning(complete).GetProperty("detailsDeferred").GetBoolean());
+        AssertCompactReasoning(complete);
+        var stored = await SubagentChatState.ReadAsync(parent, child.AgentId, settings.DataDirectory);
+        Assert.Equal(child.AssistantMessage.ToolSteps![0].Detail, stored!.AssistantMessage.ToolSteps![0].Detail);
 
         Missum.Ai.Contracts.RunEvent Event(long id, string type, object payload) => new(id, child.RunId, type,
             DateTimeOffset.UtcNow.AddMilliseconds(id), JsonSerializer.SerializeToElement(payload, Missum.Ai.Contracts.MissumAiProtocol.CreateJsonOptions()));
         static JsonElement Reasoning(JsonElement snapshot) => snapshot.GetProperty("messages")[1].GetProperty("toolSteps")[0];
+        static void AssertCompactReasoning(JsonElement snapshot)
+        {
+            Assert.Equal(JsonValueKind.Null, Reasoning(snapshot).GetProperty("detail").ValueKind);
+            Assert.True(Reasoning(snapshot).GetProperty("detailsDeferred").GetBoolean());
+        }
         async Task<JsonElement> Publish()
         {
             child = child with { ProjectionRevision = child.ProjectionRevision + 1 };
@@ -280,6 +287,41 @@ public sealed class AssistantStreamingProjectionTests
             Assert.Equal(parent.Id, result.GetProperty("parentMessageId").GetGuid());
             return result;
         }
+    }
+
+    [Theory]
+    [InlineData(MissumAiAssistantUpdateKind.Delta)]
+    [InlineData(MissumAiAssistantUpdateKind.Status)]
+    public async Task LiveReasoningDisplayTransportsMetadataWithoutTheStoredBody(MissumAiAssistantUpdateKind kind)
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        var chats = environment.Get<IChatRepository>();
+        var session = await chats.CreateSessionAsync("Compact reasoning", ChatMode.ClaudeScience);
+        var message = await chats.AddMessageAsync(session.Id, ChatRole.Assistant, "Vollständiger Antworttext", MessageStatus.Streaming);
+        var body = new string('r', 80_000);
+        var step = new AssistantToolStep("old-reasoning", "assistant.reasoning", "running", body,
+            ContentOffset: message.Content.Length, UpdatedAt: DateTimeOffset.UtcNow);
+        await chats.SaveToolStepAsync(message.Id, step);
+        var coordinator = CreateCoordinator(environment, settings, environment.Get<IConversationSnapshotRepository>(),
+            environment.Get<IChatArtifactRepository>());
+        JsonElement displayed = default;
+        await coordinator.EmitMissumAiUpdateAsync(new(kind, message with { ToolSteps = [step] }, ToolStep: step),
+            (_, payload, _) =>
+            {
+                displayed = JsonSerializer.SerializeToElement(payload, JsonSerializerOptions.Web);
+                return Task.CompletedTask;
+            }, "compact-reasoning");
+
+        var projected = displayed.GetProperty("toolStep");
+        Assert.Equal(step.Id, projected.GetProperty("id").GetString());
+        Assert.Equal(step.ContentOffset, projected.GetProperty("contentOffset").GetInt32());
+        Assert.Equal(JsonValueKind.Null, projected.GetProperty("detail").ValueKind);
+        Assert.True(projected.GetProperty("detailsDeferred").GetBoolean());
+        Assert.True(displayed.GetRawText().Length < 4000);
+        Assert.Equal(body, (await environment.Get<IConversationSnapshotRepository>()
+            .GetToolStepAsync(session.Id, message.Id, step.Id))!.Detail);
     }
 
     [Theory]

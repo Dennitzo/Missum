@@ -99,7 +99,6 @@ public sealed class QwenUiAcceptanceFixtureTests(ITestOutputHelper output)
                 SelectedModel = ModelId,
                 CodingWorkspacePath = workspace,
                 IsAutomaticSpeechEnabled = false,
-                CodingToolStepsExpanded = false,
                 AssistantOutputsVisible = true,
                 LastRoute = "assistant",
                 ReasoningEffortsByModel = new(StringComparer.OrdinalIgnoreCase)

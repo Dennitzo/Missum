@@ -42,7 +42,6 @@ public sealed partial class AssistantCoordinator
     }
 
     private static AssistantToolStep? LiveDisplayToolStep(AssistantToolStep? step) => step is null ? null
-        : step.Tool == "assistant.reasoning" ? step with { InputJson = null, OutputJson = null, PreviewHtml = null }
         : DisplayToolStep(step);
 
     private static int? StreamStepOrdinal(MissumAiAssistantUpdate update) => update.ToolStep is { } step

@@ -304,7 +304,6 @@ public sealed record AppSettings
     [System.Text.Json.Serialization.JsonIgnore]
     public string? SelectedCodingModel { get; init; }
     public string? CodingWorkspacePath { get; init; }
-    public bool CodingToolStepsExpanded { get; init; }
     public bool AssistantOutputsVisible { get; init; } = true;
     // Legacy JSON field retained for backward-compatible deserialization. "auto"
     // uses the gateway's highest supported model-specific reasoning default.

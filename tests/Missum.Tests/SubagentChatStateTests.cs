@@ -970,7 +970,7 @@ public sealed class SubagentChatStateTests
     [Theory]
     [InlineData("subagent")]
     [InlineData("deepResearch")]
-    public void LiveDisplayCarriesLatestReasoningWithoutHydratingHistoricalSteps(string kind)
+    public void LiveDisplayDefersAllReasoningWhileRetainingTheOriginalTranscript(string kind)
     {
         var child = Child() with { Kind = kind };
         var historical = Enumerable.Range(0, 70).Select(index => new AssistantToolStep("old-" + index,
@@ -980,9 +980,8 @@ public sealed class SubagentChatStateTests
         var current = child.AssistantMessage.ToolSteps![^1];
         var display = child.ForDisplay();
         Assert.Equal(64, display.AssistantMessage.ToolSteps!.Count);
-        Assert.Equal(current.Detail, display.AssistantMessage.ToolSteps[^1].Detail);
-        Assert.False(display.AssistantMessage.ToolSteps[^1].DetailsDeferred);
-        Assert.All(display.AssistantMessage.ToolSteps.SkipLast(1), step =>
+        Assert.Equal("Aktuelle Überlegung", current.Detail);
+        Assert.All(display.AssistantMessage.ToolSteps, step =>
         {
             Assert.True(step.DetailsDeferred);
             Assert.Null(step.Detail);
@@ -992,7 +991,8 @@ public sealed class SubagentChatStateTests
 
         child = child.Apply(Event(child, 2, RunEventTypes.ReasoningDelta,
             new ReasoningDeltaEvent(" ist abgeschlossen.", 71, State: "completed")));
-        Assert.Equal("Aktuelle Überlegung ist abgeschlossen.", child.ForDisplay().AssistantMessage.ToolSteps![^1].Detail);
+        Assert.Null(child.ForDisplay().AssistantMessage.ToolSteps![^1].Detail);
+        Assert.Equal("Aktuelle Überlegung ist abgeschlossen.", child.AssistantMessage.ToolSteps![^1].Detail);
         var terminal = child.Apply(Event(child, 3, RunEventTypes.RunCompleted, new { }));
         Assert.All(terminal.ForDisplay().AssistantMessage.ToolSteps!, step =>
         {

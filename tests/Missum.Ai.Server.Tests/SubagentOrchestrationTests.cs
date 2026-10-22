@@ -1,4 +1,4 @@
-﻿using Missum.Ai.Contracts;
+using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Coding;
 using Missum.Ai.Server.Core.Gateway;
 using Missum.Ai.Server.Core.Models;
@@ -25,7 +25,7 @@ public sealed class SubagentOrchestrationTests
         using var context = new TestServerContext();
         var report = "Anfang des Berichts mit Größen und Einheiten.\n" + new string('a', 20_000)
             + "\nENTSCHEIDENDER_BEFUND_IN_DER_MITTE\n" + new string('b', 20_000) + "\nOffene Punkte am Ende.";
-        using var handler = new DualAgentHandler(childImmediatelyComplete: true) { ChildReport = report };
+        using var handler = new DualAgentHandler(childImmediatelyComplete: true) { ChildReport = report, EmitChildReasoning = true };
         using var http = new HttpClient(handler);
         using var runtime = new ModelRuntimeClient(http, context.WrappedOptions, NullLogger<ModelRuntimeClient>.Instance);
         var services = new ServiceCollection();
@@ -59,6 +59,17 @@ public sealed class SubagentOrchestrationTests
         var child = Assert.Single(await repository.GetSubagentRunsAsync(parent.RunId));
         Assert.Equal(report, CodingTextReconciler.Project(await repository.GetVisibleTextEventsAsync(child.Snapshot.RunId)));
         Assert.True(await repository.HasConsumedSubagentResultAsync(parent.RunId, child.Snapshot.RunId));
+        var childEvents = await repository.GetEventsAfterAsync(child.Snapshot.RunId, 0);
+        Assert.DoesNotContain(childEvents, item => item.Type == RunEventTypes.ReasoningDelta);
+        Assert.Contains(childEvents, item => item.Type == RunEventTypes.ModelGeneration
+            && item.Data.GetProperty("state").GetString() == "reasoningStarted");
+        Assert.Contains(childEvents, item => item.Type == RunEventTypes.ModelGeneration
+            && item.Data.GetProperty("state").GetString() == "reasoningCompleted");
+        var parentEvents = await repository.GetEventsAfterAsync(parent.RunId, 0);
+        Assert.DoesNotContain(parentEvents, item => item.Data.GetRawText().Contains("PRIVATE_CHILD_REASONING", StringComparison.Ordinal));
+        Assert.Contains(parentEvents, item => item.Type == RunEventTypes.SubagentEvent
+            && item.Data.GetProperty("event").GetProperty("type").GetString() == RunEventTypes.ModelGeneration
+            && item.Data.GetProperty("event").GetProperty("data").GetProperty("state").GetString() == "reasoningStarted");
     }
 
     [Fact]
@@ -999,6 +1010,7 @@ public sealed class SubagentOrchestrationTests
         public bool SharedPrimary { get; init; }
         public bool ResearchParentAnswer { get; init; }
         public string? ChildReport { get; init; }
+        public bool EmitChildReasoning { get; init; }
         public string? FinalDelegatedReceipt { get; private set; }
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -1060,7 +1072,9 @@ public sealed class SubagentOrchestrationTests
                         throw;
                     }
                 }
-                if (childImmediatelyComplete) return Text(ChildReport ?? "Die eigene Aufgabe ist abgeschlossen.");
+                if (childImmediatelyComplete) return EmitChildReasoning
+                    ? TextWithReasoning(ChildReport ?? "Die eigene Aufgabe ist abgeschlossen.")
+                    : Text(ChildReport ?? "Die eigene Aufgabe ist abgeschlossen.");
                 return turn switch
                 {
                     1 => Tool(ClientToolNames.CodingRead, new { path = "child.txt" }),
@@ -1123,6 +1137,14 @@ public sealed class SubagentOrchestrationTests
             { name = ModelRuntimeClient.ToTransportToolName(name), arguments = JsonSerializer.Serialize(arguments) } },
         } }, "tool_calls");
         private static HttpResponseMessage Text(string content) => Sse(new { content }, "stop");
+        private static HttpResponseMessage TextWithReasoning(string content) => new(HttpStatusCode.OK)
+        {
+            Content = new StringContent("data: " + JsonSerializer.Serialize(new
+                { choices = new[] { new { delta = new { reasoning_content = "PRIVATE_CHILD_REASONING" } } } })
+                + "\n\ndata: " + JsonSerializer.Serialize(new
+                { choices = new[] { new { delta = new { content }, finish_reason = "stop" } } })
+                + "\n\ndata: [DONE]\n\n", Encoding.UTF8, "text/event-stream"),
+        };
         private static HttpResponseMessage Sse(object delta, string finish) => new(HttpStatusCode.OK)
         {
             Content = new StringContent("data: " + JsonSerializer.Serialize(new { choices = new[] { new { index = 0, delta, finish_reason = finish } } })

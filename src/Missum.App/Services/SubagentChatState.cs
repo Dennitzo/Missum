@@ -275,18 +275,13 @@ public sealed partial record SubagentChatState(
 
     private static ChatMessage ProjectMessage(ChatMessage message)
     {
-        // The live thinking row uses the latest reasoning directly, including its
-        // last completed fragment before the next tool starts. It replaces the
-        // historical tool control, so that control cannot lazily load the text.
-        // Keep just this one live source; older reasoning and tool payloads stay deferred.
-        var liveReasoningId = message.Status == MessageStatus.Streaming
-            ? message.ToolSteps?.LastOrDefault(step => step.Tool == "assistant.reasoning")?.Id : null;
+        // Only compact activity metadata reaches the display. Stored transcripts
+        // retain their original reasoning without copying it on every UI update.
         return message with
         {
             ToolExecution = null, ContextSummary = null,
             ToolSteps = message.ToolSteps?.TakeLast(64).Select(step => step.Tool is "assistant.narration" or "assistant.progress"
-                ? step : step.Id == liveReasoningId ? step with
-                { InputJson = null, OutputJson = null, PreviewHtml = null, DetailsDeferred = false } : step with
+                ? step : step with
             {
                 DisplayHeader = AssistantToolStepHeaders.Create(step),
                 Detail = null, InputJson = null, OutputJson = null, PreviewHtml = null,

@@ -249,8 +249,9 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
 
     private void ApplyEvent(string type, JsonElement data)
     {
+        if (type == "tool.details") ObserveToolTabDetails(data);
         if (ApplyPagedHistoryEvent(type, data) || ApplySourcesEvent(type, data)) return;
-        if (ApplySubagentEvent(type, data)) return;
+        if (ApplySubagentEvent(type, data)) { RefreshOpenToolTabs(); return; }
         if (ApplyResearchEvent(type, data)) return;
         ObserveContinuationAdmission(type, data);
         if (type == "chat.started" && S(data, "sessionId") == _session.ToString()
@@ -335,7 +336,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         }
         var eventSession = S(data, "sessionId", S(data, "activeSessionId"));
         if (eventSession.Length > 0 && !string.Equals(eventSession, _session.ToString(), StringComparison.OrdinalIgnoreCase)) return;
-        if (type == "conversation.toolStepChanged") { ApplyNativeMessageDelta(data); return; }
+        if (type == "conversation.toolStepChanged") { ApplyNativeMessageDelta(data); ObserveThinkingProgress(data); return; }
         UpdateContext(data);
         ObserveThinkingProgress(data);
         if (type == "reasoning.snapshot" && S(data, "role") + ":" + S(data, "modelId") == _reasoningModel) { _reasoning = data.Deserialize<ComposerReasoningOptions>(JsonOptions); RefreshComposerModelDisplay(); }
@@ -484,13 +485,18 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
 
     private static StackPanel MessageBody(Border bubble) => bubble.Child is StackPanel panel ? panel : (StackPanel)((Grid)bubble.Child).Children[1];
 
-    private void RenderMessages() => _messagesDirty = true;
+    private void RenderMessages()
+    {
+        RefreshOpenToolTabs();
+        _messagesDirty = true;
+    }
     // JsonElement equality is document/position identity. Stable messages need
     // neither JSON re-serialization nor native footer/tooltip updates on a delta.
     private readonly Dictionary<string, JsonElement> _renderedMessageSources = new(StringComparer.Ordinal);
     private readonly Dictionary<string, (JsonElement Source, string Signature)> _sourceMessageSignatures = new(StringComparer.Ordinal);
     private void ResetConversationViews()
     {
+        ClearToolTabs();
         CancelPromptTimelineNavigation();
         _autoScrollGesture.Reset();
         _pendingConversationViewportAnchor = null;
@@ -523,7 +529,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
 
     private void QueueSessionScrollToLatest()
     {
-        if (_sessionScrollQueued || !_scrollNewSessionToLatest || !CanFollowConversationTail || _disposed) return;
+        if (_sessionScrollQueued || !_scrollNewSessionToLatest || !CanFollowConversationTail || _disposed || !IsConversationActiveView) return;
         _sessionScrollQueued = true;
         var session = _session;
         var owner = ConversationViewKey;
@@ -532,13 +538,15 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         {
             _sessionScrollQueued = false;
             if (_disposed || session != _session || owner != ConversationViewKey
-                || scrollIntent != _conversationScrollIntent || !_scrollNewSessionToLatest || !CanFollowConversationTail) return;
+                || scrollIntent != _conversationScrollIntent || !_scrollNewSessionToLatest || !CanFollowConversationTail || !IsConversationActiveView) return;
             ScrollConversationToLatest();
         }));
     }
 
     private void RenderMessagesNow(bool deferLayout = false)
     {
+        RefreshOpenToolTabs();
+        if (!IsConversationActiveView) { _messagesDirty = true; return; }
         ReconcilePendingMessages();
         if (_conversationSelection?.IsSelecting == true)
         {
@@ -633,6 +641,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     private ConversationViewportAnchor? _pendingConversationViewportAnchor;
     private void QueueConversationLayoutProjection(bool follow, ConversationViewportAnchor? viewportAnchor = null)
     {
+        if (!IsConversationActiveView) return;
         if (follow) _scrollNewSessionToLatest = true;
         _pendingConversationViewportAnchor ??= viewportAnchor;
         if (_conversationLayoutProjectionQueued) return;
@@ -647,7 +656,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             _conversationLayoutProjectionQueued = false;
             var anchor = _pendingConversationViewportAnchor;
             _pendingConversationViewportAnchor = null;
-            if (_disposed || owner != ConversationViewKey) return;
+            if (_disposed || owner != ConversationViewKey || !IsConversationActiveView) return;
             RunUiCallback("Conversation.LayoutProjection", () =>
             {
                 RefreshVirtualConversationViewport();
@@ -1277,6 +1286,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         if (_captionSubscribed) App.Current.GetService<SystemAudioCaptionService>().Changed -= OnNativeCaptionChanged;
         _ = StopNativeDictationAsync();
         DisposeMessageActions();
+        ClearToolTabs(returnToChat: false);
         DisposeScienceViews();
         _researchRefreshTimer?.Stop();
         _ = CancelNativeMediaCaptureAsync();

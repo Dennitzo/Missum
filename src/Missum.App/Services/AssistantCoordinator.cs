@@ -1,4 +1,4 @@
-﻿using Missum.Ai.Contracts;
+using Missum.Ai.Contracts;
 using Missum.Core.Contracts;
 using Missum.Core.Chat;
 using Missum.Core.Coding;
@@ -406,7 +406,6 @@ public sealed partial class AssistantCoordinator(
             codingWorkspaceRequired = isCodingSession
                 && (string.IsNullOrWhiteSpace(session.CodingWorkspacePath)
                     || !Directory.Exists(session.CodingWorkspacePath)),
-            codingToolStepsExpanded = CurrentSettings.CodingToolStepsExpanded,
             changesSummary = missumAi is null ? null : await missumAi.GetChangesSummaryAsync(session.Id, messages, cancellationToken).ConfigureAwait(false),
             isSessionPaneOpen = CurrentSettings.IsAssistantSessionPaneOpen,
         };
@@ -492,7 +491,6 @@ public sealed partial class AssistantCoordinator(
             toolStepWindows = page.ToolStepWindows,
             chatMode = ChatModeName(conversation.Session.ChatMode),
             conversationRevision = conversation.Session.ConversationRevision,
-            codingToolStepsExpanded = CurrentSettings.CodingToolStepsExpanded,
             changesSummary = missumAi is null ? null : await missumAi.GetChangesSummaryAsync(sessionId, conversation.Messages, cancellationToken).ConfigureAwait(false),
             messages = conversation.Messages.Select(message => ToMessageDto(
                 message,
@@ -2324,10 +2322,8 @@ public sealed partial class AssistantCoordinator(
     };
 
     private static object ToMessageDto(ChatMessage message, IReadOnlyList<ChatArtifact>? messageArtifacts = null,
-        ConversationToolStepWindow? toolWindow = null, bool preserveLiveReasoning = false)
+        ConversationToolStepWindow? toolWindow = null)
     {
-        var liveReasoningId = preserveLiveReasoning && message.Status == MessageStatus.Streaming
-            ? message.ToolSteps?.LastOrDefault(step => step.Tool == "assistant.reasoning")?.Id : null;
         return new
         {
             id = message.Id,
@@ -2342,9 +2338,7 @@ public sealed partial class AssistantCoordinator(
             contentProfile = message.ContentProfile.ToString().ToLowerInvariant(),
             message.Revision,
             tool = message.ToolExecution,
-            toolSteps = (message.ToolSteps ?? []).TakeLast(64).Select(step => step.Id == liveReasoningId
-                ? step with { InputJson = null, OutputJson = null, PreviewHtml = null }
-                : DisplayToolStep(step)),
+            toolSteps = (message.ToolSteps ?? []).TakeLast(64).Select(DisplayToolStep),
             toolStepWindow = toolWindow ?? new ConversationToolStepWindow(message.ToolSteps?.Count ?? 0,
                 message.ToolSteps?.Count > 64, message.ToolSteps?.Count > 64 ? message.ToolSteps.Count - 64 : null),
             artifacts = AssistantArtifactOriginalResolver.DisplayArtifacts(messageArtifacts ?? [], message.ToolSteps)

@@ -14,33 +14,31 @@ public sealed partial class NativeAssistantPage
     private readonly Dictionary<string, NativeThinkingIndicatorState> _thinkingStates = new(StringComparer.Ordinal);
     private readonly Dictionary<string, ThinkingIndicatorView> _thinkingIndicators = new(StringComparer.Ordinal);
     private readonly Dictionary<string, NativeModelPhasePresentation> _modelPhases = new(StringComparer.Ordinal);
-    private bool? _observedToolExpansionDefault;
+    private readonly Dictionary<string, NativeChatActivityState> _chatActivityStates = new(StringComparer.Ordinal);
 
     private void ResetToolDisclosureDefaults(IEnumerable<string> messageIds)
     {
-        var expanded = _settings.Current.CodingToolStepsExpanded;
         foreach (var id in messageIds)
-        {
-            if (_virtualMessages.TryGetValue(id, out var virtualized)) virtualized.ExpandedSteps.Clear();
-            if (!_messageBlocks.TryGetValue(id, out var blocks)) continue;
-            foreach (var entry in blocks.Values.ToArray())
-                if ((entry is ActivitySlotView slot ? slot.Content : entry) is ToolStepView tool) tool.SetExpanded(expanded, forceDetails: false);
-                else if (entry is ThinkingIndicatorView thinking) thinking.SetExpanded(expanded);
-        }
+            if (_virtualMessages.TryGetValue(id, out var state)) state.ExpandedSteps.Clear();
     }
 
-    private void ApplyToolExpansionDefaultIfChanged()
+    private bool WaitingForModel(string id, JsonElement message)
     {
-        var expanded = _settings.Current.CodingToolStepsExpanded;
-        if (_observedToolExpansionDefault == expanded) return;
-        // Defer replacing selected detail runs, or projecting a hidden chat.
-        // The unchanged observed value leaves the new default pending until
-        // selection ends and the native conversation is visible again.
-        if (!IsLoaded || BodyGrid.Visibility != Visibility.Visible || _conversationSelection?.IsSelecting == true) return;
-        var initialized = _observedToolExpansionDefault.HasValue;
-        _observedToolExpansionDefault = expanded;
-        if (initialized)
-            ResetToolDisclosureDefaults(DisplayMessages.Keys);
+        if (!_chatActivityStates.TryGetValue(id, out var state)) _chatActivityStates[id] = state = new();
+        var visible = MessageSteps(message).LastOrDefault(step => S(step, "tool") is not
+            ("assistant.reasoning" or "assistant.progress" or "context.compact"));
+        state.ObserveOutput(MessageContent(message), S(visible, "id") + ":" + S(visible, "status")
+            + (S(visible, "tool") == "assistant.narration" ? S(visible, "detail") : ""),
+            S(message, "status") is "streaming" or "pending");
+        return state.Waiting;
+    }
+
+    private void InvalidateMessagePresentation(string id)
+    {
+        _renderedMessageSources.Remove(id);
+        _renderedMessageVersions.Remove(id);
+        if (_messageViews.TryGetValue(id, out var cached)) _messageViews[id] = ("", cached.View);
+        RenderMessages();
     }
 
     private void ObserveThinkingProgress(JsonElement data)
@@ -49,28 +47,18 @@ public sealed partial class NativeAssistantPage
         var messageId = S(data, "messageId", S(data, "runMessageId"));
         if (messageId.Length == 0 && data.TryGetProperty("message", out var message)) messageId = S(message, "id");
         if (messageId.Length == 0) return;
-        int? generated = data.TryGetProperty("generatedTokens", out var tokens) && tokens.ValueKind == JsonValueKind.Number
-            && tokens.TryGetInt32(out var count) ? count : null;
-        DateTimeOffset? updated = DateTimeOffset.TryParse(S(data, "generationUpdatedAt"), out var at) ? at : null;
-        var priorPhase = _modelPhases.GetValueOrDefault(messageId);
-        if (updated.HasValue && priorPhase?.UpdatedAt is { } priorUpdated && updated < priorUpdated) return;
-        int? Count(string name) => data.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Number
-            && value.TryGetInt32(out var count) ? count : null;
-        double? fraction = data.TryGetProperty("promptProgress", out var progress) && progress.ValueKind == JsonValueKind.Number
-            && progress.TryGetDouble(out var percentage) ? percentage : null;
-        _modelPhases[messageId] = (priorPhase ?? new NativeModelPhasePresentation())
-            .Observe(S(data, "generationState"), Count("processedPromptTokens"), Count("totalPromptTokens"), fraction, updated);
-        if (!_thinkingStates.TryGetValue(messageId, out var state))
-            _thinkingStates[messageId] = state = new NativeThinkingIndicatorState();
-        state.ObserveProgress(messageId, S(data, "generationState"), generated, updated);
+        if (DisplayMessages.TryGetValue(messageId, out var current)) WaitingForModel(messageId, current);
+        if (!_chatActivityStates.TryGetValue(messageId, out var state)) _chatActivityStates[messageId] = state = new();
+        DateTimeOffset? at = DateTimeOffset.TryParse(S(data, "generationUpdatedAt"), out var updated) ? updated : null;
+        if (state.ObservePhase(S(data, "generationState"), at)) InvalidateMessagePresentation(messageId);
     }
 
     private void ClearConversationThinkingState()
     {
-        foreach (var id in _messages.Keys) { _thinkingStates.Remove(id); _modelPhases.Remove(id); }
+        foreach (var id in _messages.Keys) { _thinkingStates.Remove(id); _modelPhases.Remove(id); _chatActivityStates.Remove(id); }
     }
 
-    private void RefreshThinkingIndicators(bool refreshTokens = false) => ApplyToolExpansionDefaultIfChanged();
+    private void RefreshThinkingIndicators(bool refreshTokens = false) { if (_disposed) return; }
 
     private sealed class ThinkingIndicatorView : Grid
     {

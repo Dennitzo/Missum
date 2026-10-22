@@ -81,7 +81,10 @@ public sealed class RunSteeringProcessorTests
         Assert.Single(events, item => item.Type == RunEventTypes.RunStarted);
         Assert.Single(events, item => item.Type == RunEventTypes.RunCompleted);
         Assert.Single(events, item => item.Type == RunSteeringEventTypes.Applied);
-        Assert.Contains(events, item => item.Type == RunEventTypes.ReasoningDelta && item.Data.GetProperty("state").GetString() == "steered");
+        Assert.DoesNotContain(events, item => item.Type == RunEventTypes.ReasoningDelta);
+        Assert.Contains(events, item => item.Type == RunEventTypes.ModelGeneration
+            && item.Data.GetProperty("state").GetString() == "reasoningCompleted"
+            && item.Data.TryGetProperty("failureKind", out var reason) && reason.GetString() == "steered");
         Assert.DoesNotContain(events, item => item.Type is RunEventTypes.RunCancelled or RunEventTypes.RunFailed);
         Assert.Equal("Blau ist gespeichert.", CodingTextReconciler.Project(events));
         Assert.True(harness.Handler.FirstGenerationCancelled);

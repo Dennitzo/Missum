@@ -12,7 +12,7 @@ public sealed class NativeToolResultView : StackPanel
     public NativeToolResultView(JsonElement data, string path, bool input, bool hidePatch, string? sourceLanguage = null)
         : this(NativeToolResultFormatter.Format(data, path, hidePatch, sourceLanguage)) { }
 
-    internal NativeToolResultView(IEnumerable<NativeToolResultFormatter.Block> content)
+    internal NativeToolResultView(IEnumerable<NativeToolResultFormatter.Block> content, bool embedded = false)
     {
         Spacing = 12;
         // Both the parent transcript and subagent tabs use this view. Flat
@@ -25,7 +25,7 @@ public sealed class NativeToolResultView : StackPanel
             Children.Remove(more);
             for (var index = 0; index < 16 && next is { } block; index++)
             {
-                Children.Add(CodeCard(block.Title, block.Text, block.Language ?? "text", block.Path));
+                Children.Add(CodeCard(block.Title, block.Text, block.Language ?? "text", block.Path, embedded));
                 next = blocks.MoveNext() ? blocks.Current : null;
             }
             if (next is not null) Children.Add(more);
@@ -52,14 +52,16 @@ public sealed class NativeToolResultView : StackPanel
         return button;
     }
 
-    public static Border CodeCard(string title, string source, string language, string? path = null)
+    public static Border CodeCard(string title, string source, string language, string? path = null, bool embedded = false)
     {
         FrameworkElement body;
-        if (language == "diff") body = new NativeDiffView(source);
+        if (language == "diff") body = new NativeDiffView(source, wrapLines: embedded);
         else
         {
-            var text = new TextBlock { FontFamily = new("Cascadia Mono"), Foreground = NativeThemeBrushes.Text, FontSize = language == "text" ? 14 : 13, LineHeight = 23, IsTextSelectionEnabled = true, TextWrapping = language == "text" ? TextWrapping.Wrap : TextWrapping.NoWrap, Margin = new(12) };
-            var scroll = new ScrollViewer { Content = text, MaxHeight = 520, HorizontalScrollBarVisibility = language == "text" ? ScrollBarVisibility.Disabled : ScrollBarVisibility.Auto, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollMode = language == "text" ? ScrollMode.Disabled : ScrollMode.Enabled };
+            var text = new TextBlock { FontFamily = new("Cascadia Mono"), Foreground = NativeThemeBrushes.Text, FontSize = language == "text" ? 14 : 13, LineHeight = 23, IsTextSelectionEnabled = true, TextWrapping = embedded || language == "text" ? TextWrapping.Wrap : TextWrapping.NoWrap, Margin = new(12) };
+            // Tool tabs own the single scrolling surface. Bounded source pages
+            // keep the native text control small without creating a nested viewport.
+            ScrollViewer? scroll = embedded ? null : new ScrollViewer { Content = text, MaxHeight = 520, HorizontalScrollBarVisibility = language == "text" ? ScrollBarVisibility.Disabled : ScrollBarVisibility.Auto, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollMode = language == "text" ? ScrollMode.Disabled : ScrollMode.Enabled };
             var pages = new List<int> { 0 };
             var current = 0;
             var nextOffset = 0;
@@ -85,7 +87,7 @@ public sealed class NativeToolResultView : StackPanel
                 next.IsEnabled = nextOffset < source.Length;
                 position.Text = "Abschnitt " + (current + 1);
                 pager.Visibility = pages.Count > 1 || next.IsEnabled ? Visibility.Visible : Visibility.Collapsed;
-                scroll.ChangeView(null, 0, null, disableAnimation: true);
+                scroll?.ChangeView(null, 0, null, disableAnimation: true);
             }
             previous.Click += (_, _) => { if (current > 0) { current--; ShowPage(); } };
             next.Click += (_, _) =>
@@ -95,7 +97,7 @@ public sealed class NativeToolResultView : StackPanel
                 current++; ShowPage();
             };
             ShowPage();
-            body = new StackPanel { Children = { scroll, pager } };
+            body = new StackPanel { Children = { (FrameworkElement?)scroll ?? text, pager } };
         }
         return Frame(title + (string.IsNullOrEmpty(path) ? "" : "\n" + path), body, CopyButton(language == "diff" ? "Diff kopieren" : "Kopieren", source));
     }
