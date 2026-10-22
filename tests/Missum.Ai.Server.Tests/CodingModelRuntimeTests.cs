@@ -33,11 +33,12 @@ public sealed class CodingModelRuntimeTests
             Assert.Equal($"file-{index}.txt", call.Arguments.GetProperty("path").GetString());
             Assert.Equal("Grüße\n\"old\"", call.Arguments.GetProperty("oldText").GetString());
             Assert.Equal("new\n", call.Arguments.GetProperty("newText").GetString());
-            Assert.Equal(new string('a', 64), call.Arguments.GetProperty("expectedSha256").GetString());
+            Assert.Equal(["path", "oldText", "newText"], call.Arguments.EnumerateObject().Select(static property => property.Name));
         }
         using var body = JsonDocument.Parse(handler.ChatBody!);
         var schema = body.RootElement.GetProperty("tools")[0].GetProperty("function").GetProperty("parameters");
         Assert.False(schema.TryGetProperty("oneOf", out _));
+        Assert.False(schema.GetProperty("properties").TryGetProperty("expectedSha256", out _));
         Assert.Equal(spec.Schema.GetProperty("properties").GetRawText(), schema.GetProperty("properties").GetRawText());
     }
 

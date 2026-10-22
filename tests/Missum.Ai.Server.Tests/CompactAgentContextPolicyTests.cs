@@ -102,9 +102,15 @@ public sealed class CompactAgentContextPolicyTests
         var policy = CompactAgentContextPolicy.Build(Request(RunMode.General), []);
         Assert.Contains("Systemweit lesen ist erlaubt", policy, StringComparison.Ordinal);
         Assert.Contains("nur im ausgewählten Workspace", policy, StringComparison.Ordinal);
-        Assert.Contains("sha256 als expectedSha256", policy, StringComparison.Ordinal);
+        Assert.Contains("Dateien direkt bearbeiten, Nutzeränderungen erhalten", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("expectedSha256", policy, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("sha256", policy, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("Direkte Nutzeranweisungen", policy, StringComparison.Ordinal);
-        Assert.Contains("Status bleiben immer Deutsch", policy, StringComparison.Ordinal);
+        Assert.Contains("Antworte auf Deutsch", policy, StringComparison.Ordinal);
+        Assert.Contains("Sichtbare Fortschrittsmeldungen bleiben Deutsch", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("Sprachregel für den Reasoning-/Analysekanal", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("sichtbaren Reasoning-/Analysekanal", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("Reasoning-/Analysekanal und Status bleiben immer Deutsch", policy, StringComparison.Ordinal);
         Assert.Contains("keine privaten", policy, StringComparison.Ordinal);
         Assert.Contains("Sichtprüfung", policy, StringComparison.Ordinal);
         Assert.Contains("prepared", policy, StringComparison.Ordinal);
@@ -115,7 +121,7 @@ public sealed class CompactAgentContextPolicyTests
     }
 
     [Fact]
-    public void CodingKeepsHashPlanProcessAndLocalDependencyContractsWithoutCommandRecipes()
+    public void CodingKeepsPlanProcessAndLocalDependencyContractsWithoutHashHandshakeOrCommandRecipes()
     {
         var policy = CompactAgentContextPolicy.Build(Request(RunMode.Coding), [ClientToolNames.CodingRead]);
         foreach (var requirement in new[] { "höchstens eine in_progress", "completed benötigt echte erfolgreiche",
@@ -125,6 +131,11 @@ public sealed class CompactAgentContextPolicyTests
             Assert.Contains(requirement, policy, StringComparison.Ordinal);
         Assert.DoesNotContain(".assistant/research/", policy, StringComparison.Ordinal);
         Assert.DoesNotContain("--require-virtualenv", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("expectedSha256", policy, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("sha256", policy, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Sprachregel für den Reasoning-/Analysekanal", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("sichtbaren Reasoning-/Analysekanal", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("Reasoning-/Analysekanal und Status bleiben immer Deutsch", policy, StringComparison.Ordinal);
         Assert.True(policy.Length < 10000 + AgentNarrationPolicy.Instructions.Length, $"Coding policy contains {policy.Length} characters.");
     }
 

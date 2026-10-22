@@ -244,6 +244,23 @@ function Get-MissumBuiltAt {
     return [DateTime]::UtcNow.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
 }
 
+function Get-MissumFileSha256 {
+    param([Parameter(Mandatory = $true)][string] $LiteralPath)
+
+    # Use the framework directly: Get-FileHash is a module-exported function in
+    # Windows PowerShell 5.1 and may be unavailable in nested publish scopes.
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    $stream = $null
+    try {
+        $stream = [IO.File]::OpenRead([IO.Path]::GetFullPath($LiteralPath))
+        return [BitConverter]::ToString($algorithm.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+        $algorithm.Dispose()
+    }
+}
+
 function Assert-MissumArtifactPath {
     param(
         [Parameter(Mandatory = $true)]

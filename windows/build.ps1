@@ -54,7 +54,7 @@ if (-not $SkipPublish) {
         throw 'Portable build did not produce Missum.exe and its publish manifest.'
     }
     $manifest = Get-Content -LiteralPath $portableManifest -Raw | ConvertFrom-Json
-    $actualExecutableHash = (Get-FileHash -LiteralPath $portableExecutable -Algorithm SHA256).Hash.ToLowerInvariant()
+    $actualExecutableHash = Get-MissumFileSha256 -LiteralPath $portableExecutable
     if ($manifest.mode -ne 'SingleFile' -or $manifest.runtimeIdentifier -ne $RuntimeIdentifier -or
         $manifest.executableSha256 -ne $actualExecutableHash) {
         throw 'Portable build result does not match its verified SingleFile manifest.'

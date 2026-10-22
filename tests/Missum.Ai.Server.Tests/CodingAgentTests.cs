@@ -50,7 +50,13 @@ public sealed class CodingAgentTests
     {
         var prompt = RunProcessor.CreateInitialMessages(Request(), "coding", [ClientToolNames.CodingRead])[0].Content!;
         Assert.Contains("Coding-Agent", prompt, StringComparison.Ordinal);
-        Assert.Contains("sha256", prompt, StringComparison.Ordinal);
+        Assert.Contains("Bearbeite Dateien direkt; ein vorheriger Leseaufruf ist nicht vorgeschrieben", prompt, StringComparison.Ordinal);
+        Assert.DoesNotContain("expectedSha256", prompt, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("sha256", prompt, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Antworte auf Deutsch", prompt, StringComparison.Ordinal);
+        Assert.DoesNotContain("Sprachregel für den Reasoning-/Analysekanal", prompt, StringComparison.Ordinal);
+        Assert.DoesNotContain("sichtbaren Reasoning-/Analysekanal", prompt, StringComparison.Ordinal);
+        Assert.DoesNotContain("Reasoning-/Analysekanal und Status bleiben immer Deutsch", prompt, StringComparison.Ordinal);
         Assert.Contains("keine Testergebnisse", prompt, StringComparison.Ordinal);
         Assert.Contains("Git-Diffs nur in erkannten Git-Projekten", prompt, StringComparison.Ordinal);
         Assert.Contains("ein reiner Dateiwerkzeug-Auftrag erfordert keinen Git-Prozess", prompt, StringComparison.Ordinal);
@@ -79,6 +85,14 @@ public sealed class CodingAgentTests
         var catalog = new AgentToolCatalog();
         var tool = catalog.Resolve(name, catalog.GetAvailableTools(Request()));
         Assert.Throws<ArgumentException>(() => catalog.Validate(tool, JsonSerializer.Deserialize<JsonElement>(json)));
+    }
+
+    [Fact]
+    public void CodingEditAcceptsDirectEditWithoutAHashHandshake()
+    {
+        var catalog = new AgentToolCatalog();
+        var tool = catalog.Resolve(ClientToolNames.CodingEdit, catalog.GetAvailableTools(Request()));
+        catalog.Validate(tool, JsonSerializer.SerializeToElement(new { path = "a.cs", oldText = "a", newText = "b" }));
     }
 
     [Fact]

@@ -8,13 +8,13 @@ namespace Missum.Ai.Server.Tests;
 public sealed class CodingBatchEditSchemaTests
 {
     private static readonly AgentToolSpec Edit = CodingToolCatalog.CreateTools().Single(static tool => tool.Name == ClientToolNames.CodingEdit);
-    private static readonly string Hash = new('a', 64);
     private readonly AgentToolCatalog _catalog = new();
 
     [Fact]
     public void SingleAndAtomicBatchAreExclusiveSchemaAlternatives()
     {
         Assert.Equal(2, Edit.Schema.GetProperty("oneOf").GetArrayLength());
+        Assert.False(Edit.Schema.GetProperty("properties").TryGetProperty("expectedSha256", out _));
         Assert.Equal(100, Edit.Schema.GetProperty("properties").GetProperty("edits").GetProperty("maxItems").GetInt32());
         _catalog.Validate(Edit, Arguments(new { oldText = "original", newText = "changed" }));
         _catalog.Validate(Edit, Arguments(new { edits = new[] { new { oldText = "original", newText = "" }, new { oldText = "second", newText = "new" } } }));
@@ -42,7 +42,6 @@ public sealed class CodingBatchEditSchemaTests
         var properties = JsonSerializer.SerializeToElement(replacements).EnumerateObject()
             .ToDictionary(static property => property.Name, static property => property.Value, StringComparer.Ordinal);
         properties["path"] = JsonSerializer.SerializeToElement("file.py");
-        properties["expectedSha256"] = JsonSerializer.SerializeToElement(Hash);
         return JsonSerializer.SerializeToElement(properties);
     }
 }

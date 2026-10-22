@@ -79,12 +79,12 @@ $manifest = [ordered]@{
     windowsAppSdkSelfContained = $true
     buildId = Get-MissumBuildId
     builtAtUtc = Get-MissumBuiltAt
-    executableSha256 = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
+    executableSha256 = Get-MissumFileSha256 -LiteralPath $executable
     files = @(Get-ChildItem -LiteralPath $stageDirectory -Recurse -File | Sort-Object FullName | ForEach-Object {
         [ordered]@{
             path = ($_.FullName.Substring($stageDirectory.Length).TrimStart('\', '/') -replace '\\', '/')
             length = $_.Length
-            sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            sha256 = Get-MissumFileSha256 -LiteralPath $_.FullName
         }
     })
 }

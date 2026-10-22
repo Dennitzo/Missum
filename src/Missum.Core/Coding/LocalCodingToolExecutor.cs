@@ -268,7 +268,7 @@ public sealed class LocalCodingToolExecutor
             oldText = NormalizeNewlines(oldText, "\n");
             var index = normalized.IndexOf(oldText, StringComparison.Ordinal);
             if (index < 0)
-                throw new InvalidOperationException($"coding.edit.text_not_found: Ersetzung {replacements.Count + 1}: oldText wurde nicht gefunden. Es wurde nichts geändert. Suche mit coding.search nach einer kurzen eindeutigen Textstelle und übernimm den tatsächlichen Text ohne Zeilennummern. Verwende kleinere Ersetzungen. Wiederhole nicht dieselben Argumente.");
+                throw new InvalidOperationException($"coding.edit.text_not_found: Ersetzung {replacements.Count + 1}: oldText wurde nicht gefunden. Es wurde nichts geändert. Suche mit coding.search nach einer kurzen eindeutigen Textstelle und übernimm den tatsächlichen Text ohne Zeilennummern. Verwende kleinere Ersetzungen. Wiederhole nicht dieselben Argumente. Hinweis: Backslashes sind JSON-Zeichen; ein einzelnes Backslash in der Datei muss im JSON als \\\\, ein doppeltes Backslash als \\\\\\\\ angegeben werden.");
             var duplicate = normalized.IndexOf(oldText, index + 1, StringComparison.Ordinal);
             if (duplicate >= 0)
                 throw new InvalidOperationException($"coding.edit.ambiguous_match: Ersetzung {replacements.Count + 1}: oldText kommt mehrfach vor (Zeilen {1 + normalized.AsSpan(0, index).Count('\n')} und {1 + normalized.AsSpan(0, duplicate).Count('\n')}). Es wurde nichts geändert. Lies diese Bereiche und ergänze eindeutige benachbarte Zeilen in oldText.");
