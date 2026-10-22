@@ -160,6 +160,31 @@ public sealed class ResearchSandboxServiceTests : IDisposable
         Assert.Contains("scriptSha256", manifest, StringComparison.Ordinal);
     }
 
+    [Fact]
+    [Trait("Category", "Live")]
+    public async Task CodingSubprocessImportsPreinstalledMathlibOfflineWithoutLakeOrCustomEnvironment()
+    {
+        if (Environment.GetEnvironmentVariable("MISSUM_AI_RESEARCH_SANDBOX_LIVE") != "1") return;
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+        await _service.WriteTextAsync("live-mathlib", "check_mathlib.py", """
+            import pathlib, subprocess, tempfile
+            with tempfile.TemporaryDirectory() as directory:
+                source = pathlib.Path(directory) / "Proof.lean"
+                source.write_text("import Mathlib\nexample (x y : ℝ) : (x+y)^2 = x^2+2*x*y+y^2 := by ring\nexample : (2 : ℝ)+2 = 4 := by norm_num\n", encoding="utf-8")
+                checked = subprocess.run(["lean", str(source)], capture_output=True, text=True)
+                assert checked.returncode == 0, checked.stdout + checked.stderr
+                source.write_text("import Mathlib\nexample : (1 : ℝ) = 2 := by norm_num\n", encoding="utf-8")
+                rejected = subprocess.run(["lean", str(source)], capture_output=True, text=True)
+                assert rejected.returncode != 0, "False statement unexpectedly accepted"
+                print("Mathlib imports and tactics work offline; false statement rejected")
+            """, cancellationToken: timeout.Token);
+        var result = await _service.RunPythonAsync("live-mathlib", "check_mathlib.py", timeoutSeconds: 120,
+            cancellationToken: timeout.Token);
+        Assert.False(result.TimedOut);
+        Assert.True(result.ExitCode == 0, result.StandardOutput + result.StandardError);
+        Assert.Contains("Mathlib imports and tactics work offline; false statement rejected", result.StandardOutput, StringComparison.Ordinal);
+    }
+
     public void Dispose()
     {
         try { if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true); }

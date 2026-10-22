@@ -28,9 +28,9 @@ $arguments = @('build')
 if ($Pull) { $arguments += '--pull' }
 Invoke-MissumAiCompose -Paths $paths -Arguments $arguments
 $docker = Resolve-MissumDockerCommand
-$runnerArguments = @('build', '--tag', 'missum-ai/research-runner:1')
+$runnerArguments = @('build', '--tag', 'missum-ai/research-runner:3')
 if ($Pull) { $runnerArguments += '--pull' }
 $runnerArguments += Resolve-MissumRepositoryPath -RelativePath 'deploy\missum-ai\research-runner'
 & $docker @runnerArguments
 if ($LASTEXITCODE -ne 0) { throw "Research runner build failed with exit code $LASTEXITCODE." }
-Write-Host "Missum AI $ImageVersion gateway/workers and research-runner:1 were built successfully. Language, vision and embedding models use the native Windows runtime." -ForegroundColor Green
+Write-Host "Missum AI $ImageVersion gateway/workers and research-runner:3 were built successfully. Language, vision and embedding models use the native Windows runtime." -ForegroundColor Green

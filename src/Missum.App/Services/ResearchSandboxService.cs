@@ -14,7 +14,7 @@ namespace Missum.App.Services;
 /// </summary>
 public sealed partial class ResearchSandboxService(AssistantRuntimeProfile profile, Missum.Core.Contracts.IChatRepository? chats = null) : IResearchSandboxService, IDisposable
 {
-    public const string RunnerImage = "missum-ai/research-runner:2";
+    public const string RunnerImage = "missum-ai/research-runner:3";
     private const long MaximumProjectBytes = 100L * 1024 * 1024 * 1024;
     private const int MaximumOutputCharacters = 2 * 1024 * 1024;
     private static readonly Regex SafeId = new("^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$", RegexOptions.CultureInvariant | RegexOptions.Compiled);

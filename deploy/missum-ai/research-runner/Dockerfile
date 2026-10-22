@@ -58,9 +58,15 @@ FROM runtime
 # Cache archives use owner-only modes. Copy directly into the final image with
 # readable permissions instead of modifying every cached file through overlayfs.
 COPY --from=mathlib-build --chmod=0755 /opt/mathlib /opt/mathlib
-ENV MISSUM_LEAN_MATHLIB_ROOT=/opt/mathlib
+ENV MISSUM_LEAN_MATHLIB_ROOT=/opt/mathlib \
+    LEAN_PATH=/opt/mathlib/.lake/build/lib/lean:/opt/mathlib/.lake/packages/batteries/.lake/build/lib/lean:/opt/mathlib/.lake/packages/Qq/.lake/build/lib/lean:/opt/mathlib/.lake/packages/aesop/.lake/build/lib/lean:/opt/mathlib/.lake/packages/proofwidgets/.lake/build/lib/lean:/opt/mathlib/.lake/packages/importGraph/.lake/build/lib/lean:/opt/mathlib/.lake/packages/LeanSearchClient/.lake/build/lib/lean:/opt/mathlib/.lake/packages/plausible/.lake/build/lib/lean
 LABEL missum.lean.version="4.30.0" missum.mathlib.revision="c5ea00351c28e24afc9f0f84379aa41082b1188f"
 
 USER 10001:10001
 WORKDIR /sandbox/work
+# Exercise the same bare compiler used by Coding/Python subprocesses, with the
+# runtime user and no Lake dependency installation. Include imported tactics.
+RUN printf 'import Mathlib\nexample (x y : ℝ) : (x + y)^2 = x^2 + 2*x*y + y^2 := by ring\nexample : (2 : ℝ) + 2 = 4 := by norm_num\n' > /tmp/missum-mathlib-check.lean \
+    && lean /tmp/missum-mathlib-check.lean \
+    && rm /tmp/missum-mathlib-check.lean
 ENTRYPOINT []
