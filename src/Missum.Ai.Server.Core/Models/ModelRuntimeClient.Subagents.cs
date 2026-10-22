@@ -82,7 +82,7 @@ public sealed partial class ModelRuntimeClient
         // the child's first inference. Only its generation prefill is omitted.
         var prefill = new Dictionary<string, object?>(StringComparer.Ordinal)
         {
-            ["messages"] = PrepareLanguageBoundMessages(messages).Select(ToOpenAiMessage).ToArray(),
+            ["messages"] = PrepareNativeRequestMessages(messages).Select(ToOpenAiMessage).ToArray(),
             ["parallel_tool_calls"] = string.Equals(modelRole, "coding", StringComparison.Ordinal),
             ["add_generation_prompt"] = false,
         };

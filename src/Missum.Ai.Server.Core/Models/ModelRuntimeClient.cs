@@ -348,7 +348,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
             var body = new Dictionary<string, object?>(StringComparer.Ordinal)
             {
                 ["model"] = preparation.InstanceId,
-                ["messages"] = PrepareLanguageBoundMessages(messages)
+                ["messages"] = PrepareNativeRequestMessages(messages)
                     .Select(ToOpenAiMessage)
                     .ToArray(),
                 // Stream progress and text immediately. A tool is executed only

@@ -76,10 +76,10 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
         await File.WriteAllTextAsync(Path.Combine(_root, "large.cs"), string.Join("\n", lines));
         var first = await Execute("coding.read", new { path = "large.cs", maximumLines = 300 });
         Assert.Equal(301, first.GetProperty("nextLine").GetInt32());
-        Assert.Contains("300: " + lines[299], first.GetProperty("content").GetString());
+        Assert.Equal(string.Join("\n", lines.Take(300)) + "\n", first.GetProperty("content").GetString());
         var all = await Execute("coding.read", new { path = "large.cs" });
         Assert.False(all.GetProperty("truncated").GetBoolean());
-        Assert.Contains("700: " + lines[699], all.GetProperty("content").GetString());
+        Assert.Equal(string.Join("\n", lines), all.GetProperty("content").GetString());
         Assert.False(all.TryGetProperty("sha256", out _));
     }
 
@@ -90,9 +90,9 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
         await File.WriteAllTextAsync(Path.Combine(_root, "escaped.txt"), string.Join("\n", Enumerable.Repeat(line, 40)));
         var first = await Execute("coding.read", new { path = "escaped.txt", maximumLines = 1000 });
         Assert.False(first.GetProperty("truncated").GetBoolean());
-        Assert.Contains("40: " + line, first.GetProperty("content").GetString());
+        Assert.Equal(string.Join("\n", Enumerable.Repeat(line, 40)), first.GetProperty("content").GetString());
         var second = await Execute("coding.read", new { path = "escaped.txt", startLine = 32 });
-        Assert.StartsWith("32: " + line, second.GetProperty("content").GetString());
+        Assert.Equal(string.Join("\n", Enumerable.Repeat(line, 9)), second.GetProperty("content").GetString());
         Assert.False(second.GetProperty("truncated").GetBoolean());
     }
 
@@ -104,10 +104,83 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
         var result = await Execute("coding.read", new { path = "complete.txt" });
         Assert.False(result.GetProperty("truncated").GetBoolean());
         Assert.Equal(JsonValueKind.Null, result.GetProperty("nextLine").ValueKind);
-        Assert.Contains("1100: " + line, result.GetProperty("content").GetString());
+        Assert.Equal(string.Join("\n", Enumerable.Repeat(line, 1100)), result.GetProperty("content").GetString());
         var selected = await Execute("coding.read", new { path = "complete.txt", startLine = 1099, maximumLines = int.MaxValue });
-        Assert.StartsWith("1099: ", selected.GetProperty("content").GetString());
+        Assert.Equal(line + "\n" + line, selected.GetProperty("content").GetString());
         Assert.False(selected.GetProperty("truncated").GetBoolean());
+    }
+
+    [Theory]
+    [InlineData("\n", false)]
+    [InlineData("\r\n", true)]
+    public async Task SearchAndReadSourceValuesRoundTripDirectlyIntoEdits(string newline, bool bom)
+    {
+        const string line = """12: Prüfung ü ö ß 😀 é: \Box \nabla \\ \u00FC \n \t "Zitat" C:\neu\test""";
+        var original = "header" + newline + line + newline + "tail";
+        var path = Path.Combine(_root, "latex.md");
+        await File.WriteAllTextAsync(path, original, new UTF8Encoding(bom));
+        var read = await Execute("coding.read", new { path = "latex.md" });
+        Assert.Equal(original, read.GetProperty("content").GetString());
+        Assert.Equal("source", read.GetProperty("contentFormat").GetString());
+        var search = await Execute("coding.search", new { path = "latex.md", query = "\\nabla" });
+        // Exercise transport decoding, including a serializer that escapes Unicode.
+        var transported = JsonSerializer.Deserialize<JsonElement>(JsonSerializer.Serialize(search));
+        var match = Assert.Single(transported.GetProperty("matches").EnumerateArray());
+        Assert.Equal(line, match.GetProperty("text").GetString());
+        await Execute("coding.edit", new { path = "latex.md", oldText = match.GetProperty("text").GetString(), newText = line + " geändert" });
+        Assert.Equal("header" + newline + line + " geändert" + newline + "tail", await File.ReadAllTextAsync(path));
+        var selected = await Execute("coding.read", new { path = "latex.md", startLine = 2, maximumLines = 1 });
+        Assert.Equal(line + " geändert" + newline, selected.GetProperty("content").GetString());
+        await Execute("coding.edit", new { path = "latex.md", oldText = selected.GetProperty("content").GetString(), newText = line + newline });
+        Assert.Equal(original, await File.ReadAllTextAsync(path));
+        Assert.Equal(bom, (await File.ReadAllBytesAsync(path)).AsSpan().StartsWith(Encoding.UTF8.Preamble));
+    }
+
+    [Fact]
+    public async Task SearchMarksClippedSourceWithoutAddingEllipsesAndKeepsLongQueryWhole()
+    {
+        var query = new string('q', 400);
+        var source = new string('x', 240) + "😀" + query + new string('y', 500);
+        await File.WriteAllTextAsync(Path.Combine(_root, "long.txt"), source);
+        var search = await Execute("coding.search", new { query, path = "long.txt" });
+        var match = Assert.Single(search.GetProperty("matches").EnumerateArray());
+        var anchor = match.GetProperty("text").GetString()!;
+        Assert.Contains(query, anchor, StringComparison.Ordinal);
+        Assert.True(match.GetProperty("textTruncatedBefore").GetBoolean());
+        Assert.True(match.GetProperty("textTruncatedAfter").GetBoolean());
+        Assert.Equal(source[(match.GetProperty("startColumn").GetInt32() - 1)..(match.GetProperty("endColumn").GetInt32() - 1)], anchor);
+        await Execute("coding.edit", new { path = "long.txt", oldText = anchor, newText = "replaced" });
+        Assert.Equal(source.Replace(anchor, "replaced", StringComparison.Ordinal), await File.ReadAllTextAsync(Path.Combine(_root, "long.txt")));
+    }
+
+    [Fact]
+    public async Task SearchWireBudgetRetainsUsableSourceFieldsInsteadOfNestedJsonPreview()
+    {
+        var lines = Enumerable.Range(0, 45).Select(index => index + " needle " + new string('\\', 285)).ToArray();
+        await File.WriteAllTextAsync(Path.Combine(_root, "slashes.txt"), string.Join("\n", lines));
+        var search = await Execute("coding.search", new { path = "slashes.txt", query = "needle", maximumResults = 50 });
+        Assert.True(search.GetProperty("truncated").GetBoolean());
+        Assert.True(search.GetRawText().Length <= LocalCodingToolExecutor.MaximumOutputCharacters);
+        Assert.False(search.TryGetProperty("preview", out _));
+        var matches = search.GetProperty("matches").EnumerateArray().ToArray();
+        Assert.NotEmpty(matches);
+        Assert.All(matches, match => Assert.Contains(match.GetProperty("text").GetString()!, lines[match.GetProperty("line").GetInt32() - 1], StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task EscapedRepresentationIsNeverGuessedAndFailedEditLeavesOriginalBytes()
+    {
+        const string source = """Prüfung \Box \\ \u00FC""";
+        var path = Path.Combine(_root, "literal.txt");
+        await File.WriteAllTextAsync(path, source);
+        var before = await File.ReadAllBytesAsync(path);
+        var representation = JsonSerializer.Serialize(source);
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(() => Execute("coding.edit",
+            new { path = "literal.txt", oldText = representation[1..^1], newText = "wrong" }));
+        Assert.DoesNotContain("Backslash", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(before, await File.ReadAllBytesAsync(path));
+        await Execute("coding.edit", new { path = "literal.txt", oldText = source, newText = source + " korrekt" });
+        Assert.Equal(source + " korrekt", await File.ReadAllTextAsync(path));
     }
 
     [Theory]
@@ -352,7 +425,7 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
         Assert.Equal(2, match.GetProperty("line").GetInt32());
         var read = await Execute("coding.read", new { path = relative });
         Assert.False(read.TryGetProperty("sha256", out _));
-        Assert.Contains("2: value = 1", read.GetProperty("content").GetString()!, StringComparison.Ordinal);
+        Assert.Equal("Header\nvalue = 1\nFooter\n", read.GetProperty("content").GetString());
         var edited = await Execute("coding.edit", new
         {
             path = relative, oldText = "value = 1", newText = "value = 2",
@@ -360,7 +433,7 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
         var verified = await Execute("coding.read", new { path = relative });
         Assert.False(verified.TryGetProperty("sha256", out _));
         Assert.False(verified.TryGetProperty("sha256", out _));
-        Assert.Contains("2: value = 2", verified.GetProperty("content").GetString()!, StringComparison.Ordinal);
+        Assert.Equal("Header\nvalue = 2\nFooter\n", verified.GetProperty("content").GetString());
         var command = await Execute("coding.command", new
         {
             executable = "powershell.exe", workingDirectory = "notes", timeoutSeconds = 15,
@@ -392,7 +465,7 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
         if (withBom) expected = [.. Encoding.UTF8.Preamble, .. expected];
         Assert.Equal(expected, await File.ReadAllBytesAsync(path));
         var reread = await Execute("coding.read", new { path = "multiline.txt" });
-        Assert.Contains("3:   replacement café", reread.GetProperty("content").GetString()!, StringComparison.Ordinal);
+        Assert.Equal($"prefix{newline}begin{newline}  replacement café{newline}end{newline}suffix{newline}", reread.GetProperty("content").GetString());
     }
 
     [Fact]

@@ -125,20 +125,38 @@ public sealed class LocalCodingToolExecutor
             for (var index = 0; index < lines.Length; index++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                var matchIndex = lines[index].IndexOf(query, StringComparison.OrdinalIgnoreCase);
+                var line = lines[index];
+                if (index < lines.Length - 1 && line.EndsWith('\r')) line = line[..^1];
+                var matchIndex = line.IndexOf(query, StringComparison.OrdinalIgnoreCase);
                 if (matchIndex < 0) continue;
                 var start = Math.Max(0, matchIndex - 120);
-                var preview = lines[index].Substring(start, Math.Min(300, lines[index].Length - start)).TrimEnd('\r');
+                var end = Math.Min(line.Length, Math.Max(start + 300, matchIndex + query.Length + 120));
+                // Never cut a Unicode scalar or the matched phrase itself in half.
+                if (start > 0 && char.IsLowSurrogate(line[start]) && char.IsHighSurrogate(line[start - 1])) start--;
+                if (end < line.Length && char.IsHighSurrogate(line[end - 1]) && char.IsLowSurrogate(line[end])) end++;
+                var preview = line[start..end];
                 var relative = Relative(path);
                 if (matches.Count == maximum || outputSize + preview.Length + relative.Length > 7_000) { truncated = true; break; }
-                matches.Add(new { path = relative, line = index + 1, text = preview });
+                matches.Add(new { path = relative, line = index + 1, text = preview,
+                    startColumn = start + 1, endColumn = end + 1, matchColumn = matchIndex + 1,
+                    lineLength = line.Length, textTruncatedBefore = start > 0, textTruncatedAfter = end < line.Length });
                 outputSize += preview.Length + relative.Length;
             }
             if (truncated) break;
         }
-        return Serialize(new { query, matches, searchedFiles, truncated, includedGeneratedPath = includeGenerated,
+        JsonElement Result() => Serialize(new { query, matches, searchedFiles, truncated, contentFormat = "source", includedGeneratedPath = includeGenerated,
             ignoredDirectories = includeGenerated ? Array.Empty<string>() : IgnoredDirectories.Order(StringComparer.OrdinalIgnoreCase).ToArray(),
             ignoredDirectoryPatterns = includeGenerated ? Array.Empty<string>() : IgnoredDirectoryPatterns });
+        var result = Result();
+        // Keep source fields structured even when escaping/metadata reaches the wire
+        // budget; a serialized-JSON preview would introduce another escaping layer.
+        while (matches.Count > 0 && result.GetRawText().Length > MaximumOutputCharacters)
+        {
+            matches.RemoveAt(matches.Count - 1);
+            truncated = true;
+            result = Result();
+        }
+        return result;
     }
 
     private async Task<JsonElement> ReadAsync(JsonElement args, CancellationToken cancellationToken)
@@ -155,23 +173,21 @@ public sealed class LocalCodingToolExecutor
             throw new InvalidDataException("Die Datei ist während des Lesens über das direkte Leselimit von 8 MiB gewachsen.");
         if (IsBinary(bytes)) throw new InvalidDataException("Die Datei ist binär und kann nicht als Text gelesen werden.");
         var text = Decode(bytes);
-        var lines = text.Split('\n');
+        var lineStarts = new List<int> { 0 };
+        for (var offset = 0; (offset = text.IndexOf('\n', offset)) >= 0; offset++) lineStarts.Add(offset + 1);
         var start = Integer(args, "startLine", 1, 1, int.MaxValue);
         var maximum = Integer(args, "maximumLines", int.MaxValue, 1, int.MaxValue);
-        var content = new StringBuilder();
-        var next = start - 1;
-        var end = Math.Min((long)lines.Length, (long)start - 1 + maximum);
-        while (next < end)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            content.Append(next + 1).Append(": ").AppendLine(lines[next].TrimEnd('\r'));
-            next++;
-        }
+        var first = Math.Min(start - 1, lineStarts.Count);
+        var next = (int)Math.Min((long)lineStarts.Count, (long)first + maximum);
+        var startOffset = first < lineStarts.Count ? lineStarts[first] : text.Length;
+        var endOffset = next < lineStarts.Count ? lineStarts[next] : text.Length;
+        var content = text[startOffset..endOffset];
         return Serialize(new
         {
-            path = Relative(path), totalLines = lines.Length,
-            startLine = start, nextLine = next < lines.Length ? (int?)next + 1 : null,
-            truncated = next < lines.Length, content = content.ToString(),
+            path = Relative(path), totalLines = lineStarts.Count, contentFormat = "source",
+            startLine = start, endLine = next > first ? (int?)next : null,
+            nextLine = next < lineStarts.Count ? (int?)next + 1 : null,
+            truncated = next < lineStarts.Count, content,
         });
     }
 
@@ -244,7 +260,7 @@ public sealed class LocalCodingToolExecutor
         JsonElement[] operations = hasBatch ? batch.EnumerateArray().ToArray() : [args];
         var replacements = new List<(int Start, int Length, string NewText)>(operations.Length);
         var totalCharacters = 0;
-        // coding.read omits CR characters. Match LF/CRLF equivalently even in mixed
+        // Match LF/CRLF equivalently even in mixed
         // files, then map back to original offsets without rewriting untouched bytes.
         var normalized = original.Replace("\r\n", "\n", StringComparison.Ordinal);
         var offsets = new List<int>(normalized.Length + 1);
@@ -268,7 +284,7 @@ public sealed class LocalCodingToolExecutor
             oldText = NormalizeNewlines(oldText, "\n");
             var index = normalized.IndexOf(oldText, StringComparison.Ordinal);
             if (index < 0)
-                throw new InvalidOperationException($"coding.edit.text_not_found: Ersetzung {replacements.Count + 1}: oldText wurde nicht gefunden. Es wurde nichts geändert. Suche mit coding.search nach einer kurzen eindeutigen Textstelle und übernimm den tatsächlichen Text ohne Zeilennummern. Verwende kleinere Ersetzungen. Wiederhole nicht dieselben Argumente. Hinweis: Backslashes sind JSON-Zeichen; ein einzelnes Backslash in der Datei muss im JSON als \\\\, ein doppeltes Backslash als \\\\\\\\ angegeben werden.");
+                throw new InvalidOperationException($"coding.edit.text_not_found: Ersetzung {replacements.Count + 1}: oldText wurde nicht gefunden. Es wurde nichts geändert. Suche mit coding.search nach einer kurzen eindeutigen Textstelle oder lies den betroffenen Bereich mit coding.read. Verwende kleinere Ersetzungen. Wiederhole nicht dieselben Argumente.");
             var duplicate = normalized.IndexOf(oldText, index + 1, StringComparison.Ordinal);
             if (duplicate >= 0)
                 throw new InvalidOperationException($"coding.edit.ambiguous_match: Ersetzung {replacements.Count + 1}: oldText kommt mehrfach vor (Zeilen {1 + normalized.AsSpan(0, index).Count('\n')} und {1 + normalized.AsSpan(0, duplicate).Count('\n')}). Es wurde nichts geändert. Lies diese Bereiche und ergänze eindeutige benachbarte Zeilen in oldText.");

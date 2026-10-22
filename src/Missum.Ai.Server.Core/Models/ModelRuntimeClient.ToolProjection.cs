@@ -123,7 +123,7 @@ public sealed partial class ModelRuntimeClient
         "context.retrieve" => "Dokumenttexte mit BGE-M3 semantisch zur Anfrage ordnen.",
         "coding.list" => "Projektdateien begrenzt auflisten; Build/Git/Abhängigkeiten werden übersprungen.",
         "coding.search" => "Exakte Textphrase im Projekt mit Datei/Zeile suchen.",
-        "coding.read" => "Vollständige Datei mit Zeilennummern und SHA-256 lesen. Ausschnitt nur mit startLine/maximumLines; frischer Inhalt wird nicht still gekürzt.",
+        "coding.read" => "Unveränderten Quelltext lesen; Datei/Zeilenbereich separat. Ausschnitt nur mit startLine/maximumLines; frischer Inhalt wird nicht still gekürzt.",
         "coding.write" => "UTF-8-Datei erstellen; größere Projekte aufteilen. Bestehende Datei direkt überschreiben; kein vorheriger Leseaufruf erforderlich.",
         "coding.edit" => "Atomar exakten Text ersetzen: oldText/newText ODER edits. Fundstellen eindeutig/nicht überlappend; kein vorheriger Leseaufruf erforderlich. Fehler verändert keine Datei.",
         "coding.command" => "Programm mit getrennten Argumenten ausführen. timeoutSeconds=0: unbegrenzt; Stop beendet Kinder. Abhängigkeiten nur workspace-lokal installieren (Python .venv), nie global/--user. cwd ist keine Sandbox.",

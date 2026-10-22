@@ -36,7 +36,8 @@ internal static partial class NativeToolResultFormatter
             var content = Text(output, "content");
             var start = int.TryParse(First(Text(output, "startLine"), Text(input, "startLine")), out var line) ? line : 1;
             var lines = content.ReplaceLineEndings("\n").TrimEnd('\n').Split('\n');
-            if (content.Length > 0 && lines.Select((text, index) => text.StartsWith((start + index) + ": ", StringComparison.Ordinal)).All(value => value))
+            if (Text(output, "contentFormat") != "source" && content.Length > 0
+                && lines.Select((text, index) => text.StartsWith((start + index) + ": ", StringComparison.Ordinal)).All(value => value))
                 content = string.Join("\n", lines.Select((text, index) => text[((start + index).ToString(System.Globalization.CultureInfo.InvariantCulture).Length + 2)..]))
                     + (content.EndsWith('\n') ? "\n" : "");
             yield return Code("Gelesen", content, language, path, start);

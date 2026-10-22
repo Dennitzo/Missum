@@ -18,6 +18,15 @@ public sealed class NativeToolResultFormatterTests
     }
 
     [Fact]
+    public void RawReadReceiptDoesNotStripRealNumberedSourceOrChangeNewlines()
+    {
+        const string source = "7: Prüfung \\Box\r\n8: tatsächlicher Inhalt\r\n";
+        var output = JsonSerializer.SerializeToElement(new { startLine = 7, contentFormat = "source", content = source });
+        var block = Assert.Single(NativeToolResultFormatter.Receipt("coding.read", default, output, "completed"));
+        Assert.Equal(source, block.Text);
+    }
+
+    [Fact]
     public void EditReceiptShowsOneDiffWithoutMetadataOrDuplicateInput()
     {
         const string diff = "@@ -4 +4 @@\n-old\n+new";

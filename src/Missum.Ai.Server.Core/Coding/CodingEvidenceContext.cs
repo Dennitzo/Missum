@@ -24,6 +24,19 @@ public static class CodingEvidenceContext
             if (output.Length + line.Length + omissionNotice.Length + 4 > budgetCharacters) { omitted = true; return; }
             output.AppendLine(line);
         }
+        void AddSourceFile(CodingActiveFile file)
+        {
+            var entry = new StringBuilder(JsonSerializer.Serialize(new
+            {
+                section = "active_file", data = new
+                {
+                    file.Path, file.StartLine, file.Truncated, file.EvidenceId, file.Sequence, file.OutputEvidenceId,
+                },
+            })).Append('\n');
+            CodingSourceToolContent.AppendSource(entry, SelectSnippet(file, file.StartLine), "Gespeicherter Dateiausschnitt");
+            if (output.Length + entry.Length + omissionNotice.Length + 4 > budgetCharacters) { omitted = true; return; }
+            output.Append(entry);
+        }
         Add("next", new { state.Phase, state.NextStep, state.EnvironmentRevision });
         foreach (var item in state.AcceptanceCriteria) Add("acceptance", item);
         if (state.Science is not null)
@@ -36,8 +49,7 @@ public static class CodingEvidenceContext
         foreach (var item in state.Tests.TakeLast(4)) Add("executed_process", item);
         foreach (var file in state.ActiveFiles.OrderByDescending(file => state.NextStep?.Contains(file.Path, StringComparison.OrdinalIgnoreCase) == true)
             .ThenByDescending(static file => file.Sequence))
-            Add("active_file", new { file.Path, file.StartLine, Snippet = SelectSnippet(file, file.StartLine),
-                file.Truncated, file.EvidenceId, file.Sequence, file.OutputEvidenceId });
+            AddSourceFile(file);
         foreach (var item in state.Evidence.TakeLast(6)) Add("receipt", item);
         if (omitted) output.AppendLine(omissionNotice);
         return new LmChatMessage("user", output.ToString());

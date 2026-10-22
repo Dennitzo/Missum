@@ -43,6 +43,33 @@ public sealed class CodingModelRuntimeTests
     }
 
     [Fact]
+    public async Task NativeTokenCountingAndGenerationReceiveDecodedReadAndSearchText()
+    {
+        const string source = """Prüfung ü ö ß 😀 \Box \nabla \\ \u00FC \n""";
+        var handler = new CodingHandler();
+        using var http = new HttpClient(handler);
+        using var client = CreateClient(http);
+        var read = new LmToolCall("read-source", "coding.read", JsonSerializer.SerializeToElement(new { path = "a.md" }));
+        var search = new LmToolCall("search-source", "coding.search", JsonSerializer.SerializeToElement(new { query = "\\Box" }));
+        LmChatMessage[] messages = [new("user", "Bearbeite die gefundenen Texte"),
+            new("assistant", ToolCalls: [read]),
+            new("tool", JsonSerializer.Serialize(new { status = "completed", result = new { path = "a.md", contentFormat = "source", content = source } }), ToolCallId: read.Id),
+            new("assistant", ToolCalls: [search]),
+            new("tool", JsonSerializer.Serialize(new { status = "completed", result = new { matches = new[] { new { path = "a.md", line = 1, text = source } } } }), ToolCallId: search.Id)];
+        await client.CompleteChatAsync(CodingId, messages, [], modelRole: "coding");
+        using var generation = JsonDocument.Parse(handler.ChatBody!);
+        using var tokenCounting = JsonDocument.Parse(handler.InputTokenBody!);
+        var generatedTools = generation.RootElement.GetProperty("messages").EnumerateArray()
+            .Where(message => message.GetProperty("role").GetString() == "tool").Select(message => message.GetProperty("content").GetString()).ToArray();
+        var countedTools = tokenCounting.RootElement.GetProperty("messages").EnumerateArray()
+            .Where(message => message.GetProperty("role").GetString() == "tool").Select(message => message.GetProperty("content").GetString()).ToArray();
+        Assert.Equal(2, generatedTools.Length);
+        Assert.All(generatedTools, content => Assert.Contains(source, content));
+        Assert.Equal(generatedTools, countedTools);
+        Assert.Contains("\\u00FC", messages[2].Content);
+    }
+
+    [Fact]
     public async Task CodingRunLoadsOnlyNativeModelAndStreamsToolAndPromptProgress()
     {
         var handler = new CodingHandler();
@@ -115,6 +142,7 @@ public sealed class CodingModelRuntimeTests
         public List<string> Hosts { get; } = [];
         public int Loads { get; private set; }
         public string? ChatBody { get; private set; }
+        public string? InputTokenBody { get; private set; }
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
@@ -122,7 +150,11 @@ public sealed class CodingModelRuntimeTests
             if (unavailable) { throw new HttpRequestException("Offline"); }
             if (request.RequestUri.AbsolutePath == "/props") return Json(new { default_generation_settings = new { n_ctx = 32_768 } });
             if (request.RequestUri.AbsolutePath is "/sessions/prepare" or "/sessions/save") return Json(new { success = true });
-            if (request.RequestUri.AbsolutePath == "/v1/chat/completions/input_tokens") return Json(new { input_tokens = 16 });
+            if (request.RequestUri.AbsolutePath == "/v1/chat/completions/input_tokens")
+            {
+                InputTokenBody = await request.Content!.ReadAsStringAsync(cancellationToken);
+                return Json(new { input_tokens = 16 });
+            }
             if (request.RequestUri.AbsolutePath == "/v1/models")
             {
                 return Json(new { data = new[] {

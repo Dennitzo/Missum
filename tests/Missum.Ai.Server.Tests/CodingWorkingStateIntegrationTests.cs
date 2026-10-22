@@ -1136,7 +1136,7 @@ public sealed class CodingWorkingStateIntegrationTests
         var lastNative = harness.Handler.Requests.Last().GetProperty("messages");
         Assert.Equal(lastNative.GetArrayLength() + 1, retained.Messages.Count);
         Assert.Equal(lastNative.EnumerateArray().Select(m => m.GetProperty("content").GetString()),
-            retained.Messages.SkipLast(1).Select(m => m.Content ?? string.Empty));
+            CodingSourceToolContent.Project(retained.Messages.SkipLast(1).ToArray()).Select(m => m.Content ?? string.Empty));
         Assert.Contains(retained.Messages, m => m.Content == "Verified result.");
         Assert.Contains(retained.Messages, m => m.Content == "FULL_PREVIOUS_FILE_CONTENT");
         Assert.Contains(retained.Messages, m => m.Role == "tool" && m.Content!.Contains("NEW_READ_CONTENT", StringComparison.Ordinal));

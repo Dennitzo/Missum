@@ -32,6 +32,11 @@ public sealed partial class ModelRuntimeClient
         return normalized;
     }
 
+    // Both inference and subagent prefill use this exact projection; token
+    // counting receives their resulting request body as well.
+    internal static IReadOnlyList<LmChatMessage> PrepareNativeRequestMessages(IReadOnlyList<LmChatMessage> messages) =>
+        CodingSourceToolContent.Project(PrepareLanguageBoundMessages(messages));
+
     private static readonly string[] HighestReasoningLevels = ["max", "ultra", "xhigh", "high", "medium", "low", "minimal"];
     private static readonly string[] LowestReasoningLevels = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra", "on"];
     internal string? ResolveReasoningEffort(string modelId, string role, string? requested) =>
