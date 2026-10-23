@@ -57,22 +57,6 @@ interactive simulations. They are independent of the removed browser assistant.
 The PDF exporter uses the bundled Markdown/KaTeX resources in
 `Assets/DocumentRendering` and requires no CDN.
 
-## Project repository files
-
-Creating or selecting a project prepares a GitHub-formatted `README.md` and a
-managed section in `.gitignore`, while preserving existing documentation and
-custom ignore rules. During authorized project edits, the selected local model
-fills in the project's actual purpose, setup, usage and relevant structure, and
-keeps these files aligned with its changes. Missing files are also restored after
-file edits or shell commands that change the project. Read-only tools and commands
-leave project files unchanged.
-
-The managed ignore rules exclude the local publication renderer, its helper
-script and guide, build receipts, logs and temporary files. Publication Markdown,
-PDFs, research data, sources, plots and proof files remain eligible for version
-control. Clear Git staging/publishing commands check these rules before running;
-existing tracked files are never automatically removed from the index.
-
 ## Data and models
 
 Missum stores its own chats and settings in %LOCALAPPDATA%\Missum.

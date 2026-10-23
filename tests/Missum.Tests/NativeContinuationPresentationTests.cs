@@ -35,4 +35,39 @@ public sealed class NativeContinuationPresentationTests
         var step = JsonSerializer.SerializeToElement(new { tool = "assistant.continuation", detail = "Lauf fortgesetzt" });
         Assert.Equal("Fortsetzung wird vorbereitet", NativeAssistantPage.ContinuationReceiptLabel(step));
     }
+
+    [Theory]
+    [InlineData("failed", false)]
+    [InlineData("failed", true)]
+    [InlineData("cancelled", false)]
+    [InlineData("cancelled", true)]
+    [InlineData("interrupted", false)]
+    [InlineData("interrupted", true)]
+    public void ManualCompactionReceiptIsNeverAnAiContinuationEvenWithDeferredDetails(string status, bool deferred)
+    {
+        var message = JsonSerializer.SerializeToElement(new
+        {
+            id = Guid.NewGuid(), role = "assistant", status, content = "", error = "Missum AI Server returned HTTP 404.",
+            toolSteps = new[] { new { id = "manual-compaction:fixture", tool = "context.compact", status,
+                detailsDeferred = deferred } },
+        });
+
+        Assert.False(NativeAssistantPage.IsResumableAssistantStatus(message));
+    }
+
+    [Theory]
+    [InlineData("failed")]
+    [InlineData("cancelled")]
+    [InlineData("interrupted")]
+    public void RealAiWorkWithAutomaticCompactionRemainsResumable(string status)
+    {
+        var message = JsonSerializer.SerializeToElement(new
+        {
+            id = Guid.NewGuid(), role = "assistant", status, content = "Bereits überprüfte Herleitung.",
+            toolSteps = new[] { new { id = "context-compaction:run:42", tool = "context.compact", status,
+                detailsDeferred = true } },
+        });
+
+        Assert.True(NativeAssistantPage.IsResumableAssistantStatus(message));
+    }
 }

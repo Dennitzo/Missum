@@ -31,8 +31,8 @@ public sealed class ResearchSandboxServiceTests : IDisposable
         using var service = new ResearchSandboxService(profile, chats);
         var layout = await service.EnsureProjectAsync(project);
         Assert.Equal(workspace, layout.RootPath);
-        Assert.True(File.Exists(Path.Combine(workspace, "README.md")));
-        Assert.Contains("/.publication-renderer/", await File.ReadAllTextAsync(Path.Combine(workspace, ".gitignore")), StringComparison.Ordinal);
+        Assert.False(File.Exists(Path.Combine(workspace, "README.md")));
+        Assert.False(File.Exists(Path.Combine(workspace, ".gitignore")));
         await service.WriteTextAsync(project, "new.py", "print('workspace')");
         Assert.True(File.Exists(Path.Combine(workspace, "work", "new.py")));
         Assert.False(Directory.Exists(Path.Combine(workspace, "Science")));

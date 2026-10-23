@@ -9,6 +9,9 @@ public sealed partial class NativeAssistantPage
 {
     internal static string CompactionReceiptLabel(JsonElement step) => S(step, "status") switch
     {
+        "completed" when S(step, "explanation") == Missum.App.Services.MissumAiAssistantService.NoCompactionDetailPrefix
+            || S(step, "detail").StartsWith(Missum.App.Services.MissumAiAssistantService.NoCompactionDetailPrefix, StringComparison.Ordinal)
+            => "Keine Kontextkomprimierung erforderlich",
         "completed" => "Kontextkomprimierung abgeschlossen",
         "cancelled" or "interrupted" => "Kontextkomprimierung abgebrochen",
         "failed" or "denied" => "Kontextkomprimierung fehlgeschlagen",

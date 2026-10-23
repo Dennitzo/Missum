@@ -672,7 +672,6 @@ public sealed class CodingWorkingStateIntegrationTests
             + "\n\n" + CodingAgentPolicy.StagedExecutionAndNarrationPrompt
             + "\n\n" + CodingAgentPolicy.WorkspaceDependenciesPrompt
             + "\n\n" + CodingAgentPolicy.ScientificResearchPrompt
-            + "\n\n" + RepositoryMaintenancePolicy.Instructions
             + "\n\n" + MathFormattingPolicy.Instructions, system);
         Assert.Equal(first.Messages[0], second.Messages[0]);
         Assert.Empty(harness.Handler.Requests);

@@ -28,6 +28,7 @@ internal static partial class GatewayEndpoints
         endpoints.MapGet("/v1/models/status", WriteModelStatusAsync);
         endpoints.MapGet("/v1/models/coding", WriteCodingModelStatusAsync);
         endpoints.MapPost("/v1/models/prepare", PrepareModelAsync);
+        endpoints.MapPost("/v1/sessions/context/compact", CompactSessionContextAsync);
         endpoints.MapGet("/v1/gpu/status", WriteGpuStatusAsync);
         endpoints.MapGet("/v1/services/status", WriteServiceStatusAsync);
         endpoints.MapPost("/v1/context/embeddings", CreateEmbeddingsAsync);
@@ -130,6 +131,14 @@ internal static partial class GatewayEndpoints
     {
         var probes = context.RequestServices.GetRequiredService<ServiceProbeService>();
         await WriteJsonAsync(context, await probes.GetStatusesAsync(context.RequestAborted).ConfigureAwait(false)).ConfigureAwait(false);
+    }
+
+    private static async Task CompactSessionContextAsync(HttpContext context)
+    {
+        var request = await ReadJsonAsync<SessionContextCompactionRequest>(context).ConfigureAwait(false);
+        var processor = context.RequestServices.GetRequiredService<RunProcessor>();
+        await WriteJsonAsync(context, await processor.CompactSessionContextAsync(request, context.RequestAborted)
+            .ConfigureAwait(false)).ConfigureAwait(false);
     }
 
     private static async Task CreateEmbeddingsAsync(HttpContext context)

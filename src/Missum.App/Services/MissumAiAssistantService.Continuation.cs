@@ -33,12 +33,14 @@ public sealed partial class MissumAiAssistantService
             var session = await chats.GetSessionAsync(sessionId, token).ConfigureAwait(false)
                 ?? throw new InvalidOperationException("Die AI-Sitzung wurde nicht gefunden.");
             var history = await LoadModelHistoryAsync(sessionId, token).ConfigureAwait(false);
-            var anchor = ValidateContinuationAnchor(sessionId, assistantMessageId, history);
             // Only the resumed message needs its execution receipts (frozen
             // create payload, timing and child ownership). Model-history paging
             // must not erase those recovery records or load every old tool body.
-            assistant = await chats.GetMessageAsync(anchor.Assistant.Id, token).ConfigureAwait(false)
+            var candidate = await chats.GetMessageAsync(assistantMessageId, token).ConfigureAwait(false)
                 ?? throw new InvalidOperationException("Die fortzusetzende AI-Nachricht wurde nicht gefunden.");
+            var anchor = ValidateContinuationAnchor(sessionId, assistantMessageId,
+                history.Select(message => message.Id == assistantMessageId ? candidate : message).ToArray());
+            assistant = anchor.Assistant;
             var persisted = await runs.GetByAssistantMessageIdAsync(assistant.Id, token).ConfigureAwait(false);
             if (persisted is not null && (persisted.SessionId != sessionId || persisted.AssistantMessageId != assistant.Id))
                 throw new InvalidDataException("Der gespeicherte Lauf gehört nicht zu dieser AI-Nachricht.");
@@ -255,6 +257,8 @@ public sealed partial class MissumAiAssistantService
         if (history.Skip(index + 1).Any(message => message.Role is ChatRole.User or ChatRole.Assistant))
             throw new InvalidOperationException("Nur der letzte Auftrag einer Sitzung kann fortgesetzt werden.");
         var assistant = history[index];
+        if (HasOnlyManualCompactionReceipts((assistant.ToolSteps ?? []).Select(step => (step.Id, step.Tool))))
+            throw new InvalidOperationException("Eine manuelle Kontextkomprimierung ist kein fortsetzbarer AI-Auftrag. Starte sie erneut über das Plus-Menü.");
         if (assistant.Status is not (MessageStatus.Cancelled or MessageStatus.Interrupted)
             && !(assistant.Status == MessageStatus.Failed && HasGenuineContinuationContent(assistant)))
             throw new InvalidOperationException("Diese Nachricht enthält keinen gestoppten Auftrag zum Fortsetzen.");
@@ -266,12 +270,25 @@ public sealed partial class MissumAiAssistantService
 
     internal static bool HasGenuineContinuationContent(ChatMessage message)
     {
+        if (HasOnlyManualCompactionReceipts((message.ToolSteps ?? []).Select(step => (step.Id, step.Tool)))) return false;
         if (message.ToolSteps?.Any(step => step.Tool is not (ContinuationStepTool or "assistant.progress")) == true) return true;
         var content = message.Content.Trim();
         return content.Length > 0 && !string.Equals(content, message.Error?.Trim(), StringComparison.Ordinal)
             && !content.StartsWith("**Fehler", StringComparison.Ordinal)
             && !content.StartsWith("Der AI-Lauf ist fehlgeschlagen", StringComparison.Ordinal)
             && content != "Der Missum-AI-Auftrag konnte nicht abgeschlossen werden.";
+    }
+
+    internal static bool HasOnlyManualCompactionReceipts(IEnumerable<(string Id, string Tool)> steps)
+    {
+        var hasManualCompaction = false;
+        foreach (var (id, tool) in steps)
+        {
+            if (tool == "context.compact" && id.StartsWith("manual-compaction:", StringComparison.Ordinal))
+                hasManualCompaction = true;
+            else if (tool != "assistant.progress") return false;
+        }
+        return hasManualCompaction;
     }
 
     private static bool IsActiveContinuationRun(RunState state) => state is RunState.Queued or RunState.Running or RunState.WaitingForClient;

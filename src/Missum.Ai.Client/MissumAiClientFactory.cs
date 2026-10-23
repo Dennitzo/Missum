@@ -16,7 +16,15 @@ public static class MissumAiClientFactory
             BaseAddress = EnsureTrailingSlash(options.ServerUri),
             Timeout = options.RequestTimeout ?? TimeSpan.FromMinutes(20),
         };
-        return new MissumAiClient(httpClient, options.ClientId, ownsHttpClient: true);
+        // Explicit context summaries can take as long as native inference.
+        // Keep ordinary control-request deadlines separate from this channel.
+        var longOperationHttpClient = new HttpClient(new HttpClientHandler { UseProxy = false }, disposeHandler: true)
+        {
+            BaseAddress = httpClient.BaseAddress,
+            Timeout = Timeout.InfiniteTimeSpan,
+        };
+        return new MissumAiClient(httpClient, options.ClientId, ownsHttpClient: true,
+            longOperationHttpClient: longOperationHttpClient);
     }
 
     private static Uri EnsureTrailingSlash(Uri uri)

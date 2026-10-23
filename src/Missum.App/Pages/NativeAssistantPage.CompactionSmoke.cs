@@ -10,6 +10,7 @@ public sealed partial class NativeAssistantPage
 {
     private async Task VerifyCompactionReceiptSmokeAsync()
     {
+        await SettingsPage.VerifyStatusAccentSmokeAsync(LayoutRoot);
         if (!IsMessageFooterSmoke || Environment.GetEnvironmentVariable("ASSISTANT_DISABLE_RUNTIME_AUTOSTART") != "1")
             throw new InvalidOperationException("Der Komprimierungstest benötigt ein isoliertes Profil ohne Modellstart.");
         var original = _snapshot.Clone();
@@ -22,6 +23,8 @@ public sealed partial class NativeAssistantPage
             {
                 var session = await chats.CreateSessionAsync("Statische Kontextkomprimierung", ChatMode.Coding, _lifetime.Token);
                 var other = await chats.CreateSessionAsync("Andere Sitzung", ChatMode.Coding, _lifetime.Token);
+                await chats.AddMessageAsync(session.Id, ChatRole.User, "Prüfe den gespeicherten Forschungsstand.",
+                    MessageStatus.Completed, cancellationToken: _lifetime.Token);
                 var normal = await chats.AddMessageAsync(session.Id, ChatRole.Assistant, "Gesicherter Forschungsstand.",
                     MessageStatus.Completed, cancellationToken: _lifetime.Token);
                 var step = new AssistantToolStep("normal-compaction", "context.compact", "running",
@@ -31,6 +34,15 @@ public sealed partial class NativeAssistantPage
             }, _lifetime.Token);
 
             await Open(fixture.Session.Id);
+            var toolsMenu = ShowComposerTools();
+            try
+            {
+                await WaitForNativePreviewFrameAsync();
+                var compactAction = ((StackPanel)((ScrollViewer)toolsMenu.Content).Content).Children.OfType<Button>()
+                    .Single(button => Microsoft.UI.Xaml.Automation.AutomationProperties.GetName(button) == "Kontext komprimieren");
+                if (!compactAction.IsEnabled) throw new InvalidOperationException("Die manuelle Komprimierung fehlt im Plus-Menü der geöffneten Sitzung.");
+            }
+            finally { toolsMenu.Hide(); }
             var messageId = fixture.Message.Id.ToString();
             var running = await Receipt(messageId, "Kontext wird komprimiert");
             var height = running.ActualHeight;
@@ -50,16 +62,41 @@ public sealed partial class NativeAssistantPage
                 await Publish(fixture.Message, step with { Status = state, CompletedAt = DateTimeOffset.UtcNow,
                     UpdatedAt = DateTimeOffset.UtcNow });
             }
+            await Publish(fixture.Message, fixture.Step with { Id = "compaction-not-required", Status = "completed",
+                Detail = MissumAiAssistantService.NoCompactionDetailPrefix + " Der Kontext ist bereits kompakt.",
+                Explanation = MissumAiAssistantService.NoCompactionDetailPrefix,
+                CompletedAt = DateTimeOffset.UtcNow, UpdatedAt = DateTimeOffset.UtcNow });
             await Open(fixture.Other.Id);
             await Open(fixture.Session.Id);
             await Receipt(messageId, "Kontextkomprimierung abgeschlossen");
             await Receipt(messageId, "Kontextkomprimierung abgebrochen");
             await Receipt(messageId, "Kontextkomprimierung fehlgeschlagen");
+            await Receipt(messageId, "Keine Kontextkomprimierung erforderlich");
             var stored = await chats.GetMessageAsync(fixture.Message.Id, _lifetime.Token);
-            if (stored?.ToolSteps?.Count != 3 || stored.ToolSteps.Any(step => step.Status == "running")
-                || Descendants(_messageViews[messageId].View).OfType<CompactionReceiptView>().Count() != 3)
+            if (stored?.ToolSteps?.Count != 4 || stored.ToolSteps.Any(step => step.Status == "running")
+                || Descendants(_messageViews[messageId].View).OfType<CompactionReceiptView>().Count() != 4)
                 throw new InvalidOperationException("Sitzungswechsel verliert oder dupliziert gespeicherte Komprimierungen.");
             await SaveMathPreviewAsync(_messageViews[messageId].View, "native-compaction-preview.png");
+
+            foreach (var status in new[] { MessageStatus.Failed, MessageStatus.Cancelled, MessageStatus.Interrupted })
+            {
+                var manual = await chats.AddMessageAsync(fixture.Session.Id, ChatRole.Assistant, "", status,
+                    cancellationToken: _lifetime.Token);
+                var manualStep = fixture.Step with { Id = "manual-compaction:" + manual.Id.ToString("N"),
+                    Status = status.ToString().ToLowerInvariant(), ContentOffset = 0,
+                    CompletedAt = DateTimeOffset.UtcNow, UpdatedAt = DateTimeOffset.UtcNow };
+                await chats.SaveToolStepAsync(manual.Id, manualStep, _lifetime.Token);
+                if (status == MessageStatus.Failed)
+                    await chats.UpdateMessageAsync(manual.Id, "", status, "Missum AI Server returned HTTP 404.", _lifetime.Token);
+                await Open(fixture.Other.Id);
+                await Open(fixture.Session.Id);
+                var manualId = manual.Id.ToString();
+                await Receipt(manualId, status == MessageStatus.Failed ? "Kontextkomprimierung fehlgeschlagen"
+                    : "Kontextkomprimierung abgebrochen");
+                if (_messageBlocks[manualId].ContainsKey("continuation")
+                    || Descendants(_messageViews[manualId].View).OfType<ContinuationToolStepView>().Any())
+                    throw new InvalidOperationException("Eine manuelle Komprimierung bietet nach dem Nachladen fälschlich AI-Fortsetzung an.");
+            }
 
             // A single large message takes the real virtual/lazy-render path.
             var longMessage = await chats.AddMessageAsync(fixture.Other.Id, ChatRole.Assistant,
@@ -86,7 +123,8 @@ public sealed partial class NativeAssistantPage
                 JsonSerializer.Serialize(new { passed = true, completedReceipt = true, abortedReceipt = true,
                     failedReceipt = true, databaseReload = true, virtualizedReceipt = true,
                     sameRowOnStatusChange = true, noInteraction = true, noDeferredDetails = true,
-                    hiddenReasoning = true, modelRequests = 0 }));
+                    hiddenReasoning = true, manualComposerAction = true, noOpReceipt = true, settingsAccentChecked = true,
+                    manualCompactionNeverResumable = true, modelRequests = 0 }));
         }
         finally
         {

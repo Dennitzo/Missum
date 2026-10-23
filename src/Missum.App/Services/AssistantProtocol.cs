@@ -8,7 +8,7 @@ public static class AssistantProtocol
     {
         "settings.get", "settings.update", "settings.connectionTest", "promptTriggers.list", "promptTriggers.apply",
         "backup.create", "backup.restore", "backup.restoreCommit", "backup.restoreCancel", "models.list", "models.select",
-        "chat.resume", "session.groupDeleteEmpty", "coding.pickWorkspace",
+        "chat.resume", "chat.compact", "session.groupDeleteEmpty", "coding.pickWorkspace",
         "app.ready", "conversation.refresh", "conversation.page", "conversation.prompts", "conversation.promptPage", "conversation.blocks.page", "subagent.blocks.page", "tool.details", "subagent.load", "chat.send", "chat.steer", "chat.cancel", "session.create", "session.open",
         "reasoning.get", "reasoning.set",
         "session.rename", "session.delete", "session.clear", "session.draft", "session.groupCollapse", "session.projectCreate", "session.workspaceCreate", "mode.switch", "action.invoke", "document.pick", "document.paste",

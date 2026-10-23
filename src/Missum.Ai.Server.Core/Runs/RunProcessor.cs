@@ -381,6 +381,11 @@ public sealed partial class RunProcessor : BackgroundService
         }
 
         var messages = checkpoint.Messages.ToList();
+        RetiredRepositoryInstructions.RemoveFrom(messages, request.Messages
+            .Where(static message => string.Equals(message.Role, "user", StringComparison.OrdinalIgnoreCase))
+            .Select(static message => string.Join(Environment.NewLine,
+                message.Content.Where(static part => !string.IsNullOrWhiteSpace(part.Text)).Select(static part => part.Text)))
+            .ToArray());
         if (!ScienceSkill.Enabled(request) && !checkpoint.PreserveSessionPromptPrefix && !compactContext && isCoding && request.Subagent is null)
             CodingAgentPolicy.EnsureCurrentInstructions(messages);
         if (!checkpoint.PreserveSessionPromptPrefix && !compactContext && useStableSubagentToolCatalog && request.Subagent is null)
@@ -2557,10 +2562,6 @@ public sealed partial class RunProcessor : BackgroundService
                 Code: "agent.run_limit",
                 Message: limit.Message,
                 Retryable: false),
-            ModelGenerationTerminatedException { ProviderCode: "model_stall_timeout" } => (
-                Code: "provider.generation_stalled",
-                Message: "Das native Modell hat 20 Minuten lang keinen neuen Prompt- oder Tokenfortschritt geliefert. Der gespeicherte Arbeitsstand bleibt erhalten; eine stille, blockierte Inferenz wird nicht endlos wiederholt.",
-                Retryable: true),
             ModelGenerationTerminatedException => (
                 Code: "provider.generation_terminated",
                 Message: "native llama hat die Modellgenerierung wiederholt vor einem vollständigen Tool-Call beendet. Der Lauf kann erneut gestartet werden.",

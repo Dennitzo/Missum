@@ -201,8 +201,7 @@ public sealed class AgentNarrationPolicyTests
     {
         List<LmChatMessage> messages = [new("system", CodingAgentPolicy.ResponseLanguagePrompt
             + CodingAgentPolicy.StagedExecutionAndNarrationPrompt + CodingAgentPolicy.WorkspaceDependenciesPrompt
-            + CodingAgentPolicy.ScientificResearchPrompt + RepositoryMaintenancePolicy.Instructions
-            + MathFormattingPolicy.Instructions), new("user", "Fortsetzen")];
+            + CodingAgentPolicy.ScientificResearchPrompt + MathFormattingPolicy.Instructions), new("user", "Fortsetzen")];
         var before = messages.ToArray();
 
         CodingAgentPolicy.EnsureCurrentInstructions(messages);

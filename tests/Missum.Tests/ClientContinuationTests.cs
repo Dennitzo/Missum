@@ -610,6 +610,47 @@ public sealed class ClientContinuationTests
         Assert.Throws<InvalidOperationException>(() => MissumAiAssistantService.ValidateContinuationAnchor(session, empty.Id, [user, failed]));
     }
 
+    [Theory]
+    [InlineData(MessageStatus.Failed)]
+    [InlineData(MessageStatus.Cancelled)]
+    [InlineData(MessageStatus.Interrupted)]
+    public async Task ManualCompactionCannotResumeThePreviousPromptAfterHistoryWasReloaded(MessageStatus status)
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var chats = environment.Get<IChatRepository>();
+        var session = await chats.CreateSessionAsync("Komprimierung", ChatMode.General);
+        await chats.AddMessageAsync(session.Id, ChatRole.User, "Der vorherige erledigte Auftrag.", MessageStatus.Completed);
+        var message = await chats.AddMessageAsync(session.Id, ChatRole.Assistant, "", status);
+        await chats.SaveToolStepAsync(message.Id, new("manual-compaction:" + message.Id.ToString("N"),
+            "context.compact", status.ToString().ToLowerInvariant(), "Missum AI Server returned HTTP 404."));
+        var original = (await chats.GetMessageAsync(message.Id))!;
+        // The model history intentionally omits all receipts; validation must
+        // hydrate this selected message instead of treating it as an empty AI run.
+        Assert.Empty(Assert.Single(await chats.ListContextMessagesAsync(session.Id), item => item.Id == message.Id).ToolSteps!);
+        var page = await environment.Get<IConversationSnapshotRepository>().GetPageAsync(session.Id);
+        var displayMessage = Assert.Single(page!.Conversation.Messages, item => item.Id == message.Id);
+        var displayReceipt = Assert.Single(displayMessage.ToolSteps!);
+        Assert.Equal("manual-compaction:" + message.Id.ToString("N"), displayReceipt.Id);
+        Assert.True(displayReceipt.DetailsDeferred);
+        var handler = new ContinuationHandler(RunState.Cancelled);
+        using var host = await Host.CreateAsync(environment, handler);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            host.Service.ResumeMessageAsync(session.Id, message.Id, _ => Task.CompletedTask));
+
+        Assert.Contains("kein fortsetzbarer AI-Auftrag", error.Message);
+        Assert.Empty(handler.Requests);
+        Assert.Empty(handler.Preparations);
+        Assert.Equal(0, handler.HealthProbeCount);
+        Assert.False(host.Service.IsRunning);
+        var reloaded = (await chats.GetMessageAsync(message.Id))!;
+        Assert.Equal(original.Status, reloaded.Status);
+        Assert.Equal(original.Error, reloaded.Error);
+        Assert.Equal(original.Revision, reloaded.Revision);
+        Assert.Equal(original.ToolSteps, reloaded.ToolSteps);
+        Assert.False(MissumAiAssistantService.HasGenuineContinuationContent(reloaded));
+    }
+
     [Fact]
     public void RevisionsAndSteeringUseRunRelativeOffsetsAndCannotErasePreviousAnswer()
     {

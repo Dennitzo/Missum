@@ -170,7 +170,7 @@ public sealed class AssistantHost : IAsyncDisposable
         lock (_admissionGate)
         {
             if (_restoring) throw new InvalidOperationException("Missum stellt ein Backup wieder her. Bitte warte auf die Wiederverbindung.");
-            if (_restorePending != 0 && type is "chat.send" or "chat.resume")
+            if (_restorePending != 0 && type is "chat.send" or "chat.resume" or "chat.compact")
                 throw new InvalidOperationException("Die Wiederherstellung wartet auf die laufenden Aufträge. Neue Aufträge können nach dem Neustart gestartet werden.");
             if (type != "backup.restoreCommit") _admittedCommands++;
         }
@@ -357,7 +357,7 @@ public sealed class AssistantHost : IAsyncDisposable
         File.Move(temporary, _receiptPath, overwrite: true);
     }
 
-    private static bool IsMutation(string type) => type is "chat.send" or "chat.resume" or "action.invoke"
+    private static bool IsMutation(string type) => type is "chat.send" or "chat.resume" or "chat.compact" or "action.invoke"
         or "document.remove" or "attachment.remove" or "settings.update" or "promptTriggers.apply" or "backup.restoreCommit"
         or "session.create" or "session.rename" or "session.delete" or "session.clear" or "session.projectCreate" or "session.workspaceCreate" or "session.groupDeleteEmpty"
         or "microphone.speak" or "message.exportPdf" or "research.export";

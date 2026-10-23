@@ -41,7 +41,13 @@
         <Button Grid.Column="2" Click="OnSave" Content="Speichern" Style="{StaticResource MissumPrimaryButtonStyle}" />
       </Grid>
 
-      <InfoBar x:Name="StatusBar" IsClosable="True" IsOpen="False" Severity="Informational" />
+      <InfoBar x:Name="StatusBar" IsClosable="True" IsOpen="False" Severity="Informational" Foreground="{ThemeResource MissumTextBrush}">
+        <InfoBar.Resources>
+          <StaticResource x:Key="InfoBarSuccessSeverityBackgroundBrush" ResourceKey="MissumAccentSubtleBrush" />
+          <StaticResource x:Key="InfoBarSuccessSeverityIconBackground" ResourceKey="MissumAccentBrush" />
+          <StaticResource x:Key="InfoBarSuccessSeverityIconForeground" ResourceKey="MissumAccentTextBrush" />
+        </InfoBar.Resources>
+      </InfoBar>
 
       <Border Style="{StaticResource MissumCardStyle}">
         <StackPanel Spacing="14">

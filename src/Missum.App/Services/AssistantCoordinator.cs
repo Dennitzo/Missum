@@ -145,7 +145,6 @@ public sealed partial class AssistantCoordinator(
         var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Die ausgewählte Sitzung wurde nicht gefunden.");
         await CodingWorkspaceGit.EnsureRepositoryAsync(fullPath, cancellationToken).ConfigureAwait(false);
-        await ProjectRepositoryScaffold.EnsureAsync(fullPath, cancellationToken: cancellationToken).ConfigureAwait(false);
         // A workspace is session context in every chat mode, not a tool selection.
         await chats.SetCodingWorkspacePathAsync(session.Id, fullPath, activateCoding: false, cancellationToken).ConfigureAwait(false);
     }
@@ -693,6 +692,13 @@ public sealed partial class AssistantCoordinator(
             case "chat.send":
                 await SendChatAsync(envelope, emit, cancellationToken);
                 break;
+            case "chat.compact":
+                if (missumAi is null) throw new InvalidOperationException("AI-Verbindung ist nicht verfügbar.");
+                if (_runScheduler?.Snapshot.IsIdle == false)
+                    throw new InvalidOperationException("Beende den laufenden AI-Auftrag, bevor du den Kontext komprimierst.");
+                await missumAi.CompactSessionContextAsync(GetRequiredGuid(envelope.Payload, "sessionId"),
+                    update => EmitMissumAiUpdateAsync(update, emit, envelope.RequestId), cancellationToken).ConfigureAwait(false);
+                break;
             case "chat.resume":
                 if (missumAi is null) throw new InvalidOperationException("Der AI-Clientdienst ist nicht verfügbar.");
                 if (_runScheduler?.Snapshot.IsIdle == false)
@@ -965,7 +971,6 @@ public sealed partial class AssistantCoordinator(
         if (!Enum.IsDefined(chatMode)) throw new ArgumentOutOfRangeException(nameof(chatMode));
         var fullPath = Path.GetFullPath(workspacePath.Trim());
         if (!Directory.Exists(fullPath)) throw new DirectoryNotFoundException("Der Projektordner existiert nicht.");
-        await ProjectRepositoryScaffold.EnsureAsync(fullPath, cancellationToken: cancellationToken).ConfigureAwait(false);
         await SciencePublicationScaffold.EnsureAsync(chatMode, fullPath, cancellationToken).ConfigureAwait(false);
         var session = await chats.CreateSessionAsync(DefaultSessionTitle, chatMode, cancellationToken).ConfigureAwait(false);
         try

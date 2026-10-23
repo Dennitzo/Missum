@@ -8,7 +8,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Missum.Tests;
 
-public sealed class MissumAiStackLifecycleServiceTests
+public sealed partial class MissumAiStackLifecycleServiceTests
 {
     [Fact]
     public async Task ArtifactClientFactoryStartsOnlyHttpServicesAndNeverProbesOrStartsNativeModels()
@@ -342,7 +342,7 @@ public sealed class MissumAiStackLifecycleServiceTests
         Assert.Equal(expected, MissumAiStackLifecycleService.PathsMatch(actual, @"C:\ProgramData\Missum-AI-Stack\data"));
 
     private static MissumAiStackLifecycleService Create(FakeDocker docker) => new(docker.Profile, docker.RunAsync,
-        environment: _ => null);
+        environment: _ => null, createContainer: docker.CreateContainerAsync);
 
     private sealed class ArtifactGatewayHandler(FakeDocker docker) : HttpMessageHandler
     {
@@ -366,6 +366,11 @@ public sealed class MissumAiStackLifecycleServiceTests
 
     private sealed class FakeDocker
     {
+        private static readonly string[] GatewayEnvironment = ["MISSUM_AI_DATA_DIRECTORY=/data", "CUSTOM_SETTING=preserved"];
+        private static readonly string[] GatewayEntrypoint = ["dotnet", "Missum.Ai.Gateway.dll"];
+        private static readonly string[] GatewaySecurityOptions = ["no-new-privileges:true"];
+        private static readonly string[] BackendAliases = ["missum-ai-gateway", "gateway"];
+        private static readonly string[] EdgeAliases = ["gateway"];
         public AssistantRuntimeProfile Profile { get; } = new("stable", "Missum", @"C:\profile", new Uri("http://127.0.0.1:8080"),
             8081, 8082, @"C:\state", @"C:\bin\llama-server.exe", @"C:\ProgramData\Missum-AI-Stack", "Missum.stable");
         public List<TestContainer> Containers { get; } = [];
@@ -378,6 +383,13 @@ public sealed class MissumAiStackLifecycleServiceTests
         public bool RemoveRunnerOnStop { get; init; }
         public bool RemoveRunnerOnInspect { get; init; }
         public bool DaemonReady { get; set; } = true;
+        public bool ImageUpdateAvailable { get; init; }
+        public bool EquivalentImageWithDifferentIds { get; init; }
+        public bool ImageMissing { get; init; }
+        public bool ContainerdImageDescriptors { get; init; }
+        public bool StartOriginalDuringUpdate { get; init; }
+        public bool FailReplacementRename { get; init; }
+        public List<JsonElement> CreatedConfigurations { get; } = [];
         public TestContainer Gateway => Containers.Single(container => container.Service == "gateway");
         public TestContainer Proxy => Containers.Single(container => container.Service == "caddy");
         public TestContainer? Runner { get; private set; }
@@ -412,6 +424,16 @@ public sealed class MissumAiStackLifecycleServiceTests
             var command = arguments.Skip(2).ToArray();
             if (!DaemonReady) return Task.FromResult(new MissumAiStackLifecycleService.DockerCommandResult(1, "", "Docker engine is unavailable"));
             if (command[0] == "info") return Success("28.0.0");
+            if (command[0] == "image")
+            {
+                if (ImageMissing) return Task.FromResult(new MissumAiStackLifecycleService.DockerCommandResult(1, "", "No such image"));
+                if (command.Contains("--platform", StringComparer.Ordinal))
+                    return Success(JsonSerializer.Serialize(new[] { new { Id = "sha256:manifest-list", Os = "linux", Architecture = "amd64",
+                        Descriptor = new { mediaType = "application/vnd.oci.image.manifest.v1+json", digest = EquivalentImageWithDifferentIds ? "sha256:old-manifest" : "sha256:new-manifest" } } }));
+                if (ContainerdImageDescriptors)
+                    return Task.FromResult(new MissumAiStackLifecycleService.DockerCommandResult(1, "", "No such image config ID"));
+                return Success(JsonSerializer.Serialize(new[] { ImageDescription(command[2]), ImageDescription("sha256:new") }));
+            }
             if (command[0] == "ps")
             {
                 var filters = command.Select((value, index) => (value, index)).Where(item => item.value == "--filter")
@@ -425,15 +447,42 @@ public sealed class MissumAiStackLifecycleServiceTests
                 var json = JsonSerializer.Serialize(Containers.Where(container => command.Contains(container.Id, StringComparer.Ordinal)).Select(container => new
                 {
                 Id = container.Id,
-                Config = new { Labels = container.Labels },
+                Name = "/" + container.Name,
+                Image = container.Image,
+                ImageManifestDescriptor = ContainerdImageDescriptors ? new { digest = container.Image == "sha256:new" ? "sha256:new-manifest" : "sha256:old-manifest",
+                    platform = new { os = "linux", architecture = "amd64" } } : null,
+                Config = new { Labels = container.Labels, Image = ImageUpdateAvailable ? "missum-ai/gateway:2.0.0" : null,
+                    Env = GatewayEnvironment, Entrypoint = GatewayEntrypoint },
                 State = new { Running = container.Running },
                 Mounts = new[] { new { Type = "bind", Source = GatewayDataRoot, Destination = "/data" } },
-                HostConfig = new { PortBindings = new Dictionary<string, object> { ["8080/tcp"] = new[] { new { HostPort = PublishedPort.ToString(System.Globalization.CultureInfo.InvariantCulture), HostIp = "" } } } },
+                HostConfig = new { PortBindings = new Dictionary<string, object> { ["8080/tcp"] = new[] { new { HostPort = PublishedPort.ToString(System.Globalization.CultureInfo.InvariantCulture), HostIp = "" } } },
+                    ReadonlyRootfs = true, Binds = new[] { GatewayDataRoot + ":/data:rw" },
+                    SecurityOpt = GatewaySecurityOptions, NetworkMode = "missum-ai-stack_backend" },
+                NetworkSettings = new { Networks = new Dictionary<string, object> { ["missum-ai-stack_backend"] = new {
+                    Aliases = BackendAliases, IPAMConfig = new { IPv4Address = "172.20.0.42" },
+                    EndpointID = "old-endpoint", NetworkID = "old-network", IPAddress = "172.20.0.42" },
+                    ["missum-ai-stack_edge"] = new { Aliases = EdgeAliases, IPAMConfig = (object?)null } } },
                 }));
                 return runnerRemoved ? Task.FromResult(new MissumAiStackLifecycleService.DockerCommandResult(1, json, "Error: No such object: " + Runner!.Id)) : Success(json);
             }
             Mutations.Add(command);
-            if (command[0] == "start" && FailGatewayStart && command.Contains(Gateway.Id, StringComparer.Ordinal))
+            if (command[0] == "rename")
+            {
+                var target = Containers.Single(container => container.Id == command[1]);
+                if (FailReplacementRename && target.Image == "sha256:new" && !command[2].Contains("-missum-update-", StringComparison.Ordinal))
+                    return Task.FromResult(new MissumAiStackLifecycleService.DockerCommandResult(1, "", "rename failed"));
+                target.Name = command[2];
+                return Success("");
+            }
+            if (command[0] == "rm")
+            {
+                var target = Containers.Single(container => container.Id == command[1]);
+                if (target.Running) return Task.FromResult(new MissumAiStackLifecycleService.DockerCommandResult(1, "", "container is running"));
+                Containers.Remove(target);
+                return Success("");
+            }
+            if (command[0] == "start" && FailGatewayStart && Containers.Any(container => container.Service == "gateway"
+                && command.Contains(container.Id, StringComparer.Ordinal)))
                 return Task.FromResult(new MissumAiStackLifecycleService.DockerCommandResult(1, "", "Gateway could not start"));
             foreach (var container in Containers.Where(container => command.Contains(container.Id, StringComparer.Ordinal)))
                 container.Running = command[0] == "start";
@@ -443,6 +492,23 @@ public sealed class MissumAiStackLifecycleServiceTests
                 return Task.FromResult(new MissumAiStackLifecycleService.DockerCommandResult(1, "", "No such container"));
             }
             return Success("");
+        }
+
+        private object ImageDescription(string image) => new { Id = image, Os = "linux", Architecture = "amd64",
+            Config = new { Entrypoint = new[] { "dotnet", "Missum.Ai.Gateway.dll" } },
+            RootFS = new { Type = "layers", Layers = new[] { image == "sha256:new" && !EquivalentImageWithDifferentIds ? "new-layer" : "old-layer" } } };
+
+        public Task<string> CreateContainerAsync(string endpoint, string name, JsonElement configuration, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Assert.Equal(Endpoint, endpoint);
+            CreatedConfigurations.Add(configuration.Clone());
+            if (StartOriginalDuringUpdate) Gateway.Running = true;
+            var container = new TestContainer(new string('9', 64), "gateway", compose: true, running: false)
+            { Name = name, Image = "sha256:new" };
+            Containers.Add(container);
+            Mutations.Add(["create", name]);
+            return Task.FromResult(container.Id);
         }
 
         private static Task<MissumAiStackLifecycleService.DockerCommandResult> Success(string text) =>
@@ -455,10 +521,12 @@ public sealed class MissumAiStackLifecycleServiceTests
         public string Service { get; }
         public bool Compose { get; }
         public bool Running { get; set; }
+        public string Name { get; set; }
+        public string Image { get; set; } = "sha256:old";
         public Dictionary<string, string> Labels { get; } = [];
         public TestContainer(string id, string service, bool compose, bool running)
         {
-            Id = id; Service = service; Compose = compose; Running = running;
+            Id = id; Service = service; Compose = compose; Running = running; Name = "missum-ai-" + service;
             if (compose)
             {
                 Labels["com.docker.compose.project"] = MissumAiStackLifecycleService.ComposeProject;

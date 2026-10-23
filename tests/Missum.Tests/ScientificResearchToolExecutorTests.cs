@@ -35,16 +35,16 @@ public sealed class ScientificResearchToolExecutorTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task ExistingFileRequiresCurrentHashAndRestoresOriginalBytes()
+    public async Task ExistingFileCanBeReplacedWithoutHashAndRestoresOriginalBytes()
     {
         var root = Path.Combine(_root, ".assistant", "research", "replication");
         Directory.CreateDirectory(root);
         var path = Path.Combine(root, "model.py");
         var original = Encoding.UTF8.GetBytes("value = 1\n");
         await File.WriteAllBytesAsync(path, original);
-        var hash = Convert.ToHexStringLower(SHA256.HashData(original));
         var written = await Execute(ClientToolNames.ResearchCodeWrite,
-            new { projectId = "replication", path = "model.py", content = "value = 2\n", expectedSha256 = hash });
+            new { projectId = "replication", path = "model.py", content = "value = 2\n" });
+        Assert.Equal("value = 2\n", await File.ReadAllTextAsync(path));
 
         await Execute(ClientToolNames.ResearchCodeRestore,
             new { projectId = "replication", changeSetId = written.GetProperty("changeSetId").GetString() });

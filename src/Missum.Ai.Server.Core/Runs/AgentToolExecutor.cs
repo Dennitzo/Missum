@@ -214,7 +214,7 @@ public sealed partial class AgentToolExecutor
             $"Die native Vision-Modellanfrage scheiterte bei {provider.Phase}.",
             IsRetryableMediaStatus(provider.StatusCode)),
         ModelGenerationTerminatedException generation => new(
-            generation.ProviderCode == "model_stall_timeout" ? "media.provider_stalled" : "media.provider_generation_failed",
+            "media.provider_generation_failed",
             $"Die Vision-Modellgenerierung wurde beendet ({generation.ProviderCode}).",
             true),
         ReasoningLoopDetectedException => new(

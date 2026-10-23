@@ -120,13 +120,12 @@ public static class CodingAgentPolicy
         (enabled && !science ? SystemPrompt + "\n\n" + WorkingStatePrompt : SystemPrompt) + "\n\n" + ResponseLanguagePrompt
         + "\n\n" + (science ? StagedExecutionAndNarrationPrompt[StagedExecutionAndNarrationPrompt.IndexOf("Vorlesbare Begleittexte:", StringComparison.Ordinal)..] : StagedExecutionAndNarrationPrompt)
         + "\n\n" + WorkspaceDependenciesPrompt
-        + (science ? "" : "\n\n" + ScientificResearchPrompt) + "\n\n" + RepositoryMaintenancePolicy.Instructions
-        + "\n\n" + AgentNarrationPolicy.Instructions + "\n\n" + MathFormattingPolicy.Instructions;
+        + (science ? "" : "\n\n" + ScientificResearchPrompt) + "\n\n" + AgentNarrationPolicy.Instructions + "\n\n" + MathFormattingPolicy.Instructions;
 
     internal static void EnsureCurrentInstructions(List<LmChatMessage> messages)
     {
         EnsureResponseLanguage(messages);
-        foreach (var instruction in new[] { StagedExecutionAndNarrationPrompt, WorkspaceDependenciesPrompt, ScientificResearchPrompt, RepositoryMaintenancePolicy.Instructions, MathFormattingPolicy.Instructions })
+        foreach (var instruction in new[] { StagedExecutionAndNarrationPrompt, WorkspaceDependenciesPrompt, ScientificResearchPrompt, MathFormattingPolicy.Instructions })
         {
             if (messages.Any(message => message.Role == "system"
                 && message.Content?.Contains(instruction, StringComparison.Ordinal) == true)) continue;

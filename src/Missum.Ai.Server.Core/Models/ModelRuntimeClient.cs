@@ -37,7 +37,6 @@ public sealed partial class ModelRuntimeClient : IDisposable
     private static readonly TimeSpan StatusCacheDuration = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan ModelLoadTimeout = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan ManagedPairLoadTimeout = TimeSpan.FromMinutes(10);
-    private static readonly TimeSpan ModelTurnTimeout = TimeSpan.FromMinutes(20);
     private readonly HttpClient _httpClient;
     private readonly MissumAiServerOptions _options;
     private readonly ILogger<ModelRuntimeClient> _logger;
@@ -394,31 +393,25 @@ public sealed partial class ModelRuntimeClient : IDisposable
                     sessionId: sessionCacheOwnerId, parentSessionId: sessionCacheParentOwnerId,
                     cancellationToken: cancellationToken).ConfigureAwait(false);
 
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(ModelTurnTimeout);
-            var stallProgress = new NativeInferenceStallProgress(() => timeout.CancelAfter(ModelTurnTimeout));
             async ValueTask ReportProgressAsync(ModelRuntimeProgress progress, CancellationToken token)
             {
                 if (progress.PromptTokens is > 0) evaluatedPromptTokens = progress.PromptTokens;
                 if (nativeProgress is not null) await nativeProgress(progress, token).ConfigureAwait(false);
             }
-            async ValueTask ProgressWithDeadlineAsync(ModelRuntimeProgress progress, CancellationToken token)
-            {
-                stallProgress.Observe(progress);
-                await ReportProgressAsync(progress, token).ConfigureAwait(false);
-            }
             var transportToolNames = tools.ToDictionary(
                 static tool => ToTransportToolName(tool.Name),
                 static tool => tool.Name,
                 StringComparer.Ordinal);
+            // Native prefill and generation may remain silent for arbitrarily
+            // long work. Only the owning run may cancel this inference wait.
             var result = await CompleteStreamingChatWithBoundedRetryAsync(
                 body,
                 transportToolNames,
-                ProgressWithDeadlineAsync,
+                ReportProgressAsync,
                 structuredToolOnly,
                 context,
                 maximumOutputTokens,
-                timeout.Token,
+                cancellationToken,
                 inferenceDispatched: () => inferenceIncomplete = true, compactAtThreshold: compactAtThreshold).ConfigureAwait(false);
             inferenceIncomplete = false;
             if (nativeProgress is not null)
@@ -484,7 +477,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
         {
             if (inferenceIncomplete)
                 await SaveInterruptedSessionCacheAsync(preparedInstanceId, sessionCacheKey, evaluatedPromptTokens).ConfigureAwait(false);
-            throw new ModelGenerationTerminatedException("model_stall_timeout", exception);
+            throw new ModelProviderRequestException("generation", 1, exception);
         }
         catch (Exception exception) when (inferenceIncomplete && exception is (HttpRequestException or JsonException or IOException))
         {
@@ -643,23 +636,16 @@ public sealed partial class ModelRuntimeClient : IDisposable
         }
         await UpdateSessionCacheAsync("prepare", preparation.InstanceId, null, cancellationToken: cancellationToken).ConfigureAwait(false);
         ApplyReasoningSettings(body, preparation.InstanceId, "vision", reasoningEffort);
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(ModelTurnTimeout);
-        var stallProgress = new NativeInferenceStallProgress(() => timeout.CancelAfter(ModelTurnTimeout));
-        ValueTask ObserveVisionProgressAsync(ModelRuntimeProgress progress, CancellationToken token)
-        {
-            stallProgress.Observe(progress);
-            return ValueTask.CompletedTask;
-        }
+        // Vision uses the same unbounded inference wait as text and subagents.
         var result = await CompleteStreamingChatWithBoundedRetryAsync(body,
-            new Dictionary<string, string>(StringComparer.Ordinal), ObserveVisionProgressAsync,
+            new Dictionary<string, string>(StringComparer.Ordinal), nativeProgress: null,
             structuredToolOnly: false, preparation.ContextLength, maximumOutputTokens,
-            timeout.Token, allowMultimodalCountingFallback: true).ConfigureAwait(false);
+            cancellationToken, allowMultimodalCountingFallback: true).ConfigureAwait(false);
         return result;
         }
         catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
         {
-            throw new ModelGenerationTerminatedException("model_stall_timeout", exception);
+            throw new ModelProviderRequestException("generation", 1, exception);
         }
         finally { turnGate.Release(); }
     }
@@ -1022,8 +1008,8 @@ public sealed partial class ModelRuntimeClient : IDisposable
         {
             try
             {
-                // Some providers ignore stream=true. Async parsing remains bound
-                // by the caller's native inactivity deadline, including blocked reads.
+                // Some providers ignore stream=true. Even a silent response stays
+                // cancellable by Stop/shutdown without an inference idle deadline.
                 await using var jsonStream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
                 using var document = await JsonDocument.ParseAsync(jsonStream, cancellationToken: cancellationToken).ConfigureAwait(false);
                 if (document.RootElement.TryGetProperty("choices", out var choices)

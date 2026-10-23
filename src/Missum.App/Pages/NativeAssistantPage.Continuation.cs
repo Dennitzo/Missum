@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Missum.App.Controls;
+using Missum.App.Services;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
@@ -28,9 +29,11 @@ public sealed partial class NativeAssistantPage
             _continuationServerStarted = true;
     }
 
-    private static bool IsResumableAssistantStatus(JsonElement message)
+    internal static bool IsResumableAssistantStatus(JsonElement message)
     {
         if (S(message, "role") != "assistant") return false;
+        if (MissumAiAssistantService.HasOnlyManualCompactionReceipts(
+            Items(message, "toolSteps").Select(step => (S(step, "id"), S(step, "tool"))))) return false;
         var status = S(message, "status").ToLowerInvariant();
         if (status is "cancelled" or "interrupted") return true;
         if (status != "failed") return false;

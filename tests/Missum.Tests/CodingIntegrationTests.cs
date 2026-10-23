@@ -371,8 +371,8 @@ public sealed class CodingIntegrationTests
         var restored = await chats.GetSessionAsync(session.Id);
         Assert.Equal(replacement, restored?.CodingWorkspacePath);
         Assert.Equal(BuiltInActionIds.CreateAudiobook, restored?.PersistentExtensionActionId);
-        Assert.True(File.Exists(Path.Combine(replacement, "README.md")));
-        Assert.Contains("/.publication-renderer/", await File.ReadAllTextAsync(Path.Combine(replacement, ".gitignore")), StringComparison.Ordinal);
+        Assert.False(File.Exists(Path.Combine(replacement, "README.md")));
+        Assert.False(File.Exists(Path.Combine(replacement, ".gitignore")));
     }
 
     [Fact]

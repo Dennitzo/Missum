@@ -19,6 +19,7 @@ public sealed partial class ModelRuntimeClient
         var normalized = NormalizeMessageOrderForNativeRuntime(messages).Where(message => !IsLanguageReminder(message))
             .Select(message => message.Role == "system" && message.Content is { } content
                 ? message with { Content = Coding.CodingAgentPolicy.RemoveLegacyReasoningLanguage(content) } : message).ToList();
+        Policies.RetiredRepositoryInstructions.RemoveFrom(normalized);
         // The versioned gateway policy already binds language, instruction
         // priority and answer/analysis separation. Keep its evaluated prefix
         // and historical reasoning intact instead of appending legacy reminders.

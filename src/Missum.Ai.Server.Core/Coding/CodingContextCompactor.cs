@@ -27,14 +27,15 @@ internal static class CodingContextCompactor
         """ + "\n\n" + CodingAgentPolicy.ResponseLanguagePrompt;
 
     internal static CodingCompactionPlan? Plan(IReadOnlyList<LmChatMessage> messages, int contextLength,
-        CodingWorkingState? workingState = null, bool includeWorkingStateInBudget = true)
+        CodingWorkingState? workingState = null, bool includeWorkingStateInBudget = true,
+        bool force = false)
     {
         var budget = ContextPlanner.ComputeInputTokenBudget(contextLength, null);
         // Retain the evaluated prefix below the shared 90% boundary. Compact
         // deliberately between turns, leaving room for large tool receipts.
         var prompt = workingState is null || !includeWorkingStateInBudget
             ? messages : messages.Append(CodingEvidenceContext.Build(workingState)).ToArray();
-        if (ContextPlanner.EstimateTokens(prompt) < budget) return null;
+        if (!force && ContextPlanner.EstimateTokens(prompt) < budget) return null;
         var currentRequestIndex = -1;
         for (var index = messages.Count - 1; index >= 0; index--)
             if (messages[index].Role == "user" && messages[index].Content?.StartsWith(MemoryMarker, StringComparison.Ordinal) != true
@@ -67,8 +68,13 @@ internal static class CodingContextCompactor
                 .Select(item => item.index).DefaultIfEmpty(messages.Count).Min();
             firstOpen = Math.Min(firstOpen, freshStart);
         }
-        var recentCount = Math.Max(0, Math.Min(8, toolTurnStarts.Length - 1));
-        var cut = Math.Min(recentCount == 0 ? (freshReadIds.Count > 0 ? messages.Count : currentRequestIndex) : toolTurnStarts[^recentCount], firstOpen);
+        var recentCount = force ? 0 : Math.Max(0, Math.Min(8, toolTurnStarts.Length - 1));
+        // Explicit compaction archives completed work even below the automatic
+        // threshold. Retain the latest visible answer and every open exchange.
+        var forcedCut = messages.Count > 0 && messages[^1].Role == "assistant" && messages[^1].ToolCalls is not { Count: > 0 }
+            ? messages.Count - 1 : messages.Count;
+        var cut = Math.Min(force ? forcedCut
+            : recentCount == 0 ? (freshReadIds.Count > 0 ? messages.Count : currentRequestIndex) : toolTurnStarts[^recentCount], firstOpen);
         while (recentCount > 0 && ContextPlanner.EstimateTokens(messages.Skip(cut).ToArray()) > budget / 3)
         {
             recentCount--;

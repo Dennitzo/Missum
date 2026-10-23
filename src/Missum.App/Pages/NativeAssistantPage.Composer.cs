@@ -83,7 +83,7 @@ public sealed partial class NativeAssistantPage
         SelectedToolChip.Visibility = Visibility.Visible;
     }
 
-    private void ShowComposerTools()
+    private Flyout ShowComposerTools()
     {
         var width = Math.Max(280, ComposerSurface.ActualWidth);
         var menu = new Flyout { Placement = FlyoutPlacementMode.TopEdgeAlignedLeft, AreOpenCloseAnimationsEnabled = true };
@@ -122,6 +122,9 @@ public sealed partial class NativeAssistantPage
         var plan = actions.FirstOrDefault(a => S(a, "iconKey") == "plan");
         Heading("Hinzufügen");
         Row("\uE723", "Dateien und Ordner", "", () => ShowFileChoices(), iconBrush: ToolGlyphBrush("attachment", ""));
+        Row("\uE8EF", "Kontext komprimieren", _running ? "Nach dem Beenden des AI-Laufs verfügbar" : "Aktuelle Sitzung verdichten; Chatverlauf behalten",
+            () => _ = CompactCurrentSessionAsync(), !_running && !_manualCompactionBusy && Items(_snapshot, "messages").Length > 0,
+            ToolGlyphBrush("research", "context.compact"));
         if (plan.ValueKind == JsonValueKind.Object)
             Row("\uEA80", "Planmodus", "Planmodus einschalten", () => SelectComposerTool(S(plan, "actionId"), "Planmodus"), S(plan, "disabledReason").Length == 0, ToolGlyphBrush("plan", S(plan, "actionId")));
         if (document.ValueKind == JsonValueKind.Object)
@@ -138,6 +141,20 @@ public sealed partial class NativeAssistantPage
             Row(ToolIconGlyph(S(action, "iconKey")), S(action, "displayName"), S(action, "description"), () => _ = InvokeImmediateActionAsync(S(action, "actionId")), S(action, "disabledReason").Length == 0, ToolGlyphBrush(S(action, "iconKey"), S(action, "actionId")));
         menu.Content = new ScrollViewer { Content = rows, MaxHeight = 308, HorizontalScrollMode = ScrollMode.Disabled, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
         menu.ShowAt(ComposerSurface);
+        return menu;
+    }
+
+    private bool _manualCompactionBusy;
+
+    private async Task CompactCurrentSessionAsync()
+    {
+        if (_manualCompactionBusy || _running || _disposed) return;
+        var sessionId = _session;
+        _manualCompactionBusy = true;
+        try { await CommandAsync("chat.compact", new { sessionId }); }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (Exception exception) when (exception is not OutOfMemoryException) { ShowError(exception.Message); }
+        finally { _manualCompactionBusy = false; }
     }
 
     private void ShowFileChoices()

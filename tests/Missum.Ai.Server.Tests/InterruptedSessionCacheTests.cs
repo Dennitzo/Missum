@@ -39,33 +39,26 @@ public sealed class InterruptedSessionCacheTests
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public async Task InternalTimeoutOrTerminalTransportFailureProtectsTheCacheBeforeTheRunEndFlush(bool timeout)
+    public async Task ProviderCancellationOrTerminalTransportFailureProtectsTheCacheBeforeTheRunEndFlush(bool providerCancellation)
     {
         using var context = new TestServerContext();
         context.Options.ModelRuntimeUri = new("http://native.test:19090");
         using var handler = new InterruptedPrefillHandler(ModelId)
         {
-            OnInference = _ => Task.FromException<HttpResponseMessage>(timeout
-                ? new OperationCanceledException("Native inference stalled during its first batch")
+            OnInference = _ => Task.FromException<HttpResponseMessage>(providerCancellation
+                ? new OperationCanceledException("Native transport cancelled its request")
                 : new HttpRequestException("Native inference connection closed")),
         };
         using var http = new HttpClient(handler);
         using var runtime = new ModelRuntimeClient(http, context.WrappedOptions, NullLogger<ModelRuntimeClient>.Instance);
 
-        if (timeout)
-        {
-            var error = await Assert.ThrowsAsync<ModelGenerationTerminatedException>(() => runtime.CompleteChatAsync(ModelId,
-                [new("user", "Fortsetzen")], [], sessionCacheKey: "failed-prefill-session"));
-            Assert.Equal("model_stall_timeout", error.ProviderCode);
-        }
-        else
-        {
-            var error = await Assert.ThrowsAsync<ModelProviderRequestException>(() => runtime.CompleteChatAsync(ModelId,
-                [new("user", "Fortsetzen")], [], sessionCacheKey: "failed-prefill-session"));
-            Assert.Equal("generation", error.Phase);
-        }
+        var error = await Assert.ThrowsAsync<ModelProviderRequestException>(() => runtime.CompleteChatAsync(ModelId,
+            [new("user", "Fortsetzen")], [], sessionCacheKey: "failed-prefill-session"));
+        Assert.Equal("generation", error.Phase);
+        if (providerCancellation) Assert.IsAssignableFrom<OperationCanceledException>(error.InnerException);
+        else Assert.IsType<HttpRequestException>(error.InnerException);
 
-        Assert.Equal(timeout ? 1 : 3, handler.InferenceCalls);
+        Assert.Equal(providerCancellation ? 1 : 3, handler.InferenceCalls);
         Assert.Equal(1, handler.Saves);
         var save = Assert.IsType<JsonElement>(handler.SaveBody);
         Assert.Equal(134957, save.GetProperty("promptTokens").GetInt32());

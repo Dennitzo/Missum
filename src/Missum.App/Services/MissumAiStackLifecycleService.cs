@@ -11,7 +11,7 @@ namespace Missum.App.Services;
 /// files beside the portable executable. Container labels, the gateway data mount
 /// and its published port establish ownership; names alone never establish it.
 /// </summary>
-public sealed class MissumAiStackLifecycleService : IDisposable
+public sealed partial class MissumAiStackLifecycleService : IDisposable
 {
     public const string ComposeProject = "missum-ai-stack";
     public const string ProfileLabel = "com.missum.runtime.profile";
@@ -27,6 +27,7 @@ public sealed class MissumAiStackLifecycleService : IDisposable
     private readonly Func<DateTimeOffset> _now;
     private readonly Func<CancellationToken, Task> _startDesktop;
     private readonly Func<TimeSpan, CancellationToken, Task> _delay;
+    private readonly Func<string, string, JsonElement, CancellationToken, Task<string>> _createContainer;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private DateTimeOffset _nextProbe;
     private Exception? _lastFailure;
@@ -42,7 +43,8 @@ public sealed class MissumAiStackLifecycleService : IDisposable
         Func<IReadOnlyList<string>, CancellationToken, Task<DockerCommandResult>> run,
         Func<Uri, bool>? isLocalGateway = null, Func<bool>? disabled = null,
         Func<string, string?>? environment = null, Func<DateTimeOffset>? now = null,
-        Func<CancellationToken, Task>? startDesktop = null, Func<TimeSpan, CancellationToken, Task>? delay = null)
+        Func<CancellationToken, Task>? startDesktop = null, Func<TimeSpan, CancellationToken, Task>? delay = null,
+        Func<string, string, JsonElement, CancellationToken, Task<string>>? createContainer = null)
     {
         _profile = profile;
         _run = run;
@@ -52,6 +54,7 @@ public sealed class MissumAiStackLifecycleService : IDisposable
         _now = now ?? (() => DateTimeOffset.UtcNow);
         _startDesktop = startDesktop ?? StartDockerDesktopAsync;
         _delay = delay ?? Task.Delay;
+        _createContainer = createContainer ?? CreateContainerAsync;
     }
 
     public async Task EnsureStartedAsync(Uri gateway, CancellationToken cancellationToken = default)
@@ -70,6 +73,7 @@ public sealed class MissumAiStackLifecycleService : IDisposable
             await EnsureDockerDaemonAsync(endpoint, cancellationToken).ConfigureAwait(false);
             var containers = await ReadContainersAsync(endpoint, includeRunners: false, cancellationToken).ConfigureAwait(false);
             ValidateInstalledStack(containers, gateway, requireInstalled: true);
+            containers = await RefreshStoppedGatewayAsync(endpoint, containers, cancellationToken).ConfigureAwait(false);
             // Worker models may take time to warm. Gateway readiness is checked
             // by the existing connection monitor, not replaced with a CLI delay.
             foreach (var group in containers.Where(static container => !container.Running)
@@ -105,6 +109,7 @@ public sealed class MissumAiStackLifecycleService : IDisposable
             await EnsureDockerDaemonAsync(endpoint, cancellationToken).ConfigureAwait(false);
             var containers = await ReadContainersAsync(endpoint, includeRunners: false, cancellationToken).ConfigureAwait(false);
             ValidateInstalledStack(containers, gateway, requireInstalled: true);
+            containers = await RefreshStoppedGatewayAsync(endpoint, containers, cancellationToken).ConfigureAwait(false);
             foreach (var container in containers.Where(static container => !container.Running
                          && container.Service is ("gateway" or "caddy"))
                          .OrderBy(static container => ServiceOrder(container.Service)))

@@ -23,6 +23,20 @@ public sealed class AssistantHostTests
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
     [Fact]
+    public async Task ManualCompactionPassesHostProtocolAndDispatchesToTheAiService()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var session = await fixture.Environment.Get<IChatRepository>().CreateSessionAsync("Manual context route");
+        var events = new Events();
+        Assert.True(AssistantProtocol.IsIncomingTypeAllowed("chat.compact"));
+        await fixture.Host.HandleAsync("desktop", Envelope("chat.compact", new { sessionId = session.Id }), events.Emit);
+        // This fixture deliberately has no AI service. Reaching its availability
+        // check proves the real native host dispatched the command to the coordinator.
+        var error = Assert.Single(events.Items, item => item.Type == "host.error");
+        Assert.Equal("AI-Verbindung ist nicht verfügbar.", error.Payload.GetProperty("message").GetString());
+    }
+
+    [Fact]
     public async Task PromptTimelineReadsPassHostProtocolAndStayClientScoped()
     {
         await using var fixture = await Fixture.CreateAsync();

@@ -652,7 +652,6 @@ public sealed class CodingRunBudgetTests
     [Theory]
     [InlineData("transport_retry_exhausted", HttpStatusCode.BadRequest)]
     [InlineData("transport_retry_exhausted", HttpStatusCode.Unauthorized)]
-    [InlineData("model_stall_timeout", HttpStatusCode.ServiceUnavailable)]
     [InlineData("vision_output_limit", HttpStatusCode.ServiceUnavailable)]
     public async Task DurableRetryDoesNotRetryOtherTerminationReasonsOrPermanentTransportErrors(string code, HttpStatusCode status)
     {

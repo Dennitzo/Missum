@@ -13,6 +13,7 @@ public sealed class MissumAiClient : IDisposable
 {
     private const int MaximumRateLimitRetries = 3;
     private readonly HttpClient _httpClient;
+    private readonly HttpClient _longOperationHttpClient;
     private readonly JsonSerializerOptions _jsonOptions = MissumAiProtocol.CreateJsonOptions();
     private readonly bool _ownsHttpClient;
     private readonly TimeSpan _streamIdleTimeout;
@@ -20,9 +21,11 @@ public sealed class MissumAiClient : IDisposable
 
     public Uri? BaseAddress => _httpClient.BaseAddress;
 
-    public MissumAiClient(HttpClient httpClient, string? clientId = null, bool ownsHttpClient = false, TimeSpan? streamIdleTimeout = null)
+    public MissumAiClient(HttpClient httpClient, string? clientId = null, bool ownsHttpClient = false, TimeSpan? streamIdleTimeout = null,
+        HttpClient? longOperationHttpClient = null)
     {
         _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
+        _longOperationHttpClient = longOperationHttpClient ?? httpClient;
         _ownsHttpClient = ownsHttpClient;
         _streamIdleTimeout = streamIdleTimeout ?? TimeSpan.FromSeconds(90);
         if (_streamIdleTimeout <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(streamIdleTimeout));
@@ -30,6 +33,12 @@ public sealed class MissumAiClient : IDisposable
         _httpClient.DefaultRequestHeaders.TryAddWithoutValidation(
             MissumAiHeaders.ClientId,
             string.IsNullOrWhiteSpace(clientId) ? $"client-{Guid.NewGuid():N}" : clientId.Trim());
+        if (!ReferenceEquals(_longOperationHttpClient, _httpClient))
+        {
+            _longOperationHttpClient.DefaultRequestHeaders.Remove(MissumAiHeaders.ClientId);
+            _longOperationHttpClient.DefaultRequestHeaders.TryAddWithoutValidation(MissumAiHeaders.ClientId,
+                _httpClient.DefaultRequestHeaders.GetValues(MissumAiHeaders.ClientId));
+        }
     }
 
     public Task<HealthSnapshot> GetLiveHealthAsync(CancellationToken cancellationToken = default) =>
@@ -66,6 +75,17 @@ public sealed class MissumAiClient : IDisposable
     public Task<ModelPreparationResponse> PrepareModelAsync(ModelPreparationRequest request,
         CancellationToken cancellationToken = default) =>
         PostAsync<ModelPreparationRequest, ModelPreparationResponse>("v1/models/prepare", request, cancellationToken);
+
+    public async Task<SessionContextCompactionResponse> CompactSessionContextAsync(SessionContextCompactionRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        using var response = await _longOperationHttpClient.PostAsJsonAsync("v1/sessions/context/compact", request,
+            _jsonOptions, cancellationToken).ConfigureAwait(false);
+        await EnsureSuccessAsync(response, cancellationToken).ConfigureAwait(false);
+        return await response.Content.ReadFromJsonAsync<SessionContextCompactionResponse>(_jsonOptions, cancellationToken)
+            .ConfigureAwait(false) ?? throw new JsonException("The server returned no SessionContextCompactionResponse payload.");
+    }
 
     public Task<GpuStatusSnapshot> GetGpuStatusAsync(CancellationToken cancellationToken = default) =>
         GetAsync<GpuStatusSnapshot>("v1/gpu/status", cancellationToken);
@@ -571,6 +591,7 @@ public sealed class MissumAiClient : IDisposable
         if (_ownsHttpClient)
         {
             _httpClient.Dispose();
+            if (!ReferenceEquals(_longOperationHttpClient, _httpClient)) _longOperationHttpClient.Dispose();
         }
     }
 

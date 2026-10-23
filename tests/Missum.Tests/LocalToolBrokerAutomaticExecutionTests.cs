@@ -56,6 +56,43 @@ public sealed class LocalToolBrokerAutomaticExecutionTests : IAsyncLifetime
     }
 
     [Theory]
+    [InlineData(ClientToolNames.CodingWrite)]
+    [InlineData(ClientToolNames.CodingEdit)]
+    [InlineData(ClientToolNames.CodingCommand)]
+    public async Task ProjectMutationsDoNotCreateUnrequestedReadmeOrGitignore(string tool)
+    {
+        var result = await MutateProjectAsync(tool);
+
+        Assert.Equal("completed", result.Status);
+        Assert.Equal(tool == ClientToolNames.CodingCommand ? "before\n" : "after\n",
+            await File.ReadAllTextAsync(Path.Combine(_root, "source.txt")));
+        if (tool == ClientToolNames.CodingCommand)
+            Assert.Equal("EXECUTED", await File.ReadAllTextAsync(Path.Combine(_root, "executed.txt")));
+        Assert.False(File.Exists(Path.Combine(_root, "README.md")));
+        Assert.False(File.Exists(Path.Combine(_root, ".gitignore")));
+        Assert.False(result.Result.TryGetProperty("projectRepositoryFiles", out _));
+    }
+
+    [Theory]
+    [InlineData(ClientToolNames.CodingWrite)]
+    [InlineData(ClientToolNames.CodingEdit)]
+    [InlineData(ClientToolNames.CodingCommand)]
+    public async Task ProjectMutationsPreserveAuthoredReadmeAndGitignoreBytes(string tool)
+    {
+        var readme = Encoding.UTF8.GetPreamble().Concat(Encoding.UTF8.GetBytes("# Eigene Dokumentation\r\n\r\nGrüße und projektbezogene Befehle.\r\n")).ToArray();
+        var ignore = Encoding.UTF8.GetBytes("# Eigene Ausschlüsse\r\n/custom.cache\r\n!wichtige-daten.csv\r\n");
+        await File.WriteAllBytesAsync(Path.Combine(_root, "README.md"), readme);
+        await File.WriteAllBytesAsync(Path.Combine(_root, ".gitignore"), ignore);
+
+        var result = await MutateProjectAsync(tool);
+
+        Assert.Equal("completed", result.Status);
+        Assert.Equal(readme, await File.ReadAllBytesAsync(Path.Combine(_root, "README.md")));
+        Assert.Equal(ignore, await File.ReadAllBytesAsync(Path.Combine(_root, ".gitignore")));
+        Assert.False(result.Result.TryGetProperty("projectRepositoryFiles", out _));
+    }
+
+    [Theory]
     [InlineData("expired")]
     [InlineData("risk")]
     [InlineData("missing-workspace")]
@@ -92,6 +129,20 @@ public sealed class LocalToolBrokerAutomaticExecutionTests : IAsyncLifetime
             Guid.NewGuid(), null, _root, cancellationToken: cancellation.Token));
 
         Assert.False(File.Exists(Path.Combine(_root, "executed.txt")));
+    }
+
+    private async Task<ClientToolResult> MutateProjectAsync(string tool)
+    {
+        await File.WriteAllTextAsync(Path.Combine(_root, "source.txt"), "before\n");
+        var proposal = tool switch
+        {
+            ClientToolNames.CodingWrite => Create(tool, ToolRiskClass.LocalMutation,
+                new { path = "source.txt", content = "after\n" }),
+            ClientToolNames.CodingEdit => Create(tool, ToolRiskClass.LocalMutation,
+                new { path = "source.txt", oldText = "before", newText = "after" }),
+            _ => Command(0),
+        };
+        return await _broker.ExecuteAsync(proposal, Guid.NewGuid(), null, _root);
     }
 
     private static ToolProposal Command(int exitCode) => Create(ClientToolNames.CodingCommand, ToolRiskClass.Process,
