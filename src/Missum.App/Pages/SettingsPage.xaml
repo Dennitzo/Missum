@@ -110,11 +110,6 @@
             <TextBlock Margin="0,3,0,0" Foreground="{ThemeResource MissumMutedTextBrush}" Text="Akzentfarbe und Hintergrundoptik lassen sich unabhängig für Missum und den AI-Assistenten einstellen." TextWrapping="Wrap" />
           </StackPanel>
           <StackPanel Spacing="10">
-            <ToggleSwitch
-              Header="Arbeitsplan über dem Promptfenster anzeigen"
-              IsOn="{x:Bind ViewModel.ShowWorkingPlan, Mode=TwoWay}"
-              OffContent="Aus"
-              OnContent="Ein" />
             <ComboBox x:Name="ThemeBox" Header="App-Theme" SelectionChanged="OnThemeChanged">
               <ComboBoxItem Content="Windows-Systemeinstellung" Tag="System" />
               <ComboBoxItem Content="Hell" Tag="Light" />

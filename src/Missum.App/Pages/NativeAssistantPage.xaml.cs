@@ -100,9 +100,6 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         _assistantHost = App.Current.GetService<AssistantHost>();
         _hostSubscription = _assistantHost.Subscribe("desktop", (type, payload, id) => EmitAsync(type, payload, id));
         _settings = App.Current.GetService<SettingsCoordinator>();
-        _settings.Changed += OnWorkingPlanSettingsChanged;
-        BodyGrid.SizeChanged += (_, _) => WorkingPlanView.SetMaximumBodyHeight(BodyGrid.ActualHeight);
-        BodyGrid.RegisterPropertyChangedCallback(VisibilityProperty, (_, _) => RefreshWorkingPlanVisibility());
         Inspector.Visibility = _settings.Current.AssistantOutputsVisible ? Visibility.Visible : Visibility.Collapsed;
         _microphone = App.Current.GetService<MicrophoneTranscriptionService>();
         _microphone.TurnChanged += OnTranscript;
@@ -835,7 +832,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     private void OnAssistantPointerWheelChanged(object sender, PointerRoutedEventArgs e)
     {
         if (_activeResearchSessionId == _session || _activeSourcesSession == _session
-            || _activeSubagentOverviewSession == _session) return;
+            || _activeSubagentOverviewSession == _session || _activeWorkingPlanSession == _session) return;
         // Only unhandled wheel input reaches this frame. Nested text/diff viewers
         // consume their own scrolling; blank inspector/header surfaces scroll chat.
         var point = e.GetCurrentPoint(AssistantFrame);
@@ -866,7 +863,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     }
     private void SetRunning()
     {
-        WorkingPlanView.SetRunActive(_running);
+        RefreshWorkingPlanTab();
         var hasText = !string.IsNullOrWhiteSpace(Composer.Text);
         var captionRunning = _captionActive && _captionSessionId == _session;
         var preparingContinuation = IsContinuationPreparing;
@@ -966,7 +963,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     private void UpdateComposerNavigationState()
     {
         if (_disposed) return;
-        RefreshWorkingPlanVisibility();
+        RefreshWorkingPlanTab();
         ComposerInteractionHost.IsEnabled = _navigationState.CanEditComposer && ActiveSubagent is null;
         Composer.IsReadOnly = !_navigationState.CanEditComposer || ActiveSubagent is not null;
     }
@@ -1300,7 +1297,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         _ = CancelNativeMediaCaptureAsync();
         _conversationSelection?.Clear();
         _hostSubscription.Dispose();
-        _settings.Changed -= OnWorkingPlanSettingsChanged;
+        HideWorkingPlanView();
         _disposed = true; _draftTimer.Stop(); _renderTimer.Stop(); _microphone.TurnChanged -= OnTranscript; _lifetime.Cancel(); _lifetime.Dispose();
     }
 }

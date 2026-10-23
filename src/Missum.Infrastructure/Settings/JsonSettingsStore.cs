@@ -90,6 +90,7 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
         Alias("protocolVersion", "missumAiProtocolVersion");
         RemoveDeprecated("isAiConnectionEnabled");
         RemoveDeprecated("codingToolStepsExpanded");
+        RemoveDeprecated("showWorkingPlan");
         // Preserve a legacy coding-only choice, but never keep two competing selections.
         var legacyModel = root.FirstOrDefault(pair => pair.Key.Equals("selectedCodingModel", StringComparison.OrdinalIgnoreCase)).Value;
         var globalModel = root.FirstOrDefault(pair => pair.Key.Equals("selectedModel", StringComparison.OrdinalIgnoreCase)).Value;

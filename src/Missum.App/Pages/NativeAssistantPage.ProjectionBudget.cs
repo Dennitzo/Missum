@@ -18,7 +18,9 @@ public sealed partial class NativeAssistantPage
     {
         // The cache owns presentation only. Eviction never writes history,
         // prepared context or model KV data, and can always hydrate from SQLite.
-        var candidates = _subagents.Values.Where(child => !ReferenceEquals(child, ActiveSubagent) && child.Messages.Count > 0 && child.HydrationTask is null)
+        var candidates = _subagents.Values.Where(child => !ReferenceEquals(child, ActiveSubagent)
+                && !(_activeWorkingPlanSession == _session && child.AgentId == _workingPlanAgentId)
+                && child.Messages.Count > 0 && child.HydrationTask is null)
             .OrderBy(child => child.ProjectionLastAccess).ThenBy(child => child.ObservationOrder).ToArray();
         _inactiveProjectionBytes = candidates.Sum(child => child.RetainedBytes);
         foreach (var child in candidates)

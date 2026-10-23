@@ -7,131 +7,154 @@ using Microsoft.UI.Xaml.Shapes;
 
 namespace Missum.App.Controls;
 
-/// <summary>A retained, in-layout plan. Opening it reduces the chat viewport instead of covering messages.</summary>
+/// <summary>Retained, full-height content for the working-plan tab; the tab owns scrolling.</summary>
 public sealed class NativeWorkingPlanView : ContentControl
 {
-    private readonly Button _toggle;
-    private readonly FontIcon _chevron;
-    private readonly StackPanel _rows = new() { Spacing = 3, Margin = new(12, 9, 12, 11) };
-    private readonly ScrollViewer _body;
+    private readonly StackPanel _rows = new() { Spacing = 5, Margin = new(14, 11, 14, 14) };
+    private readonly StackPanel _criteriaRows = new() { Spacing = 5, Margin = new(14, 11, 14, 14) };
     private readonly Dictionary<string, PlanRow> _items = new(StringComparer.Ordinal);
-    private bool _expanded = true;
+    private readonly Dictionary<string, PlanRow> _criteria = new(StringComparer.Ordinal);
+    private readonly Border _stepsSection;
+    private readonly Border _criteriaSection;
+    private readonly TextBlock _empty = new()
+    {
+        Text = "Noch kein Arbeitsplan vorhanden.", TextWrapping = TextWrapping.Wrap,
+        Foreground = NativeThemeBrushes.Text, Margin = new(14), FontSize = 13,
+    };
     private bool _runActive;
+    private bool _viewActive = true;
 
     public NativeWorkingPlanView()
     {
-        CornerRadius = new(8);
-        BorderThickness = new(1);
-        BorderBrush = NativeThemeBrushes.Resource("MissumAccentSubtleBrush", 75);
-        Background = NativeThemeBrushes.Resource("MissumLayerBrush", 27);
         HorizontalContentAlignment = HorizontalAlignment.Stretch;
-        VerticalContentAlignment = VerticalAlignment.Stretch;
+        VerticalContentAlignment = VerticalAlignment.Top;
         IsTabStop = false;
-        _chevron = new() { Glyph = "\uE70E", FontSize = 11, Foreground = NativeThemeBrushes.ReadableAccent };
-        var header = new Grid { ColumnSpacing = 10 };
-        header.ColumnDefinitions.Add(new() { Width = new(1, GridUnitType.Star) });
-        header.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
-        header.Children.Add(new TextBlock { Text = "Arbeitsplan", FontSize = 12,
-            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Foreground = NativeThemeBrushes.ReadableAccent });
-        Grid.SetColumn(_chevron, 1);
-        header.Children.Add(_chevron);
-        _toggle = new Button { Content = header, HorizontalAlignment = HorizontalAlignment.Stretch,
-            HorizontalContentAlignment = HorizontalAlignment.Stretch, Padding = new(14, 8, 14, 8), BorderThickness = new(0),
-            Background = NativeThemeBrushes.Resource("MissumAccentSubtleBrush", 50) };
-        _toggle.Click += (_, _) => SetExpanded(!_expanded);
-        _body = new ScrollViewer { Content = _rows, HorizontalScrollMode = ScrollMode.Disabled,
-            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            MaxHeight = 240, HorizontalContentAlignment = HorizontalAlignment.Stretch };
-        var content = new Grid();
-        content.RowDefinitions.Add(new() { Height = GridLength.Auto });
-        content.RowDefinitions.Add(new() { Height = GridLength.Auto });
-        content.Children.Add(_toggle);
-        Grid.SetRow(_body, 1);
-        content.Children.Add(_body);
-        Content = new Border { Child = content, CornerRadius = CornerRadius, BorderThickness = BorderThickness,
-            BorderBrush = BorderBrush, Background = Background };
-        Unloaded += (_, _) => UpdateAnimations(false);
-        Loaded += (_, _) => UpdateAnimations(true);
-        RegisterPropertyChangedCallback(VisibilityProperty, (_, _) => UpdateAnimations(Visibility == Visibility.Visible));
-        SetExpanded(true);
+        _stepsSection = CreateSection("Arbeitsschritte", _rows);
+        _criteriaSection = CreateSection("Annahmekriterien", _criteriaRows);
+        var content = new StackPanel { Spacing = 14 };
+        content.Children.Add(_empty);
+        content.Children.Add(_stepsSection);
+        content.Children.Add(_criteriaSection);
+        Content = content;
+        Unloaded += (_, _) => StopAnimations();
+        Loaded += (_, _) => UpdateAnimations();
+        RegisterPropertyChangedCallback(VisibilityProperty, (_, _) => UpdateAnimations());
+        Update(NativeWorkingPlanProjection.Snapshot.Empty);
     }
 
-    internal bool IsExpanded => _expanded;
     internal int StepCount => _items.Count;
-    internal Button Toggle => _toggle;
-    internal ScrollViewer Body => _body;
+    internal int AcceptanceCriteriaCount => _criteria.Count;
     internal IReadOnlyList<string> VisibleTitles => _rows.Children.OfType<Grid>()
         .Select(row => row.Children.OfType<TextBlock>().Single().Text).ToArray();
 
-    internal void SetExpanded(bool expanded)
+    internal void SetViewActive(bool active)
     {
-        _expanded = expanded;
-        _body.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
-        _chevron.Glyph = expanded ? "\uE70E" : "\uE70D";
-        AutomationProperties.SetName(_toggle, expanded ? "Arbeitsplan einklappen" : "Arbeitsplan ausklappen");
-        UpdateAnimations(Visibility == Visibility.Visible);
+        if (_viewActive == active) return;
+        _viewActive = active;
+        UpdateAnimations();
     }
-
-    internal void SetMaximumBodyHeight(double availableHeight) => _body.MaxHeight = Math.Clamp(availableHeight * .32, 72, 300);
 
     internal void SetRunActive(bool active)
     {
         if (_runActive == active) return;
         _runActive = active;
-        UpdateAnimations(Visibility == Visibility.Visible);
+        UpdateAnimations();
     }
 
     internal void Update(NativeWorkingPlanProjection.Snapshot plan)
     {
-        var keep = plan.Steps.Select(step => step.Id).ToHashSet(StringComparer.Ordinal);
-        foreach (var id in _items.Keys.Where(id => !keep.Contains(id)).ToArray())
+        UpdateRows(plan.Steps, _items, _rows);
+        UpdateRows(plan.AcceptanceCriteria, _criteria, _criteriaRows);
+        _empty.Visibility = _items.Count + _criteria.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        _stepsSection.Visibility = _items.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        _criteriaSection.Visibility = _criteria.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        UpdateAnimations();
+    }
+
+    private void UpdateRows(IReadOnlyList<NativeWorkingPlanProjection.Item> steps,
+        Dictionary<string, PlanRow> items, StackPanel rows)
+    {
+        var keep = steps.Select(step => step.Id).ToHashSet(StringComparer.Ordinal);
+        foreach (var id in items.Keys.Where(id => !keep.Contains(id)).ToArray())
         {
-            var removed = _items[id];
+            var removed = items[id];
             removed.Ring.IsActive = false;
-            _rows.Children.Remove(removed.Root);
-            _items.Remove(id);
+            rows.Children.Remove(removed.Root);
+            items.Remove(id);
         }
-        for (var index = 0; index < plan.Steps.Count; index++)
+        for (var index = 0; index < steps.Count; index++)
         {
-            var step = plan.Steps[index];
-            if (!_items.TryGetValue(step.Id, out var row))
+            var step = steps[index];
+            if (!items.TryGetValue(step.Id, out var row))
             {
                 row = CreateRow();
-                _items.Add(step.Id, row);
+                items.Add(step.Id, row);
             }
-            if (_rows.Children.IndexOf(row.Root) != index)
+            if (rows.Children.IndexOf(row.Root) != index)
             {
-                _rows.Children.Remove(row.Root);
-                _rows.Children.Insert(index, row.Root);
+                rows.Children.Remove(row.Root);
+                rows.Children.Insert(index, row.Root);
             }
             if (row.Title.Text != step.Title) row.Title.Text = step.Title;
             row.Status = step.Status;
             row.Check.Visibility = step.Status == "completed" ? Visibility.Visible : Visibility.Collapsed;
         }
-        UpdateAnimations(Visibility == Visibility.Visible);
     }
 
-    private void UpdateAnimations(bool visible)
+    private void StopAnimations()
     {
-        foreach (var row in _items.Values)
-        {
-            // A saved in-progress stage does not mean a model is still running.
-            // Preserve its status and show a stationary outline until a real run resumes.
-            var running = _runActive && row.Status == "in_progress";
-            row.Pending.Visibility = row.Status != "completed" && !running ? Visibility.Visible : Visibility.Collapsed;
-            row.Ring.Visibility = running ? Visibility.Visible : Visibility.Collapsed;
-            row.Ring.IsActive = visible && IsLoaded && _expanded && running;
-            // Status names remain available to assistive technology, never as suffixes in the plan text.
-            AutomationProperties.SetName(row.Root, row.Title.Text + ", " + (row.Status switch
-            {
-                "completed" => "erledigt",
-                "in_progress" => _runActive ? "in Bearbeitung" : "in Bearbeitung, Lauf angehalten",
-                _ => "ausstehend",
-            }));
-        }
+        foreach (var row in _items.Values.Concat(_criteria.Values)) row.Ring.IsActive = false;
     }
 
-    private static PlanRow CreateRow()
+    private void UpdateAnimations()
+    {
+        var visible = _viewActive && IsLoaded && IsVisibleInTree();
+        foreach (var row in _items.Values.Concat(_criteria.Values))
+            UpdateAnimation(row, visible);
+    }
+
+    private void UpdateAnimation(PlanRow row, bool visible)
+    {
+        // A saved in-progress stage does not mean a model is still running.
+        // Preserve its status and show a stationary outline until a real run resumes.
+        var running = _runActive && row.Status == "in_progress";
+        row.Pending.Visibility = row.Status != "completed" && !running ? Visibility.Visible : Visibility.Collapsed;
+        row.Ring.Visibility = running ? Visibility.Visible : Visibility.Collapsed;
+        row.Ring.IsActive = visible && row.InViewport && running;
+        // Status names remain available to assistive technology, never as suffixes in the plan text.
+        AutomationProperties.SetName(row.Root, row.Title.Text + ", " + (row.Status switch
+        {
+            "completed" => "erledigt",
+            "in_progress" => _runActive ? "in Bearbeitung" : "in Bearbeitung, Lauf angehalten",
+            _ => "ausstehend",
+        }));
+    }
+
+    private bool IsVisibleInTree()
+    {
+        for (DependencyObject? current = this; current is not null; current = VisualTreeHelper.GetParent(current))
+            if (current is UIElement element && element.Visibility != Visibility.Visible) return false;
+        return true;
+    }
+
+    private static Border CreateSection(string title, StackPanel rows)
+    {
+        var header = new Border
+        {
+            Padding = new(14, 9, 14, 9),
+            Background = NativeThemeBrushes.Resource("MissumAccentSubtleBrush", 50),
+            Child = new TextBlock { Text = title, FontSize = 12,
+                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Foreground = NativeThemeBrushes.ReadableAccent },
+        };
+        var content = new StackPanel();
+        content.Children.Add(header);
+        content.Children.Add(rows);
+        return new Border { Child = content, CornerRadius = new(8), BorderThickness = new(1),
+            BorderBrush = NativeThemeBrushes.Resource("MissumAccentSubtleBrush", 75),
+            Background = NativeThemeBrushes.Resource("MissumLayerBrush", 27) };
+    }
+
+    private PlanRow CreateRow()
     {
         var root = new Grid { ColumnSpacing = 10, MinHeight = 23 };
         root.ColumnDefinitions.Add(new() { Width = new(16) });
@@ -147,7 +170,18 @@ public sealed class NativeWorkingPlanView : ContentControl
             TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true, Foreground = NativeThemeBrushes.Text };
         Grid.SetColumn(title, 1);
         root.Children.Add(title);
-        return new(root, title, pending, check, ring);
+        var row = new PlanRow(root, title, pending, check, ring);
+        root.EffectiveViewportChanged += (_, args) =>
+        {
+            var viewport = args.EffectiveViewport;
+            row.InViewport = viewport.Width > 0 && viewport.Height > 0
+                && viewport.Right > 0 && viewport.Bottom > 0
+                && viewport.X < root.ActualWidth && viewport.Y < root.ActualHeight;
+            UpdateAnimation(row, _viewActive && IsLoaded && IsVisibleInTree());
+        };
+        root.Unloaded += (_, _) => ring.IsActive = false;
+        root.Loaded += (_, _) => UpdateAnimation(row, _viewActive && IsLoaded && IsVisibleInTree());
+        return row;
     }
 
     private sealed class PlanRow(Grid root, TextBlock title, Ellipse pending, FontIcon check, ProgressRing ring)
@@ -158,5 +192,6 @@ public sealed class NativeWorkingPlanView : ContentControl
         internal FontIcon Check { get; } = check;
         internal ProgressRing Ring { get; } = ring;
         internal string Status { get; set; } = "pending";
+        internal bool InViewport { get; set; } = true;
     }
 }

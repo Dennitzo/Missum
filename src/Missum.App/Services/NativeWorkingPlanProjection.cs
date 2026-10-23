@@ -3,7 +3,7 @@ using Missum.Core.Models;
 
 namespace Missum.App.Services;
 
-/// <summary>One compact view of the saved plan, shared by the composer and tool details.</summary>
+/// <summary>One canonical view of the complete saved plan.</summary>
 internal static class NativeWorkingPlanProjection
 {
     internal sealed record Item(string Id, string Title, string Status);

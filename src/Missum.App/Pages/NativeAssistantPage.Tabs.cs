@@ -113,7 +113,7 @@ public sealed partial class NativeAssistantPage
 
             var tab = _sessionTabs.FirstOrDefault(item => item.Id == _session);
             if (tab is null) continue;
-            var active = ActiveSubagent is null && tab.Id == _session && _activeReviewRunId is null && _activeResearchSessionId is null && _activeSourcesSession is null && _activeSubagentOverviewSession is null && _activeToolTab is null;
+            var active = ActiveSubagent is null && tab.Id == _session && _activeReviewRunId is null && _activeResearchSessionId is null && _activeSourcesSession is null && _activeSubagentOverviewSession is null && _activeToolTab is null && _activeWorkingPlanSession is null;
             SetTabText(tab.Label, tab.Title);
             ApplyTabAppearance(tab.Container, tab.Select, active);
             SetTabEnabled(tab.Select, !_sessionTabNavigationBusy);
@@ -123,7 +123,7 @@ public sealed partial class NativeAssistantPage
             PositionTab(tab.Container, position);
             position++;
         }
-        RenderReviewTabs(RenderToolTabs(RenderSubagentOverviewTab(RenderSourcesTab(RenderSubagentTabs(position)))));
+        RenderReviewTabs(RenderToolTabs(RenderSubagentOverviewTab(RenderSourcesTab(RenderSubagentTabs(RenderWorkingPlanTab(position))))));
     }
 
     private async Task ActivateSessionTabAsync(Guid sessionId)

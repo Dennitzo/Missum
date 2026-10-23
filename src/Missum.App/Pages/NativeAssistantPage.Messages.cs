@@ -662,10 +662,12 @@ public sealed partial class NativeAssistantPage
             _title.FontWeight = Microsoft.UI.Text.FontWeights.Normal;
             _title.Foreground = ThemeBrush("MissumMutedTextBrush", 160);
             _chevron.Glyph = "\uE76C";
-            ToolTipService.SetToolTip(_toggle, IsResearchNavigation ? "Aufgabe und Werkzeugschritte im Subagent-Tab öffnen" : _title.Text);
+            var plan = S(_step, "tool") == "coding.updatePlan";
+            ToolTipService.SetToolTip(_toggle, IsResearchNavigation ? "Aufgabe und Werkzeugschritte im Subagent-Tab öffnen"
+                : plan ? "Aktuellen Arbeitsplan öffnen" : _title.Text);
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_toggle,
                 _title.Text + (_counts.Visibility == Visibility.Visible ? " " + _added.Text + " " + _removed.Text : "")
-                + (IsResearchNavigation ? ", Recherchearbeit öffnen" : ", Werkzeugdetails im Tab öffnen"));
+                + (IsResearchNavigation ? ", Recherchearbeit öffnen" : plan ? ", Arbeitsplan öffnen" : ", Werkzeugdetails im Tab öffnen"));
         }
 
         private bool IsResearchNavigation => S(_step, "tool") == "web.deepResearch"

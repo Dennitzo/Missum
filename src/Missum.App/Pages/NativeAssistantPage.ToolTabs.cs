@@ -24,6 +24,7 @@ public sealed partial class NativeAssistantPage
         if (!owner.TryGetValue(messageId, out var message)) return Task.CompletedTask;
         var step = MessageSteps(message).FirstOrDefault(item => S(item, "id") == stepId);
         if (step.ValueKind != JsonValueKind.Object) return Task.CompletedTask;
+        if (S(step, "tool") == "coding.updatePlan") return OpenWorkingPlanTabAsync(child?.AgentId);
         var tab = _toolTabs.FirstOrDefault(item => item.SessionId == _session && item.MessageId == messageId
             && item.StepId == stepId && item.AgentId == child?.AgentId);
         if (tab is null)
@@ -161,6 +162,7 @@ public sealed partial class NativeAssistantPage
     private void RefreshOpenToolTabs()
     {
         if (_disposed) return;
+        RefreshWorkingPlanTab();
         foreach (var tab in _toolTabs.Where(item => item.SessionId == _session))
         {
             var owner = tab.AgentId is { } agentId && _subagents.TryGetValue(agentId, out var child) ? child.Messages : _messages;

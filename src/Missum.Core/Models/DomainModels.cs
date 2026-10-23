@@ -296,7 +296,6 @@ public sealed record AppSettings
     // Independent of navigation/window state; used by desktop and LAN preference editors.
     public long PreferencesRevision { get; init; }
     public bool IsAutomaticSpeechEnabled { get; init; }
-    public bool ShowWorkingPlan { get; init; } = true;
     public AiProviderKind AiProvider { get; init; } = AiProviderKind.MissumAiServer;
     public string MissumAiServerUrl { get; init; } = "http://127.0.0.1:8080";
     public string MissumAiProtocolVersion { get; init; } = "1.0";

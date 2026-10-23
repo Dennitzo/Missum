@@ -239,7 +239,11 @@ public sealed partial record SubagentChatState(
                     && transcriptRevision.ValueKind == JsonValueKind.Number
                     && transcriptRevision.TryGetInt64(out var parsedTranscriptRevision) ? parsedTranscriptRevision : 0,
                 GpuIndex: root.TryGetProperty("gpuIndex", out var gpuIndex) && gpuIndex.ValueKind == JsonValueKind.Number
-                    && gpuIndex.TryGetInt32(out var parsedGpu) ? parsedGpu : null);
+                    && gpuIndex.TryGetInt32(out var parsedGpu) ? parsedGpu : null)
+            {
+                WorkingPlan = root.TryGetProperty("workingPlan", out var plan) && plan.ValueKind == JsonValueKind.Object
+                    ? plan.Clone() : null,
+            };
         }
         catch (JsonException) { return null; }
     }
@@ -265,6 +269,7 @@ public sealed partial record SubagentChatState(
 
     internal SubagentChatState ForDisplay() => ToolStepWindows is not null ? this : this with
     {
+        WorkingPlan = WorkingPlanForDisplay(),
         ToolStepWindows = (PreviousMessages ?? []).Concat([UserMessage, AssistantMessage])
             .Where(message => message.ToolSteps is { Count: > 0 }).ToDictionary(message => message.Id, message =>
                 new ConversationToolStepWindow(message.ToolSteps!.Count, message.ToolSteps.Count > 64,
@@ -322,14 +327,15 @@ public sealed partial record SubagentChatState(
     internal async Task<string> PersistAsync(string dataDirectory)
     {
         // Small transcripts remain compatible inline. Growing conversations use bounded append-only patches.
-        if (CanRemainInline()) return JsonSerializer.Serialize(this, JsonOptions);
+        if (CanRemainInline()) return JsonSerializer.Serialize(this with { WorkingPlan = WorkingPlanForDisplay() }, JsonOptions);
         var key = StorageKey;
         var directory = Path.Combine(dataDirectory, "Subagents");
         Directory.CreateDirectory(directory);
         await PersistTranscriptAsync(Path.Combine(directory, key + ".json")).ConfigureAwait(false);
         return JsonSerializer.Serialize(new { subagentStorageKey = key, agentId = AgentId, runId = RunId,
             ParentRunId, SessionId, title = Title, status = Status, resultDelivered = ResultDelivered,
-            ProjectionRevision, attemptStartedAt = AssistantMessage.CreatedAt, Kind, OriginToolStepId, OriginMessageId, TranscriptRevision, GpuIndex }, JsonOptions);
+            ProjectionRevision, attemptStartedAt = AssistantMessage.CreatedAt, Kind, OriginToolStepId, OriginMessageId, TranscriptRevision, GpuIndex,
+            workingPlan = WorkingPlanForDisplay() }, JsonOptions);
     }
 
     private string StorageKey => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(SessionId + ":" + RunId + ":" + AgentId))).ToLowerInvariant();

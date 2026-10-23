@@ -35,6 +35,7 @@ public sealed partial class AssistantCoordinator
             .Concat([ToMessageDto(state.UserMessage, toolWindow: state.ToolStepWindows?.GetValueOrDefault(state.UserMessage.Id)),
                 ToMessageDto(state.AssistantMessage, state.Artifacts, state.ToolStepWindows?.GetValueOrDefault(state.AssistantMessage.Id))]).ToArray(),
         toolStepWindows = state.ToolStepWindows,
+        workingPlan = state.WorkingPlan,
         state.IsRunning, state.Model, state.ContextUsed, state.ContextLimit,
         state.RunStatus, state.RunDetail, state.GenerationState, state.GeneratedTokens, state.GenerationUpdatedAt,
         state.ProcessedPromptTokens, state.TotalPromptTokens, state.PromptProgress,
