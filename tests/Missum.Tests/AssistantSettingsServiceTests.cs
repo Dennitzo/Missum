@@ -195,11 +195,98 @@ public sealed class AssistantSettingsServiceTests
     }
 
     [Theory]
+    [InlineData(0)]
+    [InlineData(AppSettings.CurrentVersion)]
+    public async Task WorkingPlanDefaultsOnForExistingSettingsAndPreservesAnExplicitDisabledValue(int version)
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        using var store = new JsonSettingsStore(new MissumInfrastructureOptions { DataDirectory = environment.Directory });
+        await File.WriteAllTextAsync(store.SettingsPath, JsonSerializer.Serialize(new
+        {
+            version, preferencesRevision = 7, selectedModel = "coding/existing-model",
+        }));
+
+        var loaded = await store.LoadAsync();
+
+        Assert.True(new AppSettings().ShowWorkingPlan);
+        Assert.True(loaded.ShowWorkingPlan);
+        await store.SaveAsync(loaded with { ShowWorkingPlan = false });
+        using var reopened = new JsonSettingsStore(new MissumInfrastructureOptions { DataDirectory = environment.Directory });
+        var restored = await reopened.LoadAsync();
+        Assert.False(restored.ShowWorkingPlan);
+        Assert.Equal(7, restored.PreferencesRevision);
+        Assert.Equal("coding/existing-model", restored.SelectedModel);
+    }
+
+    [Fact]
+    public async Task WorkingPlanPreferenceUsesRevisionedSnapshotsAndPartialUpdatesPreserveIt()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        using var connection = Connection(settings);
+        using var service = Service(environment, settings, connection);
+        var initial = JsonSerializer.SerializeToElement(await service.GetSnapshotAsync(), JsonSerializerOptions.Web);
+        Assert.True(initial.GetProperty("values").GetProperty("showWorkingPlan").GetBoolean());
+        var events = new List<(string Type, JsonElement Payload)>();
+
+        await service.HandleAsync(Envelope("settings.update", new
+        {
+            expectedRevision = 0, values = new { showWorkingPlan = false },
+        }), Capture(events));
+
+        var updated = Assert.Single(events);
+        Assert.Equal("settings.changed", updated.Type);
+        Assert.False(updated.Payload.GetProperty("values").GetProperty("showWorkingPlan").GetBoolean());
+        Assert.Equal(1, settings.Current.PreferencesRevision);
+        await service.UpdatePreferencesAsync(new() { Language = "en-US" }, 1);
+        Assert.False(settings.Current.ShowWorkingPlan);
+        await Assert.ThrowsAsync<AssistantSettingsConflictException>(() => service.UpdatePreferencesAsync(
+            new() { ShowWorkingPlan = true }, 1));
+        Assert.False(settings.Current.ShowWorkingPlan);
+        using var restored = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await restored.InitializeAsync();
+        Assert.False(restored.Current.ShowWorkingPlan);
+        Assert.Equal(2, restored.Current.PreferencesRevision);
+    }
+
+    [Fact]
+    public async Task NativeWorkingPlanPreferenceDetectsDraftAndKeepsItOnConflict()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        using var connection = Connection(settings);
+        using var service = Service(environment, settings, connection);
+        var viewModel = new SettingsViewModel(settings, connection, environment.Get<IPromptTriggerRepository>(),
+            environment.Get<IBackupService>(), new ShellViewModel(), new ModelCapabilityRegistry(), service);
+        viewModel.Initialize();
+        Assert.True(viewModel.ShowWorkingPlan);
+        Assert.False(viewModel.HasUnsavedChanges);
+        viewModel.ShowWorkingPlan = false;
+        Assert.True(viewModel.HasUnsavedChanges);
+        await viewModel.SavePreferencesAsync();
+        Assert.False(settings.Current.ShowWorkingPlan);
+        Assert.False(viewModel.HasUnsavedChanges);
+        viewModel.Initialize();
+        Assert.False(viewModel.ShowWorkingPlan);
+        viewModel.ShowWorkingPlan = true;
+        await service.UpdatePreferencesAsync(new() { Language = "en-US" }, 1);
+
+        await Assert.ThrowsAsync<AssistantSettingsConflictException>(() => viewModel.SavePreferencesAsync());
+
+        Assert.True(viewModel.ShowWorkingPlan);
+        Assert.True(viewModel.HasUnsavedChanges);
+        Assert.False(settings.Current.ShowWorkingPlan);
+    }
+
+    [Theory]
     [InlineData("{\"window\":{\"width\":500}}")]
     [InlineData("{\"accentColor\":\"red\"}")]
     [InlineData("{\"theme\":\"unknown\"}")]
     [InlineData("{\"missumAiServerUrl\":\"file:///C:/private\"}")]
     [InlineData("{\"isAutomaticSpeechEnabled\":\"true\"}")]
+    [InlineData("{\"showWorkingPlan\":\"true\"}")]
     public async Task InvalidOrInternalPreferenceFieldsAreRejected(string values)
     {
         await using var environment = await TestEnvironment.CreateAsync();

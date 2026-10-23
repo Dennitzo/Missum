@@ -56,7 +56,8 @@ internal static class CodingPlanProgressGuard
         {
             success = false, changed = false, errorCode = "agent.plan_unchanged", message,
             phase = state.Phase, consecutiveNoOps = state.ConsecutivePlanNoOps,
-        }), [], Succeeded: false, ErrorCode: "agent.plan_unchanged", ErrorMessage: message);
+            stateRevision = state.Sequence, storedSteps = state.Plan, storedAcceptanceCriteria = state.AcceptanceCriteria,
+        }, MissumAiProtocol.CreateJsonOptions()), [], Succeeded: false, ErrorCode: "agent.plan_unchanged", ErrorMessage: message);
     }
 
     private static bool SamePlan(IReadOnlyList<CodingPlanItem> left, IReadOnlyList<CodingPlanItem> right) =>

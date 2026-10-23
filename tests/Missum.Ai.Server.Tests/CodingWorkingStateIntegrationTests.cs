@@ -235,7 +235,7 @@ public sealed class CodingWorkingStateIntegrationTests
     }
 
     [Fact]
-    public async Task IncrementalPlanReceiptIsCompactWhileCheckpointKeepsTheFullWorkingState()
+    public async Task IncrementalPlanReceiptCarriesTheFullOrderedPlanWithoutRepeatingToolDetails()
     {
         using var harness = new Harness();
         var run = await harness.CreateAsync();
@@ -263,27 +263,51 @@ public sealed class CodingWorkingStateIntegrationTests
         Assert.Equal(JsonSerializer.Serialize(state.Facts), JsonSerializer.Serialize(checkpoint.WorkingState.Facts));
         Assert.Contains("FULL_CODE_EVIDENCE_", Assert.Single(checkpoint.WorkingState.ActiveFiles).Snippet, StringComparison.Ordinal);
         var receiptText = Assert.Single(checkpoint.Messages, message => message.ToolCallId == "plan-small").Content!;
-        Assert.True(receiptText.Length < 600, receiptText);
+        Assert.DoesNotContain("FULL_CODE_EVIDENCE_", receiptText, StringComparison.Ordinal);
+        Assert.DoesNotContain("Retain a verified fact", receiptText, StringComparison.Ordinal);
         var receipt = JsonSerializer.Deserialize<JsonElement>(receiptText);
         Assert.False(receipt.TryGetProperty("workingState", out _));
         Assert.Equal("review", receipt.GetProperty("phase").GetString());
+        Assert.Equal(checkpoint.WorkingState.Sequence, receipt.GetProperty("stateRevision").GetInt64());
         Assert.Equal("Inspect source.cs", receipt.GetProperty("nextStep").GetString());
         var changed = Assert.Single(receipt.GetProperty("updatedSteps").EnumerateArray());
         Assert.Equal("change", changed.GetProperty("id").GetString());
         Assert.Equal("completed", changed.GetProperty("status").GetString());
         Assert.False(changed.TryGetProperty("title", out _));
         Assert.False(receipt.TryGetProperty("updatedAcceptanceCriteria", out _));
+        var storedSteps = receipt.GetProperty("storedSteps").EnumerateArray().ToArray();
+        Assert.Equal(2, storedSteps.Length);
+        Assert.Equal("change", storedSteps[0].GetProperty("id").GetString());
+        Assert.Equal("Apply the targeted change", storedSteps[0].GetProperty("title").GetString());
+        Assert.Equal("completed", storedSteps[0].GetProperty("status").GetString());
+        Assert.Equal("proof-read", Assert.Single(storedSteps[0].GetProperty("evidenceIds").EnumerateArray()).GetString());
+        Assert.Equal("next", storedSteps[1].GetProperty("id").GetString());
+        Assert.Equal("Retain this untouched step", storedSteps[1].GetProperty("title").GetString());
+        Assert.Equal("pending", storedSteps[1].GetProperty("status").GetString());
+        var storedCriterion = Assert.Single(receipt.GetProperty("storedAcceptanceCriteria").EnumerateArray());
+        Assert.Equal("correct", storedCriterion.GetProperty("id").GetString());
+        Assert.Equal("Retain this acceptance criterion", storedCriterion.GetProperty("title").GetString());
         var completed = Assert.Single(await harness.Repository.GetEventsAfterAsync(run, 0), item => item.Type == RunEventTypes.ServerToolCompleted);
         Assert.Equal(receipt.GetRawText(), completed.Data.GetProperty("result").GetRawText());
         Assert.Empty(harness.Handler.Models);
     }
 
     [Fact]
-    public void PhaseOnlyPlanReceiptDoesNotRepeatExistingNextStepOrState()
+    public void PhaseOnlyPlanReceiptKeepsFullPlanWithoutRepeatingUnrequestedNextStepOrWorkingData()
     {
-        var state = CodingWorkingState.Create("A long task") with { Phase = "review", NextStep = new string('x', 1000) };
+        var state = CodingWorkingState.Create("A long task") with
+        {
+            Phase = "review", NextStep = new string('x', 1000),
+            Plan = [new("done", "Previously completed work", "completed", ["proof-read"])],
+            AcceptanceCriteria = [new("check", "Preserve acceptance criterion", "pending", [])],
+        };
         var receipt = CodingWorkingStateTools.CreatePlanReceipt(state, JsonSerializer.Deserialize<JsonElement>("""{"phase":"review"}"""));
-        Assert.Equal("{\"success\":true,\"phase\":\"review\"}", receipt.GetRawText());
+        Assert.True(receipt.GetProperty("success").GetBoolean());
+        Assert.Equal("review", receipt.GetProperty("phase").GetString());
+        Assert.Equal("done", Assert.Single(receipt.GetProperty("storedSteps").EnumerateArray()).GetProperty("id").GetString());
+        Assert.Equal("check", Assert.Single(receipt.GetProperty("storedAcceptanceCriteria").EnumerateArray()).GetProperty("id").GetString());
+        Assert.False(receipt.TryGetProperty("nextStep", out _));
+        Assert.False(receipt.TryGetProperty("workingState", out _));
     }
 
     [Theory]

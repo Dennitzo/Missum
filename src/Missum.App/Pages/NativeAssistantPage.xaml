@@ -109,6 +109,7 @@
      <Button x:Name="ScrollToBottomButton" Style="{StaticResource RoundIconButtonStyle}" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,12" Background="{ThemeResource MissumLayerStrongBrush}" BorderBrush="{ThemeResource MissumStrokeBrush}" Click="OnScrollToBottom" ToolTipService.ToolTip="Zum neuesten Beitrag" AutomationProperties.Name="Zum neuesten Beitrag">
       <Path Width="16" Height="16" Data="M8,2 L8,14 M3,9 L8,14 L13,9" Stroke="{ThemeResource MissumIconNavigationBrush}" StrokeThickness="1.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
      </Button>
+     <controls:NativeWorkingPlanView x:Name="WorkingPlanView" Grid.Row="1" MaxWidth="960" HorizontalAlignment="Stretch" Margin="0,0,0,10" Visibility="Collapsed"/>
      <StackPanel Grid.Row="2" MaxWidth="960" HorizontalAlignment="Stretch">
       <Border x:Name="ComposerSurface" Background="{ThemeResource MissumInputBrush}" BorderBrush="{ThemeResource MissumStrokeBrush}" BorderThickness="1" CornerRadius="26" Padding="12,10,10,9">
        <ContentControl x:Name="ComposerInteractionHost" IsTabStop="False" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch">

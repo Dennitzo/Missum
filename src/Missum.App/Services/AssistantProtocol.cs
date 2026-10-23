@@ -24,7 +24,7 @@ public static class AssistantProtocol
     {
         "settings.snapshot", "settings.changed", "settings.conflict", "settings.connectionResult", "promptTriggers.snapshot", "promptTriggers.changed",
         "backup.ready", "backup.restoreReady", "backup.restoreDeferred", "backup.restored", "backup.cancelled", "models.snapshot", "settings.error",
-        "subagent.snapshot", "sources.snapshot",
+        "subagent.snapshot", "sources.snapshot", "workingPlan.changed",
         "state.snapshot", "chat.queued", "queue.changed", "chat.started", "chat.delta", "chat.completed",
         "chat.cancelled", "chat.failed", "session.changed", "session.grouped",
         "document.changed", "document.import.started", "document.import.progress", "document.import.completed", "status.changed", "speech.status", "speech.progress", "theme.changed",

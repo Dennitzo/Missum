@@ -82,6 +82,8 @@ public static class CodingAgentPolicy
         Nutzerauftrags. Schritte und Kriterien dürfen gemeinsam in einem Aufruf angelegt und geändert werden.
         Sende für jeden übermittelten Punkt id, title und status; bestehende Titel unverändert übernehmen.
         Aktualisiere nur tatsächlich geänderte Punkte und ergänze evidenceIds bei belegtem Abschluss.
+        Jede Bestätigung enthält den vollständigen geordneten Plan als storedSteps und storedAcceptanceCriteria.
+        Nutze diese Gesamtfassung einschließlich erledigter und noch unveränderter Etappen für weitere Planung und Darstellung.
         Als vorhanden gelten ausschließlich erfolgreich
         gespeicherte IDs derselben Liste im aktuellen Lauf, nicht bloße Erwähnungen im Chatverlauf. Neue Läufe
         starten mit leeren Planlisten; lege benötigte Punkte dann erneut an. Ein Fehler verwirft das gesamte Update.

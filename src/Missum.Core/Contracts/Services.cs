@@ -92,6 +92,11 @@ public interface IConversationSnapshotRepository
         Task.FromResult<ConversationPage?>(null);
     Task<AssistantToolStep?> GetToolStepAsync(Guid sessionId, Guid messageId, string stepId,
         CancellationToken cancellationToken = default);
+    // Separate from the paged chat: a plan can predate every currently visible message.
+    Task<AssistantToolStep?> GetWorkingPlanAsync(Guid sessionId, CancellationToken cancellationToken = default) =>
+        Task.FromResult<AssistantToolStep?>(null);
+    Task<AssistantToolStep?> GetWorkingPlanAtAsync(Guid sessionId, Guid messageId, string stepId,
+        CancellationToken cancellationToken = default) => Task.FromResult<AssistantToolStep?>(null);
     async Task<AssistantToolStep?> GetSubagentReceiptAsync(Guid sessionId, Guid messageId, string agentId,
         CancellationToken cancellationToken = default)
     {

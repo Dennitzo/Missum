@@ -87,10 +87,12 @@ public sealed class CodingPlanValidationTests
     {
         Assert.Contains("id, title und status", CodingAgentPolicy.WorkingStatePrompt, StringComparison.Ordinal);
         Assert.Contains("gemeinsam in einem Aufruf", CodingAgentPolicy.WorkingStatePrompt, StringComparison.Ordinal);
+        Assert.Contains("vollständigen geordneten Plan", CodingAgentPolicy.WorkingStatePrompt, StringComparison.Ordinal);
         var request = new RunRequest(MissumAiProtocol.Version, RunMode.Coding, [new("user", [new("text", "Research")])]);
         var compact = CompactAgentContextPolicy.Build(request, ["coding.updatePlan"]);
         Assert.Contains("jeder übermittelte Punkt braucht id/title/status", compact, StringComparison.Ordinal);
         Assert.Contains("steps und acceptanceCriteria gemeinsam", compact, StringComparison.Ordinal);
+        Assert.Contains("vollständigen geordneten Plan", compact, StringComparison.Ordinal);
         var state = CodingWorkingStateReducer.ApplyPlanUpdate(CodingWorkingState.Create("Task"), Args(new
         { steps = new[] { new { id = "s1", title = "Original", status = "pending" } } }));
         var updated = CodingWorkingStateReducer.ApplyPlanUpdate(state, Args(new

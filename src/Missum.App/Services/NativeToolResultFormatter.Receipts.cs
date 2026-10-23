@@ -85,13 +85,11 @@ internal static partial class NativeToolResultFormatter
             yield return Code(failed ? "Nicht gespeicherter Python-Code" : "Python-Code", First(Text(input, "code"), Text(input, "content")), "python", path, 1);
         else if (tool == "coding.updatePlan")
         {
-            foreach (var key in new[] { "steps", "acceptanceCriteria" })
-            {
-                var items = Array(input, key).Select(item => First(Text(item, "title"), Text(item, "id"))
-                    + (Text(item, "status") is { Length: > 0 } state ? " · " + state : ""));
-                var text = string.Join("\n", items);
-                if (text.Length > 0) yield return new(key == "steps" ? "Arbeitsschritte" : "Abnahmekriterien", text, "text");
-            }
+            var plan = NativeWorkingPlanProjection.Read(output, input);
+            foreach (var (title, items) in new[] { ("Arbeitsschritte", plan.Steps), ("Abnahmekriterien", plan.AcceptanceCriteria) })
+                if (items.Count > 0)
+                    yield return new(title, string.Join("\n", items.Select(item =>
+                        (item.Status == "completed" ? "✓ " : item.Status == "in_progress" ? "◌ " : "○ ") + item.Title)), "text");
             if (failed) foreach (var block in Essentials(output, errorsOnly: true)) yield return block;
         }
         else

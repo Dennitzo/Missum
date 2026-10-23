@@ -26,6 +26,7 @@ public sealed partial class SettingsViewModel(
     public bool HasUnsavedChanges =>
         MissumAiServerUrl != _preferencesBaseline.MissumAiServerUrl
         || IsAutomaticSpeechEnabled != _preferencesBaseline.IsAutomaticSpeechEnabled
+        || ShowWorkingPlan != _preferencesBaseline.ShowWorkingPlan
         || LiveCaptionLanguage != _preferencesBaseline.LiveCaptionLanguage
         || Theme != _preferencesBaseline.Theme
         || AccentColor != _preferencesBaseline.AccentColor
@@ -70,6 +71,9 @@ public sealed partial class SettingsViewModel(
 
     [ObservableProperty]
     public partial bool IsAutomaticSpeechEnabled { get; set; } = true;
+
+    [ObservableProperty]
+    public partial bool ShowWorkingPlan { get; set; } = true;
 
     [ObservableProperty]
     public partial string LiveCaptionLanguage { get; set; } = "auto";
@@ -127,6 +131,7 @@ public sealed partial class SettingsViewModel(
         _preferencesRevision = current.PreferencesRevision;
         _preferencesBaseline = current;
         IsAutomaticSpeechEnabled = current.IsAutomaticSpeechEnabled;
+        ShowWorkingPlan = current.ShowWorkingPlan;
         MissumAiServerUrl = current.MissumAiServerUrl;
         LiveCaptionLanguage = current.LiveCaptionLanguage;
         SelectedModel = current.SelectedModel ?? AppSettings.DefaultSelectedModel;
@@ -184,6 +189,7 @@ public sealed partial class SettingsViewModel(
     private AssistantSettingsPatch CreatePreferencesPatch() => new()
         {
             IsAutomaticSpeechEnabled = IsAutomaticSpeechEnabled,
+            ShowWorkingPlan = ShowWorkingPlan,
             MissumAiServerUrl = MissumAiServerUrl,
             LiveCaptionLanguage = string.IsNullOrWhiteSpace(LiveCaptionLanguage) ? "auto" : LiveCaptionLanguage.Trim(),
             Theme = Theme,

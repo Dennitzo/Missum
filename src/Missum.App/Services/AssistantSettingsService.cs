@@ -64,6 +64,7 @@ public sealed class AssistantSettingsService : IDisposable
             {
                 missumAiServerUrl = current.MissumAiServerUrl,
                 isAutomaticSpeechEnabled = current.IsAutomaticSpeechEnabled,
+                showWorkingPlan = current.ShowWorkingPlan,
                 liveCaptionLanguage = current.LiveCaptionLanguage,
                 theme = EnumText(current.Theme),
                 language = current.Language,
@@ -413,6 +414,7 @@ public sealed class AssistantSettingsService : IDisposable
     {
         MissumAiServerUrl = patch.MissumAiServerUrl ?? current.MissumAiServerUrl,
         IsAutomaticSpeechEnabled = patch.IsAutomaticSpeechEnabled ?? current.IsAutomaticSpeechEnabled,
+        ShowWorkingPlan = patch.ShowWorkingPlan ?? current.ShowWorkingPlan,
         LiveCaptionLanguage = patch.LiveCaptionLanguage ?? current.LiveCaptionLanguage,
         Theme = patch.Theme ?? current.Theme,
         Language = patch.Language ?? current.Language,
@@ -445,6 +447,7 @@ public sealed class AssistantSettingsService : IDisposable
             {
                 "missumAiServerUrl" => patch with { MissumAiServerUrl = StringValue(field.Value, field.Name) },
                 "isAutomaticSpeechEnabled" => patch with { IsAutomaticSpeechEnabled = BooleanValue(field.Value, field.Name) },
+                "showWorkingPlan" => patch with { ShowWorkingPlan = BooleanValue(field.Value, field.Name) },
                 "liveCaptionLanguage" => patch with { LiveCaptionLanguage = StringValue(field.Value, field.Name) },
                 "theme" => patch with { Theme = Enum.TryParse<AppTheme>(StringValue(field.Value, field.Name), true, out var theme) && Enum.IsDefined(theme)
                     ? theme : throw new ArgumentException("Ungültiges Theme.") },
@@ -528,6 +531,7 @@ public sealed record AssistantSettingsPatch
 {
     public string? MissumAiServerUrl { get; init; }
     public bool? IsAutomaticSpeechEnabled { get; init; }
+    public bool? ShowWorkingPlan { get; init; }
     public string? LiveCaptionLanguage { get; init; }
     public AppTheme? Theme { get; init; }
     public string? Language { get; init; }

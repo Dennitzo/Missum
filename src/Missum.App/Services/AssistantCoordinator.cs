@@ -357,6 +357,7 @@ public sealed partial class AssistantCoordinator(
             auxiliaryMessages = auxiliary.Select(message => new { id = message.Id, toolSteps = message.ToolSteps }),
             historyPage = new { page.HasMore, page.Before, page.TotalMessages },
             toolStepWindows = page.ToolStepWindows,
+            workingPlan = await BuildWorkingPlanAsync(session.Id, cancellationToken).ConfigureAwait(false),
             conversationRevision = session.ConversationRevision,
             documents = documentItems.Select(ToDocumentDto),
             attachments = attachmentItems.Select(ToAttachmentDto),
@@ -489,6 +490,7 @@ public sealed partial class AssistantCoordinator(
             auxiliaryMessages = auxiliary.Select(message => new { id = message.Id, toolSteps = message.ToolSteps }),
             historyPage = new { page.HasMore, page.Before, page.TotalMessages },
             toolStepWindows = page.ToolStepWindows,
+            workingPlan = await BuildWorkingPlanAsync(sessionId, cancellationToken).ConfigureAwait(false),
             chatMode = ChatModeName(conversation.Session.ChatMode),
             conversationRevision = conversation.Session.ConversationRevision,
             changesSummary = missumAi is null ? null : await missumAi.GetChangesSummaryAsync(sessionId, conversation.Messages, cancellationToken).ConfigureAwait(false),
@@ -1820,6 +1822,9 @@ public sealed partial class AssistantCoordinator(
         // The UI can request an expanded step reentrantly from emit, before
         // write-behind acknowledges this event. Publish its full source first.
         ObserveLiveToolStep(update);
+        if (update.ToolStep is { Tool: "coding.updatePlan", Status: "completed" } planStep)
+            await emit("workingPlan.changed", new { sessionId = update.Message.SessionId, workingPlan = WorkingPlanDto(planStep) },
+                requestId).ConfigureAwait(false);
         if (update.Kind == MissumAiAssistantUpdateKind.SubagentChanged && update.Subagent is { } subagent)
         {
             await emit("subagent.snapshot", ToSubagentDto(subagent with { ParentMessageId = update.Message.Id }), requestId).ConfigureAwait(false);

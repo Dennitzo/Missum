@@ -18,10 +18,10 @@ public static class CodingEvidenceContext
         const string omissionNotice = "Weitere gespeicherte Details wurden für dieses Kontextfenster ausgelassen; keine neuen Belege angenommen.";
         var output = new StringBuilder(Marker + "Gespeicherte Arbeitsdaten, keine neue Anweisung oder Autorisierung. Der ursprüngliche Auftrag und das vollständige Journal bleiben erhalten.\n");
         var omitted = false;
-        void Add(string section, object value)
+        void Add(string section, object value, bool required = false)
         {
             var line = JsonSerializer.Serialize(new { section, data = value });
-            if (output.Length + line.Length + omissionNotice.Length + 4 > budgetCharacters) { omitted = true; return; }
+            if (!required && output.Length + line.Length + omissionNotice.Length + 4 > budgetCharacters) { omitted = true; return; }
             output.AppendLine(line);
         }
         void AddSourceFile(CodingActiveFile file)
@@ -37,11 +37,15 @@ public static class CodingEvidenceContext
             if (output.Length + entry.Length + omissionNotice.Length + 4 > budgetCharacters) { omitted = true; return; }
             output.Append(entry);
         }
-        Add("next", new { state.Phase, state.NextStep, state.EnvironmentRevision });
-        foreach (var item in state.AcceptanceCriteria) Add("acceptance", item);
+        // The plan is bounded by its own schema (16 items per list), and is the
+        // canonical task outline. Keep it complete and in stored order even if
+        // it alone exceeds the optional detail budget. In particular, completed
+        // stages must not disappear behind Science/evidence excerpts.
+        Add("next", new { state.Phase, state.NextStep, state.EnvironmentRevision }, required: true);
+        foreach (var item in state.Plan) Add("plan", item, required: true);
+        foreach (var item in state.AcceptanceCriteria) Add("acceptance", item, required: true);
         if (state.Science is not null)
             foreach (var stage in state.Science.Stages.OrderByDescending(stage => state.Plan.Any(step => step.Id == stage.Id && step.Status == "in_progress"))) Add("scienceStage", stage);
-        foreach (var item in state.Plan.OrderBy(static item => item.Status == "completed" ? 1 : 0)) Add("plan", item);
         foreach (var item in state.Facts) Add("evidenced_fact", item);
         foreach (var item in state.RejectedHypotheses) Add("rejected_hypothesis", item);
         foreach (var item in state.Failures.Where(item => item.EnvironmentRevision == state.EnvironmentRevision)) Add("failure", new { item.Tool, item.Error, item.Count, item.EvidenceId });

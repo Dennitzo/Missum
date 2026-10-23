@@ -43,6 +43,8 @@ public sealed class CompactToolProjectionTests
         Assert.Contains("im selben Aufruf", description, StringComparison.Ordinal);
         Assert.Contains("atomar", description, StringComparison.Ordinal);
         Assert.Contains("Originaltitel exakt unverändert", description, StringComparison.Ordinal);
+        Assert.Contains("vollständigen geordneten Plan", description, StringComparison.Ordinal);
+        Assert.Contains("erledigter Etappen", description, StringComparison.Ordinal);
         Assert.DoesNotContain("Nur bei neuer ID", description, StringComparison.Ordinal);
     }
 

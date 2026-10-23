@@ -83,6 +83,11 @@ public sealed partial class AssistantCoordinator
             else step = FindLiveToolStep(sessionId, messageId, stepId)
                 ?? await Task.Run(() => conversationSnapshots.GetToolStepAsync(sessionId, messageId, stepId, token), token).ConfigureAwait(false);
             if (step is null) throw new InvalidOperationException("Dieser Werkzeugschritt ist nicht mehr vorhanden.");
+            if (step is { Tool: "coding.updatePlan", Status: "completed" }
+                && GetOptionalGuid(envelope.Payload, "parentMessageId") is null
+                && !HasFullWorkingPlan(step)
+                && await conversationSnapshots.GetWorkingPlanAtAsync(sessionId, messageId, stepId, token).ConfigureAwait(false) is { } completePlan)
+                step = step with { OutputJson = completePlan.OutputJson };
             step = await EnrichLeanDisplayAsync(step, sessionId, token).ConfigureAwait(false);
             // Match compact snapshots so their next unchanged update can retain
             // the already hydrated body instead of fetching it again.

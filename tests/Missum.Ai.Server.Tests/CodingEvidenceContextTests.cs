@@ -8,6 +8,34 @@ namespace Missum.Ai.Server.Tests;
 public sealed class CodingEvidenceContextTests
 {
     [Fact]
+    public void WorkingContextKeepsTheEntireOrderedPlanAndCriteriaBeforeBudgetedDetails()
+    {
+        var title = new string('ü', 400);
+        var state = CodingWorkingState.Create("A long staged task") with
+        {
+            Plan = Enumerable.Range(1, 16).Select(index => new CodingPlanItem($"s{index}", title,
+                index < 8 ? "completed" : index == 8 ? "in_progress" : "pending", [])).ToArray(),
+            AcceptanceCriteria = Enumerable.Range(1, 16).Select(index => new CodingPlanItem($"a{index}", title, "pending", [])).ToArray(),
+            Facts = [new("OPTIONAL_EVIDENCE_DETAIL", [])],
+        };
+        var context = CodingEvidenceContext.Build(state, 2048).Content!;
+        var sections = context.Split('\n').Where(static line => line.StartsWith('{')).Select(static line => JsonSerializer.Deserialize<JsonElement>(line)).ToArray();
+        var steps = sections.Where(static section => section.GetProperty("section").GetString() == "plan").ToArray();
+        var criteria = sections.Where(static section => section.GetProperty("section").GetString() == "acceptance").ToArray();
+        Assert.Equal(16, steps.Length);
+        Assert.Equal(16, criteria.Length);
+        for (var index = 0; index < 16; index++)
+        {
+            Assert.Equal($"s{index + 1}", steps[index].GetProperty("data").GetProperty("Id").GetString());
+            Assert.Equal($"a{index + 1}", criteria[index].GetProperty("data").GetProperty("Id").GetString());
+            Assert.Equal(title, steps[index].GetProperty("data").GetProperty("Title").GetString());
+        }
+        Assert.Equal("completed", steps[0].GetProperty("data").GetProperty("Status").GetString());
+        Assert.DoesNotContain("OPTIONAL_EVIDENCE_DETAIL", context, StringComparison.Ordinal);
+        Assert.Contains("Weitere gespeicherte Details", context, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void CompletedLargeArgumentsShrinkButOpenCallsAndTheirOriginalJournalRemainExact()
     {
         var completed = new LmToolCall("done", "coding.write", JsonSerializer.SerializeToElement(new { path = "done.py", content = new string('x', 32_000) }));

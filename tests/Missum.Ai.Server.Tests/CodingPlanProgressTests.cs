@@ -78,6 +78,9 @@ public sealed class CodingPlanProgressTests
         var receipt = CodingPlanProgressGuard.NoOpReceipt(state, available);
         Assert.False(receipt.Succeeded);
         Assert.False(receipt.Result.GetProperty("changed").GetBoolean());
+        Assert.Equal(state.Sequence, receipt.Result.GetProperty("stateRevision").GetInt64());
+        Assert.Empty(receipt.Result.GetProperty("storedSteps").EnumerateArray());
+        Assert.Empty(receipt.Result.GetProperty("storedAcceptanceCriteria").EnumerateArray());
         Assert.Contains(processAllowed ? "tatsächlichen Exitcode" : "nicht freigegeben", receipt.ErrorMessage, StringComparison.Ordinal);
     }
 

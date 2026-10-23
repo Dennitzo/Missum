@@ -68,7 +68,8 @@ public static class CompactAgentContextPolicy
         steps und acceptanceCriteria gemeinsam senden; jeder übermittelte Punkt braucht id/title/status.
         Bestehende Titel unverändert übernehmen. IDs existieren erst nach erfolgreichem Speichern in diesem Lauf.
         Nur geänderte Punkte pro Meilenstein senden; ausgelassene Punkte bleiben erhalten, null/leer ist nicht
-        ausgelassen. completed benötigt echte erfolgreiche Werkzeug-Id oder OutputEvidenceId, kein Plan-
+        ausgelassen. storedSteps/storedAcceptanceCriteria enthalten stets den vollständigen geordneten Plan;
+        behalte auch erledigte Etappen in Planung und Darstellung. completed benötigt echte erfolgreiche Werkzeug-Id oder OutputEvidenceId, kein Plan-
         oder Textbeleg. changed=false ist keine Arbeit; führe nextStep aus. Phasen planning/exploration/editing/
         error_recovery/review/final passend setzen; review enthält echte Tests. readOutput benötigt gespeicherte
         OutputEvidenceId; historische _missumCompletedArguments/_goCompletedArguments sind keine neuen Argumente.

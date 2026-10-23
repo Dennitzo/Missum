@@ -100,6 +100,9 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         _assistantHost = App.Current.GetService<AssistantHost>();
         _hostSubscription = _assistantHost.Subscribe("desktop", (type, payload, id) => EmitAsync(type, payload, id));
         _settings = App.Current.GetService<SettingsCoordinator>();
+        _settings.Changed += OnWorkingPlanSettingsChanged;
+        BodyGrid.SizeChanged += (_, _) => WorkingPlanView.SetMaximumBodyHeight(BodyGrid.ActualHeight);
+        BodyGrid.RegisterPropertyChangedCallback(VisibilityProperty, (_, _) => RefreshWorkingPlanVisibility());
         Inspector.Visibility = _settings.Current.AssistantOutputsVisible ? Visibility.Visible : Visibility.Collapsed;
         _microphone = App.Current.GetService<MicrophoneTranscriptionService>();
         _microphone.TurnChanged += OnTranscript;
@@ -289,6 +292,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                 var changed = next != _session;
                 _snapshot = data;
                 _session = next;
+                ObserveWorkingPlan(data, changed);
                 if (changed) { ResetConversationViews(); ResetHistoryPaging(); _scrollNewSessionToLatest = true; ClearToolSelection(); _contextUsed = 0; _contextLimit = 0; ResetChangesSummary(); }
                 var newMode = S(data, "chatMode", "general");
                 if (_mode != newMode) { ResetConversationViews(); ClearToolSelection(); }
@@ -336,6 +340,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         }
         var eventSession = S(data, "sessionId", S(data, "activeSessionId"));
         if (eventSession.Length > 0 && !string.Equals(eventSession, _session.ToString(), StringComparison.OrdinalIgnoreCase)) return;
+        if (type == "workingPlan.changed") { ObserveWorkingPlan(data); return; }
         if (type == "conversation.toolStepChanged") { ApplyNativeMessageDelta(data); ObserveThinkingProgress(data); return; }
         UpdateContext(data);
         ObserveThinkingProgress(data);
@@ -343,6 +348,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         if (type == "conversation.snapshot")
         {
             if (!ObserveChangesConversation(_session, data)) return;
+            ObserveWorkingPlan(data);
             ApplyMessageSnapshot(data, preserveLive: true);
             ReconcilePendingMessages();
             SyncSubagents(data, sessionChanged: false);
@@ -959,6 +965,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     private void UpdateComposerNavigationState()
     {
         if (_disposed) return;
+        RefreshWorkingPlanVisibility();
         ComposerInteractionHost.IsEnabled = _navigationState.CanEditComposer && ActiveSubagent is null;
         Composer.IsReadOnly = !_navigationState.CanEditComposer || ActiveSubagent is not null;
     }
@@ -1292,6 +1299,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         _ = CancelNativeMediaCaptureAsync();
         _conversationSelection?.Clear();
         _hostSubscription.Dispose();
+        _settings.Changed -= OnWorkingPlanSettingsChanged;
         _disposed = true; _draftTimer.Stop(); _renderTimer.Stop(); _microphone.TurnChanged -= OnTranscript; _lifetime.Cancel(); _lifetime.Dispose();
     }
 }

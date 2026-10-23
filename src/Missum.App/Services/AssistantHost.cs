@@ -18,7 +18,7 @@ public sealed class AssistantHost : IAsyncDisposable
     private static readonly HashSet<string> SharedEvents = new(StringComparer.Ordinal)
     {
         "chat.queued", "queue.changed", "chat.started", "chat.delta", "chat.completed", "chat.cancelled", "chat.failed",
-        "conversation.messageCommitted", "conversation.toolStepChanged", "coding.changes", "status.changed", "subagent.snapshot",
+        "conversation.messageCommitted", "conversation.toolStepChanged", "coding.changes", "status.changed", "subagent.snapshot", "workingPlan.changed",
     };
     private readonly IServiceProvider _services;
     private readonly SettingsCoordinator _settings;

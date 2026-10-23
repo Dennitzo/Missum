@@ -10,7 +10,7 @@ internal static class CodingWorkingStateTools
 
     internal static IReadOnlyList<AgentToolSpec> CreateTools() =>
     [
-        Tool(PlanTool, "Speichere einen knappen Arbeitsstand für den aktuellen Lauf. steps und acceptanceCriteria sind getrennte Listen mit jeweils höchstens 16 Einträgen und höchstens einem in_progress. Beide Listen dürfen im selben Aufruf gemeinsam angelegt oder geändert werden; das Update ist atomar. Sende nur neue oder tatsächlich geänderte Einträge, jeweils mit id, title und status. title hat 1–400 Zeichen; bei bestehenden Einträgen den gespeicherten Originaltitel exakt unverändert mitsenden, insbesondere acceptanceCriteria niemals umdeuten. IDs im alten Chatverlauf sind nicht automatisch gespeichert: Ein neuer Lauf beginnt mit leeren Planlisten. Nicht genannte Punkte/Felder bleiben innerhalb des Laufs erhalten. Neu completed erfordert 1–3 echte erfolgreiche evidenceIds; Planbestätigungen sind keine Arbeitsbelege. facts und rejectedHypotheses brauchen echte Belege (auch Fehlerbelege möglich); je Liste bleiben die letzten 12 Befunde aktiv, ältere im Journal. explanation wird nur im Aufrufjournal festgehalten. phase=final erklärt keine Arbeit für erledigt. Fehler lehnen das gesamte Update ab; korrigiere die genannten Felder und sende die gewünschten Änderungen beider Listen erneut gemeinsam. Planung ersetzt keine Ausführung.",
+        Tool(PlanTool, "Speichere einen knappen Arbeitsstand für den aktuellen Lauf. steps und acceptanceCriteria sind getrennte Listen mit jeweils höchstens 16 Einträgen und höchstens einem in_progress. Beide Listen dürfen im selben Aufruf gemeinsam angelegt oder geändert werden; das Update ist atomar. Sende nur neue oder tatsächlich geänderte Einträge, jeweils mit id, title und status. storedSteps und storedAcceptanceCriteria geben immer den vollständigen geordneten Plan einschließlich erledigter Etappen zurück; verwende diese vollständige Fassung für weitere Planung und Darstellungen. title hat 1–400 Zeichen; bei bestehenden Einträgen den gespeicherten Originaltitel exakt unverändert mitsenden, insbesondere acceptanceCriteria niemals umdeuten. IDs im alten Chatverlauf sind nicht automatisch gespeichert: Ein neuer Lauf beginnt mit leeren Planlisten. Nicht genannte Punkte/Felder bleiben innerhalb des Laufs erhalten. Neu completed erfordert 1–3 echte erfolgreiche evidenceIds; Planbestätigungen sind keine Arbeitsbelege. facts und rejectedHypotheses brauchen echte Belege (auch Fehlerbelege möglich); je Liste bleiben die letzten 12 Befunde aktiv, ältere im Journal. explanation wird nur im Aufrufjournal festgehalten. phase=final erklärt keine Arbeit für erledigt. Fehler lehnen das gesamte Update ab; korrigiere die genannten Felder und sende die gewünschten Änderungen beider Listen erneut gemeinsam. Planung ersetzt keine Ausführung.",
             """{"steps":{"type":"array","minItems":1,"maxItems":16,"items":{"type":"object","additionalProperties":false,"properties":{"id":{"type":"string","minLength":1,"maxLength":80},"title":{"type":"string","minLength":1,"maxLength":400,"description":"Immer erforderlich; gespeicherten Originaltitel exakt unverändert mitsenden, Kriterien niemals umdeuten."},"status":{"type":"string","enum":["pending","in_progress","completed"],"description":"Immer erforderlich. Neu completed braucht echte erfolgreiche evidenceIds."},"evidenceIds":{"type":"array","maxItems":3,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":100}}},"required":["id","title","status"]}},"acceptanceCriteria":{"type":"array","minItems":1,"maxItems":16,"items":{"type":"object","additionalProperties":false,"properties":{"id":{"type":"string","minLength":1,"maxLength":80},"title":{"type":"string","minLength":1,"maxLength":400,"description":"Immer erforderlich; gespeicherten Originaltitel exakt unverändert mitsenden, Kriterien niemals umdeuten."},"status":{"type":"string","enum":["pending","in_progress","completed"],"description":"Immer erforderlich. Neu completed braucht echte erfolgreiche evidenceIds."},"evidenceIds":{"type":"array","maxItems":3,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":100}}},"required":["id","title","status"]}},"facts":{"type":"array","maxItems":12,"items":{"type":"object","additionalProperties":false,"properties":{"text":{"type":"string","minLength":1,"maxLength":600},"evidenceIds":{"type":"array","maxItems":3,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":100},"minItems":1}},"required":["text","evidenceIds"]}},"rejectedHypotheses":{"type":"array","maxItems":12,"items":{"type":"object","additionalProperties":false,"properties":{"text":{"type":"string","minLength":1,"maxLength":600},"evidenceIds":{"type":"array","maxItems":3,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":100},"minItems":1}},"required":["text","evidenceIds"]}},"explanation":{"type":"string","minLength":1,"maxLength":2000},"nextStep":{"type":"string","minLength":1,"maxLength":1000},"phase":{"type":"string","enum":["planning","exploration","editing","review","final","error_recovery","unknown"]}}""", []),
     ];
 
@@ -61,7 +61,18 @@ internal static class CodingWorkingStateTools
 
     internal static JsonElement CreatePlanReceipt(CodingWorkingState state, JsonElement arguments)
     {
-        var receipt = new Dictionary<string, object?> { ["success"] = true, ["phase"] = state.Phase };
+        // A call can contain a single status delta. Its receipt must still carry
+        // the complete ordered plan, so both the model and native clients can
+        // render the canonical plan without replacing it with the last delta.
+        var options = MissumAiProtocol.CreateJsonOptions();
+        var receipt = new Dictionary<string, object?>
+        {
+            ["success"] = true,
+            ["phase"] = state.Phase,
+            ["stateRevision"] = state.Sequence,
+            ["storedSteps"] = JsonSerializer.SerializeToElement(state.Plan, options),
+            ["storedAcceptanceCriteria"] = JsonSerializer.SerializeToElement(state.AcceptanceCriteria, options),
+        };
         if (arguments.TryGetProperty("steps", out _) || arguments.TryGetProperty("acceptanceCriteria", out _))
         {
             receipt["storedStepIds"] = state.Plan.Select(static item => item.Id).ToArray();
@@ -70,8 +81,7 @@ internal static class CodingWorkingStateTools
         if (arguments.TryGetProperty("nextStep", out _)) receipt["nextStep"] = state.NextStep;
         if (state.Science is not null)
         {
-            receipt["scienceStages"] = JsonSerializer.SerializeToElement(state.Science.Stages, Missum.Ai.Contracts.MissumAiProtocol.CreateJsonOptions());
-            receipt["storedSteps"] = JsonSerializer.SerializeToElement(state.Plan, Missum.Ai.Contracts.MissumAiProtocol.CreateJsonOptions());
+            receipt["scienceStages"] = JsonSerializer.SerializeToElement(state.Science.Stages, options);
         }
         AddChangedItems("steps", "updatedSteps", state.Plan);
         AddChangedItems("acceptanceCriteria", "updatedAcceptanceCriteria", state.AcceptanceCriteria);

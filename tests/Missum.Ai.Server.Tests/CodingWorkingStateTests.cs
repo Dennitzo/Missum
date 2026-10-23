@@ -15,6 +15,63 @@ public sealed class CodingWorkingStateTests
     private static readonly string[] MissingInterpreterArguments = ["-c", new string('#', 2048)];
 
     [Fact]
+    public void PartialPlanUpdatesKeepEveryCompletedAndPendingStageInCanonicalOrderAndReceipt()
+    {
+        var state = CodingWorkingStateReducer.ObserveToolResult(CodingWorkingState.Create("A sixteen-stage research task"),
+            Call("verified-read", "coding.read", new { path = "Publikation.md" }), "{\"success\":true,\"content\":\"Verified source\"}") with
+        {
+            Plan = Enumerable.Range(1, 16).Select(index => new CodingPlanItem($"s{index}", $"Full stage {index}",
+                index < 8 ? "completed" : "pending", index < 8 ? CompletedEvidenceIdsForPlan : [])).ToArray(),
+            AcceptanceCriteria = [new("verified", "Retain the completed criterion", "completed", CompletedEvidenceIdsForPlan),
+                new("open", "Retain the pending criterion", "pending", [])],
+        };
+        var arguments = Args(new
+        {
+            // The changed entries arrive out of order, but do not reorder the plan.
+            steps = new[] { new { id = "s16", status = "pending" }, new { id = "s15", status = "in_progress" } },
+            phase = "editing",
+        });
+        state = CodingWorkingStateReducer.ApplyPlanUpdate(state, arguments);
+        var receipt = CodingWorkingStateTools.CreatePlanReceipt(state, arguments);
+        var steps = receipt.GetProperty("storedSteps").EnumerateArray().ToArray();
+        Assert.Equal(16, state.Plan.Count);
+        Assert.Equal(16, steps.Length);
+        for (var index = 0; index < steps.Length; index++)
+        {
+            Assert.Equal($"s{index + 1}", steps[index].GetProperty("id").GetString());
+            Assert.Equal($"Full stage {index + 1}", steps[index].GetProperty("title").GetString());
+            Assert.Equal(index < 7 ? "completed" : index == 14 ? "in_progress" : "pending",
+                steps[index].GetProperty("status").GetString());
+        }
+        var criteria = receipt.GetProperty("storedAcceptanceCriteria").EnumerateArray().ToArray();
+        Assert.Equal(2, criteria.Length);
+        Assert.Equal("verified", criteria[0].GetProperty("id").GetString());
+        Assert.Equal("completed", criteria[0].GetProperty("status").GetString());
+        Assert.Equal("open", criteria[1].GetProperty("id").GetString());
+        Assert.Equal("pending", criteria[1].GetProperty("status").GetString());
+    }
+
+    private static readonly string[] CompletedEvidenceIdsForPlan = ["verified-read"];
+
+    [Fact]
+    public void FullPlanReceiptSurvivesToolTransportWithMaximumUnicodeTitlesAndBothLists()
+    {
+        var title = new string('ü', 400);
+        var state = CodingWorkingState.Create("Keep the full plan") with
+        {
+            Plan = Enumerable.Range(1, 16).Select(index => new CodingPlanItem($"s{index}", title, "pending", [])).ToArray(),
+            AcceptanceCriteria = Enumerable.Range(1, 16).Select(index => new CodingPlanItem($"a{index}", title, "pending", [])).ToArray(),
+        };
+        var receipt = CodingWorkingStateTools.CreatePlanReceipt(state, Args(new { phase = "review" })).GetRawText();
+        Assert.True(receipt.Length > CodingLoopGuard.MaximumToolResultCharacters);
+        Assert.Equal(receipt, CodingLoopGuard.BoundToolResult(receipt, CodingWorkingStateTools.PlanTool));
+        var restored = JsonSerializer.Deserialize<JsonElement>(receipt);
+        Assert.Equal(16, restored.GetProperty("storedSteps").GetArrayLength());
+        Assert.Equal(16, restored.GetProperty("storedAcceptanceCriteria").GetArrayLength());
+        Assert.Equal(title, restored.GetProperty("storedSteps")[15].GetProperty("title").GetString());
+    }
+
+    [Fact]
     public void OutputEvidenceAliasesResolveToPersistedCanonicalPlanAndFactIdsAfterCheckpointRecovery()
     {
         const string outputId = "ev-0123456789abcdef0123456789abcdef";
