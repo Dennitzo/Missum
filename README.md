@@ -1,4 +1,6 @@
-﻿# Missum
+﻿![Missum – Vorschau der Benutzeroberfläche](Missum.png)
+
+# Missum
 
 Native WinUI 3 desktop application inspired by the supplied ChatGPT/Codex reference.
 The desktop chat uses XAML controls. Missum includes its coordinator, SQLite
