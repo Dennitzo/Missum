@@ -145,6 +145,7 @@ public sealed partial class AssistantCoordinator(
         var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Die ausgewählte Sitzung wurde nicht gefunden.");
         await CodingWorkspaceGit.EnsureRepositoryAsync(fullPath, cancellationToken).ConfigureAwait(false);
+        await ProjectRepositoryScaffold.EnsureAsync(fullPath, cancellationToken: cancellationToken).ConfigureAwait(false);
         // A workspace is session context in every chat mode, not a tool selection.
         await chats.SetCodingWorkspacePathAsync(session.Id, fullPath, activateCoding: false, cancellationToken).ConfigureAwait(false);
     }
@@ -964,6 +965,7 @@ public sealed partial class AssistantCoordinator(
         if (!Enum.IsDefined(chatMode)) throw new ArgumentOutOfRangeException(nameof(chatMode));
         var fullPath = Path.GetFullPath(workspacePath.Trim());
         if (!Directory.Exists(fullPath)) throw new DirectoryNotFoundException("Der Projektordner existiert nicht.");
+        await ProjectRepositoryScaffold.EnsureAsync(fullPath, cancellationToken: cancellationToken).ConfigureAwait(false);
         await SciencePublicationScaffold.EnsureAsync(chatMode, fullPath, cancellationToken).ConfigureAwait(false);
         var session = await chats.CreateSessionAsync(DefaultSessionTitle, chatMode, cancellationToken).ConfigureAwait(false);
         try

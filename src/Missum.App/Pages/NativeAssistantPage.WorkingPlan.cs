@@ -31,6 +31,7 @@ public sealed partial class NativeAssistantPage
 
     private void RefreshWorkingPlanVisibility()
     {
+        WorkingPlanView.SetRunActive(_running);
         WorkingPlanView.Visibility = _settings.Current.ShowWorkingPlan && WorkingPlanView.StepCount > 0
             && ActiveSubagent is null && BodyGrid.Visibility == Visibility.Visible ? Visibility.Visible : Visibility.Collapsed;
         WorkingPlanView.SetMaximumBodyHeight(BodyGrid.ActualHeight);

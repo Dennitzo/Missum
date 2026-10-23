@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Missum.Core.Research;
+using Missum.Core.Coding;
 
 namespace Missum.App.Services;
 
@@ -56,6 +57,7 @@ public sealed partial class ResearchSandboxService(AssistantRuntimeProfile profi
             RejectReparsePoint(Path.GetFullPath(storageRoot));
             Directory.CreateDirectory(root);
             RejectReparsePoint(root);
+            await ProjectRepositoryScaffold.EnsureAsync(root, cancellationToken: cancellationToken).ConfigureAwait(false);
             foreach (var name in new[] { "inputs", "work", "artifacts", "notebooks", "manuscripts", "env", "runs", "snapshots" })
             {
                 var path = Path.Combine(root, name);

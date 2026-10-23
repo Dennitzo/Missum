@@ -106,7 +106,11 @@ public static class CompactAgentContextPolicy
             return Marker + "\n\n" + Common + "\n\n" + GeneralAgentPolicies.AudiobookAuthor;
 
         var sections = new List<string> { Marker, Common, AgentNarrationPolicy.Instructions, General, MathFormattingPolicy.Instructions };
-        if (request.Mode == RunMode.Coding) sections.Add(Coding);
+        if (request.Mode == RunMode.Coding)
+        {
+            sections.Add(Coding);
+            sections.Add(RepositoryMaintenancePolicy.Instructions);
+        }
         if (toolNames.Contains(SubagentToolNames.Spawn, StringComparer.Ordinal)) sections.Add(Delegation);
         return string.Join("\n\n", sections);
     }

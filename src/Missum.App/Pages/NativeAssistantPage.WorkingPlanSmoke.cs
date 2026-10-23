@@ -7,6 +7,8 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Automation.Provider;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Shapes;
+using Path = System.IO.Path;
 
 namespace Missum.App.Pages;
 
@@ -73,11 +75,15 @@ public sealed partial class NativeAssistantPage
             if (_messages.ContainsKey(fixture.First.Id.ToString()) || !_historyHasMore)
                 throw new InvalidOperationException("Die Arbeitsplan-Prüfung hat den Plan nicht außerhalb des geladenen Verlaufs angelegt.");
             AssertPlan(fixture.Steps.Length);
+            AssertPlanAnimation(active: false, pendingOutlines: 6);
+            ApplyEvent("chat.started", JsonSerializer.SerializeToElement(new { sessionId = fixtureId }, JsonOptions));
+            AssertPlanAnimation(active: true, pendingOutlines: 5);
             var expandedHeight = ConversationScroll.ActualHeight;
             InvokeToggle();
             UpdateLayout();
             if (WorkingPlanView.IsExpanded || ConversationScroll.ActualHeight < expandedHeight + 80)
                 throw new InvalidOperationException("Das Einklappen vergrößert das Chatfenster nicht.");
+            AssertPlanAnimation(active: false, pendingOutlines: 5);
             InvokeToggle();
             UpdateLayout();
             var planTop = WorkingPlanView.TransformToVisual(BodyGrid).TransformPoint(default).Y;
@@ -88,6 +94,22 @@ public sealed partial class NativeAssistantPage
                 throw new InvalidOperationException("Arbeitsplan, Chat oder Promptfenster überlagern sich.");
             var rings = Descendants(WorkingPlanView).OfType<ProgressRing>().ToArray();
             if (rings.Count(ring => ring.IsActive) != 1) throw new InvalidOperationException("Die aktive Etappe animiert nicht eindeutig.");
+            foreach (var terminal in new[] { "Abgebrochen", "Fehlgeschlagen", "Fertig" })
+            {
+                ApplyEvent("status.changed", JsonSerializer.SerializeToElement(new { sessionId = fixtureId, runStatus = terminal }, JsonOptions));
+                AssertPlanAnimation(active: false, pendingOutlines: 6);
+                // A later plan receipt must not restart animation while the session is idle.
+                ApplyEvent("workingPlan.changed", JsonSerializer.SerializeToElement(new { sessionId = fixtureId,
+                    workingPlan = AssistantCoordinator.WorkingPlanDto(fixture.FirstStep) }, JsonOptions));
+                AssertPlanAnimation(active: false, pendingOutlines: 6);
+                ApplyEvent("chat.started", JsonSerializer.SerializeToElement(new { sessionId = fixtureId }, JsonOptions));
+                AssertPlanAnimation(active: true, pendingOutlines: 5);
+            }
+            ApplyEvent("status.changed", JsonSerializer.SerializeToElement(new { sessionId = fixtureId, runStatus = "Abgebrochen" }, JsonOptions));
+            AssertPlanAnimation(active: false, pendingOutlines: 6);
+            var retainedPlan = await chats.GetMessageAsync(fixture.First.Id, _lifetime.Token);
+            if (retainedPlan?.ToolSteps?.Single(step => step.Id == fixture.FirstStep.Id).OutputJson != fixture.FirstStep.OutputJson)
+                throw new InvalidOperationException("Das Anhalten der Arbeitsplan-Animation hat gespeicherte Etappenstatus geändert.");
 
             var updatedSteps = fixture.Steps.Select(item => item.Id == "s2" ? item with { Status = "completed" }
                 : item.Id == "s3" ? item with { Status = "in_progress" } : item).Append(new("s8", "Unabhängige Gegenprüfung integrieren", "pending")).ToArray();
@@ -144,10 +166,13 @@ public sealed partial class NativeAssistantPage
                 throw new InvalidOperationException("Beim Sitzungswechsel bleibt ein fremder Plan sichtbar.");
             await CommandAsync("session.open", new { sessionId = fixtureId });
             AssertPlan(updatedSteps.Length);
+            AssertPlanAnimation(active: false, pendingOutlines: 6);
             await File.WriteAllTextAsync(Path.Combine(App.Current.DataDirectory, "native-working-plan-validation.json"),
                 JsonSerializer.Serialize(new { passed = true, planOutsideLoadedHistory = true, fullPlanSteps = updatedSteps.Length,
                     partialUpdateRetainsAllSteps = true, staleAndForeignEventsIgnored = true, retainedRows = true,
                     nativeInLayout = true, clickToCollapse = true, activeRing = true, settingsLive = true,
+                    idlePlanNotAnimating = true, terminalStatesStopAnimation = true, resumedRunRestartsAnimation = true,
+                    latePlanReceiptDoesNotRestartAnimation = true, persistedStatusesUnchanged = true,
                     themes = WorkingPlanSmokeThemes, sessionIsolation = true, subagentIsolation = true, durablePlanRestored = true, modelRequests = 0 }));
         }
         finally
@@ -175,6 +200,13 @@ public sealed partial class NativeAssistantPage
             if (new ButtonAutomationPeer(WorkingPlanView.Toggle).GetPattern(PatternInterface.Invoke) is not IInvokeProvider invoke)
                 throw new InvalidOperationException("Der Arbeitsplan-Reiter ist nicht per Klick bedienbar.");
             invoke.Invoke();
+        }
+        void AssertPlanAnimation(bool active, int pendingOutlines)
+        {
+            if (Descendants(WorkingPlanView).OfType<ProgressRing>().Count(ring => ring.IsActive) != (active ? 1 : 0)
+                || Descendants(WorkingPlanView).OfType<Ellipse>().Count(outline => outline.Visibility == Visibility.Visible
+                    && outline.Parent is Grid icon && icon.Children.OfType<ProgressRing>().Any()) != pendingOutlines)
+                throw new InvalidOperationException("Die Arbeitsplan-Animation entspricht nicht dem aktuellen Laufzustand.");
         }
     }
 }

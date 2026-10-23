@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Missum.Core.Models;
+using Missum.Core.Coding;
 
 namespace Missum.App.Services;
 
@@ -74,6 +75,9 @@ internal static class SciencePublicationScaffold
         var rendererSource = Path.Combine(packagePath, "Renderer");
         var package = await Packages.GetOrAdd(rendererSource,
             path => new Lazy<Task<RendererPackage>>(() => ReadPackageAsync(path))).Value.WaitAsync(cancellationToken).ConfigureAwait(false);
+        // Install ignore rules before copying the local runtime into an existing
+        // project too, including optional refreshes of older Science sessions.
+        await ProjectRepositoryScaffold.EnsureAsync(root, cancellationToken: cancellationToken).ConfigureAwait(false);
         var gate = Gates.GetOrAdd(root, static _ => new SemaphoreSlim(1, 1));
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try

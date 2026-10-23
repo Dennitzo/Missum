@@ -3215,6 +3215,7 @@ public sealed partial class MissumAiAssistantService(
             availableCodingModel = availableCodingModel with { ContextTokens = ModelContextSelection.Resolve(CurrentSettings, codingModel,
                 availableCodingModel.MaximumContextTokens ?? availableCodingModel.ContextTokens) };
             var codingPrompt = originalPrompt;
+            codingPrompt = WithRepositoryMaintenance(codingPrompt, _activeCodingWorkspace, compact: true);
             if (isScienceSession)
                 codingPrompt = await BuildPublicationWorkspacePromptAsync(codingSession, codingPrompt, cancellationToken).ConfigureAwait(false);
             if (action == PromptTriggerAction.PlanMode)
@@ -3320,6 +3321,7 @@ public sealed partial class MissumAiAssistantService(
             trigger,
             hasDocumentContext: documentContext is not null,
             hasAudiobookHistory);
+        transformed = WithRepositoryMaintenance(transformed, codingSession.CodingWorkspacePath, audiobook);
         var latestParts = new List<ContentPart> { new("text", Text: transformed) };
         foreach (var item in uploaded)
         {

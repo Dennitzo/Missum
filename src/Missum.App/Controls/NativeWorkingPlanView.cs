@@ -16,6 +16,7 @@ public sealed class NativeWorkingPlanView : ContentControl
     private readonly ScrollViewer _body;
     private readonly Dictionary<string, PlanRow> _items = new(StringComparer.Ordinal);
     private bool _expanded = true;
+    private bool _runActive;
 
     public NativeWorkingPlanView()
     {
@@ -73,6 +74,13 @@ public sealed class NativeWorkingPlanView : ContentControl
 
     internal void SetMaximumBodyHeight(double availableHeight) => _body.MaxHeight = Math.Clamp(availableHeight * .32, 72, 300);
 
+    internal void SetRunActive(bool active)
+    {
+        if (_runActive == active) return;
+        _runActive = active;
+        UpdateAnimations(Visibility == Visibility.Visible);
+    }
+
     internal void Update(NativeWorkingPlanProjection.Snapshot plan)
     {
         var keep = plan.Steps.Select(step => step.Id).ToHashSet(StringComparer.Ordinal);
@@ -99,18 +107,28 @@ public sealed class NativeWorkingPlanView : ContentControl
             if (row.Title.Text != step.Title) row.Title.Text = step.Title;
             row.Status = step.Status;
             row.Check.Visibility = step.Status == "completed" ? Visibility.Visible : Visibility.Collapsed;
-            row.Pending.Visibility = step.Status is not ("completed" or "in_progress") ? Visibility.Visible : Visibility.Collapsed;
-            row.Ring.Visibility = step.Status == "in_progress" ? Visibility.Visible : Visibility.Collapsed;
-            // Status names remain available to assistive technology, never as suffixes in the plan text.
-            AutomationProperties.SetName(row.Root, step.Title + ", " + (step.Status switch
-            { "completed" => "erledigt", "in_progress" => "in Bearbeitung", _ => "ausstehend" }));
         }
         UpdateAnimations(Visibility == Visibility.Visible);
     }
 
     private void UpdateAnimations(bool visible)
     {
-        foreach (var row in _items.Values) row.Ring.IsActive = visible && IsLoaded && _expanded && row.Status == "in_progress";
+        foreach (var row in _items.Values)
+        {
+            // A saved in-progress stage does not mean a model is still running.
+            // Preserve its status and show a stationary outline until a real run resumes.
+            var running = _runActive && row.Status == "in_progress";
+            row.Pending.Visibility = row.Status != "completed" && !running ? Visibility.Visible : Visibility.Collapsed;
+            row.Ring.Visibility = running ? Visibility.Visible : Visibility.Collapsed;
+            row.Ring.IsActive = visible && IsLoaded && _expanded && running;
+            // Status names remain available to assistive technology, never as suffixes in the plan text.
+            AutomationProperties.SetName(row.Root, row.Title.Text + ", " + (row.Status switch
+            {
+                "completed" => "erledigt",
+                "in_progress" => _runActive ? "in Bearbeitung" : "in Bearbeitung, Lauf angehalten",
+                _ => "ausstehend",
+            }));
+        }
     }
 
     private static PlanRow CreateRow()

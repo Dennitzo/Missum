@@ -88,3 +88,27 @@ appsettings.*.local.json
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# >>> Missum managed local files >>>
+# Keep project-specific rules outside this automatically maintained block.
+/.publication-renderer/
+/.publication-renderer.install-*/
+/.publication-renderer.previous-*/
+/Publikation-erzeugen.ps1
+/PDF-ERZEUGEN.md
+/publication-build.json
+/publication-build.json.*.tmp
+/publication-build.log
+/.publication-build.lock
+/publication.json
+/publication.json.*.tmp
+/.missum-publication-*/
+/.publication-*.tmp.pdf
+/.publication-build-*.tmp.pdf
+/.missum-repository-*.tmp
+bin/
+obj/
+/.vs/
+*.suo
+*.user
+# <<< Missum managed local files <<<

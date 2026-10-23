@@ -152,14 +152,17 @@ public sealed partial class LocalToolBroker(
                 if (proposal.Name == "coding.renderHtml")
                     return Result(proposal, "completed", CodingSessionTools.RenderReceipt(proposal.Arguments));
                 using var evidence = evidenceStore?.BeginStep(proposal.ProposalId, proposal.Name, proposal.Arguments);
-                var codingResult = await new LocalCodingToolExecutor(codingWorkspacePath!, commandProgress, evidence)
-                    .ExecuteAsync(proposal.Name, proposal.Arguments, cancellationToken).ConfigureAwait(false);
+                var codingExecution = await ExecuteCodingWithRepositoryFilesAsync(proposal, codingWorkspacePath!,
+                    commandProgress, evidence, cancellationToken).ConfigureAwait(false);
+                var codingResult = codingExecution.Result;
                 if (evidence is not null)
                 {
                     var enriched = JsonNode.Parse(codingResult.GetRawText())!.AsObject();
                     enriched["evidence"] = JsonSerializer.SerializeToNode(evidence.Reference, JsonOptions);
                     codingResult = JsonSerializer.SerializeToElement(enriched, JsonOptions);
                 }
+                if (codingExecution.FailureMessage is not null)
+                    return Result(proposal, "failed", codingResult, "client.tool_failed", codingExecution.FailureMessage);
                 if (codingResult.TryGetProperty("success", out var success) && success.ValueKind == JsonValueKind.False)
                 {
                     return Result(proposal, "failed", codingResult, "client.coding_tool_failed",

@@ -90,6 +90,7 @@ public sealed class ScientificResearchToolExecutor(
     public async Task<JsonElement> ExecuteAsync(string toolName, JsonElement arguments, CancellationToken cancellationToken = default)
     {
         ValidateArguments(toolName, arguments);
+        await ProjectRepositoryScaffold.EnsureAsync(_workspace, cancellationToken: cancellationToken).ConfigureAwait(false);
         var projectId = Identifier(arguments, "projectId");
         var projectRelative = Path.Combine(".assistant", "research", projectId);
         var projectRoot = WorkspaceFilePath.Resolve(_workspace, projectRelative);

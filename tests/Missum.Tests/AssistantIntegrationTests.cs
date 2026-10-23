@@ -1222,6 +1222,10 @@ public sealed class AssistantIntegrationTests
         Assert.Equal(mode, created.ChatMode);
         Assert.Equal(mode, (await chats.GetSessionAsync(first.Id))!.ChatMode);
         Assert.NotNull(await chats.GetMessageAsync(message.Id));
+        Assert.True(File.Exists(Path.Combine(environment.Directory, "README.md")));
+        var ignore = await File.ReadAllTextAsync(Path.Combine(environment.Directory, ".gitignore"));
+        Assert.Contains("/.publication-renderer/", ignore, StringComparison.Ordinal);
+        Assert.Contains("/Publikation-erzeugen.ps1", ignore, StringComparison.Ordinal);
     }
 
     [Fact]

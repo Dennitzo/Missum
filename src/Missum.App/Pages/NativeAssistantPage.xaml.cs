@@ -866,6 +866,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     }
     private void SetRunning()
     {
+        WorkingPlanView.SetRunActive(_running);
         var hasText = !string.IsNullOrWhiteSpace(Composer.Text);
         var captionRunning = _captionActive && _captionSessionId == _session;
         var preparingContinuation = IsContinuationPreparing;
