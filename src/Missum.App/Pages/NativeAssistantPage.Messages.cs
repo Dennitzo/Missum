@@ -203,6 +203,14 @@ public sealed partial class NativeAssistantPage
                 desired.Add(ActivityContainer(messageId, key, receipt, activity.ReplacesKey));
                 continue;
             }
+            if (tool == "context.compact")
+            {
+                if (!blocks.TryGetValue(key, out var receipt) || receipt is not CompactionReceiptView)
+                    blocks[key] = receipt = new CompactionReceiptView();
+                ((CompactionReceiptView)receipt).Update(step);
+                desired.Add(ActivityContainer(messageId, key, receipt, activity.ReplacesKey));
+                continue;
+            }
             if (!blocks.TryGetValue(key, out var element) || element is not ToolStepView)
             {
                 var view = new ToolStepView()
@@ -485,7 +493,7 @@ public sealed partial class NativeAssistantPage
             // the same. Never duplicate a megabyte reasoning/output as raw JSON.
             _hasStep = true;
             var wasActivity = _activity;
-            _activity = S(step, "tool") is "assistant.activity" or "assistant.reasoning" or "assistant.progress" or "context.compact";
+            _activity = S(step, "tool") is "assistant.activity" or "assistant.reasoning" or "assistant.progress";
             _running = S(step, "status") is "running" or "pending";
             _activityHeader.Visibility = _activity ? Visibility.Visible : Visibility.Collapsed;
             _toggle.Visibility = _activity || _detailsOnly ? Visibility.Collapsed : Visibility.Visible;
@@ -514,13 +522,7 @@ public sealed partial class NativeAssistantPage
                 "research.skeptic" => "Ergebnisse kritisch prüfen", "research.verify" => "Belege bewerten",
                 "research.model" => "Recherche bearbeiten", "research.operation" => "Rechercheauftrag",
                 "math.formalProof" => "Lean-Beweis prüfen", "assistant.progress" => "Fortschritt",
-                "context.compact" => S(step, "status") switch
-                {
-                    "completed" => "Kontextkomprimierung abgeschlossen",
-                    "cancelled" or "interrupted" => "Kontextkomprimierung abgebrochen",
-                    "failed" or "denied" => "Kontextkomprimierung fehlgeschlagen",
-                    _ => "Kontext komprimieren",
-                },
+                "context.compact" => CompactionReceiptLabel(step),
                 "assistant.continuation" => S(step, "status") switch
                 {
                     "completed" => "Lauf fortgesetzt", "failed" or "denied" => "Fortsetzen fehlgeschlagen",

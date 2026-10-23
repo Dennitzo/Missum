@@ -36,7 +36,7 @@ internal static class NativeActivityProjection
             var id = Text(step, "id");
             var offset = step.TryGetProperty("contentOffset", out var position) && position.ValueKind == JsonValueKind.Number
                 && position.TryGetInt32(out var value) && value >= 0 ? Math.Clamp(value, cursor, contentLength) : cursor;
-            if (tool is "assistant.reasoning" or "assistant.progress" or "context.compact")
+            if (tool is "assistant.reasoning" or "assistant.progress")
             {
                 thinking = true;
                 thinkingOffset = offset;
@@ -59,8 +59,13 @@ internal static class NativeActivityProjection
         var thinkingAtTail = thinking && thinkingOffset >= contentLength;
         var completedAtTail = completedTool && cursor >= contentLength;
         AnswerUntil(contentLength);
+        // A durable running compaction already describes the current work.
+        // Do not append a second transient thinking row for its model phase.
+        var compactingAtTail = result.LastOrDefault() is { } last
+            && Text(last.Step, "tool") == "context.compact"
+            && Text(last.Step, "status") is "running" or "pending";
         // No completed/historical thinking rows, and never a placeholder before an answer.
-        if (active && (waitingForModel || thinkingAtTail || completedAtTail || result.Count == 0)) result.Add(new(slot, Active, cursor));
+        if (active && !compactingAtTail && (waitingForModel || thinkingAtTail || completedAtTail || result.Count == 0)) result.Add(new(slot, Active, cursor));
         return result;
     }
 }

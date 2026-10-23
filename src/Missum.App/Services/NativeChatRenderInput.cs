@@ -16,7 +16,7 @@ internal sealed class NativeChatRenderInput(string content, JsonElement[] steps,
     private static string Text(JsonElement item, string key) => item.ValueKind == JsonValueKind.Object
         && item.TryGetProperty(key, out var field) ? field.ToString() : "";
     private static bool Hidden(JsonElement step) => Text(step, "tool") is
-        "assistant.reasoning" or "assistant.progress" or "context.compact";
+        "assistant.reasoning" or "assistant.progress";
 
     internal bool Equivalent(NativeChatRenderInput other)
     {

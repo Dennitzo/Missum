@@ -66,7 +66,7 @@ public sealed partial class NativeAssistantPage
                 var height = slot.ActualHeight;
                 if (view.HasActivityDisclosure || view.ActivityLabel != "Denke nach" || view.IsExpanded)
                     throw new InvalidOperationException("Thinking must be static text without disclosure.");
-                foreach (var tool in new[] { "assistant.reasoning", "context.compact", "assistant.progress" })
+                foreach (var tool in new[] { "assistant.reasoning", "assistant.progress" })
                 {
                     ApplyEvent("conversation.toolStepChanged", JsonSerializer.SerializeToElement(new
                     {
@@ -75,7 +75,7 @@ public sealed partial class NativeAssistantPage
                     }));
                     RenderMessagesNow(); UpdateLayout();
                     if (!ReferenceEquals(slot, _messageBlocks[id]["slot:activity:start"]) || Math.Abs(slot.ActualHeight - height) > 1)
-                        throw new InvalidOperationException("Prefill/reasoning/compaction changed the activity slot.");
+                        throw new InvalidOperationException("Prefill/reasoning changed the activity slot.");
                 }
                 if (Descendants(_messageViews[id].View).OfType<TextBlock>().Any(text => text.Text.Contains("PRIVATE REASONING", StringComparison.Ordinal)))
                     throw new InvalidOperationException("Reasoning leaked into the chat.");

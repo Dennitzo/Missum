@@ -48,4 +48,16 @@ public sealed class NativeChatRenderInputTests
         var first = Input("Antwort");
         Assert.False(first.Equivalent(new("Antwort", [], [], "streaming", false, true)));
     }
+
+    [Fact]
+    public void CompactionStatusInvalidatesTheVisibleRowAndCannotDisappearInStalePreparation()
+    {
+        var running = Input("Antwort", Step("compact", "context.compact", offset: 7));
+        var completedStep = JsonSerializer.SerializeToElement(new { id = "compact", tool = "context.compact", contentOffset = 7, status = "completed" });
+        Assert.False(running.Equivalent(Input("Antwort", completedStep)));
+        Assert.False(running.Equivalent(Input("Antwort")));
+        Assert.False(running.CanPublishBefore(Input("Antwort")));
+        Assert.False(running.CanPublishBefore(Input("Antwort", Step("compact", "context.compact", offset: 3))));
+        Assert.True(running.CanPublishBefore(Input("Antwort danach", completedStep)));
+    }
 }

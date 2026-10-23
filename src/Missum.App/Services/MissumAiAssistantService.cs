@@ -2251,7 +2251,7 @@ public sealed partial class MissumAiAssistantService(
                         var context = item.Data.Deserialize<ContextChangedEvent>(JsonOptions);
                         if (context is not null)
                         {
-                            if (context.WasCompacted)
+                            if (context.CompactionPerformed ?? context.WasCompacted)
                             {
                                 await RecordToolStepAsync(activeCompactionStepId ?? $"context-compaction:{item.RunId}:{item.Id}",
                                     "context.compact", "completed", context.Detail ?? "Der Arbeitskontext wurde verdichtet.",

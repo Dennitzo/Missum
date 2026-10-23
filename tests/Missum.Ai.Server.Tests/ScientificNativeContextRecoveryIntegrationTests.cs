@@ -63,6 +63,7 @@ public sealed class ScientificNativeContextRecoveryIntegrationTests
             var compacted = Assert.Single(events, item => item.Type == RunEventTypes.ContextChanged
                 && item.Data.GetProperty("wasCompacted").GetBoolean());
             Assert.Equal(contextLength, compacted.Data.GetProperty("contextLimit").GetInt32());
+            Assert.True(compacted.Data.GetProperty("compactionPerformed").GetBoolean());
             var digits = string.Concat((compacted.Data.GetProperty("detail").GetString() ?? "").Where(char.IsDigit));
             Assert.Contains(exactTokens.ToString(System.Globalization.CultureInfo.InvariantCulture), digits, StringComparison.Ordinal);
             Assert.Contains(contextLength.ToString(System.Globalization.CultureInfo.InvariantCulture), digits, StringComparison.Ordinal);

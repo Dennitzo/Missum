@@ -232,7 +232,7 @@ public sealed partial class NativeAssistantPage
                         if (!string.IsNullOrWhiteSpace(S(step, "detail")))
                             result.Add(new("steering:" + stepId, "steering", S(step, "detail"), next, step));
                     }
-                    else result.Add(new(activity.Key, tool is "subagent" or "subagent.completed" ? "subagent" : tool == "assistant.continuation" ? "continuationReceipt" : "tool",
+                    else result.Add(new(activity.Key, tool is "subagent" or "subagent.completed" ? "subagent" : tool == "assistant.continuation" ? "continuationReceipt" : tool == "context.compact" ? "compactionReceipt" : "tool",
                         "", 0, step, Number: tool == "assistant.activity" ? number : ++number, ReplacesKey: activity.ReplacesKey, OwnsActivitySlot: true));
                 }
                 if (artifactGroups.Remove(stepId, out var images))
@@ -271,7 +271,7 @@ public sealed partial class NativeAssistantPage
 
     private NativeVirtualizingBlockPanel.Row VirtualRow(string messageId, JsonElement message, LogicalBlock block)
     {
-        object version = block.Kind is "text" or "steering" ? block.Text : block.Kind is "tool" or "subagent" or "continuationReceipt" ? block.Data : MessageVersion(message);
+        object version = block.Kind is "text" or "steering" ? block.Text : block.Kind is "tool" or "subagent" or "continuationReceipt" or "compactionReceipt" ? block.Data : MessageVersion(message);
         var estimate = block.Kind switch { "text" => Math.Max(38, block.Text.Length / 85d * 26 + 12),
             "steering" => Math.Max(38, block.Text.Length / 85d * 26 + 12) + 36, "artifacts" => 360, _ => 44 };
         return new(block.Key, version, estimate,
@@ -320,6 +320,9 @@ public sealed partial class NativeAssistantPage
             case "continuationReceipt":
                 view = new ContinuationReceiptView();
                 break;
+            case "compactionReceipt":
+                view = new CompactionReceiptView();
+                break;
             case "earlier":
                 var earlier = new Button { Content = block.Text, HorizontalAlignment = HorizontalAlignment.Left };
                 earlier.Click += async (_, _) => await LoadEarlierToolBlocksAsync(id);
@@ -342,7 +345,8 @@ public sealed partial class NativeAssistantPage
         {
             var sameKind = block.Kind == "tool" && slot.Content is ToolStepView || block.Kind == "subagent" && slot.Content is SubagentLifecycleView
                 || block.Kind == "text" && slot.Content is ContentControl
-                || block.Kind == "continuationReceipt" && slot.Content is ContinuationReceiptView;
+                || block.Kind == "continuationReceipt" && slot.Content is ContinuationReceiptView
+                || block.Kind == "compactionReceipt" && slot.Content is CompactionReceiptView;
             if (!sameKind) slot.Content = CreateVirtualBlock(id, message, block, wrap: false);
             else UpdateVirtualBlock((FrameworkElement)slot.Content, id, message, block);
             return;
@@ -364,6 +368,7 @@ public sealed partial class NativeAssistantPage
                 tool.OpenDetails = () => OpenToolTabAsync(id, S(block.Data, "id"));
                 tool.Update(block.Data, block.Number); break;
             case ContinuationReceiptView receipt: receipt.Update(block.Data); break;
+            case CompactionReceiptView receipt: receipt.Update(block.Data); break;
             case SubagentLifecycleView child: child.Update(block.Data, FindSubagentForStep(block.Data)); break;
             case NativeArtifactLinks artifacts: artifacts.UpdateArtifacts(block.Artifacts ?? []); break;
             case ContinuationToolStepView continuation: UpdateContinuationStep(id, message, continuation); break;

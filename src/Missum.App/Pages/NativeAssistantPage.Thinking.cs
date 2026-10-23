@@ -26,7 +26,7 @@ public sealed partial class NativeAssistantPage
     {
         if (!_chatActivityStates.TryGetValue(id, out var state)) _chatActivityStates[id] = state = new();
         var visible = MessageSteps(message).LastOrDefault(step => S(step, "tool") is not
-            ("assistant.reasoning" or "assistant.progress" or "context.compact"));
+            ("assistant.reasoning" or "assistant.progress"));
         state.ObserveOutput(MessageContent(message), S(visible, "id") + ":" + S(visible, "status")
             + (S(visible, "tool") == "assistant.narration" ? S(visible, "detail") : ""),
             S(message, "status") is "streaming" or "pending");

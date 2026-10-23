@@ -393,7 +393,7 @@ public sealed partial record SubagentChatState(
             case RunEventTypes.ContextChanged:
                 var context = item.Data.Deserialize<ContextChangedEvent>(JsonOptions);
                 next = next with { ContextUsed = context?.EstimatedInputTokens ?? ContextUsed, ContextLimit = context?.ContextLimit ?? ContextLimit };
-                if (context?.WasCompacted == true)
+                if (context is not null && (context.CompactionPerformed ?? context.WasCompacted))
                 {
                     var prior = message.ToolSteps?.LastOrDefault(step => step.Tool == "context.compact" && step.Status == "running");
                     message = AddStep(message, new(prior?.Id ?? $"context-compaction:{RunId}:{item.Id}", "context.compact", "completed",
@@ -470,8 +470,12 @@ public sealed partial record SubagentChatState(
         // Parent lifecycle receipts can arrive with a clock older than the last
         // child token. The revision makes their terminal tool states authoritative.
         Status = status, UpdatedAt = at, Revision = message.Revision + 1,
-        ToolSteps = (message.ToolSteps ?? []).Select(step => step.Status == "running" ? step with
-            { Status = status == MessageStatus.Completed ? "completed" : status.ToString().ToLowerInvariant(), CompletedAt = at, UpdatedAt = at } : step).ToArray(),
+        ToolSteps = (message.ToolSteps ?? []).Select(step => step.Status != "running" ? step
+            : step.Tool == "context.compact"
+                ? MissumAiAssistantService.CompleteOpenToolStep(step, status.ToString().ToLowerInvariant(), null)
+                    with { CompletedAt = at, UpdatedAt = at }
+                : step with { Status = status == MessageStatus.Completed ? "completed" : status.ToString().ToLowerInvariant(),
+                    CompletedAt = at, UpdatedAt = at }).ToArray(),
     };
 
     internal static string StateName(RunState state) => JsonNamingPolicy.CamelCase.ConvertName(state.ToString());

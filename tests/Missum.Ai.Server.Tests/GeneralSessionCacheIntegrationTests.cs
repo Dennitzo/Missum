@@ -18,6 +18,31 @@ public sealed class GeneralSessionCacheIntegrationTests
     private static readonly int[] ContinuedRequestIndices = [2, 3, 4];
 
     [Fact]
+    public async Task ReusedPreparedSessionHistoryDoesNotReportAnotherCompactionOperation()
+    {
+        using var context = new TestServerContext();
+        context.Options.ModelRuntimeUri = new("http://native.test:19090");
+        context.Options.GeneralModelId = NativeHandler.ModelA;
+        using var native = new NativeHandler();
+        using var services = new Services(context, native);
+        var request = Request("prepared-session", [Message("user", "Arbeite mit dem gespeicherten Arbeitsstand weiter.")],
+            NativeHandler.ModelA) with { SessionContext = new("prepared-history", 12, 1, 1000, PreparedByAi: true) };
+
+        var first = await services.CompleteAsync(request);
+        var second = await services.CompleteAsync(request with { Messages = [.. request.Messages,
+            Message("assistant", native.Answers[0]), Message("user", "Setze mit dem nächsten Punkt fort.")] });
+
+        foreach (var runId in new[] { first, second })
+        {
+            var changed = Assert.Single(await services.Repository.GetEventsAfterAsync(runId, 0),
+                item => item.Type == RunEventTypes.ContextChanged);
+            Assert.True(changed.Data.GetProperty("wasCompacted").GetBoolean());
+            Assert.True(changed.Data.GetProperty("historyWasCompacted").GetBoolean());
+            Assert.False(changed.Data.GetProperty("compactionPerformed").GetBoolean());
+        }
+    }
+
+    [Fact]
     public async Task CodingContinuationKeepsEvaluatedPolicyOrderAndToolSchemaOrderWithoutFreshGpuAdmission()
     {
         using var context = new TestServerContext();
@@ -349,7 +374,8 @@ public sealed class GeneralSessionCacheIntegrationTests
             var events = await Repository.GetEventsAfterAsync(id, 0);
             Assert.Single(events, item => item.Type == RunEventTypes.RunCompleted);
             Assert.DoesNotContain(events, item => item.Type == RunEventTypes.RunFailed);
-            Assert.DoesNotContain(events, item => item.Type == RunEventTypes.ContextChanged && item.Data.GetProperty("wasCompacted").GetBoolean());
+            Assert.DoesNotContain(events, item => item.Type == RunEventTypes.ContextChanged
+                && item.Data.GetProperty("compactionPerformed").GetBoolean());
             return id;
         }
 

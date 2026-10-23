@@ -731,6 +731,85 @@ public sealed class SubagentChatStateTests
         Assert.Equal(child.AgentId, completed.AgentId);
     }
 
+    [Fact]
+    public void ReusedPreparedHistoryUpdatesCountersWithoutCreatingAnotherCompactionReceipt()
+    {
+        var child = Child();
+        var context = new ContextChangedEvent(1000, 32768, 0, true, "Gespeicherte Verdichtung geladen.",
+            HistoryWasCompacted: true, CompactionPerformed: false);
+
+        child = child.Apply(Event(child, 1, RunEventTypes.ContextChanged, context));
+        child = child.Apply(Event(child, 2, RunEventTypes.ContextChanged, context with { EstimatedInputTokens = 1200 }));
+
+        Assert.Empty(child.AssistantMessage.ToolSteps ?? []);
+        Assert.Equal(1200, child.ContextUsed);
+        Assert.Equal(32768, child.ContextLimit);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(true)]
+    public void ActualAndLegacyCompactionCompletionsRemainVisibleWithoutAStartHeartbeat(bool? performed)
+    {
+        var child = Child();
+        var completed = child.Apply(Event(child, 1, RunEventTypes.ContextChanged,
+            new ContextChangedEvent(1000, 32768, 0, true, "Neu verdichtet.",
+                HistoryWasCompacted: true, CompactionPerformed: performed)));
+
+        var receipt = Assert.Single(completed.AssistantMessage.ToolSteps!);
+        Assert.Equal("context.compact", receipt.Tool);
+        Assert.Equal("completed", receipt.Status);
+        Assert.NotNull(receipt.CompletedAt);
+        Assert.Equal(receipt, Assert.Single(completed.Apply(Event(completed, 2, RunEventTypes.RunCompleted, new { }))
+            .AssistantMessage.ToolSteps!));
+    }
+
+    [Fact]
+    public void ReusedHistoryCannotCompleteAnActiveCompactionButANewResultCompletesItsSameReceipt()
+    {
+        var child = Child();
+        child = child.Apply(Event(child, 1, RunEventTypes.ModelGeneration, new ModelGenerationEvent("codingCompacting")));
+        var original = Assert.Single(child.AssistantMessage.ToolSteps!);
+        var context = new ContextChangedEvent(1000, 32768, 0, true,
+            HistoryWasCompacted: true, CompactionPerformed: false);
+        child = child.Apply(Event(child, 2, RunEventTypes.ContextChanged, context));
+        Assert.Equal("running", Assert.Single(child.AssistantMessage.ToolSteps!).Status);
+
+        child = child.Apply(Event(child, 3, RunEventTypes.ContextChanged, context with { CompactionPerformed = true }));
+
+        var completed = Assert.Single(child.AssistantMessage.ToolSteps!);
+        Assert.Equal(original.Id, completed.Id);
+        Assert.Equal(original.StartedAt, completed.StartedAt);
+        Assert.Equal("completed", completed.Status);
+        Assert.Equal(Start.AddSeconds(3), completed.CompletedAt);
+    }
+
+    [Theory]
+    [InlineData(RunEventTypes.RunCompleted, "interrupted", MessageStatus.Completed)]
+    [InlineData(RunEventTypes.RunFailed, "failed", MessageStatus.Failed)]
+    [InlineData(RunEventTypes.RunCancelled, "cancelled", MessageStatus.Cancelled)]
+    public async Task MissingSubagentCompactionResultCannotBecomeASuccessAfterPersistingAndReloading(
+        string type, string expected, MessageStatus messageStatus)
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var child = Child();
+        child = child.Apply(Event(child, 1, RunEventTypes.ModelGeneration, new ModelGenerationEvent("codingCompacting")));
+        child = child.Apply(Event(child, 2, type, type == RunEventTypes.RunFailed
+            ? (object)new RunFailedEvent("fixture.failure", "Komprimierung ohne Ergebnis", false) : new { }));
+
+        var serialized = await child.PersistAsync(environment.Directory);
+        var parent = child.AssistantMessage with { ToolSteps = [Receipt(child, child.ReceiptId, serialized)] };
+        var restored = await SubagentChatState.ReadAsync(parent, child.AgentId, environment.Directory);
+
+        Assert.NotNull(restored);
+        Assert.Equal(messageStatus, restored.AssistantMessage.Status);
+        var step = Assert.Single(restored.AssistantMessage.ToolSteps!);
+        Assert.Equal("context.compact", step.Tool);
+        Assert.Equal(expected, step.Status);
+        Assert.Contains("kein neuer komprimierter Kontext", step.Detail);
+        Assert.Equal(Start.AddSeconds(2), step.CompletedAt);
+    }
+
     [Theory]
     [InlineData(RunEventTypes.RunCompleted, "completed", MessageStatus.Completed)]
     [InlineData(RunEventTypes.RunFailed, "failed", MessageStatus.Failed)]

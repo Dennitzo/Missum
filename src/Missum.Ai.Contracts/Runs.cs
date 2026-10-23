@@ -357,7 +357,10 @@ public sealed record ContextChangedEvent(
     bool PreparationCompleted = true,
     int HistoryTokens = 0,
     bool HistoryWasCompacted = false,
-    int? InputTokenBudget = null);
+    int? InputTokenBudget = null,
+    // WasCompacted also describes already prepared input. This flag identifies a
+    // new operation in this event; null preserves historical journal semantics.
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] bool? CompactionPerformed = null);
 
 public sealed record QueueChangedEvent(int Position, int Waiting, string Lane = "gpu");
 

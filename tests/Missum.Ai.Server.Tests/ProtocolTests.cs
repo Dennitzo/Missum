@@ -9,6 +9,25 @@ namespace Missum.Ai.Server.Tests;
 
 public sealed class ProtocolTests
 {
+    [Theory]
+    [InlineData(null)]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ContextCompactionOperationFlagRoundTripsWithoutChangingLegacyState(bool? performed)
+    {
+        var options = MissumAiProtocol.CreateJsonOptions();
+        var context = new ContextChangedEvent(1000, 32768, 0, true,
+            HistoryWasCompacted: true, CompactionPerformed: performed);
+        var json = JsonSerializer.Serialize(context, options);
+        var restored = JsonSerializer.Deserialize<ContextChangedEvent>(json, options)!;
+
+        Assert.True(restored.WasCompacted);
+        Assert.True(restored.HistoryWasCompacted);
+        Assert.Equal(performed, restored.CompactionPerformed);
+        using var document = JsonDocument.Parse(json);
+        Assert.Equal(performed.HasValue, document.RootElement.TryGetProperty("compactionPerformed", out _));
+    }
+
     [Fact]
     public void GeneralPoliciesRemainValidUtf8GermanText()
     {

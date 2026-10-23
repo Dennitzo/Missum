@@ -572,7 +572,8 @@ public sealed partial class RunProcessor : BackgroundService
                     0,
                     research.FetchedSourceCount,
                     PreparationCompleted: true,
-                    InputTokenBudget: ContextPlanner.ComputeInputTokenBudget(contextLength, maximumOutputTokens)),
+                    InputTokenBudget: ContextPlanner.ComputeInputTokenBudget(contextLength, maximumOutputTokens),
+                    CompactionPerformed: true),
                 cancellationToken).ConfigureAwait(false);
             await SaveCheckpointAsync().ConfigureAwait(false);
             if (explicitResearchResult is { } researchReceipt)
@@ -1130,7 +1131,8 @@ public sealed partial class RunProcessor : BackgroundService
                     await _repository.AppendEventAsync(runId, RunEventTypes.ContextChanged,
                         new ContextChangedEvent(ContextPlanner.EstimateTokens(messages), contextLength,
                             0, true, $"{compaction.ArchivedMessages} ältere Coding-Nachrichten wurden als fortsetzbarer Arbeitsstand gespeichert. Der ursprüngliche Auftrag und aktuelle Werkzeugbelege bleiben im Kontext; das vollständige Journal bleibt erhalten.",
-                            InputTokenBudget: ContextPlanner.ComputeInputTokenBudget(contextLength, maximumOutputTokens)),
+                            InputTokenBudget: ContextPlanner.ComputeInputTokenBudget(contextLength, maximumOutputTokens),
+                            CompactionPerformed: true),
                         steeringCall.Token).ConfigureAwait(false);
                 }
                 try
@@ -1195,7 +1197,8 @@ public sealed partial class RunProcessor : BackgroundService
                         PreparationCompleted: true,
                         HistoryTokens: request.SessionContext?.EstimatedTokens ?? 0,
                         HistoryWasCompacted: request.SessionContext?.PreparedByAi == true,
-                        InputTokenBudget: contextPlan.InputTokenBudget),
+                        InputTokenBudget: contextPlan.InputTokenBudget,
+                        CompactionPerformed: contextPlan.WasCompacted),
                     steeringCall.Token).ConfigureAwait(false);
 
                 if (isCoding || !string.IsNullOrWhiteSpace(request.SessionId))
@@ -1268,7 +1271,8 @@ public sealed partial class RunProcessor : BackgroundService
                                 new ContextChangedEvent(contextPlan.EstimatedInputTokens, overflow.ContextLength,
                                     0, true, $"Der native Tokenzähler meldete {overflow.InputTokens:N0} Eingabetoken bei {overflow.ContextLength:N0} Kontexttoken. "
                                         + contextPlan.Notice, PreparationCompleted: true,
-                                    InputTokenBudget: contextPlan.InputTokenBudget), steeringCall.Token).ConfigureAwait(false);
+                                    InputTokenBudget: contextPlan.InputTokenBudget,
+                                    CompactionPerformed: true), steeringCall.Token).ConfigureAwait(false);
                         }
                     }
                     await _repository.AppendEventAsync(runId, "model.turn.metrics", new

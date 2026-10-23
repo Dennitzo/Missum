@@ -8,16 +8,17 @@ public sealed class NativeActivityProjectionTests
 {
     private static readonly string[] ExpectedNarrationAnswerThinking = ["assistant.narration", "assistant.answer", "assistant.activity"];
     private static readonly string[] ExpectedNarrationTool = ["assistant.narration", "coding.read"];
+    private static readonly string[] ExpectedCompactionChronology = ["assistant.answer", "context.compact", "assistant.answer", "coding.read", "assistant.answer"];
     private static JsonElement Step(string id, string tool, string status = "completed", int offset = 0) =>
         JsonSerializer.SerializeToElement(new { id, tool, status, contentOffset = offset, detail = "PRIVATE REASONING 20000 tokens" });
     private static string Tool(NativeActivityProjection.Entry item) => item.Step.GetProperty("tool").GetString()!;
 
     [Fact]
-    public void PrefillReasoningAndCompactionUseOneNonDisclosureTailSlot()
+    public void PrefillAndReasoningUseOneNonDisclosureTailSlot()
     {
         var initial = Assert.Single(NativeActivityProjection.Build([], true, 0));
         var thinking = Assert.Single(NativeActivityProjection.Build([
-            Step("r", "assistant.reasoning", "running"), Step("p", "assistant.progress"), Step("c", "context.compact")], true, 0));
+            Step("r", "assistant.reasoning", "running"), Step("p", "assistant.progress")], true, 0));
         Assert.Equal(initial.Key, thinking.Key);
         Assert.Equal(initial.Offset, thinking.Offset);
         Assert.Equal("assistant.activity", Tool(thinking));
@@ -29,6 +30,7 @@ public sealed class NativeActivityProjectionTests
     [InlineData("coding.read")]
     [InlineData("subagent")]
     [InlineData("assistant.narration")]
+    [InlineData("context.compact")]
     public void AnyVisibleStepConsumesTheThinkingSlot(string tool)
     {
         var before = Assert.Single(NativeActivityProjection.Build([Step("r", "assistant.reasoning", "running")], true, 0));
@@ -142,13 +144,63 @@ public sealed class NativeActivityProjectionTests
     public void HiddenReceiptsCannotSplitCompletedSourceText()
     {
         var result = NativeActivityProjection.Build([
-            Step("r1", "assistant.reasoning", offset: 20), Step("p", "assistant.progress", offset: 40),
-            Step("c", "context.compact", offset: 60)], false, 100);
+            Step("r1", "assistant.reasoning", offset: 20), Step("p", "assistant.progress", offset: 40)], false, 100);
 
         var answer = Assert.Single(result);
         Assert.Equal("source:0", answer.Key);
         Assert.Equal(0, answer.Offset);
         Assert.Equal(100, answer.EndOffset);
+    }
+
+    [Theory]
+    [InlineData("running")]
+    [InlineData("completed")]
+    [InlineData("failed")]
+    [InlineData("cancelled")]
+    public void PersistedCompactionKeepsItsChronologicalSourcePosition(string status)
+    {
+        var steps = new[] { Step("r", "assistant.reasoning", offset: 20),
+            Step("c", "context.compact", status, 60), Step("next", "coding.read", offset: 80) };
+        var result = NativeActivityProjection.Build(steps, false, 100);
+
+        Assert.Equal(ExpectedCompactionChronology, result.Select(Tool));
+        var receipt = Assert.Single(result, entry => Tool(entry) == "context.compact");
+        Assert.Equal("tool:c", receipt.Key);
+        Assert.Equal(60, receipt.Offset);
+        Assert.Equal(status, receipt.Step.GetProperty("status").GetString());
+        Assert.Equal(100, result.Where(entry => Tool(entry) == "assistant.answer").Sum(entry => entry.EndOffset - entry.Offset));
+        Assert.DoesNotContain(result, entry => Tool(entry) == "assistant.activity");
+    }
+
+    [Fact]
+    public void RunningCompactionReplacesThinkingWithoutADuplicateTransientRow()
+    {
+        var thinking = Assert.Single(NativeActivityProjection.Build([], true, 0));
+        var running = Assert.Single(NativeActivityProjection.Build([Step("c", "context.compact", "running")], true, 0, waitingForModel: true));
+        var completed = NativeActivityProjection.Build([Step("c", "context.compact")], true, 0, waitingForModel: true);
+        Assert.Equal(thinking.Key, running.ReplacesKey);
+        Assert.Equal("context.compact", Tool(running));
+        Assert.Equal(running.Key, completed[0].Key);
+        Assert.Equal("assistant.activity", Tool(completed[^1]));
+        Assert.Equal("activity:after:c", completed[^1].Key);
+    }
+
+    [Fact]
+    public void VirtualHistoryKeepsCompactionAsASeparateStaticBlockAfterPagingAndReload()
+    {
+        var message = JsonSerializer.SerializeToElement(new { role = "assistant", status = "completed" });
+        var tail = new[] { Step("c", "context.compact", offset: 30), Step("next", "coding.read", offset: 50) };
+        var recent = NativeAssistantPage.BuildLogicalBlocks(message, new string('x', 100), tail, [], false, []);
+        var reloaded = JsonSerializer.Deserialize<JsonElement[]>(JsonSerializer.Serialize(
+            Enumerable.Range(0, 150).Select(index => Step("older-" + index, "coding.read")).Concat(tail)))!;
+        var history = NativeAssistantPage.BuildLogicalBlocks(message, new string('x', 100), reloaded, [], false, []);
+        var receipt = Assert.Single(recent, block => block.Kind == "compactionReceipt");
+        Assert.Equal("tool:c", receipt.Key);
+        Assert.True(receipt.OwnsActivitySlot);
+        var restored = Assert.Single(history, block => block.Kind == "compactionReceipt");
+        Assert.Equal(receipt.Key, restored.Key);
+        Assert.Equal(receipt.Data.GetRawText(), restored.Data.GetRawText());
+        Assert.Equal(new string('x', 100), string.Concat(history.Where(block => block.Kind == "text").Select(block => block.Text)));
     }
 
     [Fact]
