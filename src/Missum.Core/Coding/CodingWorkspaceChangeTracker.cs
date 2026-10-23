@@ -25,7 +25,7 @@ public sealed class CodingWorkspaceChangeTracker : IDisposable
     private static readonly HashSet<string> Ignored = new(StringComparer.OrdinalIgnoreCase)
     {
         ".git", ".vs", ".venv", "venv", "node_modules", "bin", "obj", "__pycache__", ".next", "dist",
-        ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".nox", ".cache", "htmlcov", "unsloth-tmp",
+        ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".nox", ".cache", "htmlcov", "unsloth-tmp", ".publication-renderer",
     };
     private readonly string _root;
     private readonly string _storage;

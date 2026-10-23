@@ -9,6 +9,21 @@ namespace Missum.Tests;
 public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
 {
     [Fact]
+    public async Task PublicationRuntimeStaysOutOfDefaultDiscoveryButCanBeReadExplicitly()
+    {
+        var runtime = Path.Combine(_root, ".publication-renderer");
+        Directory.CreateDirectory(runtime);
+        await File.WriteAllTextAsync(Path.Combine(runtime, "runtime.json"), "publication-runtime-sentinel");
+        await File.WriteAllTextAsync(Path.Combine(_root, "Publikation-erzeugen.ps1"), "publication-runtime-sentinel");
+        var listed = await Execute("coding.list", new { });
+        Assert.Equal("Publikation-erzeugen.ps1", Assert.Single(listed.GetProperty("entries").EnumerateArray()).GetProperty("path").GetString());
+        var search = await Execute("coding.search", new { query = "publication-runtime-sentinel" });
+        Assert.Equal("Publikation-erzeugen.ps1", Assert.Single(search.GetProperty("matches").EnumerateArray()).GetProperty("path").GetString());
+        var explicitRead = await Execute("coding.read", new { path = ".publication-renderer/runtime.json" });
+        Assert.Equal("publication-runtime-sentinel", explicitRead.GetProperty("content").GetString());
+    }
+
+    [Fact]
     public async Task HugeSingleLineScientificResultIsRejectedBeforeJsonReceiptAllocation()
     {
         var path = Path.Combine(_root, "huge-result.json");

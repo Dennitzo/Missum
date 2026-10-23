@@ -16,7 +16,7 @@ public sealed class LocalCodingToolExecutor
     private static readonly HashSet<string> IgnoredDirectories = new(StringComparer.OrdinalIgnoreCase)
     {
         ".git", ".vs", ".venv", "venv", "node_modules", "bin", "obj", "__pycache__", ".next", "dist",
-        ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".nox", ".cache", "htmlcov", "unsloth-tmp",
+        ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".nox", ".cache", "htmlcov", "unsloth-tmp", ".publication-renderer",
         "Binaries", "DerivedDataCache", "Intermediate", "Saved",
     };
     private static readonly string[] IgnoredDirectoryPatterns = ["*.egg-info", "pytest-of-*", "pytest-<digits>"];

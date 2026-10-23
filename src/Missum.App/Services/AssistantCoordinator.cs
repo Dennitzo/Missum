@@ -962,6 +962,7 @@ public sealed partial class AssistantCoordinator(
         if (!Enum.IsDefined(chatMode)) throw new ArgumentOutOfRangeException(nameof(chatMode));
         var fullPath = Path.GetFullPath(workspacePath.Trim());
         if (!Directory.Exists(fullPath)) throw new DirectoryNotFoundException("Der Projektordner existiert nicht.");
+        await SciencePublicationScaffold.EnsureAsync(chatMode, fullPath, cancellationToken).ConfigureAwait(false);
         var session = await chats.CreateSessionAsync(DefaultSessionTitle, chatMode, cancellationToken).ConfigureAwait(false);
         try
         {

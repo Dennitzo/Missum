@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Missum.Publication.Cli</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/Missum.Core/Missum.Core.csproj" />
+    <Compile Include="../../src/Missum.App/Services/ScientificPublicationImages.cs" Link="Shared/ScientificPublicationImages.cs" />
+    <Compile Include="../../src/Missum.App/Services/ScientificPublicationService.Prose.cs" Link="Shared/ScientificPublicationService.Prose.cs" />
+    <Content Include="../../src/Missum.App/Assets/Scripts/export-document.ps1" Link="Assets/Scripts/export-document.ps1" TargetPath="Assets/Scripts/export-document.ps1" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="../../src/Missum.App/Assets/DocumentRendering/**/*" Link="Assets/DocumentRendering/%(RecursiveDir)%(Filename)%(Extension)" TargetPath="Assets/DocumentRendering/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

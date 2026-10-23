@@ -19,6 +19,7 @@
     <AppxPackageSigningEnabled>false</AppxPackageSigningEnabled>
     <PublishTrimmed>false</PublishTrimmed>
     <PublishReadyToRun>false</PublishReadyToRun>
+    <PublicationRendererPublishDir>$(MSBuildProjectDirectory)\obj\publication-renderer-publish\</PublicationRendererPublishDir>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)' == 'Portable'">
@@ -34,6 +35,7 @@
     <ProjectReference Include="..\Missum.Ai.Client\Missum.Ai.Client.csproj" />
     <ProjectReference Include="..\Missum.Ai.Contracts\Missum.Ai.Contracts.csproj" />
     <ProjectReference Include="..\ExtensionHost\ExtensionHost.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\..\tools\Missum.Publication.Cli\Missum.Publication.Cli.csproj" ReferenceOutputAssembly="false" Private="false" />
     <ProjectReference Include="..\Missum.Core\Missum.Core.csproj" />
     <ProjectReference Include="..\Missum.Infrastructure\Missum.Infrastructure.csproj" />
   </ItemGroup>
@@ -65,6 +67,9 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
+    <Content Include="..\..\tools\Missum.Publication.Cli\Bundle\*" Link="Assets\PublicationTool\%(Filename)%(Extension)"
+             TargetPath="Assets\PublicationTool\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
     <Content Include="..\..\windows\manage-coding-llama.ps1">
       <Link>Assets\NativeRuntime\windows\manage-coding-llama.ps1</Link>
       <TargetPath>Assets\NativeRuntime\windows\manage-coding-llama.ps1</TargetPath>
@@ -166,6 +171,32 @@
     </ItemGroup>
     <Copy SourceFiles="@(_PortableExtensionHostArtifacts)"
           DestinationFiles="@(_PortableExtensionHostArtifacts->'$(PublishDir)ExtensionHost\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+  <!-- The project-local publication tool must work without an installed SDK or
+       runtime. Keep this separate payload outside the WinUI single-file bundle. -->
+  <Target Name="PreparePublicationRendererBundle" AfterTargets="Build"
+          Condition="'$(DesignTimeBuild)' != 'true' and '$(SkipPublicationRendererBundle)' != 'true'">
+    <RemoveDir Directories="$(PublicationRendererPublishDir)" />
+    <MSBuild Projects="..\..\tools\Missum.Publication.Cli\Missum.Publication.Cli.csproj"
+             Targets="Restore;Publish" BuildInParallel="false"
+             RemoveProperties="TargetFramework;TargetFrameworks;OutputPath;OutDir;IntermediateOutputPath;BaseIntermediateOutputPath;WindowsAppSDKSelfContained;IncludeAllContentForSelfExtract"
+             Properties="Configuration=Release;RuntimeIdentifier=win-x64;SelfContained=true;PublishSingleFile=false;PublishTrimmed=false;PublishReadyToRun=false;DebugSymbols=false;DebugType=None;PublishDir=$(PublicationRendererPublishDir)" />
+    <Error Condition="!Exists('$(PublicationRendererPublishDir)Missum.Publication.Cli.exe')"
+           Text="Das eigenständige Publikationswerkzeug wurde nicht erzeugt." />
+    <ItemGroup>
+      <_PublicationRendererArtifacts Include="$(PublicationRendererPublishDir)**\*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_PublicationRendererArtifacts)"
+          DestinationFiles="@(_PublicationRendererArtifacts->'$(OutDir)Assets\PublicationTool\Renderer\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="CopyPublishedPublicationRendererBundle" AfterTargets="Publish" DependsOnTargets="PreparePublicationRendererBundle"
+          Condition="'$(PublishDir)' != '' and '$(SkipPublicationRendererBundle)' != 'true'">
+    <Copy SourceFiles="@(_PublicationRendererArtifacts)"
+          DestinationFiles="@(_PublicationRendererArtifacts->'$(PublishDir)Assets\PublicationTool\Renderer\%(RecursiveDir)%(Filename)%(Extension)')"
           SkipUnchangedFiles="true" />
   </Target>
 </Project>

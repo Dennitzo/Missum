@@ -33,6 +33,18 @@ public sealed class CodingWorkspaceChangeTrackerTests : IDisposable
     }
 
     [Fact]
+    public async Task PublicationRuntimeChangesDoNotBecomeResearchChanges()
+    {
+        await WriteAsync("Publikation.md", "# Quelle\n");
+        await WriteAsync(".publication-renderer/Assets/styles.css", "before");
+        using var tracker = new CodingWorkspaceChangeTracker(Workspace, Storage);
+        await tracker.InitializeAsync();
+        await WriteAsync(".publication-renderer/Assets/styles.css", "after");
+        await WriteAsync(".publication-renderer/new-runtime.json", "generated");
+        Assert.Empty((await tracker.RefreshAsync()).Files);
+    }
+
+    [Fact]
     public async Task ExternalFileCreatesDeletesAndEmptyFilesHaveCorrectNetKindsAndPatchHeaders()
     {
         await WriteAsync("old.txt", "one\ntwo\n");

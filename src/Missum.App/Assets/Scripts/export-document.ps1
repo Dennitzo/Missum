@@ -11,7 +11,11 @@ param(
 
     [switch]$ScientificPublication,
 
-    [switch]$ChatTranscript
+    [switch]$ChatTranscript,
+
+    [string]$DiagnosticsPath,
+
+    [switch]$ValidateOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -23,6 +27,42 @@ if ($ScientificPublication -and $ChatTranscript) {
 # otherwise uses the console code page and corrupts German text and TeX symbols.
 $OutputEncoding = [Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = $OutputEncoding
+$diagnosticLimit = if ([string]::IsNullOrWhiteSpace($DiagnosticsPath)) { 8 } else { [int]::MaxValue }
+$diagnosticTextLimit = if ([string]::IsNullOrWhiteSpace($DiagnosticsPath)) { 500 } else { [int]::MaxValue }
+
+function Write-DocumentProgress([string]$Message) {
+    if (-not [string]::IsNullOrWhiteSpace($DiagnosticsPath)) { Write-Output $Message }
+}
+
+function Save-DocumentDiagnostics([string]$Dom) {
+    if ([string]::IsNullOrWhiteSpace($DiagnosticsPath)) { return }
+    $counts = [ordered]@{}
+    foreach ($entry in @(@('mathRendered', 'katex-rendered'), @('mathInvalid', 'katex-invalid'),
+        @('headingInvalid', 'heading-invalid'), @('figureInvalid', 'figure-invalid'))) {
+        $count = 0
+        if ($Dom -match ('data-missum-' + $entry[1] + '="([0-9]+)"')) { $count = [int]$Matches[1] }
+        $counts[$entry[0]] = $count
+    }
+    $issues = [Collections.Generic.List[object]]::new()
+    foreach ($entry in @(@('math', 'katex-errors'), @('heading', 'heading-errors'))) {
+        if ($Dom -match ('data-missum-' + $entry[1] + '="([^"]*)"')) {
+            $items = [Uri]::UnescapeDataString($Matches[1]) | ConvertFrom-Json
+            foreach ($item in @($items)) {
+                if ($null -eq $item) { continue }
+                $issue = [ordered]@{ kind = $entry[0] }
+                foreach ($property in $item.PSObject.Properties) { $issue[$property.Name] = $property.Value }
+                $issues.Add($issue)
+            }
+        }
+    }
+    if ($counts.figureInvalid -gt 0) {
+        $issues.Add([ordered]@{ kind = 'figure'; reason = "$($counts.figureInvalid) nicht lesbare Abbildungen." })
+    }
+    $report = [ordered]@{ schema = 'missum.pdf.diagnostics.v1'; source = $source; counts = $counts; errors = @($issues.ToArray()) }
+    $destination = [IO.Path]::GetFullPath($DiagnosticsPath)
+    [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($destination)) | Out-Null
+    [IO.File]::WriteAllText($destination, (ConvertTo-Json -InputObject $report -Depth 8), [Text.UTF8Encoding]::new($false))
+}
 
 function Resolve-EdgeExecutable {
     $configured = [Environment]::GetEnvironmentVariable('MISSUM_EDGE_PATH')
@@ -97,6 +137,7 @@ $katexCssUri = Convert-ToFileUri (Join-Path $katexRoot 'katex.min.css')
 $katexScriptUri = Convert-ToFileUri (Join-Path $katexRoot 'katex.min.js')
 
 $sourceText = [IO.File]::ReadAllText($source, [Text.Encoding]::UTF8)
+Write-DocumentProgress 'Manuskript wird mit Missum-Markdown, Publikationslayout und KaTeX 0.16.10 gesetzt.'
 $outlineBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('[]'))
 $outlineMatch = [regex]::Match($sourceText, '<!-- MISSUM_PUBLICATION_OUTLINE:(?<payload>[A-Za-z0-9+/=]+) -->')
 if ($outlineMatch.Success) {
@@ -626,12 +667,12 @@ $html = @"
       document.body.dataset.missumKatexInvalid = String(documentContent.querySelectorAll('.math-selectable.invalid').length);
       const headings = Array.from(documentContent.querySelectorAll('h2, h3, h4, h5, h6'));
       document.body.dataset.missumKatexErrors = encodeURIComponent(JSON.stringify(
-        Array.from(documentContent.querySelectorAll('.math-selectable.invalid')).slice(0, 8).map(formula => {
+        Array.from(documentContent.querySelectorAll('.math-selectable.invalid')).slice(0, $diagnosticLimit).map(formula => {
           const preceding = headings.filter(heading => Boolean(heading.compareDocumentPosition(formula) & Node.DOCUMENT_POSITION_FOLLOWING));
           const heading = preceding.length ? preceding[preceding.length - 1] : null;
-          return { section: heading ? (heading.dataset.missumOriginalHeading || heading.textContent.trim()).slice(0, 500) : '',
-            source: (formula.querySelector('.math-source-text')?.textContent || '').slice(0, 500),
-            reason: (formula.dataset.mathError || '').slice(0, 500) };
+          return { section: heading ? (heading.dataset.missumOriginalHeading || heading.textContent.trim()).slice(0, $diagnosticTextLimit) : '',
+            source: (formula.querySelector('.math-source-text')?.textContent || '').slice(0, $diagnosticTextLimit),
+            reason: (formula.dataset.mathError || '').slice(0, $diagnosticTextLimit) };
         })));
       document.body.dataset.missumKatexRendered = String(documentContent.querySelectorAll('.math-render[data-math-typeset="true"] .katex').length);
       document.body.dataset.missumFigureInvalid = String(Array.from(documentContent.querySelectorAll('.publication-figure img')).filter(image => !image.complete || image.naturalWidth === 0).length);
@@ -659,7 +700,7 @@ $html = @"
               text: heading.textContent.trim(), reason: 'Überschrift überschreitet die Satzbreite oder zwei Zeilen; fachlich kürzen.' });
         }
         document.body.dataset.missumHeadingInvalid = String(issues.length);
-        document.body.dataset.missumHeadingErrors = encodeURIComponent(JSON.stringify(issues.slice(0, 12)));
+        document.body.dataset.missumHeadingErrors = encodeURIComponent(JSON.stringify(issues.slice(0, Math.max(12, $diagnosticLimit))));
       }
     };
     if (document.body.classList.contains('scientific-publication')) {
@@ -691,6 +732,7 @@ try {
         (([Uri]$htmlPath).AbsoluteUri + '?missum-validation=1')
     )
 
+    Write-DocumentProgress 'Prüfung: Formeln, Überschriften, Schriftarten und Abbildungen.'
     $validationResult = Invoke-EdgeProcess -Executable $edge -CommandArguments $dumpArguments
     $renderedDom = $validationResult.Output
     if ($validationResult.ExitCode -ne 0) {
@@ -699,6 +741,7 @@ try {
     if ($renderedDom -notmatch 'data-missum-pdf-ready="true"') {
         throw 'Der Missum-Markdown-/KaTeX-Renderer wurde vor der PDF-Erzeugung nicht vollständig initialisiert.'
     }
+    Save-DocumentDiagnostics $renderedDom
     if (-not $ChatTranscript -and $renderedDom -match 'data-missum-katex-invalid="([1-9][0-9]*)"') {
         $invalidCount = $Matches[1]
         $formulaDetails = ''
@@ -729,6 +772,11 @@ try {
         throw "Die PDF wurde nicht erzeugt, weil eine Überschrift nicht vollständig lesbar ist. $headingDetails Die vorherige PDF bleibt erhalten."
     }
 
+    if ($ValidateOnly) {
+        Write-DocumentProgress 'Prüfung erfolgreich. Die vorhandene PDF wurde nicht verändert.'
+        return
+    }
+    Write-DocumentProgress 'Prüfung erfolgreich. PDF mit Inhaltsverzeichnis und Lesezeichen wird erzeugt.'
     $publicationArguments = @()
     if ($ScientificPublication) {
         $publicationArguments = @('--export-tagged-pdf', '--generate-pdf-document-outline')
