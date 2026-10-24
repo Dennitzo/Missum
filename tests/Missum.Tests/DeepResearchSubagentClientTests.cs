@@ -18,7 +18,7 @@ public sealed class DeepResearchSubagentClientTests
     [Theory]
     [InlineData(0)]
     [InlineData(1)]
-    public async Task RealResearchUsesOneOrdinaryChildWithControlsAndReloadableOrigin(int gpuIndex)
+    public async Task HistoricalResearchChildRemainsReloadableWithoutSubagentControlsOrPlanet(int gpuIndex)
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var chats = environment.Get<IChatRepository>();
@@ -59,23 +59,28 @@ public sealed class DeepResearchSubagentClientTests
         Assert.Equal("completed", child.Status);
         Assert.True(child.ResultDelivered);
         Assert.Equal("Beleg aus der Originalquelle mit offener Einschränkung.", child.AssistantMessage.Content);
-        Assert.NotNull(child.CompletionReceipt(0, At));
+        Assert.Null(child.CompletionReceipt(0, At));
         Assert.NotEmpty(observations);
         Assert.All(observations, snapshot =>
         {
             Assert.Equal(child.AgentId, snapshot.GetProperty("agentId").GetString());
-            Assert.True(snapshot.GetProperty("canStop").GetBoolean());
-            Assert.True(snapshot.GetProperty("canResume").GetBoolean());
+            Assert.False(snapshot.GetProperty("canStop").GetBoolean());
+            Assert.False(snapshot.GetProperty("canResume").GetBoolean());
+            Assert.Equal(JsonValueKind.Null, snapshot.GetProperty("planetIndex").ValueKind);
             Assert.Equal(gpuIndex, snapshot.GetProperty("gpuIndex").GetInt32());
         });
         var liveThinking = observations.Where(snapshot => snapshot.GetProperty("status").GetString() == "running")
             .SelectMany(snapshot => snapshot.GetProperty("messages").EnumerateArray())
             .SelectMany(message => message.GetProperty("toolSteps").EnumerateArray())
             .Where(step => step.GetProperty("tool").GetString() == "assistant.reasoning").ToArray();
-        Assert.Contains(liveThinking, step => step.GetProperty("detail").GetString() == "Ich vergleiche die Originalquelle."
-            && (!step.TryGetProperty("detailsDeferred", out var deferred) || !deferred.GetBoolean()));
-        Assert.Contains(liveThinking, step => step.GetProperty("detail").GetString() == "Ich vergleiche die Originalquelle. Eine Einschränkung bleibt offen."
-            && (!step.TryGetProperty("detailsDeferred", out var deferred) || !deferred.GetBoolean()));
+        Assert.NotEmpty(liveThinking);
+        Assert.All(liveThinking, step =>
+        {
+            Assert.Equal(JsonValueKind.Null, step.GetProperty("detail").ValueKind);
+            Assert.True(step.GetProperty("detailsDeferred").GetBoolean());
+        });
+        Assert.Contains(child.AssistantMessage.ToolSteps!, step => step.Tool == "assistant.reasoning"
+            && step.Detail == "Ich vergleiche die Originalquelle. Eine Einschränkung bleibt offen.");
         JsonElement refreshed = default;
         await coordinator.HandleAsync(new(AssistantProtocol.ProtocolVersion, "conversation.refresh", "reload-research",
             JsonSerializer.SerializeToElement(new { sessionId = session.Id })),
@@ -83,7 +88,8 @@ public sealed class DeepResearchSubagentClientTests
         var reloaded = Assert.Single(refreshed.GetProperty("subagents").EnumerateArray());
         Assert.Equal(child.AgentId, reloaded.GetProperty("agentId").GetString());
         Assert.Equal("research-operation", reloaded.GetProperty("originToolStepId").GetString());
-        Assert.True(reloaded.GetProperty("canResume").GetBoolean());
+        Assert.False(reloaded.GetProperty("canResume").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, reloaded.GetProperty("planetIndex").ValueKind);
     }
 
     [Fact]

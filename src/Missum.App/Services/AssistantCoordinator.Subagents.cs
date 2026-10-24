@@ -8,7 +8,7 @@ public sealed partial class AssistantCoordinator
     private object[] ToSubagentDtos(IEnumerable<SubagentChatState> states)
     {
         var children = states.ToArray();
-        _browserPlanetIdentities.Value.EnsureAssigned(children.Select(child => child.AgentId));
+        _browserPlanetIdentities.Value.EnsureAssigned(children.Where(child => !child.IsDeepResearch).Select(child => child.AgentId));
         return children.Select(ToSubagentDto).ToArray();
     }
 
@@ -24,12 +24,12 @@ public sealed partial class AssistantCoordinator
         state.AgentId, state.RunId, state.ParentRunId, state.SessionId, state.Title, state.Status,
         state.Kind, state.OriginToolStepId, state.OriginMessageId,
         state.TranscriptRevision,
-        canStop = !state.IsLegacyDeepResearch,
-        canResume = !state.IsLegacyDeepResearch,
+        canStop = !state.IsDeepResearch,
+        canResume = !state.IsDeepResearch,
         state.GpuIndex,
         sourceUpdates,
         state.TranscriptDeferred, state.ParentMessageId,
-        planetIndex = _browserPlanetIdentities.Value.GetOrAssign(state.AgentId),
+        planetIndex = state.IsDeepResearch ? (int?)null : _browserPlanetIdentities.Value.GetOrAssign(state.AgentId),
         messages = (state.PreviousMessages ?? []).Select(message => ToMessageDto(message,
             state.PreviousMessageArtifacts?.GetValueOrDefault(message.Id.ToString()), state.ToolStepWindows?.GetValueOrDefault(message.Id)))
             .Concat([ToMessageDto(state.UserMessage, toolWindow: state.ToolStepWindows?.GetValueOrDefault(state.UserMessage.Id)),

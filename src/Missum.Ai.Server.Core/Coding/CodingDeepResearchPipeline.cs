@@ -380,11 +380,11 @@ internal static partial class CodingDeepResearchPipeline
                 SynthesisSchema(excerpts)).ConfigureAwait(false);
             var synthesized = RequiredArguments(synthesis, SynthesisToolName);
             if (synthesized.TryGetProperty("summary", out var summaryText) && summaryText.ValueKind == JsonValueKind.String)
-                summary = Bound(summaryText.GetString() ?? "", 12000);
+                summary = summaryText.GetString() ?? "";
             if (ActivityText(synthesized, "conclusionStatus") is { } assessed
                 && assessed is "supported" or "provisionallySupported" or "refuted" or "conflictingEvidence" or "unresolved"
                 && ActivityText(synthesized, "assessmentReason") is { Length: > 0 } reason)
-            { synthesisAssessment = assessed; assessmentReason = Bound(reason, 2000); }
+            { synthesisAssessment = assessed; assessmentReason = reason; }
             var claimedFindings = synthesized.GetProperty("findings");
             foreach (var item in claimedFindings.EnumerateArray().Take(8))
             {
@@ -591,7 +591,9 @@ internal static partial class CodingDeepResearchPipeline
                     },
                     budget = new { modelCalls, toolCalls, maximumSeconds = (int?)null },
                 }, ResultJson);
-                value = CompactResearchResult(value);
+                // Research reports are durable tool results, not previews. Keep
+                // their complete text; the outer model's context planner owns
+                // compression when its actual token window requires it.
                 return new(value, [], null, errorCode is null, errorCode, errorCode is null ? null : "Deep Research ist unvollständig.");
         }
 
@@ -928,9 +930,9 @@ internal static partial class CodingDeepResearchPipeline
         type = "object",
         properties = new
         {
-            summary = new { type = "string", maxLength = 12000 },
+            summary = new { type = "string" },
             conclusionStatus = new { type = "string", @enum = SynthesisAssessmentStatuses },
-            assessmentReason = new { type = "string", maxLength = 2000 },
+            assessmentReason = new { type = "string" },
             findings = new
             {
                 type = "array", maxItems = excerpts.Count == 0 ? 0 : 8,

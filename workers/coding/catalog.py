@@ -561,6 +561,29 @@ def gpu_inventory():
         return []
 
 
+def available_host_memory():
+    """Available physical RAM, without optional packages or a paging-file budget."""
+    try:
+        if os.name == "nt":
+            class MemoryStatus(ctypes.Structure):
+                _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong),
+                            *[(name, ctypes.c_ulonglong) for name in (
+                                "totalPhysical", "availablePhysical", "totalPageFile", "availablePageFile",
+                                "totalVirtual", "availableVirtual", "availableExtendedVirtual")]]
+            status = MemoryStatus()
+            status.length = ctypes.sizeof(status)
+            if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return None
+            return status.availablePhysical
+        # MemAvailable includes reclaimable filesystem pages, unlike MemFree.
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) * 1024
+    except (AttributeError, OSError, ValueError, IndexError):
+        pass
+    return None
+
+
 def model_file_bytes(model):
     path = model["path"]
     match = SHARD.match(path.name)
@@ -711,13 +734,33 @@ def estimate_replica_bytes(model, context):
     architecture = metadata.get("general.architecture", "")
     layers = metadata.get(architecture + ".block_count")
     interval = metadata.get(architecture + ".full_attention_interval")
+    recurrent_extra = 0
     if isinstance(layers, int) and isinstance(interval, int) and interval > 1:
         prediction = metadata.get(architecture + ".nextn_predict_layers", 0)
-        metadata[architecture + ".block_count"] = max(1, (layers - prediction) // interval)
+        prediction = prediction if type(prediction) is int and 0 <= prediction < layers else 0
+        dense_layers = max(1, (layers - prediction + interval - 1) // interval)
+        metadata[architecture + ".block_count"] = dense_layers
+        # Only dense attention gets token-sized KV. Recurrent state buffers
+        # still exist in the other layers; do not shrink them with the mask.
+        recurrent_extra = recurrent_state_bytes(metadata, layers - dense_layers)
     kv = estimate_q8_session_bytes(metadata, context)
-    # Additional runtime buffers plus per-device reserve cover CUDA graphs and
-    # batching. Unknown layouts still undergo an isolated allocation trial.
-    return int(model_file_bytes(model) * 1.05) + (kv or 0) + 512 * 1024**2
+    # Admission must not treat an unknown KV layout as a zero-byte cache.
+    # Additional runtime buffers and the separate per-device reserve cover
+    # CUDA graphs and batching before a native allocation is attempted.
+    return (int(model_file_bytes(model) * 1.05) + kv + int(recurrent_extra * 1.1) + 512 * 1024**2
+            if kv is not None else None)
+
+
+def recurrent_state_bytes(metadata, layers):
+    architecture = metadata.get("general.architecture", "")
+    def number(suffix):
+        value = metadata.get(architecture + "." + suffix)
+        return value if type(value) is int and value > 0 else 0
+    state, inner = number("ssm.state_size"), number("ssm.inner_size")
+    if not state or not inner:
+        return 0
+    convolution = max(0, (number("ssm.conv_kernel") or 1) - 1) * (inner + 2 * (number("ssm.group_count") or 1) * state)
+    return layers * (state * inner + convolution) * 4 * 2
 
 
 def estimate_q8_session_bytes(metadata, tokens):
@@ -762,11 +805,7 @@ def estimate_q8_session_bytes(metadata, tokens):
         return None
     # GGML q8_0 stores 32 values and a 2-byte scale in each 34-byte block.
     per_token = layers * (((key * kv_heads + 31) // 32) * 34 + ((value * kv_heads + 31) // 32) * 34)
-    recurrent = 0
-    if number("ssm.state_size") and number("ssm.inner_size"):
-        state, inner = number("ssm.state_size"), number("ssm.inner_size")
-        convolution = max(0, (number("ssm.conv_kernel") or 1) - 1) * (inner + 2 * (number("ssm.group_count") or 1) * state)
-        recurrent = layers * (state * inner + convolution) * 4 * 2
+    recurrent = recurrent_state_bytes(metadata, layers)
     return int((tokens * (per_token + 24) + recurrent) * 1.1) + 16 * 1024**2
 
 
@@ -1028,40 +1067,31 @@ class GpuLoadManager:
             return None
 
     def agent_status(self, model_id, context_length=None):
-        """Prefer an admitted independent GPU1 slot, otherwise share the primary.
-
-        Sharing selects the already loaded exact model; it never creates a
-        second allocation or changes its context. Session keys still identify
-        independent KV branches, and the server serializes primary-slot turns.
-        """
+        """Only admit an independently budgeted GPU1 slot; never share the primary."""
         with self.lock:
             secondary = self._secondary_agent_status(model_id, context_length)
-            if secondary["allowed"]:
-                return dict(secondary, executionMode="parallel")
-            if secondary["reason"] in ("subagent.model_not_language", "subagent.primary_not_loaded",
-                                       "subagent.context_unavailable", "subagent.context_too_large",
-                                       "subagent.primary_not_gpu0"):
-                return secondary
-            base = secondary["modelId"]
-            parent = next((item for item in self.router("v1/models")["data"]
-                           if item["id"] == base and item.get("status", {}).get("value") in ("loaded", "sleeping")), None)
-            if parent is None:
-                return dict(secondary, reason="subagent.primary_not_loaded")
-            primary_gpu = next((item for item in gpu_inventory() if item["index"] == 0), None)
-            if primary_gpu is None:
-                return secondary
-            parent_device = self._argument(parent, "--device") or self.placements.get(base)
-            if parent_device and primary_gpu["device"] not in parent_device.split(","):
-                return dict(secondary, reason="subagent.primary_not_gpu0")
-            context = self.router("props?model=" + urllib.parse.quote(base, safe=""))\
-                .get("default_generation_settings", {}).get("n_ctx")
-            if type(context) is not int or context < 2048:
-                return dict(secondary, reason="subagent.context_unavailable")
-            if context_length is not None and context_length > context:
-                return dict(secondary, reason="subagent.context_too_large")
-            return dict(allowed=True, reason=None, modelId=base, instanceId=base, gpuIndex=0,
-                        contextLength=context, requiredBytes=0, freeBytes=primary_gpu["free"],
-                        executionMode="shared_primary", parallelUnavailableReason=secondary["reason"])
+            return dict(secondary, executionMode="parallel" if secondary["allowed"] else "unavailable")
+
+    def _full_gpu_residency(self, item, model, instance):
+        """Require a fixed full-offload load, not an auto-fit or CPU-backed instance."""
+        policy = self.policies.get(instance, {})
+        fit = self._argument(item, "--fit") or policy.get("fit")
+        layers = self._argument(item, "--n-gpu-layers") or self._argument(item, "-ngl") or policy.get("gpuLayers")
+        metadata = model_metadata(Path(model["path"]), allow_metadata_only=True) or {}
+        blocks = metadata.get(metadata.get("general.architecture", "") + ".block_count")
+        if fit != "off" or layers is None or not re.fullmatch(r"[0-9]+", str(layers)):
+            return "subagent.primary_offload_unknown"
+        layers = int(layers)
+        if layers < 999 and (type(blocks) is not int or layers <= blocks):
+            return "subagent.primary_cpu_offload"
+        # Explicit tensor overrides may put individual tensors on CPU even
+        # when n-gpu-layers requests all layers.
+        arguments = item.get("status", {}).get("args", [])
+        if (self._argument(item, "--override-tensor") or self._argument(item, "-ot")
+                or "--no-kv-offload" in arguments or "-nkvo" in arguments
+                or self._argument(item, "--mmproj-device") == "CPU"):
+            return "subagent.primary_cpu_offload"
+        return None
 
     def _secondary_agent_status(self, model_id, context_length=None):
         with self.lock:
@@ -1087,6 +1117,9 @@ class GpuLoadManager:
             if parent_split != "none" or parent_device != primary_gpu["device"]:
                 return dict(result, reason="subagent.primary_uses_multiple_gpus" if parent_split != "none"
                             or parent_device and "," in parent_device else "subagent.primary_not_gpu0")
+            residency_error = self._full_gpu_residency(parent, model, base)
+            if residency_error:
+                return dict(result, reason=residency_error)
             if any(item["id"] not in (base, replica) for item in active):
                 return dict(result, reason="subagent.other_model_resident")
             if base in self.agent_failures:
@@ -1098,9 +1131,26 @@ class GpuLoadManager:
                 return dict(result, reason="subagent.context_unavailable")
             if context_length is not None and context_length > context:
                 return dict(result, reason="subagent.context_too_large")
+            reserve = max(2048, int(self.fit_target)) * 1024**2
+            if primary_gpu["free"] < reserve:
+                return dict(result, reason="subagent.primary_vram_insufficient", contextLength=context)
+            host_free = available_host_memory()
+            # Full GPU offload still needs host token/batch buffers. Preserve
+            # physical headroom; swap capacity is not evidence of free RAM.
+            host_required = reserve + 512 * 1024**2 + context * 64
+            result.update(contextLength=context, requiredHostBytes=host_required, freeHostBytes=host_free)
+            if host_free is None:
+                return dict(result, reason="subagent.ram_unavailable")
+            if host_free < host_required:
+                return dict(result, reason="subagent.ram_insufficient")
             if existing and existing.get("status", {}).get("value") in ("loaded", "sleeping"):
+                # Its model/KV/work buffers are already committed. Admission
+                # still requires *additional* free safety headroom, not enough
+                # free memory to allocate the same replica a second time.
+                result.update(requiredBytes=reserve, freeBytes=secondary_gpu["free"])
                 child_device = self._argument(existing, "--device") or self.placements.get(replica)
-                if child_device and child_device != secondary_gpu["device"]:
+                child_split = self._argument(existing, "--split-mode") or self.policies.get(replica, {}).get("split")
+                if child_device != secondary_gpu["device"] or child_split != "none":
                     return dict(result, reason="subagent.secondary_not_gpu1")
                 child_props = self.router("props?model=" + urllib.parse.quote(replica, safe=""))
                 child_context = child_props.get("default_generation_settings", {}).get("n_ctx")
@@ -1109,9 +1159,16 @@ class GpuLoadManager:
                 if child_context != context:
                     return dict(result, reason="subagent.context_mismatch", contextLength=context,
                                 replicaContextLength=child_context)
+                if self._full_gpu_residency(existing, model, replica):
+                    return dict(result, reason="subagent.secondary_offload_unknown")
+                if secondary_gpu["free"] < reserve:
+                    return dict(result, reason="subagent.vram_insufficient", requiredBytes=reserve,
+                                freeBytes=secondary_gpu["free"])
                 return dict(result, allowed=True, contextLength=context)
-            required = self.allocations.get(base) or estimate_replica_bytes(model, context)
-            required += int(self.fit_target) * 1024**2
+            estimate = estimate_replica_bytes(model, context)
+            if estimate is None:
+                return dict(result, reason="subagent.resource_estimate_unavailable")
+            required = max(self.allocations.get(base, 0), estimate) + reserve
             result.update(contextLength=context, requiredBytes=required, freeBytes=secondary_gpu["free"])
             if secondary_gpu["free"] < required:
                 return dict(result, reason="subagent.vram_insufficient")
@@ -1124,17 +1181,19 @@ class GpuLoadManager:
             if not availability["allowed"]:
                 return availability
             base, replica = availability["modelId"], availability["instanceId"]
-            if replica != base:
-                try:
-                    self.load(replica)
-                except (OSError, RuntimeError, ValueError):
-                    # A measured admission can still lose a race with another
-                    # GPU allocation. Keep the usable primary and its context;
-                    # no retry may silently move a second copy onto GPU0.
-                    shared = self.agent_status(base)
-                    if not shared["allowed"] or shared["instanceId"] != base:
-                        raise
-                    availability, replica = shared, base
+            if replica != base + "@subagent":
+                return dict(availability, allowed=False, reason="subagent.shared_primary_disabled", executionMode="unavailable")
+            try:
+                self.load(replica)
+            except (OSError, RuntimeError, ValueError) as error:
+                # A competing allocation can invalidate an earlier budget.
+                # Keep the primary and its KV unchanged; never fork onto it.
+                reason = self.agent_failures.get(base) or (
+                    str(error) if re.fullmatch(r"subagent\.[a-z_]+", str(error)) else "subagent.runtime_load_failed")
+                return dict(availability, allowed=False, reason=reason, executionMode="unavailable", detail=str(error)[-4000:])
+            availability = self.agent_status(base)
+            if not availability["allowed"]:
+                return availability
             self.sessions._check_preparation_cancelled(cancelled)
             cache = (self.sessions.fork(base, source_key, replica, key, prefill, session_id, parent_session_id, cancelled)
                      if source_key and key else self.sessions.prepare(replica, key, session_id, parent_session_id))

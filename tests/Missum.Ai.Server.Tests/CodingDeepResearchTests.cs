@@ -154,7 +154,7 @@ public sealed class CodingDeepResearchTests
     }
 
     [Fact]
-    public async Task LongScienceQuestionCompactsDescriptionsWithoutLosingEvidenceOrVerificationReferences()
+    public async Task LongScienceQuestionPreservesFullReportAndEvidenceBeyondOrdinaryPreviewLimit()
     {
         var question = ("Forschungsprojekt: Quantengravitation. " + new string('Ä', 7_919))[..7_919];
         var harness = new Harness
@@ -169,13 +169,13 @@ public sealed class CodingDeepResearchTests
         var result = execution.Result.Result;
 
         Assert.True(execution.Result.Succeeded, result.GetRawText());
-        Assert.True(result.GetRawText().Length <= CodingLoopGuard.MaximumToolResultCharacters);
+        Assert.True(result.GetRawText().Length > CodingLoopGuard.MaximumToolResultCharacters);
         Assert.Equal(2, result.GetProperty("findings").GetArrayLength());
         Assert.Equal(2, result.GetProperty("sources").GetArrayLength());
         Assert.Equal(2, result.GetProperty("plan").GetArrayLength());
         Assert.Equal(2, result.GetProperty("verifications").GetArrayLength());
-        Assert.True(result.GetProperty("outputCompaction").GetProperty("descriptionTextShortened").GetBoolean());
-        Assert.Contains("[gekürzt]", result.GetProperty("problem").GetProperty("originalQuestion").GetString(), StringComparison.Ordinal);
+        Assert.False(result.TryGetProperty("outputCompaction", out _));
+        Assert.Equal(question, result.GetProperty("problem").GetProperty("originalQuestion").GetString());
         Assert.All(result.GetProperty("findings").EnumerateArray(), finding => Assert.Equal(Evidence, finding.GetProperty("quote").GetString()));
         Assert.All(result.GetProperty("verifications").EnumerateArray(), verification =>
             Assert.InRange(verification.GetProperty("claimIndex").GetInt32(), 0, 1));

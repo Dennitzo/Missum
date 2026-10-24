@@ -134,7 +134,7 @@ public sealed partial class NativeAssistantPage
                 offset = Math.Clamp(startOffset, 0, content.Length);
         }
         var eligible = positionedSteps.Skip(firstStep).Where(step => !IsDeepResearchReceipt(step)
-            && !IsAcceptedSubagentManagementStep(step, subagentReceipts) && !IsAcceptedDeepResearchStep(step, subagentReceipts)
+            && !IsAcceptedSubagentManagementStep(step, subagentReceipts)
             && (S(step, "tool") != "assistant.continuation" || S(step, "status") == "completed"));
         var projected = assistant ? NativeActivityProjection.Build(eligible, S(message, "status") is "streaming" or "pending", content.Length, WaitingForModel(messageId, message)) : [];
         foreach (var activity in projected)
@@ -154,7 +154,7 @@ public sealed partial class NativeAssistantPage
             if (IsDeepResearchReceipt(step)) { ArtifactsAfterStep(id); continue; }
             // The persisted child receipt owns its lifecycle row. Keep rejected
             // manager calls visible, and coalesce only calls for an accepted child.
-            if (IsAcceptedSubagentManagementStep(step, subagentReceipts) || IsAcceptedDeepResearchStep(step, subagentReceipts))
+            if (IsAcceptedSubagentManagementStep(step, subagentReceipts))
             { ArtifactsAfterStep(id); continue; }
             if (tool is "subagent" or "subagent.completed")
             {
@@ -222,7 +222,6 @@ public sealed partial class NativeAssistantPage
                 view.LoadDetails = () => LoadToolStepDetailsAsync(messageId, id);
                 view.OpenResearch = () => OpenDeepResearchTabAsync(messageId, id);
                 view.CanOpenResearch = () => FindDeepResearchView(messageId, id) is not null;
-                view.ResearchIdentity = () => ResearchIdentity(messageId, id);
                 view.SubagentRequested += async agentId =>
                 {
                     if (_subagents.TryGetValue(agentId, out var child)) await ActivateSubagentTabAsync(child);
@@ -233,7 +232,6 @@ public sealed partial class NativeAssistantPage
             toolView.LoadDetails = () => LoadToolStepDetailsAsync(messageId, id);
             toolView.OpenResearch = () => OpenDeepResearchTabAsync(messageId, id);
             toolView.CanOpenResearch = () => FindDeepResearchView(messageId, id) is not null;
-            toolView.ResearchIdentity = () => ResearchIdentity(messageId, id);
             toolView.DefaultExpanded = false;
             toolView.OpenDetails = () => OpenToolTabAsync(messageId, id);
             toolView.Update(step, tool == "assistant.activity" ? toolNumber : ++toolNumber);
@@ -367,7 +365,6 @@ public sealed partial class NativeAssistantPage
             else RenderDetails();
         }
         internal Func<bool>? CanOpenResearch { get; set; }
-        internal Func<(string AgentId, int PlanetIndex, string Title)?>? ResearchIdentity { get; set; }
         internal Task? NavigationTask { get; private set; }
         internal event Action<bool>? ExpansionChanged;
         private readonly TextBlock _title = new() { FontSize = 14, Foreground = ThemeBrush("MissumMutedTextBrush", 160), TextTrimming = TextTrimming.CharacterEllipsis };
@@ -377,7 +374,6 @@ public sealed partial class NativeAssistantPage
         private readonly FontIcon _chevron = new() { Glyph = "\uE76C", FontSize = 10, Foreground = NativeIconPalette.BrushFor("navigation") };
         private readonly TextBlock _status = new();
         private readonly FontIcon _compactIcon = new() { Glyph = "\uE70F", FontSize = 14, Foreground = ToolGlyphBrush("tool", ""), VerticalAlignment = VerticalAlignment.Center };
-        private NativeSubagentAvatar? _researchAvatar;
         private readonly Grid _headerRow = new() { ColumnSpacing = 8 };
         private JsonElement _step;
         private string _diff = "";
@@ -642,19 +638,8 @@ public sealed partial class NativeAssistantPage
         {
             var expanded = _details.Visibility == Visibility.Visible;
             _title.Text = _label + (_summary.Length > 0 ? " · " + _summary : "");
-            var research = IsResearchNavigation ? ResearchIdentity?.Invoke() : null;
-            if (_researchAvatar is not null) _researchAvatar.Visibility = research.HasValue ? Visibility.Visible : Visibility.Collapsed;
-            _compactIcon.Visibility = research.HasValue ? Visibility.Collapsed : Visibility.Visible;
-            if (research is { } child)
-            {
-                if (_researchAvatar is null)
-                {
-                    _researchAvatar = new(child.AgentId, 14, child.PlanetIndex);
-                    _headerRow.Children.Add(_researchAvatar);
-                }
-                _researchAvatar.SetAgentId(child.AgentId, child.PlanetIndex);
-                _title.Text = ResearchTaskLabel(child.Title);
-            }
+            // Research remains an ordinary tool outside its detailed tab.
+            _compactIcon.Visibility = Visibility.Visible;
             if (_running) _title.Text += " …";
             if (S(_step, "tool") != "context.compact"
                 && S(_step, "status") is "failed" or "denied" or "cancelled" or "interrupted") _title.Text += " · " + _status.Text;
@@ -663,7 +648,7 @@ public sealed partial class NativeAssistantPage
             _title.Foreground = ThemeBrush("MissumMutedTextBrush", 160);
             _chevron.Glyph = "\uE76C";
             var plan = S(_step, "tool") == "coding.updatePlan";
-            ToolTipService.SetToolTip(_toggle, IsResearchNavigation ? "Aufgabe und Werkzeugschritte im Subagent-Tab öffnen"
+            ToolTipService.SetToolTip(_toggle, IsResearchNavigation ? "Deep-Research-Tab öffnen"
                 : plan ? "Aktuellen Arbeitsplan öffnen" : _title.Text);
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_toggle,
                 _title.Text + (_counts.Visibility == Visibility.Visible ? " " + _added.Text + " " + _removed.Text : "")

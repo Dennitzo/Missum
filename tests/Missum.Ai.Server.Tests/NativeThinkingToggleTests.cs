@@ -165,7 +165,7 @@ public sealed class NativeThinkingToggleTests
             if (path == "/agents/prepare")
             {
                 PrepareBody = body;
-                return Json(new { allowed = true, modelId = Model, instanceId = Model + "@subagent", gpuIndex = 1, contextLength = 32768, cacheStatus = "forked" });
+                return Json(new { allowed = true, modelId = Model, instanceId = Model + "@subagent", gpuIndex = 1, contextLength = 32768, cacheStatus = "forked", executionMode = "parallel", requiredBytes = 1_000L, freeBytes = 2_000L });
             }
             if (path == "/v1/chat/completions")
             {

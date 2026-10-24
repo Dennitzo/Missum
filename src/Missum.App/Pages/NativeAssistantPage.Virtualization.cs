@@ -208,7 +208,7 @@ public sealed partial class NativeAssistantPage
                 offset = next;
             }
             var eligible = steps.Where(step => !IsDeepResearchReceipt(step)
-                && !IsAcceptedSubagentManagementStep(step, receipts) && !IsAcceptedDeepResearchStep(step, receipts)
+                && !IsAcceptedSubagentManagementStep(step, receipts)
                 && (S(step, "tool") != "assistant.continuation" || S(step, "status") == "completed"));
             foreach (var activity in NativeActivityProjection.Build(eligible, S(message, "status") is "streaming" or "pending", content.Length, waitingForModel))
             {
@@ -223,7 +223,7 @@ public sealed partial class NativeAssistantPage
                     TextUntil(end, activity.Key, activity.ReplacesKey);
                     continue;
                 }
-                if (!IsDeepResearchReceipt(step) && !IsAcceptedSubagentManagementStep(step, receipts) && !IsAcceptedDeepResearchStep(step, receipts)
+                if (!IsDeepResearchReceipt(step) && !IsAcceptedSubagentManagementStep(step, receipts)
                     && (tool != "assistant.continuation" || S(step, "status") == "completed"))
                 {
                     if (tool == "assistant.narration") Text(activity.Key, S(step, "detail"), -1, activitySlot: true, activity.ReplacesKey);
@@ -309,7 +309,6 @@ public sealed partial class NativeAssistantPage
                     LoadDetails = () => LoadToolStepDetailsAsync(id, S(block.Data, "id")), ScrollOwner = ConversationScroll,
                     OpenResearch = () => OpenDeepResearchTabAsync(id, S(block.Data, "id")),
                     CanOpenResearch = () => FindDeepResearchView(id, S(block.Data, "id")) is not null,
-                    ResearchIdentity = () => ResearchIdentity(id, S(block.Data, "id")),
                     PinSelection = () => _conversationSelection?.IsSelecting == true,
                     Project = projection => RunUiCallback("ToolStep.VirtualLargeReasoning", projection),
                 };
@@ -363,7 +362,6 @@ public sealed partial class NativeAssistantPage
                 tool.LoadDetails = () => LoadToolStepDetailsAsync(id, S(block.Data, "id"));
                 tool.OpenResearch = () => OpenDeepResearchTabAsync(id, S(block.Data, "id"));
                 tool.CanOpenResearch = () => FindDeepResearchView(id, S(block.Data, "id")) is not null;
-                tool.ResearchIdentity = () => ResearchIdentity(id, S(block.Data, "id"));
                 tool.DefaultExpanded = false;
                 tool.OpenDetails = () => OpenToolTabAsync(id, S(block.Data, "id"));
                 tool.Update(block.Data, block.Number); break;

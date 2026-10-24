@@ -18,7 +18,6 @@ public sealed class SubagentOrchestrationTests
     private const string ModelId = "coding/Qwen-Fixture-Q4~123456";
 
     [Theory]
-    [InlineData("web.deepResearch")]
     [InlineData(SubagentToolNames.Spawn)]
     public async Task CodingParentReceivesEntireDelegatedReportBeyondOrdinaryToolPreviewLimit(string toolName)
     {
@@ -84,83 +83,11 @@ public sealed class SubagentOrchestrationTests
         Assert.Equal(result, CodingLoopGuard.BoundToolResult(result, SubagentToolNames.Spawn));
     }
 
-    [Theory]
-    [InlineData(0)]
-    [InlineData(1)]
-    public async Task DeepResearchIsARealReplaySafeSubagentWithOriginalTaskAndOrdinaryEvents(int gpuIndex)
-    {
-        using var context = new TestServerContext();
-        using var handler = new DualAgentHandler(childImmediatelyComplete: true) { SharedPrimary = gpuIndex == 0 };
-        using var http = new HttpClient(handler);
-        using var runtime = new ModelRuntimeClient(http, context.WrappedOptions, NullLogger<ModelRuntimeClient>.Instance);
-        var services = new ServiceCollection();
-        services.AddLogging();
-        services.AddMissumAiServerServices(context.Options, includeHostedServices: false);
-        services.AddSingleton(context.Database);
-        services.AddSingleton(runtime);
-        using var provider = services.BuildServiceProvider();
-        var repository = provider.GetRequiredService<RunRepository>();
-        var processor = provider.GetRequiredService<RunProcessor>();
-        // Direct General requests need no native/client subagent capability.
-        var request = new RunRequest(MissumAiProtocol.Version, RunMode.General,
-            [new("user", [new("text", "Untersuche unabhängige Originalquellen.")])],
-            AllowedServerTools: ["web.search", "web.fetch", "web.deepResearch"], PreferredGeneralModelId: ModelId);
-        var parent = (await repository.CreateAsync(request, null)).Snapshot;
-        await repository.SaveCheckpointAsync(parent.RunId, new([new("system", "PARENT_PREFIX"), new("user", "Original task")],
-            0, 0, 0, 0, SelectedModelId: ModelId));
-        var arguments = JsonSerializer.SerializeToElement(new { task = "Originalquellen zu Quanteninterferenz", maximumSources = 3 });
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
-        var first = await processor.ExecuteCodingDeepResearchAsync(parent.RunId, "research-operation", arguments, ModelId,
-            "general", 32768, 24, 27, new AgentToolCatalog().GetAvailableTools(request), null,
-            parentMessages: [new("system", "PARENT_PREFIX"), new("user", "LIVE_RECENT_PARENT_FINDING")], cancellationToken: timeout.Token);
-        var second = await processor.ExecuteCodingDeepResearchAsync(parent.RunId, "research-operation", arguments, ModelId,
-            "general", 32768, 24, 27, new AgentToolCatalog().GetAvailableTools(request), null, cancellationToken: timeout.Token);
-
-        Assert.True(first.Result.Succeeded, first.Result.ErrorMessage);
-        Assert.Equal(first.Result.Result.GetProperty("runId").GetString(), second.Result.Result.GetProperty("runId").GetString());
-        var (child, saved) = Assert.Single(await repository.GetSubagentRunsAsync(parent.RunId));
-        Assert.Equal(RunState.Completed, child.State);
-        Assert.Equal("deepResearch", saved.Subagent!.Specialization);
-        Assert.Equal("research-operation", saved.Subagent.OriginToolStepId);
-        Assert.Equal("Originalquellen zu Quanteninterferenz", saved.Subagent.AssignedTask);
-        Assert.Equal(gpuIndex, saved.Subagent.GpuIndex);
-        Assert.Equal(ModelId + (gpuIndex == 1 ? "@subagent" : ""), saved.Subagent.RuntimeInstanceId);
-        Assert.Equal(0, RunProcessor.ResolveMaximumModelRounds(saved, context.Options, []));
-        Assert.Equal(0, RunProcessor.ResolveMaximumToolCalls(saved, context.Options, []));
-        Assert.Equal(1, handler.PrepareCalls);
-        Assert.Contains("LIVE_RECENT_PARENT_FINDING", handler.LastPrepareBody, StringComparison.Ordinal);
-        Assert.Equal(1, handler.ChildTurns);
-        var parentEvents = await repository.GetEventsAfterAsync(parent.RunId, 0);
-        var lifecycle = Assert.Single(parentEvents, item => item.Type == RunEventTypes.SubagentStarted);
-        Assert.Equal("deepResearch", lifecycle.Data.GetProperty("specialization").GetString());
-        Assert.Equal("research-operation", lifecycle.Data.GetProperty("originToolStepId").GetString());
-        Assert.Equal(gpuIndex, lifecycle.Data.GetProperty("gpuIndex").GetInt32());
-        Assert.Contains(parentEvents, item => item.Type == RunEventTypes.SubagentCompleted);
-        Assert.Contains(parentEvents, item => item.Type == RunEventTypes.SubagentEvent
-            && item.Data.GetProperty("event").GetProperty("type").GetString() == RunEventTypes.TextDelta);
-        Assert.DoesNotContain(parentEvents, item => item.Type == RunEventTypes.DeepResearchProgress);
-        Assert.Equal(GpuLeaseMode.Shared, RunProcessor.SubagentLeaseMode(saved.Subagent with { GpuIndex = 0 }));
-        Assert.Equal(GpuLeaseMode.CodingSecondary, RunProcessor.SubagentLeaseMode(saved.Subagent with { GpuIndex = 1 }));
-    }
-
     [Fact]
-    public void ResearchSpecializationKeepsTaskFirstAndLeavesEvidenceWorkAutonomous()
-    {
-        var prompt = RunProcessor.CreateResearchSubagentAssignment("Originaler Titel", JsonSerializer.SerializeToElement(new { task = "Originaler Titel" }));
-        Assert.StartsWith("Originaler Titel\n", prompt, StringComparison.Ordinal);
-        Assert.Contains("Es gibt keine feste Anzahl", prompt, StringComparison.Ordinal);
-        Assert.Contains("entscheide selbst", prompt, StringComparison.Ordinal);
-        Assert.Contains("web.deepResearch nicht erneut", prompt, StringComparison.Ordinal);
-    }
-
-    [Theory]
-    [InlineData(0)]
-    [InlineData(1)]
-    public async Task FirstGeneralResearchStartsWithoutPriorMainInferenceAndConsumesItsChildOnce(int gpuIndex)
+    public async Task StaleSupervisorSharedPrimaryAdmissionNeverStartsOrPreparesAChild()
     {
         using var context = new TestServerContext();
-        using var handler = new DualAgentHandler(childImmediatelyComplete: true)
-            { SharedPrimary = gpuIndex == 0, ResearchParentAnswer = true };
+        using var handler = new DualAgentHandler { SharedPrimary = true };
         using var http = new HttpClient(handler);
         using var runtime = new ModelRuntimeClient(http, context.WrappedOptions, NullLogger<ModelRuntimeClient>.Instance);
         var services = new ServiceCollection();
@@ -170,72 +97,58 @@ public sealed class SubagentOrchestrationTests
         services.AddSingleton(runtime);
         using var provider = services.BuildServiceProvider();
         var repository = provider.GetRequiredService<RunRepository>();
-        var request = new RunRequest(MissumAiProtocol.Version, RunMode.General,
-            [new("user", [new("text", "Prüfe geeignete Originalquellen.")])],
-            AllowedServerTools: ["web.search", "web.fetch", "web.deepResearch"], PreferredGeneralModelId: ModelId, DeepResearch: true);
-        var parent = (await repository.CreateAsync(request, null)).Snapshot;
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
-
-        await provider.GetRequiredService<RunProcessor>().ProcessAsync(parent.RunId, timeout.Token);
-
-        Assert.Equal(RunState.Completed, (await repository.GetAsync(parent.RunId))!.State);
-        var (child, saved) = Assert.Single(await repository.GetSubagentRunsAsync(parent.RunId));
-        Assert.Equal(RunState.Completed, child.State);
-        Assert.Equal(gpuIndex, saved.Subagent!.GpuIndex);
-        Assert.Equal(1, handler.ChildTurns);
-        Assert.Equal(1, handler.ParentTurns);
-        Assert.True(await repository.HasConsumedSubagentResultAsync(parent.RunId, child.RunId));
-        Assert.Single(await repository.GetEventsAfterAsync(parent.RunId, 0), item => item.Type == SubagentToolNames.ResultConsumedEvent);
-    }
-
-    [Theory]
-    [InlineData(false, 0)]
-    [InlineData(true, 0)]
-    [InlineData(false, 1)]
-    [InlineData(true, 1)]
-    public async Task CancellingOrSteeringResearchSettlesItsActualChildAndKeepsItsFailedReceipt(bool steer, int gpuIndex)
-    {
-        using var context = new TestServerContext();
-        using var handler = new DualAgentHandler(holdChild: true) { SharedPrimary = gpuIndex == 0 };
-        using var http = new HttpClient(handler);
-        using var runtime = new ModelRuntimeClient(http, context.WrappedOptions, NullLogger<ModelRuntimeClient>.Instance);
-        var services = new ServiceCollection();
-        services.AddLogging();
-        services.AddMissumAiServerServices(context.Options, includeHostedServices: false);
-        services.AddSingleton(context.Database);
-        services.AddSingleton(runtime);
-        using var provider = services.BuildServiceProvider();
-        var repository = provider.GetRequiredService<RunRepository>();
-        var processor = provider.GetRequiredService<RunProcessor>();
         var request = Request();
         var parent = (await repository.CreateAsync(request, null)).Snapshot;
+        var result = await provider.GetRequiredService<RunProcessor>().ExecuteSubagentToolAsync(SubagentToolNames.Spawn,
+            JsonSerializer.SerializeToElement(new { task = "No resources for another model" }), parent.RunId, "denied-operation",
+            request, new(ModelId, "general", 32768), [new("user", "Task")], CancellationToken.None);
+        Assert.False(result.Succeeded);
+        Assert.Equal("subagent.insufficient_vram", result.ErrorCode);
+        Assert.Equal(0, handler.PrepareCalls);
+        Assert.Equal(0, handler.ChildTurns);
+        Assert.Empty(await repository.GetSubagentRunsAsync(parent.RunId));
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task SavedChildrenCannotUseThePrimaryAndIndependentChildrenRecoverAfterNativeRestart(bool independent, bool legacyResearch)
+    {
+        using var context = new TestServerContext();
+        using var handler = new DualAgentHandler(initiallyUnloaded: true, childImmediatelyComplete: true);
+        using var http = new HttpClient(handler);
+        using var runtime = new ModelRuntimeClient(http, context.WrappedOptions, NullLogger<ModelRuntimeClient>.Instance);
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddMissumAiServerServices(context.Options, includeHostedServices: false);
+        services.AddSingleton(context.Database);
+        services.AddSingleton(runtime);
+        using var provider = services.BuildServiceProvider();
+        var repository = provider.GetRequiredService<RunRepository>();
+        var parent = (await repository.CreateAsync(Request(), null)).Snapshot;
+        var childRequest = Request() with { SessionId = "recovered-child", Subagent = new(parent.RunId,
+            "recovered-agent", "Saved task", Request().SessionId, ModelId + (independent ? "@subagent" : ""),
+            GpuIndex: independent ? 1 : 0, Specialization: legacyResearch ? "deepResearch" : null) };
+        var child = await repository.CreateSubagentAsync(childRequest,
+            new([new("system", "SAVED_POLICY"), new("user", "Saved task")], 0, 0, 0, 0, SelectedModelId: ModelId), "saved-child");
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
-        var researching = processor.ExecuteCodingDeepResearchAsync(parent.RunId, "cancel-research",
-            JsonSerializer.SerializeToElement(new { task = "Quellen prüfen" }), ModelId, "general", 32768, 24, 27,
-            new AgentToolCatalog().GetAvailableTools(request), null, cancellationToken: timeout.Token);
-        await handler.ChildStarted.Task.WaitAsync(timeout.Token);
-        var (child, _) = Assert.Single(await repository.GetSubagentRunsAsync(parent.RunId));
-        if (steer)
-            _ = await repository.AcceptSteeringAsync(parent.RunId, new(request.SessionId!, "new-direction", "Beende die Recherche und beantworte stattdessen die neue Frage."));
+        var process = provider.GetRequiredService<RunProcessor>().ProcessAsync(child.RunId, timeout.Token);
+        if (independent && !legacyResearch)
+        {
+            await process;
+            Assert.Equal(RunState.Completed, (await repository.GetAsync(child.RunId))!.State);
+            Assert.Equal(1, handler.MainLoads);
+            Assert.Equal(1, handler.ChildTurns);
+        }
         else
         {
-            Assert.True(await repository.CancelAsync(child.RunId));
-            Assert.True(processor.Cancel(child.RunId));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => process);
+            Assert.Equal(0, handler.MainLoads);
+            Assert.Equal(0, handler.ChildTurns);
         }
-        var result = await researching;
-        Assert.False(result.Result.Succeeded);
-        Assert.Equal("failed", result.Result.Result.GetProperty("status").GetString());
-        Assert.Equal("cancelled", result.Result.Result.GetProperty("state").GetString());
-        Assert.Contains("abgebrochen", result.Result.Result.GetProperty("instruction").GetString(), StringComparison.Ordinal);
-        if (steer) Assert.Equal("run.steered", result.Result.ErrorCode);
-        Assert.Equal(child.RunId, result.Result.Result.GetProperty("runId").GetString());
-        Assert.Equal(JsonValueKind.Array, result.Result.Result.GetProperty("completionEvidence").ValueKind);
-        Assert.Equal(RunState.Cancelled, (await repository.GetAsync(child.RunId))!.State);
-        Assert.True(handler.ChildInferenceCancelled);
-        Assert.Empty(await repository.GetSubagentRunsAsync(parent.RunId, activeOnly: true));
-        Assert.Equal(RunState.Queued, (await repository.GetAsync(parent.RunId))!.State);
-        Assert.Contains(await repository.GetEventsAfterAsync(parent.RunId, 0), item => item.Type == RunEventTypes.SubagentCompleted
-            && item.Data.GetProperty("runId").GetString() == child.RunId);
+        Assert.Equal(0, handler.ParentTurns);
+        Assert.Equal(0, handler.PrepareCalls);
     }
 
     [Fact]
@@ -987,6 +900,7 @@ public sealed class SubagentOrchestrationTests
         private int _parentTurns;
         private int _childTurns;
         private bool _primaryLoaded = !initiallyUnloaded;
+        private bool _secondaryLoaded = !initiallyUnloaded;
         public bool ParentWorkedWhileChildActive { get; private set; }
         public bool ParentUsedChildResult { get; private set; }
         public TaskCompletionSource ChildStarted => _childStarted;
@@ -1019,12 +933,18 @@ public sealed class SubagentOrchestrationTests
             if (path == "/v1/models") return Json(new { data = new[]
             {
                 new { id = ModelId, tags = ParentTags, status = new { value = _primaryLoaded ? "loaded" : "unloaded" } },
-                new { id = ModelId + "@subagent", tags = ChildTags, status = new { value = initiallyUnloaded ? "unloaded" : "loaded" } },
+                new { id = ModelId + "@subagent", tags = ChildTags, status = new { value = _secondaryLoaded ? "loaded" : "unloaded" } },
             } });
             if (path == "/props") return Json(new { default_generation_settings = new { n_ctx = 32768 } });
             if (path == "/release") return Json(new { success = true });
             if (path == "/models/load")
             {
+                using var load = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken));
+                if (load.RootElement.GetProperty("model").GetString() == ModelId + "@subagent")
+                {
+                    _secondaryLoaded = true;
+                    return Json(new { success = true });
+                }
                 // Loaded-primary companion reconciliation is idempotent; it
                 // must not count as another physical primary load.
                 if (!_primaryLoaded) MainLoads++;
@@ -1044,7 +964,10 @@ public sealed class SubagentOrchestrationTests
                 if (!_primaryLoaded) DeniedBeforeLoad = true;
                 return Json(new { allowed = !denySubagent && _primaryLoaded, reason = !_primaryLoaded ? "subagent.primary_not_loaded" : denySubagent ? "subagent.insufficient_vram" : null, modelId = ModelId,
                     instanceId = ModelId + (SharedPrimary ? "" : "@subagent"), gpuIndex = SharedPrimary ? 0 : 1,
-                    contextLength = 32768, cacheStatus = PrepareCacheStatus, cachedTokens = 10 });
+                    contextLength = 32768, cacheStatus = PrepareCacheStatus, cachedTokens = 10,
+                    executionMode = SharedPrimary ? "shared_primary" : "parallel",
+                    parallelUnavailableReason = SharedPrimary ? "subagent.primary_uses_multiple_gpus" : (string?)null,
+                    requiredBytes = SharedPrimary ? 0L : 3_000_000_000L, freeBytes = 8_000_000_000L });
             }
             if (path is "/sessions/prepare" or "/sessions/save") return Json(new { success = true });
             if (path == "/v1/chat/completions/input_tokens") return Json(new { input_tokens = 100 });

@@ -20,6 +20,9 @@ public sealed partial class RunProcessor
         if (authorized is not { } source || source.Request.Subagent is not { } sourceRelation)
             return SubagentFailure("subagent.invalid_continuation_owner",
                 "Dieser frühere Subagent ist für die Fortsetzung des aktuellen Hauptlaufs nicht freigegeben.");
+        if (sourceRelation.Specialization == "deepResearch")
+            return SubagentFailure("web.deepResearch.tool_only",
+                "Gespeicherte Recherche-Subagenten werden nicht fortgesetzt. Ihre Ergebnisse bleiben lesbar; neue Recherche erfolgt mit web.deepResearch als Werkzeug.");
         if (!arguments.TryGetProperty("task", out var requestedTask) || requestedTask.ValueKind != JsonValueKind.String
             || !string.Equals(requestedTask.GetString()?.Trim(), sourceRelation.AssignedTask.Trim(), StringComparison.Ordinal))
             return SubagentFailure("subagent.continuation_task_changed",
@@ -48,8 +51,8 @@ public sealed partial class RunProcessor
             return SubagentFailure("subagent.source_still_running",
                 "Der ursprüngliche Subagent ist noch aktiv. Warte auf seinen tatsächlichen Endzustand; es wurde kein paralleler Fortsetzungsversuch gestartet.");
         var availability = await _modelRuntime.GetSubagentAvailabilityAsync(selection.ModelId, selection.ContextLength, token).ConfigureAwait(false);
-        if (!availability.Allowed)
-            return SubagentFailure("subagent.insufficient_vram", availability.Reason
+        if (!availability.IsParallelAdmitted)
+            return SubagentFailure("subagent.insufficient_vram", availability.Reason ?? availability.ParallelUnavailableReason
                 ?? "Das aktuelle Modell lässt derzeit keinen Subagenten zu; der frühere Auftrag bleibt gespeichert.");
         if (availability.GpuIndex == 1 && (await _repository.GetSubagentRunsAsync(activeOnly: true,
                 cancellationToken: token).ConfigureAwait(false)).Any(static child => child.Request.Subagent?.GpuIndex is null or 1))

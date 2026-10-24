@@ -77,6 +77,11 @@ public sealed partial class NativeAssistantPage
             await VerifySteeringPromptSmokeAsync(_snapshot.Clone());
             return 0;
         }
+        if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_RESPONSIVENESS") == "deep-research")
+        {
+            await VerifyDeepResearchSmokeAsync(_snapshot.Clone());
+            return 0;
+        }
         if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_RESPONSIVENESS") == "palette")
             return await VerifyIconPaletteSmokeAsync();
         if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_RESPONSIVENESS") == "sources")

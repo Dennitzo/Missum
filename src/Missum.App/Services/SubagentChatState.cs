@@ -33,6 +33,7 @@ public sealed partial record SubagentChatState(
     internal string CompletionReceiptId => "subagent-completed:" + AgentId + ":" + RunId;
     [JsonIgnore] internal IReadOnlyDictionary<Guid, ConversationToolStepWindow>? ToolStepWindows { get; init; }
     public bool IsRunning => Status is "queued" or "running" or "waitingForClient";
+    [JsonIgnore] public bool IsDeepResearch => Kind == DeepResearchKind;
     [JsonIgnore] public bool IsLegacyDeepResearch => AgentId.StartsWith(DeepResearchAgentPrefix, StringComparison.Ordinal)
         || RunId.StartsWith("deep-research-run:", StringComparison.Ordinal);
     public string LifecycleText => TaskTitle(Title) + " hat die Arbeit begonnen";
@@ -179,7 +180,7 @@ public sealed partial record SubagentChatState(
     }
 
     internal AssistantToolStep? CompletionReceipt(int contentOffset, DateTimeOffset at) =>
-        !IsLegacyDeepResearch && ResultDelivered is true && Status == "completed" && AssistantMessage.Status == MessageStatus.Completed
+        !IsDeepResearch && ResultDelivered is true && Status == "completed" && AssistantMessage.Status == MessageStatus.Completed
             ? new(CompletionReceiptId, CompletionTool, "completed", TaskTitle(Title) + " hat die Arbeit beendet",
                 OutputJson: JsonSerializer.Serialize(new { AgentId, RunId, ParentRunId, SessionId, Title, Kind, OriginToolStepId,
                     OriginMessageId, GpuIndex, status = "completed", resultDelivered = true }, JsonOptions),

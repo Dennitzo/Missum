@@ -197,6 +197,7 @@ public sealed class ModelRuntimeClientTests
                 return SubagentResponse(new
                 {
                     allowed = true, modelId = NativeGeneralId, instanceId = NativeGeneralId + "@subagent", gpuIndex = 1,
+                    executionMode = "parallel", requiredBytes = 1_000L, freeBytes = 2_000L,
                     cacheStatus = "forked", cachedTokens = 138_000, sourceCachedTokens = 0,
                     sourceEvaluatedTokens = 138_000, preparationSampledTokens = (int?)null,
                     evaluatedGeneratedTokens = 0, preparationMode = "replayed",
@@ -220,7 +221,7 @@ public sealed class ModelRuntimeClientTests
     }
 
     [Fact]
-    public async Task SubagentPreparationAcceptsTheExactPrimaryInstanceWithoutAdditionalModelLoading()
+    public async Task SubagentPreparationRejectsTheExactPrimaryInstanceWithoutAdditionalModelLoading()
     {
         var handler = new NativeRuntimeHandler
         {
@@ -231,11 +232,27 @@ public sealed class ModelRuntimeClientTests
             })),
         };
         using var client = CreateClient(new HttpClient(handler));
-        var prepared = await client.PrepareSubagentAsync("gpt-oss-120b", "parent-key", "child-key");
-        Assert.Equal(NativeGeneralId, prepared.InstanceId);
-        Assert.Equal(0, prepared.GpuIndex);
-        Assert.Equal(12_000, prepared.CachedTokens);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => client.PrepareSubagentAsync("gpt-oss-120b", "parent-key", "child-key"));
         Assert.Empty(handler.ModelOperations);
+    }
+
+    [Theory]
+    [InlineData("parallel", 1000, 2000, true)]
+    [InlineData("parallel", 3000, 2000, false)]
+    [InlineData("parallel", 0, 2000, false)]
+    [InlineData("shared_primary", 1000, 2000, false)]
+    [InlineData(null, 1000, 2000, false)]
+    public void SubagentAdmissionRequiresExplicitParallelModeAndProvenCapacity(string? mode, long required, long free, bool expected)
+    {
+        var admission = ModelRuntimeClient.ReadSubagentAvailability(JsonSerializer.SerializeToElement(new
+        {
+            allowed = true, modelId = NativeGeneralId, instanceId = NativeGeneralId + "@subagent", gpuIndex = 1,
+            executionMode = mode, requiredBytes = required, freeBytes = free,
+            parallelUnavailableReason = "subagent.primary_uses_multiple_gpus",
+        }), NativeGeneralId);
+        Assert.Equal(expected, admission.IsParallelAdmitted);
+        Assert.Equal(mode, admission.ExecutionMode);
+        Assert.Equal("subagent.primary_uses_multiple_gpus", admission.ParallelUnavailableReason);
     }
 
     [Theory]

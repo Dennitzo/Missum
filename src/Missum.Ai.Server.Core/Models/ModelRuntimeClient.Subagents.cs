@@ -4,7 +4,15 @@ namespace Missum.Ai.Server.Core.Models;
 
 public sealed record SubagentRuntimeAvailability(
     bool Allowed, string? Reason, string ModelId, string? InstanceId, int? GpuIndex,
-    int ContextLength = 0, long? RequiredBytes = null, long? FreeBytes = null);
+    int ContextLength = 0, long? RequiredBytes = null, long? FreeBytes = null,
+    string? ExecutionMode = null, string? ParallelUnavailableReason = null)
+{
+    // Older supervisors can report allowed=true for a branch on the primary.
+    // Admission is fail-closed: only a separately budgeted GPU1 replica counts.
+    public bool IsParallelAdmitted => Allowed && ExecutionMode == "parallel"
+        && GpuIndex == 1 && InstanceId == ModelId + "@subagent"
+        && RequiredBytes is > 0 && FreeBytes >= RequiredBytes;
+}
 
 public sealed record SubagentRuntimePreparation(
     string InstanceId, string ModelId, int GpuIndex, string CacheStatus, int CachedTokens,
@@ -102,9 +110,8 @@ public sealed partial class ModelRuntimeClient
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(childSessionCacheKey);
-        // Fork an idle immutable prefix while retaining both turn leases. An
-        // admitted GPU1 replica has its own turn lease; a shared GPU0 branch
-        // keeps the primary lease and restores its independent snapshot key.
+        // Fork an idle immutable prefix while retaining both turn leases.
+        // A delegated context is never prepared on the primary instance.
         var turnLease = await AcquireTurnAsync(null, cancellationToken).ConfigureAwait(false);
         try
         {
@@ -130,10 +137,8 @@ public sealed partial class ModelRuntimeClient
                             json.RootElement.TryGetProperty("detail", out var timeoutDetail) && timeoutDetail.ValueKind == JsonValueKind.String
                                 ? timeoutDetail.GetString() ?? "Die native Vorbereitung meldet keinen weiteren Fortschritt."
                                 : "Die native Vorbereitung meldet keinen weiteren Fortschritt.");
-                    if (!availability.Allowed || availability.ModelId != installed.Id
-                        || availability.InstanceId is null || availability.GpuIndex is not (0 or 1)
-                        || availability.GpuIndex == 0 && availability.InstanceId != installed.Id
-                        || availability.GpuIndex == 1 && availability.InstanceId != installed.Id + "@subagent")
+                    if (!availability.IsParallelAdmitted || availability.ModelId != installed.Id
+                        || availability.InstanceId is null || availability.GpuIndex is not 1)
                         throw new InvalidOperationException(availability.Reason ?? "subagent.runtime_unavailable");
                     var cacheStatus = json.RootElement.TryGetProperty("cacheStatus", out var cache) ? cache.GetString() ?? "miss" : "miss";
                     // A resumed child has its own canonical message history and no
@@ -198,6 +203,8 @@ public sealed partial class ModelRuntimeClient
             root.TryGetProperty("gpuIndex", out var gpu) && gpu.ValueKind == JsonValueKind.Number && gpu.TryGetInt32(out var index) ? index : null,
             root.TryGetProperty("contextLength", out var context) && context.ValueKind == JsonValueKind.Number && context.TryGetInt32(out var length) ? length : 0,
             root.TryGetProperty("requiredBytes", out var required) && required.ValueKind == JsonValueKind.Number && required.TryGetInt64(out var bytes) ? bytes : null,
-            root.TryGetProperty("freeBytes", out var free) && free.ValueKind == JsonValueKind.Number && free.TryGetInt64(out var freeBytes) ? freeBytes : null);
+            root.TryGetProperty("freeBytes", out var free) && free.ValueKind == JsonValueKind.Number && free.TryGetInt64(out var freeBytes) ? freeBytes : null,
+            root.TryGetProperty("executionMode", out var mode) && mode.ValueKind == JsonValueKind.String ? mode.GetString() : null,
+            root.TryGetProperty("parallelUnavailableReason", out var unavailable) && unavailable.ValueKind == JsonValueKind.String ? unavailable.GetString() : null);
     }
 }

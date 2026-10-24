@@ -77,40 +77,36 @@ public sealed partial class NativeAssistantPage
                 Research(nestedResearchId, "research-nested", "Delegierte Recherche", delegatedMessage),
                 Research(legacyResearchId, "research-legacy", "Historische Recherche", legacy: true) }, JsonOptions);
             ApplyEvent("state.snapshot", JsonSerializer.SerializeToElement(snapshot)); ShowChatView(); RenderMessagesNow(); UpdateLayout();
-            if (SessionSubagents().Length != 5 || SubagentsSection.Visibility != Visibility.Visible
-                || SubagentsPanel.Children.Count != 1 || _subagentSummaryIcons?.Children.Count != 4
-                || _subagentSummaryIcons!.Children.Any(icon => icon is not Missum.App.Controls.NativeSubagentAvatar)
-                || Descendants(Inspector).OfType<TextBlock>().Any(label => label.Text == "Deep Research")
-                || _messageBlocks[parentId].ContainsKey("tool:companion") || _messageBlocks[parentId].ContainsKey("tool:research-one")
-                || _messageBlocks[parentId]["tool:research-one-start"] is not SubagentLifecycleView)
-                throw new InvalidOperationException("Deep Research verwendet nicht ausschließlich die gemeinsame Subagentendarstellung mit Planeten.");
+            if (SessionSubagents().Length != 1 || SubagentsSection.Visibility != Visibility.Visible
+                || SubagentsPanel.Children.Count != 1 || _subagentSummaryIcons?.Children.Count != 1
+                || _messageBlocks[parentId].ContainsKey("tool:companion")
+                || _messageBlocks[parentId].ContainsKey("tool:research-one-start")
+                || _messageBlocks[parentId]["tool:research-one"] is not ToolStepView)
+                throw new InvalidOperationException("Deep Research ist nicht als eigener Werkzeugschritt von Subagenten getrennt.");
             Inspector.Visibility = Visibility.Visible;
             OpenSubagentOverview(); UpdateLayout();
-            var overviewResearch = Descendants(_subagentOverviewHost).OfType<Button>()
-                .FirstOrDefault(button => button.Tag is string id && id == researchId);
-            if (overviewResearch is null)
-                throw new InvalidOperationException("Deep Research fehlt in der bestehenden gemeinsamen Subagentenübersicht.");
-            if (Descendants(overviewResearch).OfType<Missum.App.Controls.NativeSubagentAvatar>().Count() != 1
-                || Descendants(overviewResearch).OfType<TextBlock>().All(label => label.Text != "Erste Recherche"))
-                throw new InvalidOperationException("Recherche erhält in der Subagentenübersicht nicht denselben Planeten und Aufgabentitel.");
+            if (Descendants(_subagentOverviewHost).OfType<Button>()
+                .Any(button => button.Tag is string id && id != "real-agent-smoke"))
+                throw new InvalidOperationException("Deep Research erscheint weiterhin in der Subagentenübersicht.");
             await SaveMathPreviewAsync(LayoutRoot, "native-deep-research-overview-preview.png");
-            await InvokeOverviewButtonAsync(overviewResearch, researchId);
-            ShowParentConversation();
+            ShowParentConversation(); ShowChatView(); RenderMessagesNow();
             Inspector.Visibility = Visibility.Visible; UpdateLayout();
-            var step = (SubagentLifecycleView)_messageBlocks[parentId]["tool:research-one-start"];
-            if (step.TaskLabel.Text != "Deep Research · Erste Recherche")
-                throw new InvalidOperationException("Die Recherche-Werkzeugzeile benennt ihre Deep-Research-Spezialisierung nicht.");
-            if (new ButtonAutomationPeer(step).GetPattern(PatternInterface.Invoke) is not IInvokeProvider invoke)
+            var step = (ToolStepView)_messageBlocks[parentId]["tool:research-one"];
+            if (Descendants(step).OfType<Missum.App.Controls.NativeSubagentAvatar>().Any()
+                || !Descendants(step).OfType<TextBlock>().Any(text => text.Text.StartsWith("Deep Research", StringComparison.Ordinal)))
+                throw new InvalidOperationException("Deep Research besitzt keinen normalen Werkzeugkopf ohne Planeten.");
+            var headerButton = Descendants(step).OfType<Button>().First();
+            if (new ButtonAutomationPeer(headerButton).GetPattern(PatternInterface.Invoke) is not IInvokeProvider invoke)
                 throw new InvalidOperationException("Der Deep-Research-Werkzeugschritt besitzt keine zugängliche Tabnavigation.");
             invoke.Invoke();
             await WaitForPagingSmokeAsync(() => step.NavigationTask is not null, "Deep-Research-Headernavigation wurde nicht aufgerufen.");
             await step.NavigationTask!; RenderMessagesNow(); UpdateLayout();
             var transcriptId = childMessage;
             if (_activeSubagentId != researchId || ActiveSubagent is not { IsDeepResearch: true, IsLegacyDeepResearch: false } || !Composer.IsReadOnly
-                || ComposerInteractionHost.IsEnabled || Composer.PlaceholderText != "Aufgabe vom Hauptagenten"
-                || _subagents[researchId].Label.Text != "Subagent · Erste Recherche"
-                || Descendants(_subagents[researchId].Select).OfType<Missum.App.Controls.NativeSubagentAvatar>().Count() != 1
-                || !_messageBlocks[transcriptId].ContainsKey("tool:research-reasoning")
+                || ComposerInteractionHost.IsEnabled || !Composer.PlaceholderText.StartsWith("Deep Research", StringComparison.Ordinal)
+                || ModelLabel.Text == "Subagent-Modell"
+                || _subagents[researchId].Label.Text != "Deep Research"
+                || Descendants(_subagents[researchId].Select).OfType<Missum.App.Controls.NativeSubagentAvatar>().Any()
                 || _messageBlocks[transcriptId]["tool:research-fetch"] is not ToolStepView
                 || !WebSourceActions().Any(action => action.Urls.Contains(sourceUrl, StringComparer.Ordinal))
                 || !_messageActionViews[transcriptId].Copy.IsEnabled || !_messageActionViews[transcriptId].Read.IsEnabled)
@@ -170,34 +166,49 @@ public sealed partial class NativeAssistantPage
                 throw new InvalidOperationException("Die Recherche eines echten Subagenten wird nicht anhand der ursprünglichen Child-Nachricht geöffnet.");
             ShowParentConversation();
             if (_messageBlocks[parentId]["tool:research-legacy"] is not ToolStepView legacyHeader
-                || !Descendants(legacyHeader).OfType<Missum.App.Controls.NativeSubagentAvatar>()
-                    .Any(icon => icon.Visibility == Visibility.Visible))
-                throw new InvalidOperationException("Der historische Recherche-Werkzeugkopf verwendet keinen Subagenten-Planeten.");
+                || Descendants(legacyHeader).OfType<Missum.App.Controls.NativeSubagentAvatar>().Any())
+                throw new InvalidOperationException("Der historische Recherche-Werkzeugkopf zeigt weiterhin einen Subagenten-Planeten.");
             await OpenDeepResearchTabAsync(parentId, "research-legacy");
             if (_activeSubagentId != legacyResearchId || ActiveSubagent?.IsLegacyDeepResearch != true
-                || !Composer.PlaceholderText.Contains("Historische Recherche", StringComparison.Ordinal)
-                || Descendants(_subagents[legacyResearchId].Select).OfType<Missum.App.Controls.NativeSubagentAvatar>().Count() != 1)
-                throw new InvalidOperationException("Die historische Recherche bleibt nicht mit Planeten lesbar und getrennt von echten Laufsteuerungen.");
+                || !Composer.PlaceholderText.Contains("Deep Research", StringComparison.Ordinal)
+                || Descendants(_subagents[legacyResearchId].Select).OfType<Missum.App.Controls.NativeSubagentAvatar>().Any())
+                throw new InvalidOperationException("Die historische Recherche bleibt nicht ohne Planeten lesbar und getrennt von echten Laufsteuerungen.");
             ShowParentConversation();
             var fallback = new ToolStepView { OpenResearch = () => Task.FromResult(false), CanOpenResearch = () => false };
             fallback.Update(JsonSerializer.SerializeToElement(new { id = "legacy", tool = "web.deepResearch", status = "completed", detail = "Historischer Recherchebericht" }));
             fallback.SetExpanded(true);
             if (!fallback.IsExpanded)
                 throw new InvalidOperationException("Historische Recherche ohne Projektion besitzt keine normale Detailausweichansicht.");
+            var closing = _subagents[researchId];
+            await ActivateSubagentTabAsync(closing);
+            if (new ButtonAutomationPeer(closing.Close).GetPattern(PatternInterface.Invoke) is not IInvokeProvider close)
+                throw new InvalidOperationException("Der Recherchetab besitzt keine bedienbare Schließen-Schaltfläche.");
+            close.Invoke(); UpdateLayout();
+            if (closing.TabOpen || ActiveSubagent is not null || !_running)
+                throw new InvalidOperationException("Das Schließen des Recherchetabs verändert den Hauptlauf oder lässt den Tab offen.");
+            ObserveSubagentSnapshot(closing.Snapshot);
+            if (closing.TabOpen) throw new InvalidOperationException("Recherchefortschritt öffnet einen manuell geschlossenen Tab erneut.");
+            await OpenDeepResearchTabAsync(parentId, "research-one");
+            if (!closing.TabOpen || ActiveSubagent != closing)
+                throw new InvalidOperationException("Ein geschlossener Recherchetab lässt sich nicht wieder öffnen.");
+            ShowParentConversation();
+            SessionTabsPanel.Children.Remove(_subagents["real-agent-smoke"].Container);
+            _subagents.Remove("real-agent-smoke"); RenderSubagentOverlay();
+            if (SubagentsSection.Visibility != Visibility.Collapsed)
+                throw new InvalidOperationException("Reine Rechercheaktivitäten blenden die Subagentenübersicht ein.");
             // The logical-block path must coalesce the same technical receipt.
             var logical = BuildLogicalBlocks(_messages[parentId], MessageContent(_messages[parentId]), MessageSteps(_messages[parentId]), [], false, []);
-            if (logical.Any(block => block.Key is "tool:companion" or "tool:research-one" or "tool:research-two")
-                || logical.Count(block => block.Kind == "subagent") != 2
-                || logical.Count(block => S(block.Data, "tool") == "web.deepResearch") != 1)
+            if (logical.Any(block => block.Key is "tool:companion" or "tool:research-one-start" or "tool:research-two-start")
+                || logical.Any(block => block.Kind == "subagent")
+                || logical.Count(block => S(block.Data, "tool") == "web.deepResearch") != 3)
                 throw new InvalidOperationException("Die virtuelle Rechercheprojektion enthält doppelte technische Schritte.");
             await File.WriteAllTextAsync(Path.Combine(App.Current.DataDirectory, "native-deep-research-validation.json"),
                 JsonSerializer.Serialize(new { passed = true, headerOpensMatchingResearch = true, distinctOperations = 3,
                     nestedSubagentOriginResolves = true, historicalDetailsFallback = true, sharedSources = true,
                     tokenOnlySnapshotsRetainHydratedDetails = true, transcriptRevisionStillUpdates = true,
-                    streamingReasoningVisible = true, liveSnapshotsRetainExpandedDetails = true,
-                    disclosureStopsTailFollowing = true, deepResearchLifecyclePrefix = true,
-                    sharedSubagentOverview = true, unifiedOutputsSection = true, sharedPlanetIcons = true, sharedTaskTitles = true,
-                    realResearchUsesNormalLifecycle = true, legacyResearchRemainsReadable = true,
+                    liveSnapshotsRetainExpandedDetails = true,
+                    standaloneClosableTab = true, excludedFromSubagentOverview = true,
+                    researchToolHeaderPreserved = true, researchUsesSearchIcon = true, legacyResearchRemainsReadable = true,
                     sharedTranscriptAndToolRenderer = true, sharedCopyReadFooter = true, readonlyParentControlsPreserved = true,
                     outputsOrder = "subagents,sources", companionReceiptHiddenInBothRenderers = true,
                     modelRequests = 0, userDataModified = false }, JsonOptions), _lifetime.Token);

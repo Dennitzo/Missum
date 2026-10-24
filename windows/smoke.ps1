@@ -596,16 +596,16 @@ try {
     if (-not (Test-Path -LiteralPath $deepResearchReport -PathType Leaf)) { throw 'Native Deep Research evidence is missing.' }
     $deepResearch = Get-Content -LiteralPath $deepResearchReport -Raw | ConvertFrom-Json
     foreach ($check in @('passed', 'headerOpensMatchingResearch', 'sharedTranscriptAndToolRenderer', 'sharedCopyReadFooter',
-        'readonlyParentControlsPreserved', 'companionReceiptHiddenInBothRenderers', 'unifiedOutputsSection', 'sharedPlanetIcons',
-        'sharedTaskTitles', 'realResearchUsesNormalLifecycle', 'legacyResearchRemainsReadable',
-        'streamingReasoningVisible', 'liveSnapshotsRetainExpandedDetails', 'disclosureStopsTailFollowing', 'deepResearchLifecyclePrefix')) {
+        'readonlyParentControlsPreserved', 'companionReceiptHiddenInBothRenderers', 'standaloneClosableTab',
+        'excludedFromSubagentOverview', 'researchToolHeaderPreserved', 'researchUsesSearchIcon', 'legacyResearchRemainsReadable',
+        'liveSnapshotsRetainExpandedDetails', 'tokenOnlySnapshotsRetainHydratedDetails', 'transcriptRevisionStillUpdates')) {
         if ($deepResearch.$check -ne $true) { throw "Native Deep Research failed: $check" }
     }
     Copy-Item -LiteralPath $deepResearchReport -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-deep-research-validation.json')) -Force
     foreach ($previewName in @('native-deep-research-overview-preview.png', 'native-deep-research-preview.png', 'native-deep-research-live-disclosure-preview.png')) {
         Copy-Item -LiteralPath (Join-Path $smokeData $previewName) -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.' + $previewName)) -Force
     }
-    Write-Host 'Native research subagents, shared planet icons, task titles, lifecycle navigation and legacy transcript verified.'
+    Write-Host 'Native standalone research tabs, tool navigation, live details and historical transcripts verified.'
 
     $responsivenessReport = Join-Path $smokeData 'native-responsiveness-validation.json'
     if (Test-Path -LiteralPath $responsivenessReport -PathType Leaf) {

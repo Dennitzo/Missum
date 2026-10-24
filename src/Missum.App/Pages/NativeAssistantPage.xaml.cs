@@ -610,9 +610,10 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                     layout.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) });
                     var childAgent = ActiveSubagent;
                     layout.Children.Add(new Border { Width = 28, Height = 28, CornerRadius = new(14), VerticalAlignment = VerticalAlignment.Top,
-                        Background = childAgent is null ? ThemeBrush("MissumAccentSubtleBrush", 42) : new SolidColorBrush(Microsoft.UI.Colors.Transparent),
-                        Child = childAgent is null
-                            ? new FontIcon { Glyph = "\uE99A", FontSize = 15, Foreground = NativeIconPalette.BrushFor("navigation") }
+                        Background = childAgent is null || childAgent.IsDeepResearch ? ThemeBrush("MissumAccentSubtleBrush", 42) : new SolidColorBrush(Microsoft.UI.Colors.Transparent),
+                        Child = childAgent is null || childAgent.IsDeepResearch
+                            ? new FontIcon { Glyph = childAgent?.IsDeepResearch == true ? "\uE721" : "\uE99A", FontSize = 15,
+                                Foreground = NativeIconPalette.BrushFor(childAgent?.IsDeepResearch == true ? "research" : "navigation") }
                             : SubagentIcon(childAgent.AgentId, 26, childAgent.PlanetIndex) });
                     bubble.Child = null;
                     Grid.SetColumn(messageBody, 1); layout.Children.Add(messageBody); bubble.Child = layout;
@@ -871,7 +872,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
 
         ModelButton.IsEnabled = ActiveSubagent is null;
         SendIcon.Glyph = stop ? "\uE71A" : "\uE74A";
-        var label = ActiveSubagent?.IsLegacyDeepResearch == true ? "Historische Recherche · Steuerung im Hauptchat"
+        var label = ActiveSubagent?.IsDeepResearch == true ? "Deep Research · Steuerung im Hauptchat"
             : preparingContinuation ? "Vorbereitung stoppen" : stop ? "Aktivität stoppen" : _running ? "Antwort umlenken" : "Nachricht senden";
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(SendButton, label);
         ToolTipService.SetToolTip(SendButton, label);

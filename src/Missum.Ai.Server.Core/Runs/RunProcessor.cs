@@ -227,6 +227,29 @@ public sealed partial class RunProcessor : BackgroundService
         var contextLength = Math.Min(
             selection.ContextLength,
             request.Limits?.MaximumContextTokens ?? selection.ContextLength);
+        if (request.Subagent is { } delegatedAdmission)
+        {
+            if (delegatedAdmission.Specialization == "deepResearch")
+                throw new InvalidOperationException("web.deepResearch.tool_only: Gespeicherte Recherche-Subagenten werden nicht erneut ausgeführt. "
+                    + "Ihr Verlauf bleibt erhalten; neue Recherche erfolgt ausschließlich als Werkzeug im Hauptlauf.");
+            if (delegatedAdmission.GpuIndex == 0 || delegatedAdmission.RuntimeInstanceId != selection.ModelId + "@subagent")
+                throw new InvalidOperationException("subagent.parallel_capacity_required: Der gespeicherte Subagent besitzt keine unabhängig budgetierte Modellinstanz. "
+                    + "Die Hauptinstanz wird nicht als Fallback verwendet; der Hauptlauf behält die offene Teilaufgabe.");
+            var admission = await _modelRuntime.GetSubagentAvailabilityAsync(selection.ModelId, contextLength, cancellationToken).ConfigureAwait(false);
+            if (admission.Reason == "subagent.primary_not_loaded")
+            {
+                // A durable GPU1 child may be resumed before its owner has
+                // reloaded after a native restart. Warm only the main model;
+                // admission must still succeed before any child inference.
+                await using var warmup = await _scheduler.AcquireAsync("subagent-owner-recovery", delegatedAdmission.ParentRunId,
+                    GpuLeaseMode.Shared, cancellationToken).ConfigureAwait(false);
+                await _workers.PrepareLmModelWithStatusAsync(selection.ModelId, contextLength, null, cancellationToken).ConfigureAwait(false);
+                admission = await _modelRuntime.GetSubagentAvailabilityAsync(selection.ModelId, contextLength, cancellationToken).ConfigureAwait(false);
+            }
+            if (!admission.IsParallelAdmitted)
+                throw new InvalidOperationException("subagent.parallel_capacity_required: " + (admission.Reason ?? admission.ParallelUnavailableReason
+                    ?? "Für eine unabhängige Subagenteninstanz ist keine freie Kapazität nachgewiesen."));
+        }
         var maximumOutputTokens = ResolveMaximumOutputTokensPerTurn(request);
         var codingBudget = CodingRunBudget.FromOptions(_options);
         var subagentAvailable = await CanOfferSubagentToolsAsync(request,
@@ -486,9 +509,6 @@ public sealed partial class RunProcessor : BackgroundService
                 contextLength = ResolveLoadedContextLength(contextLength, preparation);
                 if (request.DeepResearch)
                 {
-                    // A delegated research branch may use this same model on
-                    // GPU0. Never retain its inference lane while awaiting it.
-                    await researchLease.DisposeAsync().ConfigureAwait(false);
                     var scheduled = ScheduleExplicitDeepResearch(
                         new AgentRunCheckpoint([], 0, 0, 0, 0), runId, researchTask, request.ResearchOptions);
                     var arguments = scheduled.ActiveToolCalls![0].Arguments;
@@ -499,7 +519,7 @@ public sealed partial class RunProcessor : BackgroundService
                         : await ExecuteCodingDeepResearchAsync(runId, researchOperationId, arguments,
                         selection.ModelId, selection.Role, contextLength, CodingDeepResearchPipeline.MaximumModelCalls,
                         CodingDeepResearchPipeline.MaximumToolCalls, effectiveTools, request.ReasoningEffort,
-                        parentMessages: messages, cancellationToken: cancellationToken)
+                        schedulerLeaseAlreadyHeld: true, parentMessages: messages, cancellationToken: cancellationToken)
                         .ConfigureAwait(false);
                     var payload = advanced.Result.Result;
                     explicitResearchResult = payload;
@@ -581,8 +601,6 @@ public sealed partial class RunProcessor : BackgroundService
                     CompactionPerformed: true),
                 cancellationToken).ConfigureAwait(false);
             await SaveCheckpointAsync().ConfigureAwait(false);
-            if (explicitResearchResult is { } researchReceipt)
-                await ConsumeResearchSubagentResultAsync(runId, researchReceipt, cancellationToken).ConfigureAwait(false);
             }
             catch (RunSteeringBoundaryException)
             {
@@ -813,15 +831,12 @@ public sealed partial class RunProcessor : BackgroundService
                             // unbounded research cascade and exhausting the context before it can answer.
                             deepResearchCompleted = true;
                             await SaveCheckpointAsync().ConfigureAwait(false);
-                            await ConsumeResearchSubagentResultAsync(runId, result.Result, cancellationToken).ConfigureAwait(false);
                             var report = RenderExplicitDeepResearchReport(result.Result);
                             if (await CompleteRunAsync(report, textWasStreamed: false).ConfigureAwait(false)) return;
                             cancellationToken.ThrowIfCancellationRequested();
                             if (!await _repository.HasPendingSteeringAsync(runId, cancellationToken).ConfigureAwait(false)) return;
                         }
                         await SaveCheckpointAsync().ConfigureAwait(false);
-                        if (tool.Name == CodingDeepResearchPipeline.ToolName)
-                            await ConsumeResearchSubagentResultAsync(runId, result.Result, cancellationToken).ConfigureAwait(false);
                         if (tool.Name == SubagentToolNames.Wait)
                             _ = await _repository.TryConsumeSubagentResultAsync(runId,
                                 call.Arguments.GetProperty("runId").GetString()!, cancellationToken).ConfigureAwait(false);

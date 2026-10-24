@@ -20,13 +20,28 @@ class SubagentRuntimeTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         gguf(self.root / "FutureLocalModel.gguf", architecture="llama", context=32768)
+        # Supply real cache dimensions: admission must reject unknown layouts
+        # instead of treating their context as zero bytes.
+        with (self.root / "FutureLocalModel.gguf").open("r+b") as stream:
+            _, _, _, count = struct.unpack("<4sIQQ", stream.read(24))
+            for _ in range(count):
+                catalog.read_string(stream)
+                catalog.skip_value(stream, struct.unpack("<I", stream.read(4))[0])
+            dimensions = {"llama.block_count": 32, "llama.embedding_length": 4096,
+                          "llama.attention.head_count": 32, "llama.attention.head_count_kv": 8}
+            for key, value in dimensions.items():
+                key = key.encode()
+                stream.write(struct.pack("<Q", len(key)) + key + struct.pack("<II", 4, value))
+            stream.seek(16)
+            stream.write(struct.pack("<Q", count + len(dimensions)))
         self.model = catalog.discover_models(self.root)[0]
         self.base = self.model["id"]
         self.child = self.base + "@subagent"
         self.manager = catalog.GpuLoadManager(self.root, self.root / "models.ini", self.root, 8081)
         self.devices = [dict(index=0, device="CUDA0", free=40 * 1024**3),
                         dict(index=1, device="CUDA1", free=40 * 1024**3)]
-        self.primary = dict(id=self.base, status=dict(value="loaded", args=["--device", "CUDA0", "--split-mode", "none"]))
+        self.primary = dict(id=self.base, status=dict(value="loaded", args=[
+            "--device", "CUDA0", "--split-mode", "none", "--fit", "off", "--n-gpu-layers", "999"]))
         self.active = [self.primary]
         self.loads = []
         self.fail = False
@@ -34,6 +49,9 @@ class SubagentRuntimeTests(unittest.TestCase):
         self.failure_detail = "CUDA error: out of memory"
         self.contexts = {}
         self.manager.router = self.router
+        ram = patch.object(catalog, "available_host_memory", return_value=32 * 1024**3)
+        ram.start()
+        self.addCleanup(ram.stop)
 
     def router(self, path, body=None, timeout=15):
         if path.startswith("v1/models"):
@@ -170,6 +188,24 @@ class SubagentRuntimeTests(unittest.TestCase):
         self.assertEqual([], self.loads)
         invalidate.assert_not_called()
 
+    def test_resident_replica_requires_positive_single_gpu1_placement_proof(self):
+        for placement in ([], ["--device", "CUDA1"], ["--split-mode", "none"],
+                          ["--device", "CUDA1", "--split-mode", "layer"],
+                          ["--device", "CUDA0,CUDA1", "--split-mode", "none"]):
+            with self.subTest(placement=placement), patch.object(catalog, "gpu_inventory", return_value=self.devices):
+                self.active[:] = [self.primary, dict(id=self.child, status=dict(value="loaded", args=[
+                    *placement, "--fit", "off", "--n-gpu-layers", "999"]))]
+                result = self.manager.agent_status(self.base)
+                self.assertFalse(result["allowed"])
+                self.assertEqual("subagent.secondary_not_gpu1", result["reason"])
+        # A supervisor-owned placement and policy provide the same proof when
+        # the native router does not echo its command line arguments.
+        self.manager.placements[self.child] = "CUDA1"
+        self.manager.policies[self.child] = catalog.model_runtime_policy(self.model, "CUDA1")
+        self.active[-1]["status"]["args"] = []
+        with patch.object(catalog, "gpu_inventory", return_value=self.devices):
+            self.assertTrue(self.manager.agent_status(self.base)["allowed"])
+
     def test_loading_primary_finishes_before_replica_admission_without_rewriting_placement(self):
         self.primary["status"]["value"] = "loading"
         def finish(_):
@@ -237,25 +273,29 @@ class SubagentRuntimeTests(unittest.TestCase):
             self.assertIn("batch-size = 256\nubatch-size = 256", block)
         self.assertEqual(self.manager.placements, {self.base: "CUDA0", self.child: "CUDA1"})
 
-    def test_actual_multi_gpu_placement_delegates_on_the_existing_primary_without_replica(self):
+    def test_actual_multi_gpu_placement_never_falls_back_to_existing_primary(self):
         self.primary["status"]["args"] = ["--device", "CUDA0,CUDA1", "--split-mode", "layer"]
         with patch.object(catalog, "gpu_inventory", return_value=self.devices):
             result = self.manager.agent_status(self.base)
-        self.assertTrue(result["allowed"])
-        self.assertEqual(self.base, result["instanceId"])
-        self.assertEqual(0, result["gpuIndex"])
-        self.assertEqual("shared_primary", result["executionMode"])
-        self.assertEqual("subagent.primary_uses_multiple_gpus", result["parallelUnavailableReason"])
+        self.assertFalse(result["allowed"])
+        self.assertEqual(self.child, result["instanceId"])
+        self.assertEqual(1, result["gpuIndex"])
+        self.assertEqual("unavailable", result["executionMode"])
+        self.assertEqual("subagent.primary_uses_multiple_gpus", result["reason"])
         self.assertFalse(self.loads)
 
-    def test_actual_free_vram_blocks_new_replica_but_resident_replica_remains_usable(self):
+    def test_actual_free_vram_blocks_new_and_resident_replica_without_safety_headroom(self):
         self.devices[1]["free"] = 1024**3
         with patch.object(catalog, "gpu_inventory", return_value=self.devices):
-            shared = self.manager.agent_status(self.base)
-            self.assertTrue(shared["allowed"])
-            self.assertEqual(self.base, shared["instanceId"])
-            self.assertEqual("subagent.vram_insufficient", shared["parallelUnavailableReason"])
-            self.active.append(dict(id=self.child, status=dict(value="loaded")))
+            blocked = self.manager.agent_status(self.base)
+            self.assertFalse(blocked["allowed"])
+            self.assertEqual("subagent.vram_insufficient", blocked["reason"])
+            self.active.append(dict(id=self.child, status=dict(value="loaded", args=[
+                "--device", "CUDA1", "--split-mode", "none", "--fit", "off", "--n-gpu-layers", "999"])))
+            parallel = self.manager.agent_status(self.base)
+            self.assertFalse(parallel["allowed"])
+            self.assertEqual("subagent.vram_insufficient", parallel["reason"])
+            self.devices[1]["free"] = 3 * 1024**3
             parallel = self.manager.agent_status(self.base)
             self.assertTrue(parallel["allowed"])
             self.assertEqual(self.child, parallel["instanceId"])
@@ -267,37 +307,36 @@ class SubagentRuntimeTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "subagent.vram_allocation_failed"):
                 self.manager.load(self.child)
             available = self.manager.agent_status(self.base)
-            self.assertTrue(available["allowed"])
-            self.assertEqual(self.base, available["instanceId"])
-            self.assertEqual("subagent.vram_allocation_failed", available["parallelUnavailableReason"])
+            self.assertFalse(available["allowed"])
+            self.assertEqual(self.child, available["instanceId"])
+            self.assertEqual("subagent.vram_allocation_failed", available["reason"])
         self.assertEqual([self.child], self.loads)
         self.assertEqual("CUDA1", self.manager.placements[self.child])
 
-    def test_shared_preparation_uses_independent_keys_without_loading_or_reconfiguring_model(self):
+    def test_rejected_preparation_never_forks_or_reconfigures_primary(self):
         self.devices[1]["free"] = 1024**3
         with patch.object(catalog, "gpu_inventory", return_value=self.devices), patch.object(
                 self.manager.sessions, "fork", return_value=dict(status="forked", restoredTokens=230)) as fork:
             result = self.manager.agent_prepare(self.base, "parent", "child", {}, "child-session", "parent-session")
-        self.assertTrue(result["allowed"])
-        self.assertEqual((self.base, 0, "forked", 230),
-                         (result["instanceId"], result["gpuIndex"], result["cacheStatus"], result["cachedTokens"]))
+        self.assertFalse(result["allowed"])
+        self.assertEqual("subagent.vram_insufficient", result["reason"])
         self.assertEqual([], self.loads)
         self.assertEqual({}, self.manager.policies)
-        fork.assert_called_once_with(self.base, "parent", self.base, "child", {}, "child-session", "parent-session", None)
+        fork.assert_not_called()
 
-    def test_failed_secondary_allocation_prepares_shared_branch_without_loading_another_primary(self):
+    def test_failed_secondary_allocation_never_prepares_shared_primary_branch(self):
         self.failed_models.add(self.child)
         with patch.object(catalog, "gpu_inventory", return_value=self.devices), patch.object(
                 self.manager.sessions, "fork", return_value=dict(status="forked", restoredTokens=230)) as fork:
             result = self.manager.agent_prepare(self.base, "parent", "child", {})
-        self.assertTrue(result["allowed"])
-        self.assertEqual((self.base, 0), (result["instanceId"], result["gpuIndex"]))
-        self.assertEqual("subagent.vram_allocation_failed", result["parallelUnavailableReason"])
+        self.assertFalse(result["allowed"])
+        self.assertEqual((self.child, 1), (result["instanceId"], result["gpuIndex"]))
+        self.assertEqual("subagent.vram_allocation_failed", result["reason"])
         self.assertEqual([self.child], self.loads)
         self.assertEqual("loaded", self.primary["status"]["value"])
-        fork.assert_called_once_with(self.base, "parent", self.base, "child", {}, None, None, None)
+        fork.assert_not_called()
 
-    def test_shared_admission_rejects_another_models_resident_slot_and_unfinished_primary_load(self):
+    def test_admission_rejects_another_models_resident_slot_and_unfinished_primary_load(self):
         for status in ("loading", "failed"):
             with self.subTest(status=status), patch.object(catalog, "gpu_inventory", return_value=self.devices[:1]):
                 self.primary["status"]["value"] = status
@@ -307,14 +346,105 @@ class SubagentRuntimeTests(unittest.TestCase):
         self.active[:] = [dict(id="other-model", status=dict(value="loaded"))]
         self.assertEqual("subagent.primary_not_loaded", self.manager.agent_status(self.base)["reason"])
 
-    def test_one_gpu_shared_admission_preserves_the_actual_primary_context_limit(self):
+    def test_one_gpu_machine_rejects_delegation_without_touching_primary(self):
         with patch.object(catalog, "gpu_inventory", return_value=self.devices[:1]):
             result = self.manager.agent_status(self.base, 32768)
-            self.assertTrue(result["allowed"])
-            self.assertEqual((self.base, 0, 32768), (result["instanceId"], result["gpuIndex"], result["contextLength"]))
+            self.assertFalse(result["allowed"])
+            self.assertEqual("subagent.second_gpu_unavailable", result["reason"])
             rejected = self.manager.agent_status(self.base, 32769)
             self.assertFalse(rejected["allowed"])
-            self.assertEqual("subagent.context_too_large", rejected["reason"])
+            self.assertEqual("subagent.second_gpu_unavailable", rejected["reason"])
+
+    def test_single_gpu_load_policy_proves_full_offload_without_router_argument_echo(self):
+        # The normal small-model path fixes fit=off and all GPU layers. This
+        # remains eligible when the native router omits those default args.
+        self.primary["status"]["args"] = ["--device", "CUDA0", "--split-mode", "none"]
+        self.manager.placements[self.base] = "CUDA0"
+        self.manager.policies[self.base] = catalog.model_runtime_policy(self.model, "CUDA0")
+        with patch.object(catalog, "gpu_inventory", return_value=self.devices):
+            result = self.manager.agent_status(self.base)
+        self.assertTrue(result["allowed"])
+        self.assertEqual("parallel", result["executionMode"])
+        self.assertGreater(result["requiredBytes"], 0)
+        self.assertGreaterEqual(result["freeBytes"], result["requiredBytes"])
+
+    def test_cpu_backed_or_unknown_primary_is_never_admitted(self):
+        cases = [(["--fit", "on", "--n-gpu-layers", "auto"], "subagent.primary_offload_unknown"),
+                 (["--fit", "off", "--n-gpu-layers", "20"], "subagent.primary_cpu_offload"),
+                 (["--fit", "off", "--n-gpu-layers", "999", "--no-kv-offload"], "subagent.primary_cpu_offload"),
+                 ([], "subagent.primary_offload_unknown")]
+        for arguments, expected in cases:
+            with self.subTest(arguments=arguments), patch.object(catalog, "gpu_inventory", return_value=self.devices):
+                self.primary["status"]["args"] = ["--device", "CUDA0", "--split-mode", "none", *arguments]
+                result = self.manager.agent_status(self.base)
+                self.assertFalse(result["allowed"])
+                self.assertEqual(expected, result["reason"])
+                self.assertEqual("unavailable", result["executionMode"])
+        self.assertEqual([], self.loads)
+
+    def test_unknown_cache_dimensions_are_not_treated_as_zero_byte_context(self):
+        with patch.object(catalog, "gpu_inventory", return_value=self.devices), patch.object(
+                catalog, "estimate_replica_bytes", return_value=None):
+            result = self.manager.agent_status(self.base)
+        self.assertFalse(result["allowed"])
+        self.assertEqual("subagent.resource_estimate_unavailable", result["reason"])
+        self.assertFalse(self.loads)
+
+    def test_hybrid_replica_budget_keeps_recurrent_state_for_all_layers(self):
+        metadata = {"general.architecture": "hybrid", "hybrid.block_count": 33,
+                    "hybrid.full_attention_interval": 4, "hybrid.embedding_length": 4096,
+                    "hybrid.attention.head_count": 32, "hybrid.attention.head_count_kv": 8,
+                    "hybrid.ssm.state_size": 128, "hybrid.ssm.inner_size": 4096}
+        dense = dict(metadata, **{"hybrid.block_count": 9})
+        expected = (int(catalog.model_file_bytes(self.model) * 1.05)
+                    + catalog.estimate_q8_session_bytes(dense, 32768)
+                    + int(catalog.recurrent_state_bytes(metadata, 24) * 1.1) + 512 * 1024**2)
+        with patch.object(catalog, "model_metadata", return_value=metadata):
+            self.assertEqual(expected, catalog.estimate_replica_bytes(self.model, 32768))
+
+    def test_full_context_budget_can_reject_an_otherwise_small_model(self):
+        with patch.object(catalog, "gpu_inventory", return_value=self.devices):
+            accepted = self.manager.agent_status(self.base)
+            self.contexts[self.base] = 1048576
+            rejected = self.manager.agent_status(self.base)
+        self.assertTrue(accepted["allowed"])
+        self.assertFalse(rejected["allowed"])
+        self.assertEqual("subagent.vram_insufficient", rejected["reason"])
+        self.assertGreater(rejected["requiredBytes"], rejected["freeBytes"])
+
+    def test_primary_safety_reserve_and_physical_ram_are_required(self):
+        with patch.object(catalog, "gpu_inventory", return_value=self.devices):
+            self.devices[0]["free"] = 1024**3
+            self.assertEqual("subagent.primary_vram_insufficient", self.manager.agent_status(self.base)["reason"])
+            self.devices[0]["free"] = 40 * 1024**3
+            with patch.object(catalog, "available_host_memory", return_value=1024**3):
+                result = self.manager.agent_status(self.base)
+                self.assertEqual("subagent.ram_insufficient", result["reason"])
+                self.assertGreater(result["requiredHostBytes"], result["freeHostBytes"])
+            with patch.object(catalog, "available_host_memory", return_value=None):
+                self.assertEqual("subagent.ram_unavailable", self.manager.agent_status(self.base)["reason"])
+
+    def test_prepare_rechecks_capacity_after_load_and_never_forks_on_lost_reserve(self):
+        def competing_allocation(_):
+            self.active.append(dict(id=self.child, status=dict(value="loaded", args=[
+                "--device", "CUDA1", "--split-mode", "none", "--fit", "off", "--n-gpu-layers", "999"])))
+            self.devices[1]["free"] = 1024**3
+        with patch.object(catalog, "gpu_inventory", return_value=self.devices), patch.object(
+                self.manager, "load", side_effect=competing_allocation), patch.object(self.manager.sessions, "fork") as fork:
+            result = self.manager.agent_prepare(self.base, "parent", "child", {})
+        self.assertFalse(result["allowed"])
+        self.assertEqual("subagent.vram_insufficient", result["reason"])
+        fork.assert_not_called()
+
+    def test_prepare_rejects_stale_shared_admission_without_touching_primary(self):
+        with patch.object(self.manager, "agent_status", return_value=dict(
+                allowed=True, modelId=self.base, instanceId=self.base)), patch.object(
+                self.manager, "load") as load, patch.object(self.manager.sessions, "fork") as fork:
+            result = self.manager.agent_prepare(self.base, "parent", "child", {})
+        self.assertFalse(result["allowed"])
+        self.assertEqual("subagent.shared_primary_disabled", result["reason"])
+        load.assert_not_called()
+        fork.assert_not_called()
 
     def test_shared_canonical_fork_preserves_parent_and_child_snapshots_across_owner_switches(self):
         cache, state, _, canonical, source, prefill = self.canonical_cache()
@@ -339,7 +469,7 @@ class SubagentRuntimeTests(unittest.TestCase):
         self.devices[0]["device"], self.devices[1]["device"] = "CUDA1", "CUDA0"
         with patch.object(catalog, "gpu_inventory", return_value=self.devices):
             self.assertEqual("subagent.primary_not_gpu0", self.manager.agent_status(self.base)["reason"])
-            self.primary["status"]["args"] = ["--device", "CUDA1", "--split-mode", "none"]
+            self.primary["status"]["args"] = ["--device", "CUDA1", "--split-mode", "none", "--fit", "off", "--n-gpu-layers", "999"]
             self.assertTrue(self.manager.agent_status(self.base)["allowed"])
 
     def test_fork_cache_copies_exact_prefix_into_independent_snapshot_and_preserves_child_progress(self):

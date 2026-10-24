@@ -74,7 +74,7 @@ public sealed class DeepResearchClientIntegrationTests
                 return Task.CompletedTask;
             }, deadline.Token);
         Assert.Empty(introductions);
-        Assert.Equal(session.Title, (await chats.GetSessionAsync(session.Id))!.Title);
+        Assert.Equal(prompt, (await chats.GetSessionAsync(session.Id))!.Title);
         var recorded = await chats.ListMessagesAsync(session.Id);
         Assert.True(requests.Count == 1, string.Join(" | ", recorded.Select(message => message.Error ?? message.Content)));
         var scienceRequest = requests[0].Messages[^1].Content[0].Text!;

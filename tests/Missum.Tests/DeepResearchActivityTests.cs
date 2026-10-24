@@ -62,8 +62,15 @@ public sealed class DeepResearchActivityTests
         var emitted = observations.Where(state => state.GetProperty("kind").GetString() == "deepResearch").ToArray();
         Assert.True(emitted.Length >= 3);
         Assert.All(emitted, state => Assert.Equal(parent.Id, state.GetProperty("parentMessageId").GetGuid()));
+        Assert.All(emitted, state =>
+        {
+            Assert.False(state.GetProperty("canStop").GetBoolean());
+            Assert.False(state.GetProperty("canResume").GetBoolean());
+            Assert.Equal(JsonValueKind.Null, state.GetProperty("planetIndex").ValueKind);
+        });
         Assert.Equal("running", emitted[0].GetProperty("status").GetString());
         Assert.Equal("completed", emitted[^1].GetProperty("status").GetString());
+        Assert.Null(activity.CompletionReceipt(0, At));
         if (!nested)
         {
             var header = Assert.Single(parent.ToolSteps!, step => step.Tool == "web.deepResearch");

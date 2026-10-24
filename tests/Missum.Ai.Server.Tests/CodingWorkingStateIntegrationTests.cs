@@ -832,7 +832,8 @@ public sealed class CodingWorkingStateIntegrationTests
         {
             Mode = RunMode.General, PreferredGeneralModelId = NativeHandler.ModelId,
             ResearchOptions = new(ProjectId: "research-recovery", ProtocolVersion: 2),
-            Subagent = new("parent-recovery", "child-recovery", "Prüfe den Beweis.", "parent-session"),
+            Subagent = new("parent-recovery", "child-recovery", "Prüfe den Beweis.", "parent-session",
+                NativeHandler.ModelId + "@subagent", GpuIndex: 1),
         } : Request();
         var run = (await harness.Repository.CreateAsync(request, null)).Snapshot.RunId;
         if (scienceSubagent)
@@ -887,7 +888,8 @@ public sealed class CodingWorkingStateIntegrationTests
             Mode = RunMode.Coding, PreferredCodingModelId = NativeHandler.ModelId,
             ClientCapabilities = ["coding", "coding.evidence", "workspace"],
             ResearchOptions = null,
-            Subagent = new("parent-recovery", "child-recovery", "Prüfe den Beweis.", "parent-session"),
+            Subagent = new("parent-recovery", "child-recovery", "Prüfe den Beweis.", "parent-session",
+                NativeHandler.ModelId + "@subagent", GpuIndex: 1),
         };
         var run = (await harness.Repository.CreateAsync(request, null)).Snapshot.RunId;
         await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Prüfe den Beweis.")],
@@ -1495,6 +1497,7 @@ public sealed class CodingWorkingStateIntegrationTests
     {
         internal const string ModelId = "coding/Qwen3.8-WorkingStateFixture-Q4~abc123";
         private static readonly string[] Tags = ["missum-context-train:32768"];
+        private static readonly string[] ChildTags = ["missum-context-train:32768", "missum-agent-instance:subagent", "missum-base-model:" + ModelId];
         private int _concurrent;
         internal int MaximumConcurrent { get; private set; }
         internal bool AdaptiveScenario { get; set; }
@@ -1507,8 +1510,17 @@ public sealed class CodingWorkingStateIntegrationTests
             var path = request.RequestUri!.AbsolutePath;
             if (path == "/v1/models")
             {
-                return Json(new { data = new[] { new { id = ModelId, tags = Tags, status = new { value = "loaded" } } } });
+                return Json(new { data = new[]
+                {
+                    new { id = ModelId, tags = Tags, status = new { value = "loaded" } },
+                    new { id = ModelId + "@subagent", tags = ChildTags, status = new { value = "loaded" } },
+                } });
             }
+            if (path == "/agents/status") return Json(new
+            {
+                allowed = true, modelId = ModelId, instanceId = ModelId + "@subagent", gpuIndex = 1,
+                executionMode = "parallel", requiredBytes = 1_000L, freeBytes = 2_000L,
+            });
             if (path == "/props") return Json(new { default_generation_settings = new { n_ctx = 32768 } });
             if (path is "/sessions/prepare" or "/sessions/save") return Json(new { success = true });
             if (path == "/v1/chat/completions/input_tokens") return Json(new { input_tokens = 64 });

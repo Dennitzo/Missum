@@ -50,43 +50,28 @@ public sealed partial class NativeAssistantPage
         }
         Snapshot(0);
         await Task.Delay(800);
-        Snapshot(1);
-        RefreshThinkingIndicators(); UpdateLayout();
-        var thinking = _thinkingIndicators[id];
-        thinking.SetExpanded(false);
-        if (new ButtonAutomationPeer(thinking.ToggleButton).GetPattern(PatternInterface.Invoke) is not IInvokeProvider invoke)
-            throw new InvalidOperationException("Live-Reasoning besitzt keinen bedienbaren Disclosure-Button.");
-        invoke.Invoke();
-        await WaitForPagingSmokeAsync(() => thinking.IsExpanded, "Live-Reasoning wurde nicht ausgeklappt.");
-        if (thinking.Visibility != Visibility.Visible || !Descendants(thinking.ReasoningView).OfType<TextBlock>()
-            .Any() && thinking.ReasoningView.Children.Count == 0)
-            throw new InvalidOperationException("Der laufende Recherche-Denkprozess bleibt beim Aufklappen leer: "
-                + JsonSerializer.Serialize(new { thinking.Visibility, thinking.IsExpanded, thinking.IsProcessing,
-                    thinking.ReasoningView.Source, controls = thinking.ReasoningView.Children.Count,
-                    DisplayRunning, status = S(child.Messages[id], "status"), id }, JsonOptions));
-        if (CanFollowConversationTail || _scrollNewSessionToLatest)
-            throw new InvalidOperationException("Manuelles Ausklappen folgt weiterhin automatisch dem Antwortende.");
+        // Tool details use the same native, independently scrolling tab as
+        // ordinary chat tools. Research progress must not replace its controls.
         var tool = (ToolStepView)_messageBlocks[id]["tool:source-live"];
-        tool.SetExpanded(true); UpdateLayout();
-        var detail = Descendants(tool).OfType<NativeToolResultView>().Single();
-        var toolY = tool.TransformToVisual(ConversationContent).TransformPoint(new()).Y;
-        ConversationScroll.ChangeView(null, Math.Max(0, toolY - 80), null, true);
-        await Task.Delay(100); UpdateLayout();
-        var offset = ConversationScroll.VerticalOffset;
+        if (tool.IsExpanded) throw new InvalidOperationException("Werkzeugdetails werden wieder innerhalb des Rechercheverlaufs ausgeklappt.");
+        await OpenToolTabAsync(id, "source-live"); UpdateLayout();
+        var tab = _activeToolTab ?? throw new InvalidOperationException("Recherche-Werkzeugdetails öffnen keinen nativen Tab.");
+        var detail = Descendants(tab.Details).OfType<NativeToolResultView>().Single();
+        var offset = tab.Scroll.VerticalOffset;
+        Snapshot(1);
         for (var tick = 2; tick <= 9; tick++)
         {
             Snapshot(tick);
+            RefreshOpenToolTabs();
             await Task.Delay(40);
-            if (!ReferenceEquals(tool, _messageBlocks[id]["tool:source-live"])
-                || !Descendants(tool).Contains(detail) || !tool.IsExpanded
-                || Math.Abs(ConversationScroll.VerticalOffset - offset) > 2
-                || !thinking.ReasoningView.Source.Contains("Prüfschritt " + tick, StringComparison.Ordinal))
-                throw new InvalidOperationException("Live-Recherche ersetzt geladene Details, verliert Reasoning oder verschiebt die Leseposition.");
+            if (!ReferenceEquals(_activeToolTab, tab) || !Descendants(tab.Details).Contains(detail)
+                || Math.Abs(tab.Scroll.VerticalOffset - offset) > 2)
+                throw new InvalidOperationException("Live-Recherche ersetzt geladene Werkzeugdetails oder verschiebt die Leseposition im Tab.");
         }
         await SaveMathPreviewAsync(LayoutRoot, "native-deep-research-live-disclosure-preview.png");
-        OnScrollToBottom(this, new RoutedEventArgs());
-        if (!CanFollowConversationTail)
-            throw new InvalidOperationException("Expliziter Sprung zum Ende reaktiviert das Nachscrollen nicht.");
+        CloseToolTab(tab);
+        await ActivateSubagentTabAsync(child);
+
     }
 
     private static void VerifyLiveToolDetailRefreshRace()

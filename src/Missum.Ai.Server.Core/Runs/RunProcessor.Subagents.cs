@@ -80,8 +80,11 @@ public sealed partial class RunProcessor
         ModelRuntimeClient.BuildSessionCacheKey(request.SessionId ?? runId, role,
             request.Mode == RunMode.Coding ? request.CodingOptions?.WorkspacePath : request.WorkspacePath);
 
-    internal static GpuLeaseMode SubagentLeaseMode(SubagentRunContext? relation) =>
-        relation is null || relation.GpuIndex == 0 ? GpuLeaseMode.Shared : GpuLeaseMode.CodingSecondary;
+    internal static GpuLeaseMode SubagentLeaseMode(SubagentRunContext? relation) => relation is null
+        ? GpuLeaseMode.Shared
+        : relation.GpuIndex != 0 && relation.RuntimeInstanceId?.EndsWith("@subagent", StringComparison.Ordinal) == true
+            ? GpuLeaseMode.CodingSecondary
+            : throw new InvalidOperationException("subagent.shared_primary_disabled: Subagenten benötigen eine unabhängige Modellinstanz.");
 
     /// <summary>Preserves every evaluated parent message and closes outstanding parent-only tool calls.</summary>
     internal static IReadOnlyList<LmChatMessage> ForkSubagentMessages(IReadOnlyList<LmChatMessage> parentMessages, string task,
@@ -126,9 +129,9 @@ public sealed partial class RunProcessor
         try
         {
             var availability = await _modelRuntime.GetSubagentAvailabilityAsync(selection.ModelId, selection.ContextLength, cancellationToken).ConfigureAwait(false);
-            if (!availability.Allowed)
+            if (!availability.IsParallelAdmitted)
                 _runtime.WriteLog("Information", "subagent.unavailable", $"Modell {selection.ModelId}: {availability.Reason}");
-            return availability.Allowed;
+            return availability.IsParallelAdmitted;
         }
         catch (HttpRequestException exception)
         {
@@ -154,6 +157,10 @@ public sealed partial class RunProcessor
                     ?? throw new InvalidOperationException("Der Subagentenauftrag fehlt.");
                 if (!IsTerminalSubagentState(previous.State))
                 {
+                    if (previousRequest.Subagent is not { GpuIndex: 1 } relation
+                        || relation.RuntimeInstanceId != selection.ModelId + "@subagent" || relation.Specialization == "deepResearch")
+                        return SubagentFailure("subagent.shared_primary_disabled",
+                            "Der gespeicherte Subagent nutzt keine unabhängige Modellinstanz. Die Teilaufgabe bleibt beim Hauptlauf.");
                     await EnsureSubagentStartedAsync(previous, previousRequest, cancellationToken).ConfigureAwait(false);
                     _ = StartSubagentRunner(previous.RunId, previousRequest);
                 }
@@ -163,13 +170,13 @@ public sealed partial class RunProcessor
                 return await ResumeSubagentAsync(arguments, parentRunId, operationId, parentRequest,
                     selection, parentMessages, cancellationToken).ConfigureAwait(false);
             var availability = await _modelRuntime.GetSubagentAvailabilityAsync(selection.ModelId, selection.ContextLength, cancellationToken).ConfigureAwait(false);
-            if (!availability.Allowed)
-                return SubagentFailure("subagent.insufficient_vram", availability.Reason ?? "Das aktuelle Modell belegt die für den Subagenten benötigten GPU-Ressourcen.");
+            if (!availability.IsParallelAdmitted)
+                return SubagentFailure("subagent.insufficient_vram", availability.Reason ?? availability.ParallelUnavailableReason
+                    ?? "Für eine unabhängige Subagenteninstanz ist keine freie Kapazität nachgewiesen. Die Teilaufgabe bleibt beim Hauptlauf.");
             var active = await _repository.GetSubagentRunsAsync(activeOnly: true, cancellationToken: cancellationToken).ConfigureAwait(false);
             if (availability.GpuIndex == 1 && active.Any(static child => child.Request.Subagent?.GpuIndex is null or 1))
                 return SubagentFailure("subagent.gpu_busy", "Die parallele GPU bearbeitet bereits einen Subagenten. Arbeite weiter und warte auf dessen Ergebnis.");
             var task = arguments.GetProperty("task").GetString()!;
-            var research = toolName == CodingDeepResearchPipeline.ToolName;
             var identity = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(operationId))).ToLowerInvariant();
             var agentId = "subagent-" + identity[..16];
             var childSessionId = new Guid(Convert.FromHexString(identity[..32])).ToString();
@@ -185,8 +192,7 @@ public sealed partial class RunProcessor
                 DeepResearch = false,
                 ResearchOptions = null,
                 Subagent = new(parentRunId, agentId, task, parentRequest.SessionId, ParentSessionCacheKey: parentCacheKey,
-                    Specialization: research ? "deepResearch" : null, OriginToolStepId: operationId,
-                    ResearchAutonomy: research ? ResearchSubagentAutonomy(arguments) : null),
+                    OriginToolStepId: operationId),
                 Messages = [.. parentRequest.Messages, new("user", [new("text", Text: task)])],
             };
             var childCacheKey = BuildRunSessionCacheKey(childRequest, agentId, selection.Role);
@@ -194,8 +200,7 @@ public sealed partial class RunProcessor
             var childContextProfile = parentCheckpoint?.ContextProfileVersion;
             childRequest = childRequest with { ContextProfileVersion = childContextProfile };
             var childWorkingState = childRequest.Mode == RunMode.Coding ? CodingWorkingState.Create(task) : null;
-            var childContext = WithWorkingState(ForkSubagentMessages(parentMessages,
-                research ? CreateResearchSubagentAssignment(task, arguments) : task, agentId), childWorkingState).ToList();
+            var childContext = WithWorkingState(ForkSubagentMessages(parentMessages, task, agentId), childWorkingState).ToList();
             if (childContextProfile == ToolContextProfiles.Current)
                 AppendRuntimeContext(childContext, childRequest, subagentAvailable: false);
             var childMessages = ModelRuntimeClient.PrepareLanguageBoundMessages(childContext);

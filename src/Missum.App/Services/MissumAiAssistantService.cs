@@ -1740,9 +1740,9 @@ public sealed partial class MissumAiAssistantService(
             var agentId = SubagentChatState.DeepResearchAgentId(assistant.Id, operationId);
             if (!subagentStates.TryGetValue(agentId, out var activity))
             {
-                // Current gateways announce a real child through subagent.started.
-                // Only the legacy progress protocol creates a synthetic activity;
-                // an outer tool header must never create a duplicate child.
+                // The progress stream creates a display-only tool activity,
+                // never a child model run. Older child envelopes still replay
+                // without duplicating the same activity.
                 if (progress is null || subagentStates.Values.Any(child => !child.IsLegacyDeepResearch
                     && child.OriginToolStepId == operationId && child.OriginMessageId == originMessage.Id)) return;
                 var original = originalStep
