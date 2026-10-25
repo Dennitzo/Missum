@@ -146,20 +146,19 @@ public sealed partial class ModelRuntimeClient : IDisposable
             var runtimeModels = await GetRuntimeModelsAsync(timeout.Token).ConfigureAwait(false);
             var selected = ResolveInstalledModel(runtimeModels, runtimeInstanceId ?? modelId)
                 ?? throw new FileNotFoundException($"Das lokale Unsloth-Modell '{modelId}' ist nicht installiert.");
-            var requestedBase = ResolveInstalledModel(runtimeModels, modelId)?.Id;
+            var requestedBaseModel = ResolveInstalledModel(runtimeModels, modelId);
+            var requestedBase = requestedBaseModel?.Id;
             if (runtimeInstanceId is not null && !(selected.IsSubagent
                 ? string.Equals(selected.BaseModelId, requestedBase, StringComparison.Ordinal)
                 : string.Equals(selected.Id, requestedBase, StringComparison.Ordinal)))
                 throw new ArgumentException("Die Subagent-Instanz muss dasselbe installierte Modell wie der Hauptagent verwenden.", nameof(runtimeInstanceId));
-            var restoresManagedPair = selected.IsSubagent && selected.BaseModelId is { } restoredBase
-                && ResolveInstalledModel(runtimeModels, restoredBase) is { ManagedGpuPlacement: true, State: not ("loaded" or "sleeping") };
-            if (selected.ManagedGpuPlacement && !selected.IsSubagent || restoresManagedPair)
-            {
-                // The controller may load two independent 280-second native
-                // processes in sequence. This bounds model startup, not AI runs.
-                loadTimeout = ManagedPairLoadTimeout;
-                timeout.CancelAfter(loadTimeout);
-            }
+            // Remote GGUF weights can take longer than either local startup
+            // deadline to cross SMB. Storage is advertised with the existing
+            // model catalog; only the caller controls cancellation in that case.
+            var owningModel = selected.IsSubagent && selected.BaseModelId is { } owningModelId
+                ? ResolveInstalledModel(runtimeModels, owningModelId) : requestedBaseModel;
+            loadTimeout = ResolveModelLoadTimeout(selected, owningModel);
+            timeout.CancelAfter(loadTimeout);
             if (contextLength > selected.MaximumContextLength)
                 throw new ModelContextLengthException(selected.Id, contextLength, selected.MaximumContextLength);
             if (selected.State is "loaded" or "sleeping")
@@ -233,9 +232,21 @@ public sealed partial class ModelRuntimeClient : IDisposable
         }
         catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
         {
+            if (loadTimeout == Timeout.InfiniteTimeSpan)
+                throw new InvalidOperationException($"Das Laden des Netzwerkmodells '{modelId}' wurde durch die Verbindung zur nativen Runtime unterbrochen.", exception);
             throw new TimeoutException($"Das Modell '{modelId}' wurde nicht innerhalb von {loadTimeout.TotalMinutes:0} Minuten geladen.", exception);
         }
         finally { EndModelTransition(); _modelGate.Release(); }
+    }
+
+    internal static TimeSpan ResolveModelLoadTimeout(RuntimeModel selected, RuntimeModel? owningModel = null)
+    {
+        if (selected.NetworkStorage || selected.IsSubagent && owningModel?.NetworkStorage == true)
+            return Timeout.InfiniteTimeSpan;
+        var restoresManagedPair = selected.IsSubagent
+            && owningModel is { ManagedGpuPlacement: true, State: not ("loaded" or "sleeping") };
+        return selected.ManagedGpuPlacement && !selected.IsSubagent || restoresManagedPair
+            ? ManagedPairLoadTimeout : ModelLoadTimeout;
     }
 
     public async Task<bool> UnloadModelAsync(string modelId, CancellationToken cancellationToken = default)
@@ -2127,7 +2138,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
                 context, state is "loaded" or "sleeping" ? context : 0, name, null, null, !embedding, vision, reasoning.SupportedEfforts, reasoning.DefaultEffort, reasoning.Family,
                 item.TryGetProperty("tags", out var gpuTags) && gpuTags.ValueKind == JsonValueKind.Array
                     && gpuTags.EnumerateArray().Any(tag => tag.ValueKind == JsonValueKind.String && tag.GetString() is "missum-gpu-policy:single-preferred-v1" or "go-gpu-policy:single-preferred-v1"),
-                isSubagent, baseModelId)); // Legacy catalog read alias.
+                isSubagent, baseModelId, tags.Contains("missum-model-storage:network", StringComparer.Ordinal))); // Legacy catalog read alias.
         }
         return [.. models];
     }
@@ -2323,5 +2334,6 @@ public sealed partial class ModelRuntimeClient : IDisposable
         string? ReasoningFamily = null,
         bool ManagedGpuPlacement = false,
         bool IsSubagent = false,
-        string? BaseModelId = null);
+        string? BaseModelId = null,
+        bool NetworkStorage = false);
 }

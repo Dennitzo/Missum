@@ -299,6 +299,7 @@ public sealed record AppSettings
     public AiProviderKind AiProvider { get; init; } = AiProviderKind.MissumAiServer;
     public string MissumAiServerUrl { get; init; } = "http://127.0.0.1:8080";
     public string MissumAiProtocolVersion { get; init; } = "1.0";
+    public string? NativeModelRoot { get; init; }
     public string LiveCaptionLanguage { get; init; } = "auto";
     public string? SelectedModel { get; init; } = DefaultSelectedModel;
     [System.Text.Json.Serialization.JsonIgnore]

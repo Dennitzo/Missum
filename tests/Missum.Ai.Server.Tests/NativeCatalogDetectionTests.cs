@@ -113,6 +113,8 @@ public sealed class NativeCatalogDetectionTests
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
+            if (request.RequestUri!.AbsolutePath == "/runtime")
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
             Assert.Equal("/v1/models", request.RequestUri!.AbsolutePath);
             if (mode == "offline") throw new HttpRequestException("Connection refused\r\n" + new string('x', 2_000));
             if (mode == "timeout") throw new OperationCanceledException("Native model status timed out.");

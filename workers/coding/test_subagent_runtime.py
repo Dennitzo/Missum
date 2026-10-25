@@ -85,6 +85,33 @@ class SubagentRuntimeTests(unittest.TestCase):
         self.assertEqual(self.child, result["subagent"]["instanceId"])
         self.assertEqual(["loaded", "loaded"], [item["status"]["value"] for item in self.active])
 
+    def test_explicit_runtime_stop_interrupts_wait_for_existing_network_load(self):
+        self.primary["status"]["value"] = "loading"
+        marker = self.root / "stop.requested"
+        with patch.object(catalog, "model_load_deadline", return_value=float("inf")), patch.object(
+                catalog.time, "sleep", side_effect=lambda _: marker.write_text("stop")):
+            with self.assertRaisesRegex(PreparationCancelledError, "owning runtime stop"):
+                self.manager.load(self.base)
+        self.assertEqual([], self.loads)
+
+    def test_explicit_runtime_stop_interrupts_new_network_model_load_without_retry(self):
+        self.active.clear()
+        original = self.router
+
+        def router(path, body=None, timeout=15):
+            result = original(path, body, timeout)
+            if path == "models/load":
+                self.active[-1]["status"]["value"] = "loading"
+                (self.root / "stop.requested").write_text("stop")
+            return result
+
+        self.manager.router = router
+        with patch.object(catalog, "gpu_inventory", return_value=self.devices), patch.object(
+                catalog, "model_load_deadline", return_value=float("inf")):
+            with self.assertRaisesRegex(PreparationCancelledError, "owning runtime stop"):
+                self.manager.load(self.base)
+        self.assertEqual([self.base], self.loads)
+
     def test_reused_primary_eagerly_loads_missing_replica_then_preserves_both_slots(self):
         with patch.object(catalog, "gpu_inventory", return_value=self.devices):
             first = self.manager.load(self.base)

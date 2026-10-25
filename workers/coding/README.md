@@ -5,6 +5,29 @@ embedding requests, reading existing Unsloth model files in place.
 The gateway and other Missum services continue to run in Docker; the gateway connects
 to Windows through `http://host.docker.internal:8081`.
 
+The native settings card **AI-Modellordner** accepts local folders and Windows
+UNC shares such as `\\server\share\Huggingface`. The Hugging Face cache parent
+or its `hub` folder can both be selected: discovery uses the actual `hub` folder
+when it contains `models--…` repositories, preserving relative model IDs and
+skipping unrelated `datasets`/`xet` caches. Models are read in place; presets,
+templates, logs and KV files remain in the local native runtime directory.
+Changing physical model files/locations still changes their cache fingerprint;
+existing conversations remain authoritative when a disposable KV file is no
+longer compatible. Incomplete split GGUF files and MTP-only prediction companions
+are not offered as chat models.
+
+The native control port exposes read-only `GET /runtime` with `modelRoot` (the
+selected folder) and `discoveryRoot` (the effective GGUF hub). These values are
+captured at supervisor startup, so querying the active path does not scan the
+NAS. A missing/unreachable folder reports a path/access error rather than
+silently switching to a different local model cache. First startup permits up
+to 120 seconds for UNC discovery (30 seconds for local storage), returning as
+soon as the endpoint is ready; this does not limit a model inference run.
+GGUF files on a UNC share advertise `missum-model-storage:network`. Their actual
+model load has no fixed wall-clock deadline: a large transfer still responds to
+an explicit stop of the owning native runtime and reports native allocation/file errors. Local model
+loads retain their existing 280-second allocation ceiling.
+
 GPU placement is negotiated through the supervisor on port 8082 (router port
 plus one), advertised with the `missum-gpu-policy:single-preferred-v1` catalog tag.
 Before loading an unloaded model, Missum reads current physical GPU free memory.

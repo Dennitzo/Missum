@@ -148,6 +148,7 @@ public sealed class CodingModelRuntimeTests
         {
             Hosts.Add(request.RequestUri!.Host);
             if (unavailable) { throw new HttpRequestException("Offline"); }
+            if (request.RequestUri.AbsolutePath == "/runtime") return new(HttpStatusCode.NotFound);
             if (request.RequestUri.AbsolutePath == "/props") return Json(new { default_generation_settings = new { n_ctx = 32_768 } });
             if (request.RequestUri.AbsolutePath is "/sessions/prepare" or "/sessions/save") return Json(new { success = true });
             if (request.RequestUri.AbsolutePath == "/v1/chat/completions/input_tokens")

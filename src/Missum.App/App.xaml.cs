@@ -458,12 +458,15 @@ public partial class App : Application
         IReadOnlyList<ServiceStatusSnapshot>? serviceStatus = null;
         try
         {
+            // Starting or changing a network model folder can outlast a health
+            // probe. Only application shutdown cancels that owned operation;
+            // the short HTTP diagnostic budget begins after it has settled.
+            using var client = await GetService<MissumAiConnectionService>()
+                .CreateClientAsync(cancellationToken)
+                .ConfigureAwait(false);
             using var availabilityCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             availabilityCancellation.CancelAfter(AiAvailabilityProbeTimeout);
             var availabilityToken = availabilityCancellation.Token;
-            using var client = await GetService<MissumAiConnectionService>()
-                .CreateClientAsync(availabilityToken)
-                .ConfigureAwait(false);
             var healthTask = client.GetReadyHealthAsync(availabilityToken);
             var capabilitiesTask = client.GetCapabilitiesAsync(availabilityToken);
 

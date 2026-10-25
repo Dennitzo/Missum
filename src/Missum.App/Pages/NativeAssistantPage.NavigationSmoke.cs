@@ -13,6 +13,11 @@ public sealed partial class NativeAssistantPage
     // Returning to A must not reuse a footer still parented to A's discarded bubble.
     private async Task<int> VerifyMessageNavigationSmokeAsync()
     {
+        if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_RESPONSIVENESS") == "model-root")
+        {
+            await SettingsPage.VerifyNativeModelRootSmokeAsync(LayoutRoot);
+            return 0;
+        }
         if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_RESPONSIVENESS") == "working-plan")
         {
             await VerifyWorkingPlanSmokeAsync(_snapshot.Clone());

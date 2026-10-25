@@ -26,10 +26,10 @@ import urllib.request
 import urllib.error
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from session_cache import NativeSessionCache, PreparationProgress, PreparationTimeoutError
+from session_cache import NativeSessionCache, PreparationCancelledError, PreparationProgress, PreparationTimeoutError
 
 SHARD = re.compile(r"^(.*)-([0-9]{5})-of-([0-9]{5})\.gguf$", re.IGNORECASE)
-NON_TEXT = re.compile(r"(?:^|[-_./])(?:mmproj|ggml-vocab|embedding|embed|asr|whisper|clip|vae|diffusion)(?:[-_./]|$)", re.IGNORECASE)
+NON_TEXT = re.compile(r"(?:^|[-_./])(?:mmproj|ggml-vocab|embedding|embed|asr|whisper|clip|vae|diffusion|mtp)(?:[-_./]|$)", re.IGNORECASE)
 NON_TEXT_ARCHITECTURES = ("bert", "nomic-bert", "jina-bert", "embedding", "t5", "clip", "mclip", "wavtokenizer", "whisper", "dflash")
 EMBEDDING_ARCHITECTURES = ("bert", "nomic-bert", "jina-bert", "embedding")
 _METADATA_CACHE = {}
@@ -54,24 +54,34 @@ def read_string(stream):
     return read_exact(stream, size).decode("utf-8", errors="replace")
 
 
+def skip_bytes(stream, length):
+    # BufferedReader.seek(…, SEEK_CUR) can query the underlying remote file
+    # pointer for every token string. Consume small metadata values from the
+    # read buffer instead, avoiding hundreds of thousands of SMB seeks.
+    if length <= 64 * 1024:
+        read_exact(stream, length)
+    else:
+        stream.seek(length, 1)
+
+
 def skip_value(stream, kind):
     if kind == 8:
         length = u64(stream)
         if length > 16 * 1024 * 1024:
             raise ValueError("GGUF metadata string exceeds bound")
-        stream.seek(length, 1)
+        skip_bytes(stream, length)
     elif kind == 9:
         element = struct.unpack("<I", read_exact(stream, 4))[0]
         count = u64(stream)
         if count > 10_000_000 or element == 9:
             raise ValueError("Invalid GGUF array")
         if element in SCALAR_SIZES:
-            stream.seek(SCALAR_SIZES[element] * count, 1)
+            skip_bytes(stream, SCALAR_SIZES[element] * count)
         else:
             for _ in range(count):
                 skip_value(stream, element)
     elif kind in SCALAR_SIZES:
-        stream.seek(SCALAR_SIZES[kind], 1)
+        skip_bytes(stream, SCALAR_SIZES[kind])
     else:
         raise ValueError("Unknown GGUF value kind")
 
@@ -83,7 +93,7 @@ def model_metadata(path, allow_metadata_only=False):
     cache_key = (str(path), stat.st_size, stat.st_mtime_ns, allow_metadata_only)
     if cache_key in _METADATA_CACHE:
         return _METADATA_CACHE[cache_key]
-    with path.open("rb") as stream:
+    with path.open("rb", buffering=64 * 1024) as stream:
         magic, version, tensors, count = struct.unpack("<4sIQQ", read_exact(stream, 24))
         if magic != b"GGUF" or version not in (2, 3) or (tensors == 0 and not allow_metadata_only) or count > 100_000:
             return None
@@ -241,13 +251,36 @@ def reasoning_profile(metadata):
     return {"enabled": None, "effort": None, "budget": -1, "levels": [], "mode": "automatic"}
 
 
-def discover_models(root):
-    root = Path(root).resolve()
-    found = []
+def resolve_model_catalog_root(root):
+    """Accept either a GGUF/HF hub directory or its Hugging Face cache parent.
+
+    Keep IDs relative to the actual hub, so selecting ``Huggingface`` instead
+    of ``Huggingface/hub`` does not rename the same installed models. This also
+    avoids walking datasets/xet caches on a network share.
+    """
+    root = Path(root).expanduser().resolve(strict=True)
     if not root.is_dir():
-        return found
+        raise NotADirectoryError(f"AI model directory is not a directory: {root}")
+    if root.name.lower() != "hub":
+        hub = root / "hub"
+        try:
+            hub.stat()
+        except (FileNotFoundError, NotADirectoryError):
+            return root
+        if hub.is_dir() and any(child.name.startswith("models--") and child.is_dir() for child in hub.iterdir()):
+            return hub.resolve(strict=True)
+    return root
+
+
+def discover_models(root):
+    root = resolve_model_catalog_root(root)
+    found = []
     for path in sorted(root.rglob("*.gguf")):
         try:
+            if re.match(r"mtp(?:[-_.]|$)", path.name, re.IGNORECASE):
+                # Prediction-only companions may contain the main tokenizer
+                # metadata, but cannot act as independently selected chats.
+                continue
             # HF symlinks may target blobs within this mount, never other host paths.
             if not path.resolve().is_relative_to(root):
                 continue
@@ -305,6 +338,18 @@ def discover_models(root):
 def discover(root):
     """Compatibility view for callers needing only Coding text models."""
     return [(model["id"], model["path"]) for model in discover_models(root) if model["role"] == "general"]
+
+
+def is_network_model_path(path):
+    value = str(path).replace("\\", "/")
+    return value.lower().startswith("//?/unc/") or (value.startswith("//") and not value.startswith("//?/"))
+
+
+def model_load_deadline(model):
+    # NAS transfers can legitimately exceed a local allocation trial by many
+    # minutes. Native failures and the owning supervisor's explicit stop remain
+    # authoritative; storage speed is not a model error.
+    return float("inf") if is_network_model_path(model["path"]) else time.monotonic() + 280
 
 
 DEEPSEEK_HISTORY_BY_FLAG = "{%- if keep_reasoning and thinking -%}"
@@ -439,6 +484,8 @@ def write_presets(root, target, placements=None, managed_gpu=False, fit_target="
         if any(char in str(path) for char in "\r\n"):
             continue
         tags = f"missum-context-train:{model['context']},missum-context-policy:{model['contextPolicy']}"
+        if is_network_model_path(path):
+            tags += ",missum-model-storage:network"
         if model.get("projector"):
             tags += ",missum-vision:projector"
         if managed_gpu:
@@ -812,7 +859,8 @@ def estimate_q8_session_bytes(metadata, tokens):
 class GpuLoadManager:
     """Only changes presets while their model is unloaded; never on live refresh."""
     def __init__(self, root, preset, state, port, fit_target="2048", gpu_layers="auto", binary=None):
-        self.root, self.preset, self.state, self.port = root, preset, state, port
+        self.model_root = Path(root).expanduser().resolve(strict=True)
+        self.root, self.preset, self.state, self.port = resolve_model_catalog_root(root), preset, state, port
         self.fit_target, self.gpu_layers = fit_target, gpu_layers
         self.placements = {}
         self.policies = {}
@@ -1227,6 +1275,7 @@ class GpuLoadManager:
 
     def load(self, model_id, context_length=None):
         with self.lock:
+            self._check_model_load_stopped()
             models = self.refresh()
             model = next((item for item in models if item["id"] == model_id), None)
             if model is None:
@@ -1263,8 +1312,9 @@ class GpuLoadManager:
             if existing:
                 # Never rewrite the placement of an instance already loading.
                 # The pair is ready only after the parent has its actual n_ctx.
-                deadline = time.monotonic() + 280
+                deadline = model_load_deadline(model)
                 while existing.get("status", {}).get("value") == "loading":
+                    self._check_model_load_stopped()
                     if time.monotonic() >= deadline:
                         raise TimeoutError("Native model load exceeded its time limit")
                     time.sleep(0.25)
@@ -1286,7 +1336,7 @@ class GpuLoadManager:
             else:
                 device = choose_single_gpu(model, devices, self.fit_target)
                 self.agent_failures.pop(base, None)
-            deadline = time.monotonic() + 280
+            deadline = model_load_deadline(model)
             forced_policy = None
             for attempt in range(3):
                 policy = forced_policy or self.resolve_load_policy(model, device)
@@ -1316,6 +1366,7 @@ class GpuLoadManager:
                 self.record(model_id, device, "loading")
                 self.router("models/load", {"model": model_id})
                 while time.monotonic() < deadline:
+                    self._check_model_load_stopped()
                     item = next(item for item in self.router("v1/models")["data"] if item["id"] == model_id)
                     status = item.get("status", {})
                     if status.get("value") in ("loaded", "sleeping") and not status.get("failed"):
@@ -1367,9 +1418,34 @@ class GpuLoadManager:
                 device = None
             raise RuntimeError("GPU load attempts exhausted")
 
+    def _check_model_load_stopped(self):
+        # The explicit supervisor stop waits for this lock before checkpointing
+        # its models. Release it promptly even if a NAS load is still in flight.
+        if (Path(self.state) / "stop.requested").exists():
+            raise PreparationCancelledError("Native model loading cancelled by the owning runtime stop")
+
 
 def start_gpu_control(manager, host, port):
     class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path != "/runtime":
+                self.send_json({"error": "Unknown native runtime resource"}, 404)
+                return
+            # Already resolved at startup. Status/setting refreshes must never
+            # enumerate or reopen a NAS tree on their request thread.
+            self.send_json({"modelRoot": str(manager.model_root), "discoveryRoot": str(manager.root)})
+
+        def send_json(self, result, status=200):
+            encoded = json.dumps(result).encode()
+            try:
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
         def client_disconnected(self):
             try:
                 readable, _, _ = select.select([self.connection], [], [], 0)
@@ -1410,15 +1486,7 @@ def start_gpu_control(manager, host, port):
                 status = 200
             except Exception as error:
                 result, status = {"error": str(error)}, 500
-            encoded = json.dumps(result).encode()
-            try:
-                self.send_response(status)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(encoded)))
-                self.end_headers()
-                self.wfile.write(encoded)
-            except (BrokenPipeError, ConnectionResetError):
-                pass
+            self.send_json(result, status)
         def log_message(self, *_):
             pass
     server = ThreadingHTTPServer((host, port), Handler)
@@ -1460,7 +1528,11 @@ def main():
     parser.add_argument("--fit-target", default="2048")
     parser.add_argument("--gpu-layers", default="auto")
     args = parser.parse_args()
-    root = Path(args.model_root).resolve(strict=True)
+    try:
+        root = Path(args.model_root).expanduser().resolve(strict=True)
+        resolve_model_catalog_root(root)
+    except OSError as error:
+        parser.error(f"AI model directory is unavailable: {args.model_root}. Check the folder, NAS connection and access permissions. {error}")
     if args.list_models:
         print(json.dumps(discover_models(root), default=str))
         return 0

@@ -63,6 +63,7 @@ public sealed class AssistantSettingsService : IDisposable
             values = new
             {
                 missumAiServerUrl = current.MissumAiServerUrl,
+                nativeModelRoot = current.NativeModelRoot,
                 isAutomaticSpeechEnabled = current.IsAutomaticSpeechEnabled,
                 liveCaptionLanguage = current.LiveCaptionLanguage,
                 theme = EnumText(current.Theme),
@@ -402,6 +403,7 @@ public sealed class AssistantSettingsService : IDisposable
         return patch with
         {
             MissumAiServerUrl = patch.MissumAiServerUrl is { } address ? NormalizeGatewayAddress(address) : null,
+            NativeModelRoot = patch.NativeModelRoot is { } modelRoot ? NativeModelRootPath.Normalize(modelRoot) ?? "" : null,
             LiveCaptionLanguage = patch.LiveCaptionLanguage?.Trim(),
             Language = patch.Language?.Trim(),
             AccentColor = patch.AccentColor is { } accent ? NormalizeColor(accent) : null,
@@ -412,6 +414,7 @@ public sealed class AssistantSettingsService : IDisposable
     private static AppSettings ApplyPatch(AppSettings current, AssistantSettingsPatch patch) => current with
     {
         MissumAiServerUrl = patch.MissumAiServerUrl ?? current.MissumAiServerUrl,
+        NativeModelRoot = patch.NativeModelRoot is { } modelRoot ? NativeModelRootPath.Normalize(modelRoot) : current.NativeModelRoot,
         IsAutomaticSpeechEnabled = patch.IsAutomaticSpeechEnabled ?? current.IsAutomaticSpeechEnabled,
         LiveCaptionLanguage = patch.LiveCaptionLanguage ?? current.LiveCaptionLanguage,
         Theme = patch.Theme ?? current.Theme,
@@ -444,6 +447,7 @@ public sealed class AssistantSettingsService : IDisposable
             patch = field.Name switch
             {
                 "missumAiServerUrl" => patch with { MissumAiServerUrl = StringValue(field.Value, field.Name) },
+                "nativeModelRoot" => patch with { NativeModelRoot = field.Value.ValueKind == JsonValueKind.Null ? "" : StringValue(field.Value, field.Name) },
                 "isAutomaticSpeechEnabled" => patch with { IsAutomaticSpeechEnabled = BooleanValue(field.Value, field.Name) },
                 "liveCaptionLanguage" => patch with { LiveCaptionLanguage = StringValue(field.Value, field.Name) },
                 "theme" => patch with { Theme = Enum.TryParse<AppTheme>(StringValue(field.Value, field.Name), true, out var theme) && Enum.IsDefined(theme)
@@ -527,6 +531,7 @@ public sealed class AssistantSettingsService : IDisposable
 public sealed record AssistantSettingsPatch
 {
     public string? MissumAiServerUrl { get; init; }
+    public string? NativeModelRoot { get; init; }
     public bool? IsAutomaticSpeechEnabled { get; init; }
     public string? LiveCaptionLanguage { get; init; }
     public AppTheme? Theme { get; init; }

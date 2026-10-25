@@ -64,6 +64,23 @@ function Write-NativeSupervisorOwner {
     else { [IO.File]::Move($temporaryOwner, $ownerFile) }
 }
 
+function ConvertTo-NativeQuotedArgument {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string] $Value)
+    if ($Value -match '"') { throw 'An argument contains an unsupported double quote.' }
+    # Pass literal UNC/local paths, including spaces and apostrophes, to the
+    # Windows argv parser. Only trailing slashes before the closing quote need
+    # doubling; this never evaluates a path as PowerShell code.
+    return '"' + ($Value -replace '(\\+)$', '$1$1') + '"'
+}
+
+function Get-NativeStartupTimeoutSeconds {
+    param([Parameter(Mandatory = $true)][string] $ModelDirectory)
+    # A first metadata pass on SMB may be slower than a local drive. This is
+    # only a readiness ceiling; a ready router returns immediately.
+    if ([IO.Path]::GetFullPath($ModelDirectory).StartsWith('\\', [StringComparison]::Ordinal)) { return 120 }
+    return 30
+}
+
 function Get-OwnedSupervisor {
     if (-not (Test-Path -LiteralPath $ownerFile -PathType Leaf)) { return $null }
     $owner = Get-Content -LiteralPath $ownerFile -Raw | ConvertFrom-Json
@@ -196,7 +213,7 @@ if (Get-OwnedSupervisor) {
     return
 }
 if (-not (Test-Path -LiteralPath $catalogScript -PathType Leaf)) { throw "Native model catalog script not found: $catalogScript. Restore the complete Assets\NativeRuntime folder from the portable package." }
-if (-not (Test-Path -LiteralPath $ModelRoot -PathType Container)) { throw "Local model directory not found: $ModelRoot" }
+if (-not (Test-Path -LiteralPath $ModelRoot -PathType Container)) { throw "AI model directory unavailable: $ModelRoot. Check the folder, NAS connection and access permissions." }
 if (-not (Test-Path -LiteralPath $BinaryPath -PathType Leaf)) { throw "Native llama-server.exe not found: $BinaryPath. Specify an existing binary with -BinaryPath." }
 if ([string]::IsNullOrWhiteSpace($PythonPath)) {
     $unslothPython = Join-Path $env:USERPROFILE '.unsloth\studio\unsloth_studio\Scripts\python.exe'
@@ -229,15 +246,13 @@ if (Test-Path -LiteralPath $stopFile -PathType Leaf) { Remove-Item -LiteralPath 
 $arguments = @($catalogScript, '--model-root', [IO.Path]::GetFullPath($ModelRoot), '--binary', [IO.Path]::GetFullPath($BinaryPath),
     '--state-directory', $StateDirectory, '--port', [string]$Port, '--fit-target', [string]$FitTargetMiB, '--gpu-layers', $GpuLayers)
 $quotedArguments = ($arguments | ForEach-Object {
-    if ($_ -match '"') { throw 'An argument contains an unsupported double quote.' }
-    # Windows argument parsing consumes backslashes before the closing quote.
-    # Preserve directory roots and paths ending in a separator by doubling them.
-    '"' + ($_ -replace '(\\+)$', '$1$1') + '"'
+    ConvertTo-NativeQuotedArgument $_
 }) -join ' '
 $process = Start-Process -FilePath $PythonPath -ArgumentList $quotedArguments -WorkingDirectory $StateDirectory -WindowStyle Hidden `
     -RedirectStandardOutput (Join-Path $StateDirectory 'stdout.log') -RedirectStandardError (Join-Path $StateDirectory 'stderr.log') -PassThru
 Write-NativeSupervisorOwner -Process $process
-$deadline = [DateTime]::UtcNow.AddSeconds(30)
+$startupTimeoutSeconds = Get-NativeStartupTimeoutSeconds $ModelRoot
+$deadline = [DateTime]::UtcNow.AddSeconds($startupTimeoutSeconds)
 do {
     if ($process.HasExited) { throw "Native model supervisor exited. Inspect $StateDirectory\stderr.log" }
     try {
@@ -251,4 +266,4 @@ do {
         return
     } catch { Start-Sleep -Milliseconds 500 }
 } while ([DateTime]::UtcNow -lt $deadline)
-throw "Native model supervisor did not become ready within 30 seconds. Inspect $StateDirectory\stderr.log"
+throw "Native model supervisor did not become ready within $startupTimeoutSeconds seconds. Inspect $StateDirectory\stderr.log"

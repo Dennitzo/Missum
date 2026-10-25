@@ -3,6 +3,12 @@ from pathlib import Path
 import struct
 import tempfile
 import unittest
+import urllib.error
+import urllib.request
+from types import SimpleNamespace
+from unittest.mock import patch
+import json
+import io
 
 spec = importlib.util.spec_from_file_location("coding_catalog", Path(__file__).with_name("catalog.py"))
 catalog = importlib.util.module_from_spec(spec)
@@ -27,6 +33,76 @@ def gguf(path, architecture="qwen3", tensors=1, model_type="model", context=3276
 
 
 class CatalogTests(unittest.TestCase):
+    def test_network_model_loading_has_no_local_wall_clock_deadline(self):
+        for value in (r"\\umbrel.local\Melow's Umbrel\Huggingface\hub\model.gguf",
+                      "//umbrel.local/Melow's Umbrel/Huggingface/hub/model.gguf",
+                      r"\\?\UNC\umbrel.local\share\model.gguf"):
+            self.assertTrue(catalog.is_network_model_path(value))
+            self.assertEqual(float("inf"), catalog.model_load_deadline({"path": value}))
+        for value in (r"C:\Huggingface\hub\model.gguf", r"\\?\C:\Huggingface\hub\model.gguf", "/local/model.gguf"):
+            self.assertFalse(catalog.is_network_model_path(value))
+            with patch.object(catalog.time, "monotonic", return_value=5):
+                self.assertEqual(285, catalog.model_load_deadline({"path": value}))
+
+    def test_network_storage_tag_is_advertised_for_main_and_subagent_presets(self):
+        gguf(self.root / "model.gguf")
+        target = self.root / "models.ini"
+        with patch.object(catalog, "is_network_model_path", return_value=True):
+            catalog.write_presets(self.root, target, agent_instances=True)
+        self.assertEqual(2, target.read_text().count("missum-model-storage:network"))
+
+    def test_tokenizer_string_array_skips_use_buffered_reads_without_remote_seeks(self):
+        class BufferedMetadata(io.BytesIO):
+            def seek(self, *_):
+                raise AssertionError("Short metadata values must not seek on SMB")
+
+        text = [b"a", b"token with spaces", "Größe".encode()]
+        payload = struct.pack("<IQ", 8, len(text)) + b"".join(struct.pack("<Q", len(value)) + value for value in text)
+        stream = BufferedMetadata(payload)
+        catalog.skip_value(stream, 9)
+        self.assertEqual(len(payload), stream.tell())
+
+    def test_mtp_prediction_weights_are_not_selectable_chat_models(self):
+        gguf(self.root / "mtp-FutureModel-Q8_0.gguf", architecture="qwen35moe")
+        gguf(self.root / "FutureModel-Q8_0.gguf", architecture="qwen35moe")
+        models = catalog.discover_models(self.root)
+        self.assertEqual(["FutureModel-Q8_0.gguf"], [model["path"].name for model in models])
+
+    def test_huggingface_cache_parent_and_hub_keep_the_same_model_identity(self):
+        cache = self.root / "Melow's models" / "Huggingface"
+        hub = cache / "hub"
+        model = hub / "models--example--Future-GGUF" / "snapshots" / "revision" / "future.gguf"
+        gguf(model)
+        gguf(cache / "datasets" / "irrelevant.gguf")
+        gguf(cache / "xet" / "irrelevant.gguf")
+        self.assertEqual(catalog.discover_models(hub), catalog.discover_models(cache))
+        self.assertEqual(1, len(catalog.discover_models(cache)))
+        state = self.root / "local-state"
+        manager = catalog.GpuLoadManager(cache, state / "models.ini", state, 8081)
+        self.assertEqual(cache.resolve(), manager.model_root)
+        self.assertEqual(hub.resolve(), manager.root)
+
+    def test_missing_model_root_is_reported_instead_of_an_empty_catalog(self):
+        with self.assertRaises(FileNotFoundError):
+            catalog.discover_models(self.root / "missing-share")
+
+    def test_native_runtime_metadata_is_read_only_and_never_rescans_models(self):
+        manager = SimpleNamespace(model_root=self.root, root=self.root / "hub")
+        server = catalog.start_gpu_control(manager, "127.0.0.1", 0)
+        try:
+            address = "http://127.0.0.1:" + str(server.server_address[1])
+            with patch.object(catalog, "discover_models", side_effect=AssertionError("No NAS scan allowed")):
+                with urllib.request.urlopen(address + "/runtime", timeout=3) as response:
+                    self.assertEqual({"modelRoot": str(self.root), "discoveryRoot": str(self.root / "hub")},
+                                     json.load(response))
+                with self.assertRaises(urllib.error.HTTPError) as unknown:
+                    urllib.request.urlopen(address + "/unknown", timeout=3)
+                self.assertEqual(404, unknown.exception.code)
+                unknown.exception.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+
     def test_native_presets_use_exactly_the_single_slot_saved_by_session_cache(self):
         gguf(self.root / "model.gguf")
         target = self.root / "models.ini"

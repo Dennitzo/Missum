@@ -7,7 +7,7 @@ $tokens = $null
 $parseErrors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($launcher, [ref]$tokens, [ref]$parseErrors)
 if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
-foreach ($name in @('Test-NativeSupervisorIdentity', 'Write-NativeSupervisorOwner')) {
+foreach ($name in @('Test-NativeSupervisorIdentity', 'Write-NativeSupervisorOwner', 'ConvertTo-NativeQuotedArgument', 'Get-NativeStartupTimeoutSeconds')) {
     $functionAst = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
     if (-not $functionAst) { throw "Missing launcher function: $name" }
     # Evaluate only these bounded functions, never the launcher's entry point.
@@ -36,6 +36,15 @@ Assert-LauncherCheck (-not (Test-NativeSupervisorIdentity $owner $null $command 
 $rootState = 'D:\'
 $rootCommand = 'python "' + $savedScript + '" "--state-directory" "D:\\"'
 Assert-LauncherCheck (Test-NativeSupervisorIdentity $owner $process $rootCommand $rootState) 'Quoted state root preserves the trailing slash'
+$nasRoot = "\\umbrel.local\Melow's Umbrel\Huggingface"
+Assert-LauncherCheck ((ConvertTo-NativeQuotedArgument $nasRoot) -eq ('"' + $nasRoot + '"')) 'UNC model path preserves its leading slashes, spaces and apostrophe'
+Assert-LauncherCheck ((ConvertTo-NativeQuotedArgument ($nasRoot + '\')) -eq ('"' + $nasRoot + '\\"')) 'UNC directory trailing slash survives the Windows argument parser'
+Assert-LauncherCheck ((Get-NativeStartupTimeoutSeconds $nasRoot) -eq 120) 'Network metadata discovery has a separate bounded startup allowance'
+Assert-LauncherCheck ((Get-NativeStartupTimeoutSeconds 'C:\Local models') -eq 30) 'Local model startup keeps its existing readiness allowance'
+$invalidArgumentRejected = $false
+try { ConvertTo-NativeQuotedArgument 'invalid"path' | Out-Null }
+catch { $invalidArgumentRejected = $true }
+Assert-LauncherCheck $invalidArgumentRejected 'Embedded double quotes are rejected instead of altering the command line'
 $stateParameter = $ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'StateDirectory' }
 Assert-LauncherCheck ($stateParameter.DefaultValue.Extent.Text -match '\$env:USERPROFILE' -and $stateParameter.DefaultValue.Extent.Text -match '\.missum\\native-runtime') 'Default state path is independent of virtualized LocalAppData'
 

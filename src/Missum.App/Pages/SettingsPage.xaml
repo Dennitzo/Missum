@@ -109,6 +109,28 @@
         </StackPanel>
       </Border>
 
+      <Border x:Name="NativeModelRootCard" Style="{StaticResource MissumCardStyle}">
+        <StackPanel Spacing="14">
+          <StackPanel>
+            <TextBlock Style="{StaticResource MissumSectionTitleStyle}" Text="AI-Modellordner" />
+            <TextBlock Margin="0,3,0,0" Foreground="{ThemeResource MissumMutedTextBrush}"
+              Text="Ordner für die nativen GGUF-Modelle. Lokale Ordner und NAS-Freigaben werden unterstützt. Änderungen mit „Speichern“ übernehmen; bei aktiven AI-Läufen erfolgt die Umstellung nach deren Abschluss."
+              TextWrapping="Wrap" />
+          </StackPanel>
+          <Grid ColumnSpacing="10">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="*" />
+              <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBox x:Name="NativeModelRootBox" Header="Modellordner" MinWidth="160"
+              PlaceholderText="\\Server\Freigabe\Huggingface"
+              Text="{x:Bind ViewModel.NativeModelRoot, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+            <Button x:Name="SelectNativeModelRootButton" Grid.Column="1" Margin="0,24,0,0" Click="OnSelectNativeModelRoot" Content="Ordner auswählen"
+              Style="{StaticResource MissumPrimaryButtonStyle}" />
+          </Grid>
+        </StackPanel>
+      </Border>
+
       <Border Style="{StaticResource MissumCardStyle}">
         <StackPanel Spacing="14">
           <StackPanel>

@@ -177,6 +177,7 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
             MissumAiProtocolVersion = string.IsNullOrWhiteSpace(settings.MissumAiProtocolVersion)
                 ? "1.0"
                 : settings.MissumAiProtocolVersion.Trim(),
+            NativeModelRoot = string.IsNullOrWhiteSpace(settings.NativeModelRoot) ? null : settings.NativeModelRoot.Trim(),
             LiveCaptionLanguage = settings.Version < 5
                 && string.Equals(settings.LiveCaptionLanguage, "de", StringComparison.OrdinalIgnoreCase)
                     ? "auto"

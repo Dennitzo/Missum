@@ -74,6 +74,7 @@ public sealed class SettingsCoordinator(ISettingsStore store) : IDisposable
 
     private static bool PreferencesEqual(AppSettings left, AppSettings right) =>
         left.MissumAiServerUrl == right.MissumAiServerUrl
+        && left.NativeModelRoot == right.NativeModelRoot
         && left.IsAutomaticSpeechEnabled == right.IsAutomaticSpeechEnabled
         && left.LiveCaptionLanguage == right.LiveCaptionLanguage
         && left.Theme == right.Theme

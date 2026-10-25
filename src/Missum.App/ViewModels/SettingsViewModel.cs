@@ -21,10 +21,12 @@ public sealed partial class SettingsViewModel(
         ?? new(settings, missumAi, triggerRepository, backups);
     private long _preferencesRevision;
     private AppSettings _preferencesBaseline = new();
+    private string _initialNativeModelRoot = "";
 
     /// <summary>External settings refreshes may replace the editor only when it has no local draft.</summary>
     public bool HasUnsavedChanges =>
         MissumAiServerUrl != _preferencesBaseline.MissumAiServerUrl
+        || NativeModelRoot != _initialNativeModelRoot
         || IsAutomaticSpeechEnabled != _preferencesBaseline.IsAutomaticSpeechEnabled
         || LiveCaptionLanguage != _preferencesBaseline.LiveCaptionLanguage
         || Theme != _preferencesBaseline.Theme
@@ -67,6 +69,9 @@ public sealed partial class SettingsViewModel(
 
     [ObservableProperty]
     public partial string MissumAiServerUrl { get; set; } = MissumAiConnectionService.DefaultServerUrl;
+
+    [ObservableProperty]
+    public partial string NativeModelRoot { get; set; } = "";
 
     [ObservableProperty]
     public partial bool IsAutomaticSpeechEnabled { get; set; } = true;
@@ -128,6 +133,7 @@ public sealed partial class SettingsViewModel(
         _preferencesBaseline = current;
         IsAutomaticSpeechEnabled = current.IsAutomaticSpeechEnabled;
         MissumAiServerUrl = current.MissumAiServerUrl;
+        RefreshNativeModelRoot();
         LiveCaptionLanguage = current.LiveCaptionLanguage;
         SelectedModel = current.SelectedModel ?? AppSettings.DefaultSelectedModel;
         SelectedGeneralModelItem = EnsureModelItem(Models, SelectedModel);
@@ -178,6 +184,7 @@ public sealed partial class SettingsViewModel(
         _preferencesRevision = settings.Current.PreferencesRevision;
         _preferencesBaseline = settings.Current;
         MissumAiServerUrl = settings.Current.MissumAiServerUrl;
+        RefreshNativeModelRoot();
         SelectedModel = settings.Current.SelectedModel;
     }
 
@@ -185,12 +192,20 @@ public sealed partial class SettingsViewModel(
         {
             IsAutomaticSpeechEnabled = IsAutomaticSpeechEnabled,
             MissumAiServerUrl = MissumAiServerUrl,
+            NativeModelRoot = NativeModelRoot == _initialNativeModelRoot ? null : NativeModelRoot,
             LiveCaptionLanguage = string.IsNullOrWhiteSpace(LiveCaptionLanguage) ? "auto" : LiveCaptionLanguage.Trim(),
             Theme = Theme,
             AccentColor = AccentColor,
             BackgroundColor = BackgroundColor,
             Language = Language,
         };
+
+    private void RefreshNativeModelRoot()
+    {
+        NativeModelRoot = settings.Current.NativeModelRoot
+            ?? NativeModelRuntimeService.ResolveModelRoot(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+        _initialNativeModelRoot = NativeModelRoot;
+    }
 
     public async Task<MissumAiConnectionStatus?> RefreshModelsAsync(CancellationToken cancellationToken = default)
     {
@@ -416,6 +431,7 @@ public sealed partial class SettingsViewModel(
             _preferencesRevision = settings.Current.PreferencesRevision;
             _preferencesBaseline = settings.Current;
             MissumAiServerUrl = settings.Current.MissumAiServerUrl;
+            RefreshNativeModelRoot();
             SelectedModel = settings.Current.SelectedModel;
         }
         _deletedTriggers.Clear();

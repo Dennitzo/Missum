@@ -150,6 +150,20 @@ public sealed partial class SettingsPage : Page
         });
     }
 
+    private async void OnSelectNativeModelRoot(object sender, RoutedEventArgs e)
+    {
+        await RunActionAsync(async () =>
+        {
+            var picker = new FolderPicker { SuggestedStartLocation = PickerLocationId.ComputerFolder };
+            picker.FileTypeFilter.Add("*");
+            InitializePicker(picker);
+            var folder = await picker.PickSingleFolderAsync();
+            if (folder is not null)
+                ViewModel.NativeModelRoot = NativeModelRootPath.Normalize(folder.Path)
+                    ?? throw new InvalidOperationException("Der ausgewählte Ordner besitzt keinen Dateisystempfad.");
+        });
+    }
+
     private void OnCaptionLanguageChanged(object sender, SelectionChangedEventArgs e)
     {
         if (!_synchronizing && (CaptionLanguageBox.SelectedItem as ComboBoxItem)?.Tag is string value)

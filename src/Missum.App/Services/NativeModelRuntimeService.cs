@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Text.Json;
+using Missum.Core.Models;
 
 namespace Missum.App.Services;
 
@@ -19,6 +20,11 @@ public sealed class NativeModelRuntimeService : IDisposable
     private readonly TimeSpan _shutdownDrainTimeout;
     private readonly string _runtimeEndpoint;
     private readonly NativeSessionCacheCleanupService? _cacheCleanup;
+    private readonly Func<string>? _modelRoot;
+    private readonly Func<CancellationToken, Task<string?>>? _runningModelRoot;
+    private readonly Func<string, CancellationToken, Task>? _startAtModelRoot;
+    private readonly Func<string, CancellationToken, Task>? _validateModelRoot;
+    private string? _checkedModelRoot;
     private int _stopping;
     private bool _stopped;
     private DateTimeOffset _nextProbe;
@@ -27,7 +33,7 @@ public sealed class NativeModelRuntimeService : IDisposable
     public NativeModelRuntimeService()
         : this(AssistantRuntimeProfile.Resolve()) { }
 
-    public NativeModelRuntimeService(AssistantRuntimeProfile profile)
+    public NativeModelRuntimeService(AssistantRuntimeProfile profile, SettingsCoordinator? settings = null)
         : this(
             IsLocalGateway,
             token => ProbeAsync(profile.NativePort, token),
@@ -35,7 +41,12 @@ public sealed class NativeModelRuntimeService : IDisposable
             () => DateTimeOffset.UtcNow,
             token => RunInstalledRuntimeAsync(profile, "Stop", token),
             runtimeEndpoint: $"http://127.0.0.1:{profile.NativePort}",
-            stopOwned: token => RunInstalledRuntimeAsync(profile, "Stop", token, ownedShutdown: true))
+            stopOwned: token => RunInstalledRuntimeAsync(profile, "Stop", token, ownedShutdown: true),
+            modelRoot: () => ResolveModelRoot(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), profile,
+                settings?.Current.NativeModelRoot),
+            runningModelRoot: token => ReadRunningModelRootAsync(profile.NativeStateDirectory, token),
+            startAtModelRoot: (root, token) => RunInstalledRuntimeAsync(profile, "Start", token, modelRoot: root),
+            validateModelRoot: ValidateModelRootAsync)
     {
         _cacheCleanup = new(profile);
     }
@@ -45,7 +56,10 @@ public sealed class NativeModelRuntimeService : IDisposable
         Func<DateTimeOffset>? now = null, Func<CancellationToken, Task>? stop = null,
         Func<Uri, CancellationToken, Task<bool?>>? gatewayIdle = null, TimeSpan? shutdownDrainTimeout = null,
         string runtimeEndpoint = "http://127.0.0.1:8081", Func<CancellationToken, Task>? stopOwned = null,
-        NativeSessionCacheCleanupService? cacheCleanup = null)
+        NativeSessionCacheCleanupService? cacheCleanup = null,
+        Func<string>? modelRoot = null, Func<CancellationToken, Task<string?>>? runningModelRoot = null,
+        Func<string, CancellationToken, Task>? startAtModelRoot = null,
+        Func<string, CancellationToken, Task>? validateModelRoot = null)
     {
         _isLocalGateway = isLocalGateway;
         _probe = probe;
@@ -58,6 +72,10 @@ public sealed class NativeModelRuntimeService : IDisposable
         _now = now ?? (() => DateTimeOffset.UtcNow);
         _runtimeEndpoint = runtimeEndpoint;
         _cacheCleanup = cacheCleanup;
+        _modelRoot = modelRoot;
+        _runningModelRoot = runningModelRoot;
+        _startAtModelRoot = startAtModelRoot;
+        _validateModelRoot = validateModelRoot;
     }
 
     public async Task EnsureStartedAsync(Uri gateway, CancellationToken cancellationToken)
@@ -71,16 +89,49 @@ public sealed class NativeModelRuntimeService : IDisposable
         try
         {
             if (Volatile.Read(ref _stopping) != 0) return;
-            if (_now() < _nextProbe)
+            var desiredRoot = _modelRoot?.Invoke();
+            if (_now() < _nextProbe && SameModelRoot(desiredRoot, _checkedModelRoot))
             {
                 if (_lastFailure is not null)
                     throw new InvalidOperationException(_lastFailure.Message, _lastFailure);
                 await FlushDeletedSessionCachesAsync(cancellationToken).ConfigureAwait(false);
                 return;
             }
-            if (!await _probe(cancellationToken).ConfigureAwait(false))
+            _checkedModelRoot = desiredRoot;
+            var running = await _probe(cancellationToken).ConfigureAwait(false);
+            if (running && desiredRoot is not null && _runningModelRoot is not null)
             {
-                await _start(cancellationToken).ConfigureAwait(false);
+                var actualRoot = await _runningModelRoot(cancellationToken).ConfigureAwait(false);
+                if (actualRoot is null)
+                    throw new InvalidOperationException("Der Modellordner der laufenden nativen Runtime konnte nicht sicher bestimmt werden. Die vorhandene Runtime wird nicht beendet.");
+                if (!SameModelRoot(actualRoot, desiredRoot))
+                {
+                    // A saved preference may change during a long model run.
+                    // Keep the resident model and its KV until the owner is idle.
+                    if (await _gatewayIdle(gateway, cancellationToken).ConfigureAwait(false) is not true)
+                    {
+                        _lastFailure = null;
+                        _nextProbe = _now().AddSeconds(2);
+                        return;
+                    }
+                    if (_validateModelRoot is not null)
+                        await _validateModelRoot(desiredRoot, cancellationToken).ConfigureAwait(false);
+                    // Network validation can take time; recheck before shutdown.
+                    if (await _gatewayIdle(gateway, cancellationToken).ConfigureAwait(false) is not true)
+                    {
+                        _lastFailure = null;
+                        _nextProbe = _now().AddSeconds(2);
+                        return;
+                    }
+                    await _stop(cancellationToken).ConfigureAwait(false);
+                    running = false;
+                }
+            }
+            if (!running)
+            {
+                if (desiredRoot is not null && _startAtModelRoot is not null)
+                    await _startAtModelRoot(desiredRoot, cancellationToken).ConfigureAwait(false);
+                else await _start(cancellationToken).ConfigureAwait(false);
                 if (!await _probe(cancellationToken).ConfigureAwait(false))
                     throw new InvalidOperationException($"Windows llama.cpp wurde gestartet, ist auf {_runtimeEndpoint} aber noch nicht erreichbar.");
             }
@@ -99,6 +150,37 @@ public sealed class NativeModelRuntimeService : IDisposable
     }
 
     public void BeginShutdown() => Interlocked.Exchange(ref _stopping, 1);
+
+    private static bool SameModelRoot(string? left, string? right) => string.Equals(
+        left is null ? null : Path.TrimEndingDirectorySeparator(Path.GetFullPath(left)),
+        right is null ? null : Path.TrimEndingDirectorySeparator(Path.GetFullPath(right)), StringComparison.OrdinalIgnoreCase);
+
+    private static async Task<string?> ReadRunningModelRootAsync(string stateDirectory, CancellationToken token)
+    {
+        try
+        {
+            await using var stream = File.OpenRead(Path.Combine(stateDirectory, "runtime.json"));
+            using var json = await JsonDocument.ParseAsync(stream, cancellationToken: token).ConfigureAwait(false);
+            return json.RootElement.TryGetProperty("modelRoot", out var root) && root.ValueKind == JsonValueKind.String
+                ? root.GetString() : null;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException) { return null; }
+    }
+
+    private static async Task ValidateModelRootAsync(string root, CancellationToken token)
+    {
+        try
+        {
+            // Windows may take seconds to resolve an offline SMB share. Never
+            // perform that probe on the dispatcher, or stop the usable runtime first.
+            if (!await Task.Run(() => Directory.Exists(root), token).WaitAsync(TimeSpan.FromSeconds(10), token).ConfigureAwait(false))
+                throw new DirectoryNotFoundException($"Der AI-Modellordner ist nicht erreichbar: {root}. Netzwerkverbindung und Ordnerfreigabe prüfen.");
+        }
+        catch (TimeoutException exception)
+        {
+            throw new IOException($"Der AI-Modellordner antwortet nicht: {root}. Netzwerkverbindung und Ordnerfreigabe prüfen.", exception);
+        }
+    }
 
     private async Task FlushDeletedSessionCachesAsync(CancellationToken cancellationToken)
     {
@@ -231,7 +313,8 @@ public sealed class NativeModelRuntimeService : IDisposable
         AssistantRuntimeProfile profile,
         string action,
         CancellationToken cancellationToken,
-        bool ownedShutdown = false)
+        bool ownedShutdown = false,
+        string? modelRoot = null)
     {
         var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         var stateDirectory = profile.NativeStateDirectory;
@@ -277,12 +360,13 @@ public sealed class NativeModelRuntimeService : IDisposable
         // PowerShell launcher exits. Never wait for its process-lifetime stdout EOF.
         var errorFile = Path.Combine(stateDirectory, "startup-" + Guid.NewGuid().ToString("N") + ".error.txt");
         foreach (var argument in BuildRuntimeManagerArguments(profile, action, supportDirectory, errorFile, userProfile,
-                     shutdownTimeoutSeconds: ownedShutdown ? 20 : null))
+                     shutdownTimeoutSeconds: ownedShutdown ? 20 : null, nativeModelRoot: modelRoot))
             info.ArgumentList.Add(argument);
         using var process = new Process { StartInfo = info };
         if (!process.Start()) throw new InvalidOperationException("Der Starthelfer für Windows llama.cpp konnte nicht gestartet werden.");
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(TimeSpan.FromSeconds(action == "Stop" ? (ownedShutdown ? 35 : 660) : 45));
+        var networkRoot = action == "Start" && ResolveModelRoot(userProfile, profile, modelRoot).StartsWith("\\\\", StringComparison.Ordinal);
+        timeout.CancelAfter(TimeSpan.FromSeconds(action == "Stop" ? (ownedShutdown ? 35 : 660) : networkRoot ? 150 : 45));
         try { await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false); }
         catch (OperationCanceledException)
         {
@@ -356,7 +440,8 @@ public sealed class NativeModelRuntimeService : IDisposable
         string supportDirectory,
         string errorFile,
         string userProfile,
-        int? shutdownTimeoutSeconds = null)
+        int? shutdownTimeoutSeconds = null,
+        string? nativeModelRoot = null)
     {
         if (shutdownTimeoutSeconds is <= 0 or > 600)
             throw new ArgumentOutOfRangeException(nameof(shutdownTimeoutSeconds));
@@ -366,7 +451,7 @@ public sealed class NativeModelRuntimeService : IDisposable
             Path.Combine(supportDirectory, "windows", "manage-coding-llama.ps1"),
             "-Action", action,
             "-StateDirectory", profile.NativeStateDirectory,
-            "-ModelRoot", ResolveModelRoot(userProfile, profile),
+            "-ModelRoot", ResolveModelRoot(userProfile, profile, nativeModelRoot),
             "-BinaryPath", profile.NativeBinaryPath,
             "-Port", profile.NativePort.ToString(System.Globalization.CultureInfo.InvariantCulture),
             "-ErrorFile", errorFile,
@@ -381,8 +466,9 @@ public sealed class NativeModelRuntimeService : IDisposable
         return ResolveModelRoot(userProfile, AssistantRuntimeProfile.Resolve());
     }
 
-    private static string ResolveModelRoot(string userProfile, AssistantRuntimeProfile profile)
+    private static string ResolveModelRoot(string userProfile, AssistantRuntimeProfile profile, string? nativeModelRoot = null)
     {
+        if (NativeModelRootPath.Normalize(nativeModelRoot) is { } selected) return selected;
         var stackEnvironment = Path.Combine(profile.StackDataRoot, "stack.env");
         if (!File.Exists(stackEnvironment))
             stackEnvironment = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "Missum-AI-Stack", "stack.env");
