@@ -13,6 +13,13 @@ internal static class CodingCompletionGuard
     internal static bool IsActionAnnouncement(string? text)
     {
         if (string.IsNullOrWhiteSpace(text) || text.Length > 1800 || text.Contains("```", StringComparison.Ordinal)) return false;
+        // A finding can precede the actual announcement. In particular, "Die
+        // Kapitel enthalten Fehler. Ich führe die Korrekturen jetzt durch."
+        // must not be mistaken for a completed edit merely because it starts
+        // with a finding rather than "Ich".
+        if (Regex.IsMatch(text,
+            @"(?:\A|[.!?]\s+|\n)\s*Ich\s+(?![^.!?\n]*\b(?:nicht|kein|keine|keinen)\b)(?:führe\b[^.!?\n]{0,240}\bjetzt\b[^.!?\n]{0,80}\b(?:aus|durch)\b|(?:setze|wende|nehme)\b[^.!?\n]{0,180}\bjetzt\b[^.!?\n]{0,80}\b(?:um|an|vor)\b)",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1))) return true;
         if (Regex.IsMatch(text, @"\b(?:nicht möglich|kann nicht|benötige|fehlt|sobald|cannot|unable|need your|Ergebnis|bestanden|geändert|erledigt|ergibt|Ursache)\b|=",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1))) return false;
         return Regex.IsMatch(text.Trim(),

@@ -41,16 +41,27 @@ public static class ScienceSkill
             pendingStages = state.Plan.Where(item => item.Status != "completed").Select(item => new { item.Id, item.Status }),
             latestBlockade = state.Failures.LastOrDefault(failure => failure.Count >= 2),
         }, MissumAiProtocol.CreateJsonOptions());
-        if (messages.LastOrDefault(message => message.Role == "system" && message.Content?.StartsWith(focusMarker, StringComparison.Ordinal) == true)?.Content != focus)
+        if (messages.Select(InstructionContent).LastOrDefault(content => content?.StartsWith(focusMarker, StringComparison.Ordinal) == true) != focus)
             messages.Add(new("system", focus));
         foreach (var name in new[] { "verification", "publication" })
         {
             if (name == "verification" && stage is null) continue;
             if (name == "publication" && !required.Contains("publication") && !required.Contains("plot") && state.Phase != "review") continue;
             var marker = "MISSUM_SCIENCE_SKILL_MODULE_V1:" + name + "\n";
-            if (messages.Any(message => message.Role == "system" && message.Content?.StartsWith(marker, StringComparison.Ordinal) == true)) continue;
+            if (messages.Any(message => InstructionContent(message)?.StartsWith(marker, StringComparison.Ordinal) == true)) continue;
             messages.Add(new("system", marker + Modules[name]));
         }
+    }
+
+    private static string? InstructionContent(LmChatMessage message)
+    {
+        if (message.Role == "system") return message.Content;
+        const string nativePrefix = "Missum-Laufanweisung:\n";
+        // Native templates fold later system instructions into chronological user
+        // turns. Recognize that stored representation without rewriting evaluated
+        // messages, so unchanged guidance is not appended again on every turn.
+        return message.Role == "user" && message.Content?.StartsWith(nativePrefix, StringComparison.Ordinal) == true
+            ? message.Content[nativePrefix.Length..] : null;
     }
 
     internal static AgentToolSpec DescribePlanTool(AgentToolSpec tool)

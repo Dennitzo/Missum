@@ -13,6 +13,31 @@ public sealed partial class NativeAssistantPage
     // Returning to A must not reuse a footer still parented to A's discarded bubble.
     private async Task<int> VerifyMessageNavigationSmokeAsync()
     {
+        if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_RESPONSIVENESS") == "model-picker")
+        {
+            await VerifyModelPickerSmokeAsync();
+            return 0;
+        }
+        if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_RESPONSIVENESS") == "prompt-identity")
+        {
+            var identitySnapshot = _snapshot.Clone();
+            await VerifyPromptIdentitySmokeAsync(identitySnapshot);
+            await VerifyPromptTimelineLazyNavigationSmokeAsync(identitySnapshot);
+            await VerifyInspectorSidebarSmokeAsync(identitySnapshot);
+            return 0;
+        }
+        if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_RESPONSIVENESS") == "inspector-appearance")
+        {
+            await VerifyInspectorSidebarSmokeAsync(_snapshot.Clone());
+            return 0;
+        }
+        if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_RESPONSIVENESS") == "inspector-sidebar")
+        {
+            var snapshot = _snapshot.Clone();
+            await VerifyWorkingPlanSmokeAsync(snapshot);
+            await VerifyInspectorSidebarSmokeAsync(snapshot);
+            return 0;
+        }
         if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_RESPONSIVENESS") == "model-root")
         {
             await SettingsPage.VerifyNativeModelRootSmokeAsync(LayoutRoot);
@@ -155,10 +180,10 @@ public sealed partial class NativeAssistantPage
             visits++;
         }
         VerifySharedSidebarSmoke();
-        // A multiline Windows prompt must converge to one durable message when its
-        // normalized repository content arrives through the native event path.
+        // A multiline Windows prompt appears only once its normalized repository
+        // content arrives; replaying that same durable ID must not add a marker.
         var multilinePrompt = "Forschungsfrage\r\n\r\nPrüfe die Feldgleichungen.\rNächster Absatz.";
-        var pendingPrompt = AddPendingUserMessage(_session, multilinePrompt);
+        var promptCountBeforeCommit = _promptTimelineMarkers.Count;
         var committedPromptId = Guid.NewGuid().ToString();
         ApplyEvent("conversation.messageCommitted", JsonSerializer.SerializeToElement(new
         {
@@ -167,9 +192,15 @@ public sealed partial class NativeAssistantPage
                 content = Missum.Core.Chat.ChatContentSanitizer.Sanitize(multilinePrompt), status = "completed", createdAt = DateTimeOffset.UtcNow.ToString("O") }
         }));
         RenderMessagesNow();
-        if (_pendingUserMessages.ContainsKey(pendingPrompt) || _messages.ContainsKey(pendingPrompt)
-            || _messageViews.ContainsKey(pendingPrompt) || !_messageViews.ContainsKey(committedPromptId))
-            throw new InvalidOperationException("A multiline research prompt remained duplicated after persistence.");
+        ApplyEvent("conversation.messageCommitted", JsonSerializer.SerializeToElement(new
+        {
+            sessionId = _session,
+            message = _messages[committedPromptId],
+        }));
+        RenderMessagesNow();
+        if (_messages.Keys.Any(id => id.StartsWith("pending:", StringComparison.Ordinal))
+            || !_messageViews.ContainsKey(committedPromptId) || _promptTimelineMarkers.Count != promptCountBeforeCommit + 1)
+            throw new InvalidOperationException("A persisted multiline research prompt was missing or duplicated after replay.");
         _messages.Remove(committedPromptId);
         RenderMessagesNow();
         // Exercise actual native controls for the streaming-to-completed transition.
@@ -353,15 +384,16 @@ public sealed partial class NativeAssistantPage
             || SourcesSummaryButton.Visibility != Visibility.Visible
             || SourcesSummaryButton.IsEnabled != (count > 0 && _session != Guid.Empty))
             throw new InvalidOperationException("The output overlay must show only its accessible Quellen summary with a right-aligned primary-color count.");
-        VerifyIconBrush(SourcesSummaryIcon.Foreground, "web");
+        VerifySidebarTextBrush(SourcesSummaryIcon.Foreground);
         if (Descendants(Inspector).OfType<TextBlock>().Any(label => label.Text is "Alle anzeigen" or "Noch keine Quellen")
             || Descendants(Inspector).OfType<TextBlock>().Count(label => label.Text == "Quellen") != 1)
             throw new InvalidOperationException("The output overlay must not duplicate the source heading, previews or all-sources link.");
         if (SourcesPanel.Parent is not StackPanel sections || !ReferenceEquals(ChangesSummaryButton.Parent, sections)
             || !ReferenceEquals(SubagentsSection.Parent, sections)
-            || sections.Children.IndexOf(SourcesPanel) != sections.Children.IndexOf(ChangesSummaryButton) + 1
-            || sections.Children.IndexOf(SubagentsSection) != sections.Children.IndexOf(SourcesPanel) + 1)
-            throw new InvalidOperationException("The source summary must follow Änderungen directly and precede Subagenten.");
+            || sections.Children.IndexOf(SourcesPanel) != sections.Children.IndexOf(ContextSummaryRow) + 1
+            || sections.Children.IndexOf(SubagentsSection) != sections.Children.IndexOf(SourcesPanel) + 1
+            || sections.Children.IndexOf(InspectorWorkingPlanHost) != sections.Children.IndexOf(SubagentsSection) + 1)
+            throw new InvalidOperationException("The source summary must follow Kontext directly and precede Subagenten.");
     }
 
     private async Task VerifySourcesSmokeAsync(JsonElement original)
@@ -392,10 +424,10 @@ public sealed partial class NativeAssistantPage
                 new("attachment:source-count-document", "Datensatz.csv", [], now, attachment)
             ]) != 3)
             throw new InvalidOperationException("The compact source count must deduplicate repeated URLs and attachments.");
-        VerifyIconBrush(((Grid)InspectorProjectRow.Content).Children.OfType<FontIcon>().Single().Foreground, "folder");
+        VerifySidebarTextBrush(((Grid)InspectorProjectRow.Content).Children.OfType<FontIcon>().Single().Foreground);
         if (((Grid)ChangesSummaryButton.Content).Children.OfType<Microsoft.UI.Xaml.Shapes.Path>().Single().Stroke
-            is not Microsoft.UI.Xaml.Media.SolidColorBrush changesBrush || changesBrush.Color != NativeThemeBrushes.MutedText.Color)
-            throw new InvalidOperationException("The changes icon must use the muted color.");
+            is not Microsoft.UI.Xaml.Media.SolidColorBrush changesBrush || changesBrush.Color != NativeThemeBrushes.Text.Color)
+            throw new InvalidOperationException("The changes icon must use the normal text color.");
         VerifyIconBrush(DictationIcon.Foreground, "speech");
         var parsedUrls = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var parsedTitles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);

@@ -22,18 +22,22 @@ public sealed partial class NativeAssistantPage
     private readonly TextBlock _workingPlanScope = new() { FontSize = 13, TextWrapping = TextWrapping.Wrap,
         Foreground = ThemeBrush("MissumMutedTextBrush", 160), Visibility = Visibility.Collapsed };
     private Button? _workingPlanTabButton;
+    private Button? _workingPlanTabCloseButton;
+    private Border? _workingPlanTabContainer;
+    private bool _workingPlanTabOpen;
+    private readonly NativeWorkingPlanView _inspectorWorkingPlanView = new(compact: true);
+    private NativeWorkingPlanProjection.Snapshot? _renderedInspectorWorkingPlan;
+    private Button? _inspectorWorkingPlanHeader;
     private Guid? _activeWorkingPlanSession;
     private string? _workingPlanAgentId;
     private JsonElement _workingPlanChildStep;
     private NativeWorkingPlanProjection.Snapshot _workingPlanChildSnapshot = NativeWorkingPlanProjection.Snapshot.Empty;
     private string? _workingPlanDetailRequest;
     private bool _workingPlanDetailsLoading;
-    private bool _workingPlanUsed;
     private long _workingPlanNavigation;
     private string? _workingPlanScrollOwner;
 
-    private bool HasWorkingPlanTab => _session != Guid.Empty
-        && (_mode is "coding" or "claudescience" || _workingPlanUsed);
+    private bool HasWorkingPlanTab => _session != Guid.Empty && _workingPlanTabOpen;
 
     private void ObserveWorkingPlan(JsonElement data, bool sessionChanged = false)
     {
@@ -42,7 +46,7 @@ public sealed partial class NativeAssistantPage
             _workingPlanUpdatedAt = default;
             _workingPlan = NativeWorkingPlanProjection.Snapshot.Empty;
             _renderedWorkingPlan = null;
-            _workingPlanUsed = false;
+            _workingPlanTabOpen = false;
             HideWorkingPlanView();
         }
         if (data.ValueKind == JsonValueKind.Object && data.TryGetProperty("workingPlan", out var plan))
@@ -53,7 +57,6 @@ public sealed partial class NativeAssistantPage
             {
                 _workingPlanUpdatedAt = updated;
                 _workingPlan = NativeWorkingPlanProjection.Read(plan);
-                _workingPlanUsed |= _workingPlan.Steps.Count + _workingPlan.AcceptanceCriteria.Count > 0 || S(plan, "stepId").Length > 0;
             }
         }
         RefreshWorkingPlanTab();
@@ -64,7 +67,7 @@ public sealed partial class NativeAssistantPage
     {
         if (!HasWorkingPlanTab)
         {
-            if (_workingPlanTabButton is not null) SessionTabsPanel.Children.Remove(_workingPlanTabButton);
+            if (_workingPlanTabContainer is not null) SessionTabsPanel.Children.Remove(_workingPlanTabContainer);
             if (_activeWorkingPlanSession is not null) ShowChatView();
             return position;
         }
@@ -75,17 +78,35 @@ public sealed partial class NativeAssistantPage
             row.Children.Add(new TextBlock { Text = "Arbeitsplan", FontSize = 13 });
             _workingPlanTabButton = TabButton();
             _workingPlanTabButton.Content = row;
-            _workingPlanTabButton.Padding = new(10, 0, 10, 0);
-            _workingPlanTabButton.Click += async (_, _) => await OpenWorkingPlanTabAsync(ActiveSubagent?.AgentId);
+            _workingPlanTabButton.Height = 30;
+            _workingPlanTabButton.Padding = new(10, 0, 5, 0);
+            _workingPlanTabButton.Click += async (_, _) => await OpenWorkingPlanTabAsync(_workingPlanAgentId);
             SetTabName(_workingPlanTabButton, "Arbeitsplan öffnen");
             SetTabToolTip(_workingPlanTabButton, "Aktueller vollständiger Arbeitsplan");
+            _workingPlanTabCloseButton = TabButton();
+            _workingPlanTabCloseButton.Content = CreateTabIcon("\uE711", 11);
+            _workingPlanTabCloseButton.Width = _workingPlanTabCloseButton.Height = 24;
+            _workingPlanTabCloseButton.Margin = new(0, 0, 3, 0);
+            _workingPlanTabCloseButton.VerticalAlignment = VerticalAlignment.Center;
+            _workingPlanTabCloseButton.Click += (_, _) => CloseWorkingPlanTab();
+            SetTabName(_workingPlanTabCloseButton, "Arbeitsplan-Tab schließen");
+            SetTabToolTip(_workingPlanTabCloseButton, "Arbeitsplan-Tab schließen");
+            var tab = new Grid();
+            tab.ColumnDefinitions.Add(new() { Width = new(1, GridUnitType.Star) });
+            tab.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
+            tab.Children.Add(_workingPlanTabButton);
+            Grid.SetColumn(_workingPlanTabCloseButton, 1);
+            tab.Children.Add(_workingPlanTabCloseButton);
+            _workingPlanTabContainer = new Border { Child = tab, MaxWidth = 284 };
         }
         if (_activeWorkingPlanSession is { } owner && owner != _session) HideWorkingPlanView();
         var active = _activeWorkingPlanSession == _session;
-        ApplyTabAppearance(_workingPlanTabButton, active);
+        ApplyTabAppearance(_workingPlanTabContainer!, _workingPlanTabButton, active);
+        SetTabCloseForeground(_workingPlanTabCloseButton!);
         SetTabEnabled(_workingPlanTabButton, !_sessionTabNavigationBusy);
+        SetTabEnabled(_workingPlanTabCloseButton!, !_sessionTabNavigationBusy);
         SetTabHelp(_workingPlanTabButton, active ? "Aktiver Arbeitsplan" : "Arbeitsplan der geöffneten Sitzung");
-        PositionTab(_workingPlanTabButton, position);
+        PositionTab(_workingPlanTabContainer!, position);
         return position + 1;
     }
 
@@ -96,7 +117,7 @@ public sealed partial class NativeAssistantPage
         ShowChatView();
         var navigation = ++_workingPlanNavigation;
         var session = _session;
-        _workingPlanUsed = true;
+        _workingPlanTabOpen = true;
         _workingPlanAgentId = agentId;
         _workingPlanChildStep = default;
         _workingPlanDetailRequest = null;
@@ -144,8 +165,66 @@ public sealed partial class NativeAssistantPage
         _workingPlanView.SetViewActive(false);
     }
 
+    private void CloseWorkingPlanTab()
+    {
+        if (_disposed || _sessionTabNavigationBusy) return;
+        _workingPlanTabOpen = false;
+        if (_activeWorkingPlanSession == _session) ShowChatView();
+        else HideWorkingPlanView();
+        if (_workingPlanTabContainer is not null) SessionTabsPanel.Children.Remove(_workingPlanTabContainer);
+        _workingPlanAgentId = null;
+        _workingPlanChildStep = default;
+        _workingPlanChildSnapshot = NativeWorkingPlanProjection.Snapshot.Empty;
+        _workingPlanDetailRequest = null;
+        _renderedWorkingPlan = null;
+        _workingPlanView.Update(NativeWorkingPlanProjection.Snapshot.Empty);
+        RenderSessionTabs();
+    }
+
+    private void RefreshInspectorWorkingPlan()
+    {
+        if (InspectorWorkingPlanHost is null || Inspector is null) return;
+        var hasPlan = _session != Guid.Empty && _workingPlan.Steps.Count + _workingPlan.AcceptanceCriteria.Count > 0;
+        InspectorWorkingPlanHost.Visibility = hasPlan ? Visibility.Visible : Visibility.Collapsed;
+        _inspectorWorkingPlanView.SetRunActive(_running);
+        var visible = hasPlan && Inspector.Visibility == Visibility.Visible;
+        _inspectorWorkingPlanView.SetViewActive(visible);
+        if (!hasPlan)
+        {
+            if (_renderedInspectorWorkingPlan is not null)
+                _inspectorWorkingPlanView.Update(NativeWorkingPlanProjection.Snapshot.Empty);
+            _renderedInspectorWorkingPlan = null;
+            return;
+        }
+        // Hidden sidebars keep only the compact snapshot; their rows are
+        // reconciled on opening without hydrating the historical tool log.
+        if (!visible) return;
+        if (_inspectorWorkingPlanHeader is null)
+        {
+            _inspectorWorkingPlanHeader = TabButton();
+            _inspectorWorkingPlanHeader.HorizontalAlignment = HorizontalAlignment.Stretch;
+            _inspectorWorkingPlanHeader.HorizontalContentAlignment = HorizontalAlignment.Stretch;
+            _inspectorWorkingPlanHeader.Padding = new(0);
+            _inspectorWorkingPlanHeader.MinHeight = 32;
+            _inspectorWorkingPlanHeader.Content = new TextBlock { Text = "Arbeitsplan", FontSize = 13,
+                MinHeight = 32, Padding = new(0, 6, 0, 6),
+                FontWeight = Microsoft.UI.Text.FontWeights.Normal, Foreground = NativeThemeBrushes.Text };
+            _inspectorWorkingPlanHeader.Click += async (_, _) => await OpenWorkingPlanTabAsync();
+            SetTabName(_inspectorWorkingPlanHeader, "Arbeitsplan im Tab öffnen");
+            SetTabToolTip(_inspectorWorkingPlanHeader, "Vollständigen Arbeitsplan öffnen");
+            InspectorWorkingPlanHost.Children.Add(_inspectorWorkingPlanHeader);
+            InspectorWorkingPlanHost.Children.Add(_inspectorWorkingPlanView);
+        }
+        if (!ReferenceEquals(_workingPlan, _renderedInspectorWorkingPlan))
+        {
+            _inspectorWorkingPlanView.Update(_workingPlan);
+            _renderedInspectorWorkingPlan = _workingPlan;
+        }
+    }
+
     private void RefreshWorkingPlanTab()
     {
+        RefreshInspectorWorkingPlan();
         var active = _activeWorkingPlanSession == _session && _workingPlanHost.Visibility == Visibility.Visible;
         _workingPlanView.SetViewActive(active);
         var child = _workingPlanAgentId is { } id && _subagents.TryGetValue(id, out var found) && found.SessionId == _session ? found : null;
@@ -210,7 +289,7 @@ public sealed partial class NativeAssistantPage
             .SelectMany(message => MessageSteps(message).Where(step => S(step, "tool") == "coding.updatePlan" && S(step, "status") == "completed")
                 .Select(step => (MessageId: S(message, "id"), Step: step))).LastOrDefault();
 
-    private static Viewbox CreateWorkingPlanTabIcon()
+    private static Viewbox CreateWorkingPlanTabIcon(double size = 13)
     {
         // A folded note, using the same mutable icon brush as all native tabs.
         var geometry = new PathGeometry();
@@ -224,7 +303,7 @@ public sealed partial class NativeAssistantPage
             Clip = new RectangleGeometry { Rect = new(0, 0, 16, 16) } };
         canvas.Children.Add(new NoteIcon { Data = geometry, Stretch = Stretch.None,
             Stroke = NativeIconPalette.BrushFor("navigation"), StrokeThickness = 1.2 });
-        return new Viewbox { Child = canvas, Width = 13, Height = 13, Stretch = Stretch.Uniform,
+        return new Viewbox { Child = canvas, Width = size, Height = size, Stretch = Stretch.Uniform,
             VerticalAlignment = VerticalAlignment.Center };
     }
 }

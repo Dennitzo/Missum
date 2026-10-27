@@ -7,6 +7,29 @@ namespace Missum.Tests;
 public sealed class NativeLongSessionProjectionTests
 {
     [Fact]
+    public void TimelineHeaderWindowsPreserveStreamedTextAndEventIdentity()
+    {
+        var state = new NativeAssistantPage.NativeMessageProjection(JsonSerializer.SerializeToElement(new
+        { id = "message", content = "Gespeichert.", toolSteps = Array.Empty<object>() }), 236);
+        state.BeginGeneration("active");
+        var delta = JsonSerializer.SerializeToElement(new { streamGeneration = "active", revision = 1, contentAppend = " Live." });
+        Assert.True(state.Apply(delta));
+        var historical = JsonSerializer.SerializeToElement(new { id = "steering-old", tool = "assistant.steering", detail = "Früherer Prompt" });
+        state.ReplaceStepWindow([historical], 10, 300);
+        Assert.Equal("Gespeichert. Live.", state.Content);
+        Assert.Equal(10, state.FirstOrdinal);
+        Assert.Equal(300, state.TotalSteps);
+        Assert.False(state.Apply(delta));
+        Assert.True(state.Apply(JsonSerializer.SerializeToElement(new { streamGeneration = "active", revision = 2, contentAppend = " Weiter." })));
+        var latest = JsonSerializer.SerializeToElement(new { id = "latest", tool = "coding.read" });
+        state.ReplaceStepWindow([latest], 299, 300);
+        Assert.Equal("Gespeichert. Live. Weiter.", state.Content);
+        Assert.Equal("latest", Assert.Single(state.Steps).GetProperty("id").GetString());
+        Assert.Equal(299, state.FirstOrdinal);
+        Assert.False(state.Apply(delta));
+    }
+
+    [Fact]
     public void LiveChildSnapshotsRetainHydratedReceiptsUntilTheirOwnVersionChanges()
     {
         var at = DateTimeOffset.UtcNow;

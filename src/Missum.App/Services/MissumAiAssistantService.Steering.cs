@@ -1,20 +1,13 @@
 using Missum.Ai.Contracts;
 using Missum.Core.Models;
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 
 namespace Missum.App.Services;
 
 public sealed partial class MissumAiAssistantService
 {
-    internal static Guid SteeringPromptMessageId(Guid parentId, string stepId)
-    {
-        if (parentId == Guid.Empty) throw new ArgumentException("Die Umlenkung benötigt eine Nachricht.", nameof(parentId));
-        ArgumentException.ThrowIfNullOrWhiteSpace(stepId);
-        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(parentId.ToString("D") + "/" + stepId));
-        return new Guid(hash.AsSpan(0, 16));
-    }
+    internal static Guid SteeringPromptMessageId(Guid parentId, string stepId) =>
+        Missum.Core.Chat.SteeringPromptIdentity.Create(parentId, stepId);
 
     internal Task SpeakSteeringPromptAsync(Guid sessionId, Guid parentMessageId, string stepId, string text,
         Func<MissumAiSpeechUpdate, Task> update, Func<SpeechPlaybackProgress, Task>? progress = null,

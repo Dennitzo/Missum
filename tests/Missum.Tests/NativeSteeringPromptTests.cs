@@ -5,22 +5,6 @@ namespace Missum.Tests;
 
 public sealed class NativeSteeringPromptTests
 {
-    [Theory]
-    [InlineData("running")]
-    [InlineData("completed")]
-    public void OnlyTheMatchingRenderableReceiptReplacesTheOptimisticPrompt(string status)
-    {
-        var pending = JsonSerializer.SerializeToElement(new { steeringInputId = "one", content = "Prüfe\r\ndie Gleichung." });
-        JsonElement Receipt(string? detail, string id = "steering-one", string tool = "assistant.steering") =>
-            JsonSerializer.SerializeToElement(new { id, tool, status, detail });
-        Assert.False(NativeAssistantPage.HasVisibleSteeringPrompt(pending, Receipt(null)));
-        Assert.False(NativeAssistantPage.HasVisibleSteeringPrompt(pending, Receipt("  ")));
-        Assert.False(NativeAssistantPage.HasVisibleSteeringPrompt(pending, Receipt("Anderer Prompt")));
-        Assert.False(NativeAssistantPage.HasVisibleSteeringPrompt(pending, Receipt("Prüfe\ndie Gleichung.", "steering-other")));
-        Assert.False(NativeAssistantPage.HasVisibleSteeringPrompt(pending, Receipt("Prüfe\ndie Gleichung.", tool: "coding.read")));
-        Assert.True(NativeAssistantPage.HasVisibleSteeringPrompt(pending, Receipt("Prüfe\ndie Gleichung.")));
-    }
-
     [Fact]
     public void VirtualizedSteeringIsAChronologicalUserBubbleWithAStableKey()
     {
@@ -37,7 +21,10 @@ public sealed class NativeSteeringPromptTests
         Assert.Equal("steering:steering-one", user.Key);
         Assert.Equal(prompt, user.Text);
         Assert.Equal(before.Length, user.Start);
-        Assert.Equal(before, string.Concat(blocks.TakeWhile(block => block != user).Where(block => block.Kind == "text").Select(block => block.Text)));
+        // Whitespace-only layout blocks are omitted; the original source anchor
+        // above must still retain the exact position after both newline bytes.
+        Assert.Equal(before.TrimEnd(), string.Concat(blocks.TakeWhile(block => block != user)
+            .Where(block => block.Kind == "text").Select(block => block.Text)).TrimEnd());
         Assert.Equal("Neue Antwort.", string.Concat(blocks.SkipWhile(block => block != user).Where(block => block.Kind == "text").Select(block => block.Text)));
         Assert.DoesNotContain(blocks, block => block.Kind == "tool" && block.Key == "tool:steering-one");
         var updated = NativeAssistantPage.BuildLogicalBlocks(message, before + "Neue Antwort. Weiterer Text.", steps, [], false, indices);

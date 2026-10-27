@@ -20,6 +20,7 @@ public sealed partial class NativeAssistantPage
     private string? _promptTimelineOwner;
     private readonly Dictionary<string, PromptTimelineEntry> _promptTimelineEntries = new(StringComparer.Ordinal);
     private string? _promptIndexLoadedOwner;
+    private long _promptIndexGeneration;
     private readonly HashSet<Guid> _promptIndicesLoading = [];
     private NativePromptNavigationTarget? _promptNavigation;
     private bool _promptNavigationLayoutAttached, _promptNavigationProjectionQueued;
@@ -27,9 +28,55 @@ public sealed partial class NativeAssistantPage
     private readonly Dictionary<string, PromptHistoryGap> _promptHistoryGaps = new(StringComparer.Ordinal);
     private bool _promptHistoryGapLoading;
     private sealed record PromptHistoryGap(string Key, ConversationCursor Before, ConversationCursor After);
-    private sealed record PromptTimelineEntry(string Id, DateTimeOffset CreatedAt, PromptTimelinePreviewContent Preview);
+    private sealed record PromptTimelineEntry(string Id, DateTimeOffset CreatedAt, PromptTimelinePreviewContent Preview,
+        string MessageId, string? StepId = null, int? ContentOffset = null, long? StepOrdinal = null);
     private bool HasPromptTimelineTarget => _promptNavigation?.IsCurrent(ConversationViewKey, _conversationScrollIntent) == true;
     private bool IsPromptTimelineNavigationPending => HasPromptTimelineTarget;
+    private readonly HashSet<string> _targetedPromptWindows = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _promptTailRestoreRequests = new(StringComparer.Ordinal);
+
+    private double PromptTimelineOffset(PromptTimelineEntry prompt)
+    {
+        if (!_messageViews.TryGetValue(prompt.MessageId, out var message) || !MessagesPanel.Children.Contains(message.View))
+            return double.NaN;
+        if (prompt.StepId is null) return MessageOffset(message.View);
+        var key = "steering:" + prompt.StepId;
+        if (_virtualMessages.TryGetValue(prompt.MessageId, out var virtualMessage)
+            && virtualMessage.Panel.BlockOffset(key) is { } relative)
+            return MessageOffset(virtualMessage.Panel) + relative;
+        return _messageBlocks.TryGetValue(prompt.MessageId, out var blocks) && blocks.TryGetValue(key, out var view)
+            ? MessageOffset(view) : double.NaN;
+    }
+
+    private void ObserveEmptyPromptTimelineSnapshot(JsonElement data)
+    {
+        if (!data.TryGetProperty("historyPage", out var page) || S(page, "totalMessages") != "0"
+            || Items(data, "messages").Length != 0) return;
+        _promptIndexGeneration++;
+        _promptTimelineOwner = ConversationViewKey;
+        _promptIndexLoadedOwner = ConversationViewKey;
+        _promptTimelineEntries.Clear();
+        _promptHistoryGaps.Clear();
+        CancelPromptTimelineNavigation();
+    }
+
+    private async Task RestorePromptTimelineTailAsync(string messageId, string owner, long intent)
+    {
+        var requestId = Guid.NewGuid().ToString("N");
+        if (!_promptTailRestoreRequests.TryAdd(messageId, requestId)) return;
+        try
+        {
+            await CommandAsync("conversation.blocks.page", new { sessionId = _session, messageId,
+                timelineTail = true, timelineOwner = owner, tailRequestId = requestId });
+            if (!_disposed && owner == ConversationViewKey && intent == _conversationScrollIntent)
+                QueueConversationLayoutProjection(follow: true);
+        }
+        finally
+        {
+            if (_promptTailRestoreRequests.GetValueOrDefault(messageId) == requestId)
+                _promptTailRestoreRequests.Remove(messageId);
+        }
+    }
 
     private void OnPromptTimelineSizeChanged(object sender, SizeChangedEventArgs e) => RunUiCallback("PromptTimeline.SizeChanged", () => RenderPromptTimeline());
 
@@ -41,6 +88,7 @@ public sealed partial class NativeAssistantPage
             CancelPromptTimelineNavigation();
             _promptTimelineOwner = ConversationViewKey;
             _promptIndexLoadedOwner = null;
+            _promptIndexGeneration++;
             _promptTimelineEntries.Clear();
             _promptHistoryGaps.Clear();
         }
@@ -50,11 +98,41 @@ public sealed partial class NativeAssistantPage
             && !string.IsNullOrWhiteSpace(MessageContent(message))))
         {
             var id = S(prompt, "id");
-            _promptTimelineEntries[id] = new(id, MessageCreatedAt(prompt), previews[id]);
+            if (!Guid.TryParse(id, out _)) continue;
+            _promptTimelineEntries[id] = new(id, MessageCreatedAt(prompt), previews[id], id);
+        }
+        foreach (var message in messages.Where(message => S(message, "role") == "assistant"))
+        {
+            var messageId = S(message, "id");
+            if (!Guid.TryParse(messageId, out var parentId)) continue;
+            var steps = MessageSteps(message);
+            for (var ordinal = 0; ordinal < steps.Length; ordinal++)
+            {
+                var step = steps[ordinal];
+                var detail = S(step, "detail");
+                var stepId = S(step, "id");
+                if (S(step, "tool") != "assistant.steering" || stepId.Length == 0) continue;
+                var id = Missum.Core.Chat.SteeringPromptIdentity.Create(parentId, stepId).ToString("D");
+                if (S(step, "status") is not ("running" or "completed"))
+                { _promptTimelineEntries.Remove(id); continue; }
+                if (string.IsNullOrWhiteSpace(detail)) continue;
+                _promptTimelineEntries.TryGetValue(id, out var prior);
+                var at = prior?.CreatedAt ?? (DateTimeOffset.TryParse(S(step, "startedAt", S(step, "completedAt", S(step, "updatedAt"))), out var created)
+                    ? created : MessageCreatedAt(message));
+                int? position = int.TryParse(S(step, "contentOffset"), out var parsedOffset) ? parsedOffset : null;
+                var content = MessageContent(message);
+                var start = Math.Clamp(position ?? content.Length, 0, content.Length);
+                var answer = content.Substring(start, Math.Min(256, content.Length - start));
+                _promptTimelineEntries[id] = new(id, at, new(NativePromptTimelineState.PreviewText(detail, 118),
+                    NativePromptTimelineState.PreviewText(answer, 190)), messageId, stepId, position,
+                    ProjectionFor(message).StepOrdinal(stepId) ?? prior?.StepOrdinal ?? ordinal);
+            }
         }
         if (ActiveSubagent is null && !_selectionInputSmokeActive && _promptIndexLoadedOwner != ConversationViewKey)
             _ = LoadPromptTimelineIndexAsync();
-        var prompts = _promptTimelineEntries.Values.OrderBy(prompt => prompt.CreatedAt).ThenBy(prompt => prompt.Id, StringComparer.Ordinal).ToArray();
+        var prompts = _promptTimelineEntries.Values.OrderBy(prompt => prompt.CreatedAt)
+            .ThenBy(prompt => prompt.MessageId, StringComparer.Ordinal).ThenBy(prompt => prompt.StepOrdinal ?? -1)
+            .ThenBy(prompt => prompt.Id, StringComparer.Ordinal).ToArray();
         var visibility = prompts.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
         if (PromptTimeline.Visibility != visibility) PromptTimeline.Visibility = visibility;
         if (prompts.Length == 0)
@@ -82,8 +160,7 @@ public sealed partial class NativeAssistantPage
         {
             var prompt = prompts[index];
             var id = prompt.Id;
-            var targetOffset = _messageViews.TryGetValue(id, out var messageView) && MessagesPanel.Children.Contains(messageView.View)
-                ? MessageOffset(messageView.View) : double.NaN;
+            var targetOffset = PromptTimelineOffset(prompt);
             if (!_promptTimelineMarkers.TryGetValue(id, out var marker))
             {
                 var line = new Border
@@ -139,6 +216,9 @@ public sealed partial class NativeAssistantPage
                 ToolTipService.SetPlacement(hitTarget, PlacementMode.Right);
             }
             marker.TargetOffset = targetOffset;
+            var accessibleName = $"Zu Prompt {index + 1} springen: {NativePromptTimelineState.PreviewText(prompt.Preview.Prompt, 80)}";
+            if (Microsoft.UI.Xaml.Automation.AutomationProperties.GetName(marker.HitTarget) != accessibleName)
+                Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(marker.HitTarget, accessibleName);
             var stride = Math.Min(14, available / Math.Max(1, prompts.Length - 1));
             var top = (available - stride * (prompts.Length - 1)) / 2 + index * stride;
             if (marker.Top != top)
@@ -263,6 +343,7 @@ public sealed partial class NativeAssistantPage
 
     private async Task ScrollToPromptAsync(string id)
     {
+        if (!_promptTimelineEntries.TryGetValue(id, out var prompt)) return;
         _conversationSelection?.Clear();
         OnToolDisclosureInteraction();
         var target = new NativePromptNavigationTarget(id, ConversationViewKey, _conversationScrollIntent);
@@ -274,14 +355,16 @@ public sealed partial class NativeAssistantPage
         }
         _activePromptTimelineId = id;
         UpdatePromptTimelineSelection();
-        if (!DisplayMessages.ContainsKey(id))
+        if (!DisplayMessages.ContainsKey(prompt.MessageId)
+            || prompt.StepId is { } missingStep && !MessageSteps(DisplayMessages[prompt.MessageId]).Any(step => S(step, "id") == missingStep))
         {
             if (ActiveSubagent is { } child) await EnsureSubagentTranscriptAsync(child);
             else if (Guid.TryParse(id, out var promptId))
                 await CommandAsync("conversation.promptPage", new { sessionId = _session, promptId, navigationIntent = target.Intent });
         }
         if (_disposed || !ReferenceEquals(_promptNavigation, target) || !target.IsCurrent(ConversationViewKey, _conversationScrollIntent)) return;
-        if (!DisplayMessages.ContainsKey(id)) { CancelPromptTimelineNavigation(); return; }
+        if (!DisplayMessages.ContainsKey(prompt.MessageId)) { CancelPromptTimelineNavigation(); return; }
+        if (prompt.StepId is not null) _messageStepStarts[prompt.MessageId] = 0;
         RenderMessagesNow();
         RefreshVirtualConversationViewport();
         QueuePromptTimelineTargetProjection();
@@ -291,29 +374,44 @@ public sealed partial class NativeAssistantPage
     {
         var session = _session;
         var owner = ConversationViewKey;
+        var generation = _promptIndexGeneration;
         if (_disposed || session == Guid.Empty || ActiveSubagent is not null || !_promptIndicesLoading.Add(session)) return;
         try
         {
-            if (await CommandAsync("conversation.prompts", new { sessionId = session }) && owner == ConversationViewKey)
+            if (await CommandAsync("conversation.prompts", new { sessionId = session, indexGeneration = generation })
+                && owner == ConversationViewKey && generation == _promptIndexGeneration)
                 _promptIndexLoadedOwner = owner;
         }
-        finally { _promptIndicesLoading.Remove(session); }
+        finally
+        {
+            _promptIndicesLoading.Remove(session);
+            if (!_disposed && owner == ConversationViewKey && generation != _promptIndexGeneration
+                && _promptIndexLoadedOwner != owner) RenderPromptTimeline();
+        }
     }
 
     private void ApplyPromptTimelineIndex(JsonElement data)
     {
         if (ActiveSubagent is not null || S(data, "sessionId") != _session.ToString()) return;
+        if (long.TryParse(S(data, "indexGeneration"), out var generation) && generation != _promptIndexGeneration) return;
         if (_promptTimelineOwner != ConversationViewKey)
         {
             _promptTimelineOwner = ConversationViewKey;
             _promptTimelineEntries.Clear();
+            _promptIndexGeneration++;
         }
         foreach (var prompt in Items(data, "prompts"))
         {
             var id = S(prompt, "id");
-            if (id.Length == 0 || _promptTimelineEntries.ContainsKey(id)) continue;
-            _promptTimelineEntries[id] = new(id, MessageCreatedAt(prompt),
-                new(NativePromptTimelineState.PreviewText(S(prompt, "preview"), 118), ""));
+            if (!Guid.TryParse(id, out _)) continue;
+            _promptTimelineEntries.TryGetValue(id, out var prior);
+            var parent = S(prompt, "parentMessageId", id);
+            var stepId = S(prompt, "stepId");
+            int? offset = int.TryParse(S(prompt, "contentOffset"), out var position) ? position : null;
+            long? ordinal = long.TryParse(S(prompt, "stepOrdinal"), out var stepOrdinal) ? stepOrdinal : null;
+            _promptTimelineEntries[id] = new(id, MessageCreatedAt(prompt), prior?.Preview
+                ?? new(NativePromptTimelineState.PreviewText(S(prompt, "preview"), 118), ""),
+                parent, stepId.Length == 0 ? null : stepId, offset, ordinal);
         }
         _promptIndexLoadedOwner = ConversationViewKey;
         RenderPromptTimeline();
@@ -330,9 +428,11 @@ public sealed partial class NativeAssistantPage
         {
             _promptNavigationProjectionQueued = false;
             if (_disposed || !HasPromptTimelineTarget) { CancelPromptTimelineNavigation(); return; }
-            if (_conversationSelection?.IsSelecting == true || !_messageViews.TryGetValue(_promptNavigation!.Id, out var message)
-                || !MessagesPanel.Children.Contains(message.View)) return;
-            var offset = Math.Clamp(MessageOffset(message.View), 0, ConversationScroll.ScrollableHeight);
+            if (_conversationSelection?.IsSelecting == true
+                || !_promptTimelineEntries.TryGetValue(_promptNavigation!.Id, out var prompt)) return;
+            var targetOffset = PromptTimelineOffset(prompt);
+            if (!double.IsFinite(targetOffset)) return;
+            var offset = Math.Clamp(targetOffset, 0, ConversationScroll.ScrollableHeight);
             if (Math.Abs(ConversationScroll.VerticalOffset - offset) > .5)
             {
                 ConversationScroll.ChangeView(null, offset, null, disableAnimation: true);

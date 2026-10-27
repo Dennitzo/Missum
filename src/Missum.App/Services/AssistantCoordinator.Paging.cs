@@ -12,8 +12,10 @@ public sealed partial class AssistantCoordinator
         if (envelope.Type == "conversation.prompts")
         {
             var sessionId = GetRequiredGuid(envelope.Payload, "sessionId");
+            long? indexGeneration = envelope.Payload.TryGetProperty("indexGeneration", out var generation)
+                && generation.ValueKind == JsonValueKind.Number && generation.TryGetInt64(out var parsedGeneration) ? parsedGeneration : null;
             var prompts = await Task.Run(() => conversationSnapshots.GetPromptsAsync(sessionId, token), token).ConfigureAwait(false);
-            await emit("conversation.prompts", new { sessionId, prompts }, envelope.RequestId).ConfigureAwait(false);
+            await emit("conversation.prompts", new { sessionId, prompts, indexGeneration }, envelope.RequestId).ConfigureAwait(false);
             return true;
         }
         if (envelope.Type is "conversation.page" or "conversation.promptPage")
@@ -34,6 +36,8 @@ public sealed partial class AssistantCoordinator
                 sessionId, promptId, navigationIntent, timelineGap, page.HasMore, page.Before, page.TotalMessages, toolStepWindows = page.ToolStepWindows,
                 messages = page.Conversation.Messages.Select(message => ToMessageDto(message,
                     page.Conversation.Artifacts.GetValueOrDefault(message.Id), page.ToolStepWindows?.GetValueOrDefault(message.Id))),
+                parentMessageId = page.TargetPrompt?.ParentMessageId, stepId = page.TargetPrompt?.StepId,
+                contentOffset = page.TargetPrompt?.ContentOffset, stepOrdinal = page.TargetPrompt?.StepOrdinal,
                 auxiliaryMessages = auxiliary.Select(message => new { id = message.Id, toolSteps = message.ToolSteps ?? [] }),
                 subagents = ToSubagentDtos(ReadActivitySummaries(auxiliary)),
             }, envelope.RequestId).ConfigureAwait(false);
@@ -46,7 +50,11 @@ public sealed partial class AssistantCoordinator
             long? before = envelope.Payload.TryGetProperty("beforeOrdinal", out var ordinal) && ordinal.TryGetInt64(out var value) ? value : null;
             var page = await conversationSnapshots.GetToolStepsPageAsync(sessionId, messageId, 64, before, token).ConfigureAwait(false);
             if (page is null) throw new InvalidOperationException("Die Werkzeugnachricht ist nicht mehr vorhanden.");
-            await emit("conversation.blocks.page", new { sessionId, messageId, page.Steps, page.Window }, envelope.RequestId).ConfigureAwait(false);
+            var timelineTail = envelope.Payload.TryGetProperty("timelineTail", out var tail) && tail.ValueKind == JsonValueKind.True;
+            var timelineOwner = GetOptionalString(envelope.Payload, "timelineOwner", 256);
+            var tailRequestId = GetOptionalString(envelope.Payload, "tailRequestId", 128);
+            await emit("conversation.blocks.page", new { sessionId, messageId, page.Steps, page.Window,
+                timelineTail, timelineOwner, tailRequestId }, envelope.RequestId).ConfigureAwait(false);
             return true;
         }
         if (envelope.Type == "subagent.blocks.page")

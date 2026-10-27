@@ -131,6 +131,7 @@ public sealed partial class NativeAssistantPage
         private long _firstOrdinal;
         internal long TotalSteps { get; private set; }
         internal long FirstOrdinal => _firstOrdinal;
+        internal long? StepOrdinal(string id) => _ordinals.TryGetValue(id, out var ordinal) ? ordinal : null;
         private long _eventRevision;
         private string? _streamGeneration;
         internal JsonElement Source { get; private set; }
@@ -174,6 +175,20 @@ public sealed partial class NativeAssistantPage
             if (preceding.Length > 0) _firstOrdinal = previousFirst;
             TotalSteps = Math.Max(TotalSteps, incomingFirst + incomingIndex);
             UpdatedAt = at;
+            Version++;
+        }
+
+        internal void ReplaceStepWindow(IEnumerable<JsonElement> steps, long firstOrdinal, long totalSteps)
+        {
+            // Timeline navigation replaces presentation headers only. Retain
+            // streamed text, event revision and the generation owned by this message.
+            var previous = _steps.ToDictionary(step => S(step, "id"), StringComparer.Ordinal);
+            _steps.Clear(); _stepIndices.Clear(); _stepValues = null;
+            _ordinals.Clear(); _provisionalOrdinals.Clear();
+            _firstOrdinal = firstOrdinal;
+            TotalSteps = totalSteps;
+            var ordinal = firstOrdinal;
+            foreach (var step in steps) PutStep(RetainHydratedStep(step, previous.GetValueOrDefault(S(step, "id"))), ordinal++);
             Version++;
         }
 

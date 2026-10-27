@@ -204,17 +204,17 @@ public sealed partial class NativeAssistantPage
                 var groupColors = groupIcons.Select(item => ((SolidColorBrush)item.Icon.Foreground).Color).ToArray();
                 if (groupColors.Distinct().Count() < 7)
                     throw new InvalidOperationException("Die Themenpalette unterscheidet nicht alle sieben Farbgruppen.");
-                VerifyIconBrush(((Grid)InspectorProjectRow.Content).Children.OfType<FontIcon>().Single().Foreground, "navigation");
+                VerifySidebarTextBrush(((Grid)InspectorProjectRow.Content).Children.OfType<FontIcon>().Single().Foreground);
                 if (((Grid)ChangesSummaryButton.Content).Children.OfType<Microsoft.UI.Xaml.Shapes.Path>().Single().Stroke
-                    is not SolidColorBrush changesBrush || changesBrush.Color != NativeThemeBrushes.MutedText.Color)
-                    throw new InvalidOperationException("Das Änderungen-Icon muss die gedämpfte Farbe verwenden.");
+                    is not SolidColorBrush changesBrush || changesBrush.Color != NativeThemeBrushes.Text.Color)
+                    throw new InvalidOperationException("Das Änderungen-Icon muss die normale Schriftfarbe verwenden.");
                 if (Descendants(Inspector).OfType<TextBlock>().Any(label => label.Text == "Ausgaben")
                     || Descendants(Inspector).OfType<Button>().Any(button =>
                         Microsoft.UI.Xaml.Automation.AutomationProperties.GetName(button) == "Ausgaben schließen"))
                     throw new InvalidOperationException("Das Overlay darf keine Überschrift oder eigenes Schließen-Icon mehr enthalten.");
                 VerifyIconBrush(InspectorToggleIcon.Stroke, "navigation");
                 foreach (var sourceButton in SourcesPanel.Children.OfType<Button>())
-                    VerifyIconBrush(((Grid)sourceButton.Content).Children.OfType<FontIcon>().Single().Foreground, "web");
+                    VerifySidebarTextBrush(((Grid)sourceButton.Content).Children.OfType<FontIcon>().Single().Foreground);
                 VerifySourcesSummarySmoke();
                 foreach (var tabIcon in Descendants(SessionTabsPanel).OfType<FontIcon>())
                     VerifyIconBrush(tabIcon.Foreground, "navigation");

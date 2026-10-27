@@ -62,11 +62,20 @@ public sealed partial class NativeAssistantPage
         if (type is "conversation.blocks.page" or "subagent.blocks.page")
         {
             var id = S(data, "messageId");
+            var timelineTail = S(data, "timelineTail") == "True";
+            if (timelineTail && (S(data, "timelineOwner") != ConversationViewKey
+                || _promptTailRestoreRequests.GetValueOrDefault(id) != S(data, "tailRequestId"))) return true;
             var messages = _messages.ContainsKey(id) ? _messages
                 : _subagents.Values.FirstOrDefault(child => child.SessionId == _session && child.Messages.ContainsKey(id))?.Messages;
             if (messages is not null && messages.TryGetValue(id, out var message))
             {
-                ProjectionFor(message).Prepend(Items(data, "steps"));
+                if (timelineTail && data.TryGetProperty("window", out var tailWindow))
+                {
+                    var first = long.TryParse(S(tailWindow, "beforeOrdinal"), out var firstOrdinal) ? firstOrdinal : 0;
+                    var total = long.TryParse(S(tailWindow, "totalSteps"), out var count) ? count : 0;
+                    ProjectionFor(message).ReplaceStepWindow(Items(data, "steps"), first, total);
+                }
+                else ProjectionFor(message).Prepend(Items(data, "steps"));
                 if (data.TryGetProperty("window", out var window)) _toolStepWindows[id] = window.Clone();
                 _renderedMessageSources.Remove(id);
                 _sourceMessageSignatures.Remove(id);
@@ -87,6 +96,7 @@ public sealed partial class NativeAssistantPage
             }
             var offset = ConversationScroll.VerticalOffset;
             var incomingPage = Items(data, "messages").ToArray();
+            var targetParent = type == "conversation.promptPage" ? S(data, "parentMessageId") : "";
             var previousOldest = _messages.Values.Select(PromptMessageCursor).Where(cursor => cursor is not null).Cast<Missum.Core.Models.ConversationCursor>()
                 .OrderBy(cursor => cursor.CreatedAt).ThenBy(cursor => cursor.Id.ToString("D"), StringComparer.Ordinal).FirstOrDefault();
             var previousHasMore = _historyHasMore;
@@ -95,6 +105,14 @@ public sealed partial class NativeAssistantPage
             {
                 var id = S(message, "id");
                 if (!_messages.ContainsKey(id)) _messages[id] = message.Clone();
+                if (id == targetParent && data.TryGetProperty("toolStepWindows", out var windows)
+                    && windows.TryGetProperty(id, out var targetWindow))
+                {
+                    var first = long.TryParse(S(targetWindow, "beforeOrdinal"), out var firstOrdinal) ? firstOrdinal : 0;
+                    var total = long.TryParse(S(targetWindow, "totalSteps"), out var count) ? count : 0;
+                    ProjectionFor(_messages[id]).ReplaceStepWindow(Items(message, "toolSteps"), first, total);
+                    _targetedPromptWindows.Add(id);
+                }
             }
             ObserveToolStepWindows(data);
             ApplyHistoryPageCursor(data);

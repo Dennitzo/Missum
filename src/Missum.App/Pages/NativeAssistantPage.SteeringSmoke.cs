@@ -41,7 +41,7 @@ public sealed partial class NativeAssistantPage
                     throw new InvalidOperationException("An empty subagent summary remained visible.");
                 var inputId = Guid.NewGuid().ToString("N");
                 var prompt = "Prüfe den alternativen Ansatz.\n\nErhalte alle mathematischen Ausdrücke.";
-                var pending = AddPendingUserMessage(session.Id, prompt, inputId);
+                var promptId = MissumAiAssistantService.SteeringPromptMessageId(assistant.Id, "steering-" + inputId).ToString("D");
                 // Simulate an acknowledgement racing ahead of its payload.
                 ApplyEvent("chat.delta", JsonSerializer.SerializeToElement(new
                 {
@@ -50,8 +50,9 @@ public sealed partial class NativeAssistantPage
                     toolStepOrdinal = 0, toolStepCount = 1,
                 }));
                 RenderMessagesNow();
-                if (!_pendingUserMessages.ContainsKey(pending) || !_messageViews.ContainsKey(pending))
-                    throw new InvalidOperationException("A textless acknowledgement removed the pending prompt.");
+                if (_messageActionViews.ContainsKey(promptId) || _promptTimelineMarkers.ContainsKey(promptId)
+                    || _messages.Keys.Any(id => id.StartsWith("pending:", StringComparison.Ordinal)))
+                    throw new InvalidOperationException("A textless acknowledgement created a provisional prompt or timeline marker.");
 
                 await chats.SaveToolStepDeltaAsync(assistant.Id, new("steering-" + inputId, "assistant.steering", "completed", prompt,
                     ContentOffset: content.Length, UpdatedAt: DateTimeOffset.UtcNow), _lifetime.Token);
@@ -61,8 +62,9 @@ public sealed partial class NativeAssistantPage
                 RenderMessagesNow();
                 await WaitForSteeringBubbleAsync(assistant.Id.ToString(), "steering-" + inputId, prompt);
                 await VerifySteeringFooterSmokeAsync(assistant.Id, "steering-" + inputId, prompt);
-                if (_pendingUserMessages.ContainsKey(pending) || _messages.ContainsKey(pending))
-                    throw new InvalidOperationException("Stored steering did not replace its pending prompt exactly once.");
+                if (!_promptTimelineMarkers.ContainsKey(promptId) || _promptTimelineMarkers.Count != 1
+                    || _messages.Keys.Any(id => id.StartsWith("pending:", StringComparison.Ordinal)))
+                    throw new InvalidOperationException("Stored steering did not produce exactly one stable timeline marker.");
                 if (_virtualMessages.ContainsKey(assistant.Id.ToString()) != large)
                     throw new InvalidOperationException("Steering smoke did not exercise both message renderers.");
                 await CommandAsync("session.open", new { sessionId = Guid.Parse(S(original, "activeSessionId")) });
@@ -86,7 +88,7 @@ public sealed partial class NativeAssistantPage
             }
             await File.WriteAllTextAsync(Path.Combine(directory, "native-steering-prompt-validation.json"), JsonSerializer.Serialize(new
             {
-                processId = Environment.ProcessId, pendingRetainedUntilText = true, compactDatabaseReload = true,
+                processId = Environment.ProcessId, noProvisionalPrompts = true, storedSteeringHasOneTimelineMarker = true, compactDatabaseReload = true,
                 shortMessageBubble = true, virtualMessageBubble = true, sessionReload = true, emptySubagentsHidden = true,
                 copyExactPrompt = true, readExactPrompt = true, independentSpeechIdentity = true, pauseResumeStop = true,
                 recycledFooterRestored = true,

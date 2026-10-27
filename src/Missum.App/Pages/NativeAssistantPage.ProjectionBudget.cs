@@ -39,7 +39,7 @@ public sealed partial class NativeAssistantPage
             foreach (var message in ordered.Take(ordered.Length - 72))
             {
                 var id = S(message, "id");
-                if (S(message, "status") is "streaming" or "pending" || id.StartsWith("pending:", StringComparison.Ordinal)) continue;
+                if (S(message, "status") is "streaming" or "pending") continue;
                 _messages.Remove(id); ReleaseMessageProjection(id);
             }
             var first = _messages.Values.OrderBy(MessageCreatedAt).First();

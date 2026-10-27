@@ -21,6 +21,7 @@ internal sealed class NativeVirtualizingBlockPanel : StackPanel
     private readonly Dictionary<string, double> _heights = new(StringComparer.Ordinal);
     private IReadOnlyList<Row> _rows = [];
     private double[] _offsets = [0];
+    private readonly Dictionary<string, int> _rowIndices = new(StringComparer.Ordinal);
     private bool _refreshQueued;
     private bool _refreshing;
     private double _width;
@@ -76,6 +77,8 @@ internal sealed class NativeVirtualizingBlockPanel : StackPanel
             if (anchor == replaced) anchor = row.Key;
         }
         _rows = rows;
+        _rowIndices.Clear();
+        for (var index = 0; index < _rows.Count; index++) _rowIndices[_rows[index].Key] = index;
         Reindex();
         if (anchor is not null && ScrollOwner is { } owner)
         {
@@ -90,9 +93,13 @@ internal sealed class NativeVirtualizingBlockPanel : StackPanel
     {
         _offsets = new double[_rows.Count + 1];
         for (var index = 0; index < _rows.Count; index++)
+        {
             _offsets[index + 1] = _offsets[index] + _heights.GetValueOrDefault(_rows[index].Key,
                 Math.Max(1, _rows[index].EstimatedHeight));
+        }
     }
+
+    internal double? BlockOffset(string key) => _rowIndices.TryGetValue(key, out var index) ? _offsets[index] : null;
 
     internal void QueueRefresh()
     {

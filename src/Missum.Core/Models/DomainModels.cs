@@ -106,10 +106,12 @@ public sealed record ConversationSnapshot(
 
 /// <summary>Display-only pagination; never used to assemble a model request or cache prefix.</summary>
 public sealed record ConversationCursor(DateTimeOffset CreatedAt, Guid Id);
-public sealed record ConversationPrompt(Guid Id, DateTimeOffset CreatedAt, string Preview);
+public sealed record ConversationPrompt(Guid Id, DateTimeOffset CreatedAt, string Preview,
+    Guid? ParentMessageId = null, string? StepId = null, int? ContentOffset = null, long? StepOrdinal = null);
 public sealed record ConversationPage(ConversationSnapshot Conversation, bool HasMore,
     ConversationCursor? Before, int TotalMessages,
-    IReadOnlyDictionary<Guid, ConversationToolStepWindow>? ToolStepWindows = null);
+    IReadOnlyDictionary<Guid, ConversationToolStepWindow>? ToolStepWindows = null,
+    ConversationPrompt? TargetPrompt = null);
 
 public sealed record SessionContextPreparation(
     string CacheKey,

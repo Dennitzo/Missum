@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using Missum.App.Services;
 using Missum.App.Controls;
@@ -39,7 +39,6 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     private string _mode = "general";
     private bool _initialised, _rendering, _running, _disposed;
     private bool _speaking;
-    private readonly Dictionary<string, JsonElement> _pendingUserMessages = new(StringComparer.Ordinal);
     private bool _sendPending;
 
     private string? _dictationPrefix;
@@ -100,7 +99,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         _assistantHost = App.Current.GetService<AssistantHost>();
         _hostSubscription = _assistantHost.Subscribe("desktop", (type, payload, id) => EmitAsync(type, payload, id));
         _settings = App.Current.GetService<SettingsCoordinator>();
-        Inspector.Visibility = _settings.Current.AssistantOutputsVisible ? Visibility.Visible : Visibility.Collapsed;
+        _inspectorRequested = _settings.Current.AssistantOutputsVisible;
         _microphone = App.Current.GetService<MicrophoneTranscriptionService>();
         _microphone.TurnChanged += OnTranscript;
         _draftTimer = DispatcherQueue.CreateTimer();
@@ -258,7 +257,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             && data.TryGetProperty("userMessage", out var userMessage) && userMessage.ValueKind == JsonValueKind.Object)
         {
             _messages[S(userMessage, "id")] = userMessage;
-            ReconcilePendingMessages();
+            ReconcileLiveCaptionMessage();
             RenderMessages();
         }
         if (type == "host.error") { ShowError(S(data, "message")); return; }
@@ -310,7 +309,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                 if (changed) Composer.Text = S(data, "draft");
                 _rendering = false;
                 ApplyMessageSnapshot(data, preserveLive: !changed);
-                ReconcilePendingMessages();
+                ReconcileLiveCaptionMessage();
                 SyncSubagents(data, changed);
                 ObserveThinkingProgress(data);
                 UpdateCaptionChip();
@@ -347,7 +346,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             if (!ObserveChangesConversation(_session, data)) return;
             ObserveWorkingPlan(data);
             ApplyMessageSnapshot(data, preserveLive: true);
-            ReconcilePendingMessages();
+            ReconcileLiveCaptionMessage();
             SyncSubagents(data, sessionChanged: false);
             RenderSessionTabs();
             RenderMessages();
@@ -405,6 +404,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         // its newer text while still accepting snapshot metadata and artifacts.
         ObserveToolStepWindows(data);
         var incoming = Items(data, "messages");
+        ObserveEmptyPromptTimelineSnapshot(data);
         if (preserveLive) incoming = incoming.Select(PreserveNewerLiveMessage).ToArray();
         var hasPage = data.TryGetProperty("historyPage", out var page);
         var keepOlderPages = preserveLive && hasPage && page.TryGetProperty("hasMore", out var more)
@@ -445,45 +445,10 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         return JsonSerializer.SerializeToElement(merged);
     }
 
-    private void ReconcilePendingMessages()
+    private void ReconcileLiveCaptionMessage()
     {
         if (_captionSessionId == _session && _captionMessageId is Guid captionId && _captionMessage.ValueKind == JsonValueKind.Object)
             _messages[captionId.ToString()] = _captionMessage;
-        foreach (var (id, pending) in _pendingUserMessages.ToArray())
-        {
-            if (S(pending, "sessionId") != _session.ToString()) continue;
-            // An acknowledgement without its display text cannot replace the
-            // optimistic prompt. Keep it until the actual conversation row arrives.
-            var confirmed = S(pending, "steeringInputId").Length > 0
-                ? _messages.Values.Any(message => S(message, "sessionId") == S(pending, "sessionId")
-                    && MessageSteps(message).Any(step => HasVisibleSteeringPrompt(pending, step)))
-                : _messages.Values.Any(message => !S(message, "id").StartsWith("pending:", StringComparison.Ordinal) && S(message, "role") == "user"
-                && S(message, "sessionId") == S(pending, "sessionId")
-                && Missum.Core.Chat.ChatContentSanitizer.Sanitize(MessageContent(message)) == Missum.Core.Chat.ChatContentSanitizer.Sanitize(S(pending, "content"))
-                && MessageCreatedAt(message) >= MessageCreatedAt(pending));
-            if (confirmed)
-            { _pendingUserMessages.Remove(id); _messages.Remove(id); }
-            else _messages[id] = pending;
-        }
-    }
-
-    internal static bool HasVisibleSteeringPrompt(JsonElement pending, JsonElement step) =>
-        S(pending, "steeringInputId") is { Length: > 0 } inputId
-        && S(step, "tool") == "assistant.steering" && S(step, "id") == "steering-" + inputId
-        && !string.IsNullOrWhiteSpace(S(step, "detail"))
-        && Missum.Core.Chat.ChatContentSanitizer.Sanitize(S(step, "detail"))
-            == Missum.Core.Chat.ChatContentSanitizer.Sanitize(S(pending, "content"));
-
-    private string AddPendingUserMessage(Guid session, string prompt, string? steeringInputId = null)
-    {
-        var id = "pending:" + Guid.NewGuid().ToString("N");
-        var pending = JsonSerializer.SerializeToElement(new { id, sessionId = session, role = "user", content = Missum.Core.Chat.ChatContentSanitizer.Sanitize(prompt.Trim()),
-            status = "pending", steeringInputId, createdAt = DateTimeOffset.UtcNow.ToString("O") }, JsonOptions);
-        _pendingUserMessages[id] = pending;
-        _messages[id] = pending;
-        RenderMessagesNow();
-        OnScrollToBottom(this, new RoutedEventArgs());
-        return id;
     }
 
     private static StackPanel MessageBody(Border bubble) => bubble.Child is StackPanel panel ? panel : (StackPanel)((Grid)bubble.Child).Children[1];
@@ -499,6 +464,8 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     private readonly Dictionary<string, (JsonElement Source, string Signature)> _sourceMessageSignatures = new(StringComparer.Ordinal);
     private void ResetConversationViews()
     {
+        _targetedPromptWindows.Clear();
+        _promptTailRestoreRequests.Clear();
         ClearToolTabs();
         CancelPromptTimelineNavigation();
         _autoScrollGesture.Reset();
@@ -550,7 +517,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     {
         RefreshOpenToolTabs();
         if (!IsConversationActiveView) { _messagesDirty = true; return; }
-        ReconcilePendingMessages();
+        ReconcileLiveCaptionMessage();
         if (_conversationSelection?.IsSelecting == true)
         {
             // Keep every paragraph and its viewport position stable throughout
@@ -759,7 +726,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
 
     private async Task SetInspectorVisibleAsync(bool visible)
     {
-        Inspector.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        _inspectorRequested = visible;
         UpdateResponsiveLayout();
         await _settings.UpdateAsync(settings => settings with { AssistantOutputsVisible = visible });
     }
@@ -821,11 +788,16 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     }
     private void OnScrollToBottom(object sender, RoutedEventArgs e)
     {
+        CancelPromptTimelineNavigation();
         _readingToolConversation = null;
         _scrollNewSessionToLatest = true;
         _autoScrollGesture.Reset();
         _resumeTailOnManualScroll = false;
         _conversationScrollIntent++;
+        var latest = OrderedDisplayMessages().LastOrDefault();
+        var latestId = S(latest, "id");
+        if (ActiveSubagent is null && _targetedPromptWindows.Remove(latestId))
+            _ = RestorePromptTimelineTailAsync(latestId, ConversationViewKey, _conversationScrollIntent);
         ConversationContent.UpdateLayout();
         ConversationScroll.ChangeView(null, ConversationScroll.ScrollableHeight, null, true);
         SyncOuterScroll();
@@ -835,14 +807,15 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         if (_activeResearchSessionId == _session || _activeSourcesSession == _session
             || _activeSubagentOverviewSession == _session || _activeWorkingPlanSession == _session) return;
         // Only unhandled wheel input reaches this frame. Nested text/diff viewers
-        // consume their own scrolling; blank inspector/header surfaces scroll chat.
+        // consume their own scrolling. The independent outputs sidebar never
+        // forwards a wheel gesture into the conversation at its scroll limits.
         var point = e.GetCurrentPoint(AssistantFrame);
         if (point.Properties.IsHorizontalMouseWheel || point.Properties.MouseWheelDelta == 0) return;
         var modifiers = e.KeyModifiers;
         if (modifiers.HasFlag(VirtualKeyModifiers.Control) || modifiers.HasFlag(VirtualKeyModifiers.Shift)) return;
         var scroll = ReviewScroll.Visibility == Visibility.Visible ? ReviewScroll : ConversationScroll;
         for (var source = e.OriginalSource as DependencyObject; source is not null && source != AssistantFrame; source = VisualTreeHelper.GetParent(source))
-            if (source == scroll || source == Composer || source == OuterChatScrollBar || source == ComposerChipsScroll) return;
+            if (source == scroll || source == Composer || source == OuterChatScrollBar || source == ComposerChipsScroll || source == Inspector) return;
         if (scroll == ConversationScroll && TryHandleFollowingWheel(point.Properties.MouseWheelDelta * 1.2))
         { e.Handled = true; return; }
         if (scroll == ConversationScroll)
@@ -853,14 +826,22 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         e.Handled = true;
     }
     private void OnBodySizeChanged(object sender, SizeChangedEventArgs e) => RunUiCallback("Body.SizeChanged", UpdateResponsiveLayout);
+    private bool _inspectorRequested;
     private void UpdateResponsiveLayout()
     {
-        if (Inspector is null || BodyGrid is null || AssistantFrame is null || InspectorToggle is null) return;
-        Inspector.Width = Math.Min(304, Math.Max(180, AssistantFrame.ActualWidth - 44));
-        Inspector.MaxHeight = Math.Max(80, AssistantFrame.ActualHeight - 80);
-        var label = Inspector.Visibility == Visibility.Visible ? "Ausgaben schließen" : "Ausgaben öffnen";
+        if (Inspector is null || InspectorColumn is null || AssistantFrame is null || InspectorToggle is null) return;
+        var available = NativeInspectorLayout.HasRoom(AssistantFrame.ActualWidth);
+        var visible = available && _inspectorRequested;
+        var width = visible ? NativeInspectorLayout.SidebarWidth : 0;
+        if (InspectorColumn.Width.Value != width) InspectorColumn.Width = new(width);
+        var visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        if (Inspector.Visibility != visibility) Inspector.Visibility = visibility;
+        InspectorToggle.IsEnabled = available;
+        var label = !available ? "Ausgaben bei größerem Fenster verfügbar" : visible ? "Ausgaben schließen" : "Ausgaben öffnen";
         ToolTipService.SetToolTip(InspectorToggle, label);
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(InspectorToggle, label);
+        RefreshInspectorWorkingPlan();
+        RefreshInspectorContext();
     }
     private void SetRunning()
     {
@@ -905,14 +886,13 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             var steeringSession = _session;
             var steeringDraft = Composer.Text;
             var inputId = Guid.NewGuid().ToString("N");
-            var pending = AddPendingUserMessage(steeringSession, prompt, inputId);
             _sendPending = true;
             _draftTimer.Stop(); Composer.Text = "";
+            OnScrollToBottom(this, new RoutedEventArgs());
             try
             {
                 if (!await CommandAsync("chat.steer", new { sessionId = steeringSession, prompt, inputId }))
                 {
-                    _pendingUserMessages.Remove(pending); _messages.Remove(pending); RenderMessages();
                     if (_session == steeringSession && Composer.Text.Length == 0) Composer.Text = steeringDraft;
                 }
                 else await RefreshForExternalActivationAsync();
@@ -943,7 +923,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         if (_disposed || _session != session || !string.Equals(Composer.Text, draft, StringComparison.Ordinal)) return;
 
         if (!string.IsNullOrEmpty(_composerInstruction)) prompt = _composerInstruction + "\n\n" + prompt;
-        var pendingUserId = AddPendingUserMessage(session, prompt);
+        OnScrollToBottom(this, new RoutedEventArgs());
         var promptEpoch = _changeReceiptState.BeginPrompt(session);
         ResetChangesSummary();
         _draftTimer.Stop(); _rendering = true; Composer.Text = ""; _rendering = false;
@@ -951,7 +931,6 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         var deepResearch = mode == "claudescience" && string.IsNullOrEmpty(selectedAction);
         if (!await CommandAsync("chat.send", new { sessionId = session, prompt, extensionActionId = deepResearch ? null : selectedAction, deepResearch, deepResearchProfile = deepResearch ? "auto" : null }))
         {
-            _pendingUserMessages.Remove(pendingUserId); _messages.Remove(pendingUserId); RenderMessages();
             _changeReceiptState.CancelPrompt(session, promptEpoch);
             if (_session == session)
             {
@@ -1065,6 +1044,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         if (!Equals(ContextToolTip.Content, description)) ContextToolTip.Content = description;
         if (Microsoft.UI.Xaml.Automation.AutomationProperties.GetName(ContextIndicator) != description)
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(ContextIndicator, description);
+        RefreshInspectorContext();
     }
     private void OnContextPointerEntered(object sender, PointerRoutedEventArgs e) => ContextToolTip.IsOpen = true;
     private void OnContextPointerExited(object sender, PointerRoutedEventArgs e) => ContextToolTip.IsOpen = false;
@@ -1092,148 +1072,6 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             if (!_disposed && _reasoningModel == role + ":" + modelId)
             { _reasoning = null; RefreshComposerModelDisplay(); }
         }
-    }
-    private async void OnReasoningClick(object sender, RoutedEventArgs e)
-    {
-        if (ActiveSubagent is not null) return;
-        await LoadReasoningAsync();
-        if (_disposed || ActiveSubagent is not null) return;
-        var options = _reasoning;
-        var flyout = new Flyout { Placement = Microsoft.UI.Xaml.Controls.Primitives.FlyoutPlacementMode.Top, AreOpenCloseAnimationsEnabled = true };
-        var presenter = new Style(typeof(FlyoutPresenter));
-        presenter.Setters.Add(new Setter(Control.BackgroundProperty, ThemeBrush("MissumLayerStrongBrush", 43)));
-        presenter.Setters.Add(new Setter(Control.CornerRadiusProperty, new CornerRadius(18)));
-        presenter.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(12, 8, 12, 6)));
-        presenter.Setters.Add(new Setter(Control.BorderBrushProperty, ThemeBrush("MissumStrokeBrush", 62)));
-        flyout.FlyoutPresenterStyle = presenter;
-        var panel = new StackPanel { Width = 232, Spacing = 0 };
-        var heading = new Grid();
-        var caption = new TextBlock { Text = options?.Available == true ? "Reasoning: " + EffortLabel(options.Selected) : "Reasoning: nicht verfügbar", HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, FontSize = 15, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Foreground = ThemeBrush("MissumAccentReadableBrush", 0x8B) };
-        heading.Children.Add(caption);
-        panel.Children.Add(heading);
-        var chooseModel = new Button { Content = ModelLabel.Text + " ›", BorderThickness = new(0), Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), HorizontalAlignment = HorizontalAlignment.Center, FontSize = 13, Foreground = ThemeBrush("MissumMutedTextBrush", 185), Padding = new(6, 0, 6, 4), MaxWidth = 228 };
-        chooseModel.Click += (_, _) => { flyout.Hide(); OnSelectModel(sender, e); };
-        panel.Children.Add(chooseModel);
-        if (options?.Available == true)
-        {
-            string[] order = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "on"];
-            var levels = options.Levels.OrderBy(level => { var i = Array.IndexOf(order, level); return i < 0 ? int.MaxValue : i; }).ToArray();
-            var selected = options.Selected;
-            var slider = new Slider { Minimum = 0, Maximum = Math.Max(1, levels.Length - 1), StepFrequency = 1, TickFrequency = 1,
-                TickPlacement = Microsoft.UI.Xaml.Controls.Primitives.TickPlacement.None, IsThumbToolTipEnabled = false,
-                IsEnabled = levels.Length > 1, Value = Math.Max(0, Array.IndexOf(levels, selected)), Margin = new(0, 2, 0, 0) };
-            var accent = ThemeBrush("MissumAccentBrush", 0x8B);
-            slider.CornerRadius = new(12); slider.Foreground = new SolidColorBrush(Microsoft.UI.Colors.Transparent); slider.Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
-            slider.Resources["SliderTrackThemeHeight"] = 24d;
-            slider.Resources["SliderHorizontalThumbWidth"] = 24d;
-            slider.Resources["SliderHorizontalThumbHeight"] = 24d;
-            slider.Resources["SliderThumbCornerRadius"] = new CornerRadius(14);
-            slider.Resources["SliderThumbBorderBrush"] = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
-            slider.Resources["SliderOuterThumbBackground"] = new SolidColorBrush(Microsoft.UI.Colors.White);
-            foreach (var suffix in new[] { "", "PointerOver", "Pressed" })
-            {
-                slider.Resources["SliderTrackValueFill" + suffix] = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
-                slider.Resources["SliderTrackFill" + suffix] = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
-                slider.Resources["SliderThumbBackground" + suffix] = new SolidColorBrush(Microsoft.UI.Colors.White);
-            }
-            // Use the same thumb-centre geometry for the fill and discrete stops.
-            // The native Slider remains responsible for keyboard, pointer and accessibility input.
-            var sliderContainer = new Grid();
-            var track = new Border { Height = 24, CornerRadius = new(12), Background = ThemeBrush("MissumHoverBrush", 69), VerticalAlignment = VerticalAlignment.Center, Margin = new(0, 2, 0, 0), IsHitTestVisible = false };
-            var color = (accent as SolidColorBrush)?.Color ?? Microsoft.UI.Colors.MediumPurple;
-            var light = Windows.UI.Color.FromArgb(255, (byte)((color.R + 255) / 2), (byte)((color.G + 255) / 2), (byte)((color.B + 255) / 2));
-            var gradient = new LinearGradientBrush { StartPoint = new(0, .5), EndPoint = new(1, .5) };
-            gradient.GradientStops.Add(new GradientStop { Color = light, Offset = 0 });
-            gradient.GradientStops.Add(new GradientStop { Color = color, Offset = 1 });
-            var fill = new Border { Height = 24, CornerRadius = new(12, 0, 0, 12), Background = gradient, HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Center, Margin = new(0, 2, 0, 0), IsHitTestVisible = false };
-            sliderContainer.Children.Add(track); sliderContainer.Children.Add(fill); sliderContainer.Children.Add(slider);
-            var dots = new Canvas { Height = 4, VerticalAlignment = VerticalAlignment.Center, Margin = new(0, 2, 0, 0), IsHitTestVisible = false };
-            for (var i = 0; i < levels.Length; i++)
-            {
-                var dot = new Microsoft.UI.Xaml.Shapes.Ellipse { Width = 4, Height = 4, Fill = Brush(140), Visibility = i == (int)slider.Value ? Visibility.Collapsed : Visibility.Visible };
-                Canvas.SetLeft(dot, 10 + 208d * i / Math.Max(1, levels.Length - 1)); dots.Children.Add(dot);
-            }
-            sliderContainer.Children.Add(dots);
-            void UpdateTrack()
-            {
-                var width = sliderContainer.ActualWidth;
-                if (width <= 0) return;
-                fill.Width = 12 + Math.Max(0, width - 24) * slider.Value / slider.Maximum;
-                for (var i = 0; i < dots.Children.Count; i++)
-                    Canvas.SetLeft(dots.Children[i], 10 + Math.Max(0, width - 24) * i / Math.Max(1, levels.Length - 1));
-            }
-            sliderContainer.SizeChanged += (_, _) => UpdateTrack();
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(slider, "Reasoning-Aufwand");
-            slider.ValueChanged += (_, args) =>
-            {
-                selected = levels[Math.Clamp((int)Math.Round(args.NewValue), 0, levels.Length - 1)];
-                caption.Text = "Reasoning: " + EffortLabel(selected);
-                if (ActiveSubagent is null) ReasoningLabel.Text = EffortLabel(selected);
-                UpdateTrack();
-                for (var i = 0; i < dots.Children.Count; i++) dots.Children[i].Visibility = i == (int)slider.Value ? Visibility.Collapsed : Visibility.Visible;
-                var animation = new Microsoft.UI.Xaml.Media.Animation.DoubleAnimation { From = .45, To = 1, Duration = new Duration(TimeSpan.FromMilliseconds(160)) };
-                Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTarget(animation, caption);
-                Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTargetProperty(animation, "Opacity");
-                var storyboard = new Microsoft.UI.Xaml.Media.Animation.Storyboard(); storyboard.Children.Add(animation); storyboard.Begin();
-                ToolTipService.SetToolTip(slider, caption.Text);
-            };
-            panel.Children.Add(sliderContainer);
-            flyout.Closed += async (_, _) => { if (selected != options.Selected && selected is not null) await CommandAsync("reasoning.set", new { modelId = options.ModelId, role = options.Role, effort = selected }); };
-        }
-        else { panel.Children.Add(new TextBlock { Text = options?.Detail ?? "Modell auswählen", FontSize = 13, TextWrapping = TextWrapping.Wrap, Foreground = ThemeBrush("MissumMutedTextBrush", 150) }); }
-        AddContextLimitSlider(panel, flyout, options);
-        flyout.Content = panel; NativeDropdownChevron.Bind(flyout, ModelButton); flyout.ShowAt(ModelButton);
-    }
-    private async void OnSelectModel(object sender, RoutedEventArgs e)
-    {
-        try
-        {
-            var role = ModelRole;
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
-            timeout.CancelAfter(TimeSpan.FromSeconds(15));
-            using var client = await App.Current.GetService<MissumAiConnectionService>().CreateClientAsync(timeout.Token);
-            var catalog = await client.GetModelStatusAsync(timeout.Token);
-            var json = JsonSerializer.SerializeToElement(catalog, JsonOptions);
-            var list = new ComboBox { MinWidth = 360, PlaceholderText = "Modell auswählen", Header = "Modell" };
-            var levels = new ComboBox { MinWidth = 360, Header = "Denkaufwand", PlaceholderText = "Automatisch" };
-            var models = Items(json, "models").Where(m => S(m, "role") is "general" or "coding" && S(m, "downloaded") == "True").GroupBy(m => S(m, "id")).Select(group => group.FirstOrDefault(m => S(m, "role") == role) is { ValueKind: JsonValueKind.Object } matching ? matching : group.First()).ToArray();
-            var currentId = _settings.Current.SelectedModel;
-            foreach (var model in models) list.Items.Add(new ComboBoxItem { Content = S(model, "displayName", S(model, "id")), Tag = S(model, "id") });
-            list.SelectionChanged += (_, _) =>
-            {
-                levels.Items.Clear();
-                if (list.SelectedItem is not ComboBoxItem selectedModel) return;
-                var id = selectedModel.Tag.ToString();
-                var model = models.First(m => S(m, "id") == id);
-                foreach (var level in Items(model, "reasoningEfforts"))
-                {
-                    var raw = level.GetString()!;
-                    levels.Items.Add(new ComboBoxItem { Content = EffortLabel(raw), Tag = raw });
-                }
-                var key = MissumAiAssistantService.ReasoningKey(id!, role);
-                var selectedEffort = _settings.Current.ReasoningEffortsByModel.GetValueOrDefault(key) ?? S(model, "defaultReasoningEffort");
-                levels.SelectedItem = levels.Items.OfType<ComboBoxItem>()
-                    .FirstOrDefault(item => string.Equals(item.Tag?.ToString(), selectedEffort, StringComparison.OrdinalIgnoreCase));
-                levels.Visibility = levels.Items.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
-            };
-            list.SelectedItem = list.Items.OfType<ComboBoxItem>().FirstOrDefault(i => i.Tag.ToString() == currentId);
-            var content = new StackPanel { Spacing = 16, Children = { list, levels } };
-            var dialog = new ContentDialog { XamlRoot = XamlRoot, Title = "Lokales Modell", Content = content, PrimaryButtonText = "Übernehmen", CloseButtonText = "Abbrechen" };
-            if (await dialog.ShowAsync() == ContentDialogResult.Primary && list.SelectedItem is ComboBoxItem selected)
-            {
-                var id = selected.Tag.ToString()!;
-                await _settings.UpdateAsync(s =>
-                {
-                    var efforts = new Dictionary<string, string>(s.ReasoningEffortsByModel, StringComparer.OrdinalIgnoreCase);
-                    if (levels.SelectedItem is ComboBoxItem selectedEffort && selectedEffort.Tag is string effort)
-                        efforts[MissumAiAssistantService.ReasoningKey(id, role)] = effort;
-                    return s with { SelectedModel = id, SelectedCodingModel = id, ReasoningEffortsByModel = efforts };
-                });
-                _reasoningModel = "";
-                await App.Current.GetService<MissumAiAssistantService>().RequestLiveModelSelectionAsync(_lifetime.Token);
-                await RefreshForExternalActivationAsync();
-            }
-        }        catch (Exception ex) { ShowError(ex.Message); }
     }
     private async void OnMicrophone(object sender, RoutedEventArgs e)
     {
@@ -1298,6 +1136,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         _ = CancelNativeMediaCaptureAsync();
         _conversationSelection?.Clear();
         _hostSubscription.Dispose();
+        _reasoningFlyout?.Hide(); _modelSelectionFlyout?.Hide();
         HideWorkingPlanView();
         _disposed = true; _draftTimer.Stop(); _renderTimer.Stop(); _microphone.TurnChanged -= OnTranscript; _lifetime.Cancel(); _lifetime.Dispose();
     }

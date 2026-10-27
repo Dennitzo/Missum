@@ -38,6 +38,23 @@
    </ControlTemplate></Setter.Value></Setter>
   </Style>
   <Style TargetType="TextBlock"><Setter Property="FontFamily" Value="Segoe UI Variable Text"/><Setter Property="FontSize" Value="15"/><Setter Property="FontWeight" Value="Normal"/><Setter Property="Foreground" Value="{ThemeResource TextFillColorPrimaryBrush}"/></Style>
+  <Style x:Key="ComposerModelButtonStyle" TargetType="Button">
+   <Setter Property="Background" Value="{ThemeResource MissumLayerStrongBrush}"/>
+   <Setter Property="Foreground" Value="{ThemeResource MissumTextBrush}"/>
+   <Setter Property="BorderThickness" Value="0"/><Setter Property="CornerRadius" Value="14"/>
+   <Setter Property="Padding" Value="10,3"/><Setter Property="MinHeight" Value="28"/>
+   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
+    <Grid x:Name="PickerRoot" Background="Transparent">
+     <VisualStateManager.VisualStateGroups><VisualStateGroup x:Name="CommonStates">
+      <VisualState x:Name="Normal"/>
+      <VisualState x:Name="PointerOver"><VisualState.Setters><Setter Target="PickerSurface.Background" Value="{ThemeResource MissumHoverBrush}"/></VisualState.Setters></VisualState>
+      <VisualState x:Name="Pressed"><VisualState.Setters><Setter Target="PickerSurface.Background" Value="{ThemeResource MissumPressedBrush}"/></VisualState.Setters></VisualState>
+      <VisualState x:Name="Disabled"><VisualState.Setters><Setter Target="PickerRoot.Opacity" Value="0.4"/></VisualState.Setters></VisualState>
+     </VisualStateGroup></VisualStateManager.VisualStateGroups>
+     <Border x:Name="PickerSurface" Background="{TemplateBinding Background}" CornerRadius="14" Padding="{TemplateBinding Padding}"><ContentPresenter Content="{TemplateBinding Content}" HorizontalAlignment="Center" VerticalAlignment="Center"/></Border>
+    </Grid>
+   </ControlTemplate></Setter.Value></Setter>
+  </Style>
   <Style x:Key="RoundIconButtonStyle" TargetType="Button">
    <Setter Property="Width" Value="32"/><Setter Property="Height" Value="32"/>
    <Setter Property="MinWidth" Value="32"/><Setter Property="MinHeight" Value="32"/>
@@ -92,7 +109,9 @@
      <Button Grid.Column="2" x:Name="InspectorToggle" Style="{StaticResource RoundIconButtonStyle}" Click="OnToggleInspector" ToolTipService.ToolTip="Ausgaben schließen" AutomationProperties.Name="Ausgaben schließen"><Path x:Name="InspectorToggleIcon" Width="16" Height="16" Stretch="Uniform" Stroke="{ThemeResource MissumIconNavigationBrush}" StrokeThickness="1.1" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Data="M5,4 A2,2 0 1 1 1,4 A2,2 0 1 1 5,4 Z M8,4 L15,4 M5,12 A2,2 0 1 1 1,12 A2,2 0 1 1 5,12 Z M8,12 L15,12"/></Button>
     </Grid>
    </Border>
-   <Grid Grid.Row="1" x:Name="BodyGrid" SizeChanged="OnBodySizeChanged">
+   <Grid Grid.Row="1" x:Name="WorkspaceGrid" SizeChanged="OnBodySizeChanged">
+    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition x:Name="InspectorColumn" Width="0"/></Grid.ColumnDefinitions>
+   <Grid x:Name="BodyGrid">
     <Grid Padding="20,0,20,16">
      <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
      <ScrollViewer x:Name="ConversationScroll" SizeChanged="OnConversationSizeChanged" ViewChanged="OnConversationViewChanged" HorizontalContentAlignment="Stretch" VerticalScrollBarVisibility="Hidden" HorizontalScrollBarVisibility="Disabled" HorizontalScrollMode="Disabled" Padding="42,20,42,24">
@@ -138,8 +157,8 @@
            <ToolTipService.ToolTip><ToolTip x:Name="ContextToolTip" Placement="Top" Content="Kontext noch nicht gemessen"/></ToolTipService.ToolTip>
            <controls:NativeContextRing x:Name="ContextRing" Value="0" Maximum="100"/>
           </Button>
-          <Button x:Name="ModelButton" Click="OnReasoningClick" CornerRadius="18" Padding="11,5" Background="{ThemeResource MissumLayerStrongBrush}" ToolTipService.ToolTip="Modell und Reasoning auswählen">
-           <StackPanel Orientation="Horizontal" Spacing="6"><TextBlock x:Name="ModelLabel" Text="Modell auswählen" FontSize="14" MaxWidth="170" TextTrimming="CharacterEllipsis"/><TextBlock x:Name="ReasoningLabel" Text="" FontSize="14" Foreground="{ThemeResource MissumAccentReadableBrush}"/><FontIcon Glyph="&#xE76C;" FontSize="9" Foreground="{ThemeResource MissumIconNavigationBrush}"/></StackPanel>
+          <Button x:Name="ModelButton" Click="OnReasoningClick" Style="{StaticResource ComposerModelButtonStyle}" ToolTipService.ToolTip="Aufwand auswählen">
+           <StackPanel Orientation="Horizontal" Spacing="4"><TextBlock x:Name="ModelPickerActionLabel" Text="Aufwand auswählen" Visibility="Collapsed" FontSize="13" Foreground="{ThemeResource MissumMutedTextBrush}"/><TextBlock x:Name="ModelLabel" Text="Modell auswählen" FontSize="13" MaxWidth="164" TextTrimming="CharacterEllipsis" Foreground="{ThemeResource MissumTextBrush}"/><TextBlock x:Name="ReasoningLabel" Text="" FontSize="13" Foreground="{ThemeResource MissumAccentReadableBrush}"/><FontIcon Glyph="&#xE70D;" FontSize="8" Foreground="{ThemeResource MissumMutedTextBrush}"/></StackPanel>
           </Button>
          </StackPanel>
          <Button x:Name="DictationButton" Grid.Column="3" Style="{StaticResource ComposerRoundIconButtonStyle}" HorizontalAlignment="Left" Click="OnMicrophone" ToolTipService.ToolTip="Diktieren" AutomationProperties.Name="Diktieren"><Grid><FontIcon x:Name="DictationIcon" Glyph="&#xE720;" FontSize="18" Foreground="{ThemeResource MissumIconSpeechBrush}"/><StackPanel x:Name="DictationBars" Orientation="Horizontal" Spacing="2" VerticalAlignment="Center" Visibility="Collapsed"/></Grid></Button>
@@ -153,34 +172,47 @@
       </Border>
      </StackPanel>
     </Grid>
-    <Border x:Name="Inspector" Visibility="Visible" HorizontalAlignment="Right" VerticalAlignment="Top" Width="304" Background="{ThemeResource MissumLayerStrongBrush}" BorderBrush="{ThemeResource MissumStrokeBrush}" BorderThickness="1" CornerRadius="24" Padding="18,12,18,18" Margin="0,10,22,0" Translation="0,0,32" AutomationProperties.Name="Ausgaben und Quellen">
-     <Border.Shadow><ThemeShadow/></Border.Shadow>
-     <ScrollViewer HorizontalScrollBarVisibility="Disabled" HorizontalScrollMode="Disabled">
-      <StackPanel Spacing="2">
+    <primitives:ScrollBar x:Name="OuterChatScrollBar" Style="{StaticResource OuterScrollStyle}" Width="12" Margin="0,0,5,5" HorizontalAlignment="Right" Orientation="Vertical" Visibility="Collapsed" SmallChange="48" ValueChanged="OnOuterScrollChanged" AutomationProperties.Name="Chat scrollen"/>
+   </Grid>
+   <ScrollViewer x:Name="ReviewScroll" Visibility="Collapsed" Padding="28,22,28,28" SizeChanged="OnReviewSizeChanged" HorizontalScrollBarVisibility="Disabled" HorizontalScrollMode="Disabled" HorizontalContentAlignment="Left" AutomationProperties.Name="Git-Diffs des AI-Laufs">
+    <StackPanel x:Name="ReviewChangesPanel" HorizontalAlignment="Left" Spacing="16"/>
+   </ScrollViewer>
+   <ContentControl x:Name="ResearchHost" Visibility="Collapsed" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" AutomationProperties.Name="Forschungsstand dieser Sitzung"/>
+    <Border x:Name="Inspector" Grid.Column="1" Visibility="Collapsed" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Width="288" Background="{ThemeResource MissumLayerBrush}" BorderBrush="{ThemeResource MissumStrokeBrush}" BorderThickness="1,0,0,0" CornerRadius="0" Padding="16,12,16,16" AutomationProperties.Name="Ausgaben-Seitenleiste">
+     <Border.Resources>
+      <StaticResource x:Key="ScrollBarButtonArrowForeground" ResourceKey="MissumTextBrush"/>
+      <StaticResource x:Key="ScrollBarButtonArrowForegroundPointerOver" ResourceKey="MissumTextBrush"/>
+      <StaticResource x:Key="ScrollBarButtonArrowForegroundPressed" ResourceKey="MissumTextBrush"/>
+      <StaticResource x:Key="ScrollBarButtonArrowForegroundDisabled" ResourceKey="MissumTextBrush"/>
+     </Border.Resources>
+     <ScrollViewer x:Name="InspectorScroll" HorizontalScrollBarVisibility="Disabled" HorizontalScrollMode="Disabled" VerticalScrollBarVisibility="Auto" HorizontalContentAlignment="Stretch">
+      <StackPanel x:Name="InspectorSections" Spacing="2">
        <Button x:Name="InspectorProjectRow" Click="OnInspectorWorkspaceClick" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Background="Transparent" BorderThickness="0" CornerRadius="4" Padding="0,6" MinHeight="32" AutomationProperties.Name="Workspace im Explorer öffnen">
-        <Grid ColumnSpacing="10"><Grid.ColumnDefinitions><ColumnDefinition Width="16"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions><FontIcon Glyph="&#xE8B7;" FontSize="16" Foreground="{ThemeResource MissumIconFolderBrush}"/><TextBlock Grid.Column="1" x:Name="WorkspaceText" Text="Kein Projekt ausgewählt" FontSize="14" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/></Grid>
+        <Grid ColumnSpacing="10"><Grid.ColumnDefinitions><ColumnDefinition Width="16"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions><FontIcon Glyph="&#xE8B7;" FontSize="16" Width="16" Height="16" VerticalAlignment="Center" Foreground="{ThemeResource MissumTextBrush}"/><TextBlock Grid.Column="1" x:Name="WorkspaceText" Text="Kein Projekt ausgewählt" Foreground="{ThemeResource MissumTextBrush}" FontSize="13" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/></Grid>
        </Button>
        <Button x:Name="ChangesSummaryButton" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Background="Transparent" BorderThickness="0" CornerRadius="4" Padding="0,6" MinHeight="32" Click="OnChangesSummaryClick" AutomationProperties.Name="Dateiänderungen überprüfen"/>
+       <Grid x:Name="ContextSummaryRow" ColumnSpacing="10" Padding="0,6" MinHeight="32" AutomationProperties.Name="Aktueller Kontext">
+        <Grid.ColumnDefinitions><ColumnDefinition Width="16"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+        <FontIcon x:Name="InspectorContextIcon" Glyph="&#xE9D9;" FontSize="16" Width="16" Height="16" VerticalAlignment="Center" Foreground="{ThemeResource MissumTextBrush}"/>
+        <TextBlock Grid.Column="1" Text="Kontext" FontSize="13" Foreground="{ThemeResource MissumTextBrush}" VerticalAlignment="Center"/>
+        <TextBlock Grid.Column="2" x:Name="InspectorContextCount" Text="0k / —" FontSize="13" Foreground="{ThemeResource MissumTextBrush}" VerticalAlignment="Center" HorizontalAlignment="Right"/>
+       </Grid>
        <StackPanel x:Name="SourcesPanel" Visibility="Collapsed">
         <Button x:Name="SourcesSummaryButton" IsEnabled="False" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Background="Transparent" BorderThickness="0" CornerRadius="4" Padding="0,6" MinHeight="32" Click="OnSourcesSummaryClick" AutomationProperties.Name="Quellenübersicht öffnen">
          <Grid ColumnSpacing="10">
           <Grid.ColumnDefinitions><ColumnDefinition Width="16"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-          <FontIcon x:Name="SourcesSummaryIcon" Glyph="&#xE774;" FontSize="14" Foreground="{ThemeResource MissumIconWebBrush}"/>
+          <FontIcon x:Name="SourcesSummaryIcon" Glyph="&#xE774;" FontSize="16" Width="16" Height="16" VerticalAlignment="Center" Foreground="{ThemeResource MissumTextBrush}"/>
           <TextBlock Grid.Column="1" Text="Quellen" FontSize="13" Foreground="{ThemeResource MissumTextBrush}" VerticalAlignment="Center"/>
           <TextBlock Grid.Column="2" x:Name="SourcesSummaryCount" Text="0" FontSize="13" Foreground="{ThemeResource MissumTextBrush}" VerticalAlignment="Center" HorizontalAlignment="Right"/>
          </Grid>
         </Button>
        </StackPanel>
-       <StackPanel x:Name="SubagentsSection" Spacing="2" Margin="0,10,0,8" Visibility="Collapsed" AutomationProperties.Name="Subagenten"><TextBlock x:Name="SubagentsHeading" Text="Subagenten" MinHeight="32" Padding="0,6" FontSize="14" Foreground="{ThemeResource MissumMutedTextBrush}"/><StackPanel x:Name="SubagentsPanel" Spacing="2"/></StackPanel>
+       <StackPanel x:Name="SubagentsSection" Spacing="2" Margin="0,10,0,8" Visibility="Collapsed" AutomationProperties.Name="Subagenten"><TextBlock x:Name="SubagentsHeading" Text="Subagenten" MinHeight="32" Padding="0,6" FontSize="13" Foreground="{ThemeResource MissumTextBrush}"/><StackPanel x:Name="SubagentsPanel" Spacing="2"/></StackPanel>
+       <StackPanel x:Name="InspectorWorkingPlanHost" Visibility="Collapsed" Margin="0,10,0,8"/>
       </StackPanel>
      </ScrollViewer>
     </Border>
-    <primitives:ScrollBar x:Name="OuterChatScrollBar" Style="{StaticResource OuterScrollStyle}" Width="12" Margin="0,0,5,5" HorizontalAlignment="Right" Orientation="Vertical" Visibility="Collapsed" SmallChange="48" ValueChanged="OnOuterScrollChanged" AutomationProperties.Name="Chat scrollen"/>
    </Grid>
-   <ScrollViewer x:Name="ReviewScroll" Grid.Row="1" Visibility="Collapsed" Padding="28,22,28,28" SizeChanged="OnReviewSizeChanged" HorizontalScrollBarVisibility="Disabled" HorizontalScrollMode="Disabled" HorizontalContentAlignment="Left" AutomationProperties.Name="Git-Diffs des AI-Laufs">
-    <StackPanel x:Name="ReviewChangesPanel" HorizontalAlignment="Left" Spacing="16"/>
-   </ScrollViewer>
-   <ContentControl x:Name="ResearchHost" Grid.Row="1" Visibility="Collapsed" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" AutomationProperties.Name="Forschungsstand dieser Sitzung"/>
   </Grid>
   </Border>
  </Grid>

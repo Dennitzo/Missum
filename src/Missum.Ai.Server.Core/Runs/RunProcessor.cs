@@ -1478,18 +1478,37 @@ public sealed partial class RunProcessor : BackgroundService
                 // Tool responses persist the reset together with their pending calls below.
                 if (response.ToolCalls.Count == 0) await SaveCheckpointAsync().ConfigureAwait(false);
             }
-            if (isCoding && response.ToolCalls.Count == 0 && CodingCompletionGuard.IsActionAnnouncement(response.Content))
+            string? completionRepair = null;
+            var unfinishedSciencePlan = false;
+            if (isCoding && response.ToolCalls.Count == 0)
+            {
+                if (workingState?.Science is not null)
+                {
+                    workingState = ScienceStagePolicy.Revalidate(workingState);
+                    completionRepair = ScienceCompletionGuard.RepairPrompt(workingState);
+                    unfinishedSciencePlan = completionRepair is not null;
+                }
+                if (completionRepair is null && CodingCompletionGuard.IsActionAnnouncement(response.Content))
+                    completionRepair = CodingCompletionGuard.RepairPrompt;
+            }
+            if (completionRepair is not null)
             {
                 incompleteResponseRetryCount++;
                 messages.Add(new LmChatMessage("assistant", response.Content, ReasoningContent: response.ReasoningContent));
-                if (!messages.Any(message => message.Role == "system" && message.Content == CodingCompletionGuard.RepairPrompt))
-                    messages.Add(new LmChatMessage("system", CodingCompletionGuard.RepairPrompt));
+                // Append after this response, never rewrite an evaluated native
+                // prefix. A previous reminder can have been normalized to a
+                // chronological user turn and remains part of the saved KV tail.
+                messages.Add(new LmChatMessage("system", completionRepair));
                 await SaveCheckpointAsync().ConfigureAwait(false);
                 if (incompleteResponseRetryCount > 2)
-                    throw new AgentRunLimitException("Das Modell hat dreimal nur weitere Arbeit angekündigt, ohne sie auszuführen. Der Auftrag wurde nicht als erledigt markiert. Der Arbeitsstand bleibt für die Fortsetzung erhalten.");
+                    throw new AgentRunLimitException(unfinishedSciencePlan
+                        ? "Das Modell hat dreimal ohne Werkzeugaufruf geantwortet, obwohl der Science-Arbeitsplan noch ausführbare Etappen enthält. Der Auftrag wurde nicht als erledigt markiert. Der Arbeitsstand bleibt für die Fortsetzung erhalten."
+                        : "Das Modell hat dreimal nur weitere Arbeit angekündigt, ohne sie auszuführen. Der Auftrag wurde nicht als erledigt markiert. Der Arbeitsstand bleibt für die Fortsetzung erhalten.");
+                _runtime.WriteLog("Warning", "coding.completion_deferred",
+                    $"Run {runId}, Runde {roundCount}: vorzeitigen Abschluss verhindert; offener Science-Plan={unfinishedSciencePlan}, Korrekturversuch={incompleteResponseRetryCount}.");
                 await _repository.AppendEventAsync(runId, RunEventTypes.ModelGeneration,
                     new ModelGenerationEvent("responseRecovery", Attempt: incompleteResponseRetryCount,
-                        FailureKind: "unfinished_action_announcement"), cancellationToken).ConfigureAwait(false);
+                        FailureKind: unfinishedSciencePlan ? "unfinished_science_plan" : "unfinished_action_announcement"), cancellationToken).ConfigureAwait(false);
                 continue;
             }
             if (incompleteResponseRetryCount > 0)

@@ -27,6 +27,7 @@ public sealed partial class NativeAssistantPage
         var app = App.Current;
         var originalAccent = app.AccentColor;
         var originalBackground = app.BackgroundColor;
+        var originalWindowSize = app.MainWindow?.AppWindow.Size;
         var originalTheme = (XamlRoot?.Content as FrameworkElement)?.RequestedTheme == ElementTheme.Light ? AppTheme.Light : AppTheme.Dark;
         var fixtureIds = new List<Guid>();
         var animationPlayerObserved = false;
@@ -34,6 +35,9 @@ public sealed partial class NativeAssistantPage
         try
         {
             await _settings.UpdateAsync(value => value with { IsAutomaticSpeechEnabled = false });
+            app.MainWindow?.AppWindow.Resize(new Windows.Graphics.SizeInt32(1600, 1000));
+            await WaitForNativePreviewFrameAsync();
+            await SetInspectorVisibleAsync(true);
             var fixture = await Task.Run(async () =>
             {
                 var session = await chats.CreateSessionAsync("Arbeitsplan · vollständige Etappen", ChatMode.Coding, _lifetime.Token);
@@ -80,21 +84,19 @@ public sealed partial class NativeAssistantPage
             foreach (var emptySession in new[] { fixture.Empty, fixture.Science })
             {
                 await OpenSessionAsync(emptySession.Id);
-                AssertTabPresent();
-                await ClickWorkingPlanAsync();
-                AssertPlan([], []);
-                if (!Descendants(_workingPlanView).OfType<TextBlock>().Any(text => text.Text == "Noch kein Arbeitsplan vorhanden."))
-                    throw new InvalidOperationException("Der feste Arbeitsplan-Tab zeigt keinen verständlichen Leerzustand.");
+                AssertTabAbsent();
+                if (InspectorWorkingPlanHost.Visibility != Visibility.Collapsed)
+                    throw new InvalidOperationException("Ohne Plan darf keine Arbeitsplan-Gruppe erscheinen.");
                 AssertAnimation(false);
             }
             await OpenSessionAsync(fixture.General.Id);
-            if (_workingPlanTabButton is not null && SessionTabsPanel.Children.Contains(_workingPlanTabButton))
-                throw new InvalidOperationException("Im normalen Chat ohne Plan erscheint ein Arbeitsplan-Tab.");
+            AssertTabAbsent();
             await OpenSessionAsync(fixture.Session.Id);
             if (_messages.ContainsKey(fixture.First.Id.ToString()) || !_historyHasMore)
                 throw new InvalidOperationException("Der gespeicherte Plan liegt nicht außerhalb des geladenen Verlaufs.");
             await ClickWorkingPlanAsync();
             AssertPlan(fixture.Steps, fixture.Criteria);
+            AssertInspectorPlan(fixture.Steps, fixture.Criteria);
             AssertAnimation(false);
             ApplyEvent("chat.started", JsonSerializer.SerializeToElement(new { sessionId = fixture.Session.Id }, JsonOptions));
             await AssertAnimationAsync(true);
@@ -132,6 +134,7 @@ public sealed partial class NativeAssistantPage
                     ToolStep: updatedStep, Status: "Arbeitsplan aktualisiert"),
                 (type, data, id) => EmitAsync(type, data, id), "working-plan-smoke");
             AssertPlan(updatedSteps, updatedCriteria);
+            AssertInspectorPlan(updatedSteps, updatedCriteria);
             var retainedRow = Descendants(_workingPlanView).OfType<TextBlock>().Single(text => text.Text == updatedSteps[0].Title);
             ApplyEvent("workingPlan.changed", JsonSerializer.SerializeToElement(new { sessionId = Guid.NewGuid(),
                 workingPlan = AssistantCoordinator.WorkingPlanDto(fixture.FirstStep) }, JsonOptions));
@@ -152,14 +155,21 @@ public sealed partial class NativeAssistantPage
                 await OpenToolTabAsync(receipt.Item1.ToString(), receipt.Item2);
                 AssertPlan(updatedSteps, updatedCriteria);
                 if (_toolTabs.Count != toolTabsBefore || _activeToolTab is not null)
-                    throw new InvalidOperationException("Ein Arbeitsplanschritt hat einen zusätzlichen Werkzeug-Tab statt des festen Arbeitsplans geöffnet.");
+                    throw new InvalidOperationException("Ein Arbeitsplanschritt hat einen zusätzlichen Werkzeug-Tab statt des gemeinsamen Arbeitsplans geöffnet.");
                 AssertTabPresent();
                 ShowChatView();
             }
             await ClickWorkingPlanAsync();
             AssertPlan(updatedSteps, updatedCriteria);
-            if (SessionTabsPanel.Children.Count(element => ReferenceEquals(element, _workingPlanTabButton)) != 1)
-                throw new InvalidOperationException("Der feste Arbeitsplan-Tab wurde dupliziert.");
+            if (SessionTabsPanel.Children.Count(element => ReferenceEquals(element, _workingPlanTabContainer)) != 1)
+                throw new InvalidOperationException("Der temporäre Arbeitsplan-Tab wurde dupliziert.");
+            await ClosePlanTabAsync();
+            ApplyEvent("workingPlan.changed", JsonSerializer.SerializeToElement(new { sessionId = fixture.Session.Id,
+                workingPlan = AssistantCoordinator.WorkingPlanDto(updatedStep) }, JsonOptions));
+            AssertTabAbsent();
+            AssertInspectorPlan(updatedSteps, updatedCriteria);
+            await ClickWorkingPlanAsync();
+            AssertPlan(updatedSteps, updatedCriteria);
 
             var childId = "working-plan-smoke:" + Guid.NewGuid().ToString("N");
             var childMessage = Guid.NewGuid().ToString();
@@ -176,6 +186,7 @@ public sealed partial class NativeAssistantPage
             }, JsonOptions));
             await OpenToolTabAsync(childMessage, childStep.Id);
             AssertPlan(childSteps, []);
+            AssertInspectorPlan(updatedSteps, updatedCriteria);
             await AssertAnimationAsync(true);
             if (_toolTabs.Count != toolTabsBefore || _workingPlanAgentId != childId || _running)
                 throw new InvalidOperationException("Der Subagentenplan hat keinen eigenen Plan- und Laufbezug.");
@@ -199,8 +210,9 @@ public sealed partial class NativeAssistantPage
                 await SaveMathPreviewAsync(LayoutRoot, "native-working-plan-" + theme.ToString().ToLowerInvariant() + ".png");
             }
             await OpenSessionAsync(fixture.Empty.Id);
-            await ClickWorkingPlanAsync();
-            AssertPlan([], []);
+            AssertTabAbsent();
+            if (InspectorWorkingPlanHost.Visibility != Visibility.Collapsed)
+                throw new InvalidOperationException("Eine andere Sitzung hat den vorherigen Arbeitsplan übernommen.");
             AssertAnimation(false);
             await OpenSessionAsync(fixture.Session.Id);
             await ClickWorkingPlanAsync();
@@ -217,8 +229,9 @@ public sealed partial class NativeAssistantPage
             await File.WriteAllTextAsync(Path.Combine(App.Current.DataDirectory, "native-working-plan-validation.json"),
                 JsonSerializer.Serialize(new { passed = true, planOutsideLoadedHistory = true, fullPlanSteps = updatedSteps.Length,
                     fullAcceptanceCriteria = updatedCriteria.Length, partialUpdateRetainsAllSteps = true,
-                    staleAndForeignEventsIgnored = true, retainedRows = true, fixedPlanTab = true,
-                    emptyCodingAndScienceTabs = true, noEmptyGeneralTab = true, composerPlanRemoved = true,
+                    staleAndForeignEventsIgnored = true, retainedRows = true, temporaryClosablePlanTab = true,
+                    closedTabStaysClosedOnUpdate = true, sidebarReopensPlan = true, automaticSidebarUpdates = true,
+                    noEmptyCodingScienceOrGeneralTabs = true, composerPlanRemoved = true,
                     historicalReceiptsOpenLatestPlan = true, noDuplicateToolTabs = true, singleNativeScroll = true,
                     activeRing = true, animationPlayerObserved, hiddenTabStopsAnimation = true, idlePlanNotAnimating = true,
                     terminalStatesStopAnimation = true, resumedRunRestartsAnimation = true,
@@ -229,7 +242,9 @@ public sealed partial class NativeAssistantPage
         finally
         {
             app.ApplyTheme(originalTheme); app.ApplyBackgroundColor(originalBackground); app.ApplyAccentColor(originalAccent);
+            if (originalWindowSize is { } size) app.MainWindow?.AppWindow.Resize(size);
             await _settings.UpdateAsync(value => value with { IsAutomaticSpeechEnabled = settings.IsAutomaticSpeechEnabled });
+            await SetInspectorVisibleAsync(settings.AssistantOutputsVisible);
             ShowChatView(); ShowParentConversation();
             await CommandAsync("session.open", new { sessionId = originalSession });
             foreach (var id in fixtureIds) await chats.DeleteSessionAsync(id, _lifetime.Token);
@@ -248,10 +263,11 @@ public sealed partial class NativeAssistantPage
 
         void AssertTabPresent()
         {
-            if (_workingPlanTabButton is null || !SessionTabsPanel.Children.Contains(_workingPlanTabButton)
+            if (_workingPlanTabButton is null || _workingPlanTabContainer is null || !SessionTabsPanel.Children.Contains(_workingPlanTabContainer)
                 || !Descendants(_workingPlanTabButton).OfType<TextBlock>().Any(text => text.Text == "Arbeitsplan")
-                || !Descendants(_workingPlanTabButton).OfType<Microsoft.UI.Xaml.Shapes.Path>().Any())
-                throw new InvalidOperationException("Der feste Arbeitsplan-Tab mit Notizzettel-Icon fehlt.");
+                || !Descendants(_workingPlanTabButton).OfType<Microsoft.UI.Xaml.Shapes.Path>().Any()
+                || _workingPlanTabCloseButton is null || !Descendants(_workingPlanTabContainer).Contains(_workingPlanTabCloseButton))
+                throw new InvalidOperationException("Der temporäre schließbare Arbeitsplan-Tab mit Notizzettel-Icon fehlt.");
             UpdateLayout();
             if (_workingPlanTabButton.Content is not StackPanel row || row.Children[0] is not Viewbox icon
                 || Math.Abs(icon.ActualWidth - 13) > .5 || Math.Abs(icon.ActualHeight - 13) > .5)
@@ -264,13 +280,42 @@ public sealed partial class NativeAssistantPage
 
         async Task ClickWorkingPlanAsync()
         {
-            AssertTabPresent();
-            if (new ButtonAutomationPeer(_workingPlanTabButton!).GetPattern(PatternInterface.Invoke) is not IInvokeProvider invoke)
+            var button = HasWorkingPlanTab ? _workingPlanTabButton : _inspectorWorkingPlanHeader;
+            if (button is null || new ButtonAutomationPeer(button).GetPattern(PatternInterface.Invoke) is not IInvokeProvider invoke)
                 throw new InvalidOperationException("Der Arbeitsplan-Tab ist nicht per Klick bedienbar.");
             invoke.Invoke();
             await WaitForPagingSmokeAsync(() => _activeWorkingPlanSession == _session && _workingPlanHost.Visibility == Visibility.Visible,
-                "Der Klick hat den festen Arbeitsplan-Tab nicht geöffnet.");
+                "Der Klick hat den temporären Arbeitsplan-Tab nicht geöffnet.");
             UpdateLayout(); await WaitForNativePreviewFrameAsync();
+            AssertTabPresent();
+        }
+
+        void AssertTabAbsent()
+        {
+            if (HasWorkingPlanTab || _workingPlanTabContainer is not null && SessionTabsPanel.Children.Contains(_workingPlanTabContainer))
+                throw new InvalidOperationException("Ein geschlossener oder noch nicht geöffneter Arbeitsplan-Tab wird automatisch angezeigt.");
+        }
+
+        async Task ClosePlanTabAsync()
+        {
+            AssertTabPresent();
+            if (new ButtonAutomationPeer(_workingPlanTabCloseButton!).GetPattern(PatternInterface.Invoke) is not IInvokeProvider invoke)
+                throw new InvalidOperationException("Der Arbeitsplan-Tab hat keinen bedienbaren Schließen-Button.");
+            invoke.Invoke();
+            await WaitForPagingSmokeAsync(() => !HasWorkingPlanTab && _workingPlanHost.Visibility == Visibility.Collapsed,
+                "Der Arbeitsplan-Tab wurde nicht geschlossen.");
+            UpdateLayout(); AssertTabAbsent(); AssertAnimation(false);
+        }
+
+        void AssertInspectorPlan(IReadOnlyList<NativeWorkingPlanProjection.Item> steps, IReadOnlyList<NativeWorkingPlanProjection.Item> criteria)
+        {
+            UpdateLayout();
+            if (InspectorWorkingPlanHost.Visibility != Visibility.Visible || Inspector.Visibility != Visibility.Visible
+                || _inspectorWorkingPlanView.StepCount != steps.Count || _inspectorWorkingPlanView.AcceptanceCriteriaCount != criteria.Count
+                || !_inspectorWorkingPlanView.VisibleTitles.SequenceEqual(steps.Select(item => item.Title))
+                || criteria.Any(item => !Descendants(_inspectorWorkingPlanView).OfType<TextBlock>().Any(text => text.Text == item.Title))
+                || Descendants(_inspectorWorkingPlanView).OfType<ScrollViewer>().Any())
+                throw new InvalidOperationException("Die Seitenleiste zeigt nicht den vollständigen aktuellen Sitzungsplan ohne innere Scrollfenster.");
         }
 
         void AssertPlan(IReadOnlyList<NativeWorkingPlanProjection.Item> steps, IReadOnlyList<NativeWorkingPlanProjection.Item> criteria)
@@ -284,7 +329,7 @@ public sealed partial class NativeAssistantPage
                 || Descendants(_workingPlanView).OfType<TextBlock>().Any(text => text.Text.Contains(" · pending", StringComparison.Ordinal)
                     || text.Text.Contains(" · in_progress", StringComparison.Ordinal) || text.Text.Contains(" · completed", StringComparison.Ordinal))
                 || Descendants(_workingPlanView).OfType<Button>().Any())
-                throw new InvalidOperationException("Der feste Arbeitsplan zeigt nicht den vollständigen aktuellen Plan mit symbolischem Status.");
+                throw new InvalidOperationException("Der Arbeitsplan zeigt nicht den vollständigen aktuellen Plan mit symbolischem Status.");
             AssertSingleScroll();
         }
 

@@ -36,7 +36,11 @@ checks:[{id:"algebra",kind:"analytic",required:true}]}]. JSON-Werkzeugargumente 
 Ein fachlicher Abschluss braucht outcome=clarified oder refuted und erfolgreiche passende Belege.
 Bei Blockaden bleibt status=pending, outcome=open mit konkreten blockers/openQuestions; unabhängige Etappen fortsetzen.
 Für Rücksprünge eine Erklärung mitsenden und die frühere Etappe öffnen. Abhängige Freigaben werden entwertet.
-Am Laufende darf der Arbeitsstand offen bleiben; dann sichtbar Teilabschluss und genaue offene Punkte nennen.
+Eine normale Textantwort oder Arbeitsankündigung beendet keine noch ausführbare Etappe. Setze offene Arbeit
+mit tatsächlichen Werkzeugen fort; aktualisiere erledigte Etappen mit den vorhandenen Belegen.
+Ein Teilabschluss mit offenen Punkten ist bei konkreten dokumentierten Blockaden zulässig. Halte diese
+in scienceStages.blockers fest und bearbeite zuvor alle unabhängigen noch ausführbaren Etappen.
+Nutzerstopp und ausdrückliche Einschränkungen des aktuellen Auftrags bleiben maßgeblich.
 Die bestehende Planregel mit leeren Listen bei neuen Läufen gilt nicht für fortgesetzte Science-Pläne:
 Missum liefert den gespeicherten Sitzungsstand. Verwende dessen IDs unverändert.
 Ist der gesamte frühere Plan fachlich abgeschlossen, startet ein neuer Auftrag mit leeren Planlisten;

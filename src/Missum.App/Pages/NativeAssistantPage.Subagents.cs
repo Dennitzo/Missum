@@ -72,8 +72,9 @@ public sealed partial class NativeAssistantPage
         ReasoningLabel.Text = child is not null ? childEffort.Length > 0 ? EffortLabel(childEffort) : ""
             : _reasoning?.Available == true ? EffortLabel(_reasoning.Selected) : "";
         ModelButton.IsEnabled = child is null;
-        ToolTipService.SetToolTip(ModelButton, child is null ? "Modell und Reasoning auswählen"
+        ToolTipService.SetToolTip(ModelButton, child is null ? "Aufwand auswählen"
             : (child.IsDeepResearch ? "Modell der Recherche: " : "Modell des Subagenten: ") + ModelLabel.Text);
+        RefreshModelPickerTrigger();
     }
 
     private bool IsKnownConversationMessage(string id) => _messages.ContainsKey(id)
@@ -436,8 +437,7 @@ public sealed partial class NativeAssistantPage
         var caption = active > 0 ? active + (active == 1 ? " arbeitet" : " arbeiten") : inactive + " fertig";
         var finished = active > 0 && inactive > 0 ? inactive + " fertig" : "";
         if (_subagentSummaryLabel!.Text != caption) _subagentSummaryLabel.Text = caption;
-        _subagentSummaryLabel.Foreground = active > 0 ? ThemeBrush("MissumTextBrush", 230)
-            : ThemeBrush("MissumMutedTextBrush", 160);
+        _subagentSummaryLabel.Foreground = NativeThemeBrushes.Text;
         if (_subagentSummaryFinished!.Text != finished) _subagentSummaryFinished.Text = finished;
         _subagentSummaryFinished.Visibility = finished.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
         var representatives = (active > 0 ? working : children).Take(4).ToArray();
@@ -446,7 +446,7 @@ public sealed partial class NativeAssistantPage
             var child = representatives[index];
             var variant = child.PlanetIndex;
             if (!_subagentSummaryAvatars.TryGetValue(variant, out var icon))
-                _subagentSummaryAvatars[variant] = icon = SubagentIcon(child.AgentId, 14, variant);
+                _subagentSummaryAvatars[variant] = icon = SubagentIcon(child.AgentId, 16, variant);
             icon.SetAgentId(child.AgentId, variant);
             if (index >= _subagentSummaryIcons!.Children.Count || !ReferenceEquals(_subagentSummaryIcons.Children[index], icon))
             {
@@ -477,10 +477,10 @@ public sealed partial class NativeAssistantPage
         if (_subagentSummaryButton is not null) return;
         _subagentSummaryIcons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4,
             VerticalAlignment = VerticalAlignment.Center };
-        _subagentSummaryLabel = new TextBlock { FontSize = 14, VerticalAlignment = VerticalAlignment.Center,
+        _subagentSummaryLabel = new TextBlock { FontSize = 13, VerticalAlignment = VerticalAlignment.Center,
             TextTrimming = TextTrimming.CharacterEllipsis, TextWrapping = TextWrapping.NoWrap };
-        _subagentSummaryFinished = new TextBlock { FontSize = 14, VerticalAlignment = VerticalAlignment.Center,
-            Foreground = ThemeBrush("MissumMutedTextBrush", 145), Opacity = .75, HorizontalAlignment = HorizontalAlignment.Right };
+        _subagentSummaryFinished = new TextBlock { FontSize = 13, VerticalAlignment = VerticalAlignment.Center,
+            Foreground = NativeThemeBrushes.Text, HorizontalAlignment = HorizontalAlignment.Right };
         var row = new Grid { ColumnSpacing = 6 };
         row.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
         row.ColumnDefinitions.Add(new() { Width = new(1, GridUnitType.Star) });

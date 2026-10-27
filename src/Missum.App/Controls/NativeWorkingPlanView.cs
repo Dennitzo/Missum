@@ -23,15 +23,22 @@ public sealed class NativeWorkingPlanView : ContentControl
     };
     private bool _runActive;
     private bool _viewActive = true;
+    private readonly bool _compact;
 
-    public NativeWorkingPlanView()
+    public NativeWorkingPlanView(bool compact = false)
     {
+        _compact = compact;
         HorizontalContentAlignment = HorizontalAlignment.Stretch;
         VerticalContentAlignment = VerticalAlignment.Top;
         IsTabStop = false;
-        _stepsSection = CreateSection("Arbeitsschritte", _rows);
+        if (compact)
+        {
+            _rows.Margin = new(0, 5, 0, 5); _rows.Spacing = 7;
+            _criteriaRows.Margin = new(0, 5, 0, 5); _criteriaRows.Spacing = 7;
+        }
+        _stepsSection = CreateSection(compact ? null : "Arbeitsschritte", _rows);
         _criteriaSection = CreateSection("Annahmekriterien", _criteriaRows);
-        var content = new StackPanel { Spacing = 14 };
+        var content = new StackPanel { Spacing = compact ? 10 : 14 };
         content.Children.Add(_empty);
         content.Children.Add(_stepsSection);
         content.Children.Add(_criteriaSection);
@@ -137,21 +144,26 @@ public sealed class NativeWorkingPlanView : ContentControl
         return true;
     }
 
-    private static Border CreateSection(string title, StackPanel rows)
+    private Border CreateSection(string? title, StackPanel rows)
     {
-        var header = new Border
-        {
-            Padding = new(14, 9, 14, 9),
-            Background = NativeThemeBrushes.Resource("MissumAccentSubtleBrush", 50),
-            Child = new TextBlock { Text = title, FontSize = 12,
-                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Foreground = NativeThemeBrushes.ReadableAccent },
-        };
         var content = new StackPanel();
-        content.Children.Add(header);
+        if (title is not null)
+        {
+            var header = new Border
+            {
+                Padding = _compact ? new(0) : new(14, 9, 14, 9),
+                Background = _compact ? null : NativeThemeBrushes.Resource("MissumAccentSubtleBrush", 50),
+                Child = new TextBlock { Text = title, FontSize = _compact ? 13 : 12,
+                    MinHeight = _compact ? 32 : 0, Padding = _compact ? new(0, 6, 0, 6) : new(0),
+                    FontWeight = _compact ? Microsoft.UI.Text.FontWeights.Normal : Microsoft.UI.Text.FontWeights.SemiBold,
+                    Foreground = _compact ? NativeThemeBrushes.Text : NativeThemeBrushes.ReadableAccent },
+            };
+            content.Children.Add(header);
+        }
         content.Children.Add(rows);
-        return new Border { Child = content, CornerRadius = new(8), BorderThickness = new(1),
-            BorderBrush = NativeThemeBrushes.Resource("MissumAccentSubtleBrush", 75),
-            Background = NativeThemeBrushes.Resource("MissumLayerBrush", 27) };
+        return new Border { Child = content, CornerRadius = new(_compact ? 0 : 8), BorderThickness = new(_compact ? 0 : 1),
+            BorderBrush = _compact ? null : NativeThemeBrushes.Resource("MissumAccentSubtleBrush", 75),
+            Background = _compact ? null : NativeThemeBrushes.Resource("MissumLayerBrush", 27) };
     }
 
     private PlanRow CreateRow()
@@ -160,13 +172,16 @@ public sealed class NativeWorkingPlanView : ContentControl
         root.ColumnDefinitions.Add(new() { Width = new(16) });
         root.ColumnDefinitions.Add(new() { Width = new(1, GridUnitType.Star) });
         var icon = new Grid { Width = 16, Height = 16, VerticalAlignment = VerticalAlignment.Top, Margin = new(0, 3, 0, 0) };
-        var pending = new Ellipse { Width = 12, Height = 12, Stroke = NativeThemeBrushes.ReadableAccent, StrokeThickness = 1.25 };
-        var check = new FontIcon { Glyph = "\uE73E", FontSize = 13, Foreground = NativeThemeBrushes.ReadableAccent };
+        var iconBrush = _compact ? NativeThemeBrushes.Text : NativeThemeBrushes.ReadableAccent;
+        var pending = new Ellipse { Width = _compact ? 16 : 12, Height = _compact ? 16 : 12, Stroke = iconBrush, StrokeThickness = 1.25 };
+        var check = new FontIcon { Glyph = "\uE73E", FontSize = _compact ? 16 : 13, Width = 16, Height = 16,
+            Foreground = iconBrush };
         var ring = new ProgressRing { Width = 16, Height = 16, MinWidth = 0, MinHeight = 0,
-            Foreground = NativeThemeBrushes.ReadableAccent, IsActive = false };
+            Foreground = iconBrush, IsActive = false };
         icon.Children.Add(pending); icon.Children.Add(check); icon.Children.Add(ring);
         root.Children.Add(icon);
-        var title = new TextBlock { FontFamily = new FontFamily("Cascadia Mono"), FontSize = 13, LineHeight = 23,
+        var title = new TextBlock { FontFamily = new FontFamily(_compact ? "Segoe UI Variable Text" : "Cascadia Mono"),
+            FontSize = 13, LineHeight = _compact ? 19 : 23,
             TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true, Foreground = NativeThemeBrushes.Text };
         Grid.SetColumn(title, 1);
         root.Children.Add(title);
