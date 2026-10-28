@@ -44,4 +44,5 @@ public sealed record AgentRunCheckpoint(
     string? ToolCatalogSignature = null,
     IReadOnlyList<LmToolDefinition>? ContextTools = null,
     string? ResearchStateStamp = null,
-    string ContextScope = "session-v3");
+    string ContextScope = "session-v3",
+    SpecializedAgentCheckpoint? SpecializedAgent = null);

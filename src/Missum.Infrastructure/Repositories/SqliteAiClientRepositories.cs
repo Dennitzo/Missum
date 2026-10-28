@@ -1018,6 +1018,15 @@ public sealed class SqliteMissumAiRunRepository(SqliteDatabase database) : IMiss
         return await ReadAsync(command, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<IReadOnlyList<MissumAiRunRecord>> ListPendingForSessionAsync(Guid sessionId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = SelectSql + " WHERE r.session_id=$session AND (r.state IN ('queued','running','waitingForClient') OR (r.server_run_id IS NULL AND r.error_code='client.run_create_failed')) ORDER BY r.updated_at;";
+        command.Parameters.AddWithValue("$session", sessionId.ToString("D"));
+        return await ReadAsync(command, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task UpdateAsync(
         Guid id,
         string? serverRunId,

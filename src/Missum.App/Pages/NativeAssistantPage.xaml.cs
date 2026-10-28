@@ -74,7 +74,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         ComposerChipsScroll.SizeChanged += (_, _) => RunUiCallback("ComposerChips.SizeChanged", () =>
         {
             var width = Math.Clamp(ComposerChipsScroll.ActualWidth, 28, 220);
-            SelectedToolChip.MaxWidth = CaptionChip.MaxWidth = width;
+            SelectedToolChip.MaxWidth = SpecializedAgentChip.MaxWidth = CaptionChip.MaxWidth = width;
         });
         ConfigureSidebarHoverActions(ProjectsHeader, AddProjectButton);
         Composer.AddHandler(UIElement.PreviewKeyDownEvent, new Microsoft.UI.Xaml.Input.KeyEventHandler(OnComposerKeyDown), true);
@@ -295,6 +295,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                 _mode = newMode;
                 _running = _changeReceiptState.IsPromptPending(_session)
                     || (S(data, "isRunning") == "True" && !_finishedSessions.Contains(_session));
+                ObserveSpecializedAgentSelection(data);
                 ModeLabel.Text = _mode switch { "coding" => "Codex", "claudescience" => "Claude Science", _ => "ChatGPT" };
                 ChatStatus = _running && !S(data, "runStatus").StartsWith("Modell generiert", StringComparison.Ordinal) ? S(data, "runStatus") + "  " + S(data, "runDetail") : "";
                 _persistentAction = S(data, "selectedExtensionActionId");
@@ -846,6 +847,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     private void SetRunning()
     {
         RefreshWorkingPlanTab();
+        RefreshSpecializedAgentChip();
         var hasText = !string.IsNullOrWhiteSpace(Composer.Text);
         var captionRunning = _captionActive && _captionSessionId == _session;
         var preparingContinuation = IsContinuationPreparing;
@@ -905,6 +907,9 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         var draft = Composer.Text;
         var session = _session;
         var selectedAction = _selectedAction == BuiltInActionIds.DeepResearch ? null : _selectedAction;
+        var specializedAgent = CaptureSpecializedAgentSelection(prompt);
+        var specializedAgentProfile = specializedAgent?.ProfileId;
+        var specializedAgentGoal = specializedAgent?.Goal;
         var mode = _mode;
         _sendPending = true;
         try
@@ -929,7 +934,8 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         _draftTimer.Stop(); _rendering = true; Composer.Text = ""; _rendering = false;
         _finishedSessions.Remove(session); _running = true; SetRunning(); _chatErrors.Remove(session); RefreshChatNotices(); ChatStatus = "Anfrage wird vorbereitet …";
         var deepResearch = mode == "claudescience" && string.IsNullOrEmpty(selectedAction);
-        if (!await CommandAsync("chat.send", new { sessionId = session, prompt, extensionActionId = deepResearch ? null : selectedAction, deepResearch, deepResearchProfile = deepResearch ? "auto" : null }))
+        if (!await CommandAsync("chat.send", new { sessionId = session, prompt, extensionActionId = deepResearch ? null : selectedAction, deepResearch, deepResearchProfile = deepResearch ? "auto" : null,
+            specializedAgentProfile, specializedAgentGoal }))
         {
             _changeReceiptState.CancelPrompt(session, promptEpoch);
             if (_session == session)

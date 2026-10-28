@@ -35,6 +35,7 @@ internal static partial class GatewayEndpoints
         endpoints.MapPost("/v1/context/embeddings/release", ReleaseEmbeddingsAsync);
 
         endpoints.MapPost("/v1/runs", CreateRunAsync);
+        endpoints.MapPost("/v1/runs/cancel-by-key", CancelRunByKeyAsync);
         endpoints.MapGet("/v1/runs/{runId}", GetRunAsync);
         endpoints.MapGet("/v1/runs/{runId}/events", StreamRunEventsAsync);
         endpoints.MapPost("/v1/runs/{runId}/client-tool-results", SubmitClientToolResultAsync);
@@ -186,6 +187,8 @@ internal static partial class GatewayEndpoints
     {
         var request = await ReadJsonAsync<RunRequest>(context).ConfigureAwait(false);
         RunRequestValidator.Validate(request);
+        if (request.SpecializedAgent is { } specialized)
+            _ = context.RequestServices.GetRequiredService<Missum.Ai.Server.Core.Agents.SpecializedAgentRegistry>().Resolve(specialized.ProfileId);
         var idempotencyKey = context.Request.Headers[MissumAiHeaders.IdempotencyKey].FirstOrDefault();
         if (idempotencyKey?.Length > 128)
         {
@@ -195,7 +198,7 @@ internal static partial class GatewayEndpoints
         var repository = context.RequestServices.GetRequiredService<RunRepository>();
         var queue = context.RequestServices.GetRequiredService<RunWorkChannel>();
         var (snapshot, created) = await repository.CreateAsync(request, idempotencyKey, context.RequestAborted).ConfigureAwait(false);
-        if (created)
+        if (created && snapshot.State == RunState.Queued)
         {
             await queue.EnqueueAsync(snapshot.RunId, context.RequestAborted).ConfigureAwait(false);
         }
@@ -379,6 +382,16 @@ internal static partial class GatewayEndpoints
         _ = processor.Cancel(runId);
 
         context.Response.StatusCode = StatusCodes.Status202Accepted;
+    }
+
+    private static async Task CancelRunByKeyAsync(HttpContext context)
+    {
+        var request = await ReadJsonAsync<RunCancelByKeyRequest>(context).ConfigureAwait(false);
+        var repository = context.RequestServices.GetRequiredService<RunRepository>();
+        var runId = await repository.CancelByIdempotencyKeyAsync(request, context.RequestAborted).ConfigureAwait(false);
+        if (runId is not null)
+            _ = context.RequestServices.GetRequiredService<RunProcessor>().Cancel(runId);
+        context.Response.StatusCode = StatusCodes.Status204NoContent;
     }
 
     private static async Task CreateUploadAsync(HttpContext context)
@@ -845,7 +858,7 @@ internal static partial class GatewayEndpoints
         var repository = context.RequestServices.GetRequiredService<RunRepository>();
         var queue = context.RequestServices.GetRequiredService<RunWorkChannel>();
         var (snapshot, created) = await repository.CreateAsync(request, idempotencyKey, context.RequestAborted).ConfigureAwait(false);
-        if (created)
+        if (created && snapshot.State == RunState.Queued)
         {
             await queue.EnqueueAsync(snapshot.RunId, context.RequestAborted).ConfigureAwait(false);
         }

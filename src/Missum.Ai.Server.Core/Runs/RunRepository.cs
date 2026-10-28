@@ -24,99 +24,9 @@ public sealed partial class RunRepository
         };
     }
 
-    public async Task<(RunSnapshot Snapshot, bool Created)> CreateAsync(
-        RunRequest request,
-        string? idempotencyKey,
-        CancellationToken cancellationToken = default)
-    {
-        if (!string.IsNullOrWhiteSpace(idempotencyKey))
-        {
-            var existing = await FindByIdempotencyKeyAsync(idempotencyKey, cancellationToken).ConfigureAwait(false);
-            if (existing is not null)
-            {
-                await EnsureSameIdempotentRequestAsync(existing.RunId, request, cancellationToken).ConfigureAwait(false);
-                return existing.State == RunState.Interrupted
-                    ? await TryRestartInterruptedAsync(existing, cancellationToken).ConfigureAwait(false)
-                    : (existing, false);
-            }
-        }
-
-        var now = DateTimeOffset.UtcNow;
-        var runId = $"run-{Guid.NewGuid():N}";
-        await using var connection = await _database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        await using var command = connection.CreateCommand();
-        command.CommandText = """
-            INSERT INTO runs(
-                run_id, idempotency_key, state, mode, request_json, created_at, updated_at)
-            VALUES($id, $key, $state, $mode, $request, $created, $updated);
-            """;
-        command.Parameters.AddWithValue("$id", runId);
-        command.Parameters.AddWithValue("$key", (object?)idempotencyKey ?? DBNull.Value);
-        command.Parameters.AddWithValue("$state", RunState.Queued.ToString());
-        command.Parameters.AddWithValue("$mode", request.Mode.ToString());
-        command.Parameters.AddWithValue("$request", JsonSerializer.Serialize(request, _database.JsonOptions));
-        command.Parameters.AddWithValue("$created", MissumAiDatabase.FormatTimestamp(now));
-        command.Parameters.AddWithValue("$updated", MissumAiDatabase.FormatTimestamp(now));
-        try
-        {
-            _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        }
-        catch (SqliteException exception) when (exception.SqliteErrorCode == 19 && !string.IsNullOrWhiteSpace(idempotencyKey))
-        {
-            var existing = await FindByIdempotencyKeyAsync(idempotencyKey, cancellationToken).ConfigureAwait(false);
-            if (existing is not null)
-            {
-                await EnsureSameIdempotentRequestAsync(existing.RunId, request, cancellationToken).ConfigureAwait(false);
-                return existing.State == RunState.Interrupted
-                    ? await TryRestartInterruptedAsync(existing, cancellationToken).ConfigureAwait(false)
-                    : (existing, false);
-            }
-
-            throw;
-        }
-
-        return (new RunSnapshot(runId, RunState.Queued, request.Mode, null, null, 0, now, now), true);
-    }
-
-    private async Task EnsureSameIdempotentRequestAsync(
-        string runId,
-        RunRequest request,
-        CancellationToken cancellationToken)
-    {
-        var existingRequest = await GetRequestAsync(runId, cancellationToken).ConfigureAwait(false)
-            ?? throw new InvalidOperationException("Idempotent run request disappeared from storage.");
-        var existingJson = JsonSerializer.Serialize(existingRequest, _database.JsonOptions);
-        var requestedJson = JsonSerializer.Serialize(request, _database.JsonOptions);
-        if (!string.Equals(existingJson, requestedJson, StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException("Idempotency-Key is already bound to a different run request.");
-        }
-    }
-
-    private async Task<(RunSnapshot Snapshot, bool Created)> TryRestartInterruptedAsync(
-        RunSnapshot existing,
-        CancellationToken cancellationToken)
-    {
-        await using var connection = await _database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        await using var command = connection.CreateCommand();
-        command.CommandText = """
-            UPDATE runs
-            SET state = $queued, error_code = NULL, updated_at = $updated
-            WHERE run_id = $id AND state = $interrupted;
-            """;
-        command.Parameters.AddWithValue("$queued", RunState.Queued.ToString());
-        command.Parameters.AddWithValue("$interrupted", RunState.Interrupted.ToString());
-        command.Parameters.AddWithValue("$updated", MissumAiDatabase.FormatTimestamp(DateTimeOffset.UtcNow));
-        command.Parameters.AddWithValue("$id", existing.RunId);
-        var changed = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        var snapshot = await GetAsync(existing.RunId, cancellationToken).ConfigureAwait(false)
-            ?? throw new InvalidOperationException("Interrupted run disappeared while restarting.");
-        if (changed == 1)
-        {
-            _notifier.Notify(existing.RunId);
-        }
-        return (snapshot, changed == 1);
-    }
+    public Task<(RunSnapshot Snapshot, bool Created)> CreateAsync(
+        RunRequest request, string? idempotencyKey, CancellationToken cancellationToken = default) =>
+        CreateOrRestoreByKeyAsync(request, idempotencyKey, cancellationToken);
 
     public async Task<RunRequest?> GetRequestAsync(string runId, CancellationToken cancellationToken = default)
     {
@@ -353,6 +263,7 @@ public sealed partial class RunRepository
             interrupt.CommandText = """
                 UPDATE runs SET state = $interrupted, error_code = 'run.gateway_restarted', updated_at = $now
                 WHERE state = $running AND mode != 'Coding'
+                    AND json_extract(request_json, '$.specializedAgent.profileId') IS NULL
                     AND COALESCE(json_extract(request_json, '$.deepResearch'), 0) != 1
                     AND NOT (COALESCE(json_extract(request_json, '$.researchOptions.protocolVersion'), 0) >= 2
                         AND EXISTS (SELECT 1 FROM json_each(json_extract(request_json, '$.clientCapabilities'))
@@ -371,6 +282,7 @@ public sealed partial class RunRepository
             resumeCoding.CommandText = """
                 UPDATE runs SET state = $queued, error_code = NULL, updated_at = $now
                 WHERE (mode = 'Coding'
+                    OR json_extract(request_json, '$.specializedAgent.profileId') IS NOT NULL
                     OR (mode IN ('General', 'Auto') AND json_extract(request_json, '$.deepResearch') = 1)
                     OR (COALESCE(json_extract(request_json, '$.researchOptions.protocolVersion'), 0) >= 2
                         AND EXISTS (SELECT 1 FROM json_each(json_extract(request_json, '$.clientCapabilities'))
@@ -823,10 +735,16 @@ public sealed partial class RunRepository
                 OR (r.mode IN ('Auto','General') AND json_extract(r.request_json, '$.sessionId') IS NOT NULL))
             ON CONFLICT(run_id) DO UPDATE SET checkpoint_json = excluded.checkpoint_json;
             INSERT INTO run_events(run_id, event_type, data_json, created_at)
-            SELECT $run, 'run.steering.applied', json_object('inputId', input_id, 'sequence', sequence,
-                'sessionId', session_id, 'text', text, 'visibleTextOffset', $offset), $updated
-            FROM run_steering_inputs
-            WHERE run_id = $run AND sequence <= $steering AND applied_at IS NULL
+            SELECT $run, 'run.steering.applied', json_patch(json_object('inputId', input_id, 'sequence', sequence,
+                'sessionId', session_id, 'text', text, 'visibleTextOffset', $offset), json_object(
+                    'agentId', (SELECT json_extract(e.data_json, '$.agentId') FROM run_events e
+                        WHERE e.run_id = i.run_id AND e.event_type = 'run.steering.accepted'
+                            AND json_extract(e.data_json, '$.inputId') = i.input_id ORDER BY e.id DESC LIMIT 1),
+                    'agentProfile', (SELECT json_extract(e.data_json, '$.agentProfile') FROM run_events e
+                        WHERE e.run_id = i.run_id AND e.event_type = 'run.steering.accepted'
+                            AND json_extract(e.data_json, '$.inputId') = i.input_id ORDER BY e.id DESC LIMIT 1))), $updated
+            FROM run_steering_inputs i
+            WHERE i.run_id = $run AND sequence <= $steering AND applied_at IS NULL
                 AND EXISTS (SELECT 1 FROM runs WHERE run_id = $run AND state IN ('Queued','Running','WaitingForClient','Interrupted'))
             ORDER BY sequence;
             UPDATE run_steering_inputs SET applied_at = $updated

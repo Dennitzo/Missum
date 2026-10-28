@@ -291,6 +291,17 @@ public sealed class MissumAiClient : IDisposable
         await EnsureSuccessAsync(response, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task CancelRunByIdempotencyKeyAsync(string sessionId, string idempotencyKey,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(idempotencyKey);
+        using var response = await _httpClient.PostAsJsonAsync("v1/runs/cancel-by-key",
+            new RunCancelByKeyRequest(sessionId, idempotencyKey), _jsonOptions, cancellationToken).ConfigureAwait(false);
+        await EnsureSuccessAsync(response, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task SubmitClientToolResultAsync(
         string runId,
         ClientToolResult result,

@@ -127,6 +127,14 @@ public sealed partial class NativeAssistantPage
             ToolGlyphBrush("research", "context.compact"));
         if (plan.ValueKind == JsonValueKind.Object)
             Row("\uEA80", "Planmodus", "Planmodus einschalten", () => SelectComposerTool(S(plan, "actionId"), "Planmodus"), S(plan, "disabledReason").Length == 0, ToolGlyphBrush("plan", S(plan, "actionId")));
+        foreach (var profile in Missum.Ai.Contracts.SpecializedAgentProfiles.BuiltIn)
+        {
+            var selected = SelectedSpecializedAgent?.Id == profile.Id;
+            Row("\uE8EE", profile.DisplayName, selected ? "Aktiv; Entfernen beendet den gesamten Auftrag"
+                    : _mode is "coding" or "claudescience" ? profile.Description : "Für Codex und Claude Science",
+                () => SelectSpecializedAgent(profile.Id), (_mode is "coding" or "claudescience") && (!_running || selected) && !_specializedAgentSelectionBusy,
+                NativeIconPalette.BrushFor("research"));
+        }
         if (document.ValueKind == JsonValueKind.Object)
             Row("\uE8A5", "Dokumente erstellen", "Word, PDF, Tabellen und Präsentationen", () => SelectComposerTool(S(document, "actionId"), "Dokumente erstellen"), S(document, "disabledReason").Length == 0, ToolGlyphBrush("document", S(document, "actionId")));
         foreach (var action in actions.Where(a => !S(a, "actionId").StartsWith("builtin.", StringComparison.Ordinal)))

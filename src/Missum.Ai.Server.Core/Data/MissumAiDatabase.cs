@@ -9,7 +9,7 @@ namespace Missum.Ai.Server.Core.Data;
 
 public sealed class MissumAiDatabase : IDisposable
 {
-    private const int CurrentSchemaVersion = 3;
+    private const int CurrentSchemaVersion = 4;
     private readonly MissumAiServerOptions _options;
     private readonly JsonSerializerOptions _jsonOptions = MissumAiProtocol.CreateJsonOptions();
     private readonly SemaphoreSlim _initializeGate = new(1, 1);
@@ -70,8 +70,9 @@ public sealed class MissumAiDatabase : IDisposable
                 await ValidateDatabaseAsync(connection, cancellationToken).ConfigureAwait(false);
                 versionCommand.CommandText = """
                     INSERT OR IGNORE INTO schema_migrations(version, applied_at)
-                    VALUES(3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
-                    PRAGMA user_version=3;
+                    VALUES(3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                          (4, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+                    PRAGMA user_version=4;
                     """;
                 _ = await versionCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             }
@@ -196,6 +197,11 @@ public sealed class MissumAiDatabase : IDisposable
             error_code TEXT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS run_cancel_keys (
+            idempotency_key TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            cancelled_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS run_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

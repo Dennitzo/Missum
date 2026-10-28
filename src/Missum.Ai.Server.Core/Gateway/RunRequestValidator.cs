@@ -42,6 +42,14 @@ public static class RunRequestValidator
             throw new ArgumentException("Unsupported context profile.");
         if (request.Subagent is not null)
             throw new ArgumentException("Subagent runs are created by the gateway from an existing authorized parent run.");
+        if (request.SpecializedAgent is { } specialized
+            && (string.IsNullOrWhiteSpace(specialized.ProfileId) || specialized.ProfileId.Length > 64
+                || specialized.ProfileId.Any(character => !char.IsAsciiLetterOrDigit(character) && character is not ('-' or '_' or '.'))
+                || specialized.Goal is { Length: > 100_000 } || specialized.Goal is not null && string.IsNullOrWhiteSpace(specialized.Goal)
+                || string.IsNullOrWhiteSpace(request.SessionId)
+                || request.ConversationProfile is ConversationProfile.Audiobook or ConversationProfile.ContextPreparation
+                || request.ClientCapabilities?.Contains("workspace", StringComparer.OrdinalIgnoreCase) != true))
+            throw new ArgumentException("Spezialisierte Agenten benötigen ein gültiges Profil, ein Nutzerziel und eine projektgebundene Coding-/Science-Sitzung.");
         if (request.DeepResearch && (request.AllowedServerTools is not { } researchTools
             || !researchTools.Contains("web.search", StringComparer.Ordinal)
             || !researchTools.Contains("web.fetch", StringComparer.Ordinal)

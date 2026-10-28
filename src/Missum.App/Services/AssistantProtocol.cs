@@ -10,7 +10,7 @@ public static class AssistantProtocol
         "backup.create", "backup.restore", "backup.restoreCommit", "backup.restoreCancel", "models.list", "models.select",
         "chat.resume", "chat.compact", "session.groupDeleteEmpty", "coding.pickWorkspace",
         "app.ready", "conversation.refresh", "conversation.page", "conversation.prompts", "conversation.promptPage", "conversation.blocks.page", "subagent.blocks.page", "tool.details", "subagent.load", "chat.send", "chat.steer", "chat.cancel", "session.create", "session.open",
-        "reasoning.get", "reasoning.set",
+        "reasoning.get", "reasoning.set", "session.agentProfile",
         "session.rename", "session.delete", "session.clear", "session.draft", "session.groupCollapse", "session.projectCreate", "session.workspaceCreate", "mode.switch", "action.invoke", "document.pick", "document.paste",
         "document.remove", "attachment.remove", "message.exportPdf", "message.copy",
         "memory.list", "memory.create", "memory.update", "memory.pin", "memory.confirm", "memory.delete", "memory.autoCapture",

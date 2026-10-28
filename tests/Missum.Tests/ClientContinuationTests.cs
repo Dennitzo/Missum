@@ -99,6 +99,41 @@ public sealed class ClientContinuationTests
     }
 
     [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ManualContinuationKeepsSelectedSpecializedAgentAndOriginalGoalButNeverRestoresAClearedChip(bool selected)
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var seeded = await SeedAsync(environment, MessageStatus.Cancelled, ChatMode.Coding);
+        var handler = new ContinuationHandler(RunState.Cancelled) { OriginalRunMode = RunMode.Coding };
+        using var host = await Host.CreateAsync(environment, handler);
+        await host.Settings.UpdateAsync(current => current with { SelectedModel = "fixture/selected" });
+        var store = new SessionAgentProfileStore(host.Settings.DataDirectory);
+        const string originalGoal = "Verallgemeinere die Gleichung \\Box \\psi = 0 und prüfe alle Grenzfälle.";
+        await store.WriteGoalAsync(seeded.Session.Id, seeded.Message.Id, new(SpecializedAgentProfiles.Loop, originalGoal));
+        await store.WriteAsync(seeded.Session.Id, selected ? SpecializedAgentProfiles.Loop : null);
+        await environment.Get<IChatRepository>().SaveToolStepAsync(seeded.Message.Id,
+            new("steering-auto", "assistant.steering", "completed", "Automatischer Folgeauftrag.",
+                InputJson: "{\"sequence\":1,\"agentProfile\":\"loop\"}"));
+        await environment.Get<IChatRepository>().SaveToolStepAsync(seeded.Message.Id,
+            new("steering-human", "assistant.steering", "completed", "Zusätzliche Randbedingung: rho gleich null.",
+                InputJson: "{\"sequence\":2}"));
+
+        var result = await host.Service.ResumeMessageAsync(seeded.Session.Id, seeded.Message.Id, _ => Task.CompletedTask);
+
+        Assert.Equal(MessageStatus.Completed, result.Status);
+        var agent = Assert.Single(handler.Requests).SpecializedAgent;
+        if (!selected) Assert.Null(agent);
+        else
+        {
+            Assert.NotNull(agent);
+            Assert.Equal(SpecializedAgentProfiles.Loop, agent.ProfileId);
+            Assert.Equal(originalGoal + "\n\nWeitere Nutzeranweisung:\nZusätzliche Randbedingung: rho gleich null.", agent.Goal);
+            Assert.DoesNotContain("Automatischer Folgeauftrag", agent.Goal);
+        }
+    }
+
+    [Theory]
     [InlineData("desktop")]
     [InlineData("mac-tab")]
     public async Task ManualContinuationUsesInvokingClientChoiceFrozenBeforePreparation(string clientId)

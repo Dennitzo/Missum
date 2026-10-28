@@ -206,6 +206,8 @@ public interface IMissumAiRunRepository
     Task<MissumAiRunRecord?> GetByServerRunIdAsync(string serverRunId, CancellationToken cancellationToken = default);
     Task<MissumAiRunRecord?> GetByAssistantMessageIdAsync(Guid assistantMessageId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<MissumAiRunRecord>> ListResumableAsync(CancellationToken cancellationToken = default);
+    async Task<IReadOnlyList<MissumAiRunRecord>> ListPendingForSessionAsync(Guid sessionId, CancellationToken cancellationToken = default) =>
+        (await ListResumableAsync(cancellationToken).ConfigureAwait(false)).Where(run => run.SessionId == sessionId).ToArray();
     Task UpdateAsync(
         Guid id,
         string? serverRunId,

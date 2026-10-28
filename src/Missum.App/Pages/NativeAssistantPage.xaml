@@ -149,6 +149,7 @@
          <ScrollViewer x:Name="ComposerChipsScroll" Grid.Column="1" HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled" HorizontalScrollMode="Enabled" VerticalScrollMode="Disabled" VerticalAlignment="Center" Margin="2,0,6,0">
           <StackPanel Orientation="Horizontal" Spacing="4">
            <controls:NativeComposerToolChip x:Name="SelectedToolChip" Visibility="Collapsed" Click="OnClearTool"/>
+           <controls:NativeComposerToolChip x:Name="SpecializedAgentChip" Visibility="Collapsed" Click="OnClearSpecializedAgent"/>
            <controls:NativeComposerToolChip x:Name="CaptionChip" Visibility="Collapsed" Click="OnStopCaptions"/>
           </StackPanel>
          </ScrollViewer>

@@ -58,6 +58,8 @@ public static class MissumAiServerHostExtensions
             provider.GetRequiredService<IOptions<MissumAiServerOptions>>(),
             provider.GetRequiredService<Microsoft.Extensions.Logging.ILogger<ModelRuntimeClient>>()));
         services.AddHttpClient<WorkerApiClient>();
+        services.AddSingleton<Missum.Ai.Server.Core.Agents.ISpecializedAgentProfile, Missum.Ai.Server.Core.Agents.LoopAgentProfile>();
+        services.AddSingleton<Missum.Ai.Server.Core.Agents.SpecializedAgentRegistry>();
         services.AddSingleton<RunProcessor>();
         services.AddSingleton<ClientToolDeadlineService>();
         if (includeHostedServices)

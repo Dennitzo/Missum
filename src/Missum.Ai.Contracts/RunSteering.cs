@@ -7,7 +7,7 @@ public sealed record RunSteeringAccepted(string RunId, string InputId, long Sequ
 
 /// <summary>VisibleTextOffset is an absolute character offset in canonical persisted main text (RunVisibleText.Canonicalize), not raw model bytes.</summary>
 public sealed record RunSteeringEvent(string InputId, long Sequence, string SessionId, string Text,
-    int? VisibleTextOffset = null);
+    int? VisibleTextOffset = null, string? AgentId = null, string? AgentProfile = null);
 
 public static class RunSteeringEventTypes
 {

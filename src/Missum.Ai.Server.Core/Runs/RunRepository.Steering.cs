@@ -9,7 +9,22 @@ public sealed partial class RunRepository
 {
     private readonly RunEventNotifier _steeringNotifier = new();
     public async Task<RunSteeringAccepted> AcceptSteeringAsync(string runId, RunSteeringRequest input,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        (await AcceptSteeringCoreAsync(runId, input, null, null, onlyWithoutPending: false, cancellationToken).ConfigureAwait(false))!;
+
+    /// <summary>A serial agent may continue only if no newer instruction already owns the next turn.</summary>
+    internal Task<RunSteeringAccepted?> TryAcceptSpecializedSteeringAsync(string runId, RunSteeringRequest input,
+        string agentId, string agentProfile, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(agentId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(agentProfile);
+        if (agentId.Length > 128 || agentProfile.Length > 128)
+            throw new ArgumentException("Agentenkennung und Profil dürfen höchstens 128 Zeichen enthalten.");
+        return AcceptSteeringCoreAsync(runId, input, agentId, agentProfile, onlyWithoutPending: true, cancellationToken);
+    }
+
+    private async Task<RunSteeringAccepted?> AcceptSteeringCoreAsync(string runId, RunSteeringRequest input,
+        string? agentId, string? agentProfile, bool onlyWithoutPending, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(input);
         if (string.IsNullOrWhiteSpace(input.SessionId) || input.SessionId.Length > 256
@@ -35,21 +50,40 @@ public sealed partial class RunRepository
         }
         if (!string.Equals(request.SessionId, input.SessionId, StringComparison.Ordinal))
             throw new InvalidOperationException("Die Umlenkung gehört nicht zur Sitzung dieses Laufs.");
-        command.CommandText = "SELECT sequence, text, applied_at FROM run_steering_inputs WHERE run_id = $run AND input_id = $input;";
+        command.CommandText = """
+            SELECT sequence, text, applied_at,
+                (SELECT data_json FROM run_events e WHERE e.run_id = i.run_id
+                    AND e.event_type = 'run.steering.accepted'
+                    AND json_extract(e.data_json, '$.inputId') = i.input_id ORDER BY e.id DESC LIMIT 1)
+            FROM run_steering_inputs i WHERE run_id = $run AND input_id = $input;
+            """;
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
         {
             if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             {
                 if (!string.Equals(reader.GetString(1), input.Text, StringComparison.Ordinal))
                     throw new InvalidOperationException("inputId ist bereits an einen anderen Umlenkungstext gebunden.");
+                var origin = reader.IsDBNull(3) ? null : JsonSerializer.Deserialize<RunSteeringEvent>(reader.GetString(3), _database.JsonOptions);
+                if (!string.Equals(origin?.AgentId, agentId, StringComparison.Ordinal)
+                    || !string.Equals(origin?.AgentProfile, agentProfile, StringComparison.Ordinal))
+                    throw new InvalidOperationException("inputId ist bereits an einen anderen Absender gebunden.");
                 if (reader.IsDBNull(2)) _steeringNotifier.Notify(runId);
                 return new(runId, input.InputId, reader.GetInt64(0), reader.IsDBNull(2) ? "accepted" : "applied", true);
             }
         }
         if (state is not ("Queued" or "Running" or "WaitingForClient"))
+        {
+            if (onlyWithoutPending) return null;
             throw new InvalidOperationException("Dieser Lauf ist bereits beendet und kann nicht mehr umgelenkt werden.");
+        }
         if (request.Workload?.Kind is RunWorkloadKind.ImageGeneration or RunWorkloadKind.MediaAnalysis)
             throw new InvalidOperationException("Nur General- und Coding-Konversationen können umgelenkt werden.");
+        if (onlyWithoutPending)
+        {
+            command.CommandText = "SELECT EXISTS(SELECT 1 FROM run_steering_inputs WHERE run_id = $run AND applied_at IS NULL);";
+            if (Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0)
+                return null;
+        }
         command.Parameters.AddWithValue("$session", input.SessionId);
         command.Parameters.AddWithValue("$text", input.Text);
         command.Parameters.AddWithValue("$now", MissumAiDatabase.FormatTimestamp(DateTimeOffset.UtcNow));
@@ -61,7 +95,8 @@ public sealed partial class RunRepository
         var sequence = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture);
         command.CommandText = "INSERT INTO run_events(run_id, event_type, data_json, created_at) VALUES($run, $type, $data, $now);";
         command.Parameters.AddWithValue("$type", RunSteeringEventTypes.Accepted);
-        command.Parameters.AddWithValue("$data", JsonSerializer.Serialize(new RunSteeringEvent(input.InputId, sequence, input.SessionId, input.Text), _database.JsonOptions));
+        command.Parameters.AddWithValue("$data", JsonSerializer.Serialize(new RunSteeringEvent(input.InputId, sequence, input.SessionId, input.Text,
+            AgentId: agentId, AgentProfile: agentProfile), _database.JsonOptions));
         _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         _notifier.Notify(runId);
@@ -74,12 +109,22 @@ public sealed partial class RunRepository
     {
         await using var connection = await _database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT input_id, sequence, session_id, text FROM run_steering_inputs WHERE run_id = $run AND applied_at IS NULL ORDER BY sequence;";
+        command.CommandText = """
+            SELECT input_id, sequence, session_id, text,
+                (SELECT data_json FROM run_events e WHERE e.run_id = i.run_id
+                    AND e.event_type = 'run.steering.accepted'
+                    AND json_extract(e.data_json, '$.inputId') = i.input_id ORDER BY e.id DESC LIMIT 1)
+            FROM run_steering_inputs i WHERE run_id = $run AND applied_at IS NULL ORDER BY sequence;
+            """;
         command.Parameters.AddWithValue("$run", runId);
         List<RunSteeringEvent> result = [];
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            result.Add(new(reader.GetString(0), reader.GetInt64(1), reader.GetString(2), reader.GetString(3)));
+        {
+            var origin = reader.IsDBNull(4) ? null : JsonSerializer.Deserialize<RunSteeringEvent>(reader.GetString(4), _database.JsonOptions);
+            result.Add(new(reader.GetString(0), reader.GetInt64(1), reader.GetString(2), reader.GetString(3),
+                AgentId: origin?.AgentId, AgentProfile: origin?.AgentProfile));
+        }
         return result;
     }
 

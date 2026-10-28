@@ -132,6 +132,27 @@ public sealed partial class ModelRuntimeClient : IDisposable
         finally { turnGate.Release(); }
     }
 
+    private async Task<ModelPreparation> GetResidentPrimaryPreparationAsync(
+        string modelId, string? runtimeInstanceId, CancellationToken cancellationToken)
+    {
+        // Serial specialized agents borrow the owner's resident primary. They
+        // must never reconcile GPU placement, warm a companion or load weights.
+        await _modelGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var models = await GetRuntimeModelsAsync(cancellationToken).ConfigureAwait(false);
+            var owner = ResolveInstalledModel(models, modelId);
+            var resident = runtimeInstanceId is null ? owner : ResolveInstalledModel(models, runtimeInstanceId);
+            if (owner is null || resident is null || owner.IsSubagent || resident.IsSubagent
+                || !string.Equals(owner.Id, resident.Id, StringComparison.OrdinalIgnoreCase)
+                || resident.State != "loaded" || resident.LoadedContextLength < 2048)
+                throw new InvalidOperationException("specialized_agent.model_not_resident: Der spezialisierte Agent benötigt das bereits aktive Hauptmodell. "
+                    + "Es wird kein anderes Modell und keine zusätzliche Instanz geladen.");
+            return new(resident.Id, WasAlreadyLoaded: true, resident.LoadedContextLength);
+        }
+        finally { _modelGate.Release(); }
+    }
+
     private async Task<ModelPreparation> PrepareNativeModelAsync(
         string modelId, int contextLength, Func<CancellationToken, Task>? loadingStarted, CancellationToken cancellationToken,
         string? runtimeInstanceId = null)
@@ -328,8 +349,12 @@ public sealed partial class ModelRuntimeClient : IDisposable
         JsonElement? responseSchema = null,
         string? runtimeInstanceId = null,
         bool compactAtThreshold = false,
+        bool residentOnly = false,
+        bool suppressToolCalls = false,
         CancellationToken cancellationToken = default)
     {
+        if (suppressToolCalls && (requireToolCall || requiredToolName is { Length: > 0 }))
+            throw new ArgumentException("Eine werkzeugfreie Agentenprüfung darf keinen Werkzeugaufruf verlangen.", nameof(suppressToolCalls));
         ValidateToolChoice(tools, requireToolCall, requiredToolName);
         var coding = string.Equals(modelRole, "coding", StringComparison.Ordinal);
         if (coding && !IsCodingModel(modelId))
@@ -346,7 +371,9 @@ public sealed partial class ModelRuntimeClient : IDisposable
         {
             // The preset chooses the model's maximum that fits. A request limit is
             // an upper bound; it must not require a larger allocation after fitting.
-            var preparation = await PrepareNativeModelAsync(modelId, 0, null, cancellationToken, runtimeInstanceId).ConfigureAwait(false);
+            var preparation = residentOnly
+                ? await GetResidentPrimaryPreparationAsync(modelId, runtimeInstanceId, cancellationToken).ConfigureAwait(false)
+                : await PrepareNativeModelAsync(modelId, 0, null, cancellationToken, runtimeInstanceId).ConfigureAwait(false);
             preparedInstanceId = preparation.InstanceId;
             var context = requiredContextLength is { } requested
                 ? Math.Min(requested, preparation.ContextLength) : preparation.ContextLength;
@@ -395,10 +422,10 @@ public sealed partial class ModelRuntimeClient : IDisposable
                 // The host uses "required" whenever the current agent protocol
                 // mandates one structured action. Schema validation still decides
                 // which of the supplied tools and arguments are acceptable.
-                body["tool_choice"] = requireToolCall || requiredToolName is { Length: > 0 }
-                    ? "required"
-                    : "auto";
+                body["tool_choice"] = suppressToolCalls ? "none"
+                    : requireToolCall || requiredToolName is { Length: > 0 } ? "required" : "auto";
             }
+            else if (suppressToolCalls) body["tool_choice"] = "none";
 
                 await UpdateSessionCacheAsync("prepare", preparation.InstanceId, sessionCacheKey,
                     sessionId: sessionCacheOwnerId, parentSessionId: sessionCacheParentOwnerId,
@@ -425,6 +452,8 @@ public sealed partial class ModelRuntimeClient : IDisposable
                 cancellationToken,
                 inferenceDispatched: () => inferenceIncomplete = true, compactAtThreshold: compactAtThreshold).ConfigureAwait(false);
             inferenceIncomplete = false;
+            if (suppressToolCalls && result.ToolCalls.Count > 0)
+                throw new InvalidOperationException("specialized_agent.unexpected_tool_call: Das Modell hat während der werkzeugfreien Prüfung einen Werkzeugaufruf ausgegeben.");
             if (nativeProgress is not null)
             {
                 await nativeProgress(
