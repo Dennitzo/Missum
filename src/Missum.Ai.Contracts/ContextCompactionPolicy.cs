@@ -3,7 +3,7 @@ namespace Missum.Ai.Contracts;
 /// <summary>Shared working-context boundary; never reduces the model's allocated window.</summary>
 public static class ContextCompactionPolicy
 {
-    public const int TriggerPercent = 90;
+    public const int TriggerPercent = 80;
 
     public static int InputTokenBudget(int contextLength)
     {

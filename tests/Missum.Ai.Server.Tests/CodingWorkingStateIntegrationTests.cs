@@ -16,7 +16,7 @@ namespace Missum.Ai.Server.Tests;
 public sealed class CodingWorkingStateIntegrationTests
 {
     private static readonly string[] CompactionAndMainReasoningPhases = ["reasoningStarted", "reasoningCompleted", "reasoningStarted", "reasoningCompleted"];
-    private static readonly string[] PlanItemRequiredFields = ["id", "title", "status"];
+    private static readonly string[] PlanItemRequiredFields = ["id", "title"];
 
     private static readonly string[] Capabilities = ["coding", "coding.evidence"];
     private static readonly string[] ForbiddenArguments = ["delete"];
@@ -356,7 +356,7 @@ public sealed class CodingWorkingStateIntegrationTests
         var run = (await harness.Repository.CreateAsync(request, null)).Snapshot.RunId;
         var invalid = JsonSerializer.Deserialize<JsonElement>("""
             {"steps":[{"id":"s1","title":"Inspect the work","status":"in_progress"}],
-             "acceptanceCriteria":[{"id":"a1","title":"The required behavior is verified"}]}
+             "acceptanceCriteria":[{"id":"a1","status":"pending"}]}
             """);
         var corrected = JsonSerializer.Deserialize<JsonElement>("""
             {"steps":[{"id":"s1","title":"Inspect the work","status":"in_progress"}],
@@ -395,6 +395,10 @@ public sealed class CodingWorkingStateIntegrationTests
         Assert.Contains("steps und acceptanceCriteria", blocked, StringComparison.Ordinal);
         Assert.Single(saved.WorkingState!.Plan);
         Assert.Single(saved.WorkingState.AcceptanceCriteria);
+        Assert.Equal("Inspect the work", saved.WorkingState.Plan[0].Title);
+        Assert.Equal("in_progress", saved.WorkingState.Plan[0].Status);
+        Assert.Equal("The required behavior is verified", saved.WorkingState.AcceptanceCriteria[0].Title);
+        Assert.Equal("pending", saved.WorkingState.AcceptanceCriteria[0].Status);
         Assert.DoesNotContain(saved.WorkingState.Failures, item => item.Tool == CodingWorkingStateTools.PlanTool);
         Assert.DoesNotContain(saved.WorkingState.Evidence, item => item.Tool == CodingWorkingStateTools.PlanTool && item.Success);
         Assert.Equal(RunState.WaitingForClient, (await harness.Repository.GetAsync(run))!.State);
@@ -1398,6 +1402,19 @@ public sealed class CodingWorkingStateIntegrationTests
         var request = Request("Untersuche die Hypothese.") with
         { WorkflowProfile = ScienceSkill.Profile, CodingOptions = new(WorkspacePath: "C:/science") };
         var run = (await harness.Repository.CreateAsync(request, null)).Snapshot.RunId;
+        // This scenario starts after a genuinely saved plan found a concrete
+        // external blocker. Initial-plan admission is covered separately.
+        var state = CodingWorkingStateReducer.ApplyPlanUpdate(
+            CodingWorkingState.Create("Untersuche die Hypothese.") with { Science = new(ScienceSkill.Profile, []) },
+            JsonSerializer.Deserialize<JsonElement>("""
+                {"steps":[{"id":"hypothesis","title":"Hypothese anhand der Randbedingungen prüfen","status":"pending"}],
+                 "scienceStages":[{"id":"hypothesis","question":"Gilt die Hypothese unter den vorgegebenen Randbedingungen?",
+                   "strategy":"Voraussetzungen gegen die tatsächlich bereitgestellten Messdaten prüfen",
+                   "blockers":["Die ausdrücklich benötigten Messdaten wurden noch nicht bereitgestellt; ohne diese ist keine Entscheidung über die Hypothese möglich."]}]}
+                """));
+        await harness.Repository.SaveCheckpointAsync(run,
+            new(RunProcessor.CreateInitialMessages(request, "coding", []), 1, 0, 0, 0,
+                WorkingState: state, SciencePlanInitialized: true));
         await harness.DriveUntilCompletedAsync(run);
         var events = await harness.Repository.GetEventsAfterAsync(run, 0);
         var completed = Assert.Single(events, item => item.Type == RunEventTypes.RunCompleted);

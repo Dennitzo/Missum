@@ -37,7 +37,7 @@ internal static class CodingSessionContext
         result.Add(new LmChatMessage("user", "MISSUM_CODING_RUN_PLAN_SCOPE\n"
             + (science && RestoreWorkingState(previous) is { } prior && PreserveSciencePlan(prior) ? "Science-Fortsetzung: Der gespeicherte Etappenplan derselben Sitzung bleibt gültig. Verwende dessen IDs; prüfe offene und veraltete Belege. "
                 : "Aktueller Lauf: steps und acceptanceCriteria starten leer. Plan-IDs und Planbestätigungen oben gehören zum vorherigen Lauf. ")
-            + "Wenn der aktuelle Auftrag einen Plan benötigt, sende pro übermitteltem Eintrag id, title und status; "
+            + "Wenn der aktuelle Auftrag einen Plan benötigt, sende pro übermitteltem Eintrag id und title; status ist optional: neue Einträge pending, gespeicherte unverändert. "
             + "bei Updates den Originaltitel unverändert beibehalten und nur geänderte Einträge senden. "
             + "steps und acceptanceCriteria können gemeinsam in einem Aufruf angelegt oder geändert werden. "
             + "storedSteps und storedAcceptanceCriteria der Bestätigung enthalten immer den vollständigen geordneten Plan einschließlich erledigter Etappen; nutze diese Gesamtfassung weiter. "

@@ -223,7 +223,7 @@ public sealed class CodingWorkingStateTests
     }
 
     [Fact]
-    public void IncrementalCompletionStillRequiresEvidenceAndNewIdsRequireTitleAndStatus()
+    public void IncrementalCompletionStillRequiresEvidenceAndNewIdsRequireTitleButDefaultToPending()
     {
         var state = CodingWorkingStateReducer.ApplyPlanUpdate(CodingWorkingState.Create("Do real work."),
             Args(new { steps = new[] { new { id = "work", title = "Do the work", status = "pending" } } }));
@@ -231,8 +231,9 @@ public sealed class CodingWorkingStateTests
             Args(new { steps = new[] { new { id = "work", status = "completed" } } })));
         Assert.Throws<ArgumentException>(() => CodingWorkingStateReducer.ApplyPlanUpdate(state,
             Args(new { steps = new[] { new { id = "new", status = "pending" } } })));
-        Assert.Throws<ArgumentException>(() => CodingWorkingStateReducer.ApplyPlanUpdate(state,
-            Args(new { steps = new[] { new { id = "new", title = "Missing status" } } })));
+        var expanded = CodingWorkingStateReducer.ApplyPlanUpdate(state,
+            Args(new { steps = new[] { new { id = "new", title = "Missing status" } } }));
+        Assert.Equal("pending", expanded.Plan.Single(step => step.Id == "new").Status);
         Assert.Equal("pending", Assert.Single(state.Plan).Status);
     }
 

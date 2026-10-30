@@ -8,6 +8,42 @@ namespace Missum.Tests;
 
 public sealed class ConversationWorkingPlanTests
 {
+    private static readonly string[] PendingScientificFields = ["question", "strategy"];
+
+    [Fact]
+    public async Task ProvisionalSciencePlanSurvivesAFailedUpdateAndReloadsAsTheCompleteCanonicalPlan()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var chats = environment.Get<IChatRepository>();
+        var snapshots = environment.Get<IConversationSnapshotRepository>();
+        var session = await chats.CreateSessionAsync("Vorläufiger Science-Plan", ChatMode.ClaudeScience);
+        var message = await chats.AddMessageAsync(session.Id, ChatRole.Assistant, "", MessageStatus.Streaming);
+        var accepted = Plan("initial", new { steps = new[] { new { id = "a", title = "Gezielt lesen" }, new { id = "b", title = "Gegenprüfen" } } }, new
+        {
+            success = true,
+            storedSteps = new[] { new { id = "a", title = "Gezielt lesen", status = "in_progress" }, new { id = "b", title = "Gegenprüfen", status = "pending" } },
+            storedAcceptanceCriteria = Array.Empty<object>(),
+            scienceStages = new[] { new { id = "a", question = "", strategy = "", detailsPending = true } },
+            pendingScienceDetails = new[] { new { id = "a", missingFields = PendingScientificFields } },
+        });
+        await chats.SaveToolStepAsync(message.Id, accepted);
+        await chats.SaveToolStepAsync(message.Id, Plan("invalid-close", new { steps = new[] { new { id = "a", status = "completed" } } },
+            new { success = false, error = "Wissenschaftliche Details und Nachweise fehlen." }) with { Status = "failed" });
+
+        var stored = (await snapshots.GetWorkingPlanAsync(session.Id))!;
+        var current = NativeWorkingPlanProjection.FromToolStep(stored);
+        Assert.Equal(accepted.Id, stored.Id);
+        Assert.Equal(["Gezielt lesen", "Gegenprüfen"], current.Steps.Select(step => step.Title));
+        Assert.Equal(["in_progress", "pending"], current.Steps.Select(step => step.Status));
+        Assert.Empty(current.AcceptanceCriteria);
+        Assert.Null(stored.InputJson);
+        Assert.DoesNotContain("Wissenschaftliche Details und Nachweise fehlen", stored.OutputJson, StringComparison.Ordinal);
+        var reloaded = (await snapshots.GetWorkingPlanAsync(session.Id))!;
+        Assert.Equal(stored.OutputJson, reloaded.OutputJson);
+        Assert.Equal(stored.OutputJson,
+            (await snapshots.GetWorkingPlanAtAsync(session.Id, message.Id, "invalid-close"))!.OutputJson);
+    }
+
     [Fact]
     public async Task CurrentPlanLoadsOutsideTheLazyHistoryWindowWithoutOtherToolPayloads()
     {

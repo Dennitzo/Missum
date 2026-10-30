@@ -45,11 +45,17 @@ public sealed partial class RunProcessor
                     if (CodingContextCompactor.Plan(frame.Messages, contextLength, workingState,
                         includeWorkingStateInBudget: false) is { } compaction)
                     {
-                        var condensed = await _modelRuntime.CompleteChatWithCacheOwnershipAsync(selection.ModelId,
-                            compaction.SummaryRequest, [], request.SessionId ?? runId, null,
-                            modelRole: selection.Role, reasoningEffort: _modelRuntime.ResolveCompactionReasoningEffort(selection.ModelId, selection.Role),
-                            requiredContextLength: contextLength, sessionCacheKey: BuildRunSessionCacheKey(request, runId, selection.Role),
-                            residentOnly: true, suppressToolCalls: true, cancellationToken: steering.Token).ConfigureAwait(false);
+                        var condensed = await CodingContextCompactor.CompleteSummaryAsync(compaction, contextLength,
+                            request.Limits?.MaximumOutputTokens, (summaryRequest, outputLimit, summaryToken) =>
+                                _modelRuntime.CompleteChatWithCacheOwnershipAsync(selection.ModelId,
+                                    summaryRequest, [], request.SessionId ?? runId, null, outputLimit,
+                                    modelRole: selection.Role, reasoningEffort: _modelRuntime.ResolveCompactionReasoningEffort(selection.ModelId, selection.Role),
+                                    requiredContextLength: contextLength, sessionCacheKey: BuildRunSessionCacheKey(request, runId, selection.Role),
+                                    nativeProgress: (progress, _) =>
+                                    {
+                                        CodingContextCompactor.ValidateSummaryTokenBudget(progress, contextLength, outputLimit);
+                                        return ValueTask.CompletedTask;
+                                    }, residentOnly: true, suppressToolCalls: true, cancellationToken: summaryToken), steering.Token).ConfigureAwait(false);
                         frame = frame with { Messages = CodingContextCompactor.Complete(compaction, condensed.Content).ToList(),
                             InputTokens = frame.InputTokens + condensed.InputTokens, OutputTokens = frame.OutputTokens + condensed.OutputTokens,
                             Rounds = frame.Rounds + 1, Compactions = frame.Compactions + 1 };

@@ -42,12 +42,16 @@ public sealed class CodingContextCompactorTests
         Assert.Contains(compacted, m => m.Content!.Contains("Previous findings retained", StringComparison.Ordinal));
     }
 
-    [Fact]
-    public void InheritedContextAboveEightyPercentStillFitsWithoutCompaction()
+    [Theory]
+    [InlineData(75_000, false)]
+    [InlineData(85_000, true)]
+    public void InheritedContextStartsCompactingAtEightyPercent(int characters, bool shouldCompact)
     {
         LmChatMessage[] messages = [new("system", "Policy"), new("user", "Old task"),
-            new("assistant", new string('x', 85000)), new("user", "Continue")];
-        Assert.Null(CodingContextCompactor.Plan(messages, 32768));
+            new("assistant", new string('x', characters)), new("user", "Continue")];
+        var plan = CodingContextCompactor.Plan(messages, 32768);
+        if (shouldCompact) Assert.NotNull(plan);
+        else Assert.Null(plan);
     }
 
     [Fact]

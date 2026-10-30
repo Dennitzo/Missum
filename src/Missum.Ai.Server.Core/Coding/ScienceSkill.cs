@@ -34,7 +34,7 @@ public static class ScienceSkill
         {
             activeStage = stage is null ? null : new
             {
-                stage.Id, stage.Question, stage.Strategy, stage.DependsOn, stage.Outcome,
+                stage.Id, stage.Question, stage.Strategy, stage.DependsOn, stage.Outcome, stage.DetailsPending,
                 checks = stage.Checks.Select(check => new { check.Id, check.Kind, check.Required, check.EvidenceIds, boundFiles = check.Paths.Count }),
                 blockers = stage.Blockers.Take(3), openQuestions = stage.OpenQuestions.Take(3),
             }, activeStatus = active?.Status,
@@ -68,14 +68,14 @@ public static class ScienceSkill
     {
         var schema = JsonNode.Parse(tool.Schema.GetRawText())!.AsObject();
         schema["properties"]!["scienceStages"] = JsonNode.Parse("""
-            {"type":"array","minItems":1,"maxItems":16,"description":"Änderungen an gespeicherten Science-Etappen. id entspricht einer steps-ID. Neue Etappen benötigen question und strategy. Ausgelassene Felder bleiben erhalten.","items":{"type":"object","additionalProperties":false,"properties":{
+            {"type":"array","minItems":1,"maxItems":16,"description":"Optionale wissenschaftliche Details zu steps-IDs. Ein schlichter Anfangsplan und partielle Details werden gespeichert; fehlende question/strategy bleiben ausdrücklich offen. Vor einem fachlichen Abschluss beide Details ausdrücklich festlegen. Bestehende ausgelassene Felder bleiben erhalten.","items":{"type":"object","additionalProperties":false,"properties":{
             "id":{"type":"string","minLength":1,"maxLength":80},"question":{"type":"string","minLength":1,"maxLength":800},"strategy":{"type":"string","minLength":1,"maxLength":1200},
             "dependsOn":{"type":"array","maxItems":16,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":80}},
             "outcome":{"type":"string","enum":["open","clarified","refuted"]},
             "openQuestions":{"type":"array","maxItems":12,"items":{"type":"string","minLength":1,"maxLength":600}},
             "blockers":{"type":"array","maxItems":12,"items":{"type":"string","minLength":1,"maxLength":600}},
             "checks":{"type":"array","maxItems":8,"items":{"type":"object","additionalProperties":false,"properties":{
-            "id":{"type":"string","minLength":1,"maxLength":80},"kind":{"type":"string","enum":["source","analytic","lean","numeric","plot","publication"]},"required":{"type":"boolean"},
+            "id":{"type":"string","minLength":1,"maxLength":80},"kind":{"type":"string","enum":["source","analytic","lean","numeric","plot","publication"],"description":"numeric: math.numeric/math.evaluate oder erfolgreicher Rechenprozess. analytic: math.symbolic/math.smt/math.evaluate, Rechenprozess oder geprüfter Lean-Beweis. Numerische Näherung allein ist kein analytischer/Lean-Beweis. publication: tatsächlicher Lese-/Schreib-/Bearbeitungsbeleg zur Publikation; ein bloßer PDF-Prozess reicht nicht."},"required":{"type":"boolean"},
             "evidenceIds":{"type":"array","maxItems":3,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":100}},
             "paths":{"type":"array","maxItems":16,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":1024}}},"required":["id","kind","required"]}}
             },"required":["id"]}}
@@ -84,7 +84,7 @@ public static class ScienceSkill
         {
             Schema = JsonSerializer.SerializeToElement(schema),
             AllowedProperties = tool.AllowedProperties.Append("scienceStages").ToHashSet(StringComparer.Ordinal),
-            Description = tool.Description + " Science-Skill: scienceStages ergänzt Leitfrage, Prüfstrategie, Abhängigkeiten, Checks, offene Fragen, Blockaden und outcome. Science-Pläne bleiben bei Fortsetzen derselben Sitzung gespeichert. Ein abgeschlossener Schritt benötigt clarified/refuted und aktuelle Pflichtnachweise; blockierte/offene Schritte bleiben pending. Für Rücksprünge explanation mitsenden.",
+            Description = tool.Description + " Science-Skill: Ein schlichter Anfangsplan mit steps ist sofort speicherbar. scienceStages ergänzt Leitfrage, Prüfstrategie, Abhängigkeiten, Checks, offene Fragen, Blockaden und outcome. Fehlende Leitfrage/Prüfstrategie bleiben als DetailsPending offen und werden nicht erfunden; vor fachlichem completed beide ausdrücklich festlegen. Offene Science-Pläne bleiben bei Fortsetzen derselben Sitzung gespeichert. Ein abgeschlossener Schritt benötigt clarified/refuted und aktuelle Pflichtnachweise; blockierte/offene Schritte bleiben pending. Für Rücksprünge explanation mitsenden.",
         };
     }
 
@@ -113,12 +113,14 @@ public static class ScienceSkill
 
     internal static string ResultOutcome(CodingWorkingState? state) => state?.Science is null ? "open"
         : state.Plan.Count == 0 || state.Plan.Any(item => item.Status != "completed")
-            || state.Science.Stages.Any(stage => stage.Outcome == "open" || stage.Blockers.Count > 0 || stage.OpenQuestions.Count > 0)
+            || state.Science.Stages.Any(stage => stage.DetailsPending || string.IsNullOrWhiteSpace(stage.Question)
+                || string.IsNullOrWhiteSpace(stage.Strategy) || stage.Outcome == "open" || stage.Blockers.Count > 0 || stage.OpenQuestions.Count > 0)
             ? "open" : state.Science.Stages.Any(stage => stage.Outcome == "refuted") ? "refuted" : "clarified";
 }
 
 public sealed record ScienceCheck(string Id, string Kind, bool Required, IReadOnlyList<string> EvidenceIds, IReadOnlyList<string> Paths);
 public sealed record ScienceStage(string Id, string Question, string Strategy, IReadOnlyList<string> DependsOn,
-    IReadOnlyList<ScienceCheck> Checks, IReadOnlyList<string> OpenQuestions, IReadOnlyList<string> Blockers, string Outcome = "open", long ReopenedAtSequence = 0);
+    IReadOnlyList<ScienceCheck> Checks, IReadOnlyList<string> OpenQuestions, IReadOnlyList<string> Blockers, string Outcome = "open", long ReopenedAtSequence = 0,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)] bool DetailsPending = false);
 [System.Text.Json.Serialization.JsonUnmappedMemberHandling(System.Text.Json.Serialization.JsonUnmappedMemberHandling.Skip)]
 public sealed record ScienceState(string Profile, IReadOnlyList<ScienceStage> Stages);

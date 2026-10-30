@@ -251,6 +251,41 @@ public sealed class ClientContinuationTests
     }
 
     [Theory]
+    [InlineData(ChatMode.Coding)]
+    [InlineData(ChatMode.ClaudeScience)]
+    public async Task ContinuedProjectUsesSharedWorkingBudgetWithoutReducingTheSelectedModelWindow(ChatMode mode)
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var seeded = await SeedAsync(environment, MessageStatus.Cancelled, mode, priorHistoryTurns: 6);
+        var handler = new ContinuationHandler(RunState.Cancelled) { OriginalRunMode = RunMode.Coding };
+        using var host = await Host.CreateAsync(environment, handler);
+        const int selectedLimit = 32768;
+        await host.Settings.UpdateAsync(current => current with
+        {
+            SelectedModel = "fixture/selected",
+            ContextLimitsByModel = new() { ["fixture/selected"] = selectedLimit },
+        });
+
+        var result = await host.Service.ResumeMessageAsync(seeded.Session.Id, seeded.Message.Id, _ => Task.CompletedTask);
+
+        Assert.Equal(MessageStatus.Completed, result.Status);
+        var request = Assert.Single(handler.Requests);
+        Assert.Equal(selectedLimit, request.Limits!.MaximumContextTokens);
+        Assert.True(request.CodingOptions!.ContinueSessionContext);
+        var transmittedCharacters = request.Messages.Sum(message => message.Content.Sum(part => part.Text?.Length ?? 0));
+        // Includes the actual publication/workspace prompt and recent history;
+        // the rest of the shared working budget remains available for tools.
+        Assert.InRange(transmittedCharacters, 1,
+            (ContextCompactionPolicy.InputTokenBudget(selectedLimit) - 8192) * 3);
+        Assert.Contains(request.Messages, message => message.Role == "user"
+            && message.Content.Any(part => part.Text == "Leite die Energiegleichung vollständig her."));
+        var stored = await environment.Get<IChatRepository>().ListMessagesAsync(seeded.Session.Id);
+        Assert.Equal(14, stored.Count);
+        Assert.Equal(new string('x', 40000), stored[1].Content);
+        Assert.Equal(6, stored.Count(message => message.Content.Length == 40000));
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task ScienceContinuationUsesSelectedModelWithOrdinaryProjectToolsAndSession(bool webSearch)
@@ -715,7 +750,7 @@ public sealed class ClientContinuationTests
     }
 
     private static async Task<(ChatSession Session, ChatMessage Message)> SeedAsync(TestEnvironment environment, MessageStatus status,
-        ChatMode mode = ChatMode.General, PromptTriggerAction? action = null)
+        ChatMode mode = ChatMode.General, PromptTriggerAction? action = null, int priorHistoryTurns = 0)
     {
         var chats = environment.Get<IChatRepository>();
         var session = await chats.CreateSessionAsync("Unveränderter Projekttitel", mode);
@@ -725,6 +760,11 @@ public sealed class ClientContinuationTests
             workspace = Directory.CreateDirectory(Path.Combine(environment.Directory, "original-project")).FullName;
             await File.WriteAllTextAsync(Path.Combine(workspace, "source.txt"), "original source\n");
             await chats.SetCodingWorkspacePathAsync(session.Id, workspace, activateCoding: mode == ChatMode.Coding);
+        }
+        for (var index = 0; index < priorHistoryTurns; index++)
+        {
+            var historical = await chats.AddTurnAsync(session.Id, "Frühere abgeschlossene Etappe " + index);
+            await chats.UpdateMessageAsync(historical.AssistantMessage.Id, new string('x', 40000), MessageStatus.Completed);
         }
         var turn = await chats.AddTurnAsync(session.Id, "Leite die Energiegleichung vollständig her.");
         await chats.UpdateMessageAsync(turn.AssistantMessage.Id, Partial, status);

@@ -262,7 +262,7 @@ public sealed class ScientificPublicationImagesTests : IDisposable
         public Task RestoreChangeSetAsync(string projectId, string changeSetId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task<ResearchSandboxRunResult> RunPythonAsync(string projectId, string relativeScriptPath,
             IReadOnlyList<string>? arguments = null, int timeoutSeconds = 7200, string? relativeWorkingDirectory = null,
-            CancellationToken cancellationToken = default) => throw new NotSupportedException();
+            ResearchExecutionProfile executionProfile = ResearchExecutionProfile.General, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task<string> ArchiveProjectAsync(string projectId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task RestoreProjectAsync(string projectId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task<int> PurgeExpiredAsync(CancellationToken cancellationToken = default) => throw new NotSupportedException();

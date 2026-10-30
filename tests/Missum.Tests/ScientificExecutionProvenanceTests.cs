@@ -99,6 +99,54 @@ public sealed class ScientificExecutionProvenanceTests
     }
 
     [Fact]
+    public async Task FormalProfileExcludesUnusedLakeTreeButBindsProofAndRejectsUnmeasuredDependencyReads()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        using var sandbox = Sandbox(environment);
+        var layout = await sandbox.EnsureProjectAsync("lean-large-dependencies");
+        await sandbox.WriteTextAsync(layout.ProjectId, "check.py", "print('check')");
+        var lean = Path.Combine(layout.WorkPath, "lean");
+        var dependencies = Path.Combine(lean, ".lake", "packages", "mathlib", "Mathlib");
+        Directory.CreateDirectory(dependencies);
+        for (var index = 0; index < 4097; index++)
+            await File.WriteAllTextAsync(Path.Combine(dependencies, index + ".lean"), "-- unused installed dependency");
+        const string proof = "example : 1 = 1 := rfl";
+        await File.WriteAllTextAsync(Path.Combine(lean, "Proof.lean"), proof);
+        await File.WriteAllTextAsync(Path.Combine(lean, "MissumAudit.lean"), proof);
+        await File.WriteAllTextAsync(Path.Combine(lean, "lean-toolchain"), "leanprover/lean4:v4.30.0");
+        await File.WriteAllTextAsync(Path.Combine(lean, "lakefile.toml"), "name = \"missum_proofs\"");
+        var script = Path.Combine(layout.WorkPath, "check.py");
+
+        // The same large tree still exceeds the complete generic Python baseline.
+        await Assert.ThrowsAsync<IOException>(() => ResearchSandboxService.CaptureExecutionSnapshotAsync(
+            layout, Guid.NewGuid().ToString("N"), script));
+        var snapshot = await ResearchSandboxService.CaptureExecutionSnapshotAsync(layout, Guid.NewGuid().ToString("N"),
+            script, executionProfile: ResearchExecutionProfile.LeanProof);
+        Assert.Equal(5, snapshot.InputHashes.Count);
+        Assert.Equal(ResearchExecutionProfile.LeanProof, snapshot.ExecutionProfile);
+        Assert.Equal(Hash(proof), snapshot.InputHashes["work/lean/Proof.lean"]);
+        Assert.Contains("work/lean/MissumAudit.lean", snapshot.InputHashes.Keys);
+        Assert.Contains("work/lean/lean-toolchain", snapshot.InputHashes.Keys);
+        Assert.Contains("work/lean/lakefile.toml", snapshot.InputHashes.Keys);
+        var measured = ResearchSandboxService.BindExecutionReadTrace(snapshot, new(
+            new HashSet<string>(StringComparer.Ordinal) { "work/lean/Proof.lean", "work/lean/MissumAudit.lean" },
+            new HashSet<string>(StringComparer.Ordinal), new HashSet<string>(StringComparer.Ordinal) { "work/check.py" }));
+        Assert.Empty(await ResearchSandboxService.CompleteExecutionSnapshotAsync(layout, measured));
+        await File.WriteAllTextAsync(Path.Combine(lean, "receipt.json"), "{\"success\":true}");
+        var outputs = await ResearchSandboxService.CompleteExecutionSnapshotAsync(layout, measured);
+        Assert.Contains("work/lean/receipt.json", outputs.Keys);
+        Assert.DoesNotContain(outputs.Keys, path => path.Contains("/.lake/", StringComparison.Ordinal));
+
+        var unmeasuredRead = new ResearchSandboxService.ExecutionReadTrace(
+            new HashSet<string>(StringComparer.Ordinal) { "work/lean/.lake/packages/mathlib/Mathlib/0.lean" },
+            new HashSet<string>(StringComparer.Ordinal), new HashSet<string>(StringComparer.Ordinal));
+        Assert.Throws<IOException>(() => ResearchSandboxService.BindExecutionReadTrace(snapshot, unmeasuredRead));
+        await File.WriteAllTextAsync(Path.Combine(lean, "Proof.lean"), "example : 2 = 2 := rfl");
+        var error = await Assert.ThrowsAsync<IOException>(() => ResearchSandboxService.CompleteExecutionSnapshotAsync(layout, measured));
+        Assert.Contains("work/lean/Proof.lean", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task HistoricalDuplicateSnapshotsDoNotExhaustTheActiveExecutionQuota()
     {
         await using var environment = await TestEnvironment.CreateAsync();

@@ -29,6 +29,13 @@ public sealed class LeanToolIntegrationTests
             new Uri("http://127.0.0.1:8080"), 8081, 8082, Path.Combine(environment.Directory, "native"),
             Path.Combine(environment.Directory, "llama.exe"), Path.Combine(environment.Directory, "stack"), "test");
         using var sandbox = new ResearchSandboxService(profile, chats);
+        var layout = await sandbox.EnsureProjectAsync(projectId);
+        // Reproduce the actual project layout: unused local Mathlib packages must
+        // not prevent the formal runner from using its provisioned Mathlib.
+        var localMathlib = Path.Combine(layout.WorkPath, "lean", ".lake", "packages", "mathlib", "Mathlib");
+        Directory.CreateDirectory(localMathlib);
+        for (var index = 0; index < 4097; index++)
+            await File.WriteAllTextAsync(Path.Combine(localMathlib, index + ".lean"), "-- unused local dependency");
         var broker = new LocalToolBroker(null!, null!, null!, chats, researchSandbox: sandbox);
         using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(5));
         async Task<ClientToolResult> Execute(object args) => await broker.ExecuteAsync(new(
@@ -48,6 +55,7 @@ public sealed class LeanToolIntegrationTests
         Assert.Equal("c5ea00351c28e24afc9f0f84379aa41082b1188f", receipt.GetProperty("mathlibRevision").GetString());
         var checkedPath = receipt.GetProperty("source").GetString()!;
         var measuredInputs = accepted.Result.GetProperty("inputHashes");
+        Assert.DoesNotContain(measuredInputs.EnumerateObject(), input => input.Name.Contains("/.lake/", StringComparison.Ordinal));
         Assert.Equal(receipt.GetProperty("sourceFileSha256").GetString(), measuredInputs.GetProperty("work/" + checkedPath).GetString());
         Assert.Equal(receipt.GetProperty("checkedSourceSha256").GetString(),
             measuredInputs.GetProperty("work/" + receipt.GetProperty("checkedSource").GetString()).GetString());
@@ -57,7 +65,7 @@ public sealed class LeanToolIntegrationTests
         Assert.Equal("failed", rejected.Status);
         Assert.Equal("NotEstablished", rejected.Result.GetProperty("formalVerification").GetString());
         Assert.NotEmpty(rejected.Result.GetProperty("lean").GetProperty("diagnostics").EnumerateArray());
-        var layout = await sandbox.EnsureProjectAsync(projectId, deadline.Token);
+        layout = await sandbox.EnsureProjectAsync(projectId, deadline.Token);
         Assert.True(File.Exists(Path.Combine(layout.WorkPath, checkedPath.Replace('/', Path.DirectorySeparatorChar))));
         Assert.All(accepted.Result.GetProperty("runs").EnumerateArray(), run => Assert.Equal(0, run.GetProperty("exitCode").GetInt32()));
         if (Environment.GetEnvironmentVariable("MISSUM_AI_LIVE_EVIDENCE_DIRECTORY") is { Length: > 0 } evidenceRoot)

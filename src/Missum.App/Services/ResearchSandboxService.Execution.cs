@@ -214,7 +214,8 @@ public sealed partial class ResearchSandboxService
             schemaVersion = 3, layout.ProjectId, runId, phase, startedAt, completedAt, exitCode, error,
             arguments = snapshot.Arguments, workingDirectory = snapshot.WorkingDirectory,
             snapshot.ExecutedScriptPath, snapshot.ScriptSha256, snapshot.SnapshotId, snapshot.InputHashes,
-            provenance = new { version = 1, mode = "current-project-tree", sourceHashes = snapshot.SourceHashes,
+            provenance = new { version = 1, mode = "current-project-tree", executionProfile = snapshot.ExecutionProfile.ToString(),
+                excludedDirectoryPattern = ExecutionExcludedDirectoryPattern(snapshot.ExecutionProfile), sourceHashes = snapshot.SourceHashes,
                 inputsSha256Before = snapshot.InputHashes }, standardOutput, standardError,
         }, JsonOptions), CancellationToken.None);
 }

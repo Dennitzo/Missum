@@ -11,11 +11,13 @@ namespace Missum.Ai.Server.Tests;
 public sealed class NativeContextBudgetRegressionTests
 {
     [Theory]
-    [InlineData(1_000_000, 899_999, false)]
-    [InlineData(1_000_000, 900_000, true)]
+    [InlineData(1_000_000, 799_999, false)]
+    [InlineData(1_000_000, 800_000, true)]
     [InlineData(1_000_000, 960_000, true)]
-    [InlineData(258_000, 232_199, false)]
-    [InlineData(258_000, 232_200, true)]
+    [InlineData(258_000, 206_399, false)]
+    [InlineData(258_000, 206_400, true)]
+    [InlineData(262_144, 209_714, false)]
+    [InlineData(262_144, 209_715, true)]
     public async Task ExactThresholdIsEnforcedBeforeInferenceEvenWhenTheCharacterEstimateIsSmall(int contextLength, int tokens, bool compact)
     {
         using var handler = new ExactBudgetHandler { InputTokens = tokens, LoadedContext = contextLength };

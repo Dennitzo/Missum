@@ -3437,7 +3437,12 @@ public sealed partial class MissumAiAssistantService(
     {
         const int toolAndOutputReserve = 8_192;
         var promptTokens = (prompt.Length + 2L) / 3L;
-        return (int)Math.Clamp((contextLength - toolAndOutputReserve - promptTokens) * 3L, 0L, 1_200_000L);
+        // A continuation's new client-side bootstrap must leave the same growth
+        // margin as the canonical server context. Filling the complete model
+        // window here bypassed the shared compaction boundary before the first
+        // resumed turn. The configured model/KV allocation stays unchanged.
+        var inputBudget = ContextCompactionPolicy.InputTokenBudget(contextLength);
+        return (int)Math.Clamp((inputBudget - toolAndOutputReserve - promptTokens) * 3L, 0L, 1_200_000L);
     }
 
     internal static int CalculateDocumentHistoryReserveTokens(

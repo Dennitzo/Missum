@@ -371,7 +371,7 @@ public sealed partial class RunProcessor : BackgroundService
                         && checkpoint.EarlySubagentDelegationPending,
                 };
             }
-            if (isCoding && request.DeepResearch && !researchManagedByAgent)
+            if (isCoding && request.DeepResearch && !researchManagedByAgent && !ScienceInitialPlanGuard.Applies(request))
                 checkpoint = ScheduleExplicitDeepResearch(checkpoint, runId, ExtractOriginalTask(request), request.ResearchOptions);
             if (compactContext)
             {
@@ -465,6 +465,9 @@ public sealed partial class RunProcessor : BackgroundService
         var appliedModelSelectionEventId = checkpoint.AppliedModelSelectionEventId;
         var deepResearchCompleted = checkpoint.DeepResearchCompleted;
         var specializedAgent = checkpoint.SpecializedAgent;
+        var sciencePlanInitialized = checkpoint.SciencePlanInitialized && workingState?.Plan.Count > 0;
+        if (!sciencePlanInitialized && ScienceInitialPlanGuard.Applies(request) && workingState?.Plan.Count > 0)
+            sciencePlanInitialized = await _repository.HasSuccessfulInitialSciencePlanAsync(runId, cancellationToken).ConfigureAwait(false);
         if (specializedAgent is null && request.Subagent is null && request.SpecializedAgent is { } configuredAgent)
         {
             var definition = _specializedAgents.Resolve(configuredAgent.ProfileId).Definition;
@@ -671,6 +674,17 @@ public sealed partial class RunProcessor : BackgroundService
                 pendingToolCallId = null;
             }
             _ = await ApplySteeringAsync().ConfigureAwait(false);
+            if (ScienceInitialPlanGuard.Applies(request) && sciencePlanInitialized && request.DeepResearch
+                && !researchManagedByAgent && !deepResearchCompleted && activeCalls is null && pendingProposalId is null)
+            {
+                // Explicit research still starts automatically, after its visible
+                // Science plan rather than before the first planning turn.
+                var scheduled = ScheduleExplicitDeepResearch(new(messages, roundCount, toolCallCount, inputTokens, outputTokens),
+                    runId, ExtractOriginalTask(request), request.ResearchOptions);
+                messages = scheduled.Messages.ToList(); activeCalls = scheduled.ActiveToolCalls!.ToArray();
+                nextToolIndex = 0; activeCallRound = scheduled.ActiveCallRound; toolCallCount = scheduled.ToolCallCount;
+                await SaveCheckpointAsync().ConfigureAwait(false);
+            }
             if (activeCalls is { Length: > 0 })
             {
                 while (activeCalls is not null && nextToolIndex < activeCalls.Length)
@@ -685,6 +699,10 @@ public sealed partial class RunProcessor : BackgroundService
                     AgentToolSpec tool;
                     try
                     {
+                        if (ScienceInitialPlanGuard.Applies(request) && !sciencePlanInitialized && pendingProposalId is null
+                            && (activeCalls.Length - nextToolIndex != 1 || call.Name != CodingWorkingStateTools.PlanTool))
+                            throw new ArgumentException("Vor fachlichen Werkzeugen muss dieser Science-Lauf zuerst einen gültigen Arbeitsplan bestätigen. "
+                                + "Sende genau einen coding.updatePlan-Aufruf mit nichtleeren steps; dieser Aufruf wurde nicht ausgeführt.");
                         // Return a recoverable tool receipt instead of aborting the entire run.
                         // A pending client operation must still be collected exactly once.
                         if (isCoding
@@ -779,7 +797,18 @@ public sealed partial class RunProcessor : BackgroundService
                         {
                             try
                             {
+                                var initialSciencePlan = ScienceInitialPlanGuard.Applies(request) && !sciencePlanInitialized;
+                                if (initialSciencePlan) ScienceInitialPlanGuard.ValidateInitialUpdate(call.Arguments);
+                                var priorPlanSequence = workingState?.Sequence ?? 0;
                                 workingState = CodingWorkingStateReducer.ApplyPlanUpdate(workingState ?? CodingWorkingState.Create(ExtractOriginalTask(request)), call.Arguments);
+                                if (initialSciencePlan && workingState.Plan.Count > 0)
+                                {
+                                    // Re-acknowledging an inherited open plan is a
+                                    // valid run entrance, not a repeated-work loop.
+                                    workingState = workingState with { ConsecutivePlanNoOps = 0,
+                                        Sequence = Math.Max(workingState.Sequence, priorPlanSequence + 1) };
+                                    sciencePlanInitialized = true;
+                                }
                                 result = workingState.ConsecutivePlanNoOps > 0
                                     ? CodingPlanProgressGuard.NoOpReceipt(workingState, availableTools)
                                     : new(CodingWorkingStateTools.CreatePlanReceipt(workingState, call.Arguments), []);
@@ -886,7 +915,8 @@ public sealed partial class RunProcessor : BackgroundService
                         if (tool.Name == SubagentToolNames.Wait)
                             _ = await _repository.TryConsumeSubagentResultAsync(runId,
                                 call.Arguments.GetProperty("runId").GetString()!, cancellationToken).ConfigureAwait(false);
-                        if (isCoding) CodingPlanProgressGuard.ThrowIfStalled(workingState);
+                        if (isCoding && (!ScienceInitialPlanGuard.Applies(request) || sciencePlanInitialized))
+                            CodingPlanProgressGuard.ThrowIfStalled(workingState);
                         continue;
                     }
 
@@ -926,7 +956,8 @@ public sealed partial class RunProcessor : BackgroundService
             {
                 throw new CodingInvalidToolLoopException(ScientificInvalidToolDiagnostic.LastFailure(messages));
             }
-            if (isCoding) CodingPlanProgressGuard.ThrowIfStalled(workingState);
+            if (isCoding && (!ScienceInitialPlanGuard.Applies(request) || sciencePlanInitialized))
+                CodingPlanProgressGuard.ThrowIfStalled(workingState);
 
             // A tool call already emitted by the last allowed model turn is still a
             // pending operation. Drain it (including client resumes) before this guard.
@@ -962,7 +993,13 @@ public sealed partial class RunProcessor : BackgroundService
                 ? _modelRuntime.ResolveCompactionReasoningEffort(selection.ModelId, selection.Role)
                 : _modelRuntime.ResolveReasoningEffort(selection.ModelId, selection.Role, request.ReasoningEffort);
             var effort = ResolveTurnReasoningEffort();
-            var selectableTools = compactContext || useStableSubagentToolCatalog ? availableTools.ToArray() : budgetSummary ? [] : isCoding
+            var initialSciencePlanRequired = ScienceInitialPlanGuard.Applies(request) && !sciencePlanInitialized;
+            if (initialSciencePlanRequired)
+            {
+                var instruction = ScienceInitialPlanGuard.Instruction(runId, workingState);
+                if (!ScienceInitialPlanGuard.HasInstruction(messages, instruction)) messages.Add(new("system", instruction));
+            }
+            var selectableTools = initialSciencePlanRequired || compactContext || useStableSubagentToolCatalog ? availableTools.ToArray() : budgetSummary ? [] : isCoding
                 ? CodingPlanProgressGuard.OfferedTools(availableTools, workingState) : availableTools.ToArray();
             var modelTools = contextTools ?? CreateModelToolDefinitions(selectableTools, selectedToolName, isCoding || useStableSubagentToolCatalog);
             // A turn following assistant.selectTool has exactly one purpose: emit the
@@ -972,7 +1009,7 @@ public sealed partial class RunProcessor : BackgroundService
             // the model context; the client receives phase transitions only.
             // Early delegation is ordinary scientific work: its introduction must
             // stream like other tool turns. Only the internal selector is prose-free.
-            var suppressRequiredToolTurn = selectedToolName is not null;
+            var suppressRequiredToolTurn = selectedToolName is not null || initialSciencePlanRequired;
             var liveTextGate = new IncrementalVisibleTextGate(enabled: !suppressRequiredToolTurn);
             CodingTextReconciler? codingText = null;
             var reasoningActivity = new ReasoningActivityTransport();
@@ -1143,48 +1180,13 @@ public sealed partial class RunProcessor : BackgroundService
                     await SaveCheckpointAsync().ConfigureAwait(false);
                 }
                 ContextPlan contextPlan;
+                var summarizedThisTurn = false;
                 effort = ResolveTurnReasoningEffort();
                 if (isCoding && !budgetSummary && CodingContextCompactor.Plan(messages, contextLength, workingState,
                     includeWorkingStateInBudget: !workingStatePromptIncluded) is { } compaction)
                 {
-                    using var compactingCancellation = CancellationTokenSource.CreateLinkedTokenSource(steeringCall.Token);
-                    var compactingHeartbeat = PublishCodingHeartbeatAsync(runId, roundCount + 1, compactingCancellation.Token, "codingCompacting");
-                    LmChatResult condensed;
-                    var summaryEffort = _modelRuntime.ResolveCompactionReasoningEffort(selection.ModelId, selection.Role);
-                    var compactionReasoningActivity = new ReasoningActivityTransport();
-                    try
-                    {
-                        condensed = await _modelRuntime.CompleteChatAsync(selection.ModelId, compaction.SummaryRequest, [],
-                            maximumOutputTokens, modelRole: selection.Role, reasoningEffort: summaryEffort,
-                            requiredContextLength: contextLength,
-                            nativeProgress: async (progress, token) =>
-                            {
-                                if (compactionReasoningActivity.Observe(progress) is { } reasoningPhase)
-                                    await _repository.AppendEventAsync(runId, RunEventTypes.ModelGeneration,
-                                        reasoningPhase, token).ConfigureAwait(false);
-                                if (progress.State == "reasoningDelta") return;
-                                await _repository.AppendEventAsync(runId, RunEventTypes.ModelGeneration,
-                                    new ModelGenerationEvent("codingCompacting", GeneratedTokens: progress.GeneratedTokens, CurrentTokens: progress.CurrentTokens), token).ConfigureAwait(false);
-                            },
-                            cancellationToken: steeringCall.Token,
-                            runtimeInstanceId: request.Subagent?.RuntimeInstanceId).ConfigureAwait(false);
-                        if (compactionReasoningActivity.Complete() is { } completedReasoning)
-                            await _repository.AppendEventAsync(runId, RunEventTypes.ModelGeneration,
-                                completedReasoning, steeringCall.Token).ConfigureAwait(false);
-                    }
-                    finally
-                    {
-                        await compactingCancellation.CancelAsync().ConfigureAwait(false);
-                        try { await compactingHeartbeat.ConfigureAwait(false); }
-                        catch (OperationCanceledException) when (compactingCancellation.IsCancellationRequested) { }
-                    }
-                    messages = CodingContextCompactor.Complete(compaction, condensed.Content).ToList();
-                    workingStatePromptIncluded = false;
-                    inputTokens += condensed.InputTokens;
-                    outputTokens += condensed.OutputTokens;
-                    roundCount++;
-                    compactionCount++;
-                    await PublishCodingMetricsAsync(runId, roundCount, "summarization", condensed, summaryEffort, queueMilliseconds, steeringCall.Token).ConfigureAwait(false);
+                    await CompactWorkingContextAsync(compaction, contextLength, queueMilliseconds, steeringCall.Token).ConfigureAwait(false);
+                    summarizedThisTurn = true;
                     queueMilliseconds = 0; // The following model turn retains this already acquired lease.
                     budgetSummary = codingBudget.MustSummarize(roundCount, toolCallCount);
                     if (budgetSummary && !compactContext && !useStableSubagentToolCatalog)
@@ -1194,12 +1196,6 @@ public sealed partial class RunProcessor : BackgroundService
                     }
                     ApplyCodingBudgetInstruction(messages, codingBudget, roundCount, toolCallCount, preserveSessionPromptPrefix);
                     await SaveCheckpointAsync().ConfigureAwait(false);
-                    await _repository.AppendEventAsync(runId, RunEventTypes.ContextChanged,
-                        new ContextChangedEvent(ContextPlanner.EstimateTokens(messages), contextLength,
-                            0, true, $"{compaction.ArchivedMessages} ältere Coding-Nachrichten wurden als fortsetzbarer Arbeitsstand gespeichert. Der ursprüngliche Auftrag und aktuelle Werkzeugbelege bleiben im Kontext; das vollständige Journal bleibt erhalten.",
-                            InputTokenBudget: ContextPlanner.ComputeInputTokenBudget(contextLength, maximumOutputTokens),
-                            CompactionPerformed: true),
-                        steeringCall.Token).ConfigureAwait(false);
                 }
                 try
                 {
@@ -1313,8 +1309,8 @@ public sealed partial class RunProcessor : BackgroundService
                                 modelRole: selection.Role,
                                 reasoningEffort: effort,
                                 cancellationToken: steeringCall.Token,
-                                requireToolCall: selectedToolName is not null,
-                                requiredToolName: selectedToolName,
+                                requireToolCall: selectedToolName is not null || initialSciencePlanRequired,
+                                requiredToolName: initialSciencePlanRequired ? CodingWorkingStateTools.PlanTool : selectedToolName,
                                 requiredContextLength: contextLength,
                                 sessionCacheKey: !isCoding && string.IsNullOrWhiteSpace(request.SessionId) ? null
                                     : BuildRunSessionCacheKey(request, runId, selection.Role),
@@ -1328,12 +1324,30 @@ public sealed partial class RunProcessor : BackgroundService
                         {
                             // No generation or mutation has started. Rewrite the evaluated
                             // prefix only at this explicit, journalled compaction boundary.
-                            contextPlan = ScientificNativeContextRecovery.Prepare(lastNativePrompt!, overflow, maximumOutputTokens);
+                            var summarized = false;
+                            if (isCoding && !summarizedThisTurn && CodingContextCompactor.Plan(lastNativePrompt!, overflow.ContextLength, workingState,
+                                includeWorkingStateInBudget: false, force: true) is { } exactCompaction)
+                            {
+                                await heartbeatCancellation.CancelAsync().ConfigureAwait(false);
+                                try { await heartbeat.ConfigureAwait(false); }
+                                catch (OperationCanceledException) when (heartbeatCancellation.IsCancellationRequested) { }
+                                contextLength = Math.Min(contextLength, overflow.ContextLength);
+                                await CompactWorkingContextAsync(exactCompaction, contextLength, 0, steeringCall.Token,
+                                    $"Der native Tokenzähler meldete {overflow.InputTokens:N0} Eingabetoken bei {overflow.ContextLength:N0} Kontexttoken. ").ConfigureAwait(false);
+                                summarized = true;
+                                summarizedThisTurn = true;
+                                contextPlan = ContextPlanner.Prepare(WithWorkingState(messages, workingState, workingStatePromptIncluded),
+                                    contextLength, maximumOutputTokens, allowLossyCompaction: false, preserveConversationPrefix: true);
+                            }
+                            else
+                            {
+                                contextPlan = ScientificNativeContextRecovery.Prepare(lastNativePrompt!, overflow, maximumOutputTokens);
+                                compactionCount++;
+                            }
                             lastNativePrompt = ModelRuntimeClient.PrepareLanguageBoundMessages(contextPlan.Messages);
                             messages = lastNativePrompt.ToList();
-                            compactionCount++;
                             await SaveCheckpointAsync().ConfigureAwait(false);
-                            await _repository.AppendEventAsync(runId, RunEventTypes.ContextChanged,
+                            if (!summarized) await _repository.AppendEventAsync(runId, RunEventTypes.ContextChanged,
                                 new ContextChangedEvent(contextPlan.EstimatedInputTokens, overflow.ContextLength,
                                     0, true, $"Der native Tokenzähler meldete {overflow.InputTokens:N0} Eingabetoken bei {overflow.ContextLength:N0} Kontexttoken. "
                                         + contextPlan.Notice, PreparationCompleted: true,
@@ -1492,6 +1506,20 @@ public sealed partial class RunProcessor : BackgroundService
                     ReasoningContent: response.ReasoningContent));
                 await SaveCheckpointAsync().ConfigureAwait(false);
                 throw new AgentRunLimitException(codingBudget.FailureMessage(roundCount, toolCallCount));
+            }
+            if (initialSciencePlanRequired && !ScienceInitialPlanGuard.IsPlanOnly(response.ToolCalls))
+            {
+                invalidToolTurnCount++;
+                messages.Add(new("assistant", response.Content, ToolCalls: response.ToolCalls, ReasoningContent: response.ReasoningContent));
+                foreach (var rejected in response.ToolCalls)
+                    messages.Add(new("tool", ScienceInitialPlanGuard.Rejection(workingState), ToolCallId: rejected.Id));
+                messages.Add(new("system", ScienceInitialPlanGuard.Instruction(runId, workingState)));
+                await _repository.AppendEventAsync(runId, RunEventTypes.ModelGeneration,
+                    new ModelGenerationEvent("toolRejected", ToolName: CodingWorkingStateTools.PlanTool,
+                        FailureKind: ScienceInitialPlanGuard.ErrorCode,
+                        Message: "Der Science-Arbeitsplan muss vor allen fachlichen Arbeitsschritten gültig angelegt oder bestätigt sein."), cancellationToken).ConfigureAwait(false);
+                await SaveCheckpointAsync().ConfigureAwait(false);
+                continue;
             }
             if ((isCoding || request.Subagent is not null)
                 && response.ToolCalls.Count == 0 && string.IsNullOrWhiteSpace(response.Content))
@@ -1727,8 +1755,63 @@ public sealed partial class RunProcessor : BackgroundService
                 UseStableSubagentToolCatalog: useStableSubagentToolCatalog,
                 ResearchManagedByAgent: researchManagedByAgent,
                 ContextProfileVersion: contextProfileVersion, ToolCatalogSignature: toolCatalogSignature,
-                ContextTools: contextTools, SpecializedAgent: specializedAgent),
+                ContextTools: contextTools, SpecializedAgent: specializedAgent, SciencePlanInitialized: sciencePlanInitialized),
             cancellationToken);
+
+        async Task CompactWorkingContextAsync(CodingCompactionPlan compaction, int loadedContextLength,
+            double queueTime, CancellationToken token, string? reason = null)
+        {
+            await _repository.AppendEventAsync(runId, RunEventTypes.ModelGeneration,
+                new ModelGenerationEvent("codingCompacting"), token).ConfigureAwait(false);
+            using var compactingCancellation = CancellationTokenSource.CreateLinkedTokenSource(token);
+            var compactingHeartbeat = PublishCodingHeartbeatAsync(runId, roundCount + 1,
+                compactingCancellation.Token, "codingCompacting");
+            var summaryEffort = _modelRuntime.ResolveCompactionReasoningEffort(selection.ModelId, selection.Role);
+            var activity = new ReasoningActivityTransport();
+            LmChatResult condensed;
+            try
+            {
+                condensed = await CodingContextCompactor.CompleteSummaryAsync(compaction, loadedContextLength,
+                    maximumOutputTokens, (summaryRequest, outputLimit, summaryToken) =>
+                        _modelRuntime.CompleteChatAsync(selection.ModelId, summaryRequest, [], outputLimit,
+                            modelRole: selection.Role, reasoningEffort: summaryEffort,
+                            requiredContextLength: loadedContextLength,
+                            nativeProgress: async (progress, progressToken) =>
+                            {
+                                CodingContextCompactor.ValidateSummaryTokenBudget(progress, loadedContextLength, outputLimit);
+                                if (activity.Observe(progress) is { } reasoningPhase)
+                                    await _repository.AppendEventAsync(runId, RunEventTypes.ModelGeneration,
+                                        reasoningPhase, progressToken).ConfigureAwait(false);
+                                if (progress.State == "reasoningDelta") return;
+                                await _repository.AppendEventAsync(runId, RunEventTypes.ModelGeneration,
+                                    new ModelGenerationEvent("codingCompacting", GeneratedTokens: progress.GeneratedTokens,
+                                        CurrentTokens: progress.CurrentTokens), progressToken).ConfigureAwait(false);
+                            }, runtimeInstanceId: request.Subagent?.RuntimeInstanceId,
+                            cancellationToken: summaryToken), token).ConfigureAwait(false);
+                if (activity.Complete() is { } completedReasoning)
+                    await _repository.AppendEventAsync(runId, RunEventTypes.ModelGeneration,
+                        completedReasoning, token).ConfigureAwait(false);
+            }
+            finally
+            {
+                await compactingCancellation.CancelAsync().ConfigureAwait(false);
+                try { await compactingHeartbeat.ConfigureAwait(false); }
+                catch (OperationCanceledException) when (compactingCancellation.IsCancellationRequested) { }
+            }
+            messages = CodingContextCompactor.Complete(compaction, condensed.Content).ToList();
+            workingStatePromptIncluded = false;
+            inputTokens += condensed.InputTokens; outputTokens += condensed.OutputTokens;
+            roundCount++; compactionCount++;
+            await PublishCodingMetricsAsync(runId, roundCount, "summarization", condensed, summaryEffort,
+                queueTime, token).ConfigureAwait(false);
+            await SaveCheckpointAsync().ConfigureAwait(false);
+            await _repository.AppendEventAsync(runId, RunEventTypes.ContextChanged,
+                new ContextChangedEvent(ContextPlanner.EstimateTokens(messages), loadedContextLength, 0, true,
+                    reason + $"{compaction.ArchivedMessages} ältere Coding-Nachrichten wurden als fortsetzbarer Arbeitsstand gespeichert. "
+                    + "Der ursprüngliche Auftrag und aktuelle Werkzeugbelege bleiben im Kontext; das vollständige Journal bleibt erhalten.",
+                    InputTokenBudget: ContextPlanner.ComputeInputTokenBudget(loadedContextLength, maximumOutputTokens),
+                    CompactionPerformed: true), token).ConfigureAwait(false);
+        }
 
         async Task ApplyModelSelectionAsync()
         {

@@ -279,7 +279,7 @@ public sealed partial class LocalToolBroker(
             // Generated Lean sources must exist before the measured compiler run.
             // Keep the same provenance boundary used by Python experiments.
             leanPreparation = await sandbox.RunPythonAsync(projectId, scriptPath, ["--missum-prepare-only"], timeout,
-                workingDirectory, cancellationToken).ConfigureAwait(false);
+                workingDirectory, Missum.Core.Research.ResearchExecutionProfile.LeanProof, cancellationToken).ConfigureAwait(false);
             preparationFailed = leanPreparation.ExitCode != 0 || leanPreparation.TimedOut;
             try
             {
@@ -293,7 +293,8 @@ public sealed partial class LocalToolBroker(
         for (var index = 0; index < repetitions && !preparationFailed; index++)
         {
             var remaining = Math.Max(1, timeout - (int)executionBudget.Elapsed.TotalSeconds);
-            results.Add(await sandbox.RunPythonAsync(projectId, scriptPath, arguments, remaining, workingDirectory, cancellationToken).ConfigureAwait(false));
+            results.Add(await sandbox.RunPythonAsync(projectId, scriptPath, arguments, remaining, workingDirectory,
+                Missum.Core.Research.ResearchExecutionProfile.LeanProof, cancellationToken).ConfigureAwait(false));
         }
         var succeeded = !preparationFailed && results.All(static run => run.ExitCode == 0 && !run.TimedOut);
         JsonElement? leanReceipt = null;

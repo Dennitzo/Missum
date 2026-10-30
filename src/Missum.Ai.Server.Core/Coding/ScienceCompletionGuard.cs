@@ -11,6 +11,11 @@ internal static class ScienceCompletionGuard
     internal static string? RepairPrompt(CodingWorkingState? state)
     {
         if (state?.Science is not { } science) return null;
+        if (state.Plan.Count == 0)
+            return Marker + "Für diesen Science-Auftrag ist noch kein Arbeitsplan gespeichert. "
+                + "Lege jetzt als ersten Arbeitsschritt mit coding.updatePlan eine nichtleere steps-Liste an. "
+                + "Eine Textantwort oder phase/nextStep allein gilt weder als Plan noch als abgeschlossene Forschung. "
+                + "Beginne die fachliche Arbeit erst nach der erfolgreichen gespeicherten Planbestätigung.";
 
         // An open outcome or unanswered research question is not itself a
         // blockade. Only a recorded, concrete blocker stops this branch; other

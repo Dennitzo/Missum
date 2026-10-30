@@ -46,10 +46,27 @@ public sealed partial class RunProcessor
             if (plan is null)
                 return new(source.RunId, false, before, before, saved.CompactionCount,
                     "Der aktuelle Auftrag und seine neueste Antwort bleiben erhalten; es gibt noch keinen älteren Kontext zum Komprimieren.");
-            var condensed = await _modelRuntime.CompleteChatAsync(selection.ModelId, plan.SummaryRequest, [],
-                maximumOutputTokens: 4096, modelRole: selection.Role,
-                reasoningEffort: _modelRuntime.ResolveCompactionReasoningEffort(selection.ModelId, selection.Role),
-                requiredContextLength: contextLength, cancellationToken: cancellationToken).ConfigureAwait(false);
+            // A catalog/model maximum is not the fitted slot capacity. Prepare
+            // the selected primary first and bound summary input for that exact
+            // allocation, without resizing an already loaded model.
+            var preparation = await _workers.PrepareLmModelWithStatusAsync(selection.ModelId, contextLength,
+                null, cancellationToken).ConfigureAwait(false);
+            var fittedContext = ResolveLoadedContextLength(contextLength, preparation);
+            if (fittedContext != contextLength)
+                plan = CodingContextCompactor.Plan(saved.Messages, fittedContext, saved.WorkingState,
+                    includeWorkingStateInBudget: !saved.WorkingStatePromptIncluded, force: true)
+                    ?? throw new InvalidOperationException("Der zuvor komprimierbare Sitzungskontext konnte nicht erneut eingegrenzt werden.");
+            contextLength = fittedContext;
+            var condensed = await CodingContextCompactor.CompleteSummaryAsync(plan, contextLength, 4096,
+                (summaryRequest, outputLimit, token) => _modelRuntime.CompleteChatAsync(selection.ModelId, summaryRequest, [],
+                    maximumOutputTokens: outputLimit, modelRole: selection.Role,
+                    reasoningEffort: _modelRuntime.ResolveCompactionReasoningEffort(selection.ModelId, selection.Role),
+                    requiredContextLength: contextLength,
+                    nativeProgress: (progress, _) =>
+                    {
+                        CodingContextCompactor.ValidateSummaryTokenBudget(progress, contextLength, outputLimit);
+                        return ValueTask.CompletedTask;
+                    }, cancellationToken: token), cancellationToken).ConfigureAwait(false);
             var compacted = CodingContextCompactor.Complete(plan, condensed.Content);
             var after = ContextPlanner.EstimateTokens(compacted);
             if (after >= before)

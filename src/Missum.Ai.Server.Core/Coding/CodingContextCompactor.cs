@@ -14,7 +14,7 @@ internal sealed record CodingCompactionPlan(
     LmChatMessage? WorkingStateMessage = null,
     IReadOnlyList<LmChatMessage>? PreservedContextMessages = null);
 
-internal static class CodingContextCompactor
+internal static partial class CodingContextCompactor
 {
     internal const string MemoryMarker = "MISSUM_CODING_CONTEXT_MEMORY\n";
     internal const string SummaryInstruction = """
@@ -31,7 +31,7 @@ internal static class CodingContextCompactor
         bool force = false)
     {
         var budget = ContextPlanner.ComputeInputTokenBudget(contextLength, null);
-        // Retain the evaluated prefix below the shared 90% boundary. Compact
+        // Retain the evaluated prefix below the shared working-context boundary. Compact
         // deliberately between turns, leaving room for large tool receipts.
         var prompt = workingState is null || !includeWorkingStateInBudget
             ? messages : messages.Append(CodingEvidenceContext.Build(workingState)).ToArray();

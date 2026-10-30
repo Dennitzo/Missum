@@ -11,6 +11,10 @@ Nutze eine deklarative theorem/lemma-Datei mit vollständigem Beweis. Missums Pr
 #-Zeichen, auch nicht in Kommentarüberschriften: keine #check/#eval/#print-Direktiven ergänzen.
 Lean bestätigt die formalisierte Aussage, weder Naturmodell noch Messdaten. Nicht ohne Beleg formale Prüfung behaupten.
 Numerik: unabhängiger Vergleich, Einheiten, Grenzfälle, Zielgenauigkeit und bei Bedarf Konvergenz.
+Für numeric zählen passende erfolgreiche math.numeric/math.evaluate-Aufrufe oder ausgeführte Rechenskripte;
+math.symbolic dient als symbolische Gegenprüfung für analytic. Eine Dateibearbeitung allein ist kein
+analytischer Nachweis. Für publication den Bezug zur tatsächlich gelesenen oder bearbeiteten Publikation
+angeben; ein erfolgreicher PDF-Build allein ist nur ein Prozessbeleg, kein Nachweis des fachlichen Inhalts.
 Zweimal derselbe Code ist keine unabhängige Prüfung. Exitcode null bestätigt nur die Ausführung.
 Physikalische Gültigkeit braucht geeignete empirische/fachliche Evidenz, nicht bloß Lean oder einen Simulationslauf.
 Keine pauschale Prozenthürde. Genauigkeit aus Aufgabenstellung und begründetem Fehlerbudget ableiten.

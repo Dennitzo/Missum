@@ -9,7 +9,7 @@ namespace Missum.Ai.Server.Tests;
 
 public sealed class CompactToolProjectionTests
 {
-    private static readonly string[] PlanItemRequiredFields = ["id", "title", "status"];
+    private static readonly string[] PlanItemRequiredFields = ["id", "title"];
 
     [Theory]
     [InlineData(false)]
@@ -35,7 +35,7 @@ public sealed class CompactToolProjectionTests
             Assert.Equal(400, items.GetProperty("properties").GetProperty("title").GetProperty("maxLength").GetInt32());
             Assert.Contains("Originaltitel exakt unverändert",
                 items.GetProperty("properties").GetProperty("title").GetProperty("description").GetString(), StringComparison.Ordinal);
-            Assert.Contains("Immer erforderlich",
+            Assert.Contains("pending",
                 items.GetProperty("properties").GetProperty("status").GetProperty("description").GetString(), StringComparison.Ordinal);
         }
         var description = function.GetProperty("description").GetString()!;
@@ -46,6 +46,33 @@ public sealed class CompactToolProjectionTests
         Assert.Contains("vollständigen geordneten Plan", description, StringComparison.Ordinal);
         Assert.Contains("erledigter Etappen", description, StringComparison.Ordinal);
         Assert.DoesNotContain("Nur bei neuer ID", description, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("compact-v1")]
+    public void SciencePlanTransportRetainsItsPlanningAndIncompleteDetailsContract(string? profile)
+    {
+        var tool = ScienceSkill.DescribePlanTool(CodingWorkingStateTools.CreateTools().Single()).ToLmDefinition()
+            with { ContextProfileVersion = profile };
+        var function = ModelRuntimeClient.PrepareTransportTools("coding/Qwen3.8", [tool])[0].GetProperty("function");
+        var description = function.GetProperty("description").GetString()!;
+        Assert.Contains("Science", description, StringComparison.Ordinal);
+        Assert.Contains("scienceStages", description, StringComparison.Ordinal);
+        Assert.Contains("offen", description, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Ein neuer Lauf beginnt mit leeren Planlisten", description, StringComparison.Ordinal);
+        var fields = function.GetProperty("parameters").GetProperty("properties");
+        Assert.True(fields.TryGetProperty("scienceStages", out var stages));
+        Assert.Contains("offen", stages.GetProperty("description").GetString(), StringComparison.OrdinalIgnoreCase);
+        if (profile == ToolContextProfiles.Current)
+        {
+            var stageFields = stages.GetProperty("items").GetProperty("properties");
+            Assert.Contains("Leitfrage", stageFields.GetProperty("question").GetProperty("description").GetString(), StringComparison.Ordinal);
+            Assert.Contains("Prüfstrategie", stageFields.GetProperty("strategy").GetProperty("description").GetString(), StringComparison.Ordinal);
+        }
+        var regular = CodingWorkingStateTools.CreateTools().Single().ToLmDefinition() with { ContextProfileVersion = profile };
+        var regularFunction = ModelRuntimeClient.PrepareTransportTools("coding/Qwen3.8", [regular])[0].GetProperty("function");
+        Assert.False(regularFunction.GetProperty("parameters").GetProperty("properties").TryGetProperty("scienceStages", out _));
     }
 
     [Fact]

@@ -18,6 +18,12 @@ public sealed partial class ModelRuntimeClient
                 && CompactToolDescription(tool.Name) is { } compactDescription)
             {
                 description = compactDescription;
+                if (tool.Name == "coding.updatePlan" && parameters.TryGetProperty("properties", out var properties)
+                    && properties.TryGetProperty("scienceStages", out _))
+                    description += " Science: Zu Beginn zuerst einen nichtleeren Arbeitsplan speichern oder den übernommenen offenen Plan bestätigen. "
+                        + "steps allein genügt für den Anfang; scienceStages ergänzt Leitfrage, Prüfstrategie, Checks und Abhängigkeiten. "
+                        + "Fehlende Details bleiben offen (detailsPending) und dürfen nicht als erledigt gelten. Vor fachlichem Abschluss question und strategy ausdrücklich festlegen, outcome und echte passende Nachweise zuordnen. "
+                        + "Offene Science-Pläne behalten bei Fortsetzen ihre IDs; vollständig erledigte Altpläne werden bei einem neuen Auftrag ersetzt.";
                 var buffer = new ArrayBufferWriter<byte>();
                 using (var writer = new Utf8JsonWriter(buffer)) WriteCompactSchema(writer, parameters, tool.Name, null);
                 using var document = JsonDocument.Parse(buffer.WrittenMemory);
@@ -77,6 +83,8 @@ public sealed partial class ModelRuntimeClient
                     break;
             }
         }
+        if (!schema.TryGetProperty("description", out _) && CompactFieldDescription(toolName, field) is { } fieldHint)
+            writer.WriteString("description", fieldHint);
         writer.WriteEndObject();
     }
 
@@ -101,7 +109,11 @@ public sealed partial class ModelRuntimeClient
         ("document.create", "heading") => "Abschnittstitel, Blatt- oder Folienname.",
         ("document.create", "content") => "Nur Abschnittsdelta als Markdown; XLSX-Zahlen invariant, interne Formeln erlaubt; PPTX kurz.",
         ("coding.updatePlan", "title") => "Immer erforderlich; gespeicherten Originaltitel exakt unverändert mitsenden, Kriterien niemals umdeuten.",
-        ("coding.updatePlan", "status") => "Immer erforderlich. Neu completed braucht erfolgreiche evidenceIds.",
+        ("coding.updatePlan", "status") => "Ohne status: neue Einträge pending, gespeicherte unverändert. Neu completed braucht erfolgreiche evidenceIds.",
+        ("coding.updatePlan", "scienceStages") => "Optionale Science-Details nach steps-ID; fehlende question/strategy bleiben offen. Vor fachlichem Abschluss ausdrücklich konfigurieren.",
+        ("coding.updatePlan", "question") => "Konkrete Leitfrage der Etappe. Fehlende Angaben bleiben offen; keine bereits geklärte Aussage erfinden.",
+        ("coding.updatePlan", "strategy") => "Ausdrücklich gewählte Prüfstrategie; vor fachlichem Abschluss erforderlich.",
+        ("coding.updatePlan", "kind") => "source: gelesene Quelle; numeric: Numerik; analytic: symbolische/unabhängige Gegenprüfung; lean: Kernelprüfung; publication: gelesene/bearbeitete Publikation, Render-Prozess allein genügt nicht.",
         _ => null,
     };
 
@@ -134,7 +146,7 @@ public sealed partial class ModelRuntimeClient
         "coding.renderHtml" => "Einmal je Lauf isolierte lokale HTML-Vorschau ohne Netzwerk/Bridge/Dateiänderung zeigen; HTML danach nicht als Antwort wiederholen.",
         "coding.readOutput" => "Originalausschnitt über echte evidenceId lesen; offset/nextOffset sind UTF-16. Historische Belege bestätigen keinen aktuellen Dateistand.",
         "coding.searchRunEvidence" => "Gespeicherte Belege nur dieses Laufs nach Phrase durchsuchen; evidenceId/offset gezielt weiterverwenden.",
-        "coding.updatePlan" => "Nur neue/geänderte Einträge mit id,title,status senden; gespeicherte Originaltitel exakt unverändert, Kriterien niemals umdeuten. steps und acceptanceCriteria dürfen gemeinsam im selben Aufruf angelegt/geändert werden; getrennte IDs, atomar: bei Fehler wird nichts gespeichert, beide Listen korrigiert erneut senden. storedSteps/storedAcceptanceCriteria geben immer den vollständigen geordneten Plan einschließlich erledigter Etappen zurück; für weitere Planung und Darstellung verwenden. Neu completed braucht echte erfolgreiche evidenceIds; facts/rejectedHypotheses brauchen Belege. Altlauf-IDs sind kein aktueller Plan; phase=final ist kein Erfolgsbeweis.",
+        "coding.updatePlan" => "Neue/geänderte Einträge mit id,title senden; ohne status sind neue Einträge pending, gespeicherte bleiben unverändert. Gespeicherte Originaltitel exakt unverändert, Kriterien niemals umdeuten. steps und acceptanceCriteria dürfen gemeinsam im selben Aufruf angelegt/geändert werden; getrennte IDs, atomar: bei Fehler wird nichts gespeichert, beide Listen korrigiert erneut senden. storedSteps/storedAcceptanceCriteria geben immer den vollständigen geordneten Plan einschließlich erledigter Etappen zurück; für weitere Planung und Darstellung verwenden. Neu completed braucht echte erfolgreiche evidenceIds; facts/rejectedHypotheses brauchen Belege. Nur IDs des aktuellen gespeicherten Plans verwenden; phase=final ist kein Erfolgsbeweis.",
         "math.symbolic" => "SymPy symbolisch in workspace-lokaler Forschungsumgebung ausführen; reale reproduzierbare Belege zurückgeben.",
         "math.numeric" => "Numerische Rechnung in der lokalen Forschungsumgebung mit Experimentbelegen ausführen.",
         "math.smt" => "Z3-Python-Skript lokal prüfen; Skript gibt JSON-Ergebnis aus. Tatsächlichen Solverbeleg und fehlende Toolchain unterscheiden.",

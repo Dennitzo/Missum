@@ -123,6 +123,31 @@ public sealed class SessionContextCompactionTests
     }
 
     [Fact]
+    public async Task ManualSummaryUsesActualFittedWindowAndRecoversFromDenseNativeTokenization()
+    {
+        using var fixture = new Fixture();
+        fixture.Native.FittedContext = 8192;
+        fixture.Native.CountActualCharacters = true;
+        var request = Request(true, science: true) with
+        {
+            Messages = [Message("user", "Earlier scientific task"), Message("assistant", new string('x', 200_000)),
+                Message("user", "Verify the current goal without losing its assumptions.")],
+        };
+        var run = await fixture.SeedAsync(request);
+
+        var result = await fixture.Processor.CompactSessionContextAsync(new(request.SessionId!, MaximumContextTokens: 32768));
+
+        Assert.True(result.Changed);
+        Assert.Equal(1, fixture.Native.InferenceCount);
+        Assert.True(fixture.Native.Counts.Count >= 2);
+        Assert.True(fixture.Native.Counts[^1] + fixture.Native.LastOutputLimit + 1 <= fixture.Native.FittedContext);
+        var saved = (await fixture.Repository.GetIdleSessionCompactionSourceAsync(request.SessionId!))!;
+        Assert.Equal(run, saved.RunId);
+        Assert.Contains(saved.Checkpoint.Messages, message => message.Content == "Verify the current goal without losing its assumptions.");
+        Assert.Equal(RunState.Completed, (await fixture.Repository.GetAsync(run))!.State);
+    }
+
+    [Fact]
     public void ExplicitCompactionPreservesOpenToolExchangesAndWorkingState()
     {
         var pending = new LmToolCall("pending", "coding.command", JsonSerializer.SerializeToElement(new { command = "python verify.py" }));
@@ -197,19 +222,32 @@ public sealed class SessionContextCompactionTests
         internal const string ModelId = "coding/Qwen3.8-27B~compaction";
         private static readonly string[] ModelTags = ["missum-context-train:32768"];
         internal int InferenceCount { get; private set; }
+        internal int FittedContext { get; set; } = 32768;
+        internal bool CountActualCharacters { get; set; }
+        internal List<int> Counts { get; } = [];
+        internal int LastOutputLimit { get; private set; }
         internal Func<CancellationToken, Task<string>>? OnInference { get; set; }
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             var path = request.RequestUri!.AbsolutePath;
             if (path == "/v1/models") return Json(new { data = new[] { new { id = ModelId, tags = ModelTags, status = new { value = "loaded" } } } });
-            if (path == "/props") return Json(new { default_generation_settings = new { n_ctx = 32768 } });
-            if (path == "/v1/chat/completions/input_tokens") return Json(new { input_tokens = 3200 });
+            if (path == "/props") return Json(new { default_generation_settings = new { n_ctx = FittedContext } });
+            if (path == "/v1/chat/completions/input_tokens")
+            {
+                using var countBody = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken));
+                var characters = countBody.RootElement.GetProperty("messages").EnumerateArray()
+                    .Sum(message => message.TryGetProperty("content", out var content) && content.ValueKind == JsonValueKind.String ? content.GetString()!.Length : 0);
+                var count = CountActualCharacters ? characters * 2 / 3 + 96 : 3200;
+                Counts.Add(count);
+                return Json(new { input_tokens = count });
+            }
             if (path is "/sessions/prepare" or "/sessions/save") return Json(new { status = "saved" });
             if (path == "/v1/chat/completions")
             {
                 InferenceCount++;
                 using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken));
+                LastOutputLimit = body.RootElement.GetProperty("max_tokens").GetInt32();
                 Assert.False(body.RootElement.TryGetProperty("tools", out var tools)
                     && tools.ValueKind == JsonValueKind.Array && tools.GetArrayLength() > 0);
                 var answer = OnInference is null ? "Vorherige Arbeit: geprüfte Ergebnisse und offene Fragen sind zusammengefasst."

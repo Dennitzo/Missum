@@ -17,8 +17,10 @@ public sealed class ScientificNativeContextRecoveryIntegrationTests
 
     [Theory]
     [InlineData(262_144, 262_305)]
+    [InlineData(262_144, 239_683)] // Actual De-Broglie-Bohm continuation failure.
     [InlineData(1_000_000, 960_000)]
     [InlineData(1_000_000, 900_000)]
+    [InlineData(1_000_000, 800_000)]
     [InlineData(258_000, 232_200)]
     public async Task NativeOverflowCompactsSavedScienceContextBeforeFirstGenerationWithoutReexecutingTools(int contextLength, int exactTokens)
     {
@@ -68,12 +70,12 @@ public sealed class ScientificNativeContextRecoveryIntegrationTests
             Assert.Contains(exactTokens.ToString(System.Globalization.CultureInfo.InvariantCulture), digits, StringComparison.Ordinal);
             Assert.Contains(contextLength.ToString(System.Globalization.CultureInfo.InvariantCulture), digits, StringComparison.Ordinal);
             Assert.True(compacted.Data.GetProperty("estimatedInputTokens").GetInt32() < estimated);
-            Assert.Equal(2, native.TokenCounts);
-            Assert.Equal(1, native.Generations);
+            Assert.Equal(3, native.TokenCounts);
+            Assert.Equal(2, native.Generations); // Summary, then the resumed main turn.
             Assert.True(native.PromptLengths[1] < native.PromptLengths[0]);
             var checkpoint = (await repository.GetCheckpointAsync(run))!;
             Assert.Equal(20, checkpoint.ToolCallCount);
-            Assert.Equal(20, checkpoint.RoundCount);
+            Assert.Equal(21, checkpoint.RoundCount);
             Assert.Equal(1, checkpoint.CompactionCount);
             Assert.Contains(checkpoint.Messages, message => message.Role == "user" && message.Content == TaskText);
             Assert.True(ContextPlanner.EstimateTokens(checkpoint.Messages) < estimated);
@@ -168,6 +170,10 @@ public sealed class ScientificNativeContextRecoveryIntegrationTests
             if (path == "/v1/chat/completions")
             {
                 Generations++;
+                var body = await request.Content!.ReadAsStringAsync(cancellationToken);
+                if (body.Contains("Erstelle eine kompakte Arbeitszusammenfassung", StringComparison.Ordinal))
+                    return Json(new { choices = new[] { new { message = new { role = "assistant", content = "Belegte frühere Befunde und offene quantitative Prüfung bleiben erhalten." }, finish_reason = "stop" } },
+                        usage = new { prompt_tokens = 100_000, completion_tokens = 64 } });
                 InferenceStarted.TrySetResult();
                 await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
             }

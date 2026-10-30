@@ -199,6 +199,12 @@ public sealed record ResearchSandboxRuntimeStatus(bool IsReady, string State, st
 public sealed record ResearchSandboxFileChange(string ChangeSetId, string RelativePath, string? BeforeSha256,
     string AfterSha256, bool IsNewFile);
 
+public enum ResearchExecutionProfile
+{
+    General,
+    LeanProof,
+}
+
 public interface IResearchSandboxService
 {
     Task<ResearchSandboxLayout> EnsureProjectAsync(string projectId, CancellationToken cancellationToken = default);
@@ -208,7 +214,7 @@ public interface IResearchSandboxService
     Task RestoreChangeSetAsync(string projectId, string changeSetId, CancellationToken cancellationToken = default);
     Task<ResearchSandboxRunResult> RunPythonAsync(string projectId, string relativeScriptPath,
         IReadOnlyList<string>? arguments = null, int timeoutSeconds = 7200, string? relativeWorkingDirectory = null,
-        CancellationToken cancellationToken = default);
+        ResearchExecutionProfile executionProfile = ResearchExecutionProfile.General, CancellationToken cancellationToken = default);
     Task<string> ArchiveProjectAsync(string projectId, CancellationToken cancellationToken = default);
     Task RestoreProjectAsync(string projectId, CancellationToken cancellationToken = default);
     Task<int> PurgeExpiredAsync(CancellationToken cancellationToken = default);

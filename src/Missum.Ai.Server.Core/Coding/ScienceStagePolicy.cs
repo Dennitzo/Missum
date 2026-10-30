@@ -23,8 +23,8 @@ internal static class ScienceStagePolicy
                 var id = Text(item, "id", 80);
                 if (!ids.Add(id) || !updated.Plan.Any(step => step.Id == id)) Fail($"Science-Etappe {id}: eindeutige vorhandene steps-ID erforderlich; steps darf im selben Aufruf angelegt werden.");
                 var prior = stages.FirstOrDefault(stage => stage.Id == id);
-                var question = item.TryGetProperty("question", out _) || prior is null ? Text(item, "question", 800) : prior.Question;
-                var strategy = item.TryGetProperty("strategy", out _) || prior is null ? Text(item, "strategy", 1200) : prior.Strategy;
+                var question = item.TryGetProperty("question", out _) ? Text(item, "question", 800) : prior?.Question ?? "";
+                var strategy = item.TryGetProperty("strategy", out _) ? Text(item, "strategy", 1200) : prior?.Strategy ?? "";
                 if (prior is not null && updated.Plan.Single(step => step.Id == id).Status == "completed"
                     && before.Plan.Any(step => step.Id == id && step.Status == "completed")
                     && (prior.Question != question || prior.Strategy != strategy))
@@ -55,11 +55,16 @@ internal static class ScienceStagePolicy
                 if (outcome is not ("open" or "clarified" or "refuted")) Fail("outcome muss open, clarified oder refuted sein.");
                 if (checks.SelectMany(check => check.Paths).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 16) Fail("Eine Etappe darf höchstens 16 unterschiedliche Prüfdateien binden; in Teilaufgaben zerlegen.");
                 var stage = new ScienceStage(id, question, strategy, Strings(item, "dependsOn", 16, 80, prior?.DependsOn ?? []), checks,
-                    Strings(item, "openQuestions", 12, 600, prior?.OpenQuestions ?? []), Strings(item, "blockers", 12, 600, prior?.Blockers ?? []), outcome, prior?.ReopenedAtSequence ?? 0);
+                    Strings(item, "openQuestions", 12, 600, prior?.OpenQuestions ?? []), Strings(item, "blockers", 12, 600, prior?.Blockers ?? []), outcome, prior?.ReopenedAtSequence ?? 0,
+                    DetailsPending: string.IsNullOrWhiteSpace(question) || string.IsNullOrWhiteSpace(strategy));
                 stages.RemoveAll(value => value.Id == id); stages.Add(stage);
             }
         }
-        if (updated.Plan.Any(step => !stages.Any(stage => stage.Id == step.Id))) Fail("Jeder Science-Planschritt benötigt scienceStages mit derselben id, question und strategy; beide Listen gemeinsam senden.");
+        // Planning can precede investigation. Keep the complete user-facing plan
+        // immediately, while explicitly recording which scientific details have
+        // not yet been chosen. No question, strategy or required check is invented.
+        foreach (var step in updated.Plan.Where(step => !stages.Any(stage => stage.Id == step.Id)))
+            stages.Add(new(step.Id, "", "", [], [], [], [], DetailsPending: true));
         foreach (var stage in stages)
         {
             if (stage.DependsOn.Any(id => id == stage.Id || !stages.Any(other => other.Id == id))) Fail($"Etappe {stage.Id}: ungültige Abhängigkeit.");
@@ -96,6 +101,9 @@ internal static class ScienceStagePolicy
                         ValidateCheck(updated, stage, check);
                 continue;
             }
+            if (stage.DetailsPending || string.IsNullOrWhiteSpace(stage.Question) || string.IsNullOrWhiteSpace(stage.Strategy))
+                Fail($"Etappe {stage.Id}: question oder strategy ist noch nicht festgelegt. "
+                    + "Ergänze die fehlende Leitfrage und Prüfstrategie ausdrücklich in scienceStages, bevor die Etappe completed wird.");
             if (stage.Outcome == "open" || stage.Blockers.Count > 0) Fail($"Etappe {stage.Id}: offene/blockierte Etappe nicht als completed melden; pending mit blockers verwenden.");
             if (verifyReceipts)
                 foreach (var check in stage.Checks.Where(check => check.Required || check.EvidenceIds.Count > 0))
@@ -117,7 +125,10 @@ internal static class ScienceStagePolicy
                     .TakeLast(3).Select(item => new { id = item.Id, tool = item.Tool, path = item.Path }).ToArray();
                 Fail($"Etappe {stage.Id}, Check {check.Id}: Ersetze evidenceIds, nicht nur paths oder phase. {id} stammt von {receipt?.Tool ?? "unbekannt"} und ist kein erfolgreicher {check.Kind}-Nachweis. "
                     + (candidates.Length > 0 ? "Vorhandene passende Werkzeugbelege (fachliche Zuordnung selbst prüfen): " + JsonSerializer.Serialize(candidates)
-                        : "Kein passender erfolgreicher Beleg vorhanden; die gewählte Prüfung tatsächlich ausführen und ihre Beleg-ID verwenden."));
+                        : "Kein passender erfolgreicher Beleg vorhanden; die gewählte Prüfung tatsächlich ausführen und ihre Beleg-ID verwenden.")
+                    + (check.Kind == "publication" && receipt?.Tool == "coding.command"
+                        ? " Ein erfolgreicher PDF-Befehl bestätigt den Prozess, aber noch nicht den Publikationsinhalt. Lies oder bearbeite die tatsächlich betroffene Publikation und binde deren Beleg; keinen beliebigen Prozess als Publikationsprüfung umdeuten."
+                        : ""));
             }
             if (receipt!.Sequence <= stage.ReopenedAtSequence) Fail($"Etappe {stage.Id}: {check.Id} benötigt einen neuen Nachweis nach dem Rücksprung.");
             if (check.Kind == "publication" && check.Paths.Count > 0
@@ -129,8 +140,8 @@ internal static class ScienceStagePolicy
     private static bool Matches(string kind, CodingToolEvidence receipt) => kind switch
     {
         "lean" => receipt.Tool == "math.formalProof" && receipt.FormalVerified,
-        "numeric" => receipt.Tool == "coding.command" && receipt.ExitCode == 0,
-        "analytic" => receipt.Tool is "math.evaluate" || receipt.Tool == "coding.command" && receipt.ExitCode == 0 || receipt.Tool == "math.formalProof" && receipt.FormalVerified,
+        "numeric" => receipt.Tool is "math.numeric" or "math.evaluate" || receipt.Tool == "coding.command" && receipt.ExitCode == 0,
+        "analytic" => receipt.Tool is "math.symbolic" or "math.smt" or "math.evaluate" || receipt.Tool == "coding.command" && receipt.ExitCode == 0 || receipt.Tool == "math.formalProof" && receipt.FormalVerified,
         "source" => receipt.Tool is "web.fetch" or "coding.read" or "documents.readPages",
         "plot" => receipt.Tool == "coding.command" && receipt.ExitCode == 0 || receipt.Tool == "image.generate",
         "publication" => receipt.Tool is "coding.edit" or "coding.write" or "document.create" or "coding.read",
@@ -142,11 +153,15 @@ internal static class ScienceStagePolicy
         if (state.Science is null) return state;
         var invalid = new HashSet<string>();
         foreach (var stage in state.Science.Stages.Where(stage => state.Plan.Any(step => step.Id == stage.Id && step.Status == "completed")))
+        {
+            if (stage.DetailsPending || string.IsNullOrWhiteSpace(stage.Question) || string.IsNullOrWhiteSpace(stage.Strategy))
+                invalid.Add(stage.Id);
             foreach (var check in stage.Checks.Where(check => check.Required || check.EvidenceIds.Count > 0))
             {
                 try { ValidateCheck(state, stage, check); }
                 catch (ArgumentException) { invalid.Add(stage.Id); }
             }
+        }
         bool grew;
         do { grew = false; foreach (var stage in state.Science.Stages) if (stage.DependsOn.Any(invalid.Contains)) grew |= invalid.Add(stage.Id); } while (grew);
         if (invalid.Count == 0) return state;
@@ -163,8 +178,23 @@ internal static class ScienceStagePolicy
         var proof = FindProof(result);
         var verified = proof.ValueKind == JsonValueKind.Object && TextOrNull(proof, "formalVerification") == "KernelAccepted" && TextOrNull(proof, "axiomAudit") == "passed";
         var proofPath = verified ? ResolveProofPath(result, proof) : null;
-        return receipt with { FormalVerified = receipt.Tool == "math.formalProof" && verified,
+        return receipt with { Success = receipt.Success && !(receipt.Tool is "math.numeric" or "math.symbolic" or "math.smt" && HasFailedMathProcess(result)),
+            FormalVerified = receipt.Tool == "math.formalProof" && verified,
             VerificationPath = proofPath };
+    }
+
+    private static bool HasFailedMathProcess(JsonElement value, int depth = 0)
+    {
+        if (depth > 6 || value.ValueKind != JsonValueKind.Object) return false;
+        if (TextOrNull(value, "verificationStatus") == "ProcessFailed"
+            || value.TryGetProperty("success", out var success) && success.ValueKind == JsonValueKind.False
+            || value.TryGetProperty("exitCode", out var exit) && exit.ValueKind == JsonValueKind.Number && exit.TryGetInt32(out var code) && code != 0)
+            return true;
+        if (value.TryGetProperty("runs", out var runs) && runs.ValueKind == JsonValueKind.Array
+            && runs.EnumerateArray().Any(run => HasFailedMathProcess(run, depth + 1))) return true;
+        foreach (var name in new[] { "result", "data" })
+            if (value.TryGetProperty(name, out var nested) && HasFailedMathProcess(nested, depth + 1)) return true;
+        return false;
     }
 
     internal static CodingWorkingState ImportDelegatedEvidence(CodingWorkingState state, JsonElement trustedResult)

@@ -80,13 +80,15 @@ public static class CodingAgentPolicy
     public const string WorkingStatePrompt = """
         Nutze coding.updatePlan, sofern angeboten, für einen knappen Arbeitsplan und explizite Akzeptanzkriterien des
         Nutzerauftrags. Schritte und Kriterien dürfen gemeinsam in einem Aufruf angelegt und geändert werden.
-        Sende für jeden übermittelten Punkt id, title und status; bestehende Titel unverändert übernehmen.
+        Sende für jeden übermittelten Punkt id und title; bestehende Titel unverändert übernehmen.
+        status ist optional: neue Einträge beginnen ohne Angabe als pending, bestehende behalten ihren Status.
         Aktualisiere nur tatsächlich geänderte Punkte und ergänze evidenceIds bei belegtem Abschluss.
         Jede Bestätigung enthält den vollständigen geordneten Plan als storedSteps und storedAcceptanceCriteria.
         Nutze diese Gesamtfassung einschließlich erledigter und noch unveränderter Etappen für weitere Planung und Darstellung.
         Als vorhanden gelten ausschließlich erfolgreich
-        gespeicherte IDs derselben Liste im aktuellen Lauf, nicht bloße Erwähnungen im Chatverlauf. Neue Läufe
-        starten mit leeren Planlisten; lege benötigte Punkte dann erneut an. Ein Fehler verwirft das gesamte Update.
+        gespeicherte IDs derselben Liste im aktuellen Arbeitsstand, nicht bloße Erwähnungen im Chatverlauf.
+        Neue unabhängige Aufträge starten mit leeren Planlisten; offene Science-Pläne derselben Sitzung bleiben
+        bei Fortsetzung erhalten. Orientiere dich am mitgelieferten gespeicherten Stand. Ein Fehler verwirft das gesamte Update.
         Ausgelassene Punkte und Felder bleiben innerhalb eines Laufs erhalten; null/leer ist nicht ausgelassen.
         Bündele Statusänderungen am selben Meilenstein in einem Aufruf. Wiederhole keine unveränderten Pläne,
         Kriterien, Befunde oder Ankündigungen; eine einzelne belegte Korrektur mit Prüfung braucht keine ausführliche

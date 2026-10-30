@@ -192,6 +192,7 @@ public sealed partial class ResearchSandboxService(AssistantRuntimeProfile profi
         IReadOnlyList<string>? arguments = null,
         int timeoutSeconds = 7200,
         string? relativeWorkingDirectory = null,
+        ResearchExecutionProfile executionProfile = ResearchExecutionProfile.General,
         CancellationToken cancellationToken = default)
     {
         var layout = await EnsureProjectAsync(projectId, cancellationToken).ConfigureAwait(false);
@@ -206,7 +207,8 @@ public sealed partial class ResearchSandboxService(AssistantRuntimeProfile profi
         var containerName = "missum-research-" + runId;
         ResearchExecutionSnapshot snapshot;
         using var projectExecution = await AcquireProjectExecutionAsync(layout, cancellationToken).ConfigureAwait(false);
-        snapshot = await CaptureExecutionSnapshotAsync(layout, runId, script, token: cancellationToken).ConfigureAwait(false);
+        snapshot = await CaptureExecutionSnapshotAsync(layout, runId, script, executionProfile: executionProfile,
+            token: cancellationToken).ConfigureAwait(false);
         var scriptContainerPath = "/sandbox/work/" + Path.GetRelativePath(layout.WorkPath, script).Replace('\\', '/');
         var startInfo = new ProcessStartInfo("docker") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
         Add(startInfo, "run"); Add(startInfo, "--rm"); Add(startInfo, "--init"); Add(startInfo, "--name"); Add(startInfo, containerName);
@@ -318,7 +320,8 @@ public sealed partial class ResearchSandboxService(AssistantRuntimeProfile profi
             startedAt = started, completedAt = completed, result.ExitCode, result.TimedOut,
             result.Command, environment = RunnerImage, networkIsolation = "docker --network none",
             arguments = snapshot.Arguments, workingDirectory = snapshot.WorkingDirectory,
-            provenance = new { version = 1, mode = "current-project-tree", sourceHashes = snapshot.SourceHashes,
+            provenance = new { version = 1, mode = "current-project-tree", executionProfile = snapshot.ExecutionProfile.ToString(),
+                excludedDirectoryPattern = ExecutionExcludedDirectoryPattern(snapshot.ExecutionProfile), sourceHashes = snapshot.SourceHashes,
                 inputsSha256Before = snapshot.InputHashes, outputsSha256After = outputHashes },
             launcher = new { version = 1, sha256 = Hash(System.Text.Encoding.UTF8.GetBytes(PythonLauncher)),
                 projectImportRoots = new[] { "/sandbox/work", Path.GetDirectoryName(scriptContainerPath)?.Replace('\\', '/') } },
@@ -506,11 +509,14 @@ public sealed partial class ResearchSandboxService(AssistantRuntimeProfile profi
         IReadOnlyDictionary<string, string> SourceHashes, IReadOnlyDictionary<string, string> BeforeOutputHashes,
         IReadOnlyDictionary<string, DateTime> BeforeOutputTimes, bool ReadsMeasured = false,
         IReadOnlyList<string>? Arguments = null, string? WorkingDirectory = null,
-        IReadOnlyDictionary<string, string>? BaselineInputHashes = null);
+        IReadOnlyDictionary<string, string>? BaselineInputHashes = null,
+        ResearchExecutionProfile ExecutionProfile = ResearchExecutionProfile.General);
 
     internal static async Task<ResearchExecutionSnapshot> CaptureExecutionSnapshotAsync(ResearchSandboxLayout layout,
-        string runId, string script, long maximumBytes = MaximumProjectBytes, CancellationToken token = default)
+        string runId, string script, long maximumBytes = MaximumProjectBytes,
+        ResearchExecutionProfile executionProfile = ResearchExecutionProfile.General, CancellationToken token = default)
     {
+        if (!Enum.IsDefined(executionProfile)) throw new ArgumentOutOfRangeException(nameof(executionProfile));
         ValidateProjectId(runId);
         EnsureBelowRoot(script, layout.WorkPath);
         await ValidateExecutionCapacityAsync(layout, maximumBytes, token).ConfigureAwait(false);
@@ -520,7 +526,7 @@ public sealed partial class ResearchSandboxService(AssistantRuntimeProfile profi
         var beforeTimes = new Dictionary<string, DateTime>(StringComparer.Ordinal);
         foreach (var name in ExecutionInputRoots)
         {
-            foreach (var pair in await HashTreeAsync(Path.Combine(layout.RootPath, name), name, token).ConfigureAwait(false))
+            foreach (var pair in await HashTreeAsync(Path.Combine(layout.RootPath, name), name, executionProfile, token).ConfigureAwait(false))
             {
                 inputs.Add(pair.Key, pair.Value);
                 if (IsExecutionSource(pair.Key)) sourceHashes.Add(pair.Key, pair.Value);
@@ -539,7 +545,8 @@ public sealed partial class ResearchSandboxService(AssistantRuntimeProfile profi
             }
         var scriptPath = "work/" + Path.GetRelativePath(layout.WorkPath, script).Replace('\\', '/');
         sourceHashes[scriptPath] = inputs[scriptPath];
-        return new("current-" + runId, layout.WorkPath, scriptPath, inputs[scriptPath], inputs, sourceHashes, before, beforeTimes);
+        return new("current-" + runId, layout.WorkPath, scriptPath, inputs[scriptPath], inputs, sourceHashes, before, beforeTimes,
+            ExecutionProfile: executionProfile);
     }
 
     internal static async Task<IReadOnlyDictionary<string, string>> CompleteExecutionSnapshotAsync(ResearchSandboxLayout layout,
@@ -547,7 +554,7 @@ public sealed partial class ResearchSandboxService(AssistantRuntimeProfile profi
     {
         var after = new SortedDictionary<string, string>(StringComparer.Ordinal);
         foreach (var name in ExecutionInputRoots)
-            foreach (var pair in await HashTreeAsync(Path.Combine(layout.RootPath, name), name, token).ConfigureAwait(false))
+            foreach (var pair in await HashTreeAsync(Path.Combine(layout.RootPath, name), name, snapshot.ExecutionProfile, token).ConfigureAwait(false))
                 after.Add(pair.Key, pair.Value);
         foreach (var pair in snapshot.SourceHashes)
         {
@@ -587,7 +594,14 @@ public sealed partial class ResearchSandboxService(AssistantRuntimeProfile profi
         return changed;
     }
 
+    private static string? ExecutionExcludedDirectoryPattern(ResearchExecutionProfile executionProfile) =>
+        executionProfile == ResearchExecutionProfile.LeanProof ? "work/**/.lake/" : null;
+
     private static async Task<SortedDictionary<string, string>> HashTreeAsync(string root, string prefix, CancellationToken token)
+        => await HashTreeAsync(root, prefix, ResearchExecutionProfile.General, token).ConfigureAwait(false);
+
+    private static async Task<SortedDictionary<string, string>> HashTreeAsync(string root, string prefix,
+        ResearchExecutionProfile executionProfile, CancellationToken token)
     {
         var hashes = new SortedDictionary<string, string>(StringComparer.Ordinal);
         var pending = new Stack<string>(); pending.Push(root);
@@ -602,6 +616,11 @@ public sealed partial class ResearchSandboxService(AssistantRuntimeProfile profi
                 var relative = Path.GetRelativePath(root, path);
                 if (Directory.Exists(path))
                 {
+                    // The formal harness imports only provisioned /opt/mathlib, not project Lake
+                    // packages or build artifacts. Keep those unused trees out of its bounded
+                    // receipt; an unexpected Python read still fails BindExecutionReadTrace.
+                    if (executionProfile == ResearchExecutionProfile.LeanProof && prefix == "work"
+                        && Path.GetFileName(path).Equals(".lake", StringComparison.OrdinalIgnoreCase)) continue;
                     pending.Push(path); continue;
                 }
                 hashes.Add(prefix + "/" + relative.Replace('\\', '/'), await FileHashAsync(path, token).ConfigureAwait(false));

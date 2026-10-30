@@ -39,9 +39,11 @@ public sealed class DocumentContextPreparationTests
             131_072,
             "Erstelle mir eine Anleitung für XREF Vorlage");
 
-        Assert.InRange(maximumCharacters, 300_000, 330_000);
+        Assert.InRange(maximumCharacters, 260_000, 280_000);
         var estimatedEvidenceTokens = (maximumCharacters + 2) / 3;
         Assert.True(estimatedEvidenceTokens + 8_192 + 8_192 + 6_144 < 131_072);
+        Assert.True(estimatedEvidenceTokens + 8_192 + 6_144
+            < Missum.Ai.Contracts.ContextCompactionPolicy.InputTokenBudget(131_072));
     }
 
     [Theory]

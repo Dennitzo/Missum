@@ -11,10 +11,11 @@ namespace Missum.Ai.Server.Tests;
 public sealed class CodingPlanValidationTests
 {
     [Fact]
-    public void MissingCriterionStatusesNameEveryPathAndCorrectedCombinedCallCreatesBothLists()
+    public void MissingInitialCriterionStatusesDefaultToPendingWithoutRejectingTheCombinedPlan()
     {
         // Shape of the actual Science failure: ten complete steps, four criteria
-        // with id/title but no status. Neither list needs a separate tool call.
+        // with id/title but no status. Neither list needs a separate tool call
+        // or a corrective retry: omitted new statuses safely mean pending.
         var original = JsonSerializer.SerializeToNode(new
         {
             steps = Enumerable.Range(1, 10).Select(index => new
@@ -26,19 +27,8 @@ public sealed class CodingPlanValidationTests
         })!;
         var state = CodingWorkingState.Create("Bohmsche Mechanik prüfen.");
         var before = JsonSerializer.Serialize(state);
-        var error = Assert.Throws<ArgumentException>(() => CodingWorkingStateReducer.ApplyPlanUpdate(state, Args(original)));
-        for (var index = 0; index < 4; index++)
-        {
-            Assert.Contains($"acceptanceCriteria[{index}].status", error.Message, StringComparison.Ordinal);
-            Assert.DoesNotContain($"acceptanceCriteria[{index}].title", error.Message, StringComparison.Ordinal);
-        }
-        Assert.Contains("gemeinsam in einem Aufruf", error.Message, StringComparison.Ordinal);
-        Assert.Contains("Aufteilen ist nicht erforderlich", error.Message, StringComparison.Ordinal);
-        Assert.Contains("kein Feld wurde geändert", error.Message, StringComparison.Ordinal);
-        Assert.Equal(before, JsonSerializer.Serialize(state));
-
-        foreach (var criterion in original["acceptanceCriteria"]!.AsArray()) criterion!["status"] = "pending";
         var repaired = CodingWorkingStateReducer.ApplyPlanUpdate(state, Args(original));
+        Assert.Equal(before, JsonSerializer.Serialize(state));
         Assert.Equal(10, repaired.Plan.Count);
         Assert.Equal(4, repaired.AcceptanceCriteria.Count);
         Assert.All(repaired.AcceptanceCriteria, item => Assert.Equal("pending", item.Status));
@@ -58,7 +48,7 @@ public sealed class CodingPlanValidationTests
         var error = Assert.Throws<ArgumentException>(() => CodingWorkingStateReducer.ApplyPlanUpdate(state,
             Args(new Dictionary<string, object> { [section] = new[] { new { id = "a1" } } })));
         Assert.Contains($"{section}[0].title", error.Message, StringComparison.Ordinal);
-        Assert.Contains($"{section}[0].status", error.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain($"{section}[0].status", error.Message, StringComparison.Ordinal);
         Assert.Contains($"{section}: []", error.Message, StringComparison.Ordinal);
         Assert.Contains("anderen Liste", error.Message, StringComparison.Ordinal);
     }
@@ -85,12 +75,14 @@ public sealed class CodingPlanValidationTests
     [Fact]
     public void FullAndCompactPoliciesRequestCompleteHeadersAndJointLists()
     {
-        Assert.Contains("id, title und status", CodingAgentPolicy.WorkingStatePrompt, StringComparison.Ordinal);
+        Assert.Contains("id und title", CodingAgentPolicy.WorkingStatePrompt, StringComparison.Ordinal);
+        Assert.Contains("pending", CodingAgentPolicy.WorkingStatePrompt, StringComparison.Ordinal);
         Assert.Contains("gemeinsam in einem Aufruf", CodingAgentPolicy.WorkingStatePrompt, StringComparison.Ordinal);
         Assert.Contains("vollständigen geordneten Plan", CodingAgentPolicy.WorkingStatePrompt, StringComparison.Ordinal);
         var request = new RunRequest(MissumAiProtocol.Version, RunMode.Coding, [new("user", [new("text", "Research")])]);
         var compact = CompactAgentContextPolicy.Build(request, ["coding.updatePlan"]);
-        Assert.Contains("jeder übermittelte Punkt braucht id/title/status", compact, StringComparison.Ordinal);
+        Assert.Contains("id/title", compact, StringComparison.Ordinal);
+        Assert.Contains("pending", compact, StringComparison.Ordinal);
         Assert.Contains("steps und acceptanceCriteria gemeinsam", compact, StringComparison.Ordinal);
         Assert.Contains("vollständigen geordneten Plan", compact, StringComparison.Ordinal);
         var state = CodingWorkingStateReducer.ApplyPlanUpdate(CodingWorkingState.Create("Task"), Args(new
@@ -113,7 +105,9 @@ public sealed class CodingPlanValidationTests
         Assert.Equal("coding.read", Assert.Single(continued.Failures).Tool);
         Assert.Equal(state.Evidence, continued.Evidence);
         var messages = CodingSessionContext.Continue(checkpoint, [new("system", "Policy"), new("user", "Continue")]);
-        Assert.Contains(messages, message => message.Content?.Contains("pro übermitteltem Eintrag id, title und status", StringComparison.Ordinal) == true);
+        Assert.Contains(messages, message => message.Content is { } content
+            && content.Contains("pro übermitteltem Eintrag id und title", StringComparison.Ordinal)
+            && content.Contains("pending", StringComparison.Ordinal));
         Assert.DoesNotContain(messages, message => message.Content?.Contains("genügen Updates per id", StringComparison.Ordinal) == true);
     }
 

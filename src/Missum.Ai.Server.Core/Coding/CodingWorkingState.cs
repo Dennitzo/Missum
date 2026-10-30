@@ -85,7 +85,11 @@ public static class CodingWorkingStateReducer
         var historical = call.Name == "coding.readOutput" && Boolean(result, "historical");
         var evidence = new CodingToolEvidence(call.Id, call.Name, success, path, exit, summary, sequence, outputEvidenceId,
             sourceRunId, historical);
-        if (state.Science is not null) evidence = ScienceStagePolicy.BindReceipt(state, evidence, outer);
+        if (state.Science is not null)
+        {
+            evidence = ScienceStagePolicy.BindReceipt(state, evidence, outer);
+            if (success && !evidence.Success) { success = false; failed = true; }
+        }
         var files = state.ActiveFiles.ToList();
         var environment = state.EnvironmentFingerprint;
         var environmentChanged = false;
@@ -186,7 +190,8 @@ public static class CodingWorkingStateReducer
         if (missing.Count == 0) return;
         throw new ArgumentException("Fehlende Pflichtfelder für neue Planeinträge: " + string.Join(", ", missing) + ". "
             + "Diese IDs sind in der jeweiligen Liste dieses Laufs noch nicht gespeichert. "
-            + "title benötigt 1–400 Zeichen; status ist pending, in_progress oder completed (nur mit echten erfolgreichen evidenceIds). "
+            + "title benötigt 1–400 Zeichen. Ein ausgelassener status beginnt bei neuen Einträgen sicher mit pending; "
+            + "explizit erlaubt sind pending, in_progress oder completed (nur mit echten erfolgreichen evidenceIds). "
             + "steps und acceptanceCriteria können gemeinsam in einem Aufruf angelegt oder geändert werden. "
             + "Ergänze die genannten Felder und sende den korrigierten gemeinsamen Aufruf erneut; Aufteilen ist nicht erforderlich. "
             + $"Gespeicherte IDs in steps: {JsonSerializer.Serialize(state.Plan.Select(static entry => entry.Id))}; "
@@ -204,7 +209,6 @@ public static class CodingWorkingStateReducer
                 if (!existing.Any(previous => previous.Id == id))
                 {
                     if (!item.TryGetProperty("title", out _)) missing.Add($"{section}[{index}].title (ID {JsonSerializer.Serialize(id)})");
-                    if (!item.TryGetProperty("status", out _)) missing.Add($"{section}[{index}].status (ID {JsonSerializer.Serialize(id)})");
                 }
                 index++;
             }
@@ -222,7 +226,7 @@ public static class CodingWorkingStateReducer
             var previousIndex = items.FindIndex(previous => previous.Id == id);
             var previous = previousIndex >= 0 ? items[previousIndex] : null;
             var title = item.TryGetProperty("title", out _) || previous is null ? RequireText(item, "title", 400) : previous.Title;
-            var status = item.TryGetProperty("status", out _) || previous is null ? RequireText(item, "status", 20) : previous.Status;
+            var status = item.TryGetProperty("status", out _) ? RequireText(item, "status", 20) : previous?.Status ?? "pending";
             if (status is not ("pending" or "in_progress" or "completed") || !updatedIds.Add(id))
                 throw new ArgumentException("Planschritte benötigen eindeutige IDs und einen gültigen Status.");
             IReadOnlyList<string> evidence;

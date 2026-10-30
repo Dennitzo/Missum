@@ -65,8 +65,10 @@ public static class CompactAgentContextPolicy
         bekannte Leseziele; keine wiederholte Inventur. Öffentliche API-Fragen benötigen keine lokalen Prozesse.
         searchHistory/searchKnowledge betreffen nur diese Sitzung. renderHtml höchstens einmal pro Lauf.
         coding.updatePlan: wenige Etappen und unverkleinerte Akzeptanzkriterien, höchstens eine in_progress.
-        steps und acceptanceCriteria gemeinsam senden; jeder übermittelte Punkt braucht id/title/status.
-        Bestehende Titel unverändert übernehmen. IDs existieren erst nach erfolgreichem Speichern in diesem Lauf.
+        steps und acceptanceCriteria gemeinsam senden; jeder übermittelte Punkt braucht id/title.
+        Ohne status beginnen neue Einträge als pending; gespeicherte Statuswerte bleiben erhalten.
+        Bestehende Titel unverändert übernehmen. IDs gelten erst nach erfolgreichem Speichern im aktuellen Stand;
+        übernommene offene Science-Pläne derselben Sitzung behalten ihre IDs.
         Nur geänderte Punkte pro Meilenstein senden; ausgelassene Punkte bleiben erhalten, null/leer ist nicht
         ausgelassen. storedSteps/storedAcceptanceCriteria enthalten stets den vollständigen geordneten Plan;
         behalte auch erledigte Etappen in Planung und Darstellung. completed benötigt echte erfolgreiche Werkzeug-Id oder OutputEvidenceId, kein Plan-

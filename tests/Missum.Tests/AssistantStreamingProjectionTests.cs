@@ -10,6 +10,56 @@ namespace Missum.Tests;
 
 public sealed class AssistantStreamingProjectionTests
 {
+    [Fact]
+    public async Task InitialSciencePlanIsPublishedBeforeLaterToolUpdatesWithoutWaitingForHistoryHydration()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        var chats = environment.Get<IChatRepository>();
+        var snapshots = environment.Get<IConversationSnapshotRepository>();
+        var session = await chats.CreateSessionAsync("Früher Science-Plan", ChatMode.ClaudeScience);
+        var message = await chats.AddMessageAsync(session.Id, ChatRole.Assistant, "", MessageStatus.Streaming);
+        var at = DateTimeOffset.UtcNow;
+        var plan = new AssistantToolStep("initial-plan", "coding.updatePlan", "completed", OutputJson: """
+            {"success":true,
+             "storedSteps":[{"id":"inspect","title":"Relevanten Stand sichten","status":"in_progress"},
+                            {"id":"verify","title":"Gleichungen unabhängig prüfen","status":"pending"},
+                            {"id":"publish","title":"Ergebnis einarbeiten","status":"pending"}],
+             "storedAcceptanceCriteria":[{"id":"accuracy","title":"Genauigkeit nachvollziehbar belegen","status":"pending"}],
+             "scienceStages":[{"id":"inspect","question":"","strategy":"","detailsPending":true}],
+             "pendingScienceDetails":[{"id":"inspect","missingFields":["question","strategy"]}]}
+            """, UpdatedAt: at);
+        var coordinator = CreateCoordinator(environment, settings, snapshots, environment.Get<IChatArtifactRepository>());
+        var events = new List<string>();
+        JsonElement visiblePlan = default;
+
+        await coordinator.EmitMissumAiUpdateAsync(new(MissumAiAssistantUpdateKind.Status,
+            message with { ToolSteps = [plan] }, ToolStep: plan), async (type, payload, _) =>
+        {
+            events.Add(type);
+            if (type != "workingPlan.changed") return;
+            var dto = JsonSerializer.SerializeToElement(payload, JsonSerializerOptions.Web);
+            Assert.Equal(session.Id, dto.GetProperty("sessionId").GetGuid());
+            visiblePlan = dto.GetProperty("workingPlan");
+            Assert.Null(await snapshots.GetToolStepAsync(session.Id, message.Id, plan.Id));
+        }, "initial-science-plan");
+        var read = new AssistantToolStep("first-read", "coding.read", "running", InputJson: "{\"path\":\"Publikation.md\"}");
+        await coordinator.EmitMissumAiUpdateAsync(new(MissumAiAssistantUpdateKind.Status,
+            message with { ToolSteps = [plan, read] }, ToolStep: read), (type, _, _) =>
+        {
+            events.Add(type);
+            return Task.CompletedTask;
+        }, "first-science-read");
+
+        Assert.Equal(["workingPlan.changed", "status.changed", "status.changed"], events);
+        var displayed = NativeWorkingPlanProjection.Read(visiblePlan);
+        Assert.Equal(["inspect", "verify", "publish"], displayed.Steps.Select(step => step.Id));
+        Assert.Equal(["in_progress", "pending", "pending"], displayed.Steps.Select(step => step.Status));
+        Assert.Equal("Genauigkeit nachvollziehbar belegen", Assert.Single(displayed.AcceptanceCriteria).Title);
+        Assert.Equal(plan.Id, visiblePlan.GetProperty("stepId").GetString());
+    }
+
     [Theory]
     [InlineData(MissumAiAssistantUpdateKind.Delta)]
     [InlineData(MissumAiAssistantUpdateKind.Status)]
