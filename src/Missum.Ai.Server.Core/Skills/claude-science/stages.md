@@ -1,6 +1,11 @@
 # Etappen und Lösungswechsel
 
-Vor Werkzeugarbeit kurz erklären, welche konkrete Etappe jetzt folgt. Nach einem belegten Zwischenergebnis
+Zum Laufstart zuerst genau einen kurzen, auftragsbezogenen deutschen Einleitungssatz als normale AI-Nachricht
+ausgeben: Thema, Ziel und erster geplanter Arbeitsschritt, bevor du die fachliche Lösung vertiefst.
+Den ersten Modellturn direkt nach diesem Satz beenden, ohne Arbeitsplan oder Werkzeugaufruf.
+Erst im nächsten Modellturn den Arbeitsplan mit coding.updatePlan speichern oder bestätigen.
+Die Einleitung allein beendet weder den Auftrag noch ersetzt sie den Plan.
+Vor weiterer Werkzeugarbeit kurz erklären, welche konkrete Etappe jetzt folgt. Nach einem belegten Zwischenergebnis
 den Fortschritt in gut vorlesbaren deutschen Sätzen erklären. Keine pauschale generische Startankündigung.
 Aufgaben, Zielgenauigkeit, Voraussetzungen, Einheiten und Abhängigkeiten explizit klären.
 Ein Gesamtplan beschreibt die Richtung, nicht die vollständige Lösung aller späteren Probleme.

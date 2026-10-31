@@ -468,6 +468,16 @@ public sealed partial class RunProcessor : BackgroundService
         var sciencePlanInitialized = checkpoint.SciencePlanInitialized && workingState?.Plan.Count > 0;
         if (!sciencePlanInitialized && ScienceInitialPlanGuard.Applies(request) && workingState?.Plan.Count > 0)
             sciencePlanInitialized = await _repository.HasSuccessfulInitialSciencePlanAsync(runId, cancellationToken).ConfigureAwait(false);
+        var scienceIntroductionPublished = checkpoint.ScienceIntroductionPublished || sciencePlanInitialized;
+        if (!scienceIntroductionPublished && ScienceInitialPlanGuard.Applies(request) && streamingTurnStartEventId is null)
+        {
+            // A Stop can persist visible introduction text before its checkpoint flag.
+            // Only this run's journal counts; inherited assistant messages do not.
+            var startupText = CodingTextReconciler.Project(
+                await _repository.GetVisibleTextEventsAsync(runId, 0, cancellationToken).ConfigureAwait(false));
+            scienceIntroductionPublished = !string.IsNullOrWhiteSpace(startupText);
+            if (scienceIntroductionPublished) visibleTextLength = startupText.Length;
+        }
         if (specializedAgent is null && request.Subagent is null && request.SpecializedAgent is { } configuredAgent)
         {
             var definition = _specializedAgents.Resolve(configuredAgent.ProfileId).Definition;
@@ -700,8 +710,8 @@ public sealed partial class RunProcessor : BackgroundService
                     try
                     {
                         if (ScienceInitialPlanGuard.Applies(request) && !sciencePlanInitialized && pendingProposalId is null
-                            && (activeCalls.Length - nextToolIndex != 1 || call.Name != CodingWorkingStateTools.PlanTool))
-                            throw new ArgumentException("Vor fachlichen Werkzeugen muss dieser Science-Lauf zuerst einen gültigen Arbeitsplan bestätigen. "
+                            && (!scienceIntroductionPublished || activeCalls.Length - nextToolIndex != 1 || call.Name != CodingWorkingStateTools.PlanTool))
+                            throw new ArgumentException("Dieser Science-Lauf benötigt zuerst einen sichtbaren Einleitungssatz und danach einen gültigen Arbeitsplan. "
                                 + "Sende genau einen coding.updatePlan-Aufruf mit nichtleeren steps; dieser Aufruf wurde nicht ausgeführt.");
                         // Return a recoverable tool receipt instead of aborting the entire run.
                         // A pending client operation must still be collected exactly once.
@@ -986,17 +996,22 @@ public sealed partial class RunProcessor : BackgroundService
                     await SaveCheckpointAsync().ConfigureAwait(false);
                 }
             }
+            var initialSciencePlanRequired = ScienceInitialPlanGuard.Applies(request) && !sciencePlanInitialized;
+            var initialScienceIntroductionRequired = initialSciencePlanRequired && !scienceIntroductionPublished;
+            if (initialScienceIntroductionRequired) selectedToolName = null;
             // Historical-session preparation is an internal summary, just like
             // rolling compaction. Do not inherit the main model's (possibly
             // maximum) thinking default while rephrasing established history.
-            string? ResolveTurnReasoningEffort() => request.ConversationProfile == ConversationProfile.ContextPreparation
+            string? ResolveTurnReasoningEffort() => initialScienceIntroductionRequired
+                || request.ConversationProfile == ConversationProfile.ContextPreparation
                 ? _modelRuntime.ResolveCompactionReasoningEffort(selection.ModelId, selection.Role)
                 : _modelRuntime.ResolveReasoningEffort(selection.ModelId, selection.Role, request.ReasoningEffort);
             var effort = ResolveTurnReasoningEffort();
-            var initialSciencePlanRequired = ScienceInitialPlanGuard.Applies(request) && !sciencePlanInitialized;
             if (initialSciencePlanRequired)
             {
-                var instruction = ScienceInitialPlanGuard.Instruction(runId, workingState);
+                var instruction = initialScienceIntroductionRequired
+                    ? ScienceInitialPlanGuard.IntroductionInstruction(runId, workingState)
+                    : ScienceInitialPlanGuard.Instruction(runId, workingState);
                 if (!ScienceInitialPlanGuard.HasInstruction(messages, instruction)) messages.Add(new("system", instruction));
             }
             var selectableTools = initialSciencePlanRequired || compactContext || useStableSubagentToolCatalog ? availableTools.ToArray() : budgetSummary ? [] : isCoding
@@ -1009,7 +1024,8 @@ public sealed partial class RunProcessor : BackgroundService
             // the model context; the client receives phase transitions only.
             // Early delegation is ordinary scientific work: its introduction must
             // stream like other tool turns. Only the internal selector is prose-free.
-            var suppressRequiredToolTurn = selectedToolName is not null || initialSciencePlanRequired;
+            var suppressRequiredToolTurn = selectedToolName is not null
+                || initialSciencePlanRequired && !initialScienceIntroductionRequired;
             var liveTextGate = new IncrementalVisibleTextGate(enabled: !suppressRequiredToolTurn);
             CodingTextReconciler? codingText = null;
             var reasoningActivity = new ReasoningActivityTransport();
@@ -1305,12 +1321,14 @@ public sealed partial class RunProcessor : BackgroundService
                                 modelTools,
                                 request.SessionId ?? runId,
                                 request.Subagent?.ParentSessionId,
-                                maximumOutputTokens,
+                                initialScienceIntroductionRequired ? Math.Min(maximumOutputTokens ?? 256, 256) : maximumOutputTokens,
                                 modelRole: selection.Role,
                                 reasoningEffort: effort,
                                 cancellationToken: steeringCall.Token,
-                                requireToolCall: selectedToolName is not null || initialSciencePlanRequired,
-                                requiredToolName: initialSciencePlanRequired ? CodingWorkingStateTools.PlanTool : selectedToolName,
+                                requireToolCall: selectedToolName is not null || initialSciencePlanRequired && !initialScienceIntroductionRequired,
+                                requiredToolName: initialSciencePlanRequired && !initialScienceIntroductionRequired ? CodingWorkingStateTools.PlanTool : selectedToolName,
+                                suppressToolCalls: initialScienceIntroductionRequired,
+                                deferSuppressedToolCallValidation: initialScienceIntroductionRequired,
                                 requiredContextLength: contextLength,
                                 sessionCacheKey: !isCoding && string.IsNullOrWhiteSpace(request.SessionId) ? null
                                     : BuildRunSessionCacheKey(request, runId, selection.Role),
@@ -1453,6 +1471,15 @@ public sealed partial class RunProcessor : BackgroundService
             }
 
             if (await _repository.IsTerminalStateAsync(runId, cancellationToken).ConfigureAwait(false)) return;
+            if (initialScienceIntroductionRequired && interruptedContent.Length == 0
+                && !liveTextGate.HasStreamed && !string.IsNullOrWhiteSpace(response.Content))
+            {
+                // Non-streaming providers must publish the same ordinary assistant text.
+                foreach (var part in SplitDeltas(response.Content))
+                    if (liveTextGate.Push(part) is { Length: > 0 } delta)
+                        await PublishVisibleDeltaAsync(codingText is null ? new TextDeltaEvent(delta)
+                            : codingText.Push(delta), cancellationToken).ConfigureAwait(false);
+            }
             var remainingLiveDelta = liveTextGate.Flush();
             if (!string.IsNullOrEmpty(remainingLiveDelta))
             {
@@ -1506,6 +1533,40 @@ public sealed partial class RunProcessor : BackgroundService
                     ReasoningContent: response.ReasoningContent));
                 await SaveCheckpointAsync().ConfigureAwait(false);
                 throw new AgentRunLimitException(codingBudget.FailureMessage(roundCount, toolCallCount));
+            }
+            if (initialScienceIntroductionRequired)
+            {
+                scienceIntroductionPublished = visibleTextLength > generationVisibleStart;
+                messages.Add(new("assistant", response.Content, ToolCalls: response.ToolCalls.Count > 0 ? response.ToolCalls : null,
+                    ReasoningContent: response.ReasoningContent));
+                // Even a provider that ignores tool_choice=none cannot create the plan
+                // in this turn. The introduction is a separate, durable assistant turn.
+                foreach (var rejected in response.ToolCalls)
+                    messages.Add(new("tool", ScienceInitialPlanGuard.Rejection(workingState, introductionRequired: true), ToolCallId: rejected.Id));
+                if (!scienceIntroductionPublished || response.ToolCalls.Count > 0)
+                {
+                    if (response.ToolCalls.Count > 0) invalidToolTurnCount++;
+                    if (!scienceIntroductionPublished && response.ToolCalls.Count == 0)
+                    {
+                        emptyResponseRetryCount++;
+                        if (emptyResponseRetryCount > MaximumEmptyResponseRetries)
+                        {
+                            await SaveCheckpointAsync().ConfigureAwait(false);
+                            throw new ModelEmptyResponseException(response.HadReasoning, emptyResponseRetryCount);
+                        }
+                    }
+                    await _repository.AppendEventAsync(runId, RunEventTypes.ModelGeneration,
+                        new ModelGenerationEvent(response.ToolCalls.Count > 0 ? "toolRejected" : "responseRecovery",
+                            FailureKind: ScienceInitialPlanGuard.IntroductionErrorCode,
+                            Message: "Der Einleitungssatz wird in einem eigenen werkzeugfreien Modellturn vor dem Arbeitsplan ausgegeben."), cancellationToken).ConfigureAwait(false);
+                }
+                else emptyResponseRetryCount = 0;
+                var nextInstruction = scienceIntroductionPublished
+                    ? ScienceInitialPlanGuard.Instruction(runId, workingState)
+                    : ScienceInitialPlanGuard.IntroductionInstruction(runId, workingState);
+                if (!ScienceInitialPlanGuard.HasInstruction(messages, nextInstruction)) messages.Add(new("system", nextInstruction));
+                await SaveCheckpointAsync().ConfigureAwait(false);
+                continue;
             }
             if (initialSciencePlanRequired && !ScienceInitialPlanGuard.IsPlanOnly(response.ToolCalls))
             {
@@ -1755,7 +1816,8 @@ public sealed partial class RunProcessor : BackgroundService
                 UseStableSubagentToolCatalog: useStableSubagentToolCatalog,
                 ResearchManagedByAgent: researchManagedByAgent,
                 ContextProfileVersion: contextProfileVersion, ToolCatalogSignature: toolCatalogSignature,
-                ContextTools: contextTools, SpecializedAgent: specializedAgent, SciencePlanInitialized: sciencePlanInitialized),
+                ContextTools: contextTools, SpecializedAgent: specializedAgent, SciencePlanInitialized: sciencePlanInitialized,
+                ScienceIntroductionPublished: scienceIntroductionPublished),
             cancellationToken);
 
         async Task CompactWorkingContextAsync(CodingCompactionPlan compaction, int loadedContextLength,

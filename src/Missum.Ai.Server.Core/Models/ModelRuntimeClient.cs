@@ -351,6 +351,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
         bool compactAtThreshold = false,
         bool residentOnly = false,
         bool suppressToolCalls = false,
+        bool deferSuppressedToolCallValidation = false,
         CancellationToken cancellationToken = default)
     {
         if (suppressToolCalls && (requireToolCall || requiredToolName is { Length: > 0 }))
@@ -452,7 +453,9 @@ public sealed partial class ModelRuntimeClient : IDisposable
                 cancellationToken,
                 inferenceDispatched: () => inferenceIncomplete = true, compactAtThreshold: compactAtThreshold).ConfigureAwait(false);
             inferenceIncomplete = false;
-            if (suppressToolCalls && result.ToolCalls.Count > 0)
+            // Ordinary controllers can retain the exact response for a recoverable
+            // non-execution receipt. Private reviewers keep strict validation.
+            if (suppressToolCalls && !deferSuppressedToolCallValidation && result.ToolCalls.Count > 0)
                 throw new InvalidOperationException("specialized_agent.unexpected_tool_call: Das Modell hat während der werkzeugfreien Prüfung einen Werkzeugaufruf ausgegeben.");
             if (nativeProgress is not null)
             {
