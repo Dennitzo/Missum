@@ -109,7 +109,7 @@ public sealed partial class NativeAssistantPage
             _parentComposerDraft = _parentComposerPlaceholder = null;
         }
         var projectedChildren = Items(snapshot, "subagents").ToArray();
-        PlanetIdentities.EnsureAssigned(projectedChildren.Where(child => S(child, "kind") != "deepResearch")
+        PlanetIdentities.EnsureAssigned(projectedChildren
             .Select(child => S(child, "agentId", S(child, "runId")))
             .Where(id => id.Length > 0));
         foreach (var child in projectedChildren) ObserveSubagentSnapshot(child);
@@ -229,11 +229,11 @@ public sealed partial class NativeAssistantPage
 
     private NativeSubagentState CreateSubagentTab(string agentId, Guid owner, bool research = false)
     {
-        var planetIndex = research ? -1 : PlanetIdentities.GetOrAssign(agentId);
+        var planetIndex = PlanetIdentities.GetOrAssign(agentId);
         var label = new TextBlock { Text = research ? "Deep Research" : "Subagent", FontSize = 13, MaxWidth = 184,
             TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center };
         var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 7, VerticalAlignment = VerticalAlignment.Center };
-        row.Children.Add(research ? CreateTabIcon("\uE721", 13) : SubagentIcon(agentId, 13, planetIndex)); row.Children.Add(label);
+        row.Children.Add(SubagentIcon(agentId, 13, planetIndex)); row.Children.Add(label);
         var select = TabButton(); select.Content = row; select.Height = 30; select.Padding = new(10, 0, 5, 0);
         var close = TabButton(); close.Content = CreateTabIcon("\uE711", 11);
         close.Width = close.Height = 24; close.Margin = new(0, 0, 3, 0); close.VerticalAlignment = VerticalAlignment.Center;
@@ -497,7 +497,7 @@ public sealed partial class NativeAssistantPage
         _subagentSummaryButton.Click += (_, _) => OpenSubagentOverview();
     }
 
-    private NativeSubagentState[] SessionSubagents() => _subagents.Values.Where(child => child.SessionId == _session && !child.IsDeepResearch)
+    private NativeSubagentState[] SessionSubagents() => _subagents.Values.Where(child => child.SessionId == _session)
         .OrderByDescending(child => child.CreatedAt ?? DateTimeOffset.MinValue)
         .ThenByDescending(child => child.ObservationOrder).ToArray();
 

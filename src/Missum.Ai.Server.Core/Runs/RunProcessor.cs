@@ -432,6 +432,7 @@ public sealed partial class RunProcessor : BackgroundService
         var contextTools = compactContext || useStableSubagentToolCatalog ? checkpoint.ContextTools?.ToArray()
             ?? CreateModelToolDefinitions(availableTools, null, directTools: true, contextProfileVersion) : null;
         var toolCatalogSignature = checkpoint.ToolCatalogSignature;
+        var lastModelTools = checkpoint.LastModelTools;
         var roundCount = checkpoint.RoundCount;
         var toolCallCount = checkpoint.ToolCallCount;
         var inputTokens = checkpoint.InputTokens;
@@ -549,7 +550,8 @@ public sealed partial class RunProcessor : BackgroundService
                         : await ExecuteCodingDeepResearchAsync(runId, researchOperationId, arguments,
                         selection.ModelId, selection.Role, contextLength, CodingDeepResearchPipeline.MaximumModelCalls,
                         CodingDeepResearchPipeline.MaximumToolCalls, effectiveTools, request.ReasoningEffort,
-                        schedulerLeaseAlreadyHeld: true, parentMessages: messages, cancellationToken: cancellationToken)
+                        schedulerLeaseAlreadyHeld: true, parentMessages: messages,
+                        parentTools: lastModelTools ?? contextTools, cancellationToken: cancellationToken)
                         .ConfigureAwait(false);
                     var payload = advanced.Result.Result;
                     explicitResearchResult = payload;
@@ -846,7 +848,9 @@ public sealed partial class RunProcessor : BackgroundService
                             var research = await ExecuteCodingDeepResearchAsync(runId, operationId, call.Arguments, selection.ModelId,
                                 selection.Role, contextLength, CodingRunBudget.Remaining(maximumModelRounds, roundCount + 1), CodingRunBudget.Remaining(maximumToolCalls, toolCallCount),
                                 effectiveTools, request.ReasoningEffort, runtimeInstanceId: request.Subagent?.RuntimeInstanceId,
-                                parentMessages: messages, cancellationToken: cancellationToken).ConfigureAwait(false);
+                                parentMessages: messages,
+                                parentTools: lastModelTools ?? contextTools ?? CreateModelToolDefinitions(effectiveTools, selectedToolName, isCoding || useStableSubagentToolCatalog),
+                                cancellationToken: cancellationToken).ConfigureAwait(false);
                             roundCount += research.ModelCalls;
                             toolCallCount += research.ToolCalls;
                             inputTokens += research.InputTokens;
@@ -1307,6 +1311,7 @@ public sealed partial class RunProcessor : BackgroundService
                     // Persist the exact evaluated prefix before inference. Stop may
                     // otherwise leave only the pre-tokenization prompt behind.
                     messages = lastNativePrompt.ToList();
+                    lastModelTools = modelTools;
                     preserveSessionPromptPrefix = true;
                     workingStatePromptIncluded = workingState is not null;
                     await SaveCheckpointAsync().ConfigureAwait(false);
@@ -1817,7 +1822,7 @@ public sealed partial class RunProcessor : BackgroundService
                 ResearchManagedByAgent: researchManagedByAgent,
                 ContextProfileVersion: contextProfileVersion, ToolCatalogSignature: toolCatalogSignature,
                 ContextTools: contextTools, SpecializedAgent: specializedAgent, SciencePlanInitialized: sciencePlanInitialized,
-                ScienceIntroductionPublished: scienceIntroductionPublished),
+                ScienceIntroductionPublished: scienceIntroductionPublished, LastModelTools: lastModelTools),
             cancellationToken);
 
         async Task CompactWorkingContextAsync(CodingCompactionPlan compaction, int loadedContextLength,
@@ -2337,7 +2342,8 @@ public sealed partial class RunProcessor : BackgroundService
         int contextLength,
         string? runtimeInstanceId,
         CancellationToken cancellationToken,
-        Func<ModelGenerationEvent, CancellationToken, Task>? observedProgress = null)
+        Func<ModelGenerationEvent, CancellationToken, Task>? observedProgress = null,
+        ResearchModelSession? sharedSession = null)
     {
         var stage = request.RequiredToolName switch
         {
@@ -2376,19 +2382,32 @@ public sealed partial class RunProcessor : BackgroundService
         await using var steeringCall = _repository.WatchSteering(runId, cancellationToken);
         try
         {
-        return await _modelRuntime.CompleteChatAsync(
+        var modelMessages = sharedSession?.Conversation.CreateRequest(request) ?? request.Messages;
+        if (sharedSession is not null && ContextPlanner.EstimateTokens(modelMessages)
+            > ContextPlanner.ComputeInputTokenBudget(contextLength, request.MaximumOutputTokens))
+            throw new CodingDeepResearchPipeline.ResearchBudgetException("Hauptkontext und Recherche überschreiten das verfügbare Kontextbudget; die Recherche wird mit ihrem bisherigen Stand zurückgegeben.");
+        var response = await _modelRuntime.CompleteChatWithCacheOwnershipAsync(
             request.ModelId,
-            request.Messages,
-            request.Tools,
+            modelMessages,
+            sharedSession?.Conversation.Tools ?? request.Tools,
+            sharedSession?.OwnerId,
+            sharedSession?.ParentOwnerId,
             request.MaximumOutputTokens,
             modelRole: request.ModelRole,
             reasoningEffort: requestedReasoningEffort,
-            requireToolCall: request.RequireToolCall,
-            requiredToolName: request.RequiredToolName,
+            requireToolCall: sharedSession is null && request.RequireToolCall,
+            requiredToolName: sharedSession is null ? request.RequiredToolName : null,
+            suppressToolCalls: sharedSession is not null,
+            deferSuppressedToolCallValidation: sharedSession is not null,
+            deferSessionCacheCheckpoint: sharedSession is not null,
+            responseSchema: sharedSession is null ? null
+                : request.Tools.Single(tool => tool.Name == request.RequiredToolName).Parameters,
+            sessionCacheKey: sharedSession?.CacheKey,
             requiredContextLength: contextLength,
             nativeProgress: Progress,
             runtimeInstanceId: runtimeInstanceId,
             cancellationToken: steeringCall.Token).ConfigureAwait(false);
+        return sharedSession?.Conversation.AcceptResponse(request, response) ?? response;
         }
         catch (OperationCanceledException) when (steeringCall.SteeringRequested && !cancellationToken.IsCancellationRequested)
         {
@@ -2399,8 +2418,23 @@ public sealed partial class RunProcessor : BackgroundService
     private async Task<CodingDeepResearchExecution> ExecuteCodingDeepResearchCoreAsync(
         string runId, string parentOperationId, DeepResearchProgressReporter observedResearch, JsonElement arguments, string modelId, string modelRole, int contextLength, int remainingModelCalls,
         int remainingToolCalls, IReadOnlyList<AgentToolSpec> effectiveTools, string? reasoningEffort,
-        bool schedulerLeaseAlreadyHeld = false, string? runtimeInstanceId = null, CancellationToken cancellationToken = default)
+        bool schedulerLeaseAlreadyHeld = false, string? runtimeInstanceId = null,
+        IReadOnlyList<LmChatMessage>? parentMessages = null, IReadOnlyList<LmToolDefinition>? parentTools = null,
+        CancellationToken cancellationToken = default)
     {
+        var owningRequest = await _repository.GetRequestAsync(runId, cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("Der Hauptauftrag der Recherche fehlt.");
+        var parentCheckpoint = await _repository.GetCheckpointAsync(runId, cancellationToken).ConfigureAwait(false);
+        var conversation = new ResearchConversationContext(
+            parentMessages ?? parentCheckpoint?.Messages
+                ?? CreateInitialMessages(owningRequest, modelRole, effectiveTools.Select(static tool => tool.Name).ToArray()),
+            parentTools ?? parentCheckpoint?.LastModelTools ?? parentCheckpoint?.ContextTools
+                ?? CreateModelToolDefinitions(effectiveTools, parentCheckpoint?.SelectedToolName,
+                    directTools: owningRequest.Mode == RunMode.Coding));
+        var sharedSession = new ResearchModelSession(conversation,
+            owningRequest.Mode != RunMode.Coding && string.IsNullOrWhiteSpace(owningRequest.SessionId) ? null
+                : BuildRunSessionCacheKey(owningRequest, runId, modelRole),
+            owningRequest.SessionId ?? runId, owningRequest.Subagent?.ParentSessionId);
         var researchTask = arguments.GetProperty("task").GetString()!;
         var autonomyName = arguments.TryGetProperty("autonomyLevel", out var autonomyValue) ? autonomyValue.GetString() : null;
         var researchOptions = new DeepResearchOptions(
@@ -2466,17 +2500,17 @@ public sealed partial class RunProcessor : BackgroundService
                     if (schedulerLeaseAlreadyHeld)
                     {
                         await PrepareResearchModelAsync(token).ConfigureAwait(false);
-                        return await ExecuteStagedWebResearchModelAsync(runId, request, reasoningEffort, contextLength, runtimeInstanceId, token, observedResearch.ModelAsync).ConfigureAwait(false);
+                        return await ExecuteStagedWebResearchModelAsync(runId, request, reasoningEffort, contextLength, runtimeInstanceId, token, observedResearch.ModelAsync, sharedSession).ConfigureAwait(false);
                     }
                     await using var lease = await _scheduler.AcquireAsync("coding-deep-research", runId,
                         runtimeInstanceId?.EndsWith("@subagent", StringComparison.Ordinal) == true
                             ? GpuLeaseMode.CodingSecondary : GpuLeaseMode.Shared, token).ConfigureAwait(false);
                     await PrepareResearchModelAsync(token).ConfigureAwait(false);
                     // The pipeline's cancellation budget and the common model deadline remain authoritative.
-                    return await ExecuteStagedWebResearchModelAsync(runId, request, reasoningEffort, contextLength, runtimeInstanceId, token, observedResearch.ModelAsync).ConfigureAwait(false);
+                    return await ExecuteStagedWebResearchModelAsync(runId, request, reasoningEffort, contextLength, runtimeInstanceId, token, observedResearch.ModelAsync, sharedSession).ConfigureAwait(false);
                 },
                 (call, token) => ExecuteStagedWebResearchToolAsync(runId, call, effectiveTools,
-                    CreateServerToolOperationId(runId, parentOperationId, 0, researchToolOrdinal++, call.Id), token),
+                    CreateServerToolOperationId(runId, parentOperationId, 0, researchToolOrdinal++, call.Id), token, parentOperationId),
                 _toolCatalog.Validate,
                 async (progress, token) =>
                 {
@@ -2518,7 +2552,8 @@ public sealed partial class RunProcessor : BackgroundService
         LmToolCall call,
         IReadOnlyList<AgentToolSpec> effectiveTools,
         string operationId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? parentOperationId = null)
     {
         var tool = _toolCatalog.Resolve(call.Name, effectiveTools);
         _toolCatalog.Validate(tool, call.Arguments);
@@ -2531,7 +2566,7 @@ public sealed partial class RunProcessor : BackgroundService
         if (!await _repository.TryJournalToolDispatchAsync(
             runId,
             RunEventTypes.ServerToolStarted,
-            new { tool = call.Name, toolCallId = operationId, callId = operationId, target, arguments = call.Arguments },
+            new { tool = call.Name, toolCallId = operationId, callId = operationId, parentOperationId, target, arguments = call.Arguments },
             cancellationToken).ConfigureAwait(false)) throw new RunSteeringBoundaryException();
         var result = await _toolExecutor.ExecuteAsync(
             call.Name,
@@ -2554,6 +2589,7 @@ public sealed partial class RunProcessor : BackgroundService
                 tool = call.Name,
                 toolCallId = operationId,
                 callId = operationId,
+                parentOperationId,
                 target,
                 success = result.Succeeded,
                 errorCode = result.ErrorCode,

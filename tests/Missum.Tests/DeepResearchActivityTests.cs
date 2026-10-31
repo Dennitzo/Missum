@@ -17,9 +17,11 @@ public sealed class DeepResearchActivityTests
     private static readonly string[] ReportUncertainties = ["Weitere Messung erforderlich."];
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task GatewayProgressCreatesARealReloadableActivityForDirectGeneralAndNestedResearch(bool nested)
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task GatewayProgressCreatesARealReloadableActivityForDirectGeneralAndNestedResearch(bool nested, bool explicitOwnership)
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var chats = environment.Get<IChatRepository>();
@@ -31,7 +33,7 @@ public sealed class DeepResearchActivityTests
         await settings.InitializeAsync();
         var requested = new List<string>();
         using var connection = new MissumAiConnectionService(settings, NullLogger<MissumAiConnectionService>.Instance,
-            () => new ActivityGatewayHandler(nested, session.Id, requested));
+            () => new ActivityGatewayHandler(nested, session.Id, requested, explicitOwnership));
         var broker = new LocalToolBroker(connection, documents, null!, chats);
         using var microphone = new MicrophoneTranscriptionService(connection, settings, NullLogger<MicrophoneTranscriptionService>.Instance);
         var recent = new RecentActivityService(settings, new ShellViewModel(), NullLogger<RecentActivityService>.Instance);
@@ -58,6 +60,10 @@ public sealed class DeepResearchActivityTests
         Assert.Equal(nested ? "nested-research" : "server-general-research-view-fixture", activity.OriginToolStepId);
         Assert.Equal(nested ? Assert.Single(states, state => state.Kind == "subagent").AssistantMessage.Id : parent.Id, activity.OriginMessageId);
         Assert.Contains("Der Befund ist eingeschränkt bestätigt.", activity.AssistantMessage.Content);
+        Assert.DoesNotContain(parent.ToolSteps ?? [], step => step.Tool is "web.search" or "web.fetch");
+        Assert.All(states.Where(state => state.Kind == "subagent"), state =>
+            Assert.DoesNotContain(state.AssistantMessage.ToolSteps ?? [], step => step.Tool is "web.search" or "web.fetch"));
+        Assert.Contains(activity.AssistantMessage.ToolSteps!, step => step.Tool == "web.fetch");
         Assert.DoesNotContain(requested, path => path.Contains("deep-research-run:", StringComparison.Ordinal));
         var emitted = observations.Where(state => state.GetProperty("kind").GetString() == "deepResearch").ToArray();
         Assert.True(emitted.Length >= 3);
@@ -66,7 +72,7 @@ public sealed class DeepResearchActivityTests
         {
             Assert.False(state.GetProperty("canStop").GetBoolean());
             Assert.False(state.GetProperty("canResume").GetBoolean());
-            Assert.Equal(JsonValueKind.Null, state.GetProperty("planetIndex").ValueKind);
+            Assert.True(state.GetProperty("planetIndex").GetInt32() >= 0);
         });
         Assert.Equal("running", emitted[0].GetProperty("status").GetString());
         Assert.Equal("completed", emitted[^1].GetProperty("status").GetString());
@@ -82,6 +88,27 @@ public sealed class DeepResearchActivityTests
             Assert.DoesNotContain("deep-research:", historyText);
             Assert.DoesNotContain("Der Befund ist eingeschränkt bestätigt.", historyText);
         }
+    }
+
+    [Theory]
+    [InlineData("web.search")]
+    [InlineData("web.fetch")]
+    public void ResearchOwnershipSuppressesOnlyInternalToolEnvelopesAndSurvivesReconnect(string tool)
+    {
+        var parent = Parent();
+        var activity = SubagentChatState.CreateDeepResearch(parent, "owner-run", "operation", "Recherche", At);
+        var started = new DeepResearchProgressEvent("operation", "owner-run", 1, "operation", "running", "Deep Research");
+        activity = activity.ApplyDeepResearchProgress(Event(1, "owner-run", started), started);
+        RunEvent Tool(string run, string name, string? owner = null) => new(2, run, RunEventTypes.ServerToolStarted,
+            At.AddSeconds(2), JsonSerializer.SerializeToElement(new { tool = name, parentOperationId = owner }, Json));
+
+        Assert.True(MissumAiAssistantService.IsDeepResearchInternalToolEvent(Tool("owner-run", tool), [activity]));
+        Assert.True(MissumAiAssistantService.IsDeepResearchInternalToolEvent(Tool("owner-run", tool, "operation"), []));
+        Assert.False(MissumAiAssistantService.IsDeepResearchInternalToolEvent(Tool("other-run", tool), [activity]));
+        Assert.False(MissumAiAssistantService.IsDeepResearchInternalToolEvent(Tool("owner-run", "web.deepResearch", "operation"), [activity]));
+        Assert.False(MissumAiAssistantService.IsDeepResearchInternalToolEvent(Tool("owner-run", tool), []));
+        var completed = activity.CompleteDeepResearch(new(3, "owner-run", RunEventTypes.DeepResearchProgress, At.AddSeconds(3), default), Result(), "completed");
+        Assert.False(MissumAiAssistantService.IsDeepResearchInternalToolEvent(Tool("owner-run", tool) with { Id = 4 }, [completed]));
     }
 
     [Fact]
@@ -288,7 +315,7 @@ public sealed class DeepResearchActivityTests
         sources = new[] { new { id = "source-1", title = "Originalquelle", url = "https://example.org/paper" } },
     }, Json);
 
-    private sealed class ActivityGatewayHandler(bool nested, Guid session, List<string> requests) : HttpMessageHandler
+    private sealed class ActivityGatewayHandler(bool nested, Guid session, List<string> requests, bool explicitOwnership) : HttpMessageHandler
     {
         private const string ParentRun = "run-research-view-fixture";
         private const string ChildRun = "run-real-child-fixture";
@@ -324,6 +351,12 @@ public sealed class DeepResearchActivityTests
                 Inner(RunEventTypes.DeepResearchProgress, new DeepResearchProgressEvent(operation, ownerRun, 10, "operation", "running", "Deep Research", Detail: "Prüfe Quellen."));
                 Inner(RunEventTypes.DeepResearchProgress, new DeepResearchProgressEvent(operation, ownerRun, 11, "model", "running", "Recherche planen",
                     StepId: "model-1", ModelProgress: new ModelGenerationEvent("tokenProgress", PromptTokens: 1000, GeneratedTokens: 32, CurrentTokens: 1032)));
+                Inner(RunEventTypes.ServerToolStarted, new { tool = "web.fetch", callId = "internal-fetch",
+                    parentOperationId = explicitOwnership ? operation : null,
+                    arguments = new { url = "https://example.org/paper" } });
+                Inner(RunEventTypes.ServerToolCompleted, new { tool = "web.fetch", callId = "internal-fetch", success = true,
+                    parentOperationId = explicitOwnership ? operation : null,
+                    result = new { text = "Interner Rechercheauszug, nicht Teil der Hauptantwort." } });
                 Inner(RunEventTypes.DeepResearchProgress, new DeepResearchProgressEvent(operation, ownerRun, 12, "fetch", "completed", "Originalquelle gelesen",
                     StepId: "fetch-1", Tool: "web.fetch", Url: "https://example.org/paper"));
                 Inner(RunEventTypes.DeepResearchProgress, new DeepResearchProgressEvent(operation, ownerRun, 13, "operation", "completed", "Deep Research", Result: Result()));

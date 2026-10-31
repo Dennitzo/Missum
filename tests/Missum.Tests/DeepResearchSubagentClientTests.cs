@@ -18,7 +18,7 @@ public sealed class DeepResearchSubagentClientTests
     [Theory]
     [InlineData(0)]
     [InlineData(1)]
-    public async Task HistoricalResearchChildRemainsReloadableWithoutSubagentControlsOrPlanet(int gpuIndex)
+    public async Task HistoricalResearchChildRemainsReloadableWithStablePlanetAndWithoutIndependentRunControls(int gpuIndex)
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var chats = environment.Get<IChatRepository>();
@@ -66,7 +66,7 @@ public sealed class DeepResearchSubagentClientTests
             Assert.Equal(child.AgentId, snapshot.GetProperty("agentId").GetString());
             Assert.False(snapshot.GetProperty("canStop").GetBoolean());
             Assert.False(snapshot.GetProperty("canResume").GetBoolean());
-            Assert.Equal(JsonValueKind.Null, snapshot.GetProperty("planetIndex").ValueKind);
+            Assert.True(snapshot.GetProperty("planetIndex").GetInt32() >= 0);
             Assert.Equal(gpuIndex, snapshot.GetProperty("gpuIndex").GetInt32());
         });
         var liveThinking = observations.Where(snapshot => snapshot.GetProperty("status").GetString() == "running")
@@ -89,7 +89,7 @@ public sealed class DeepResearchSubagentClientTests
         Assert.Equal(child.AgentId, reloaded.GetProperty("agentId").GetString());
         Assert.Equal("research-operation", reloaded.GetProperty("originToolStepId").GetString());
         Assert.False(reloaded.GetProperty("canResume").GetBoolean());
-        Assert.Equal(JsonValueKind.Null, reloaded.GetProperty("planetIndex").ValueKind);
+        Assert.Equal(observations[0].GetProperty("planetIndex").GetInt32(), reloaded.GetProperty("planetIndex").GetInt32());
     }
 
     [Fact]

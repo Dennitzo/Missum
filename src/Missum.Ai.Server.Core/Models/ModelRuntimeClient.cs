@@ -352,6 +352,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
         bool residentOnly = false,
         bool suppressToolCalls = false,
         bool deferSuppressedToolCallValidation = false,
+        bool deferSessionCacheCheckpoint = false,
         CancellationToken cancellationToken = default)
     {
         if (suppressToolCalls && (requireToolCall || requiredToolName is { Length: > 0 }))
@@ -481,7 +482,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
             // are batched at idle turn boundaries; an answer ending a run is forced.
             if (!string.IsNullOrEmpty(sessionCacheKey))
                 await UpdateSessionCacheAsync("save", preparation.InstanceId, sessionCacheKey,
-                    forceSave: result.ToolCalls.Count == 0,
+                    forceSave: !deferSessionCacheCheckpoint && result.ToolCalls.Count == 0,
                     newTokens: Math.Max(0, result.Metrics?.PromptEvaluatedTokens ?? 0) + Math.Max(0, result.OutputTokens),
                     cancellationToken: cancellationToken).ConfigureAwait(false);
             return result with { Metrics = (result.Metrics ?? new ModelTurnMetrics()) with

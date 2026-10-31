@@ -157,6 +157,22 @@ Umfangsgrenzen. Planung, Suche, Lesen und Auswertung senden Fortschritt, und der
 Lauf bleibt abbrechbar. Der äußere Agent erhält das Rechercheergebnis als
 Werkzeugantwort und kann anschließend mit der Projektarbeit fortfahren.
 
+Deep Research übernimmt den vollständigen aktuellen Sitzungsverlauf und die
+zuletzt tatsächlich verwendeten Werkzeugdefinitionen des Hauptagenten. Alle
+Recherchephasen laufen nacheinander auf derselben Modellinstanz mit derselben
+Sitzungs- und KV-Cache-Identität. Phasenergebnisse werden als strukturierter Text
+erzeugt, damit wechselnde interne Recherchewerkzeuge das ausgewertete
+Promptpräfix nicht ersetzen. Die Recherche ergänzt nur einen vorübergehenden
+Gesprächsabschnitt; der Hauptlauf erhält anschließend die echte Werkzeugantwort.
+Wiederverwendet wird der tatsächlich identische Tokenpräfix, nicht ein unabhängig
+veränderter Cache. Zwischenphasen erzwingen keine vollständigen KV-Snapshots.
+
+Im Hauptchat steht nur der übergeordnete Deep-Research-Schritt. Einzelne
+Rechercheaktionen, Quellenabrufe und Phasenergebnisse stehen im schließbaren
+Deep-Research-Tab. Seitenleiste und Subagentenübersicht führen die Recherche als
+Aktivität mit Planetenicon auf; sie benötigt weiterhin keinen zusätzlichen
+Subagentenprozess oder Modellspeicher.
+
 Coding und General verwenden denselben Chatheader „AI Assistent“ ohne Modellangaben.
 Die Coding-Ansicht zeigt den Workspace im Promptfenster sowie aufklappbare Werkzeugschritte
 mit Eingaben, tatsächlichem Ergebnis und Status. Dateiänderungen erscheinen als

@@ -987,7 +987,7 @@ internal static partial class CodingDeepResearchPipeline
         },
         required = RequiredVerificationFields, additionalProperties = false,
     }, Json);
-    private sealed class ResearchBudgetException(string message) : Exception(message);
+    internal sealed class ResearchBudgetException(string message) : Exception(message);
     private sealed record ResearchQuestion(string Id, string Question, string Query);
     private sealed record ResearchEvidence(string Id, string Title, string Url, string Content, IReadOnlyList<string> Windows);
     private sealed record ResearchExcerpt(string Id, string SourceId, string Quote);

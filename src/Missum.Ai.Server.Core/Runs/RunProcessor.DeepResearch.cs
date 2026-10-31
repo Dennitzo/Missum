@@ -10,6 +10,9 @@ namespace Missum.Ai.Server.Core.Runs;
 
 public sealed partial class RunProcessor
 {
+    private sealed record ResearchModelSession(ResearchConversationContext Conversation, string? CacheKey,
+        string OwnerId, string? ParentOwnerId);
+
     internal static void AppendExplicitDeepResearchReceipt(List<LmChatMessage> messages, LmToolCall call, JsonElement result)
     {
         if (messages.Any(message => message.Role == "tool" && message.ToolCallId == call.Id)) return;
@@ -41,7 +44,8 @@ public sealed partial class RunProcessor
         string runId, string parentOperationId, JsonElement arguments, string modelId, string modelRole, int contextLength,
         int remainingModelCalls, int remainingToolCalls, IReadOnlyList<AgentToolSpec> effectiveTools, string? reasoningEffort,
         bool schedulerLeaseAlreadyHeld = false, string? runtimeInstanceId = null,
-        IReadOnlyList<LmChatMessage>? parentMessages = null, CancellationToken cancellationToken = default)
+        IReadOnlyList<LmChatMessage>? parentMessages = null, IReadOnlyList<LmToolDefinition>? parentTools = null,
+        CancellationToken cancellationToken = default)
     {
         // One durable tool operation on the owning run. Its model calls use the
         // existing instance sequentially; no child run, model replica or GPU1
@@ -55,7 +59,7 @@ public sealed partial class RunProcessor
         {
             var completed = await ExecuteCodingDeepResearchCoreAsync(runId, parentOperationId, observed, arguments,
                 modelId, modelRole, contextLength, remainingModelCalls, remainingToolCalls, effectiveTools, reasoningEffort,
-                schedulerLeaseAlreadyHeld, runtimeInstanceId, steering.Token).ConfigureAwait(false);
+                schedulerLeaseAlreadyHeld, runtimeInstanceId, parentMessages, parentTools, steering.Token).ConfigureAwait(false);
             await observed.FinishAsync(completed.Result.Succeeded ? "completed" : "failed", completed.Result.ErrorMessage,
                 FormatDeepResearchReport(completed.Result.Result), completed.Result.ErrorCode, completed.Result.Result,
                 cancellationToken).ConfigureAwait(false);

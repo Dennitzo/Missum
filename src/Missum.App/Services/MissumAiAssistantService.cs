@@ -2104,6 +2104,11 @@ public sealed partial class MissumAiAssistantService(
                             if (!isScienceRun) await PersistSubagentResearchProgressAsync(localRun, item, childState, cancellationToken).ConfigureAwait(false);
                             if (isScienceRun) sciencePresentation?.Queue($"research-{localRun.SessionId:N}");
                         }
+                        // Deep Research owns its internal transcript. The accompanying
+                        // operation-scoped progress events populate that tab; replaying
+                        // its server-tool envelopes here would duplicate them in the
+                        // delegating subagent's chat as well.
+                        if (IsDeepResearchInternalToolEvent(childItem, subagentStates.Values)) break;
                         var appliedChild = childState.Apply(childItem);
                         if (childItem.Type == RunEventTypes.DeepResearchProgress)
                         {
@@ -2316,6 +2321,7 @@ public sealed partial class MissumAiAssistantService(
                         }
                         break;
                     case RunEventTypes.ServerToolStarted:
+                        if (IsDeepResearchInternalToolEvent(item, subagentStates.Values)) break;
                         var startedServerStepId = StringProperty(item.Data, "callId") ?? StringProperty(item.Data, "toolCallId")
                             ?? ContinuationFallbackToolStepId(item.RunId, item.Id);
                         activeServerStepId = startedServerStepId;
@@ -2335,6 +2341,7 @@ public sealed partial class MissumAiAssistantService(
                             Model: model)).ConfigureAwait(false);
                         break;
                     case RunEventTypes.ServerToolCompleted:
+                        if (IsDeepResearchInternalToolEvent(item, subagentStates.Values)) break;
                         var serverToolName = StringProperty(item.Data, "tool") ?? "web.search";
                         var serverStepId = StringProperty(item.Data, "callId") ?? StringProperty(item.Data, "toolCallId")
                             ?? assistant.ToolSteps?.LastOrDefault(step => step.Tool == serverToolName && step.Status == "running")?.Id
