@@ -34,7 +34,7 @@ public sealed partial class MissumAiAssistantService
             + "Verwende mathematischen Fließtext mit LaTeX statt Lean-Syntax, Taktiken oder bloß umformatiertem Quellcode. "
             + "Verweise knapp auf die separate Lean-Datei und das tatsächliche Prüfergebnis; bleibe exakt bei der geprüften Aussage und ihren Voraussetzungen. "
             + "Der aktive Science-Skill steuert Etappen und die zur Aussage passenden Prüfmethoden. "
-            + "Verwendete Quellen und verfügbare Originaldokumente unter Quellen/ speichern und Herkunft sowie verwendete Stellen festhalten. "
+            + "Belegquellen und verfügbare Originaldokumente im vorhandenen Projektordner inputs/ speichern und wiederverwenden; keinen zusätzlichen Quellen-Ordner anlegen. Herkunft sowie verwendete Stellen festhalten. "
             + "Forschungsziel, Herleitung, tatsächliche Prüfung und offene Grenzen klar trennen; eine erfolgreiche Ausführung beweist keine fachliche Richtigkeit."
             + localPdfTool;
     }

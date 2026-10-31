@@ -7,6 +7,7 @@ import io
 import json
 import os
 import re
+import subprocess
 import threading
 import time
 import unicodedata
@@ -231,6 +232,21 @@ def _synthesize_supertonic_cancellable(
         if index < len(waveforms) - 1:
             output.append(silence)
     return np.concatenate(output, axis=1)
+
+
+def _retime_supertonic_audio(audio, sample_rate: int, speed_ratio: float) -> np.ndarray:
+    """Honor protocol rates below the SDK's 0.7 minimum without lowering pitch."""
+    waveform = np.asarray(audio, dtype="<f4").reshape(-1)
+    completed = subprocess.run(
+        ["ffmpeg", "-v", "error", "-f", "f32le", "-ar", str(sample_rate),
+         "-ac", "1", "-i", "pipe:0", "-af", f"atempo={speed_ratio:.12g}",
+         "-f", "f32le", "pipe:1"],
+        input=waveform.tobytes(), capture_output=True, check=True, timeout=60,
+    )
+    adjusted = np.frombuffer(completed.stdout, dtype="<f4").copy()
+    if not adjusted.size or not np.isfinite(adjusted).all():
+        raise RuntimeError("Supertonic tempo adjustment returned invalid audio")
+    return adjusted.reshape(1, -1)
 
 
 def _supertonic_processed_length(text: str, text_processor) -> int:
@@ -576,15 +592,22 @@ class ModelRegistry:
                 raise InterruptedError("Supertonic synthesis was cancelled")
             model, voice_style = self._load_tts_on_owner_thread()
             normalized_text = _normalize_supertonic_text(text, model.model.text_processor)
+            # The public protocol accepts 0.5; the pinned Supertonic SDK accepts
+            # 0.7–2.0. Synthesize within its range, then honor the remaining ratio.
+            provider_speed = min(2.0, max(0.7, speed))
             audio = _synthesize_supertonic_cancellable(
                 model,
                 voice_style,
                 normalized_text,
-                min(2.0, max(0.7, speed)),
+                provider_speed,
                 cancel_event,
             )
             if cancel_event is not None and cancel_event.is_set():
                 raise InterruptedError("Supertonic synthesis was cancelled")
+            if speed < provider_speed:
+                audio = _retime_supertonic_audio(audio, int(model.sample_rate), speed / provider_speed)
+                if cancel_event is not None and cancel_event.is_set():
+                    raise InterruptedError("Supertonic synthesis was cancelled")
             return audio, int(model.sample_rate)
 
         return TTS_EXECUTOR.submit(synthesize_on_owner_thread).result(timeout=900)
@@ -1077,17 +1100,27 @@ def _synthesize_paragraph_parts(
     timings: list[dict] = []
     sample_rate: int | None = None
     sample_cursor = 0
-    for part in parts:
+    for index, part in enumerate(parts):
+        if cancel_event.is_set():
+            raise InterruptedError("Supertonic synthesis was cancelled")
         waveform, part_sample_rate = _synthesize_supertonic(
             part.text,
-            1.0,
+            part.speed,
             cancel_event,
         )
+        if cancel_event.is_set():
+            raise InterruptedError("Supertonic synthesis was cancelled")
         if sample_rate is None:
             sample_rate = int(part_sample_rate)
         elif sample_rate != int(part_sample_rate):
             raise RuntimeError("TTS changed sample rate inside a paragraph")
 
+        # Explicit pauses belong to the exported PCM, not just client playback.
+        # Keep speech timing ranges separate from that silence for highlighting.
+        before_samples = round(sample_rate * part.pauseBeforeMilliseconds / 1000)
+        if before_samples:
+            waveforms.append(np.zeros(before_samples, dtype=np.float32))
+            sample_cursor += before_samples
         start_seconds = sample_cursor / sample_rate
         sample_cursor += int(waveform.size)
         timings.append(
@@ -1098,7 +1131,14 @@ def _synthesize_paragraph_parts(
             }
         )
         waveforms.append(waveform)
-        if part is not parts[-1]:
+        after_samples = round(sample_rate * part.pauseAfterMilliseconds / 1000)
+        if after_samples:
+            waveforms.append(np.zeros(after_samples, dtype=np.float32))
+            sample_cursor += after_samples
+        # Preserve the existing technical gap only when no explicit boundary
+        # pause was requested; do not silently lengthen configured pauses.
+        if (index + 1 < len(parts) and not part.pauseAfterMilliseconds
+                and not parts[index + 1].pauseBeforeMilliseconds):
             technical_pause = np.zeros(int(sample_rate * 0.02), dtype=np.float32)
             waveforms.append(technical_pause)
             sample_cursor += technical_pause.size
@@ -1117,7 +1157,12 @@ def _synthesize_paragraph(request: SpeechParagraphRequest) -> dict:
         parts = _paragraph_parts(request)
         provider = session.provider
         try:
-            if request.forceSegmentSynthesis:
+            if request.forceSegmentSynthesis or any(
+                part.speed != request.speed
+                or part.pauseBeforeMilliseconds
+                or part.pauseAfterMilliseconds
+                for part in parts
+            ):
                 audio, sample_rate, timings = _synthesize_paragraph_parts(
                     parts,
                     session.cancel_event,
@@ -1125,7 +1170,7 @@ def _synthesize_paragraph(request: SpeechParagraphRequest) -> dict:
             else:
                 audio, sample_rate = _synthesize_supertonic(
                     request.text,
-                    1.0,
+                    request.speed,
                     session.cancel_event,
                 )
                 timings = []

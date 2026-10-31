@@ -10,10 +10,13 @@ public static class ScienceSkill
 {
     public const string Profile = "claude-science-v1";
     internal const string Marker = "MISSUM_SCIENCE_SKILL_V1\n";
-    private static readonly Dictionary<string, string> Modules = new[] { "SKILL", "stages", "verification", "publication" }
+    internal const string ResearchStandardMarker = "MISSUM_SCIENCE_SKILL_MODULE_V1:research-standard-v2\n";
+    private static readonly Dictionary<string, string> Modules = new[] { "SKILL", "stages", "verification", "publication", "research-standard" }
         .ToDictionary(name => name, name => Read(name));
     public static bool Enabled(RunRequest request) => request.WorkflowProfile == Profile;
-    internal static string Instructions => Marker + Modules["SKILL"] + "\n\n" + Modules["stages"];
+    internal static string Instructions => Marker + Modules["SKILL"] + "\n\n" + Modules["stages"]
+        + "\n\n" + ResearchStandardInstructions;
+    private static string ResearchStandardInstructions => ResearchStandardMarker + Modules["research-standard"];
     private static string Read(string name)
     {
         var assembly = typeof(ScienceSkill).Assembly;
@@ -62,6 +65,15 @@ public static class ScienceSkill
         // messages, so unchanged guidance is not appended again on every turn.
         return message.Role == "user" && message.Content?.StartsWith(nativePrefix, StringComparison.Ordinal) == true
             ? message.Content[nativePrefix.Length..] : null;
+    }
+
+    internal static void EnsureResearchStandard(List<LmChatMessage> messages)
+    {
+        ArgumentNullException.ThrowIfNull(messages);
+        // Called only while assembling a new run. Append an absent module after
+        // evaluated history; never rewrite its pinned policy or native KV prefix.
+        if (messages.Any(message => InstructionContent(message)?.Contains(ResearchStandardMarker, StringComparison.Ordinal) == true)) return;
+        messages.Add(new("system", ResearchStandardInstructions));
     }
 
     internal static AgentToolSpec DescribePlanTool(AgentToolSpec tool)

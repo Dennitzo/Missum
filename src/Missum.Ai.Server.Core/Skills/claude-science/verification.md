@@ -1,16 +1,20 @@
 # Wissenschaftliche Prüfung
 
 Definitionen/Literaturbefunde mit tatsächlich gelesenen Originalstellen prüfen; vorhandene passende Quellen nutzen.
-Websuche oder Deep Research nur für konkrete Wissens- und Beleglücken. Suche über den vorhandenen SearXNG-Dienst.
-Ein Suchtreffer allein belegt keine gelesene Quelle. Reine Eigenherleitungen brauchen keine künstliche Websuche.
-Algebraische/analytische Aussagen nachvollziehbar herleiten und unabhängig gegenprüfen, gegebenenfalls symbolisch.
-Für tragende sinnvoll formalisierbare Sätze Lean nutzen, wenn es die relevante Aussage absichert.
+Für mathematische und physikalische Forschung fachliche Belege standardmäßig über Websuche oder Deep Research
+beschaffen; passende vorhandene Originalquellen wiederverwenden. Suche über den vorhandenen SearXNG-Dienst.
+Ein Suchtreffer allein belegt keine gelesene Quelle; Quellenvergleich ersetzt keinen eigenen Beweis.
+Neue algebraische/analytische Rechenschritte nach dem Ausarbeiten nochmals unabhängig nachrechnen:
+Vorzeichen, Faktoren, Einheiten, Voraussetzungen und Grenzfälle prüfen, gegebenenfalls symbolisch.
+Tragende formalisierbare Aussagen als mathematischen Beweis und als tatsächlich geprüften Lean-Beweis
+anfertigen; Aussage, Voraussetzungen und Reichweite müssen übereinstimmen.
 Keine triviale Ersatzidentität, kein gewünschtes Ergebnis als Annahme. Satz und Voraussetzungen genau benennen.
 Nur math.formalProof mit KernelAccepted und bestandenem axiomAudit ist ein formaler Nachweis.
 Nutze eine deklarative theorem/lemma-Datei mit vollständigem Beweis. Missums Prüfprofil erlaubt keine
 #-Zeichen, auch nicht in Kommentarüberschriften: keine #check/#eval/#print-Direktiven ergänzen.
 Lean bestätigt die formalisierte Aussage, weder Naturmodell noch Messdaten. Nicht ohne Beleg formale Prüfung behaupten.
-Numerik: unabhängiger Vergleich, Einheiten, Grenzfälle, Zielgenauigkeit und bei Bedarf Konvergenz.
+Numerisch prüfbare Ergebnisse durch tatsächlich ausgeführte Python-Skripte unabhängig gegenprüfen:
+analytischer Vergleich, Einheiten, Grenzfälle, Zielgenauigkeit und bei Bedarf Konvergenz.
 Für numeric zählen passende erfolgreiche math.numeric/math.evaluate-Aufrufe oder ausgeführte Rechenskripte;
 math.symbolic dient als symbolische Gegenprüfung für analytic. Eine Dateibearbeitung allein ist kein
 analytischer Nachweis. Für publication den Bezug zur tatsächlich gelesenen oder bearbeiteten Publikation

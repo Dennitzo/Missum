@@ -43,6 +43,7 @@ internal static class CodingSessionContext
             + "storedSteps und storedAcceptanceCriteria der Bestätigung enthalten immer den vollständigen geordneten Plan einschließlich erledigter Etappen; nutze diese Gesamtfassung weiter. "
             + "Historische Befunde und Belege bleiben verfügbar. "
             + "Dies beschreibt den Speicherzustand und ändert den folgenden Nutzerauftrag nicht."));
+        if (science) ScienceSkill.EnsureResearchStandard(result);
         result.Add(initial.Last(message => message.Role == "user" && !ContextPlanner.IsRuntimeContext(message)
             && !ContextPlanner.IsNativeRuntimeInstruction(message)));
         return result;

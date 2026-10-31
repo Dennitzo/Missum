@@ -56,7 +56,7 @@ Run completion includes optional `scientificOutcome`. Open work adds a visible
 partial-completion note to the ordinary assistant message; it does not force a
 reasoning/retry loop. Publication.md remains the directly edited project document
 with the existing numbering/TOC/layout, readable mathematical proofs, contextual
-plots and `Literatur und Daten`. Used sources belong under `Quellen/`; missing
+plots and `Literatur und Daten`. Used sources belong in the existing `inputs/` directory; do not create a separate sources folder. Missing
 access or downloads must be reported, not invented.
 
 Tests remain separate from `windows/build.ps1`. Live acceptance uses the existing

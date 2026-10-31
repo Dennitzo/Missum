@@ -19,7 +19,8 @@ Absolute Anzeigeorte aus Werkzeugantworten nicht als Argumentpfade übernehmen.
 Orientiere dich am Gesamtplan; vertiefe im Reasoning die aktuelle Leitfrage und parke spätere unabhängige Fragen.
 Missum kontrolliert keine Gedanken, sondern Planübergänge und tatsächliche Nachweise.
 
-Wähle Prüfmethoden nach Aussageart. Keine Pflichtkette aus Websuche, Lean und Python.
+Für mathematische und physikalische Forschung den beigefügten Forschungsstandard automatisch anwenden.
+Bei anderen Aufgaben Prüfmethoden nach Aussageart wählen.
 Ausdrückliche Nutzeranforderungen bleiben Pflicht; bilde jede ausdrücklich verlangte Prüfung als required=true ab.
 Fehlende Prüfungen niemals stillschweigend abwählen oder durch eine leichtere Aussage ersetzen.
 Eine Widerlegung ist ein mögliches geklärtes Ergebnis. Eine offene Frage ist kein Erfolg.
