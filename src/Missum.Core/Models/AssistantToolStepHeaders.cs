@@ -70,6 +70,7 @@ public static class AssistantToolStepHeaders
             return count == 1 ? OneLine(first, 100) : count.ToString(CultureInfo.CurrentCulture) + " Forschungsobjekte";
         }
         if (tool == "research.read") return "Hypothesen, offene Prüfungen und Publikationsstand";
+        if (tool == "web.deepResearch") return OneLine(Text(input, "task"), 100);
         if (tool is "subagent" or "subagent.spawn" or "subagent.wait")
             return OneLine(Text(output, "title", Text(input, "title", Text(input, "task"))), 80);
 

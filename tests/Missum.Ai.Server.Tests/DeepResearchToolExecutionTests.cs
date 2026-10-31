@@ -52,9 +52,11 @@ public sealed class DeepResearchToolExecutionTests
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task ResearchReusesTheOwningSessionCacheAndExactMainPrefixAcrossAllPhases(bool coding)
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task ResearchReusesTheOwningSessionCacheAndExactMainPrefixAcrossAllPhases(bool coding, bool restored)
     {
         using var context = new TestServerContext();
         using var handler = new ResearchHandler();
@@ -78,9 +80,12 @@ public sealed class DeepResearchToolExecutionTests
             JsonSerializer.SerializeToElement(new { task = "Prüfe die Vorzeichenkonvention.", profile = "web" }));
         var parentMessages = prefix.Append(new LmChatMessage("assistant", ToolCalls: [pending])).ToArray();
         var before = JsonSerializer.Serialize(parentMessages);
+        if (restored)
+            await repository.SaveCheckpointAsync(parent.RunId, new(parentMessages, 1, 0, 100, 20,
+                ActiveToolCalls: [pending], LastModelTools: definitions));
         var result = await provider.GetRequiredService<RunProcessor>().ExecuteCodingDeepResearchAsync(parent.RunId,
             "owned-operation", pending.Arguments, Model, role, 32768, 24, 27, tools, null,
-            parentMessages: parentMessages, parentTools: definitions);
+            parentMessages: restored ? null : parentMessages, parentTools: restored ? null : definitions);
         Assert.True(result.Result.Succeeded, result.Result.Result.GetRawText());
         Assert.Equal(before, JsonSerializer.Serialize(parentMessages));
         _ = await runtime.CompleteChatWithCacheOwnershipAsync(Model,
@@ -109,6 +114,11 @@ public sealed class DeepResearchToolExecutionTests
         var synthesisBody = handler.ChatBodies[2];
         Assert.Equal("none", planBody.GetProperty("tool_choice").GetString());
         Assert.Equal("none", synthesisBody.GetProperty("tool_choice").GetString());
+        // The real DeepSeek PEG parser rejects bare JSON with response_format
+        // and retained tools. Our handler reproduces its unterminated SSE result.
+        Assert.False(planBody.TryGetProperty("response_format", out _));
+        Assert.False(synthesisBody.TryGetProperty("response_format", out _));
+        Assert.Equal(0, handler.NativeGrammarConflicts);
         var planMessages = planBody.GetProperty("messages").EnumerateArray().ToArray();
         var synthesisMessages = synthesisBody.GetProperty("messages").EnumerateArray().ToArray();
         for (var i = 0; i < planMessages.Length; i++) Assert.True(JsonElement.DeepEquals(planMessages[i], synthesisMessages[i]));
@@ -176,6 +186,7 @@ public sealed class DeepResearchToolExecutionTests
         public List<string?> Models { get; } = [];
         public List<JsonElement> ChatBodies { get; } = [];
         public List<JsonElement> CacheBodies { get; } = [];
+        public int NativeGrammarConflicts { get; private set; }
         public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -201,10 +212,20 @@ public sealed class DeepResearchToolExecutionTests
             if (HoldModel)
                 try { await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken); }
                 catch (OperationCanceledException) { Cancelled = true; throw; }
-            var isResearch = body.RootElement.TryGetProperty("response_format", out var format);
+            if (body.RootElement.TryGetProperty("response_format", out _))
+            {
+                NativeGrammarConflicts++;
+                // Native DeepSeek emits content but never a finish event when
+                // its response_format PEG parser cannot consume bare JSON.
+                return new(HttpStatusCode.OK) { Content = new StringContent(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"{\\\"questions\\\":[]}\"}}]}\n\n",
+                    Encoding.UTF8, "text/event-stream") };
+            }
+            var phaseInstruction = body.RootElement.GetProperty("messages").EnumerateArray().Last().GetProperty("content").GetString() ?? "";
+            var isResearch = body.RootElement.TryGetProperty("tool_choice", out var choice) && choice.GetString() == "none";
             if (!isResearch)
                 return Json(new { choices = new[] { new { message = new { role = "assistant", content = "Hauptantwort." }, finish_reason = "stop" } } });
-            var isPlan = format.GetProperty("json_schema").GetProperty("schema").GetProperty("properties").TryGetProperty("questions", out _);
+            var isPlan = phaseInstruction.Contains("JSON-Objekt für research.plan", StringComparison.Ordinal);
             object arguments = isPlan
                 ? new { questions = Array.Empty<object>(), sourceLimit = 0 }
                 : new { summary = FullReport, findings = Array.Empty<object>(), uncertainties = new[] { "Keine Originalquelle gelesen; Frage bleibt offen." } };

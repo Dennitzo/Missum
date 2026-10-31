@@ -130,6 +130,8 @@ public sealed partial record SubagentChatState
                     if (Text(document.RootElement, name) is { Length: > 0 } task) return task;
             }
             catch (JsonException) { }
+        if (step.DetailsDeferred && step.DisplayHeader is { Version: AssistantToolStepHeaders.CurrentVersion, Summary.Length: > 0 } header)
+            return header.Summary;
         return step.Explanation ?? step.Detail;
     }
 

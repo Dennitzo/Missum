@@ -94,9 +94,17 @@ public sealed partial class NativeAssistantPage
             ShowParentConversation(); ShowChatView(); RenderMessagesNow();
             Inspector.Visibility = Visibility.Visible; UpdateLayout();
             var step = (ToolStepView)_messageBlocks[parentId]["tool:research-one"];
-            if (Descendants(step).OfType<Missum.App.Controls.NativeSubagentAvatar>().Any()
-                || !Descendants(step).OfType<TextBlock>().Any(text => text.Text.StartsWith("Deep Research", StringComparison.Ordinal)))
-                throw new InvalidOperationException("Deep Research besitzt keinen normalen Werkzeugkopf ohne Planeten.");
+            if (Descendants(step).OfType<Missum.App.Controls.NativeSubagentAvatar>().SingleOrDefault() is not { } headerPlanet
+                || headerPlanet.Variant != _subagents[researchId].PlanetIndex
+                || !step.HeaderTitle.StartsWith("Deep Research · Erste Recherche", StringComparison.Ordinal))
+                throw new InvalidOperationException("Deep Research verwendet im Chat nicht den Titel und Planeten der Subagentenübersicht.");
+            var renamed = _subagents[researchId].Snapshot.Deserialize<Dictionary<string, JsonElement>>(JsonOptions)!;
+            renamed["title"] = JsonSerializer.SerializeToElement("Quellen gezielt vergleichen");
+            renamed["projectionRevision"] = JsonSerializer.SerializeToElement(2);
+            ObserveSubagentSnapshot(JsonSerializer.SerializeToElement(renamed)); RenderSubagentOverlay();
+            if (!step.HeaderTitle.StartsWith("Deep Research · Quellen gezielt vergleichen", StringComparison.Ordinal)
+                || headerPlanet.Variant != _subagents[researchId].PlanetIndex)
+                throw new InvalidOperationException("Nachgeladene Recherche-Titel aktualisieren den vorhandenen Werkzeugkopf nicht.");
             var headerButton = Descendants(step).OfType<Button>().First();
             if (new ButtonAutomationPeer(headerButton).GetPattern(PatternInterface.Invoke) is not IInvokeProvider invoke)
                 throw new InvalidOperationException("Der Deep-Research-Werkzeugschritt besitzt keine zugängliche Tabnavigation.");
@@ -168,8 +176,9 @@ public sealed partial class NativeAssistantPage
                 throw new InvalidOperationException("Die Recherche eines echten Subagenten wird nicht anhand der ursprünglichen Child-Nachricht geöffnet.");
             ShowParentConversation();
             if (_messageBlocks[parentId]["tool:research-legacy"] is not ToolStepView legacyHeader
-                || Descendants(legacyHeader).OfType<Missum.App.Controls.NativeSubagentAvatar>().Any())
-                throw new InvalidOperationException("Der historische Recherche-Werkzeugkopf zeigt weiterhin einen Subagenten-Planeten.");
+                || Descendants(legacyHeader).OfType<Missum.App.Controls.NativeSubagentAvatar>().SingleOrDefault()?.Variant != _subagents[legacyResearchId].PlanetIndex
+                || !legacyHeader.HeaderTitle.StartsWith("Deep Research · Historische Recherche", StringComparison.Ordinal))
+                throw new InvalidOperationException("Der historische Recherche-Werkzeugkopf besitzt nicht den Titel und Planeten seiner Recherche.");
             await OpenDeepResearchTabAsync(parentId, "research-legacy");
             if (_activeSubagentId != legacyResearchId || ActiveSubagent?.IsLegacyDeepResearch != true
                 || !Composer.PlaceholderText.Contains("Deep Research", StringComparison.Ordinal)
@@ -210,7 +219,7 @@ public sealed partial class NativeAssistantPage
                     tokenOnlySnapshotsRetainHydratedDetails = true, transcriptRevisionStillUpdates = true,
                     liveSnapshotsRetainExpandedDetails = true,
                     standaloneClosableTab = true, includedInSubagentOverview = true, researchUsesStablePlanetIdentity = true,
-                    researchToolHeaderPreserved = true, researchUsesSearchIcon = true, legacyResearchRemainsReadable = true,
+                    researchToolHeaderUsesPlanetAndTask = true, researchHeaderFollowsTitleUpdates = true, legacyResearchRemainsReadable = true,
                     sharedTranscriptAndToolRenderer = true, sharedCopyReadFooter = true, readonlyParentControlsPreserved = true,
                     outputsOrder = "subagents,sources", companionReceiptHiddenInBothRenderers = true,
                     modelRequests = 0, userDataModified = false }, JsonOptions), _lifetime.Token);

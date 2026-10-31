@@ -163,6 +163,18 @@ public sealed class DeepResearchActivityTests
     }
 
     [Fact]
+    public void DeferredHistoricalResearchUsesItsSavedTaskForTheOverviewWithoutLoadingDetails()
+    {
+        var step = new AssistantToolStep("historical", "web.deepResearch", "completed", Explanation: "Deep Research",
+            DetailsDeferred: true, DisplayHeader: new(Summary: "Primärquellen zur Führungsgleichung vergleichen"));
+        var activity = SubagentChatState.FromDeepResearchTool(Parent(), step);
+        Assert.Equal("Primärquellen zur Führungsgleichung vergleichen", activity.Title);
+        Assert.Equal(step.DisplayHeader!.Summary, activity.UserMessage.Content);
+        Assert.Null(step.InputJson);
+        Assert.True(step.DetailsDeferred);
+    }
+
+    [Fact]
     public void ModelCountersKeepHydratedTranscriptStableUntilSemanticProgressArrives()
     {
         var activity = SubagentChatState.CreateDeepResearch(Parent(), "run-parent", "operation", "Frage", At);

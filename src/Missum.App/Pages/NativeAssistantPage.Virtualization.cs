@@ -362,6 +362,7 @@ public sealed partial class NativeAssistantPage
                 tool.LoadDetails = () => LoadToolStepDetailsAsync(id, S(block.Data, "id"));
                 tool.OpenResearch = () => OpenDeepResearchTabAsync(id, S(block.Data, "id"));
                 tool.CanOpenResearch = () => FindDeepResearchView(id, S(block.Data, "id")) is not null;
+                tool.ResearchHeader = step => ResearchStepHeader(id, step);
                 tool.DefaultExpanded = false;
                 tool.OpenDetails = () => OpenToolTabAsync(id, S(block.Data, "id"));
                 tool.Update(block.Data, block.Number); break;

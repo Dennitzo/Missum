@@ -169,6 +169,11 @@ public sealed class AssistantToolStepHeadersTests
             Tool = "subagent.spawn", InputJson = "{\"title\":\"Angefragte Aufgabe\"}",
             OutputJson = "{\"title\":\"Tatsächliche Aufgabe\"}",
         }).Summary);
+        Assert.Equal("Primärquellen vergleichen", AssistantToolStepHeaders.Create(single with
+        {
+            Tool = "web.deepResearch", InputJson = "{\"task\":\"Primärquellen vergleichen\"}",
+            OutputJson = "{\"sources\":[{\"title\":\"Nicht der Aufgabentitel\"}]}",
+        }).Summary);
     }
 
     [Theory]

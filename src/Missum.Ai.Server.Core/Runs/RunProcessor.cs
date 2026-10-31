@@ -2400,8 +2400,11 @@ public sealed partial class RunProcessor : BackgroundService
             suppressToolCalls: sharedSession is not null,
             deferSuppressedToolCallValidation: sharedSession is not null,
             deferSessionCacheCheckpoint: sharedSession is not null,
-            responseSchema: sharedSession is null ? null
-                : request.Tools.Single(tool => tool.Name == request.RequiredToolName).Parameters,
+            // Keep normal native assistant framing. DeepSeek's response_format
+            // parser requires fenced JSON, while its tools+none lazy grammar does
+            // not enforce those fences. Bare JSON is then rejected after generation
+            // and arrives here as an unfinished stream. The phase schema is already
+            // in the appended request; the host validates the structured result.
             sessionCacheKey: sharedSession?.CacheKey,
             requiredContextLength: contextLength,
             nativeProgress: Progress,

@@ -162,7 +162,11 @@ zuletzt tatsächlich verwendeten Werkzeugdefinitionen des Hauptagenten. Alle
 Recherchephasen laufen nacheinander auf derselben Modellinstanz mit derselben
 Sitzungs- und KV-Cache-Identität. Phasenergebnisse werden als strukturierter Text
 erzeugt, damit wechselnde interne Recherchewerkzeuge das ausgewertete
-Promptpräfix nicht ersetzen. Die Recherche ergänzt nur einen vorübergehenden
+Promptpräfix nicht ersetzen. Das Phasenschema steht in der angehängten Anweisung;
+die Antwort verwendet normales natives Assistant-Framing ohne `response_format`.
+Dies verhindert einen Konflikt zwischen DeepSeeks JSON-PEG-Parser und den
+beibehaltenen Werkzeugdefinitionen. Missum prüft JSON und Phasenfelder vor ihrer
+Verwendung. Die Recherche ergänzt nur einen vorübergehenden
 Gesprächsabschnitt; der Hauptlauf erhält anschließend die echte Werkzeugantwort.
 Wiederverwendet wird der tatsächlich identische Tokenpräfix, nicht ein unabhängig
 veränderter Cache. Zwischenphasen erzwingen keine vollständigen KV-Snapshots.

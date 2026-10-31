@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Missum.App.Services;
 
 namespace Missum.App.Pages;
 
@@ -24,6 +25,23 @@ public sealed partial class NativeAssistantPage
         _subagents.Values.FirstOrDefault(item => item.IsDeepResearch && item.SessionId == _session
             && S(item.Snapshot, "originMessageId", S(item.Snapshot, "parentMessageId")) == sourceMessageId
             && S(item.Snapshot, "originToolStepId") == toolStepId);
+
+    private sealed record ResearchHeaderPresentation(string AgentId, int PlanetIndex, string Title);
+
+    private ResearchHeaderPresentation ResearchStepHeader(string sourceMessageId, JsonElement step)
+    {
+        var stepId = S(step, "id");
+        if (FindDeepResearchView(sourceMessageId, stepId) is { } child)
+            return new(child.AgentId, child.PlanetIndex, ResearchTaskLabel(child.Title));
+        // Match the activity's stable identity before its lazy snapshot arrives.
+        var agentId = Guid.TryParse(sourceMessageId, out var sourceId)
+            ? SubagentChatState.DeepResearchAgentId(sourceId, stepId)
+            : "deep-research:" + sourceMessageId + ":" + stepId;
+        var task = S(ToolStepView.ReadMetadata(S(step, "inputJson")), "task");
+        if (task.Length == 0 && step.TryGetProperty("displayHeader", out var header)) task = S(header, "summary");
+        return new(agentId, PlanetIdentities.GetOrAssign(agentId),
+            task.Length == 0 ? "Deep Research" : ResearchTaskLabel(SubagentChatState.TaskTitle(task)));
+    }
 
     private async Task<bool> OpenDeepResearchTabAsync(string sourceMessageId, string toolStepId)
     {

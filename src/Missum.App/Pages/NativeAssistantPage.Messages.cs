@@ -232,6 +232,7 @@ public sealed partial class NativeAssistantPage
             toolView.LoadDetails = () => LoadToolStepDetailsAsync(messageId, id);
             toolView.OpenResearch = () => OpenDeepResearchTabAsync(messageId, id);
             toolView.CanOpenResearch = () => FindDeepResearchView(messageId, id) is not null;
+            toolView.ResearchHeader = step => ResearchStepHeader(messageId, step);
             toolView.DefaultExpanded = false;
             toolView.OpenDetails = () => OpenToolTabAsync(messageId, id);
             toolView.Update(step, tool == "assistant.activity" ? toolNumber : ++toolNumber);
@@ -345,6 +346,7 @@ public sealed partial class NativeAssistantPage
         private bool _detailsInViewport;
         internal event Action<string>? SubagentRequested;
         internal Func<Task<bool>>? OpenResearch { get; set; }
+        internal Func<JsonElement, ResearchHeaderPresentation>? ResearchHeader { get; set; }
         internal Func<Task>? OpenDetails { get; set; }
         internal string HeaderTitle => _title.Text;
         private bool _detailsOnly;
@@ -374,6 +376,7 @@ public sealed partial class NativeAssistantPage
         private readonly FontIcon _chevron = new() { Glyph = "\uE76C", FontSize = 10, Foreground = NativeIconPalette.BrushFor("navigation") };
         private readonly TextBlock _status = new();
         private readonly FontIcon _compactIcon = new() { Glyph = "\uE70F", FontSize = 14, Foreground = ToolGlyphBrush("tool", ""), VerticalAlignment = VerticalAlignment.Center };
+        private NativeSubagentAvatar? _researchIcon;
         private readonly Grid _headerRow = new() { ColumnSpacing = 8 };
         private JsonElement _step;
         private string _diff = "";
@@ -482,7 +485,11 @@ public sealed partial class NativeAssistantPage
 
         public void Update(JsonElement step, int number = 1)
         {
-            if (_step.Equals(step)) return;
+            if (_step.Equals(step))
+            {
+                if (S(step, "tool") == "web.deepResearch") UpdateHeader();
+                return;
+            }
             var firstUpdate = !_hasStep || S(_step, "id") != S(step, "id");
             // Stable receipt identity is sufficient: a changed JsonElement must
             // be projected even if it has no timestamp or its text length stays
@@ -638,8 +645,22 @@ public sealed partial class NativeAssistantPage
         {
             var expanded = _details.Visibility == Visibility.Visible;
             _title.Text = _label + (_summary.Length > 0 ? " · " + _summary : "");
-            // Research remains an ordinary tool outside its detailed tab.
-            _compactIcon.Visibility = Visibility.Visible;
+            var research = S(_step, "tool") == "web.deepResearch";
+            _compactIcon.Visibility = research ? Visibility.Collapsed : Visibility.Visible;
+            if (research)
+            {
+                var presentation = ResearchHeader?.Invoke(_step);
+                var agentId = presentation?.AgentId ?? "deep-research:" + S(_step, "id");
+                if (_researchIcon is null)
+                {
+                    _researchIcon = SubagentIcon(agentId, 14, presentation?.PlanetIndex);
+                    _headerRow.Children.Add(_researchIcon);
+                }
+                _researchIcon.SetAgentId(agentId, presentation?.PlanetIndex);
+                _researchIcon.Visibility = Visibility.Visible;
+                if (presentation is not null) _title.Text = presentation.Title;
+            }
+            else if (_researchIcon is not null) _researchIcon.Visibility = Visibility.Collapsed;
             if (_running) _title.Text += " …";
             if (S(_step, "tool") != "context.compact"
                 && S(_step, "status") is "failed" or "denied" or "cancelled" or "interrupted") _title.Text += " · " + _status.Text;
@@ -648,7 +669,7 @@ public sealed partial class NativeAssistantPage
             _title.Foreground = ThemeBrush("MissumMutedTextBrush", 160);
             _chevron.Glyph = "\uE76C";
             var plan = S(_step, "tool") == "coding.updatePlan";
-            ToolTipService.SetToolTip(_toggle, IsResearchNavigation ? "Deep-Research-Tab öffnen"
+            ToolTipService.SetToolTip(_toggle, IsResearchNavigation ? _title.Text + "\nDeep-Research-Tab öffnen"
                 : plan ? "Aktuellen Arbeitsplan öffnen" : _title.Text);
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_toggle,
                 _title.Text + (_counts.Visibility == Visibility.Visible ? " " + _added.Text + " " + _removed.Text : "")
@@ -660,8 +681,8 @@ public sealed partial class NativeAssistantPage
 
         internal void RefreshResearchNavigation()
         {
-            if (!IsResearchNavigation) return;
-            _details.Visibility = Visibility.Collapsed; _details.Children.Clear();
+            if (S(_step, "tool") != "web.deepResearch") return;
+            if (IsResearchNavigation) { _details.Visibility = Visibility.Collapsed; _details.Children.Clear(); }
             UpdateHeader();
         }
 

@@ -1004,6 +1004,13 @@ public sealed partial class ModelRuntimeClient : IDisposable
                 LogInferenceRetry(_logger, exception);
                 await Task.Delay(TimeSpan.FromMilliseconds(350 * attempt), cancellationToken).ConfigureAwait(false);
             }
+            catch (StreamingProviderException exception)
+            {
+                // An explicit provider rejection is not a missing finish frame.
+                // Preserve its status and diagnostic instead of converting it to
+                // a generic transport outage or retrying the identical request.
+                throw new ModelProviderRequestException(requestPhase, attempt, exception);
+            }
         }
         throw new ModelGenerationTerminatedException("transport_retry_exhausted", last);
     }
@@ -1118,6 +1125,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
             exception is not OperationCanceledException
             && exception is not OutOfMemoryException
             && exception is not ReasoningLoopDetectedException
+            && exception is not HttpRequestException
             && exception is not IncompleteStreamingChatException)
         {
             throw new IncompleteStreamingChatException(
@@ -1176,6 +1184,9 @@ public sealed partial class ModelRuntimeClient : IDisposable
             }
 
             using var chunk = JsonDocument.Parse(payload);
+            if (chunk.RootElement.TryGetProperty("error", out var providerError)
+                && providerError.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined))
+                throw CreateStreamingProviderError(providerError);
             if (nativeProgress is not null
                 && chunk.RootElement.TryGetProperty("prompt_progress", out var promptProgress)
                 && promptProgress.ValueKind == JsonValueKind.Object)
@@ -1267,6 +1278,48 @@ public sealed partial class ModelRuntimeClient : IDisposable
             reasoningClock.Restart();
             await nativeProgress(new ModelRuntimeProgress("reasoningDelta", ReasoningDelta: delta), token).ConfigureAwait(false);
         }
+    }
+
+    private sealed class StreamingProviderException(string message, System.Net.HttpStatusCode statusCode)
+        : HttpRequestException(message, inner: null, statusCode);
+
+    private static StreamingProviderException CreateStreamingProviderError(JsonElement error)
+    {
+        string? type = null;
+        string? message = null;
+        int? status = null;
+        if (error.ValueKind == JsonValueKind.Object)
+        {
+            if (error.TryGetProperty("type", out var typeValue) && typeValue.ValueKind == JsonValueKind.String)
+                type = typeValue.GetString();
+            if (error.TryGetProperty("message", out var messageValue) && messageValue.ValueKind == JsonValueKind.String)
+                message = messageValue.GetString();
+            foreach (var property in new[] { "status", "status_code", "http_status", "code" })
+            {
+                if (!error.TryGetProperty(property, out var value)) continue;
+                if ((value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var number)
+                    || value.ValueKind == JsonValueKind.String && int.TryParse(value.GetString(), out number))
+                    && number is >= 400 and <= 599)
+                {
+                    status = number;
+                    break;
+                }
+            }
+        }
+        else if (error.ValueKind == JsonValueKind.String) message = error.GetString();
+        message = string.IsNullOrWhiteSpace(message) ? "Die native Modellruntime hat die Anfrage im Antwortstream abgewiesen." : message;
+        // Native chat parsers can report deterministic format errors as 500.
+        // Resending the same incompatible prompt cannot repair their protocol.
+        var invalidFormat = type is "invalid_request_error" or "invalid_request" or "validation_error" or "parser_error"
+            || message.Contains("Failed to parse", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("unparsed peg-native output", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("Failed to compile grammar", StringComparison.OrdinalIgnoreCase);
+        var code = invalidFormat ? System.Net.HttpStatusCode.BadRequest
+            : (System.Net.HttpStatusCode)(status ?? 400);
+        var detail = (type is { Length: > 0 } ? type + ": " : "") + message;
+        detail = detail[..Math.Min(detail.Length, 2000)];
+        detail = string.Concat(detail.Select(static character => char.IsControl(character) ? ' ' : character));
+        return new("Windows llama.cpp meldete einen Fehler im Antwortstream: " + detail, code);
     }
 
     private static string? ReadReasoningDelta(JsonElement message)

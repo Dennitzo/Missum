@@ -1204,6 +1204,66 @@ public sealed class ModelRuntimeClientTests
     }
 
     [Theory]
+    [InlineData("{\"error\":{\"code\":400,\"type\":\"invalid_request_error\",\"message\":\"Unsupported response schema\"}}", "Unsupported response schema")]
+    [InlineData("{\"error\":{\"code\":500,\"type\":\"server_error\",\"message\":\"Failed to parse model output\"}}", "Failed to parse model output")]
+    [InlineData("{\"error\":\"The chat parser rejected the response\"}", "The chat parser rejected the response")]
+    [InlineData("{\"error\":{\"message\":\"Unsupported native response format\"}}", "Unsupported native response format")]
+    public async Task ExplicitStreamingProviderRejectionPreservesItsDiagnosticWithoutTransportRetry(string frame, string diagnostic)
+    {
+        var handler = new NativeRuntimeHandler(streamingError: frame);
+        using var client = CreateClient(new HttpClient(handler));
+        var progress = new List<ModelRuntimeProgress>();
+
+        var error = await Assert.ThrowsAsync<ModelProviderRequestException>(() => client.CompleteChatAsync(
+            "gpt-oss-120b", [new("user", "Prüfe die Recherche.")], [],
+            nativeProgress: (value, _) => { progress.Add(value); return ValueTask.CompletedTask; }));
+
+        Assert.Equal("generation", error.Phase);
+        Assert.Equal(HttpStatusCode.BadRequest, error.StatusCode);
+        Assert.Contains(diagnostic, error.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("transport_retry_exhausted", error.Message, StringComparison.Ordinal);
+        Assert.Equal(1, handler.ChatAttempts);
+        Assert.DoesNotContain(progress, item => item.State == "generationRetry");
+        Assert.False(ModelRuntimeClient.IsRecoverableProviderTransportFailure(error.InnerException!));
+    }
+
+    [Theory]
+    [InlineData(429)]
+    [InlineData(503)]
+    public async Task ExplicitTransientStreamingProviderStatusPreservesTheExistingRetryPolicy(int status)
+    {
+        var handler = new NativeRuntimeHandler(streamingError: JsonSerializer.Serialize(new
+        {
+            error = new { code = status.ToString(System.Globalization.CultureInfo.InvariantCulture), type = "server_error", message = "Native capacity is temporarily unavailable" },
+        }));
+        using var client = CreateClient(new HttpClient(handler));
+        var progress = new List<ModelRuntimeProgress>();
+
+        var error = await Assert.ThrowsAsync<ModelProviderRequestException>(() => client.CompleteChatAsync(
+            "gpt-oss-120b", [new("user", "Prüfe die Recherche.")], [],
+            nativeProgress: (value, _) => { progress.Add(value); return ValueTask.CompletedTask; }));
+
+        Assert.Equal((HttpStatusCode)status, error.StatusCode);
+        Assert.Contains("Native capacity is temporarily unavailable", error.Message, StringComparison.Ordinal);
+        Assert.Equal(3, handler.ChatAttempts);
+        Assert.Equal(3, progress.Count(item => item.State == "generationRetry"));
+        Assert.True(ModelRuntimeClient.IsRecoverableProviderTransportFailure(error.InnerException!));
+    }
+
+    [Fact]
+    public async Task NullStreamingErrorFieldDoesNotDiscardASuccessfulAnswer()
+    {
+        var handler = new NativeRuntimeHandler(streamingError:
+            "{\"error\":null,\"choices\":[{\"delta\":{\"content\":\"Fertig\"},\"finish_reason\":\"stop\"}]}");
+        using var client = CreateClient(new HttpClient(handler));
+
+        var result = await client.CompleteChatAsync("gpt-oss-120b", [new("user", "Prüfen.")], []);
+
+        Assert.Equal("Fertig", result.Content);
+        Assert.Equal(1, handler.ChatAttempts);
+    }
+
+    [Theory]
     [InlineData(true)]
     [InlineData(false)]
     public async Task TransportFailureBeforeResponseReportsItsRealPhaseInsteadOfIncompleteToolCall(bool tokenCounting)
@@ -1318,7 +1378,8 @@ public sealed class ModelRuntimeClientTests
         bool streamingReasoning = false,
         bool jsonReasoning = false,
         bool malformedStreamingTool = false,
-        bool streamingTokenProgress = false) : HttpMessageHandler
+        bool streamingTokenProgress = false,
+        string? streamingError = null) : HttpMessageHandler
     {
         internal const string ReasoningText = "## Plan\n\n1. Datei prüfen.\n2. `änderung` anwenden.\n\nAbschließend testen.";
         private string? _loadedKey = NativeGeneralId;
@@ -1422,6 +1483,9 @@ public sealed class ModelRuntimeClientTests
                 }
                 OnChatRequest?.Invoke(body);
                 ChatBodies.Add(body);
+                if (streamingError is not null)
+                    return new(HttpStatusCode.OK) { Content = new StringContent(
+                        "data: " + streamingError + "\n\ndata: [DONE]\n\n", Encoding.UTF8, "text/event-stream") };
                 if (streamingTokenProgress)
                 {
                     var frames = new StringBuilder("data: {\"prompt_progress\":{\"total\":3871,\"processed\":3871,\"cache\":3000}}\n\n");
