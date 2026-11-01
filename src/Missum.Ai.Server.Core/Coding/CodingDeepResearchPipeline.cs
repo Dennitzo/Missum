@@ -453,7 +453,7 @@ internal static partial class CodingDeepResearchPipeline
         // Persisting them as research evidence would mark this preparation as
         // completed and make a temporary local outage look like a source gap.
         catch (Exception exception) when (StagedWebResearchPipeline.IsModelTransportFailure(exception)) { throw; }
-        catch (Exception exception) when (exception is ResearchBudgetException or HttpRequestException or InvalidDataException or JsonException or TimeoutException or ModelGenerationTerminatedException or ArgumentException or InvalidOperationException or KeyNotFoundException)
+        catch (Exception exception) when (exception is ResearchBudgetException or ResearchPhaseResponseException or HttpRequestException or InvalidDataException or JsonException or TimeoutException or ModelGenerationTerminatedException or ArgumentException or InvalidOperationException or KeyNotFoundException)
         {
             errorCode = exception is ResearchBudgetException ? "web.deepResearch.budget" : "web.deepResearch.incomplete";
             uncertainties.Add(Bound(exception.Message, 500));
@@ -467,30 +467,49 @@ internal static partial class CodingDeepResearchPipeline
 
         async Task<LmChatResult> InvokeModelAsync(StagedWebResearchModelRequest request)
         {
-            token.ThrowIfCancellationRequested();
-            if (modelCalls >= modelLimit) throw new ResearchBudgetException("Das Modellbudget der Recherche ist erreicht.");
-            if (ContextPlanner.EstimateTokens(request.Messages) > ContextPlanner.ComputeInputTokenBudget(contextLength, request.MaximumOutputTokens))
-                throw new ResearchBudgetException("Die Belege überschreiten das verfügbare Kontextbudget; verkleinere die Rechercheaufgabe.");
-            modelCalls++;
-            var stepId = "model-" + modelCalls.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            var title = ModelActivityTitle(request.RequiredToolName);
-            if (activity is not null)
-                await activity(new("model", "running", title, stepId, request.RequiredToolName), token).ConfigureAwait(false);
-            LmChatResult response;
-            try { response = await invokeModel(request, token).ConfigureAwait(false); }
-            catch (Exception error) when (error is not OutOfMemoryException)
+            for (var attempt = 0; ; attempt++)
             {
+                token.ThrowIfCancellationRequested();
+                if (modelCalls >= modelLimit) throw new ResearchBudgetException("Das Modellbudget der Recherche ist erreicht.");
+                // The owning runtime budgets the full conversation (including the
+                // main-agent prefix and tool definitions) and compacts it if needed.
+                // A stage-only estimate here would abort before that recovery runs.
+                modelCalls++;
+                var stepId = "model-" + modelCalls.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                var title = ModelActivityTitle(request.RequiredToolName);
                 if (activity is not null)
-                    await activity(new("model", ActivityFailureStatus(error), title, stepId, request.RequiredToolName,
-                        Detail: Bound(error.Message, 2000)), CancellationToken.None).ConfigureAwait(false);
-                throw;
+                    await activity(new("model", "running", title, stepId, request.RequiredToolName), token).ConfigureAwait(false);
+                LmChatResult response;
+                try { response = await invokeModel(request, token).ConfigureAwait(false); }
+                catch (ResearchPhaseResponseException error) when (attempt < 2 && modelCalls < modelLimit)
+                {
+                    inputTokens += error.Response.InputTokens;
+                    outputTokens += error.Response.OutputTokens;
+                    if (activity is not null)
+                        await activity(new("model", "completed", title, stepId, request.RequiredToolName,
+                            Detail: "Antwortformat wird korrigiert: " + Bound(error.Message, 1500)), token).ConfigureAwait(false);
+                    request = request with { ResponseRepair = error.Message };
+                    continue;
+                }
+                catch (Exception error) when (error is not OutOfMemoryException)
+                {
+                    if (error is ResearchPhaseResponseException invalid)
+                    {
+                        inputTokens += invalid.Response.InputTokens;
+                        outputTokens += invalid.Response.OutputTokens;
+                    }
+                    if (activity is not null)
+                        await activity(new("model", ActivityFailureStatus(error), title, stepId, request.RequiredToolName,
+                            Detail: Bound(error.Message, 2000)), CancellationToken.None).ConfigureAwait(false);
+                    throw;
+                }
+                if (activity is not null)
+                    await activity(new("model", "completed", title, stepId, request.RequiredToolName,
+                        Text: FormatModelActivity(response)), token).ConfigureAwait(false);
+                inputTokens += response.InputTokens;
+                outputTokens += response.OutputTokens;
+                return response;
             }
-            if (activity is not null)
-                await activity(new("model", "completed", title, stepId, request.RequiredToolName,
-                    Text: FormatModelActivity(response)), token).ConfigureAwait(false);
-            inputTokens += response.InputTokens;
-            outputTokens += response.OutputTokens;
-            return response;
         }
 
         async Task<WebSearchResult[]> SearchAsync(string query)
@@ -575,6 +594,16 @@ internal static partial class CodingDeepResearchPipeline
                     searchDiagnostics,
                     sources = sources.Where(source => findings.Any(finding => finding.SourceId == source.Id))
                         .Select(static source => new { source.Id, source.Title, source.Url }),
+                    // Retrieval and scientific assessment are distinct. A failed
+                    // synthesis must not discard the original windows already
+                    // read, nor turn them into supported findings by default.
+                    retrievedSources = sources.Select(static source => new
+                    {
+                        source.Id, source.Title, source.Url, source.Windows,
+                        retrievalTool = "web.fetch", assessmentStatus = "unassessed", isUntrusted = true,
+                    }),
+                    retrievedSourcesNote = "Die abgerufenen Originalfenster sind unbewertetes Quellenmaterial. "
+                        + "Ein erfolgreicher Abruf bestätigt keine fachliche Aussage; nur findings enthält zugeordnete Befunde mit ihrer gesonderten Bewertung.",
                     uncertainties = (coverageAssessed ? coverage.Issues.Where(static issue => issue.IsMaterialOpen).Select(static issue => issue.Text)
                         .Concat(coverage.Questions.Where(static question => !question.IsComplete)
                             .SelectMany(static question => question.RemainingGaps.Length > 0 ? question.RemainingGaps : [question.Reason]))
@@ -923,7 +952,7 @@ internal static partial class CodingDeepResearchPipeline
     }
 
     private static JsonElement PlanSchema() => JsonSerializer.Deserialize<JsonElement>("""
-        {"type":"object","properties":{"questions":{"type":"array","minItems":0,"maxItems":12,"items":{"type":"object","properties":{"question":{"type":"string","maxLength":300},"query":{"type":"string","maxLength":500}},"required":["question","query"],"additionalProperties":false}},"sourceLimit":{"type":"integer","minimum":0,"maximum":12},"review":{"type":"boolean"},"hypotheses":{"type":"array","maxItems":6,"items":{"type":"string","maxLength":500}},"verificationPlan":{"type":"array","maxItems":8,"items":{"type":"string","maxLength":500}}},"required":["questions"],"additionalProperties":false}
+        {"type":"object","properties":{"questions":{"type":"array","minItems":0,"maxItems":12,"items":{"type":"object","properties":{"question":{"type":"string","minLength":1,"maxLength":300,"pattern":"\\S"},"query":{"type":"string","minLength":1,"maxLength":500,"pattern":"\\S"}},"required":["question","query"],"additionalProperties":false}},"sourceLimit":{"type":"integer","minimum":0,"maximum":12},"review":{"type":"boolean"},"hypotheses":{"type":"array","maxItems":6,"items":{"type":"string","maxLength":500}},"verificationPlan":{"type":"array","maxItems":8,"items":{"type":"string","maxLength":500}}},"required":["questions"],"additionalProperties":false}
         """);
     private static JsonElement SynthesisSchema(IReadOnlyList<ResearchExcerpt> excerpts) => JsonSerializer.SerializeToElement(new
     {
@@ -941,7 +970,7 @@ internal static partial class CodingDeepResearchPipeline
                     type = "object",
                     properties = new
                     {
-                        claim = new { type = "string", maxLength = 500 },
+                        claim = new { type = "string", minLength = 1, maxLength = 500, pattern = @"\S" },
                         evidenceId = new { type = "string", maxLength = 32, @enum = excerpts.Count == 0 ? NoEvidenceIds : excerpts.Select(static excerpt => excerpt.Id).ToArray() },
                     },
                     required = RequiredFindingFields, additionalProperties = false,

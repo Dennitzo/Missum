@@ -11,7 +11,13 @@ namespace Missum.Ai.Server.Core.Runs;
 public sealed partial class RunProcessor
 {
     private sealed record ResearchModelSession(ResearchConversationContext Conversation, string? CacheKey,
-        string OwnerId, string? ParentOwnerId);
+        string OwnerId, string? ParentOwnerId, DeepResearchProgressReporter Reporter, CodingWorkingState? WorkingState)
+    {
+        internal int CompactionModelCalls { get; set; }
+        internal int CompactionInputTokens { get; set; }
+        internal int CompactionOutputTokens { get; set; }
+        internal int CompactionSequence { get; set; }
+    }
 
     internal static void AppendExplicitDeepResearchReceipt(List<LmChatMessage> messages, LmToolCall call, JsonElement result)
     {
@@ -134,7 +140,7 @@ public sealed partial class RunProcessor
                 lock (_sync) { _modelStep = step; _lastProgress = 0; _modelState = null; }
             return repository.AppendDeepResearchProgressAsync(new(operationId, runId, 0, value.Phase, value.Status,
                 value.Title, value.Detail, step, value.Tool, value.Query, value.Url, value.Sources, value.Text, modelId,
-                ErrorCode: value.ErrorCode), token);
+                ModelProgress: value.ModelProgress, ErrorCode: value.ErrorCode), token);
         }
 
         internal Task ModelAsync(ModelGenerationEvent value, CancellationToken token)

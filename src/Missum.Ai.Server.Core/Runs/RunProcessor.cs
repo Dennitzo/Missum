@@ -413,11 +413,13 @@ public sealed partial class RunProcessor : BackgroundService
         }
 
         var messages = checkpoint.Messages.ToList();
-        RetiredRepositoryInstructions.RemoveFrom(messages, request.Messages
+        var originalUserTexts = request.Messages
             .Where(static message => string.Equals(message.Role, "user", StringComparison.OrdinalIgnoreCase))
             .Select(static message => string.Join(Environment.NewLine,
                 message.Content.Where(static part => !string.IsNullOrWhiteSpace(part.Text)).Select(static part => part.Text)))
-            .ToArray());
+            .ToArray();
+        RetiredRepositoryInstructions.RemoveFrom(messages, originalUserTexts);
+        if (ScienceSkill.Enabled(request)) ScienceSkill.RemoveRetiredStartupInstructions(messages, originalUserTexts);
         if (!ScienceSkill.Enabled(request) && !checkpoint.PreserveSessionPromptPrefix && !compactContext && isCoding && request.Subagent is null)
             CodingAgentPolicy.EnsureCurrentInstructions(messages);
         if (!checkpoint.PreserveSessionPromptPrefix && !compactContext && useStableSubagentToolCatalog && request.Subagent is null)
@@ -469,16 +471,6 @@ public sealed partial class RunProcessor : BackgroundService
         var sciencePlanInitialized = checkpoint.SciencePlanInitialized && workingState?.Plan.Count > 0;
         if (!sciencePlanInitialized && ScienceInitialPlanGuard.Applies(request) && workingState?.Plan.Count > 0)
             sciencePlanInitialized = await _repository.HasSuccessfulInitialSciencePlanAsync(runId, cancellationToken).ConfigureAwait(false);
-        var scienceIntroductionPublished = checkpoint.ScienceIntroductionPublished || sciencePlanInitialized;
-        if (!scienceIntroductionPublished && ScienceInitialPlanGuard.Applies(request) && streamingTurnStartEventId is null)
-        {
-            // A Stop can persist visible introduction text before its checkpoint flag.
-            // Only this run's journal counts; inherited assistant messages do not.
-            var startupText = CodingTextReconciler.Project(
-                await _repository.GetVisibleTextEventsAsync(runId, 0, cancellationToken).ConfigureAwait(false));
-            scienceIntroductionPublished = !string.IsNullOrWhiteSpace(startupText);
-            if (scienceIntroductionPublished) visibleTextLength = startupText.Length;
-        }
         if (specializedAgent is null && request.Subagent is null && request.SpecializedAgent is { } configuredAgent)
         {
             var definition = _specializedAgents.Resolve(configuredAgent.ProfileId).Definition;
@@ -712,8 +704,8 @@ public sealed partial class RunProcessor : BackgroundService
                     try
                     {
                         if (ScienceInitialPlanGuard.Applies(request) && !sciencePlanInitialized && pendingProposalId is null
-                            && (!scienceIntroductionPublished || activeCalls.Length - nextToolIndex != 1 || call.Name != CodingWorkingStateTools.PlanTool))
-                            throw new ArgumentException("Dieser Science-Lauf benötigt zuerst einen sichtbaren Einleitungssatz und danach einen gültigen Arbeitsplan. "
+                            && (activeCalls.Length - nextToolIndex != 1 || call.Name != CodingWorkingStateTools.PlanTool))
+                            throw new ArgumentException("Dieser Science-Lauf benötigt zuerst einen gültigen Arbeitsplan. "
                                 + "Sende genau einen coding.updatePlan-Aufruf mit nichtleeren steps; dieser Aufruf wurde nicht ausgeführt.");
                         // Return a recoverable tool receipt instead of aborting the entire run.
                         // A pending client operation must still be collected exactly once.
@@ -1001,21 +993,16 @@ public sealed partial class RunProcessor : BackgroundService
                 }
             }
             var initialSciencePlanRequired = ScienceInitialPlanGuard.Applies(request) && !sciencePlanInitialized;
-            var initialScienceIntroductionRequired = initialSciencePlanRequired && !scienceIntroductionPublished;
-            if (initialScienceIntroductionRequired) selectedToolName = null;
             // Historical-session preparation is an internal summary, just like
             // rolling compaction. Do not inherit the main model's (possibly
             // maximum) thinking default while rephrasing established history.
-            string? ResolveTurnReasoningEffort() => initialScienceIntroductionRequired
-                || request.ConversationProfile == ConversationProfile.ContextPreparation
+            string? ResolveTurnReasoningEffort() => request.ConversationProfile == ConversationProfile.ContextPreparation
                 ? _modelRuntime.ResolveCompactionReasoningEffort(selection.ModelId, selection.Role)
                 : _modelRuntime.ResolveReasoningEffort(selection.ModelId, selection.Role, request.ReasoningEffort);
             var effort = ResolveTurnReasoningEffort();
             if (initialSciencePlanRequired)
             {
-                var instruction = initialScienceIntroductionRequired
-                    ? ScienceInitialPlanGuard.IntroductionInstruction(runId, workingState)
-                    : ScienceInitialPlanGuard.Instruction(runId, workingState);
+                var instruction = ScienceInitialPlanGuard.Instruction(runId, workingState);
                 if (!ScienceInitialPlanGuard.HasInstruction(messages, instruction)) messages.Add(new("system", instruction));
             }
             var selectableTools = initialSciencePlanRequired || compactContext || useStableSubagentToolCatalog ? availableTools.ToArray() : budgetSummary ? [] : isCoding
@@ -1026,10 +1013,8 @@ public sealed partial class RunProcessor : BackgroundService
             // before (or instead of) returning JSON. Keep this protocol-only
             // turn out of the visible answer. Provider reasoning remains private to
             // the model context; the client receives phase transitions only.
-            // Early delegation is ordinary scientific work: its introduction must
-            // stream like other tool turns. Only the internal selector is prose-free.
-            var suppressRequiredToolTurn = selectedToolName is not null
-                || initialSciencePlanRequired && !initialScienceIntroductionRequired;
+            // Initial planning is a structured protocol turn as well.
+            var suppressRequiredToolTurn = selectedToolName is not null || initialSciencePlanRequired;
             var liveTextGate = new IncrementalVisibleTextGate(enabled: !suppressRequiredToolTurn);
             CodingTextReconciler? codingText = null;
             var reasoningActivity = new ReasoningActivityTransport();
@@ -1202,19 +1187,19 @@ public sealed partial class RunProcessor : BackgroundService
                 ContextPlan contextPlan;
                 var summarizedThisTurn = false;
                 effort = ResolveTurnReasoningEffort();
-                if (isCoding && !budgetSummary && CodingContextCompactor.Plan(messages, contextLength, workingState,
+                if ((isCoding || request.Subagent is not null) && !budgetSummary && CodingContextCompactor.Plan(messages, contextLength, workingState,
                     includeWorkingStateInBudget: !workingStatePromptIncluded) is { } compaction)
                 {
-                    await CompactWorkingContextAsync(compaction, contextLength, queueMilliseconds, steeringCall.Token).ConfigureAwait(false);
+                    await CompactWorkingContextAsync(compaction, contextLength, queueMilliseconds, steeringCall.Token,
+                        tools: modelTools).ConfigureAwait(false);
                     summarizedThisTurn = true;
                     queueMilliseconds = 0; // The following model turn retains this already acquired lease.
-                    budgetSummary = codingBudget.MustSummarize(roundCount, toolCallCount);
-                    if (budgetSummary && !compactContext && !useStableSubagentToolCatalog)
+                    if (isCoding)
                     {
-                        modelTools = [];
-
+                        budgetSummary = codingBudget.MustSummarize(roundCount, toolCallCount);
+                        if (budgetSummary && !compactContext && !useStableSubagentToolCatalog) modelTools = [];
+                        ApplyCodingBudgetInstruction(messages, codingBudget, roundCount, toolCallCount, preserveSessionPromptPrefix);
                     }
-                    ApplyCodingBudgetInstruction(messages, codingBudget, roundCount, toolCallCount, preserveSessionPromptPrefix);
                     await SaveCheckpointAsync().ConfigureAwait(false);
                 }
                 try
@@ -1326,14 +1311,12 @@ public sealed partial class RunProcessor : BackgroundService
                                 modelTools,
                                 request.SessionId ?? runId,
                                 request.Subagent?.ParentSessionId,
-                                initialScienceIntroductionRequired ? Math.Min(maximumOutputTokens ?? 256, 256) : maximumOutputTokens,
+                                maximumOutputTokens,
                                 modelRole: selection.Role,
                                 reasoningEffort: effort,
                                 cancellationToken: steeringCall.Token,
-                                requireToolCall: selectedToolName is not null || initialSciencePlanRequired && !initialScienceIntroductionRequired,
-                                requiredToolName: initialSciencePlanRequired && !initialScienceIntroductionRequired ? CodingWorkingStateTools.PlanTool : selectedToolName,
-                                suppressToolCalls: initialScienceIntroductionRequired,
-                                deferSuppressedToolCallValidation: initialScienceIntroductionRequired,
+                                requireToolCall: selectedToolName is not null || initialSciencePlanRequired,
+                                requiredToolName: initialSciencePlanRequired ? CodingWorkingStateTools.PlanTool : selectedToolName,
                                 requiredContextLength: contextLength,
                                 sessionCacheKey: !isCoding && string.IsNullOrWhiteSpace(request.SessionId) ? null
                                     : BuildRunSessionCacheKey(request, runId, selection.Role),
@@ -1342,13 +1325,13 @@ public sealed partial class RunProcessor : BackgroundService
                                 compactAtThreshold: true).ConfigureAwait(false);
                             break;
                         }
-                        catch (NativeContextBudgetException overflow) when ((isCoding || preserveSessionPromptPrefix)
+                        catch (NativeContextBudgetException overflow) when ((isCoding || request.Subagent is not null || preserveSessionPromptPrefix)
                             && contextRetry < ScientificNativeContextRecovery.MaximumRetries)
                         {
                             // No generation or mutation has started. Rewrite the evaluated
                             // prefix only at this explicit, journalled compaction boundary.
                             var summarized = false;
-                            if (isCoding && !summarizedThisTurn && CodingContextCompactor.Plan(lastNativePrompt!, overflow.ContextLength, workingState,
+                            if ((isCoding || request.Subagent is not null) && !summarizedThisTurn && CodingContextCompactor.Plan(lastNativePrompt!, overflow.ContextLength, workingState,
                                 includeWorkingStateInBudget: false, force: true) is { } exactCompaction)
                             {
                                 await heartbeatCancellation.CancelAsync().ConfigureAwait(false);
@@ -1356,7 +1339,8 @@ public sealed partial class RunProcessor : BackgroundService
                                 catch (OperationCanceledException) when (heartbeatCancellation.IsCancellationRequested) { }
                                 contextLength = Math.Min(contextLength, overflow.ContextLength);
                                 await CompactWorkingContextAsync(exactCompaction, contextLength, 0, steeringCall.Token,
-                                    $"Der native Tokenzähler meldete {overflow.InputTokens:N0} Eingabetoken bei {overflow.ContextLength:N0} Kontexttoken. ").ConfigureAwait(false);
+                                    $"Der native Tokenzähler meldete {overflow.InputTokens:N0} Eingabetoken bei {overflow.ContextLength:N0} Kontexttoken. ",
+                                    tools: modelTools).ConfigureAwait(false);
                                 summarized = true;
                                 summarizedThisTurn = true;
                                 contextPlan = ContextPlanner.Prepare(WithWorkingState(messages, workingState, workingStatePromptIncluded),
@@ -1476,15 +1460,6 @@ public sealed partial class RunProcessor : BackgroundService
             }
 
             if (await _repository.IsTerminalStateAsync(runId, cancellationToken).ConfigureAwait(false)) return;
-            if (initialScienceIntroductionRequired && interruptedContent.Length == 0
-                && !liveTextGate.HasStreamed && !string.IsNullOrWhiteSpace(response.Content))
-            {
-                // Non-streaming providers must publish the same ordinary assistant text.
-                foreach (var part in SplitDeltas(response.Content))
-                    if (liveTextGate.Push(part) is { Length: > 0 } delta)
-                        await PublishVisibleDeltaAsync(codingText is null ? new TextDeltaEvent(delta)
-                            : codingText.Push(delta), cancellationToken).ConfigureAwait(false);
-            }
             var remainingLiveDelta = liveTextGate.Flush();
             if (!string.IsNullOrEmpty(remainingLiveDelta))
             {
@@ -1538,40 +1513,6 @@ public sealed partial class RunProcessor : BackgroundService
                     ReasoningContent: response.ReasoningContent));
                 await SaveCheckpointAsync().ConfigureAwait(false);
                 throw new AgentRunLimitException(codingBudget.FailureMessage(roundCount, toolCallCount));
-            }
-            if (initialScienceIntroductionRequired)
-            {
-                scienceIntroductionPublished = visibleTextLength > generationVisibleStart;
-                messages.Add(new("assistant", response.Content, ToolCalls: response.ToolCalls.Count > 0 ? response.ToolCalls : null,
-                    ReasoningContent: response.ReasoningContent));
-                // Even a provider that ignores tool_choice=none cannot create the plan
-                // in this turn. The introduction is a separate, durable assistant turn.
-                foreach (var rejected in response.ToolCalls)
-                    messages.Add(new("tool", ScienceInitialPlanGuard.Rejection(workingState, introductionRequired: true), ToolCallId: rejected.Id));
-                if (!scienceIntroductionPublished || response.ToolCalls.Count > 0)
-                {
-                    if (response.ToolCalls.Count > 0) invalidToolTurnCount++;
-                    if (!scienceIntroductionPublished && response.ToolCalls.Count == 0)
-                    {
-                        emptyResponseRetryCount++;
-                        if (emptyResponseRetryCount > MaximumEmptyResponseRetries)
-                        {
-                            await SaveCheckpointAsync().ConfigureAwait(false);
-                            throw new ModelEmptyResponseException(response.HadReasoning, emptyResponseRetryCount);
-                        }
-                    }
-                    await _repository.AppendEventAsync(runId, RunEventTypes.ModelGeneration,
-                        new ModelGenerationEvent(response.ToolCalls.Count > 0 ? "toolRejected" : "responseRecovery",
-                            FailureKind: ScienceInitialPlanGuard.IntroductionErrorCode,
-                            Message: "Der Einleitungssatz wird in einem eigenen werkzeugfreien Modellturn vor dem Arbeitsplan ausgegeben."), cancellationToken).ConfigureAwait(false);
-                }
-                else emptyResponseRetryCount = 0;
-                var nextInstruction = scienceIntroductionPublished
-                    ? ScienceInitialPlanGuard.Instruction(runId, workingState)
-                    : ScienceInitialPlanGuard.IntroductionInstruction(runId, workingState);
-                if (!ScienceInitialPlanGuard.HasInstruction(messages, nextInstruction)) messages.Add(new("system", nextInstruction));
-                await SaveCheckpointAsync().ConfigureAwait(false);
-                continue;
             }
             if (initialSciencePlanRequired && !ScienceInitialPlanGuard.IsPlanOnly(response.ToolCalls))
             {
@@ -1822,11 +1763,11 @@ public sealed partial class RunProcessor : BackgroundService
                 ResearchManagedByAgent: researchManagedByAgent,
                 ContextProfileVersion: contextProfileVersion, ToolCatalogSignature: toolCatalogSignature,
                 ContextTools: contextTools, SpecializedAgent: specializedAgent, SciencePlanInitialized: sciencePlanInitialized,
-                ScienceIntroductionPublished: scienceIntroductionPublished, LastModelTools: lastModelTools),
+                LastModelTools: lastModelTools),
             cancellationToken);
 
         async Task CompactWorkingContextAsync(CodingCompactionPlan compaction, int loadedContextLength,
-            double queueTime, CancellationToken token, string? reason = null)
+            double queueTime, CancellationToken token, string? reason = null, IReadOnlyList<LmToolDefinition>? tools = null)
         {
             await _repository.AppendEventAsync(runId, RunEventTypes.ModelGeneration,
                 new ModelGenerationEvent("codingCompacting"), token).ConfigureAwait(false);
@@ -1840,8 +1781,12 @@ public sealed partial class RunProcessor : BackgroundService
             {
                 condensed = await CodingContextCompactor.CompleteSummaryAsync(compaction, loadedContextLength,
                     maximumOutputTokens, (summaryRequest, outputLimit, summaryToken) =>
-                        _modelRuntime.CompleteChatAsync(selection.ModelId, summaryRequest, [], outputLimit,
+                        _modelRuntime.CompleteChatWithCacheOwnershipAsync(selection.ModelId, summaryRequest, tools ?? [],
+                            request.SessionId ?? runId, request.Subagent?.ParentSessionId, outputLimit,
                             modelRole: selection.Role, reasoningEffort: summaryEffort,
+                            sessionCacheKey: !isCoding && string.IsNullOrWhiteSpace(request.SessionId) ? null
+                                : BuildRunSessionCacheKey(request, runId, selection.Role),
+                            suppressToolCalls: true, deferSessionCacheCheckpoint: true,
                             requiredContextLength: loadedContextLength,
                             nativeProgress: async (progress, progressToken) =>
                             {
@@ -2382,35 +2327,57 @@ public sealed partial class RunProcessor : BackgroundService
         await using var steeringCall = _repository.WatchSteering(runId, cancellationToken);
         try
         {
-        var modelMessages = sharedSession?.Conversation.CreateRequest(request) ?? request.Messages;
-        if (sharedSession is not null && ContextPlanner.EstimateTokens(modelMessages)
-            > ContextPlanner.ComputeInputTokenBudget(contextLength, request.MaximumOutputTokens))
-            throw new CodingDeepResearchPipeline.ResearchBudgetException("Hauptkontext und Recherche überschreiten das verfügbare Kontextbudget; die Recherche wird mit ihrem bisherigen Stand zurückgegeben.");
-        var response = await _modelRuntime.CompleteChatWithCacheOwnershipAsync(
-            request.ModelId,
-            modelMessages,
-            sharedSession?.Conversation.Tools ?? request.Tools,
-            sharedSession?.OwnerId,
-            sharedSession?.ParentOwnerId,
-            request.MaximumOutputTokens,
-            modelRole: request.ModelRole,
-            reasoningEffort: requestedReasoningEffort,
-            requireToolCall: sharedSession is null && request.RequireToolCall,
-            requiredToolName: sharedSession is null ? request.RequiredToolName : null,
-            suppressToolCalls: sharedSession is not null,
-            deferSuppressedToolCallValidation: sharedSession is not null,
-            deferSessionCacheCheckpoint: sharedSession is not null,
-            // Keep normal native assistant framing. DeepSeek's response_format
-            // parser requires fenced JSON, while its tools+none lazy grammar does
-            // not enforce those fences. Bare JSON is then rejected after generation
-            // and arrives here as an unfinished stream. The phase schema is already
-            // in the appended request; the host validates the structured result.
-            sessionCacheKey: sharedSession?.CacheKey,
-            requiredContextLength: contextLength,
-            nativeProgress: Progress,
-            runtimeInstanceId: runtimeInstanceId,
-            cancellationToken: steeringCall.Token).ConfigureAwait(false);
-        return sharedSession?.Conversation.AcceptResponse(request, response) ?? response;
+            var modelMessages = sharedSession?.Conversation.CreateRequest(request) ?? request.Messages;
+            var compactions = 0;
+            if (sharedSession is not null && ContextPlanner.EstimateTokens(modelMessages)
+                >= ContextPlanner.ComputeInputTokenBudget(contextLength, request.MaximumOutputTokens))
+            {
+                modelMessages = await CompactResearchContextAsync(runId, request, sharedSession, contextLength,
+                    runtimeInstanceId, steeringCall.Token).ConfigureAwait(false);
+                compactions++;
+            }
+            for (; ;)
+            {
+                try
+                {
+                    var response = await _modelRuntime.CompleteChatWithCacheOwnershipAsync(
+                        request.ModelId,
+                        modelMessages,
+                        sharedSession?.Conversation.Tools ?? request.Tools,
+                        sharedSession?.OwnerId,
+                        sharedSession?.ParentOwnerId,
+                        request.MaximumOutputTokens,
+                        modelRole: request.ModelRole,
+                        reasoningEffort: requestedReasoningEffort,
+                        requireToolCall: sharedSession is null && request.RequireToolCall,
+                        requiredToolName: sharedSession is null ? request.RequiredToolName : null,
+                        suppressToolCalls: sharedSession is not null,
+                        deferSuppressedToolCallValidation: sharedSession is not null,
+                        deferSessionCacheCheckpoint: sharedSession is not null,
+                        // Keep normal native assistant framing. DeepSeek's response_format
+                        // parser requires fenced JSON, while its tools+none lazy grammar does
+                        // not enforce those fences. Bare JSON is then rejected after generation
+                        // and arrives here as an unfinished stream. The phase schema is already
+                        // in the appended request; the host validates the structured result.
+                        sessionCacheKey: sharedSession?.CacheKey,
+                        compactAtThreshold: sharedSession is not null,
+                        requiredContextLength: contextLength,
+                        nativeProgress: Progress,
+                        runtimeInstanceId: runtimeInstanceId,
+                        cancellationToken: steeringCall.Token).ConfigureAwait(false);
+                    return sharedSession?.Conversation.AcceptResponse(request, response) ?? response;
+                }
+                catch (NativeContextBudgetException overflow) when (sharedSession is not null
+                    && compactions < ScientificNativeContextRecovery.MaximumRetries)
+                {
+                    // Counting failed before dispatch. Keep this exact phase and its
+                    // schema; appending CreateRequest again would duplicate its evidence.
+                    contextLength = Math.Min(contextLength, overflow.ContextLength);
+                    modelMessages = await CompactResearchContextAsync(runId, request, sharedSession, contextLength,
+                        runtimeInstanceId, steeringCall.Token).ConfigureAwait(false);
+                    compactions++;
+                }
+            }
         }
         catch (OperationCanceledException) when (steeringCall.SteeringRequested && !cancellationToken.IsCancellationRequested)
         {
@@ -2437,7 +2404,8 @@ public sealed partial class RunProcessor : BackgroundService
         var sharedSession = new ResearchModelSession(conversation,
             owningRequest.Mode != RunMode.Coding && string.IsNullOrWhiteSpace(owningRequest.SessionId) ? null
                 : BuildRunSessionCacheKey(owningRequest, runId, modelRole),
-            owningRequest.SessionId ?? runId, owningRequest.Subagent?.ParentSessionId);
+            owningRequest.SessionId ?? runId, owningRequest.Subagent?.ParentSessionId,
+            observedResearch, parentCheckpoint?.WorkingState);
         var researchTask = arguments.GetProperty("task").GetString()!;
         var autonomyName = arguments.TryGetProperty("autonomyLevel", out var autonomyValue) ? autonomyValue.GetString() : null;
         var researchOptions = new DeepResearchOptions(
@@ -2492,7 +2460,7 @@ public sealed partial class RunProcessor : BackgroundService
                         ? GpuLeaseMode.CodingSecondary : GpuLeaseMode.Shared, cancellationToken).ConfigureAwait(false);
                 await PrepareResearchModelAsync(cancellationToken).ConfigureAwait(false);
             }
-            return await CodingDeepResearchPipeline.ExecuteWithOptionsAsync(
+            var execution = await CodingDeepResearchPipeline.ExecuteWithOptionsAsync(
                 researchTask,
                 arguments.TryGetProperty("maximumSearches", out var searches) ? searches.GetInt32() : 3,
                 arguments.TryGetProperty("maximumSources", out var sources) ? sources.GetInt32()
@@ -2534,6 +2502,12 @@ public sealed partial class RunProcessor : BackgroundService
                             progress.Completed, progress.Total, DateTimeOffset.UtcNow), token).ConfigureAwait(false);
                 },
                 researchOptions, metadataCandidates, observedResearch.ActivityAsync, cancellationToken).ConfigureAwait(false);
+            return execution with
+            {
+                ModelCalls = execution.ModelCalls + sharedSession.CompactionModelCalls,
+                InputTokens = execution.InputTokens + sharedSession.CompactionInputTokens,
+                OutputTokens = execution.OutputTokens + sharedSession.CompactionOutputTokens,
+            };
         }
         catch (RunSteeringBoundaryException)
         {

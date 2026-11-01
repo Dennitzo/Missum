@@ -81,5 +81,5 @@ public sealed class LoopAgentProfile : ISpecializedAgentProfile
             plan = context.WorkingState?.Plan, acceptanceCriteria = context.WorkingState?.AcceptanceCriteria,
             facts = context.WorkingState?.Facts, failures = context.WorkingState?.Failures,
             recentEvidence = context.WorkingState?.Evidence.TakeLast(32), previousOpenPoints = context.PreviousOpenPoints,
-        }, MissumAiProtocol.CreateJsonOptions());
+        }, MissumAiProtocol.CreateJsonOptions()) + "\n\n" + SpecializedAgentProtocol.BuildDecisionInstruction();
 }

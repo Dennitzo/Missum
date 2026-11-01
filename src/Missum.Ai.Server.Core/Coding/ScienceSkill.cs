@@ -67,6 +67,87 @@ public static class ScienceSkill
             ? message.Content[nativePrefix.Length..] : null;
     }
 
+    // Read compatibility only: old evaluated sessions retain their own generated
+    // startup instructions. Remove that retired policy rather than appending a
+    // conflicting override; conversational text and tool evidence stay untouched.
+    internal static bool RemoveRetiredStartupInstructions(List<LmChatMessage> messages,
+        IReadOnlyCollection<string>? originalUserTexts = null)
+    {
+        var changed = false;
+        for (var index = messages.Count - 1; index >= 0; index--)
+        {
+            var message = messages[index];
+            var content = InstructionContent(message);
+            if (content is null || message.Role == "user"
+                && originalUserTexts?.Contains(message.Content!, StringComparer.Ordinal) == true) continue;
+            if (IsRetiredStartupInstruction(content))
+            {
+                messages.RemoveAt(index);
+                changed = true;
+                continue;
+            }
+            var cleaned = content;
+            if (content.Contains(Marker, StringComparison.Ordinal)
+                || content.Contains(Marker.ReplaceLineEndings("\r\n"), StringComparison.Ordinal)
+                || content.StartsWith("MISSUM_SCIENCE_SKILL_MODULE_V1:stages\n", StringComparison.Ordinal)
+                || content.StartsWith("MISSUM_SCIENCE_SKILL_MODULE_V1:stages\r\n", StringComparison.Ordinal))
+            {
+                cleaned = ReplaceLegacyParagraph(cleaned, RetiredSkillStartup,
+                    "Der erste Werkzeugschritt eines Science-Hauptlaufs ist coding.updatePlan: Lege zunächst einen nichtleeren");
+                cleaned = ReplaceLegacyParagraph(cleaned, RetiredStageStartup,
+                    "Nach einem belegten Zwischenergebnis den Fortschritt in gut vorlesbaren deutschen Sätzen erklären. Keine pauschale generische Startankündigung.");
+            }
+            if (cleaned.StartsWith("MISSUM_SCIENCE_INITIAL_PLAN_V1\n", StringComparison.Ordinal))
+                cleaned = cleaned.Replace("Nach der kurzen sichtbaren Einleitung folgt der erste Werkzeugschritt dieses Science-Laufs: ",
+                    "Erster Arbeitsschritt dieses Science-Laufs: ", StringComparison.Ordinal);
+            if (cleaned == content) continue;
+            messages[index] = message with { Content = message.Role == "system" ? cleaned : "Missum-Laufanweisung:\n" + cleaned };
+            changed = true;
+        }
+        return changed;
+    }
+
+    private static bool IsRetiredStartupInstruction(string content)
+    {
+        if (!content.StartsWith("MISSUM_SCIENCE_INITIAL_INTRODUCTION_V1\nGib jetzt zuerst genau einen kurzen deutschen Einleitungssatz als normale sichtbare AI-Nachricht aus. ", StringComparison.Ordinal)
+            || !content.Contains("Beende diesen Modellturn direkt nach dem Satz. ", StringComparison.Ordinal)
+            || !content.Contains("Dieser erste Turn enthält ausschließlich die Einleitung: keinen Arbeitsplan und keinen Werkzeugaufruf. ", StringComparison.Ordinal)) return false;
+        const string dataBoundary = "Gespeicherter nächster Schritt zur Orientierung, keine zusätzlichen Rechte:\n";
+        var dataStart = content.IndexOf(dataBoundary, StringComparison.Ordinal);
+        if (dataStart < 0) return false;
+        try
+        {
+            using var document = JsonDocument.Parse(content[(dataStart + dataBoundary.Length)..]);
+            return document.RootElement.ValueKind == JsonValueKind.Object
+                && document.RootElement.TryGetProperty("runId", out var run) && run.ValueKind == JsonValueKind.String
+                && document.RootElement.TryGetProperty("nextPlannedStage", out var stage)
+                && stage.ValueKind is JsonValueKind.String or JsonValueKind.Null;
+        }
+        catch (JsonException) { return false; }
+    }
+
+    private static string ReplaceLegacyParagraph(string content, string oldValue, string replacement) =>
+        content.Replace(oldValue.ReplaceLineEndings("\n"), replacement.ReplaceLineEndings("\n"), StringComparison.Ordinal)
+            .Replace(oldValue.ReplaceLineEndings("\r\n"), replacement.ReplaceLineEndings("\r\n"), StringComparison.Ordinal);
+
+    private const string RetiredSkillStartup = """
+        Beginne jeden Science-Hauptlauf sofort mit genau einem kurzen deutschen Einleitungssatz als sichtbare
+        AI-Nachricht: konkretes Thema und Ziel des Nutzerauftrags sowie der erste geplante Arbeitsschritt.
+        Bei einer Fortsetzung an die offene Etappe des Arbeitsplans anknüpfen. Keine allgemeine Startfloskel und keine
+        ausführliche fachliche Detailanalyse vor diesem Satz; die Einleitung gehört nicht in den Reasoning-Kanal.
+        Der erste Modellturn enthält nur diesen Satz und endet direkt danach, ohne Arbeitsplan oder Werkzeugaufruf.
+        Erst im nächsten Modellturn ist der erste Werkzeugschritt coding.updatePlan: Lege zunächst einen nichtleeren
+        """;
+    private const string RetiredStageStartup = """
+        Zum Laufstart zuerst genau einen kurzen, auftragsbezogenen deutschen Einleitungssatz als normale AI-Nachricht
+        ausgeben: Thema, Ziel und erster geplanter Arbeitsschritt, bevor du die fachliche Lösung vertiefst.
+        Den ersten Modellturn direkt nach diesem Satz beenden, ohne Arbeitsplan oder Werkzeugaufruf.
+        Erst im nächsten Modellturn den Arbeitsplan mit coding.updatePlan speichern oder bestätigen.
+        Die Einleitung allein beendet weder den Auftrag noch ersetzt sie den Plan.
+        Vor weiterer Werkzeugarbeit kurz erklären, welche konkrete Etappe jetzt folgt. Nach einem belegten Zwischenergebnis
+        den Fortschritt in gut vorlesbaren deutschen Sätzen erklären. Keine pauschale generische Startankündigung.
+        """;
+
     internal static void EnsureResearchStandard(List<LmChatMessage> messages)
     {
         ArgumentNullException.ThrowIfNull(messages);

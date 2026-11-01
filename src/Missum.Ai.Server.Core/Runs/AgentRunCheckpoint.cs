@@ -47,5 +47,4 @@ public sealed record AgentRunCheckpoint(
     string ContextScope = "session-v3",
     SpecializedAgentCheckpoint? SpecializedAgent = null,
     bool SciencePlanInitialized = false,
-    bool ScienceIntroductionPublished = false,
     IReadOnlyList<LmToolDefinition>? LastModelTools = null);

@@ -1206,6 +1206,7 @@ public sealed class ModelRuntimeClientTests
     [Theory]
     [InlineData("{\"error\":{\"code\":400,\"type\":\"invalid_request_error\",\"message\":\"Unsupported response schema\"}}", "Unsupported response schema")]
     [InlineData("{\"error\":{\"code\":500,\"type\":\"server_error\",\"message\":\"Failed to parse model output\"}}", "Failed to parse model output")]
+    [InlineData("{\"error\":{\"code\":500,\"type\":\"server_error\",\"message\":\"The model produced output that does not match the expected peg-native format\"}}", "expected peg-native format")]
     [InlineData("{\"error\":\"The chat parser rejected the response\"}", "The chat parser rejected the response")]
     [InlineData("{\"error\":{\"message\":\"Unsupported native response format\"}}", "Unsupported native response format")]
     public async Task ExplicitStreamingProviderRejectionPreservesItsDiagnosticWithoutTransportRetry(string frame, string diagnostic)

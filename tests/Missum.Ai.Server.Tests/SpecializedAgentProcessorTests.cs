@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Agents;
 using Missum.Ai.Server.Core.Coding;
@@ -21,6 +22,7 @@ public sealed class SpecializedAgentProcessorTests
     private const string ReviewMarker = "[MISSUM_SPECIALIZED_AGENT_REVIEW]";
     private const string Session = "specialized-agent-session";
     private static readonly JsonSerializerOptions JsonOptions = MissumAiProtocol.CreateJsonOptions();
+    private static readonly JsonSerializerOptions DecisionOptions = new(JsonOptions) { DefaultIgnoreCondition = JsonIgnoreCondition.Never };
 
     [Fact]
     public async Task LoopReviewsThenHandsOffOnceAndCompletesOnlyAfterTheSameModelAcceptsTheGoal()
@@ -43,7 +45,8 @@ public sealed class SpecializedAgentProcessorTests
         {
             Assert.Equal("none", body.GetProperty("tool_choice").GetString());
             Assert.Equal(harness.Handler.MainBodies[0].GetProperty("tools").GetRawText(), body.GetProperty("tools").GetRawText());
-            Assert.Equal("json_schema", body.GetProperty("response_format").GetProperty("type").GetString());
+            Assert.False(body.TryGetProperty("response_format", out _));
+            Assert.EndsWith(SpecializedAgentProtocol.DecisionSchema.GetRawText(), Messages(body).Last().Content!);
         });
         Assert.DoesNotContain(harness.Handler.Paths, path => path.StartsWith("/agents/", StringComparison.Ordinal)
             || path == "/models/unload");
@@ -117,6 +120,33 @@ public sealed class SpecializedAgentProcessorTests
         Assert.DoesNotContain(await harness.Repository.GetEventsAfterAsync(run, 0), item => item.Type == RunEventTypes.RunCompleted
             || item.Type == RunSteeringEventTypes.Accepted);
         Assert.Equal("pending", Assert.Single((await harness.Repository.GetCheckpointAsync(run))!.WorkingState!.Plan).Status);
+    }
+
+    [Fact]
+    public async Task InvalidDecisionFieldsAreRepairedChronologicallyWithoutNativeResponseFormatOrChangingMainPrefix()
+    {
+        using var harness = new Harness();
+        harness.Handler.RawDecisions.Enqueue("{\"summary\":\"Geprüft\",\"outcome\":\"completed\",\"checks\":[{\"status\":\"completed\",\"begruendung\":\"Geprüft\",\"evidence\":\"Beleg\"}],\"openPoints\":[],\"nextPrompt\":null}");
+        var run = await harness.CreateAsync();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+
+        await harness.Processor.ProcessAsync(run, deadline.Token);
+
+        Assert.Equal(RunState.Completed, (await harness.Repository.GetAsync(run))!.State);
+        Assert.Single(harness.Handler.MainBodies);
+        Assert.Equal(2, harness.Handler.ReviewBodies.Count);
+        var first = Messages(harness.Handler.ReviewBodies[0]);
+        var retry = Messages(harness.Handler.ReviewBodies[1]);
+        Assert.Equal(first, retry.Take(first.Length));
+        Assert.Equal("assistant", retry[^2].Role);
+        Assert.Contains("Die letzte Entscheidung ist ungültig:", retry[^1].Content!);
+        Assert.EndsWith(SpecializedAgentProtocol.DecisionSchema.GetRawText(), retry[^1].Content!);
+        Assert.All(harness.Handler.ReviewBodies, body =>
+        {
+            Assert.False(body.TryGetProperty("response_format", out _));
+            Assert.Equal("none", body.GetProperty("tool_choice").GetString());
+            Assert.Equal(harness.Handler.MainBodies[0].GetProperty("tools").GetRawText(), body.GetProperty("tools").GetRawText());
+        });
     }
 
     [Fact]
@@ -235,6 +265,7 @@ public sealed class SpecializedAgentProcessorTests
         var review = Assert.Single(harness.Handler.ReviewBodies);
         Assert.Equal(NativeHandler.ModelId, review.GetProperty("model").GetString());
         Assert.Equal("none", review.GetProperty("tool_choice").GetString());
+        Assert.EndsWith(SpecializedAgentProtocol.DecisionSchema.GetRawText(), Messages(review).Last().Content!);
         Assert.Equal(modelStillResident ? 0 : 1, harness.Handler.ModelLoads);
         var events = await harness.Repository.GetEventsAfterAsync(run, 0);
         Assert.Equal(FirstMainResult, CodingTextReconciler.Project(events));
@@ -301,6 +332,7 @@ public sealed class SpecializedAgentProcessorTests
         internal bool FirstReviewCancelled { get; private set; }
         internal SpecializedAgentDecision DefaultDecision { get; set; } = CompletedDecision();
         internal Queue<SpecializedAgentDecision> Decisions { get; } = new();
+        internal Queue<string> RawDecisions { get; } = new();
         internal List<string> Paths { get; } = [];
         internal List<JsonElement> GenerationBodies { get; } = [];
         internal List<JsonElement> MainBodies { get; } = [];
@@ -333,9 +365,8 @@ public sealed class SpecializedAgentProcessorTests
             // A format-repair turn appends its own user instruction after the
             // original marker. Classify it by the review protocol, while the
             // initial marker remains checked in the first review request.
-            var isReview = body.TryGetProperty("response_format", out var format)
-                && format.GetProperty("type").GetString() == "json_schema"
-                && body.GetProperty("tool_choice").GetString() == "none";
+            var isReview = body.TryGetProperty("tool_choice", out var choice) && choice.GetString() == "none"
+                && Messages(body).Any(message => message.Content?.Contains(ReviewMarker, StringComparison.Ordinal) == true);
             string content;
             if (isReview)
             {
@@ -346,7 +377,8 @@ public sealed class SpecializedAgentProcessorTests
                     try { await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken); }
                     catch (OperationCanceledException) { FirstReviewCancelled = true; throw; }
                 }
-                content = JsonSerializer.Serialize(Decisions.Count > 0 ? Decisions.Dequeue() : DefaultDecision, JsonOptions);
+                content = RawDecisions.Count > 0 ? RawDecisions.Dequeue()
+                    : JsonSerializer.Serialize(Decisions.Count > 0 ? Decisions.Dequeue() : DefaultDecision, DecisionOptions);
             }
             else
             {

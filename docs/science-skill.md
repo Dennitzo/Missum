@@ -7,16 +7,9 @@ a second planning tool. Its core and stage instructions load at run start;
 verification/publication modules load only when needed. Focus messages append
 only when the active stage, pending steps or an observed repeated failure changes.
 Existing evaluated prompt prefixes are never rewritten during a run.
-
-Each new Science main run starts with a separate introduction-only model turn:
-one short German sentence tied to the user's goal and the next planned step.
-Tools are disabled, output is limited to 256 tokens, and reasoning uses `none`
-when supported or the lowest supported effort. Only the following turn creates
-or confirms `coding.updatePlan`, with the user's original reasoning setting.
-Unexpected tool calls in the introduction are not executed. The checkpoint and
-visible event journal preserve a completed introduction across restart; an
-interrupted streaming turn is reconciled instead of treating it as complete.
-Tool schemas and the evaluated KV prefix remain unchanged.
+Retired forced-startup instructions are removed when an old Science context is
+resumed. This targeted cleanup preserves conversation text and evidence; it does
+not reset session caches or reintroduce an introductory model turn.
 
 `coding.updatePlan` accepts `scienceStages` only in this profile. Each stage uses
 the same ID as its ordinary plan step, plus question, strategy, dependencies,

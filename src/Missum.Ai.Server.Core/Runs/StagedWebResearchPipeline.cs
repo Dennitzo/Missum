@@ -1116,7 +1116,8 @@ internal sealed record StagedWebResearchModelRequest(
     int? MaximumOutputTokens,
     bool RequireToolCall,
     string? RequiredToolName,
-    bool DisableReasoning);
+    bool DisableReasoning,
+    string? ResponseRepair = null);
 
 internal sealed record StagedWebResearchResult(
     string Dossier,

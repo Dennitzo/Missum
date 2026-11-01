@@ -171,6 +171,16 @@ Gesprächsabschnitt; der Hauptlauf erhält anschließend die echte Werkzeugantwo
 Wiederverwendet wird der tatsächlich identische Tokenpräfix, nicht ein unabhängig
 veränderter Cache. Zwischenphasen erzwingen keine vollständigen KV-Snapshots.
 
+Recherchephasen verwenden dieselbe automatische Komprimierungsschwelle von
+80 Prozent wie der Hauptlauf. Vor einer zu großen Anfrage und nach einer exakten
+nativen Budgetmeldung wird ältere abgeschlossene Arbeit zusammengefasst und
+dieselbe Phase fortgesetzt. Originalauftrag, aktuelle Quellenfenster, Antwortschema
+und Werkzeugrechte bleiben geschützt; Webaufrufe werden dabei nicht wiederholt.
+Komprimierungsbeginn und Abschluss erscheinen ausschließlich im Recherchetab.
+Die Hauptsitzung und ihr vollständiges Journal bleiben erhalten. Subagenten in
+Coding und General komprimieren ebenfalls automatisch; ihre Zusammenfassungen
+behalten die eigene Modellinstanz, Sitzungskennung und Cache-Eigentümerschaft.
+
 Im Hauptchat steht nur der übergeordnete Deep-Research-Schritt. Einzelne
 Rechercheaktionen, Quellenabrufe und Phasenergebnisse stehen im schließbaren
 Deep-Research-Tab. Seitenleiste und Subagentenübersicht führen die Recherche als

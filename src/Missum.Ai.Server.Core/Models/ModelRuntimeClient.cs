@@ -1313,6 +1313,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
         var invalidFormat = type is "invalid_request_error" or "invalid_request" or "validation_error" or "parser_error"
             || message.Contains("Failed to parse", StringComparison.OrdinalIgnoreCase)
             || message.Contains("unparsed peg-native output", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("does not match the expected peg-native format", StringComparison.OrdinalIgnoreCase)
             || message.Contains("Failed to compile grammar", StringComparison.OrdinalIgnoreCase);
         var code = invalidFormat ? System.Net.HttpStatusCode.BadRequest
             : (System.Net.HttpStatusCode)(status ?? 400);

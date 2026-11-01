@@ -17,11 +17,13 @@ public sealed class DeepResearchActivityTests
     private static readonly string[] ReportUncertainties = ["Weitere Messung erforderlich."];
 
     [Theory]
-    [InlineData(false, false)]
-    [InlineData(false, true)]
-    [InlineData(true, false)]
-    [InlineData(true, true)]
-    public async Task GatewayProgressCreatesARealReloadableActivityForDirectGeneralAndNestedResearch(bool nested, bool explicitOwnership)
+    [InlineData(false, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(true, false, false)]
+    [InlineData(true, true, false)]
+    [InlineData(false, true, true)]
+    [InlineData(true, true, true)]
+    public async Task GatewayProgressCreatesARealReloadableActivityForDirectGeneralAndNestedResearch(bool nested, bool explicitOwnership, bool compact)
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var chats = environment.Get<IChatRepository>();
@@ -33,7 +35,7 @@ public sealed class DeepResearchActivityTests
         await settings.InitializeAsync();
         var requested = new List<string>();
         using var connection = new MissumAiConnectionService(settings, NullLogger<MissumAiConnectionService>.Instance,
-            () => new ActivityGatewayHandler(nested, session.Id, requested, explicitOwnership));
+            () => new ActivityGatewayHandler(nested, session.Id, requested, explicitOwnership, compact));
         var broker = new LocalToolBroker(connection, documents, null!, chats);
         using var microphone = new MicrophoneTranscriptionService(connection, settings, NullLogger<MicrophoneTranscriptionService>.Instance);
         var recent = new RecentActivityService(settings, new ShellViewModel(), NullLogger<RecentActivityService>.Instance);
@@ -55,7 +57,7 @@ public sealed class DeepResearchActivityTests
         var states = SubagentChatState.Read([parent], environment.Directory);
         var activity = Assert.Single(states, state => state.Kind == "deepResearch");
         Assert.Equal("completed", activity.Status);
-        Assert.Equal(1032, activity.ContextUsed);
+        Assert.Equal(compact ? 512 : 1032, activity.ContextUsed);
         Assert.Equal(32768, activity.ContextLimit);
         Assert.Equal(nested ? "nested-research" : "server-general-research-view-fixture", activity.OriginToolStepId);
         Assert.Equal(nested ? Assert.Single(states, state => state.Kind == "subagent").AssistantMessage.Id : parent.Id, activity.OriginMessageId);
@@ -63,6 +65,16 @@ public sealed class DeepResearchActivityTests
         Assert.DoesNotContain(parent.ToolSteps ?? [], step => step.Tool is "web.search" or "web.fetch");
         Assert.All(states.Where(state => state.Kind == "subagent"), state =>
             Assert.DoesNotContain(state.AssistantMessage.ToolSteps ?? [], step => step.Tool is "web.search" or "web.fetch"));
+        if (compact)
+        {
+            Assert.DoesNotContain(parent.ToolSteps ?? [], step => step.Tool == "context.compact");
+            Assert.All(states.Where(state => state.Kind == "subagent"), state =>
+                Assert.DoesNotContain(state.AssistantMessage.ToolSteps ?? [], step => step.Tool == "context.compact"));
+            var compaction = Assert.Single(activity.AssistantMessage.ToolSteps!, step => step.Tool == "context.compact");
+            Assert.Equal("completed", compaction.Status);
+            Assert.Equal("Kontextkomprimierung abgeschlossen", compaction.Explanation);
+            Assert.Contains("Recherche wird fortgesetzt", compaction.Detail);
+        }
         Assert.Contains(activity.AssistantMessage.ToolSteps!, step => step.Tool == "web.fetch");
         Assert.DoesNotContain(requested, path => path.Contains("deep-research-run:", StringComparison.Ordinal));
         var emitted = observations.Where(state => state.GetProperty("kind").GetString() == "deepResearch").ToArray();
@@ -160,6 +172,65 @@ public sealed class DeepResearchActivityTests
         Assert.Equal(expected, activity.Status);
         Assert.False(activity.IsRunning);
         Assert.Equal(parent.Id, activity.ParentMessageId);
+    }
+
+    [Fact]
+    public void ResearchCompactionsUpdateOneScopedRowPerAttemptAndKeepTheParentReceiptUnchanged()
+    {
+        var receipt = new AssistantToolStep("research-operation", "web.deepResearch", "running", InputJson: "{\"task\":\"Recherche fortsetzen\"}");
+        var parent = Parent() with { ToolSteps = [receipt] };
+        var activity = SubagentChatState.CreateDeepResearch(parent, "run-parent", receipt.Id, "Recherche fortsetzen", At);
+        var first = new DeepResearchProgressEvent(receipt.Id, "run-parent", 1, "compaction", "running",
+            "Kontext wird komprimiert", StepId: "compact-1", Tool: "context.compact");
+        activity = activity.ApplyDeepResearchProgress(Event(1, "run-parent", first), first);
+        var started = Assert.Single(activity.AssistantMessage.ToolSteps!);
+        Assert.Equal("context.compact", started.Tool);
+        Assert.Equal("running", started.Status);
+        Assert.True(activity.IsRunning);
+        var finished = first with { Sequence = 2, Status = "completed", Title = "Kontextkomprimierung abgeschlossen",
+            Detail = "Recherche wird fortgesetzt.", ModelProgress = new("tokenProgress", CurrentTokens: 800, PromptTokens: 800) };
+        activity = activity.ApplyDeepResearchProgress(Event(2, "run-parent", finished), finished);
+        var completed = Assert.Single(activity.AssistantMessage.ToolSteps!);
+        Assert.Equal(started.Id, completed.Id);
+        Assert.Equal("completed", completed.Status);
+        Assert.Equal(started.StartedAt, completed.StartedAt);
+        Assert.NotNull(completed.CompletedAt);
+        Assert.Equal(800, activity.ContextUsed);
+        Assert.True(activity.IsRunning);
+        Assert.Same(activity, activity.ApplyDeepResearchProgress(Event(3, "run-parent", finished), finished));
+        var otherOperation = finished with { Sequence = 3, OperationId = "other-operation" };
+        Assert.Same(activity, activity.ApplyDeepResearchProgress(Event(3, "run-parent", otherOperation), otherOperation));
+
+        var second = first with { Sequence = 3, StepId = "compact-2" };
+        activity = activity.ApplyDeepResearchProgress(Event(3, "run-parent", second), second);
+        var secondDone = finished with { Sequence = 4, StepId = "compact-2",
+            ModelProgress = new("tokenProgress", CurrentTokens: 600, PromptTokens: 600) };
+        activity = activity.ApplyDeepResearchProgress(Event(4, "run-parent", secondDone), secondDone);
+        Assert.Equal(2, activity.AssistantMessage.ToolSteps!.Count);
+        Assert.Equal(2, activity.AssistantMessage.ToolSteps.Select(step => step.Id).Distinct().Count());
+        Assert.All(activity.AssistantMessage.ToolSteps, step => Assert.Equal("completed", step.Status));
+        Assert.Equal(600, activity.ContextUsed);
+        Assert.Same(receipt, Assert.Single(parent.ToolSteps!));
+        Assert.Equal("running", receipt.Status);
+        Assert.Equal("Hauptantwort", parent.Content);
+    }
+
+    [Fact]
+    public void CancellingResearchTerminalizesItsOpenCompactionWithoutReportingSuccess()
+    {
+        var activity = SubagentChatState.CreateDeepResearch(Parent(), "run-parent", "operation", "Frage", At);
+        var starting = new DeepResearchProgressEvent("operation", "run-parent", 1, "compaction", "running",
+            "Kontext wird komprimiert", StepId: "compact-1", Tool: "context.compact");
+        activity = activity.ApplyDeepResearchProgress(Event(1, "run-parent", starting), starting);
+
+        var cancelled = activity.CompleteDeepResearch(new(2, "run-parent", RunEventTypes.DeepResearchProgress, At.AddSeconds(2), default),
+            JsonSerializer.SerializeToElement(new { message = "Recherche abgebrochen." }), "cancelled");
+
+        Assert.False(cancelled.IsRunning);
+        var compaction = Assert.Single(cancelled.AssistantMessage.ToolSteps!, step => step.Tool == "context.compact");
+        Assert.Equal("cancelled", compaction.Status);
+        Assert.NotNull(compaction.CompletedAt);
+        Assert.DoesNotContain("abgeschlossen", compaction.Detail ?? "", StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -327,7 +398,7 @@ public sealed class DeepResearchActivityTests
         sources = new[] { new { id = "source-1", title = "Originalquelle", url = "https://example.org/paper" } },
     }, Json);
 
-    private sealed class ActivityGatewayHandler(bool nested, Guid session, List<string> requests, bool explicitOwnership) : HttpMessageHandler
+    private sealed class ActivityGatewayHandler(bool nested, Guid session, List<string> requests, bool explicitOwnership, bool compact = false) : HttpMessageHandler
     {
         private const string ParentRun = "run-research-view-fixture";
         private const string ChildRun = "run-real-child-fixture";
@@ -363,15 +434,24 @@ public sealed class DeepResearchActivityTests
                 Inner(RunEventTypes.DeepResearchProgress, new DeepResearchProgressEvent(operation, ownerRun, 10, "operation", "running", "Deep Research", Detail: "Prüfe Quellen."));
                 Inner(RunEventTypes.DeepResearchProgress, new DeepResearchProgressEvent(operation, ownerRun, 11, "model", "running", "Recherche planen",
                     StepId: "model-1", ModelProgress: new ModelGenerationEvent("tokenProgress", PromptTokens: 1000, GeneratedTokens: 32, CurrentTokens: 1032)));
+                long progressSequence = 12;
+                if (compact)
+                {
+                    Inner(RunEventTypes.DeepResearchProgress, new DeepResearchProgressEvent(operation, ownerRun, progressSequence++, "compaction", "running",
+                        "Kontext wird komprimiert", StepId: "compact-1", Tool: "context.compact"));
+                    Inner(RunEventTypes.DeepResearchProgress, new DeepResearchProgressEvent(operation, ownerRun, progressSequence++, "compaction", "completed",
+                        "Kontextkomprimierung abgeschlossen", Detail: "Recherche wird fortgesetzt.", StepId: "compact-1", Tool: "context.compact",
+                        ModelProgress: new("tokenProgress", CurrentTokens: 512, PromptTokens: 512)));
+                }
                 Inner(RunEventTypes.ServerToolStarted, new { tool = "web.fetch", callId = "internal-fetch",
                     parentOperationId = explicitOwnership ? operation : null,
                     arguments = new { url = "https://example.org/paper" } });
                 Inner(RunEventTypes.ServerToolCompleted, new { tool = "web.fetch", callId = "internal-fetch", success = true,
                     parentOperationId = explicitOwnership ? operation : null,
                     result = new { text = "Interner Rechercheauszug, nicht Teil der Hauptantwort." } });
-                Inner(RunEventTypes.DeepResearchProgress, new DeepResearchProgressEvent(operation, ownerRun, 12, "fetch", "completed", "Originalquelle gelesen",
+                Inner(RunEventTypes.DeepResearchProgress, new DeepResearchProgressEvent(operation, ownerRun, progressSequence++, "fetch", "completed", "Originalquelle gelesen",
                     StepId: "fetch-1", Tool: "web.fetch", Url: "https://example.org/paper"));
-                Inner(RunEventTypes.DeepResearchProgress, new DeepResearchProgressEvent(operation, ownerRun, 13, "operation", "completed", "Deep Research", Result: Result()));
+                Inner(RunEventTypes.DeepResearchProgress, new DeepResearchProgressEvent(operation, ownerRun, progressSequence, "operation", "completed", "Deep Research", Result: Result()));
                 if (nested)
                 {
                     Inner(RunEventTypes.ServerToolCompleted, new { tool = "web.deepResearch", callId = operation, success = true, result = Result() });

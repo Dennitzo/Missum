@@ -8,7 +8,8 @@ namespace Missum.Ai.Server.Core.Coding;
 
 internal sealed record DeepResearchActivity(string Phase, string Status, string Title, string? StepId = null,
     string? Tool = null, string? Detail = null, string? Query = null, string? Url = null,
-    IReadOnlyList<DeepResearchSource>? Sources = null, string? Text = null, string? ErrorCode = null);
+    IReadOnlyList<DeepResearchSource>? Sources = null, string? Text = null, string? ErrorCode = null,
+    ModelGenerationEvent? ModelProgress = null);
 
 internal static partial class CodingDeepResearchPipeline
 {

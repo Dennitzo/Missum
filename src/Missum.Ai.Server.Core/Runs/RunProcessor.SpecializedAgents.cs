@@ -65,6 +65,11 @@ public sealed partial class RunProcessor
                                 "Der Arbeitskontext wurde vor der Agentenprüfung komprimiert. Nutzerziel, Plan und gespeicherte Agentenphase bleiben erhalten.",
                                 CompactionPerformed: true), steering.Token).ConfigureAwait(false);
                     }
+                    // Older checkpoints predate the explicit result schema. Append
+                    // it chronologically; the evaluated main prefix and tools stay intact.
+                    if (frame.Messages.LastOrDefault() is not { Role: "user", Content: { } instruction }
+                        || !instruction.Contains(SpecializedAgentProtocol.DecisionInstructionMarker, StringComparison.Ordinal))
+                        frame.Messages.Add(new("user", SpecializedAgentProtocol.BuildDecisionInstruction()));
                     var context = ContextPlanner.Prepare(frame.Messages, contextLength, request.Limits?.MaximumOutputTokens,
                         allowLossyCompaction: false, preserveConversationPrefix: true);
                     LmChatResult response;
@@ -81,7 +86,11 @@ public sealed partial class RunProcessor
                                 frame.Messages, tools, request.SessionId ?? runId, null, request.Limits?.MaximumOutputTokens,
                                 modelRole: selection.Role, reasoningEffort: request.ReasoningEffort,
                                 requiredContextLength: contextLength, sessionCacheKey: BuildRunSessionCacheKey(request, runId, selection.Role),
-                                responseSchema: SpecializedAgentProtocol.DecisionSchema, residentOnly: true, suppressToolCalls: true,
+                                // With retained tools, DeepSeek's native response_format
+                                // parser expects fenced JSON but its lazy grammar never
+                                // enforces it for tool_choice:none. Validate the explicit
+                                // chronological schema here instead of changing the prefix.
+                                residentOnly: true, suppressToolCalls: true,
                                 cancellationToken: steering.Token).ConfigureAwait(false);
                             break;
                         }
@@ -114,8 +123,7 @@ public sealed partial class RunProcessor
                             throw new SpecializedAgentException("specialized_agent.invalid_decision",
                                 "Die spezialisierte Agentenprüfung konnte keine gültige Entscheidung abgeben. Der gespeicherte Stand ist erhalten. " + exception.Message, exception);
                         }
-                        frame.Messages.Add(new("user", "Missum: Die Entscheidung ist noch nicht gültig. " + exception.Message
-                            + " Antworte erneut ausschließlich im vorgegebenen Entscheidungsschema. Eine offene notwendige Prüfung verlangt continue und einen konkreten Folgeauftrag."));
+                        frame.Messages.Add(new("user", SpecializedAgentProtocol.BuildDecisionInstruction(exception.Message)));
                         await persist(frame).ConfigureAwait(false);
                     }
                 }
