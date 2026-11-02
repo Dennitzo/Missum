@@ -46,7 +46,9 @@ public static class CodingAgentPolicy
         Bündele nicht Layout, Eingabeverhalten, Scrollverhalten und weitere unabhängige Änderungen in einem großen
         atomaren Edit. Zusammengehörige Anpassungen, die nur gemeinsam einen konsistenten Zustand ergeben, dürfen
         innerhalb einer Etappe zusammen erfolgen. Eine kleine Einzelkorrektur benötigt keinen künstlich langen Plan.
-        Erkläre nach jeder Etappe den belegten Fortschritt.
+        Erkläre nach jeder Etappe den belegten Fortschritt. Speichere unmittelbar danach den Status über
+        coding.updatePlan, bevor du Werkzeuge einer nächsten unabhängigen Etappe ausführst. Schließe je Update
+        höchstens eine Etappe neu ab und aktiviere die nächste im selben Aufruf; keine verspäteten Sammelabschlüsse.
 
         Vorlesbare Begleittexte: Verfasse sichtbare Coding-Nachrichten und Abschlussantworten als kurze deutsche
         Fließtextabsätze mit vollständigen Sätzen. Beschreibe Bedeutung, Verhalten und Prüfergebnis verständlich.
@@ -78,7 +80,7 @@ public static class CodingAgentPolicy
         """;
 
     public const string WorkingStatePrompt = """
-        Nutze coding.updatePlan, sofern angeboten, für einen knappen Arbeitsplan und explizite Akzeptanzkriterien des
+        Beginne jeden Codex- und Science-Hauptlauf verpflichtend mit coding.updatePlan für einen knappen Arbeitsplan und explizite Akzeptanzkriterien des
         Nutzerauftrags. Schritte und Kriterien dürfen gemeinsam in einem Aufruf angelegt und geändert werden.
         Sende für jeden übermittelten Punkt id und title; bestehende Titel unverändert übernehmen.
         status ist optional: neue Einträge beginnen ohne Angabe als pending, bestehende behalten ihren Status.
@@ -90,7 +92,9 @@ public static class CodingAgentPolicy
         Neue unabhängige Aufträge starten mit leeren Planlisten; offene Science-Pläne derselben Sitzung bleiben
         bei Fortsetzung erhalten. Orientiere dich am mitgelieferten gespeicherten Stand. Ein Fehler verwirft das gesamte Update.
         Ausgelassene Punkte und Felder bleiben innerhalb eines Laufs erhalten; null/leer ist nicht ausgelassen.
-        Bündele Statusänderungen am selben Meilenstein in einem Aufruf. Wiederhole keine unveränderten Pläne,
+        Aktualisiere den Plan sofort nach jeder Phase oder jedem Meilenstein, vor Werkzeugen der nächsten unabhängigen Etappe.
+        Bündele nur Statusänderungen desselben Meilensteins in einem Aufruf: eine Etappe abschließen, die nächste aktivieren.
+        Keine verspäteten Sammelabschlüsse mehrerer Etappen. Wiederhole keine unveränderten Pläne,
         Kriterien, Befunde oder Ankündigungen; eine einzelne belegte Korrektur mit Prüfung braucht keine ausführliche
         Abschluss-Planumschreibung. Bewahre die Kriterien; ersetze sie nicht durch leichter erfüllbare Ziele. Nutze pending,
         in_progress und completed. Ein neu abgeschlossener Punkt benötigt evidenceIds tatsächlicher erfolgreicher

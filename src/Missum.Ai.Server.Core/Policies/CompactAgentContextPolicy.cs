@@ -64,12 +64,15 @@ public static class CompactAgentContextPolicy
         Lies relevante AGENTS.md/README/Buildregeln, gezielte list/search/read-Ausschnitte. Bündele unabhängige
         bekannte Leseziele; keine wiederholte Inventur. Öffentliche API-Fragen benötigen keine lokalen Prozesse.
         searchHistory/searchKnowledge betreffen nur diese Sitzung. renderHtml höchstens einmal pro Lauf.
-        coding.updatePlan: wenige Etappen und unverkleinerte Akzeptanzkriterien, höchstens eine in_progress.
+        Als ersten Werkzeugschritt jedes Codex-/Science-Hauptlaufs verpflichtend coding.updatePlan ausführen:
+        wenige Etappen und unverkleinerte Akzeptanzkriterien, höchstens eine in_progress.
         steps und acceptanceCriteria gemeinsam senden; jeder übermittelte Punkt braucht id/title.
         Ohne status beginnen neue Einträge als pending; gespeicherte Statuswerte bleiben erhalten.
         Bestehende Titel unverändert übernehmen. IDs gelten erst nach erfolgreichem Speichern im aktuellen Stand;
         übernommene offene Science-Pläne derselben Sitzung behalten ihre IDs.
-        Nur geänderte Punkte pro Meilenstein senden; ausgelassene Punkte bleiben erhalten, null/leer ist nicht
+        Unmittelbar nach jeder Phase/jedem Meilenstein den Plan speichern, vor Werkzeugen der nächsten unabhängigen
+        Etappe. Je Update höchstens eine Etappe neu abschließen und die nächste aktivieren; keine verspäteten Sammelabschlüsse.
+        Nur geänderte Punkte desselben Meilensteins senden; ausgelassene Punkte bleiben erhalten, null/leer ist nicht
         ausgelassen. storedSteps/storedAcceptanceCriteria enthalten stets den vollständigen geordneten Plan;
         behalte auch erledigte Etappen in Planung und Darstellung. completed benötigt echte erfolgreiche Werkzeug-Id oder OutputEvidenceId, kein Plan-
         oder Textbeleg. changed=false ist keine Arbeit; führe nextStep aus. Phasen planning/exploration/editing/

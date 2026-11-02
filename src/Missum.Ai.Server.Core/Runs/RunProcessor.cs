@@ -705,7 +705,7 @@ public sealed partial class RunProcessor : BackgroundService
                     {
                         if (ScienceInitialPlanGuard.Applies(request) && !sciencePlanInitialized && pendingProposalId is null
                             && (activeCalls.Length - nextToolIndex != 1 || call.Name != CodingWorkingStateTools.PlanTool))
-                            throw new ArgumentException("Dieser Science-Lauf benötigt zuerst einen gültigen Arbeitsplan. "
+                            throw new ArgumentException("Dieser Lauf benötigt zuerst einen gültigen Arbeitsplan. "
                                 + "Sende genau einen coding.updatePlan-Aufruf mit nichtleeren steps; dieser Aufruf wurde nicht ausgeführt.");
                         // Return a recoverable tool receipt instead of aborting the entire run.
                         // A pending client operation must still be collected exactly once.
@@ -804,7 +804,11 @@ public sealed partial class RunProcessor : BackgroundService
                                 var initialSciencePlan = ScienceInitialPlanGuard.Applies(request) && !sciencePlanInitialized;
                                 if (initialSciencePlan) ScienceInitialPlanGuard.ValidateInitialUpdate(call.Arguments);
                                 var priorPlanSequence = workingState?.Sequence ?? 0;
-                                workingState = CodingWorkingStateReducer.ApplyPlanUpdate(workingState ?? CodingWorkingState.Create(ExtractOriginalTask(request)), call.Arguments);
+                                var beforePlan = workingState ?? CodingWorkingState.Create(ExtractOriginalTask(request));
+                                var updatedPlan = CodingWorkingStateReducer.ApplyPlanUpdate(beforePlan, call.Arguments);
+                                if (ScienceInitialPlanGuard.Applies(request))
+                                    CodingPlanMilestoneGuard.ValidateTransition(beforePlan, updatedPlan);
+                                workingState = updatedPlan;
                                 if (initialSciencePlan && workingState.Plan.Count > 0)
                                 {
                                     // Re-acknowledging an inherited open plan is a
@@ -993,6 +997,7 @@ public sealed partial class RunProcessor : BackgroundService
                 }
             }
             var initialSciencePlanRequired = ScienceInitialPlanGuard.Applies(request) && !sciencePlanInitialized;
+            if (ScienceInitialPlanGuard.Applies(request)) CodingPlanMilestoneGuard.EnsureInstructions(messages);
             // Historical-session preparation is an internal summary, just like
             // rolling compaction. Do not inherit the main model's (possibly
             // maximum) thinking default while rephrasing established history.
@@ -1524,7 +1529,7 @@ public sealed partial class RunProcessor : BackgroundService
                 await _repository.AppendEventAsync(runId, RunEventTypes.ModelGeneration,
                     new ModelGenerationEvent("toolRejected", ToolName: CodingWorkingStateTools.PlanTool,
                         FailureKind: ScienceInitialPlanGuard.ErrorCode,
-                        Message: "Der Science-Arbeitsplan muss vor allen fachlichen Arbeitsschritten gültig angelegt oder bestätigt sein."), cancellationToken).ConfigureAwait(false);
+                        Message: "Der Arbeitsplan muss vor allen fachlichen Arbeitsschritten gültig angelegt oder bestätigt sein."), cancellationToken).ConfigureAwait(false);
                 await SaveCheckpointAsync().ConfigureAwait(false);
                 continue;
             }

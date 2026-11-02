@@ -34,14 +34,16 @@ public sealed class ScienceInitialPlanTests
     }
 
     [Theory]
-    [InlineData(null)]
-    [InlineData("compact-v1")]
-    public async Task FirstValidPlanPrecedesClientActionsAndMixedOrAdministrativeCallsCannotOpenTheGate(string? contextProfile)
+    [InlineData(null, true)]
+    [InlineData("compact-v1", true)]
+    [InlineData(null, false)]
+    [InlineData("compact-v1", false)]
+    public async Task FirstValidPlanPrecedesClientActionsAndMixedOrAdministrativeCallsCannotOpenTheGate(string? contextProfile, bool science)
     {
-        using var harness = new Harness(contextProfile);
-        harness.Handler.Responses.Enqueue([Plan, Read]);
+        using var harness = new Harness(contextProfile, science);
+        harness.Handler.Responses.Enqueue([harness.Plan, Read]);
         harness.Handler.Responses.Enqueue([new("admin", "coding.updatePlan", J("""{"phase":"planning","nextStep":"Publikation lesen"}"""))]);
-        harness.Handler.Responses.Enqueue([Plan]);
+        harness.Handler.Responses.Enqueue([harness.Plan]);
         harness.Handler.Responses.Enqueue([Read]);
         var run = await harness.CreateAsync();
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(20));
@@ -68,17 +70,20 @@ public sealed class ScienceInitialPlanTests
     }
 
     [Theory]
-    [InlineData(0)]
-    [InlineData(2)]
-    [InlineData(4)]
-    public async Task InheritedOpenPlanMustBeAcknowledgedWithoutErasingItsStagesOrCountingItAsANoOp(int previousNoOps)
+    [InlineData(0, true)]
+    [InlineData(2, true)]
+    [InlineData(4, true)]
+    [InlineData(0, false)]
+    [InlineData(2, false)]
+    [InlineData(4, false)]
+    public async Task InheritedOpenPlanMustBeAcknowledgedWithoutErasingItsStagesOrCountingItAsANoOp(int previousNoOps, bool science)
     {
-        using var harness = new Harness("compact-v1");
-        harness.Handler.Responses.Enqueue([Plan]);
+        using var harness = new Harness("compact-v1", science);
+        harness.Handler.Responses.Enqueue([harness.Plan]);
         harness.Handler.Responses.Enqueue([Read]);
         var run = await harness.CreateAsync();
         var state = CodingWorkingStateReducer.ApplyPlanUpdate(CodingWorkingState.Create("Alter Auftrag") with
-            { Science = new(ScienceSkill.Profile, []) }, Plan.Arguments) with { ConsecutivePlanNoOps = previousNoOps };
+            { Science = science ? new(ScienceSkill.Profile, []) : null }, harness.Plan.Arguments) with { ConsecutivePlanNoOps = previousNoOps };
         var initial = RunProcessor.CreateInitialMessages(harness.Request, "coding", [], "compact-v1");
         await harness.Repository.SaveCheckpointAsync(run, new(initial, 0, 0, 0, 0, WorkingState: state,
             SelectedModelId: Handler.Model, ContextProfileVersion: "compact-v1"));
@@ -90,17 +95,20 @@ public sealed class ScienceInitialPlanTests
         Assert.True(checkpoint.SciencePlanInitialized);
         Assert.Equal(0, checkpoint.WorkingState!.ConsecutivePlanNoOps);
         Assert.Equal("s1", Assert.Single(checkpoint.WorkingState.Plan).Id);
-        Assert.Equal("Gilt die Herleitung?", Assert.Single(checkpoint.WorkingState.Science!.Stages).Question);
+        if (science) Assert.Equal("Gilt die Herleitung?", Assert.Single(checkpoint.WorkingState.Science!.Stages).Question);
+        else Assert.Null(checkpoint.WorkingState.Science);
         var receipt = Assert.Single(await harness.Repository.GetServerToolCompletedEventsAsync(run));
         Assert.True(receipt.Data.GetProperty("success").GetBoolean());
         Assert.Single(receipt.Data.GetProperty("result").GetProperty("storedSteps").EnumerateArray());
     }
 
-    [Fact]
-    public async Task FirstTurnCreatesThePlanWithTheRequestedReasoningAndNormalOutputBudget()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task FirstTurnCreatesThePlanWithTheRequestedReasoningAndNormalOutputBudget(bool science)
     {
-        using var harness = new Harness("compact-v1");
-        harness.Handler.Responses.Enqueue([Plan]);
+        using var harness = new Harness("compact-v1", science);
+        harness.Handler.Responses.Enqueue([harness.Plan]);
         harness.Handler.Responses.Enqueue([Read]);
         var run = await harness.CreateAsync();
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(20));
@@ -114,16 +122,19 @@ public sealed class ScienceInitialPlanTests
         Assert.True(harness.Handler.Bodies[0].GetProperty("max_tokens").GetInt32() > 256);
         Assert.Empty(await harness.Repository.GetVisibleTextEventsAsync(run, 0));
         Assert.True((await harness.Repository.GetCheckpointAsync(run))!.SciencePlanInitialized);
+        Assert.All(harness.Handler.Bodies, body => Assert.Contains(CodingPlanMilestoneGuard.Marker, body.GetProperty("messages").GetRawText().Replace("\\n", "\n", StringComparison.Ordinal)));
     }
 
-    [Fact]
-    public async Task FinalTextBeforePlanIsNotPublishedAndCannotCompleteTheRun()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task FinalTextBeforePlanIsNotPublishedAndCannotCompleteTheRun(bool science)
     {
-        using var harness = new Harness("compact-v1");
+        using var harness = new Harness("compact-v1", science);
         const string prematureAnswer = "Auftrag vollständig erledigt.";
         harness.Handler.FirstText = prematureAnswer;
         harness.Handler.Responses.Enqueue([]);
-        harness.Handler.Responses.Enqueue([Plan]);
+        harness.Handler.Responses.Enqueue([harness.Plan]);
         harness.Handler.Responses.Enqueue([Read]);
         var run = await harness.CreateAsync();
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(20));
@@ -139,19 +150,21 @@ public sealed class ScienceInitialPlanTests
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task RecoveredSameRunWithAValidSavedPlanDoesNotPlanAgain(bool entranceFlagWasSaved)
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    public async Task RecoveredSameRunWithAValidSavedPlanDoesNotPlanAgain(bool entranceFlagWasSaved, bool science)
     {
-        using var harness = new Harness("compact-v1");
+        using var harness = new Harness("compact-v1", science);
         harness.Handler.Responses.Enqueue([Read]);
         var run = await harness.CreateAsync();
         var state = CodingWorkingStateReducer.ApplyPlanUpdate(CodingWorkingState.Create("Prüfe die Herleitung") with
-            { Science = new(ScienceSkill.Profile, []) }, Plan.Arguments);
+            { Science = science ? new(ScienceSkill.Profile, []) : null }, harness.Plan.Arguments);
         await harness.Repository.AppendEventAsync(run, RunEventTypes.ServerToolCompleted, new
         {
             tool = "coding.updatePlan", success = true,
-            result = CodingWorkingStateTools.CreatePlanReceipt(state, Plan.Arguments),
+            result = CodingWorkingStateTools.CreatePlanReceipt(state, harness.Plan.Arguments),
         });
         var initial = RunProcessor.CreateInitialMessages(harness.Request, "coding", [], "compact-v1");
         await harness.Repository.SaveCheckpointAsync(run, new(initial, 1, 1, 0, 0, WorkingState: state,
@@ -167,15 +180,64 @@ public sealed class ScienceInitialPlanTests
     }
 
     [Fact]
-    public async Task OrdinaryCodingDoesNotAcquireASciencePlanRequirement()
+    public async Task OrdinaryCodingMustCreateAPlanWithoutAcquiringScienceRules()
     {
         using var harness = new Harness("compact-v1", science: false);
+        harness.Handler.Responses.Enqueue([harness.Plan]);
         harness.Handler.Responses.Enqueue([Read]);
         var run = await harness.CreateAsync();
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(20));
         await Assert.ThrowsAsync<RunWaitingForClientException>(() => harness.Processor.ProcessAsync(run, deadline.Token));
-        Assert.False((await harness.Repository.GetCheckpointAsync(run))!.SciencePlanInitialized);
-        Assert.Equal("auto", Assert.Single(harness.Handler.Bodies).GetProperty("tool_choice").GetString());
+        var checkpoint = (await harness.Repository.GetCheckpointAsync(run))!;
+        Assert.True(checkpoint.SciencePlanInitialized);
+        Assert.Null(checkpoint.WorkingState!.Science);
+        Assert.Equal("required", harness.Handler.Bodies[0].GetProperty("tool_choice").GetString());
+        Assert.Equal("auto", harness.Handler.Bodies[1].GetProperty("tool_choice").GetString());
+        Assert.DoesNotContain(harness.Handler.Bodies, body => body.GetProperty("messages").GetRawText().Contains(ScienceSkill.Marker, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void InternalSummariesAndChildAgentsDoNotAcquireTheMainRunPlanGate()
+    {
+        using var harness = new Harness("compact-v1", science: false);
+        Assert.True(ScienceInitialPlanGuard.Applies(harness.Request));
+        Assert.False(ScienceInitialPlanGuard.Applies(harness.Request with { Mode = RunMode.General }));
+        Assert.False(ScienceInitialPlanGuard.Applies(harness.Request with { ConversationProfile = ConversationProfile.ContextPreparation }));
+        // Child admission remains governed by the existing subagent workflow.
+        Assert.False(ScienceInitialPlanGuard.Applies(harness.Request with { Subagent = new("parent", "child", "Prüfe den Teilauftrag", null) }));
+    }
+
+    [Fact]
+    public async Task LateBatchCompletionIsRejectedAtomicallyAndSingleStageCorrectionSucceeds()
+    {
+        using var harness = new Harness("compact-v1", science: false);
+        var run = await harness.CreateAsync();
+        var state = CodingWorkingStateReducer.ApplyPlanUpdate(CodingWorkingState.Create("Prüfe beide Etappen"), J("""
+            {"steps":[{"id":"s1","title":"Erste Prüfung","status":"in_progress"},{"id":"s2","title":"Zweite Prüfung"}]}
+            """));
+        state = CodingWorkingStateReducer.ObserveToolResult(state, new("actual-read", "coding.read", J("{}")), """{"success":true,"content":"Reales Prüfergebnis"}""");
+        await harness.Repository.SaveCheckpointAsync(run, new(RunProcessor.CreateInitialMessages(harness.Request, "coding", [], "compact-v1"),
+            1, 1, 0, 0, WorkingState: state, SelectedModelId: Handler.Model, ContextProfileVersion: "compact-v1", SciencePlanInitialized: true));
+        harness.Handler.Responses.Enqueue([new("batch", "coding.updatePlan", J("""
+            {"steps":[{"id":"s1","title":"Erste Prüfung","status":"completed","evidenceIds":["actual-read"]},
+                      {"id":"s2","title":"Zweite Prüfung","status":"completed","evidenceIds":["actual-read"]}],"phase":"final"}
+            """))]);
+        harness.Handler.Responses.Enqueue([new("one-stage", "coding.updatePlan", J("""
+            {"steps":[{"id":"s1","title":"Erste Prüfung","status":"completed","evidenceIds":["actual-read"]},
+                      {"id":"s2","title":"Zweite Prüfung","status":"in_progress"}],"phase":"review"}
+            """))]);
+        harness.Handler.Responses.Enqueue([Read]);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        await Assert.ThrowsAsync<RunWaitingForClientException>(() => harness.Processor.ProcessAsync(run, deadline.Token));
+        var receipts = await harness.Repository.GetServerToolCompletedEventsAsync(run);
+        Assert.Equal(2, receipts.Count);
+        Assert.False(receipts[0].Data.GetProperty("success").GetBoolean());
+        Assert.Contains("Höchstens eine Etappe", receipts[0].Data.GetProperty("result").GetProperty("error").GetString());
+        Assert.True(receipts[1].Data.GetProperty("success").GetBoolean());
+        var saved = (await harness.Repository.GetCheckpointAsync(run))!.WorkingState!;
+        Assert.Equal("completed", saved.Plan[0].Status);
+        Assert.Equal("in_progress", saved.Plan[1].Status);
+        Assert.Equal("review", saved.Phase);
     }
 
     private sealed class Harness : IDisposable
@@ -187,9 +249,11 @@ public sealed class ScienceInitialPlanTests
         internal RunRepository Repository { get; }
         internal RunProcessor Processor { get; }
         internal RunRequest Request { get; }
+        internal LmToolCall Plan { get; }
 
         internal Harness(string? profile, bool science = true)
         {
+            Plan = science ? ScienceInitialPlanTests.Plan : new("plan", "coding.updatePlan", J("""{"steps":[{"id":"s1","title":"Herleitung prüfen","status":"in_progress"}]}"""));
             _context.Options.ModelRuntimeUri = new("http://native.test:8081");
             _http = new(Handler);
             var services = new ServiceCollection();
