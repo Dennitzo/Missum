@@ -41,7 +41,9 @@ public sealed class NativeWorkingPlanView : ContentControl
         var content = new StackPanel { Spacing = compact ? 10 : 14 };
         content.Children.Add(_empty);
         content.Children.Add(_stepsSection);
-        content.Children.Add(_criteriaSection);
+        // The compact instance belongs to the right sidebar. Criteria remain
+        // available in the full working-plan tab, but are never rendered here.
+        if (!compact) content.Children.Add(_criteriaSection);
         Content = content;
         Unloaded += (_, _) => StopAnimations();
         Loaded += (_, _) => UpdateAnimations();
@@ -71,7 +73,7 @@ public sealed class NativeWorkingPlanView : ContentControl
     internal void Update(NativeWorkingPlanProjection.Snapshot plan)
     {
         UpdateRows(plan.Steps, _items, _rows);
-        UpdateRows(plan.AcceptanceCriteria, _criteria, _criteriaRows);
+        if (!_compact) UpdateRows(plan.AcceptanceCriteria, _criteria, _criteriaRows);
         _empty.Visibility = _items.Count + _criteria.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         _stepsSection.Visibility = _items.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
         _criteriaSection.Visibility = _criteria.Count > 0 ? Visibility.Visible : Visibility.Collapsed;

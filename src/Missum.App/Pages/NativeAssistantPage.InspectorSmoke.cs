@@ -315,8 +315,9 @@ public sealed partial class NativeAssistantPage
                 || heading.Foreground is not SolidColorBrush headingBrush || headingBrush.Color != titleBrush.Color
                 || Descendants(_inspectorWorkingPlanHeader!).Any(element => element is FontIcon or Microsoft.UI.Xaml.Shapes.Path or Viewbox))
                 throw new InvalidOperationException("Arbeitsplan ist keine reine Gruppenüberschrift in derselben Schriftfarbe wie Änderungen.");
-            var criteriaHeading = Descendants(InspectorWorkingPlanHost).OfType<TextBlock>().Single(label => label.Text == "Annahmekriterien");
-            foreach (var groupHeading in new[] { heading, criteriaHeading })
+            if (Descendants(InspectorWorkingPlanHost).OfType<TextBlock>().Any(label => label.Text == "Annahmekriterien"))
+                throw new InvalidOperationException("Annahmekriterien dürfen in der Seitenleiste nicht erscheinen.");
+            foreach (var groupHeading in new[] { heading })
             {
                 if (groupHeading.FontSize != SubagentsHeading.FontSize || groupHeading.FontWeight.Weight != SubagentsHeading.FontWeight.Weight
                     || groupHeading.Padding != SubagentsHeading.Padding || groupHeading.MinHeight != SubagentsHeading.MinHeight

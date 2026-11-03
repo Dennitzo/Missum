@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Missum.Core.Models;
 
 namespace Missum.App.Services;
@@ -19,10 +20,10 @@ internal static class NativeWorkingPlanProjection
     }
 
     internal static Snapshot Read(JsonElement output, JsonElement input = default) => new(
-        ReadItems(FirstArray(output, "storedSteps", "steps", "plan"), Property(input, "steps")),
-        ReadItems(FirstArray(output, "storedAcceptanceCriteria", "acceptanceCriteria"), Property(input, "acceptanceCriteria")));
+        ReadItems(FirstArray(output, "storedSteps", "steps", "plan"), Property(input, "steps"), numberPhases: true),
+        ReadItems(FirstArray(output, "storedAcceptanceCriteria", "acceptanceCriteria"), Property(input, "acceptanceCriteria"), numberPhases: false));
 
-    private static List<Item> ReadItems(JsonElement primary, JsonElement fallback)
+    private static List<Item> ReadItems(JsonElement primary, JsonElement fallback, bool numberPhases)
     {
         // An explicitly empty canonical array clears a list. Never replace it with a stale request.
         var items = primary.ValueKind == JsonValueKind.Array ? primary : fallback;
@@ -38,9 +39,20 @@ internal static class NativeWorkingPlanProjection
             if (id.Length == 0) id = title;
             if (!ids.Add(id)) continue;
             var status = Text(item, "status");
+            if (numberPhases) title = PhaseTitle(title, result.Count + 1);
             result.Add(new(id, title, status is "completed" or "complete" ? "completed" : status == "in_progress" ? status : "pending"));
         }
         return result;
+    }
+
+    private static string PhaseTitle(string title, int number)
+    {
+        // Older plans and model-generated titles may already include numbering.
+        // Normalize only the view, retaining saved IDs, titles, and evidence.
+        // Require a nonempty remainder so that an unusual title is not lost.
+        var content = Regex.Replace(title.Trim(), @"^(?:Phase\s+\d+(?:\s*[:)–—-]\s*|\s+))+(?=\S)", "",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(100));
+        return $"Phase {number}: {content}";
     }
 
     private static JsonElement FirstArray(JsonElement value, params string[] names)

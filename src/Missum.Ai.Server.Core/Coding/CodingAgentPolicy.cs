@@ -41,6 +41,8 @@ public static class CodingAgentPolicy
 
     public const string StagedExecutionAndNarrationPrompt = """
         Etappenplan: Teile größere Änderungsaufträge in wenige fachlich zusammenhängende, überprüfbare Etappen.
+        Benenne neue Etappen fortlaufend ab eins als „Phase 1: Inhalt“, „Phase 2: Inhalt“ und so weiter;
+        übernimm Titel bereits gespeicherter Etappen bei Aktualisierungen unverändert.
         Halte diese im Arbeitsstand fest, mit höchstens einer Etappe in_progress. Kündige die nächste Etappe kurz an,
         lies ihre relevanten Zielstellen, ändere gezielt und prüfe das Ergebnis, bevor du die nächste Etappe beginnst.
         Bündele nicht Layout, Eingabeverhalten, Scrollverhalten und weitere unabhängige Änderungen in einem großen

@@ -6,6 +6,7 @@ namespace Missum.Tests;
 
 public sealed class NativeWorkingPlanProjectionTests
 {
+    private static readonly string[] ExpectedPhases = ["Phase 1: Ursachen prüfen", "Phase 2: Änderung erstellen", "Phase 3: Ergebnis prüfen"];
     [Fact]
     public void CanonicalSavedListsWinOverTheSingleChangedRequestItem()
     {
@@ -22,9 +23,33 @@ public sealed class NativeWorkingPlanProjectionTests
         Assert.Equal("Ergebnis prüfen", Assert.Single(plan.AcceptanceCriteria).Title);
         var blocks = NativeToolResultFormatter.Receipt("coding.updatePlan", input, output, "completed").ToArray();
         Assert.Equal(2, blocks.Length);
-        Assert.Equal("✓ Erster Schritt\n◌ Zweiter Schritt\n○ Dritter Schritt", blocks[0].Text);
+        Assert.Equal("✓ Phase 1: Erster Schritt\n◌ Phase 2: Zweiter Schritt\n○ Phase 3: Dritter Schritt", blocks[0].Text);
         Assert.DoesNotContain("in_progress", blocks[0].Text, StringComparison.Ordinal);
         Assert.DoesNotContain("pending", blocks[0].Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PhaseLabelsFollowStoredOrderWithoutChangingSavedTitlesOrDuplicatingPrefixes()
+    {
+        var output = JsonSerializer.Deserialize<JsonElement>("""
+            {"storedSteps":[
+                {"id":"a","title":"Phase 0 Ursachen prüfen","status":"completed"},
+                {"id":"b","title":"Phase 8: Änderung erstellen","status":"in_progress"},
+                {"id":"c","title":"Phase 2: Phase 9: Ergebnis prüfen","status":"pending"}],
+             "storedAcceptanceCriteria":[{"id":"ac","title":"Phase 3: Genauigkeit","status":"pending"}]}
+            """);
+        var first = NativeWorkingPlanProjection.Read(output);
+        Assert.Equal(ExpectedPhases,
+            first.Steps.Select(item => item.Title));
+        Assert.Equal("Phase 3: Genauigkeit", Assert.Single(first.AcceptanceCriteria).Title);
+        Assert.Equal("Phase 0 Ursachen prüfen", output.GetProperty("storedSteps")[0].GetProperty("title").GetString());
+
+        // Coordinator DTOs are projected again by the native view.
+        var dto = JsonSerializer.SerializeToElement(new { steps = first.Steps, acceptanceCriteria = first.AcceptanceCriteria },
+            JsonSerializerOptions.Web);
+        var projectedAgain = NativeWorkingPlanProjection.Read(dto);
+        Assert.Equal(first.Steps, projectedAgain.Steps);
+        Assert.Equal(first.AcceptanceCriteria, projectedAgain.AcceptanceCriteria);
     }
 
     [Fact]

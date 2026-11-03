@@ -7,6 +7,8 @@ internal static class CodingPlanMilestoneGuard
 {
     internal const string Marker = "MISSUM_CODING_PLAN_MILESTONES_V1\n";
     internal const string Instructions = "Arbeite den gespeicherten Plan Etappe für Etappe ab. "
+        + "Benenne neue Schritte fortlaufend ab eins im Format 'Phase 1: Inhalt', 'Phase 2: Inhalt' und so weiter. "
+        + "Übernimm bei bestehenden Schritten gespeicherte IDs und Originaltitel unverändert. "
         + "Aktualisiere coding.updatePlan unmittelbar nach jeder abgeschlossenen Phase oder jedem Meilenstein, "
         + "bevor du Werkzeuge für die nächste unabhängige Etappe ausführst. "
         + "Speichere den gerade erreichten Status mit tatsächlichen evidenceIds und setze die nächste Etappe im selben Aufruf in_progress. "

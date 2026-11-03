@@ -33,6 +33,7 @@ internal static class ScienceInitialPlanGuard
 
     internal static string Instruction(string runId, CodingWorkingState? state) => Marker
         + "Erster Arbeitsschritt dieses Laufs: Lege mit genau einem coding.updatePlan-Aufruf einen knappen, vollständigen Etappenplan an. "
+        + "Benenne neue Etappen fortlaufend ab eins als 'Phase 1: Inhalt', 'Phase 2: Inhalt' und so weiter. "
         + "Führe davor keine Datei-, Recherche-, Rechen- oder Delegationswerkzeuge aus. Eine Textantwort, phase oder nextStep allein genügt nicht. "
         + "Ist ein offener Sitzungsplan vorhanden, bestätige oder aktualisiere ihn über steps mit den gespeicherten IDs; "
         + "behalte nicht genannte Etappen und vorhandene Nachweise bei. Nach der erfolgreichen Planbestätigung bearbeitest du die erste offene Etappe. "

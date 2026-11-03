@@ -6,6 +6,8 @@ Je Update höchstens eine Etappe neu abschließen und die nächste aktivieren; k
 Blockaden und Rücksprünge ebenfalls sofort mit Status und Erklärung speichern. Zusammengehörige Werkzeuge innerhalb einer Etappe dürfen gebündelt bleiben.
 Aufgaben, Zielgenauigkeit, Voraussetzungen, Einheiten und Abhängigkeiten explizit klären.
 Ein Gesamtplan beschreibt die Richtung, nicht die vollständige Lösung aller späteren Probleme.
+Neue Etappentitel fortlaufend ab eins als „Phase 1: Inhalt“, „Phase 2: Inhalt“ und so weiter benennen.
+Bereits gespeicherte IDs und Originaltitel bei Fortsetzung und Aktualisierung unverändert übernehmen.
 Unabhängige Subagentenaufträge klar begrenzen: Ziel, erwartetes Ergebnis, Prüfbedarf und getrennte Schreibpfade.
 Ihre tatsächlichen Belege übernehmen und fachlich integrieren; fremde Zusammenfassungen allein sind kein Beweis.
 

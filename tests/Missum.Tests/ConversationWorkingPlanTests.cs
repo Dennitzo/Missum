@@ -33,7 +33,7 @@ public sealed class ConversationWorkingPlanTests
         var stored = (await snapshots.GetWorkingPlanAsync(session.Id))!;
         var current = NativeWorkingPlanProjection.FromToolStep(stored);
         Assert.Equal(accepted.Id, stored.Id);
-        Assert.Equal(["Gezielt lesen", "Gegenprüfen"], current.Steps.Select(step => step.Title));
+        Assert.Equal(["Phase 1: Gezielt lesen", "Phase 2: Gegenprüfen"], current.Steps.Select(step => step.Title));
         Assert.Equal(["in_progress", "pending"], current.Steps.Select(step => step.Status));
         Assert.Empty(current.AcceptanceCriteria);
         Assert.Null(stored.InputJson);
@@ -99,9 +99,9 @@ public sealed class ConversationWorkingPlanTests
         var before = (await snapshots.GetWorkingPlanAsync(session.Id))!;
         var plan = NativeWorkingPlanProjection.FromToolStep(before);
         Assert.Equal(2, plan.Steps.Count);
-        Assert.Equal("Analysieren", plan.Steps[0].Title);
+        Assert.Equal("Phase 1: Analysieren", plan.Steps[0].Title);
         Assert.Equal("in_progress", plan.Steps[0].Status);
-        Assert.Equal("Prüfen", plan.Steps[1].Title);
+        Assert.Equal("Phase 2: Prüfen", plan.Steps[1].Title);
         Assert.Equal("Gegenprobe", Assert.Single(plan.AcceptanceCriteria).Title);
         Assert.Equal(revision, (await chats.GetSessionAsync(session.Id))!.ConversationRevision);
         Assert.Equal(before.OutputJson, (await snapshots.GetWorkingPlanAtAsync(session.Id, next.Id, "delta"))!.OutputJson);
@@ -122,7 +122,7 @@ public sealed class ConversationWorkingPlanTests
         await chats.SaveToolStepAsync(next.Id, Plan("new", new { steps = new[] { new { id = "new", title = "Aktueller Auftrag", status = "in_progress" } } },
             new { success = true, storedStepIds = NewStepIds, storedAcceptanceCriterionIds = System.Array.Empty<string>() }));
         var plan = NativeWorkingPlanProjection.FromToolStep(await snapshots.GetWorkingPlanAsync(session.Id));
-        Assert.Equal("Aktueller Auftrag", Assert.Single(plan.Steps).Title);
+        Assert.Equal("Phase 1: Aktueller Auftrag", Assert.Single(plan.Steps).Title);
         await chats.SaveToolStepAsync(next.Id, Plan("clear", new { explanation = "Plan zurückgesetzt" }, new
         {
             success = true, storedSteps = System.Array.Empty<object>(), storedAcceptanceCriteria = System.Array.Empty<object>(),
@@ -152,10 +152,10 @@ public sealed class ConversationWorkingPlanTests
         }));
         var historical = NativeWorkingPlanProjection.FromToolStep(await snapshots.GetWorkingPlanAtAsync(session.Id, message.Id, "middle"));
         Assert.Equal(2, historical.Steps.Count);
-        Assert.Equal("Analysieren", historical.Steps[0].Title);
+        Assert.Equal("Phase 1: Analysieren", historical.Steps[0].Title);
         Assert.Equal("in_progress", historical.Steps[0].Status);
         Assert.Equal("pending", historical.Steps[1].Status);
-        Assert.Equal("Späterer Stand", Assert.Single(NativeWorkingPlanProjection.FromToolStep(await snapshots.GetWorkingPlanAsync(session.Id)).Steps).Title);
+        Assert.Equal("Phase 1: Späterer Stand", Assert.Single(NativeWorkingPlanProjection.FromToolStep(await snapshots.GetWorkingPlanAsync(session.Id)).Steps).Title);
         Assert.Null(await snapshots.GetWorkingPlanAtAsync(Guid.NewGuid(), message.Id, "middle"));
         Assert.Null(await snapshots.GetWorkingPlanAtAsync(session.Id, message.Id, "missing"));
     }

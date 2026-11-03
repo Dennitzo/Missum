@@ -66,6 +66,8 @@ public static class CompactAgentContextPolicy
         searchHistory/searchKnowledge betreffen nur diese Sitzung. renderHtml höchstens einmal pro Lauf.
         Als ersten Werkzeugschritt jedes Codex-/Science-Hauptlaufs verpflichtend coding.updatePlan ausführen:
         wenige Etappen und unverkleinerte Akzeptanzkriterien, höchstens eine in_progress.
+        Neue Etappen fortlaufend ab eins benennen: „Phase 1: Inhalt“, „Phase 2: Inhalt“ und so weiter;
+        bereits gespeicherte Originaltitel unverändert übernehmen.
         steps und acceptanceCriteria gemeinsam senden; jeder übermittelte Punkt braucht id/title.
         Ohne status beginnen neue Einträge als pending; gespeicherte Statuswerte bleiben erhalten.
         Bestehende Titel unverändert übernehmen. IDs gelten erst nach erfolgreichem Speichern im aktuellen Stand;

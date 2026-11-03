@@ -184,7 +184,7 @@ public sealed partial class NativeAssistantPage
     private void RefreshInspectorWorkingPlan()
     {
         if (InspectorWorkingPlanHost is null || Inspector is null) return;
-        var hasPlan = _session != Guid.Empty && _workingPlan.Steps.Count + _workingPlan.AcceptanceCriteria.Count > 0;
+        var hasPlan = _session != Guid.Empty && _workingPlan.Steps.Count > 0;
         InspectorWorkingPlanHost.Visibility = hasPlan ? Visibility.Visible : Visibility.Collapsed;
         _inspectorWorkingPlanView.SetRunActive(_running);
         var visible = hasPlan && Inspector.Visibility == Visibility.Visible;

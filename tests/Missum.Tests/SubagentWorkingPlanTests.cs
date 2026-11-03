@@ -127,7 +127,7 @@ public sealed class SubagentWorkingPlanTests
         Assert.True(metadata.HasValue);
         var plan = metadata.Value;
         Assert.Equal(id, plan.GetProperty("stepId").GetString());
-        Assert.Equal(title, Assert.Single(plan.GetProperty("steps").EnumerateArray()).GetProperty("title").GetString());
+        Assert.Equal("Phase 1: " + title, Assert.Single(plan.GetProperty("steps").EnumerateArray()).GetProperty("title").GetString());
         Assert.Single(plan.GetProperty("acceptanceCriteria").EnumerateArray());
         Assert.True(plan.TryGetProperty("updatedAt", out _));
     }

@@ -89,6 +89,16 @@ public sealed partial class NativeAssistantPage
                     throw new InvalidOperationException("Ohne Plan darf keine Arbeitsplan-Gruppe erscheinen.");
                 AssertAnimation(false);
             }
+            // Criteria alone do not create a sidebar plan group; they remain
+            // part of the full snapshot for the separately opened plan tab.
+            await OpenSessionAsync(fixture.Empty.Id);
+            ObserveWorkingPlan(JsonSerializer.SerializeToElement(new
+            {
+                workingPlan = new { updatedAt = DateTimeOffset.UtcNow, storedSteps = Array.Empty<object>(),
+                    storedAcceptanceCriteria = fixture.Criteria },
+            }, JsonOptions));
+            if (InspectorWorkingPlanHost.Visibility != Visibility.Collapsed)
+                throw new InvalidOperationException("Ein reiner Kriterienstand darf keine Arbeitsplan-Gruppe in der Seitenleiste erzeugen.");
             await OpenSessionAsync(fixture.General.Id);
             AssertTabAbsent();
             await OpenSessionAsync(fixture.Session.Id);
@@ -135,13 +145,13 @@ public sealed partial class NativeAssistantPage
                 (type, data, id) => EmitAsync(type, data, id), "working-plan-smoke");
             AssertPlan(updatedSteps, updatedCriteria);
             AssertInspectorPlan(updatedSteps, updatedCriteria);
-            var retainedRow = Descendants(_workingPlanView).OfType<TextBlock>().Single(text => text.Text == updatedSteps[0].Title);
+            var retainedRow = Descendants(_workingPlanView).OfType<TextBlock>().Single(text => text.Text == "Phase 1: " + updatedSteps[0].Title);
             ApplyEvent("workingPlan.changed", JsonSerializer.SerializeToElement(new { sessionId = Guid.NewGuid(),
                 workingPlan = AssistantCoordinator.WorkingPlanDto(fixture.FirstStep) }, JsonOptions));
             ApplyEvent("workingPlan.changed", JsonSerializer.SerializeToElement(new { sessionId = fixture.Session.Id,
                 workingPlan = AssistantCoordinator.WorkingPlanDto(fixture.FirstStep) }, JsonOptions));
             AssertPlan(updatedSteps, updatedCriteria);
-            if (!ReferenceEquals(retainedRow, Descendants(_workingPlanView).OfType<TextBlock>().Single(text => text.Text == updatedSteps[0].Title)))
+            if (!ReferenceEquals(retainedRow, Descendants(_workingPlanView).OfType<TextBlock>().Single(text => text.Text == "Phase 1: " + updatedSteps[0].Title)))
                 throw new InvalidOperationException("Eine veraltete oder fremde Meldung hat den aktuellen Arbeitsplan ersetzt.");
 
             ShowChatView();
@@ -311,11 +321,12 @@ public sealed partial class NativeAssistantPage
         {
             UpdateLayout();
             if (InspectorWorkingPlanHost.Visibility != Visibility.Visible || Inspector.Visibility != Visibility.Visible
-                || _inspectorWorkingPlanView.StepCount != steps.Count || _inspectorWorkingPlanView.AcceptanceCriteriaCount != criteria.Count
-                || !_inspectorWorkingPlanView.VisibleTitles.SequenceEqual(steps.Select(item => item.Title))
-                || criteria.Any(item => !Descendants(_inspectorWorkingPlanView).OfType<TextBlock>().Any(text => text.Text == item.Title))
+                || _inspectorWorkingPlanView.StepCount != steps.Count || _inspectorWorkingPlanView.AcceptanceCriteriaCount != 0
+                || !_inspectorWorkingPlanView.VisibleTitles.SequenceEqual(steps.Select((item, index) => $"Phase {index + 1}: {item.Title}"))
+                || Descendants(_inspectorWorkingPlanView).OfType<TextBlock>().Any(text => text.Text == "Annahmekriterien")
+                || criteria.Any(item => Descendants(_inspectorWorkingPlanView).OfType<TextBlock>().Any(text => text.Text == item.Title))
                 || Descendants(_inspectorWorkingPlanView).OfType<ScrollViewer>().Any())
-                throw new InvalidOperationException("Die Seitenleiste zeigt nicht den vollständigen aktuellen Sitzungsplan ohne innere Scrollfenster.");
+                throw new InvalidOperationException("Die Seitenleiste zeigt nicht ausschließlich die aktuellen Arbeitsschritte ohne innere Scrollfenster.");
         }
 
         void AssertPlan(IReadOnlyList<NativeWorkingPlanProjection.Item> steps, IReadOnlyList<NativeWorkingPlanProjection.Item> criteria)
@@ -324,7 +335,7 @@ public sealed partial class NativeAssistantPage
             if (_activeWorkingPlanSession != _session || _workingPlanHost.Visibility != Visibility.Visible
                 || BodyGrid.Visibility != Visibility.Collapsed || _workingPlanView.StepCount != steps.Count
                 || _workingPlanView.AcceptanceCriteriaCount != criteria.Count
-                || !_workingPlanView.VisibleTitles.SequenceEqual(steps.Select(item => item.Title))
+                || !_workingPlanView.VisibleTitles.SequenceEqual(steps.Select((item, index) => $"Phase {index + 1}: {item.Title}"))
                 || criteria.Any(item => !Descendants(_workingPlanView).OfType<TextBlock>().Any(text => text.Text == item.Title))
                 || Descendants(_workingPlanView).OfType<TextBlock>().Any(text => text.Text.Contains(" · pending", StringComparison.Ordinal)
                     || text.Text.Contains(" · in_progress", StringComparison.Ordinal) || text.Text.Contains(" · completed", StringComparison.Ordinal))
