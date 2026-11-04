@@ -843,6 +843,9 @@ public sealed class CodingWorkingStateIntegrationTests
         if (scienceSubagent)
             await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Prüfe den Beweis.")],
                 0, 0, 0, 0, CanonicalStateReadRequired: false));
+        else
+            await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Bearbeite den Auftrag.")],
+                0, 0, 0, 0, WorkingState: RecoveryWorkingState("Bearbeite den Auftrag."), SciencePlanInitialized: true));
         harness.Handler.CompletionOverride = (_, _) => Task.FromResult(NativeHandler.EmptyResponse(reasoning));
 
         await Assert.ThrowsAsync<ModelEmptyResponseException>(() => harness.Processor.ProcessAsync(run, CancellationToken.None));
@@ -870,7 +873,8 @@ public sealed class CodingWorkingStateIntegrationTests
         using var harness = new Harness();
         var run = await harness.CreateAsync();
         await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Continue the saved work.")],
-            5, 2, 123, 45, WorkingState: CodingWorkingState.Create("Continue the saved work."), EmptyResponseRetryCount: 2));
+            5, 2, 123, 45, WorkingState: RecoveryWorkingState("Continue the saved work."), EmptyResponseRetryCount: 2,
+            SciencePlanInitialized: true));
         harness.Handler.CompletionOverride = (_, _) => Task.FromResult(NativeHandler.EmptyResponse(reasoning: true));
 
         await Assert.ThrowsAsync<ModelEmptyResponseException>(() => harness.Processor.ProcessAsync(run, CancellationToken.None));
@@ -919,6 +923,8 @@ public sealed class CodingWorkingStateIntegrationTests
     {
         using var harness = new Harness();
         var run = await harness.CreateAsync();
+        await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Bearbeite den Auftrag.")],
+            0, 0, 0, 0, WorkingState: RecoveryWorkingState("Bearbeite den Auftrag."), SciencePlanInitialized: true));
         harness.Handler.CompletionOverride = (_, _) => Task.FromResult(NativeHandler.EmptyResponse(reasoning: true, streaming: true));
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         using var subscription = harness.Notifier.Subscribe(run);
@@ -1074,6 +1080,168 @@ public sealed class CodingWorkingStateIntegrationTests
             MissumAiProtocol.CreateJsonOptions());
         Assert.Equal(0, checkpoint!.EmptyResponseRetryCount);
     }
+
+    [Theory]
+    [InlineData(RunMode.Auto, null, false, false)]
+    [InlineData(RunMode.Auto, null, true, true)]
+    [InlineData(RunMode.Auto, "compact-v1", true, false)]
+    [InlineData(RunMode.General, null, true, true)]
+    [InlineData(RunMode.General, "compact-v1", true, false)]
+    [InlineData(RunMode.General, "compact-v1", false, false)]
+    public async Task GeneralConversationRecoversAnEmptyOrReasoningOnlyTurn(RunMode mode, string? profile, bool reasoning, bool streaming)
+    {
+        using var harness = new Harness();
+        var request = GeneralRecoveryRequest(mode, profile);
+        var run = (await harness.Repository.CreateAsync(request, null)).Snapshot.RunId;
+        harness.Handler.CompletionOverride = (attempt, _) => Task.FromResult(attempt == 1
+            ? NativeHandler.EmptyResponse(reasoning, streaming)
+            : harness.Handler.CompleteResponse());
+
+        await harness.Processor.ProcessAsync(run, CancellationToken.None);
+
+        Assert.Equal(RunState.Completed, (await harness.Repository.GetAsync(run))!.State);
+        Assert.Equal(2, harness.Handler.Requests.Count);
+        var events = await harness.Repository.GetEventsAfterAsync(run, 0);
+        var recovery = Assert.Single(events, item => item.Type == RunEventTypes.ModelGeneration
+            && item.Data.TryGetProperty("state", out var state) && state.GetString() == "responseRecovery");
+        Assert.Equal(reasoning ? "reasoning_only_response" : "empty_response", recovery.Data.GetProperty("failureKind").GetString());
+        Assert.DoesNotContain(events, item => item.Type == RunEventTypes.RunFailed || item.Type == RunEventTypes.ClientToolProposed);
+        Assert.Contains(events, item => item.Type == RunEventTypes.TextDelta && item.Data.GetRawText().Contains("Verified result", StringComparison.Ordinal));
+        Assert.Null(await harness.Repository.GetCheckpointAsync(run)); // successful finalization removes the active checkpoint
+        var completed = Assert.Single(events, item => item.Type == RunEventTypes.RunCompleted);
+        Assert.Equal(128, completed.Data.GetProperty("inputTokens").GetInt32());
+        Assert.Equal(16, completed.Data.GetProperty("outputTokens").GetInt32());
+        if (reasoning) Assert.Contains(harness.Handler.Requests[1].GetProperty("messages").EnumerateArray(), message =>
+            message.TryGetProperty("reasoning_content", out var value) && value.GetString() == NativeHandler.EmptyTurnReasoning);
+    }
+
+    [Fact]
+    public async Task GeneralConversationKeepsTheRecoveryCountAndJournalAcrossAnInterruptedRetry()
+    {
+        using var harness = new Harness();
+        using var stop = new CancellationTokenSource();
+        var run = (await harness.Repository.CreateAsync(GeneralRecoveryRequest(RunMode.Auto, null), null)).Snapshot.RunId;
+        var secondRequest = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.Handler.CompletionOverride = async (attempt, token) =>
+        {
+            if (attempt == 2)
+            {
+                secondRequest.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, token);
+            }
+            return NativeHandler.EmptyResponse(reasoning: true, streaming: true);
+        };
+        var processing = harness.Processor.ProcessAsync(run, stop.Token);
+        await secondRequest.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await stop.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => processing);
+        var interrupted = (await harness.Repository.GetCheckpointAsync(run))!;
+        Assert.Equal(1, interrupted.EmptyResponseRetryCount);
+        Assert.Equal(1, interrupted.RoundCount);
+        Assert.Contains(interrupted.Messages, message => message.ReasoningContent == NativeHandler.EmptyTurnReasoning);
+
+        // Re-enter the same run from its durable checkpoint, as after a restart.
+        harness.Handler.CompletionOverride = (attempt, _) => Task.FromResult(attempt == 3
+            ? NativeHandler.EmptyResponse(reasoning: true, streaming: true)
+            : harness.Handler.CompleteResponse());
+        await harness.Processor.ProcessAsync(run, CancellationToken.None);
+
+        Assert.Equal(RunState.Completed, (await harness.Repository.GetAsync(run))!.State);
+        Assert.Null(await harness.Repository.GetCheckpointAsync(run));
+        Assert.Equal(2, harness.Handler.Requests[3].GetProperty("messages").EnumerateArray().Count(message =>
+            message.TryGetProperty("reasoning_content", out var value) && value.GetString() == NativeHandler.EmptyTurnReasoning));
+        var events = await harness.Repository.GetEventsAfterAsync(run, 0);
+        var completed = Assert.Single(events, item => item.Type == RunEventTypes.RunCompleted);
+        Assert.Equal(192, completed.Data.GetProperty("inputTokens").GetInt32());
+        Assert.Equal(24, completed.Data.GetProperty("outputTokens").GetInt32());
+        Assert.Equal(2, events.Count(item => item.Type == RunEventTypes.ModelGeneration
+            && item.Data.TryGetProperty("state", out var state) && state.GetString() == "responseRecovery"));
+        Assert.DoesNotContain(events, item => item.Type == RunEventTypes.RunFailed || item.Type == RunEventTypes.ClientToolProposed);
+    }
+
+    [Fact]
+    public async Task GeneralConversationRepeatedEmptyTurnsReturnSpecificRetryableFailure()
+    {
+        using var harness = new Harness();
+        var run = (await harness.Repository.CreateAsync(GeneralRecoveryRequest(RunMode.Auto, null), null)).Snapshot.RunId;
+        harness.Handler.CompletionOverride = (_, _) => Task.FromResult(NativeHandler.EmptyResponse(reasoning: true, streaming: true));
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var subscription = harness.Notifier.Subscribe(run);
+        await harness.Processor.StartAsync(deadline.Token);
+        try
+        {
+            while (!(await harness.Repository.GetEventsAfterAsync(run, 0, deadline.Token)).Any(item => item.Type == RunEventTypes.RunFailed))
+                await subscription.Reader.ReadAsync(deadline.Token);
+        }
+        finally { await harness.Processor.StopAsync(CancellationToken.None); }
+
+        Assert.Equal(3, harness.Handler.Requests.Count);
+        var failure = Assert.Single(await harness.Repository.GetEventsAfterAsync(run, 0), item => item.Type == RunEventTypes.RunFailed);
+        Assert.Equal("provider.empty_response", failure.Data.GetProperty("errorCode").GetString());
+        Assert.True(failure.Data.GetProperty("retryable").GetBoolean());
+        Assert.DoesNotContain("erforderliche Operation", failure.Data.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.Equal(3, (await harness.Repository.GetCheckpointAsync(run))!.EmptyResponseRetryCount);
+    }
+
+    [Fact]
+    public async Task GeneralLegacySelectedToolRemainsSelectedWhenReasoningOnlyTurnIsRetried()
+    {
+        using var harness = new Harness();
+        var request = GeneralRecoveryRequest(RunMode.Auto, null) with { ClientCapabilities = ["visual-tools"] };
+        var run = (await harness.Repository.CreateAsync(request, null)).Snapshot.RunId;
+        await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Prüfe das Bild.")],
+            0, 0, 0, 0, SelectedToolName: WorkspaceTools.ImageInput, SelectedModelId: NativeHandler.ModelId));
+        harness.Handler.CompletionOverride = (attempt, _) => Task.FromResult(attempt == 1
+            ? NativeHandler.EmptyResponse(reasoning: true, streaming: true)
+            : harness.Handler.ToolResponse("actual-image", WorkspaceTools.ImageInput, new { operation = "file", path = "test.png" }));
+
+        await harness.TickAsync(run);
+
+        Assert.Equal(RunState.WaitingForClient, (await harness.Repository.GetAsync(run))!.State);
+        Assert.Equal(2, harness.Handler.Requests.Count);
+        Assert.All(harness.Handler.Requests, body => Assert.Equal("required", body.GetProperty("tool_choice").GetString()));
+        var events = await harness.Repository.GetEventsAfterAsync(run, 0);
+        var proposal = Assert.Single(events, item => item.Type == RunEventTypes.ClientToolProposed);
+        Assert.Equal(WorkspaceTools.ImageInput, proposal.Data.GetProperty("name").GetString());
+        Assert.DoesNotContain(events, item => item.Type == RunEventTypes.RunFailed);
+        Assert.Equal(0, (await harness.Repository.GetCheckpointAsync(run))!.EmptyResponseRetryCount);
+    }
+
+    [Fact]
+    public async Task GeneralRecoveryDoesNotRepeatAnAlreadyCompletedTool()
+    {
+        using var harness = new Harness();
+        var run = (await harness.Repository.CreateAsync(GeneralRecoveryRequest(RunMode.Auto, null), null)).Snapshot.RunId;
+        var priorCall = new LmToolCall("previous-search", "web.search", JsonSerializer.SerializeToElement(new { query = "KI Beratung" }));
+        await harness.Repository.SaveCheckpointAsync(run, new(
+            [new("user", "Philosophiere über KI-Beratung."), new("assistant", null, ToolCalls: [priorCall]),
+             new("tool", "{\"results\":[\"Bisherige Quelle\"]}", ToolCallId: priorCall.Id)],
+            1, 1, 10, 5, SelectedModelId: NativeHandler.ModelId));
+        harness.Handler.CompletionOverride = (attempt, _) => Task.FromResult(attempt == 1
+            ? NativeHandler.EmptyResponse(reasoning: true, streaming: true)
+            : harness.Handler.CompleteResponse());
+
+        await harness.Processor.ProcessAsync(run, CancellationToken.None);
+
+        Assert.Equal(RunState.Completed, (await harness.Repository.GetAsync(run))!.State);
+        Assert.Equal(2, harness.Handler.Requests.Count);
+        Assert.All(harness.Handler.Requests, request => Assert.Contains("Bisherige Quelle",
+            request.GetProperty("messages").GetRawText(), StringComparison.Ordinal));
+        Assert.DoesNotContain(await harness.Repository.GetEventsAfterAsync(run, 0),
+            item => item.Type is RunEventTypes.ServerToolStarted or RunEventTypes.ClientToolProposed);
+    }
+
+    private static RunRequest GeneralRecoveryRequest(RunMode mode, string? profile) => Request("Philosophiere über eine selbstständige KI-Beratung.") with
+    {
+        Mode = mode, ConversationProfile = ConversationProfile.General, SessionId = "general-recovery-session",
+        PreferredGeneralModelId = NativeHandler.ModelId, ClientCapabilities = [],
+        AllowedServerTools = [], CodingOptions = null, ContextProfileVersion = profile,
+    };
+
+    private static CodingWorkingState RecoveryWorkingState(string task) => CodingWorkingState.Create(task) with
+    {
+        Plan = [new("recovery-step", "Prüfung fortsetzen", "in_progress", [])],
+    };
 
     [Fact]
     public async Task AnnouncedPlanContinuesToActualToolInsteadOfCompleting()

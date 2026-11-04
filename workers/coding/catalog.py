@@ -357,11 +357,10 @@ DEEPSEEK_HISTORY_BY_CONTENT = ("{%- if keep_reasoning and message['reasoning_con
                                "and message['reasoning_content'] -%}")
 
 
-def german_reasoning_template(template):
-    """Adapt known templates for German reasoning and durable prompt prefixes.
+def native_history_template(template):
+    """Preserve generated DeepSeek history across turns and thinking switches.
 
-    The heading is native assistant prefill, not a fabricated reasoning sentence.
-    llama returns the prefill in reasoning_content; history must retain it once.
+    Other models use their original GGUF template and reasoning defaults.
     """
     deepseek_history = "{%- set keep_reasoning = tp.has or (loop.index0 > last_user_idx.value) -%}"
     if "dsml_token" in template and deepseek_history in template:
@@ -380,34 +379,7 @@ def german_reasoning_template(template):
         # reasoning of each turn instead; only the generation prompt follows the
         # current flag.
         return adapted.replace(DEEPSEEK_HISTORY_BY_FLAG, DEEPSEEK_HISTORY_BY_CONTENT)
-    marker = "{%- if add_generation_prompt %}"
-    position = template.rfind(marker)
-    thinking = "{{- '<think>\\n' }}"
-    if position < 0 or thinking not in template[position:]:
-        return None
-    instruction = "Analysiere auf Deutsch und beginne unmittelbar mit dem fachlichen Inhalt. Kuendige weder die Sprache noch deinen Denkprozess an."
-    localized = template.replace("{%- set reasoning_instructions = '' %}",
-        "{%- set reasoning_instructions = '" + instruction + "' %}")
-    translations = {
-        "Reasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.":
-            "Die Denkleistung ist auf xhigh gesetzt. Denke die Aufgabe sorgfaeltig auf Deutsch durch, pruefe wesentliche Annahmen und plausible Alternativen. Priorisiere Korrektheit, Konsistenz und Klarheit der Abschlussantwort.",
-        "Reasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration.":
-            "Die Denkleistung ist auf low gesetzt. Denke kurz und zielgerichtet auf Deutsch und gelange ohne unnoetige Ausfuehrungen zum Ergebnis."
-    }
-    for original, translated in translations.items():
-        localized = localized.replace("'" + original + "'", "'" + translated + " " + instruction + "'")
-    # System/reminder instructions alone do not reliably change Qwen's learned
-    # English thinking language. A neutral German heading primes the actual
-    # native continuation without inventing any analysis or modifying GGUFs.
-    heading = "Überlegung auf Deutsch:\\n"
-    history_thinking = "'\\n<think>\\n' + reasoning_content"
-    if history_thinking in template:
-        localized = localized.replace(thinking, "{{- '<think>\\n" + heading + "' }}")
-        # The native parser returns this prefill with reasoning_content. The
-        # original history formatter already reproduces it. Adding it here
-        # would duplicate it and invalidate the KV prefix; empty reasoning
-        # (thinking disabled) likewise keeps the original empty think block.
-    return localized if localized != template else None
+    return None
 
 
 def multi_gpu_split_mode():
@@ -500,13 +472,13 @@ def write_presets(root, target, placements=None, managed_gpu=False, fit_target="
         lines += [f"[{model_id}]", f"model = {path.as_posix()}", f"tags = {tags}"]
         if model["role"] != "embedding":
             metadata = model_metadata(path, allow_metadata_only=True) or {}
-            localized = german_reasoning_template(metadata.get("tokenizer.chat_template", ""))
-            if localized:
+            history_template = native_history_template(metadata.get("tokenizer.chat_template", ""))
+            if history_template:
                 template_dir = Path(target).parent / "templates"
                 template_dir.mkdir(parents=True, exist_ok=True)
-                template_path = template_dir / (hashlib.sha256(localized.encode()).hexdigest()[:24] + ".jinja")
+                template_path = template_dir / (hashlib.sha256(history_template.encode()).hexdigest()[:24] + ".jinja")
                 if not template_path.exists():
-                    template_path.write_text(localized, encoding="utf-8")
+                    template_path.write_text(history_template, encoding="utf-8")
                 lines += [f"chat-template-file = {template_path.as_posix()}"]
         placement = (placements or {}).get(model_id)
         policy = (resolved_policies or {}).get(model_id)
@@ -904,7 +876,7 @@ class GpuLoadManager:
         # Preserve the existing default layer/single-GPU snapshot identity:
         # the same loaded configuration must not force a large prefix re-eval.
         fingerprint = dict(version=1, files=identity, context=policy["context"], cache="q8_0", slots=1,
-                           template=german_reasoning_template(metadata.get("tokenizer.chat_template", "")),
+                           template=native_history_template(metadata.get("tokenizer.chat_template", "")),
                            placement=self.placements.get(model_id), fit=self.fit_target, gpuLayers=self.gpu_layers,
                            split="layer" if policy["split"] == "none" else policy["split"])
         if model.get("projector") and model["role"] != "embedding":

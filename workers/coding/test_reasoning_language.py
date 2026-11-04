@@ -22,7 +22,7 @@ class ReasoningLanguageTests(unittest.TestCase):
         if installed is None:
             self.skipTest("No local DeepSeek model")
         original = catalog.model_metadata(installed["path"], allow_metadata_only=True)["tokenizer.chat_template"]
-        adapted = catalog.german_reasoning_template(original)
+        adapted = catalog.native_history_template(original)
         if adapted is None or "set keep_reasoning = true" not in adapted:
             self.skipTest("Installed model uses another DeepSeek template")
         environment = jinja2.Environment()
@@ -56,13 +56,13 @@ class ReasoningLanguageTests(unittest.TestCase):
         template = "{%- set dsml_token = 'DSML' -%}\n" \
             "{%- set keep_reasoning = tp.has or (loop.index0 > last_user_idx.value) -%}\n" \
             "{%- if keep_reasoning and thinking -%}{{- message['reasoning_content'] -}}{%- endif -%}"
-        adapted = catalog.german_reasoning_template(template)
+        adapted = catalog.native_history_template(template)
         self.assertIn("set keep_reasoning = true", adapted)
         # History replays by the stored reasoning of each turn, never by the
         # current thinking flag: a reasoning switch must keep the KV prefix.
         self.assertNotIn("if keep_reasoning and thinking", adapted)
         self.assertIn(catalog.DEEPSEEK_HISTORY_BY_CONTENT, adapted)
-        self.assertIsNone(catalog.german_reasoning_template(adapted))
+        self.assertIsNone(catalog.native_history_template(adapted))
         self.assertEqual(template.replace("tp.has or (loop.index0 > last_user_idx.value)", "true")
                          .replace(catalog.DEEPSEEK_HISTORY_BY_FLAG, catalog.DEEPSEEK_HISTORY_BY_CONTENT), adapted)
 
@@ -79,7 +79,7 @@ class ReasoningLanguageTests(unittest.TestCase):
         if installed is None:
             self.skipTest("No local DeepSeek model")
         original = catalog.model_metadata(installed["path"], allow_metadata_only=True)["tokenizer.chat_template"]
-        adapted = catalog.german_reasoning_template(original)
+        adapted = catalog.native_history_template(original)
         if adapted is None or catalog.DEEPSEEK_HISTORY_BY_CONTENT not in adapted:
             self.skipTest("Installed model uses another DeepSeek template")
         environment = jinja2.Environment()
@@ -111,67 +111,39 @@ class ReasoningLanguageTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
-    def test_instructions_are_localized_with_a_neutral_native_language_heading(self):
+    def test_qwen_and_unknown_templates_keep_the_original_model_defaults(self):
         template = """{{ message.content }}
-{{- '<|im_start|>' + message.role + '\\n<think>\\n' + reasoning_content + '\\n</think>\\n\\n' + content }}
+{{- '<|im_start|>' + message.role + '\n<think>\n' + reasoning_content + '\n</think>\n\n' + content }}
 {%- set reasoning_instructions = '' %}
-{%- if add_generation_prompt %}
-{{- '<|im_start|>assistant\\n' }}
-{%- if enable_thinking is defined and enable_thinking is false %}
-{{- '<think>\\n\\n</think>\\n\\n' }}
-{%- else %}
-{{- '<think>\\n' }}
-{%- endif %}
-{%- endif %}"""
-        localized = catalog.german_reasoning_template(template)
-        self.assertIn("Analysiere auf Deutsch", localized)
-        self.assertNotIn("Ich prüfe", localized)
-        self.assertIn("<think>\\nÜberlegung auf Deutsch:\\n", localized)
-        self.assertEqual(template[template.index("{%- if add_generation_prompt %}"):],
-                         localized[localized.index("{%- if add_generation_prompt %}"):].replace("Überlegung auf Deutsch:\\n", ""))
-        self.assertIn("<think>\\n\\n</think>\\n\\n", localized)
-        self.assertTrue(localized.startswith("{{ message.content }}"))
-        self.assertIsNone(catalog.german_reasoning_template("{{ messages }}"))
-        self.assertIsNone(catalog.german_reasoning_template(localized))
+{%- if add_generation_prompt %}{{- '<think>\n' }}{%- endif %}"""
+        self.assertIsNone(catalog.native_history_template(template))
+        self.assertIsNone(catalog.native_history_template("{{ messages }}"))
 
-    def test_native_heading_is_returned_in_reasoning_and_history_never_inserts_it_twice(self):
-        template = "{{- '<|im_start|>' + message.role + '\\n<think>\\n' + reasoning_content + '\\n</think>\\n\\n' + content }}" \
-            "{%- if add_generation_prompt %}{{- '<think>\\n' }}{%- endif %}"
-        localized = catalog.german_reasoning_template(template)
-        self.assertEqual(1, localized.count("Überlegung auf Deutsch:\\n"))
-        self.assertIn("'\\n<think>\\n' + reasoning_content", localized)
-        self.assertIsNone(catalog.german_reasoning_template(localized))
-
-    def test_unknown_history_form_never_gets_a_prefix_that_cannot_be_replayed(self):
-        template = "{%- set reasoning_instructions = '' %}{%- if add_generation_prompt %}{{- '<think>\\n' }}{%- endif %}"
-        localized = catalog.german_reasoning_template(template)
-        self.assertIn("Analysiere auf Deutsch", localized)
-        self.assertNotIn("Überlegung auf Deutsch", localized)
-        self.assertIn("{{- '<think>\\n' }}", localized)
-
-    def test_effective_reasoning_template_change_invalidates_native_snapshot_identity(self):
-        template = "{{- '<|im_start|>' + message.role + '\\n<think>\\n' + reasoning_content + '\\n</think>\\n\\n' + content }}" \
-            "{%- if add_generation_prompt %}{{- '<think>\\n' }}{%- endif %}"
+    def test_effective_template_change_invalidates_old_snapshot_identity(self):
+        template = "{%- if add_generation_prompt %}{{- '<think>\n' }}{%- endif %}"
         gguf(self.root / "model.gguf", template=template)
         manager = catalog.GpuLoadManager(self.root, self.root / "models.ini", self.root, 8081)
         model = catalog.discover_models(self.root)[0]["id"]
-        with patch.object(catalog, "german_reasoning_template", return_value=template):
-            original = manager.sessions._identity(model, "persisted-session")
-        localized = manager.sessions._identity(model, "persisted-session")
-        self.assertNotEqual(original, localized)
+        # Legacy language override and the original GGUF template differ: the
+        # old incompatible native state must never be restored under new defaults.
+        with patch.object(catalog, "native_history_template", return_value="old localized template"):
+            legacy = manager.sessions._identity(model, "persisted-session")
+        current = manager.sessions._identity(model, "persisted-session")
+        self.assertNotEqual(legacy, current)
 
-    def test_template_override_is_external_and_does_not_change_model_bytes(self):
+    def test_qwen_uses_no_external_template_or_model_mutation(self):
         model = self.root / "model.gguf"
-        template = "{%- set reasoning_instructions = '' %}{%- if add_generation_prompt %}{{- '<think>\\n' }}{%- endif %}"
+        template = "{%- set reasoning_instructions = '' %}{%- if add_generation_prompt %}{{- '<think>\n' }}{%- endif %}"
         gguf(model, template=template)
         original = model.read_bytes()
         target = self.root / "models.ini"
         catalog.write_presets(self.root, target)
         self.assertEqual(original, model.read_bytes())
-        self.assertIn("chat-template-file =", target.read_text())
-        self.assertEqual(len(list((self.root / "templates").glob("*.jinja"))), 1)
+        self.assertNotIn("chat-template-file =", target.read_text())
+        self.assertFalse((self.root / "templates").exists())
         catalog.write_presets(self.root, target)
-        self.assertEqual(len(list((self.root / "templates").glob("*.jinja"))), 1)
+        self.assertEqual(original, model.read_bytes())
+        self.assertNotIn("chat-template-file =", target.read_text())
 
 
 if __name__ == '__main__':

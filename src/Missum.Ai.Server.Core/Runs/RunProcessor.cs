@@ -24,10 +24,10 @@ public sealed partial class RunProcessor : BackgroundService
     internal const string EmptyResponseRepairPrompt = """
         Missum: Die letzte Modellantwort endete ohne Antworttext und ohne vollständigen strukturierten Werkzeugaufruf.
         Eine Überlegung oder Ankündigung im Reasoning-Kanal führt kein Werkzeug aus. Setze die bestehende Aufgabe
-        anhand der bereits gespeicherten Werkzeugergebnisse fort: Liefere jetzt den nächsten vollständigen Aufruf
-        eines angebotenen Werkzeugs oder, wenn die Aufgabe nachweislich erledigt ist, deine normale Abschlussantwort.
-        Bereits erfolgreich ausgeführte Dateiänderungen bleiben angewendet; wiederhole sie nicht. Prüfe offene
-        Arbeitsschritte mit den angebotenen Werkzeugen. Gib Denktext nicht als Abschlussantwort aus.
+        anhand des bisherigen Gesprächs und vorhandener Werkzeugergebnisse fort: Liefere eine normale, zur Anfrage
+        passende Antwort oder den nächsten notwendigen vollständigen Aufruf eines angebotenen Werkzeugs.
+        Bereits erfolgreich ausgeführte Aktionen bleiben angewendet; wiederhole sie nicht. Gib Denktext nicht als
+        Abschlussantwort aus.
         """;
 
     private readonly RunWorkChannel _queue;
@@ -1533,8 +1533,7 @@ public sealed partial class RunProcessor : BackgroundService
                 await SaveCheckpointAsync().ConfigureAwait(false);
                 continue;
             }
-            if ((isCoding || request.Subagent is not null)
-                && response.ToolCalls.Count == 0 && string.IsNullOrWhiteSpace(response.Content))
+            if (response.ToolCalls.Count == 0 && string.IsNullOrWhiteSpace(response.Content))
             {
                 // A provider can finish normally after emitting only reasoning. It has
                 // not requested an operation and must not replay previously committed tools.
@@ -1543,7 +1542,8 @@ public sealed partial class RunProcessor : BackgroundService
                 emptyResponseRetryCount++;
                 if (!string.IsNullOrEmpty(response.ReasoningContent))
                     messages.Add(new LmChatMessage("assistant", response.Content ?? string.Empty, ReasoningContent: response.ReasoningContent));
-                if (!messages.Any(message => message.Role == "system" && message.Content == EmptyResponseRepairPrompt))
+                if (!messages.Any(message => message.Role == "system" && message.Content == EmptyResponseRepairPrompt
+                    || message.Role == "user" && message.Content == "Missum-Laufanweisung:\n" + EmptyResponseRepairPrompt))
                     messages.Add(new LmChatMessage("system", EmptyResponseRepairPrompt));
                 await SaveCheckpointAsync().ConfigureAwait(false);
                 _runtime.WriteLog("Warning", "provider.empty_response",

@@ -89,7 +89,7 @@ class Probe:
 
 def initial(role, nonce):
     facts = "\n".join(f"Notiz {i}: Projekt {nonce}, Abschnitt {i}, Kennwort Eiche." for i in range(48))
-    return [dict(role="system", content="Antworte kurz auf Deutsch. Analysen und Denktexte ebenfalls auf Deutsch."),
+    return [dict(role="system", content="Antworte kurz auf Deutsch."),
             dict(role="user", content=f"Kontext für {role}:\n{facts}\nNenne ausschließlich das Kennwort.")]
 
 
