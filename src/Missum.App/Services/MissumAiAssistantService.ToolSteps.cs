@@ -37,6 +37,9 @@ public sealed partial class MissumAiAssistantService
         {
             stdout = progress.Stdout, stderr = progress.Stderr, elapsedMilliseconds = progress.ElapsedMilliseconds,
             truncated = progress.Truncated, phase = "running", partial = true,
+            processId = progress.ProcessId, cpuMilliseconds = progress.CpuMilliseconds,
+            workingSetBytes = progress.WorkingSetBytes, lastOutputElapsedMilliseconds = progress.LastOutputElapsedMilliseconds,
+            outputCharacters = progress.OutputCharacters,
         }, JsonOptions);
 
     internal static string SerializeClientToolOutput(ClientToolResult result, string? previousOutputJson = null,

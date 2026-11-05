@@ -73,6 +73,18 @@ internal sealed partial class WindowsProcessJob : IDisposable
 
     public void Dispose() => _handle.Dispose();
 
+    internal double? CpuMilliseconds()
+    {
+        if (_handle.IsClosed || QueryInformationJobObject(_handle, 1, out var accounting,
+            (uint)Marshal.SizeOf<JobBasicAccountingInformation>(), 0) == 0) return null;
+        return TimeSpan.FromTicks(accounting.TotalUserTime + accounting.TotalKernelTime).TotalMilliseconds;
+    }
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    private static partial int QueryInformationJobObject(SafeJobHandle job, int informationClass,
+        out JobBasicAccountingInformation information, uint length, nint returnLength);
+
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     private static partial SafeJobHandle CreateJobObjectW(nint attributes, nint name);
@@ -100,6 +112,19 @@ internal sealed partial class WindowsProcessJob : IDisposable
     }
 
     // Layout follows the installed Windows SDK winnt.h JOBOBJECT_* and IO_COUNTERS definitions.
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JobBasicAccountingInformation
+    {
+        public long TotalUserTime;
+        public long TotalKernelTime;
+        public long ThisPeriodTotalUserTime;
+        public long ThisPeriodTotalKernelTime;
+        public uint TotalPageFaultCount;
+        public uint TotalProcesses;
+        public uint ActiveProcesses;
+        public uint TotalTerminatedProcesses;
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     private struct JobBasicLimitInformation
     {

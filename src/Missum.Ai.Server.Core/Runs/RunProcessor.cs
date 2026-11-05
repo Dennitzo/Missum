@@ -435,6 +435,7 @@ public sealed partial class RunProcessor : BackgroundService
             ?? CreateModelToolDefinitions(availableTools, null, directTools: true, contextProfileVersion) : null;
         var toolCatalogSignature = checkpoint.ToolCatalogSignature;
         var lastModelTools = checkpoint.LastModelTools;
+        var commandMonitoring = checkpoint.CommandMonitoring ?? new(null, 0, null, []);
         var roundCount = checkpoint.RoundCount;
         var toolCallCount = checkpoint.ToolCallCount;
         var inputTokens = checkpoint.InputTokens;
@@ -735,7 +736,7 @@ public sealed partial class RunProcessor : BackgroundService
                             repair = CodingToolBatchRecovery.CreateRepairHint(call, messages),
                             toolHelp = compactContext ? RejectedToolHelp(call.Name, availableTools) : null,
                         }, MissumAiProtocol.CreateJsonOptions());
-                        messages.Add(new LmChatMessage("tool", invalidReceipt, ToolCallId: call.Id));
+                        messages.Add(CommandMonitoringPolicy.ToolResult(call, invalidReceipt, commandMonitoring));
                         if (workingState is not null)
                             workingState = CodingWorkingStateReducer.ObserveToolResult(workingState, WithOperationIdentity(runId, "main", activeCallRound ?? roundCount, nextToolIndex, call), invalidReceipt);
                         nextToolIndex++;
@@ -753,6 +754,11 @@ public sealed partial class RunProcessor : BackgroundService
                         ClientToolResult clientResult;
                         try
                         {
+                            if (call.Name == ClientToolNames.CodingCommand
+                                && await _repository.GetClientToolResultAsync(pendingProposalId, cancellationToken).ConfigureAwait(false) is null
+                                && await _repository.GetClientToolProgressAsync(runId, pendingProposalId, cancellationToken).ConfigureAwait(false) is { } progress
+                                && CommandMonitoringPolicy.IsDue(progress, commandMonitoring, DateTimeOffset.UtcNow))
+                                await MonitorCommandAsync(call, progress).ConfigureAwait(false);
                             clientResult = await GetClientToolResultOrSuspendAsync(runId, pendingProposalId, cancellationToken).ConfigureAwait(false);
                         }
                         catch (RunSteeringBoundaryException)
@@ -761,14 +767,14 @@ public sealed partial class RunProcessor : BackgroundService
                             pendingToolCallId = null;
                             continue;
                         }
-                        messages.Add(new LmChatMessage(
-                            "tool",
+                        messages.Add(CommandMonitoringPolicy.ToolResult(call,
                             isCoding
                                 ? CodingLoopGuard.BoundToolResult(SerializeClientToolResult(clientResult), call.Name) : SerializeClientToolResult(clientResult),
-                            ToolCallId: call.Id));
+                            commandMonitoring));
                         if (workingState is not null)
                             workingState = CodingWorkingStateReducer.ObserveToolResult(workingState, WithOperationIdentity(runId, "main", activeCallRound ?? roundCount, nextToolIndex, call), SerializeClientToolResult(clientResult));
-                        ScienceSkill.AttachEvidence(messages, workingState, call.Id, WithOperationIdentity(runId, "main", activeCallRound ?? roundCount, nextToolIndex, call).Id);
+                        if (!commandMonitoring.ClosedToolCallIds.Contains(call.Id, StringComparer.Ordinal))
+                            ScienceSkill.AttachEvidence(messages, workingState, call.Id, WithOperationIdentity(runId, "main", activeCallRound ?? roundCount, nextToolIndex, call).Id);
                         if (call.Name == ClientToolNames.CodingRenderHtml) htmlRenderUsed = true;
                         pendingProposalId = null;
                         pendingToolCallId = null;
@@ -889,11 +895,10 @@ public sealed partial class RunProcessor : BackgroundService
                                 result.ErrorCode ?? "server_tool.failed",
                                 $"Run {runId}: Serverwerkzeug {tool.Name} konnte nicht ausgeführt werden; der Agentenlauf wird fortgesetzt.");
                         }
-                        messages.Add(new LmChatMessage(
-                            "tool",
+                        messages.Add(CommandMonitoringPolicy.ToolResult(call,
                             isCoding
                                 ? CodingLoopGuard.BoundToolResult(result.Result.GetRawText(), call.Name) : result.Result.GetRawText(),
-                            ToolCallId: call.Id));
+                            commandMonitoring));
                         if (tool.Name == SubagentToolNames.Wait && result.Succeeded
                             && !await _repository.HasConsumedSubagentResultAsync(runId,
                                 call.Arguments.GetProperty("runId").GetString()!, cancellationToken).ConfigureAwait(false))
@@ -905,7 +910,8 @@ public sealed partial class RunProcessor : BackgroundService
                             workingState = CodingWorkingStateReducer.ObserveToolResult(workingState, WithOperationIdentity(runId, "main", activeCallRound ?? roundCount, nextToolIndex, call), result.Result.GetRawText());
                         if (workingState?.Science is not null && tool.Name == SubagentToolNames.Wait && result.Succeeded)
                             workingState = ScienceStagePolicy.ImportDelegatedEvidence(workingState, result.Result);
-                        if (tool.Name != CodingWorkingStateTools.PlanTool) ScienceSkill.AttachEvidence(messages, workingState, call.Id, WithOperationIdentity(runId, "main", activeCallRound ?? roundCount, nextToolIndex, call).Id);
+                        if (tool.Name != CodingWorkingStateTools.PlanTool && !commandMonitoring.ClosedToolCallIds.Contains(call.Id, StringComparer.Ordinal))
+                            ScienceSkill.AttachEvidence(messages, workingState, call.Id, WithOperationIdentity(runId, "main", activeCallRound ?? roundCount, nextToolIndex, call).Id);
                         nextToolIndex++;
                         if (request.DeepResearch && !researchManagedByAgent && tool.Name == CodingDeepResearchPipeline.ToolName
                             && result.ErrorCode != "run.steered")
@@ -952,6 +958,7 @@ public sealed partial class RunProcessor : BackgroundService
                 }
 
                 activeCalls = null;
+                commandMonitoring = commandMonitoring with { ClosedToolCallIds = [] };
                 nextToolIndex = 0;
                 activeCallRound = null;
                 await SaveCheckpointAsync().ConfigureAwait(false);
@@ -1768,11 +1775,91 @@ public sealed partial class RunProcessor : BackgroundService
                 ResearchManagedByAgent: researchManagedByAgent,
                 ContextProfileVersion: contextProfileVersion, ToolCatalogSignature: toolCatalogSignature,
                 ContextTools: contextTools, SpecializedAgent: specializedAgent, SciencePlanInitialized: sciencePlanInitialized,
-                LastModelTools: lastModelTools),
+                LastModelTools: lastModelTools, CommandMonitoring: commandMonitoring),
             cancellationToken);
 
+        async Task MonitorCommandAsync(LmToolCall call, ClientToolProgress progress)
+        {
+            commandMonitoring = CommandMonitoringPolicy.ClosePendingCalls(messages, call, progress,
+                commandMonitoring, DateTimeOffset.UtcNow);
+            // This durable timestamp prevents rapid retries after a failed status
+            // inference or restart. Active/pending dispatch identities stay intact.
+            await SaveCheckpointAsync().ConfigureAwait(false);
+            try
+            {
+                // A single pending command can accumulate days of reports without
+                // another tool turn. Archive completed monitoring exchanges at the
+                // usual threshold even when the ordinary recent-tool window has
+                // no older tool batch to discard.
+                if (ContextPlanner.EstimateTokens(messages) >= ContextPlanner.ComputeInputTokenBudget(contextLength, null)
+                    && CodingContextCompactor.Plan(messages, contextLength, workingState,
+                        includeWorkingStateInBudget: false, force: true) is { } monitorCompaction)
+                {
+                    await using var lease = await _scheduler.AcquireAsync("command-monitoring-compaction", runId,
+                        SubagentLeaseMode(request.Subagent), cancellationToken).ConfigureAwait(false);
+                    await CompactWorkingContextAsync(monitorCompaction, contextLength, 0, cancellationToken,
+                        "Die fortlaufenden Prozessberichte erreichen die Kontextgrenze. ",
+                        tools: lastModelTools ?? contextTools ?? [], countRound: false).ConfigureAwait(false);
+                }
+                messages.Add(new("user", CommandMonitoringPolicy.Instruction(call, progress)));
+                messages = ModelRuntimeClient.PrepareLanguageBoundMessages(messages).ToList();
+                preserveSessionPromptPrefix = true;
+                await SaveCheckpointAsync().ConfigureAwait(false);
+                var report = await GenerateCommandMonitoringAsync(runId, progress.ProposalId, request, selection, contextLength, messages,
+                    lastModelTools ?? contextTools ?? CreateModelToolDefinitions(availableTools, selectedToolName,
+                        isCoding || useStableSubagentToolCatalog, contextProfileVersion), cancellationToken).ConfigureAwait(false);
+                if (report.ContextBudget is { } overflow
+                    && CodingContextCompactor.Plan(messages, Math.Min(contextLength, overflow.ContextLength), workingState,
+                        includeWorkingStateInBudget: false, force: true) is { } exactCompaction)
+                {
+                    await using var lease = await _scheduler.AcquireAsync("command-monitoring-compaction", runId,
+                        SubagentLeaseMode(request.Subagent), cancellationToken).ConfigureAwait(false);
+                    await CompactWorkingContextAsync(exactCompaction, Math.Min(contextLength, overflow.ContextLength), 0,
+                        cancellationToken, "Der native Tokenzähler verlangt eine Verdichtung der Prozessberichte. ",
+                        tools: lastModelTools ?? contextTools ?? [], countRound: false).ConfigureAwait(false);
+                }
+                if (report.Response is { } modelResponse)
+                {
+                    // Rejected text (for example a literal tool-call fragment)
+                    // is not a valid assistant decision or execution history.
+                    if (report.Decision is not null)
+                        messages.Add(new("assistant", modelResponse.Content, ReasoningContent: modelResponse.ReasoningContent));
+                    inputTokens += modelResponse.InputTokens;
+                    outputTokens += modelResponse.OutputTokens;
+                }
+                // A real process completion always wins over an older model
+                // observation, including a late stop recommendation.
+                if (report.Decision is { } decision
+                    && await _repository.GetClientToolResultAsync(progress.ProposalId, cancellationToken).ConfigureAwait(false) is null
+                    && !await _repository.IsTerminalStateAsync(runId, cancellationToken).ConfigureAwait(false))
+                {
+                    if (decision.Action == "stop")
+                    {
+                        if (!await _repository.RequestClientToolStopAsync(runId, progress.ProposalId, decision.Reason!, cancellationToken).ConfigureAwait(false))
+                        {
+                            await SaveCheckpointAsync().ConfigureAwait(false);
+                            return;
+                        }
+                    }
+                    var statusText = (visibleTextLength > 0 ? "\n\n" : "") + decision.Message + "\n\n";
+                    await PublishVisibleDeltaAsync(new TextDeltaEvent(statusText,
+                        Round: (int)Math.Clamp(activeCallRound ?? roundCount, 0, int.MaxValue)), cancellationToken).ConfigureAwait(false);
+                    visibleTextLength += statusText.Length;
+                }
+                await SaveCheckpointAsync().ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch (Exception exception) when (exception is not OutOfMemoryException)
+            {
+                _runtime.WriteLog("Warning", "command.monitoring.deferred",
+                    $"Run {runId}: Prozessprüfung später fortsetzen ({exception.GetType().Name}).");
+                await SaveCheckpointAsync().ConfigureAwait(false);
+            }
+        }
+
         async Task CompactWorkingContextAsync(CodingCompactionPlan compaction, int loadedContextLength,
-            double queueTime, CancellationToken token, string? reason = null, IReadOnlyList<LmToolDefinition>? tools = null)
+            double queueTime, CancellationToken token, string? reason = null, IReadOnlyList<LmToolDefinition>? tools = null,
+            bool countRound = true)
         {
             await _repository.AppendEventAsync(runId, RunEventTypes.ModelGeneration,
                 new ModelGenerationEvent("codingCompacting"), token).ConfigureAwait(false);
@@ -1818,7 +1905,8 @@ public sealed partial class RunProcessor : BackgroundService
             messages = CodingContextCompactor.Complete(compaction, condensed.Content).ToList();
             workingStatePromptIncluded = false;
             inputTokens += condensed.InputTokens; outputTokens += condensed.OutputTokens;
-            roundCount++; compactionCount++;
+            if (countRound) roundCount++;
+            compactionCount++;
             await PublishCodingMetricsAsync(runId, roundCount, "summarization", condensed, summaryEffort,
                 queueTime, token).ConfigureAwait(false);
             await SaveCheckpointAsync().ConfigureAwait(false);
@@ -1905,7 +1993,7 @@ public sealed partial class RunProcessor : BackgroundService
             }
             if (activeCalls is not null)
                 foreach (var abandoned in activeCalls.Skip(nextToolIndex))
-                    messages.Add(new LmChatMessage("tool", "{\"status\":\"not_executed\",\"errorCode\":\"run.steered\",\"message\":\"Neue Nutzereingabe: noch nicht gestarteten Aufruf verworfen.\"}", ToolCallId: abandoned.Id));
+                    messages.Add(CommandMonitoringPolicy.ToolResult(abandoned, "{\"status\":\"not_executed\",\"errorCode\":\"run.steered\",\"message\":\"Neue Nutzereingabe: noch nicht gestarteten Aufruf verworfen.\"}", commandMonitoring));
             activeCalls = null;
             pendingProposalId = null; pendingToolCallId = null;
             nextToolIndex = 0;

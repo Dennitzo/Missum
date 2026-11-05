@@ -26,6 +26,15 @@ public sealed record ClientToolResult(
     string? ErrorCode = null,
     string? Message = null);
 
+/// <summary>Bounded, revisioned observation of an already running client command.</summary>
+public sealed record ClientToolProgress(
+    string ProposalId, long Revision, long ElapsedMilliseconds,
+    string Stdout, string Stderr, bool Truncated,
+    int? ProcessId = null, double? CpuMilliseconds = null, long? WorkingSetBytes = null,
+    long? LastOutputElapsedMilliseconds = null, long? OutputCharacters = null);
+
+public sealed record ClientToolProgressResponse(bool StopRequested, string? Reason = null);
+
 public sealed record ToolDescriptor(
     string Name,
     string Description,

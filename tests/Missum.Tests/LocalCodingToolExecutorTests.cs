@@ -997,6 +997,46 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
         }
     }
 
+    [Fact]
+    public async Task SilentCommandPublishesMeasuredHeartbeatsAndCanBeStoppedWithoutWaitingForOutput()
+    {
+        using var cancel = new CancellationTokenSource();
+        var observations = new List<CodingCommandProgress>();
+        var secondHeartbeat = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var executor = new LocalCodingToolExecutor(_root, progress =>
+        {
+            observations.Add(progress);
+            if (observations.Count >= 2) secondHeartbeat.TrySetResult();
+            return Task.CompletedTask;
+        });
+        var command = executor.ExecuteAsync("coding.command", JsonSerializer.SerializeToElement(new
+        {
+            executable = "powershell.exe", arguments = SleepCommandArguments, timeoutSeconds = 0,
+        }), cancel.Token);
+        try
+        {
+            await secondHeartbeat.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            Assert.False(command.IsCompleted);
+            Assert.All(observations, progress =>
+            {
+                Assert.Empty(progress.Stdout);
+                Assert.Empty(progress.Stderr);
+                Assert.True(progress.ProcessId > 0);
+                Assert.True(progress.CpuMilliseconds >= 0);
+                Assert.True(progress.WorkingSetBytes > 0);
+                Assert.Equal(0, progress.OutputCharacters);
+                Assert.Equal(0, progress.LastOutputElapsedMilliseconds);
+            });
+            Assert.InRange(observations[1].ElapsedMilliseconds - observations[0].ElapsedMilliseconds, 4_500, 10_000);
+        }
+        finally
+        {
+            await cancel.CancelAsync();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => command);
+        }
+        await AssertProcessExitedAsync(observations[0].ProcessId!.Value);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

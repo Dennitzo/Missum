@@ -242,6 +242,17 @@ public sealed class MissumAiDatabase : IDisposable
             FOREIGN KEY(run_id) REFERENCES runs(run_id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS client_tool_progress (
+            proposal_id TEXT PRIMARY KEY REFERENCES client_tool_proposals(proposal_id) ON DELETE CASCADE,
+            run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+            revision INTEGER NOT NULL,
+            progress_json TEXT NOT NULL,
+            stop_requested INTEGER NOT NULL DEFAULT 0,
+            stop_reason TEXT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS ix_client_tool_progress_run ON client_tool_progress(run_id);
+
         CREATE TABLE IF NOT EXISTS coding_session_contexts (
             run_id TEXT PRIMARY KEY REFERENCES runs(run_id) ON DELETE CASCADE,
             checkpoint_json TEXT NOT NULL

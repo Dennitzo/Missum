@@ -106,10 +106,15 @@ public static class CodingLoopGuard
         var matchingIds = messages.SelectMany(static message => message.ToolCalls ?? [])
             .Where(call => call.Name == candidate.Name && JsonElement.DeepEquals(call.Arguments, candidate.Arguments))
             .Select(static call => call.Id).ToHashSet(StringComparer.Ordinal);
-        var failures = messages.Count(message => message.Role == "tool"
-            && message.ToolCallId is not null && matchingIds.Contains(message.ToolCallId)
-            && IsFailure(message.Content));
-        if (failures >= 2)
+        var failedCalls = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var message in messages)
+        {
+            if (message.Role == "tool" && message.ToolCallId is { } callId && matchingIds.Contains(callId)
+                && IsFailure(message.Content)) failedCalls.Add(callId);
+            else if (ReadDeferredResult(message) is { } deferred && matchingIds.Contains(deferred.CallId)
+                && IsFailure(deferred.Result)) failedCalls.Add(deferred.CallId);
+        }
+        if (failedCalls.Count >= 2)
             throw new AgentRunLimitException($"'{candidate.Name}' wurde bereits zweimal mit identischen Argumenten erfolglos aufgerufen. Dieser Aufruf wurde nicht erneut ausgeführt. Lies den vorhandenen Fehlerbeleg, korrigiere die Argumente oder wähle ein anderes Werkzeug und setze den Nutzerauftrag fort. Der Lauf bleibt aktiv.");
     }
 
@@ -121,7 +126,9 @@ public static class CodingLoopGuard
         {
             foreach (var call in message.ToolCalls ?? [])
                 if (call.Name == ClientToolNames.CodingRenderHtml) renderCalls.Add(call.Id);
-            if (message.Role == "tool" && message.ToolCallId is { } completedId && renderCalls.Contains(completedId))
+            var completedId = message.Role == "tool" && !IsInterimResult(message.Content)
+                ? message.ToolCallId : ReadDeferredResult(message)?.CallId;
+            if (completedId is not null && renderCalls.Contains(completedId))
                 throw new ArgumentException("coding.renderHtml darf höchstens einmal pro Lauf ausgeführt werden; die vorhandene Vorschau bleibt erhalten.");
         }
     }
@@ -137,5 +144,42 @@ public static class CodingLoopGuard
         catch (JsonException) { return false; }
     }
 
-    private static bool IsFailure(JsonElement value) => CodingWorkingStateReducer.IsFailedResult(value);
+    private static bool IsFailure(JsonElement value) => !IsInterimResult(value) && CodingWorkingStateReducer.IsFailedResult(value);
+
+    private static bool IsInterimResult(JsonElement value) => value.ValueKind == JsonValueKind.Object
+        && value.TryGetProperty("final", out var final) && final.ValueKind == JsonValueKind.False;
+
+    private static bool IsInterimResult(string? content)
+    {
+        if (string.IsNullOrEmpty(content)) return false;
+        try
+        {
+            using var document = JsonDocument.Parse(content);
+            return IsInterimResult(document.RootElement);
+        }
+        catch (JsonException) { return false; }
+    }
+
+    private static (string CallId, string Result)? ReadDeferredResult(LmChatMessage message)
+    {
+        if (message.Role != "user" || message.Content is not { } content
+            || !content.StartsWith(CommandMonitoringPolicy.DeferredResultMarker, StringComparison.Ordinal)) return null;
+        // The server-generated envelope ends with a single JSON line. Embedded
+        // output newlines are JSON-escaped; never interpret the explanatory text
+        // or an arbitrary user message as a completed tool receipt.
+        var jsonStart = content.LastIndexOf('\n') + 1;
+        try
+        {
+            using var document = JsonDocument.Parse(content[jsonStart..]);
+            var value = document.RootElement;
+            if (value.ValueKind != JsonValueKind.Object
+                || !value.TryGetProperty("authoritativeFinalResult", out var final) || final.ValueKind != JsonValueKind.True
+                || !value.TryGetProperty("callId", out var id) || id.ValueKind != JsonValueKind.String
+                || id.GetString() is not { Length: > 0 } callId
+                || !value.TryGetProperty("result", out var result) || result.ValueKind != JsonValueKind.String)
+                return null;
+            return (callId, result.GetString()!);
+        }
+        catch (JsonException) { return null; }
+    }
 }

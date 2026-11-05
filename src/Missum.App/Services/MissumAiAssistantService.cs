@@ -2893,7 +2893,10 @@ public sealed partial class MissumAiAssistantService(
             }
             else
             {
-                result = await toolBroker.ExecuteForAgentAsync(
+                result = proposal.Name == ClientToolNames.CodingCommand
+                    ? await ExecuteMonitoredCommandAsync(client, localRun, item, proposal, commandProgress,
+                        evidenceStore, researchActorAgentId, cancellationToken).ConfigureAwait(false)
+                    : await toolBroker.ExecuteForAgentAsync(
                     proposal,
                     localRun.SessionId,
                     localRun.AssistantMessageId,
@@ -2905,8 +2908,6 @@ public sealed partial class MissumAiAssistantService(
                     cancellationToken: cancellationToken,
                     researchActorAgentId: researchActorAgentId).ConfigureAwait(false);
             }
-            if (proposal.Name == "image.input" && result.Status == "completed")
-
             if (evidenceStore is not null && proposal.Name is not (ClientToolNames.CodingReadOutput or ClientToolNames.CodingSearchRunEvidence))
             {
                 try

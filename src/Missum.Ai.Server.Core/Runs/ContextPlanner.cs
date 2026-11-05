@@ -38,6 +38,7 @@ public static class ContextPlanner
             && !IsRuntimeContext(message)
             && !IsNativeRuntimeInstruction(message)
             && !ModelRuntimeClient.IsLanguageReminder(message)
+            && message.Content?.StartsWith(CommandMonitoringPolicy.DeferredResultMarker, StringComparison.Ordinal) != true
             && message.Content?.StartsWith(CodingEvidenceContext.Marker, StringComparison.Ordinal) != true
             && message.Content?.StartsWith(CodingSessionContext.StateMarker, StringComparison.Ordinal) != true
             && message.Content?.StartsWith(CodingContextCompactor.MemoryMarker, StringComparison.Ordinal) != true);

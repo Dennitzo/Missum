@@ -39,6 +39,7 @@ internal static partial class GatewayEndpoints
         endpoints.MapGet("/v1/runs/{runId}", GetRunAsync);
         endpoints.MapGet("/v1/runs/{runId}/events", StreamRunEventsAsync);
         endpoints.MapPost("/v1/runs/{runId}/client-tool-results", SubmitClientToolResultAsync);
+        endpoints.MapPost("/v1/runs/{runId}/client-tool-progress", SubmitClientToolProgressAsync);
         endpoints.MapPost("/v1/runs/{runId}/cancel", CancelRunAsync);
         endpoints.MapPost("/v1/runs/{runId}/steer", SteerRunAsync);
         endpoints.MapPost("/v1/runs/{runId}/selection", SelectRunModelAsync);
@@ -290,6 +291,17 @@ internal static partial class GatewayEndpoints
                 await context.Response.Body.FlushAsync(context.RequestAborted).ConfigureAwait(false);
             }
         }
+    }
+
+    private static async Task SubmitClientToolProgressAsync(HttpContext context)
+    {
+        var runId = GetRouteString(context, "runId");
+        var progress = await ReadJsonAsync<ClientToolProgress>(context).ConfigureAwait(false);
+        var repository = context.RequestServices.GetRequiredService<RunRepository>();
+        var response = await repository.SaveClientToolProgressAsync(runId, progress, context.RequestAborted).ConfigureAwait(false);
+        if (await repository.TryQueueClientToolProgressAsync(runId, progress.ProposalId, context.RequestAborted).ConfigureAwait(false))
+            await context.RequestServices.GetRequiredService<RunWorkChannel>().EnqueueAsync(runId, context.RequestAborted).ConfigureAwait(false);
+        await WriteJsonAsync(context, response).ConfigureAwait(false);
     }
 
     private static async Task SubmitClientToolResultAsync(HttpContext context)

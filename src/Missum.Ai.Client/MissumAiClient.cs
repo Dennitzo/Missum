@@ -302,6 +302,17 @@ public sealed class MissumAiClient : IDisposable
         await EnsureSuccessAsync(response, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<ClientToolProgressResponse> SubmitClientToolProgressAsync(string runId, ClientToolProgress progress,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        using var response = await _httpClient.PostAsJsonAsync(
+            $"v1/runs/{Uri.EscapeDataString(runId)}/client-tool-progress", progress, _jsonOptions, cancellationToken).ConfigureAwait(false);
+        await EnsureSuccessAsync(response, cancellationToken).ConfigureAwait(false);
+        return await response.Content.ReadFromJsonAsync<ClientToolProgressResponse>(_jsonOptions, cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidDataException("Die Prozessüberwachung lieferte keine Antwort.");
+    }
+
     public async Task SubmitClientToolResultAsync(
         string runId,
         ClientToolResult result,

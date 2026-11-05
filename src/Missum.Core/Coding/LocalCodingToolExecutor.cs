@@ -405,6 +405,10 @@ public sealed class LocalCodingToolExecutor
         startInfo.Environment["GIT_TERMINAL_PROMPT"] = "0";
         startInfo.Environment["CI"] = "true";
         startInfo.Environment["NO_COLOR"] = "1";
+        // Python otherwise buffers redirected stdout until exit or a full pipe
+        // buffer, hiding real intermediate findings from process supervision.
+        // Inherit this in Python children too (py.exe, shell scripts, build tools).
+        startInfo.Environment["PYTHONUNBUFFERED"] = "1";
         using var process = new Process { StartInfo = startInfo };
         using var processJob = OperatingSystem.IsWindows() ? WindowsProcessJob.Create(_processLimits) : null;
         var started = Stopwatch.StartNew();
@@ -425,7 +429,7 @@ public sealed class LocalCodingToolExecutor
         var deadline = seconds == 0 ? Task.CompletedTask
             : CancelCommandAfterAsync(timeout, seconds, progressCancellation.Token);
         var progress = commandProgress is null ? Task.CompletedTask
-            : PublishCommandProgressAsync(commandProgress, outputBuffer, errorBuffer, started, progressCancellation.Token);
+            : PublishCommandProgressAsync(commandProgress, outputBuffer, errorBuffer, started, process, processJob, progressCancellation.Token);
         var timedOut = false;
         try
         {
@@ -497,22 +501,38 @@ public sealed class LocalCodingToolExecutor
         process.WaitForExitAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
 
     private static async Task PublishCommandProgressAsync(Func<CodingCommandProgress, Task> publish,
-        CommandOutputBuffer outputBuffer, CommandOutputBuffer errorBuffer, Stopwatch elapsed, CancellationToken cancellationToken)
+        CommandOutputBuffer outputBuffer, CommandOutputBuffer errorBuffer, Stopwatch elapsed, Process process,
+        WindowsProcessJob? job, CancellationToken cancellationToken)
     {
-        string? previousOutput = null;
-        string? previousError = null;
+        long previousCharacters = -1;
+        long lastOutput = 0;
+        long lastPublication = -5_000;
         while (true)
         {
             // Delay after each awaited publication: even a slow callback cannot cause catch-up bursts.
             await Task.Delay(500, cancellationToken).ConfigureAwait(false);
             var output = outputBuffer.Snapshot();
             var error = errorBuffer.Snapshot();
-            if (output.Text == previousOutput && error.Text == previousError) continue;
+            var count = outputBuffer.TotalCharacters + errorBuffer.TotalCharacters;
+            var changed = count != previousCharacters;
+            if (changed && count > 0) lastOutput = elapsed.ElapsedMilliseconds;
+            previousCharacters = count;
+            if (!changed && elapsed.ElapsedMilliseconds - lastPublication < 5_000) continue;
             cancellationToken.ThrowIfCancellationRequested();
+            double? cpu = null;
+            long? memory = null;
+            try
+            {
+                process.Refresh();
+                cpu = job?.CpuMilliseconds() ?? process.TotalProcessorTime.TotalMilliseconds;
+                memory = process.WorkingSet64;
+            }
+            catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+            { /* A process can exit between the sample and its final receipt. */ }
             await publish(new(output.Text, error.Text, output.Truncated || error.Truncated,
-                elapsed.ElapsedMilliseconds)).ConfigureAwait(false);
-            previousOutput = output.Text;
-            previousError = error.Text;
+                elapsed.ElapsedMilliseconds, ProcessId: process.Id, CpuMilliseconds: cpu, WorkingSetBytes: memory,
+                LastOutputElapsedMilliseconds: lastOutput, OutputCharacters: count)).ConfigureAwait(false);
+            lastPublication = elapsed.ElapsedMilliseconds;
         }
     }
 
@@ -541,11 +561,15 @@ public sealed class LocalCodingToolExecutor
         private readonly StringBuilder _head = new();
         private readonly StringBuilder _tail = new();
         private bool _truncated;
+        private long _totalCharacters;
+
+        public long TotalCharacters { get { lock (_gate) return _totalCharacters; } }
 
         public void Append(ReadOnlySpan<char> characters)
         {
             lock (_gate)
             {
+                _totalCharacters += characters.Length;
                 var headCount = Math.Min(characters.Length, Math.Max(0, _headLimit - _head.Length));
                 _head.Append(characters[..headCount]);
                 _tail.Append(characters[headCount..]);
@@ -734,4 +758,6 @@ public sealed class LocalCodingToolExecutor
     public sealed record CodingCommandResult(bool Success, int ExitCode, bool TimedOut, string Stdout, string Stderr, bool Truncated, long ElapsedMilliseconds);
 }
 
-public sealed record CodingCommandProgress(string Stdout, string Stderr, bool Truncated, long ElapsedMilliseconds, string? OutputJson = null);
+public sealed record CodingCommandProgress(string Stdout, string Stderr, bool Truncated, long ElapsedMilliseconds, string? OutputJson = null,
+    int? ProcessId = null, double? CpuMilliseconds = null, long? WorkingSetBytes = null,
+    long? LastOutputElapsedMilliseconds = null, long? OutputCharacters = null);

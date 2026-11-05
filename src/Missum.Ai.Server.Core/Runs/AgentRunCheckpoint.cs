@@ -47,4 +47,8 @@ public sealed record AgentRunCheckpoint(
     string ContextScope = "session-v3",
     SpecializedAgentCheckpoint? SpecializedAgent = null,
     bool SciencePlanInitialized = false,
-    IReadOnlyList<LmToolDefinition>? LastModelTools = null);
+    IReadOnlyList<LmToolDefinition>? LastModelTools = null,
+    CommandMonitoringCheckpoint? CommandMonitoring = null);
+
+public sealed record CommandMonitoringCheckpoint(string? ProposalId, long LastProgressRevision,
+    DateTimeOffset? LastAttemptAt, IReadOnlyList<string> ClosedToolCallIds);
