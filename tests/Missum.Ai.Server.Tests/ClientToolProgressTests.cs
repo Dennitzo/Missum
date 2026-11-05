@@ -54,6 +54,37 @@ public sealed class ClientToolProgressTests
         await Assert.ThrowsAsync<InvalidOperationException>(() => reopened.SaveClientToolProgressAsync(run, first with { Revision = 3 }));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task HumanSteeringStopsOnlyThePendingCommandBeforeApplyingTheNewPrompt(bool progressBeforeSteering)
+    {
+        using var environment = new TestServerContext();
+        var repository = new RunRepository(environment.Database, new RunEventNotifier());
+        var request = Request() with { SessionId = "steering-command" };
+        var run = (await repository.CreateAsync(request, null)).Snapshot.RunId;
+        var proposal = Proposal(run);
+        await repository.SaveToolProposalAsync(proposal);
+        await repository.SaveCheckpointAsync(run, new([], 0, 0, 0, 0,
+            PendingProposalId: proposal.ProposalId, PendingToolCallId: "command-call"));
+        await repository.UpdateStateAsync(run, RunState.WaitingForClient);
+        var first = new ClientToolProgress(proposal.ProposalId, 1, 5000, "", "", false, ProcessId: 123);
+        if (progressBeforeSteering)
+            Assert.False((await repository.SaveClientToolProgressAsync(run, first)).StopRequested);
+
+        await repository.AcceptSteeringAsync(run,
+            new("steering-command", "human-input", "Schreibe das Python-Skript effizienter und starte es anschließend neu."));
+        if (progressBeforeSteering)
+            Assert.True(await repository.RequestPendingCommandStopForSteeringAsync(run));
+
+        var response = await repository.SaveClientToolProgressAsync(run,
+            progressBeforeSteering ? first : first with { Revision = 1 });
+        Assert.True(response.StopRequested);
+        Assert.Contains("umgelenkt", response.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(RunState.WaitingForClient, (await repository.GetAsync(run))!.State);
+        Assert.Single(await repository.GetPendingSteeringAsync(run));
+    }
+
     [Fact]
     public async Task ProgressCannotControlOtherToolsOrTerminalRunsAndRejectsInvalidMetrics()
     {

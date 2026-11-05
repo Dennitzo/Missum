@@ -6,6 +6,8 @@ namespace Missum.App.Services;
 
 public sealed partial class MissumAiAssistantService
 {
+    private sealed record ActiveSteeringSink(Guid SessionId, Guid MessageId, Func<AssistantToolStep, Task> Persist);
+
     internal static Guid SteeringPromptMessageId(Guid parentId, string stepId) =>
         Missum.Core.Chat.SteeringPromptIdentity.Create(parentId, stepId);
 
@@ -65,9 +67,49 @@ public sealed partial class MissumAiAssistantService
             if (!capabilities.SupportsRunSteering)
                 throw new InvalidOperationException("Der AI-Server unterstützt Umlenken noch nicht. Aktualisiere den Gateway.");
             var receipt = await client.SteerRunAsync(targetRunId, new(sessionId.ToString("D"), inputId, prompt.Trim()), cancellationToken).ConfigureAwait(false);
+            await PersistAcceptedSteeringAsync(receipt, prompt.Trim()).ConfigureAwait(false);
             await chats.ClearDraftIfMatchesAsync(sessionId, prompt, CancellationToken.None).ConfigureAwait(false);
             return receipt;
         }
+    }
+
+    private async Task PersistAcceptedSteeringAsync(RunSteeringAccepted receipt, string prompt)
+    {
+        var localRun = await runs.GetByServerRunIdAsync(receipt.RunId, CancellationToken.None).ConfigureAwait(false);
+        if (localRun is null) return;
+        var message = await chats.GetMessageTextAsync(localRun.AssistantMessageId, CancellationToken.None).ConfigureAwait(false);
+        if (message is null || message.SessionId != localRun.SessionId) return;
+        var now = DateTimeOffset.UtcNow;
+        var completed = receipt.State == "applied";
+        var step = new AssistantToolStep(
+            "steering-" + receipt.InputId,
+            "assistant.steering",
+            completed ? "completed" : "running",
+            prompt,
+            InputJson: JsonSerializer.Serialize(new
+            {
+                receipt.InputId,
+                receipt.Sequence,
+                Text = prompt,
+            }, JsonOptions),
+            OutputJson: JsonSerializer.Serialize(new { applied = completed }, JsonOptions),
+            ContentOffset: message.Content.Length,
+            StartedAt: now,
+            CompletedAt: completed ? now : null,
+            UpdatedAt: now);
+        ActiveSteeringSink? sink;
+        lock (_activeRunLock) sink = _activeSteeringSink;
+        if (sink is not null && sink.SessionId == localRun.SessionId && sink.MessageId == message.Id)
+        {
+            try
+            {
+                await sink.Persist(step).ConfigureAwait(false);
+                return;
+            }
+            catch (OperationCanceledException) { }
+            catch (InvalidOperationException) { }
+        }
+        await chats.SaveToolStepDeltaAsync(message.Id, step, CancellationToken.None).ConfigureAwait(false);
     }
 
     // Steering lives inside the same durable run message so in-flight tool receipts

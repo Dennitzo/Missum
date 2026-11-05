@@ -10,7 +10,7 @@ public static class ScienceSkill
 {
     public const string Profile = "claude-science-v1";
     internal const string Marker = "MISSUM_SCIENCE_SKILL_V1\n";
-    internal const string ResearchStandardMarker = "MISSUM_SCIENCE_SKILL_MODULE_V1:research-standard-v2\n";
+    internal const string ResearchStandardMarker = "MISSUM_SCIENCE_SKILL_MODULE_V1:research-standard-v3\n";
     private static readonly Dictionary<string, string> Modules = new[] { "SKILL", "stages", "verification", "publication", "research-standard" }
         .ToDictionary(name => name, name => Read(name));
     public static bool Enabled(RunRequest request) => request.WorkflowProfile == Profile;

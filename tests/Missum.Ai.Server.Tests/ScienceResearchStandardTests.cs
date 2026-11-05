@@ -26,9 +26,15 @@ public sealed class ScienceResearchStandardTests
     public void FreshScienceRunsReceiveTheStandardWithoutChangingOtherProfiles(string? contextProfile)
     {
         var science = Initial(true, contextProfile);
-        Assert.Single(science, message => message.Content?.Contains(ScienceSkill.ResearchStandardMarker, StringComparison.Ordinal) == true);
-        Assert.DoesNotContain(Initial(false, contextProfile), message =>
+        var standard = Assert.Single(science, message =>
             message.Content?.Contains(ScienceSkill.ResearchStandardMarker, StringComparison.Ordinal) == true);
+        Assert.Contains("mehrere Kerne", standard.Content);
+        Assert.Contains("CUDA", standard.Content);
+        Assert.Contains("CPU-Referenzfall", standard.Content);
+        var ordinary = Initial(false, contextProfile);
+        Assert.DoesNotContain(ordinary, message =>
+            message.Content?.Contains(ScienceSkill.ResearchStandardMarker, StringComparison.Ordinal) == true);
+        Assert.DoesNotContain(ordinary, message => message.Content?.Contains("CPU-Referenzfall", StringComparison.Ordinal) == true);
     }
 
     [Theory]
@@ -75,7 +81,8 @@ public sealed class ScienceResearchStandardTests
     public void EarlierResearchStandardIsUpgradedWithoutRewritingTheEvaluatedPrefix()
     {
         LmChatMessage[] history = [new("system", "Historischer Science-Systemkern"),
-            new("user", "Missum-Laufanweisung:\nMISSUM_SCIENCE_SKILL_MODULE_V1:research-standard\nQuellen unter Quellen/ speichern."),
+            new("user", "Missum-Laufanweisung:\nMISSUM_SCIENCE_SKILL_MODULE_V1:research-standard-v2\n"
+                + "Belegquellen in inputs/ speichern; numerische Ergebnisse mit Python gegenprüfen."),
             new("assistant", "Bisheriges Ergebnis")];
 
         var continued = CodingSessionContext.Continue(Evaluated(history), Initial(true), science: true);
@@ -84,9 +91,14 @@ public sealed class ScienceResearchStandardTests
         for (var index = 0; index < history.Length; index++) Assert.Same(history[index], continued[index]);
         var update = Assert.Single(continued, message => message.Content?.StartsWith(ScienceSkill.ResearchStandardMarker, StringComparison.Ordinal) == true);
         Assert.Contains("inputs/", update.Content);
+        Assert.Contains("mehrere Kerne", update.Content);
+        Assert.Contains("CUDA", update.Content);
+        Assert.Contains("CPU-Referenzfall", update.Content);
         Assert.Same(update, continued[^2]);
         var repeated = CodingSessionContext.Continue(Evaluated(continued), Initial(true), science: true);
-        Assert.Single(repeated, message => message.Content?.StartsWith(ScienceSkill.ResearchStandardMarker, StringComparison.Ordinal) == true);
+        var retained = Assert.Single(repeated, message =>
+            message.Content?.StartsWith(ScienceSkill.ResearchStandardMarker, StringComparison.Ordinal) == true);
+        Assert.Same(update, retained);
     }
 
     [Fact]

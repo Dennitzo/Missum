@@ -13,6 +13,8 @@ namespace Missum.Ai.Server.Tests;
 
 public sealed class RunSteeringProcessorTests
 {
+    private static readonly string[] SlowScriptArguments = ["slow.py"];
+
     [Theory]
     [InlineData(RunMode.General)]
     [InlineData(RunMode.Coding)]
@@ -42,7 +44,8 @@ public sealed class RunSteeringProcessorTests
             "Datei lesen", DateTimeOffset.MaxValue);
         await harness.Repository.SaveToolProposalAsync(proposal);
         await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Datei prüfen"), new("assistant", null, ToolCalls: [call])],
-            1, 1, 0, 0, ActiveToolCalls: [call], PendingProposalId: proposal.ProposalId, PendingToolCallId: call.Id));
+            1, 1, 0, 0, ActiveToolCalls: [call], PendingProposalId: proposal.ProposalId, PendingToolCallId: call.Id,
+            WorkingState: harness.PlannedState, SciencePlanInitialized: true));
         await harness.Repository.EnsureClientToolProposedEventAsync(run, proposal.ProposalId);
         await harness.Repository.AppendEventAsync(run, RunModelSelectionEvents.Requested,
             new RunModelSelectionRequest("steering-session", NativeHandler.AlternateModelId));
@@ -78,7 +81,8 @@ public sealed class RunSteeringProcessorTests
         var events = await harness.Repository.GetEventsAfterAsync(run, 0, deadline.Token);
         Assert.Equal(RunState.Completed, (await harness.Repository.GetAsync(run, deadline.Token))!.State);
         Assert.Equal(2, harness.Handler.Prompts.Count);
-        Assert.Single(events, item => item.Type == RunEventTypes.RunStarted);
+        if (mode == RunMode.General)
+            Assert.Single(events, item => item.Type == RunEventTypes.RunStarted);
         Assert.Single(events, item => item.Type == RunEventTypes.RunCompleted);
         Assert.Single(events, item => item.Type == RunSteeringEventTypes.Applied);
         Assert.DoesNotContain(events, item => item.Type == RunEventTypes.ReasoningDelta);
@@ -109,7 +113,8 @@ public sealed class RunSteeringProcessorTests
         await harness.Repository.SaveToolProposalAsync(proposal);
         await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Dateien prüfen"),
             new("assistant", null, ToolCalls: [first, stale])], 1, 2, 0, 0,
-            ActiveToolCalls: [first, stale], PendingProposalId: proposal.ProposalId, PendingToolCallId: first.Id));
+            ActiveToolCalls: [first, stale], PendingProposalId: proposal.ProposalId, PendingToolCallId: first.Id,
+            WorkingState: harness.PlannedState, SciencePlanInitialized: true));
         await harness.Repository.EnsureClientToolProposedEventAsync(run, proposal.ProposalId);
         await harness.Repository.AcceptSteeringAsync(run, new("steering-session", "input-tool", "Keine weiteren Dateien lesen; Ergebnis blau."));
         await Assert.ThrowsAsync<RunWaitingForClientException>(() => harness.Processor.ProcessAsync(run, CancellationToken.None));
@@ -131,6 +136,52 @@ public sealed class RunSteeringProcessorTests
     }
 
     [Fact]
+    public async Task SteeringStopsAPublishedCommandThenAppliesAfterItsAuthoritativeReceipt()
+    {
+        using var harness = new Harness(RunMode.Coding);
+        var run = await harness.CreateAsync();
+        var command = new LmToolCall("command-in-flight", ClientToolNames.CodingCommand,
+            JsonSerializer.SerializeToElement(new { executable = "python", arguments = SlowScriptArguments }));
+        var stale = ReadCall("read-after-command", "stale.json");
+        var proposal = new ToolProposal("proposal-command", run, command.Name, command.Arguments, ToolRiskClass.Process,
+            "Python ausführen", DateTimeOffset.MaxValue);
+        await harness.Repository.SaveToolProposalAsync(proposal);
+        await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Berechnung prüfen"),
+            new("assistant", null, ToolCalls: [command, stale])], 1, 2, 0, 0,
+            ActiveToolCalls: [command, stale], PendingProposalId: proposal.ProposalId, PendingToolCallId: command.Id,
+            WorkingState: harness.PlannedState, SciencePlanInitialized: true));
+        await harness.Repository.EnsureClientToolProposedEventAsync(run, proposal.ProposalId);
+        await harness.Repository.AcceptSteeringAsync(run,
+            new("steering-session", "input-command", "Beende den ineffizienten Lauf und überarbeite das Skript."));
+        var stop = await harness.Repository.SaveClientToolProgressAsync(run,
+            new(proposal.ProposalId, 1, 5_000, "", "", false, ProcessId: 321));
+        Assert.True(stop.StopRequested);
+
+        await harness.Repository.SaveClientToolResultAsync(run, new(proposal.ProposalId, "failed",
+            JsonSerializer.SerializeToElement(new
+            {
+                success = false,
+                cancelled = true,
+                supervisionStopped = true,
+                processExitVerified = true,
+            }), "client.command_stopped_by_monitor", stop.Reason));
+        var stoppedCheckpoint = (await harness.Repository.GetCheckpointAsync(run))!;
+        Assert.Equal(command.Id, stoppedCheckpoint.PendingToolCallId);
+        Assert.Equal(command.Id, stoppedCheckpoint.ActiveToolCalls![stoppedCheckpoint.NextToolIndex].Id);
+        await harness.Processor.ProcessAsync(run, CancellationToken.None);
+
+        var prompt = Assert.Single(harness.Handler.Prompts);
+        var receiptIndex = Array.FindIndex(prompt, message => message.ToolCallId == command.Id);
+        var steeringIndex = Array.FindIndex(prompt, message => message.Role == "user"
+            && message.Content!.Contains("überarbeite das Skript", StringComparison.Ordinal));
+        Assert.True(receiptIndex >= 0 && receiptIndex < steeringIndex);
+        Assert.Contains("processExitVerified", prompt[receiptIndex].Content);
+        Assert.Contains("not_executed", Assert.Single(prompt, message => message.ToolCallId == stale.Id).Content);
+        Assert.Single(await harness.Repository.GetEventsAfterAsync(run, 0), item => item.Type == RunSteeringEventTypes.Applied);
+        Assert.Equal(RunState.Completed, (await harness.Repository.GetAsync(run))!.State);
+    }
+
+    [Fact]
     public async Task RecoveryDoesNotPublishAStaleProposalThatNeverCrossedDispatchBoundary()
     {
         using var harness = new Harness(RunMode.Coding);
@@ -140,7 +191,8 @@ public sealed class RunSteeringProcessorTests
             "Datei lesen", DateTimeOffset.MaxValue);
         await harness.Repository.SaveToolProposalAsync(proposal);
         await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Datei lesen"), new("assistant", null, ToolCalls: [call])],
-            1, 1, 0, 0, ActiveToolCalls: [call], PendingProposalId: proposal.ProposalId, PendingToolCallId: call.Id));
+            1, 1, 0, 0, ActiveToolCalls: [call], PendingProposalId: proposal.ProposalId, PendingToolCallId: call.Id,
+            WorkingState: harness.PlannedState, SciencePlanInitialized: true));
         await harness.Repository.AcceptSteeringAsync(run, new("steering-session", "input-recover", "Nicht mehr lesen, antworte blau."));
         await harness.Processor.ProcessAsync(run, CancellationToken.None);
         Assert.DoesNotContain(await harness.Repository.GetEventsAfterAsync(run, 0), item => item.Type == RunEventTypes.ClientToolProposed);
@@ -181,7 +233,9 @@ public sealed class RunSteeringProcessorTests
         using var harness = new Harness(mode);
         var run = await harness.CreateAsync();
         await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Ursprünglicher Auftrag")], 0, 0, 0, 0,
-            VisibleTextLength: 0, StreamingTurnStartEventId: 0));
+            VisibleTextLength: 0, StreamingTurnStartEventId: 0,
+            WorkingState: mode == RunMode.Coding ? harness.PlannedState : null,
+            SciencePlanInitialized: mode == RunMode.Coding));
         await harness.Repository.UpdateStateAsync(run, RunState.Running);
         await harness.Repository.AppendEventAsync(run, RunEventTypes.TextDelta, new TextDeltaEvent("Sichtbarer Zwischenstand."));
         await harness.Repository.AcceptSteeringAsync(run, new("steering-session", "restart-input", "Jetzt blau."));
@@ -206,6 +260,7 @@ public sealed class RunSteeringProcessorTests
         internal RunRepository Repository { get; }
         internal RunProcessor Processor { get; }
         internal RunRequest Request { get; }
+        internal CodingWorkingState PlannedState { get; }
 
         internal Harness(RunMode mode, bool blockFirst = false)
         {
@@ -221,12 +276,21 @@ public sealed class RunSteeringProcessorTests
             Repository = _services.GetRequiredService<RunRepository>();
             Processor = _services.GetRequiredService<RunProcessor>();
             Request = new(MissumAiProtocol.Version, mode, [new("user", [new("text", Text: "Ursprünglicher Auftrag")])],
-                ClientCapabilities: mode == RunMode.Coding ? ["coding"] : [], AllowedServerTools: [], SessionId: "steering-session",
+                ClientCapabilities: mode == RunMode.Coding ? ["coding", "coding.process"] : [], AllowedServerTools: [], SessionId: "steering-session",
                 PreferredGeneralModelId: NativeHandler.ModelId, PreferredCodingModelId: NativeHandler.ModelId,
                 Limits: new(TimeoutSeconds: 0));
+            PlannedState = CodingWorkingStateReducer.ApplyPlanUpdate(CodingWorkingState.Create("Ursprünglicher Auftrag"),
+                JsonSerializer.Deserialize<JsonElement>("""{"steps":[{"id":"phase-1","title":"Phase 1: Auftrag bearbeiten","status":"in_progress"}]}"""));
         }
 
-        internal async Task<string> CreateAsync() => (await Repository.CreateAsync(Request, null)).Snapshot.RunId;
+        internal async Task<string> CreateAsync()
+        {
+            var run = (await Repository.CreateAsync(Request, null)).Snapshot.RunId;
+            if (Request.Mode == RunMode.Coding)
+                await Repository.SaveCheckpointAsync(run, new(RunProcessor.CreateInitialMessages(Request, "coding", []),
+                    0, 0, 0, 0, WorkingState: PlannedState, SciencePlanInitialized: true));
+            return run;
+        }
         public void Dispose() { _services.Dispose(); _http.Dispose(); _context.Dispose(); }
     }
 

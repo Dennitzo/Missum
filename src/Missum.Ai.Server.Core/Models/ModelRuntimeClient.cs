@@ -137,6 +137,10 @@ public sealed partial class ModelRuntimeClient : IDisposable
     {
         // Serial specialized agents borrow the owner's resident primary. They
         // must never reconcile GPU placement, warm a companion or load weights.
+        // The ordinary owner turn has already established this residency. Reuse
+        // that exact observed instance for lightweight advisory turns instead of
+        // forcing /models?reload=1 and /props before every process heartbeat.
+        if (TryGetCachedResidentPrimaryPreparation(modelId, runtimeInstanceId, out var cached)) return cached;
         await _modelGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -151,6 +155,19 @@ public sealed partial class ModelRuntimeClient : IDisposable
             return new(resident.Id, WasAlreadyLoaded: true, resident.LoadedContextLength);
         }
         finally { _modelGate.Release(); }
+    }
+
+    private bool TryGetCachedResidentPrimaryPreparation(string modelId, string? runtimeInstanceId,
+        out ModelPreparation preparation)
+    {
+        preparation = default!;
+        if (!TryGetRuntimeModel(modelId, out var owner)
+            || !TryGetRuntimeModel(runtimeInstanceId ?? modelId, out var resident)
+            || owner.IsSubagent || resident.IsSubagent
+            || !string.Equals(owner.Id, resident.Id, StringComparison.OrdinalIgnoreCase)
+            || resident.State != "loaded" || resident.LoadedContextLength < 2048) return false;
+        preparation = new(resident.Id, WasAlreadyLoaded: true, resident.LoadedContextLength);
+        return true;
     }
 
     private async Task<ModelPreparation> PrepareNativeModelAsync(

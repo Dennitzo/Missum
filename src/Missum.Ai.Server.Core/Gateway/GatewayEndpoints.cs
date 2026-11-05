@@ -11,6 +11,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using System.Globalization;
 using System.Text.Json;
 
@@ -19,6 +20,9 @@ namespace Missum.Ai.Server.Core.Gateway;
 internal static partial class GatewayEndpoints
 {
     private static readonly JsonSerializerOptions JsonOptions = MissumAiProtocol.CreateJsonOptions();
+    private static readonly Action<ILogger, string, Exception?> SteeringCommandStopWarning =
+        LoggerMessage.Define<string>(LogLevel.Warning, new EventId(4701, "SteeringCommandStop"),
+            "The accepted steering input could not request the command stop immediately for run {RunId}.");
 
     public static void Map(IEndpointRouteBuilder endpoints)
     {
@@ -345,6 +349,21 @@ internal static partial class GatewayEndpoints
         var input = await ReadJsonAsync<RunSteeringRequest>(context).ConfigureAwait(false);
         var repository = context.RequestServices.GetRequiredService<RunRepository>();
         var accepted = await repository.AcceptSteeringAsync(runId, input, context.RequestAborted).ConfigureAwait(false);
+        if (accepted.State == "accepted")
+        {
+            try
+            {
+                _ = await repository.RequestPendingCommandStopForSteeringAsync(runId, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception error) when (error is not OutOfMemoryException)
+            {
+                // Acceptance is already durable. A following command heartbeat
+                // applies the same stop request, so never turn a successful user
+                // steering input into an HTTP failure here.
+                SteeringCommandStopWarning(
+                    context.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger("RunSteering"), runId, error);
+            }
+        }
         // Acceptance is durable even if the HTTP caller disconnects after commit.
         // Active model calls observe it; suspended workers resume at their tool boundary.
         await context.RequestServices.GetRequiredService<RunWorkChannel>().EnqueueAsync(runId, CancellationToken.None).ConfigureAwait(false);

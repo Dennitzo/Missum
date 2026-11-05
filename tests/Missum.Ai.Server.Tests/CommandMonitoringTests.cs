@@ -67,6 +67,44 @@ public sealed class CommandMonitoringTests
     public void StructuredDecisionsAcceptOnlyUsableStatusMessages(string response, string action) =>
         Assert.Equal(action, CommandMonitoringPolicy.Parse(response).Action);
 
+    [Fact]
+    public void MonitoringPromptIsBoundedIndependentlyOfTheMainConversation()
+    {
+        var hugeTask = new string('x', 250_000);
+        var state = CodingWorkingStateReducer.ApplyPlanUpdate(CodingWorkingState.Create(hugeTask),
+            J("""{"steps":[{"id":"phase-1","title":"Symbolische Rechnung profilieren","status":"in_progress"}]}"""));
+        var prompt = CommandMonitoringPolicy.CreatePrompt(hugeTask, state, Command,
+            new("p", 3, 120_000, new string('o', 16_000), new string('e', 16_000), false,
+                ProcessId: 42, CpuMilliseconds: 110_000, WorkingSetBytes: 5_000_000,
+                LastOutputElapsedMilliseconds: 100_000, OutputCharacters: 32_000));
+
+        Assert.Equal(3, prompt.Count);
+        Assert.True(prompt.Sum(message => message.Content?.Length ?? 0) < 55_000);
+        Assert.Contains("Symbolische Rechnung profilieren", prompt[1].Content);
+        Assert.Contains("outputCharacters", prompt[2].Content);
+        Assert.DoesNotContain(new string('x', 20_000), string.Concat(prompt.Select(message => message.Content)));
+    }
+
+    [Fact]
+    public void MonitoringPromptAlsoBoundsLargeCommandArguments()
+    {
+        var command = Command with
+        {
+            Arguments = J(JsonSerializer.Serialize(new
+            {
+                executable = "python",
+                arguments = Enumerable.Range(0, 64).Select(index => index + "-" + new string('a', 4_000)).ToArray(),
+            })),
+        };
+        var prompt = CommandMonitoringPolicy.CreatePrompt("Auftrag", null, command,
+            new("p", 1, 30_000, "", "", false));
+
+        Assert.True(prompt.Sum(message => message.Content?.Length ?? 0) < 30_000);
+        var instruction = prompt[2].Content!;
+        using var data = JsonDocument.Parse(instruction[(instruction.LastIndexOf('\n') + 1)..]);
+        Assert.EndsWith("[für die Prozessprüfung gekürzt]", data.RootElement.GetProperty("argumentsJson").GetString());
+    }
+
     [Theory]
     [InlineData("{\"message\":\"\",\"action\":\"continue\"}")]
     [InlineData("{\"message\":\"Stopp\",\"action\":\"stop\"}")]
@@ -171,10 +209,14 @@ public sealed class CommandMonitoringTests
             .EnumerateArray().Select(item => item.GetString()));
         Assert.All(schema.GetProperty("properties").EnumerateObject(), property =>
             Assert.Equal("string", property.Value.GetProperty("type").GetString()));
-        Assert.All(body.GetProperty("messages").EnumerateArray().Where(item => item.GetProperty("role").GetString() == "tool"),
-            item => Assert.False(J(item.GetProperty("content").GetString()!).GetProperty("final").GetBoolean()));
+        var monitorMessages = body.GetProperty("messages").EnumerateArray().ToArray();
+        Assert.Equal(["system", "user", "user"], monitorMessages.Select(item => item.GetProperty("role").GetString()));
+        var boundedContext = monitorMessages[1].GetProperty("content").GetString()!;
+        using (var contextDocument = JsonDocument.Parse(boundedContext[(boundedContext.IndexOf('\n') + 1)..]))
+            Assert.Equal("Berechne und prüfe das Ergebnis.", contextDocument.RootElement.GetProperty("originalTask").GetString());
+        Assert.Contains("Berechnung gestartet", monitorMessages[2].GetProperty("content").GetString());
         Assert.Equal(0, harness.Handler.Loads);
-        Assert.Contains(harness.Handler.Paths, path => path.StartsWith("/sessions/", StringComparison.Ordinal));
+        Assert.DoesNotContain(harness.Handler.Paths, path => path.StartsWith("/sessions/", StringComparison.Ordinal));
         // Replayed heartbeat cannot produce another status or spend a round.
         await Assert.ThrowsAsync<RunWaitingForClientException>(() => harness.Processor.ProcessAsync(run, timeout.Token));
         Assert.Single(harness.Handler.Bodies);
@@ -212,8 +254,10 @@ public sealed class CommandMonitoringTests
         Assert.Equal(7, saved.RoundCount);
         Assert.False((await harness.Repository.SaveClientToolProgressAsync(run,
             new(Harness.ProposalId, 2, 35_000, "", "", false))).StopRequested);
-        Assert.DoesNotContain(await harness.Repository.GetEventsAfterAsync(run, 0),
-            item => item.Type is RunEventTypes.TextDelta or RunEventTypes.RunFailed);
+        var events = await harness.Repository.GetEventsAfterAsync(run, 0);
+        Assert.Contains(events, item => item.Type == RunEventTypes.TextDelta
+            && item.Data.GetProperty("delta").GetString()!.Contains("inhaltliche AI-Prüfung", StringComparison.Ordinal));
+        Assert.DoesNotContain(events, item => item.Type == RunEventTypes.RunFailed);
     }
 
     [Fact]
@@ -230,7 +274,10 @@ public sealed class CommandMonitoringTests
         Assert.NotNull(saved.CommandMonitoring!.LastAttemptAt);
         Assert.Equal(7, saved.RoundCount);
         Assert.False((await harness.Repository.SaveClientToolProgressAsync(run, new(Harness.ProposalId, 2, 95_000, "", "", false))).StopRequested);
-        Assert.DoesNotContain(await harness.Repository.GetEventsAfterAsync(run, 0), item => item.Type == RunEventTypes.RunFailed);
+        var fallbackEvents = await harness.Repository.GetEventsAfterAsync(run, 0);
+        Assert.Contains(fallbackEvents, item => item.Type == RunEventTypes.TextDelta
+            && item.Data.GetProperty("delta").GetString()!.Contains("inhaltliche AI-Prüfung", StringComparison.Ordinal));
+        Assert.DoesNotContain(fallbackEvents, item => item.Type == RunEventTypes.RunFailed);
         await harness.Repository.SaveCheckpointAsync(run, saved with
         { CommandMonitoring = saved.CommandMonitoring with { LastAttemptAt = DateTimeOffset.UtcNow.AddMinutes(-2) } });
         harness.Handler.FailGeneration = false;

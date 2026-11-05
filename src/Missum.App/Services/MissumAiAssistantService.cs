@@ -124,6 +124,7 @@ public sealed partial class MissumAiAssistantService(
     private readonly SemaphoreSlim _startupCleanupGate = new(1, 1);
     private readonly HashSet<string> _startupServerRunIds = new(StringComparer.Ordinal);
     private readonly object _activeRunLock = new();
+    private ActiveSteeringSink? _activeSteeringSink;
     private TaskCompletionSource? _activeRunCompletion;
     private CancellationTokenSource? _activeCancellation;
     private CancellationTokenSource? _activeSpeechCancellation;
@@ -1962,6 +1963,33 @@ public sealed partial class MissumAiAssistantService(
         await using var pump = new AssistantRunEventPump(
             (cursor, token) => client.StreamRunEventsAsync(localRun.ServerRunId!, cursor, token),
             acknowledgedEventId, cancellationToken);
+        var steeringSink = new ActiveSteeringSink(localRun.SessionId, assistant.Id, async step =>
+        {
+            var applied = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            await pump.PostAsync(async () =>
+            {
+                try
+                {
+                    assistant = assistant with
+                    {
+                        ToolSteps = await SaveToolStepAsync(assistant.Id, step, CancellationToken.None).ConfigureAwait(false),
+                    };
+                    stream.SetContent(assistant.Content, assistant.Status, assistant.ToolSteps);
+                    // This callback is serialized with journal events. Commit the
+                    // accepted user input before exposing it to the native view,
+                    // without assigning it an ordinal ahead of older buffered steps.
+                    await stream.CheckpointAppliedCallbackAsync(force: true).ConfigureAwait(false);
+                    await update(new(MissumAiAssistantUpdateKind.Delta, assistant, ToolStep: step)).ConfigureAwait(false);
+                    applied.TrySetResult();
+                }
+                catch (Exception error)
+                {
+                    applied.TrySetException(error);
+                }
+            }).ConfigureAwait(false);
+            await applied.Task.ConfigureAwait(false);
+        });
+        lock (_activeRunLock) _activeSteeringSink = steeringSink;
         try
         {
             var incompleteExecutions = await toolExecutions.ListIncompleteExecutionsAsync(localRun.Id, localRun.ServerRunId!,
@@ -2191,6 +2219,8 @@ public sealed partial class MissumAiAssistantService(
                             inputJson: JsonSerializer.Serialize(new { steering.InputId, steering.Sequence, steering.Text, steering.AgentId, steering.AgentProfile }, JsonOptions),
                             outputJson: JsonSerializer.Serialize(new { applied = item.Type == RunSteeringEventTypes.Applied,
                                 steering.VisibleTextOffset, lastEventId = item.Id }, JsonOptions), eventAt: item.CreatedAt).ConfigureAwait(false);
+                        await update(new(MissumAiAssistantUpdateKind.Delta, assistant,
+                            ToolStep: assistant.ToolSteps?.FirstOrDefault(step => step.Id == steeringId))).ConfigureAwait(false);
                         await update(new(MissumAiAssistantUpdateKind.Status, assistant,
                             Status: item.Type == RunSteeringEventTypes.Applied ? "Lauf umgelenkt" : "Umlenkung angenommen",
                             Detail: "Der bestehende Auftrag wird mit der neuen Eingabe fortgesetzt.", Model: model)).ConfigureAwait(false);
@@ -2664,6 +2694,8 @@ public sealed partial class MissumAiAssistantService(
         }
         finally
         {
+            lock (_activeRunLock)
+                if (ReferenceEquals(_activeSteeringSink, steeringSink)) _activeSteeringSink = null;
             try { await pump.DisposeAsync().ConfigureAwait(false); }
             finally
             {

@@ -109,6 +109,13 @@ public sealed class RunSteeringClientTests
             if (type == "chat.steer.accepted") accepted = JsonSerializer.SerializeToElement(payload, JsonSerializerOptions.Web);
             return Task.CompletedTask;
         }, deadline.Token);
+        var acceptedLocally = (await chats.GetMessageAsync(turn.AssistantMessage.Id))!;
+        var acceptedStep = Assert.Single(acceptedLocally.ToolSteps!, step => step.Id == "steering-input-one");
+        Assert.Equal("running", acceptedStep.Status);
+        Assert.Equal("Nur die Änderung erklären.", acceptedStep.Detail);
+        Assert.True(Array.FindIndex(acceptedLocally.ToolSteps!.ToArray(), step => step.Id == "existing-read")
+            < Array.FindIndex(acceptedLocally.ToolSteps!.ToArray(), step => step.Id == "steering-input-one"));
+        shared.ReleaseEvents.TrySetResult();
         await resume;
 
         Assert.Equal("Nur die Änderung erklären.", (await chats.GetSessionAsync(session.Id))!.Title);
@@ -121,7 +128,9 @@ public sealed class RunSteeringClientTests
         Assert.Contains(restored.ToolSteps!, step => step.Id == "existing-read" && step.Detail == "Bereits geprüft");
         var input = Assert.Single(restored.ToolSteps!, step => step.Tool == "assistant.steering");
         Assert.Equal(visiblePrefix.Length, input.ContentOffset);
-        Assert.All(updates.Where(update => update.ToolStep?.Tool == "assistant.steering"), update =>
+        var steeringUpdates = updates.Where(update => update.ToolStep?.Tool == "assistant.steering").ToArray();
+        Assert.Contains(steeringUpdates, update => update.ToolStep!.Status == "running");
+        Assert.All(steeringUpdates.Where(update => update.ToolStep!.Status == "completed"), update =>
             Assert.Equal(visiblePrefix.Length, update.ToolStep!.ContentOffset));
         Assert.Equal("Nur die Änderung erklären.", input.Detail);
         Assert.Equal("completed", input.Status);
@@ -254,6 +263,7 @@ public sealed class RunSteeringClientTests
         internal ConcurrentQueue<string> Requests { get; } = new();
         internal TaskCompletionSource StreamReady { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal TaskCompletionSource<RunSteeringRequest> Steered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal TaskCompletionSource ReleaseEvents { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
     private sealed class Handler(State shared) : HttpMessageHandler
@@ -275,6 +285,7 @@ public sealed class RunSteeringClientTests
             {
                 shared.StreamReady.TrySetResult();
                 var input = await shared.Steered.Task.WaitAsync(cancellationToken);
+                await shared.ReleaseEvents.Task.WaitAsync(cancellationToken);
                 var events = new List<(string Type, object Data)>();
                 if (shared.InitialDelta is { } prefix) events.Add((RunEventTypes.TextDelta, new TextDeltaEvent(prefix)));
                 events.Add((RunSteeringEventTypes.Accepted, new RunSteeringEvent(input.InputId, 1, input.SessionId, input.Text)));

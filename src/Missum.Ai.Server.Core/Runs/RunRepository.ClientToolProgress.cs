@@ -47,6 +47,8 @@ public sealed partial class RunRepository
                 {
                     // Replayed and older observations cannot replace newer process state.
                     await reader.DisposeAsync().ConfigureAwait(false);
+                    await ApplyPendingHumanSteeringStopAsync(connection, transaction, runId, progress.ProposalId,
+                        cancellationToken).ConfigureAwait(false);
                     var previousResponse = await ReadCommandStopAsync(connection, transaction, runId, progress.ProposalId, cancellationToken).ConfigureAwait(false);
                     await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
                     return previousResponse;
@@ -73,6 +75,13 @@ public sealed partial class RunRepository
             save.Parameters.AddWithValue("$now", MissumAiDatabase.FormatTimestamp(DateTimeOffset.UtcNow));
             await save.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
+        // Human steering changes the work the model is expected to perform. A
+        // published command has already crossed the execution boundary, so keep
+        // its ownership and terminate only that process tree through the normal
+        // client stop receipt. The final command result is collected before the
+        // steering text is applied to the model context.
+        await ApplyPendingHumanSteeringStopAsync(connection, transaction, runId, progress.ProposalId,
+            cancellationToken).ConfigureAwait(false);
         var response = await ReadCommandStopAsync(connection, transaction, runId, progress.ProposalId, cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         _notifier.Notify(runId);
@@ -107,6 +116,22 @@ public sealed partial class RunRepository
         command.Parameters.AddWithValue("$proposal", proposalId);
         command.Parameters.AddWithValue("$reason", reason);
         var changed = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return changed;
+    }
+
+    internal async Task<bool> RequestPendingCommandStopForSteeringAsync(string runId,
+        CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = connection.BeginTransaction(deferred: false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT json_extract(checkpoint_json,'$.pendingProposalId') FROM run_checkpoints WHERE run_id=$run;";
+        command.Parameters.AddWithValue("$run", runId);
+        var proposalId = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) as string;
+        var changed = proposalId is not null && await ApplyPendingHumanSteeringStopAsync(connection, transaction,
+            runId, proposalId, cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         return changed;
     }
@@ -178,5 +203,33 @@ public sealed partial class RunRepository
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
             ? new(reader.GetInt64(0) != 0, reader.IsDBNull(1) ? null : reader.GetString(1)) : new(false);
+    }
+
+    private static async Task<bool> ApplyPendingHumanSteeringStopAsync(SqliteConnection connection,
+        SqliteTransaction transaction, string runId, string proposalId, CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            UPDATE client_tool_progress SET stop_requested=1,
+                stop_reason='Der Nutzer hat den laufenden Auftrag umgelenkt. Der aktuelle Befehl wird kontrolliert beendet, damit die neue Anweisung angewendet werden kann.'
+            WHERE run_id=$run AND proposal_id=$proposal AND stop_requested=0
+              AND EXISTS(SELECT 1 FROM runs WHERE run_id=$run AND state IN ('Queued','Running','WaitingForClient'))
+              AND EXISTS(SELECT 1 FROM client_tool_proposals p
+                  WHERE p.run_id=$run AND p.proposal_id=$proposal AND p.name=$name)
+              AND NOT EXISTS(SELECT 1 FROM client_tool_results result
+                  WHERE result.run_id=$run AND result.proposal_id=$proposal)
+              AND EXISTS(
+                  SELECT 1 FROM run_steering_inputs input
+                  JOIN run_events event ON event.run_id=input.run_id
+                    AND event.event_type='run.steering.accepted'
+                    AND json_extract(event.data_json,'$.inputId')=input.input_id
+                  WHERE input.run_id=$run AND input.applied_at IS NULL
+                    AND json_extract(event.data_json,'$.agentProfile') IS NULL);
+            """;
+        command.Parameters.AddWithValue("$run", runId);
+        command.Parameters.AddWithValue("$proposal", proposalId);
+        command.Parameters.AddWithValue("$name", ClientToolNames.CodingCommand);
+        return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 1;
     }
 }

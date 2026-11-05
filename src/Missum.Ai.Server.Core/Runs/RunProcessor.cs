@@ -748,7 +748,8 @@ public sealed partial class RunProcessor : BackgroundService
                     {
                         if (!string.Equals(pendingToolCallId, call.Id, StringComparison.Ordinal))
                         {
-                            throw new InvalidOperationException("Persisted client tool checkpoint is inconsistent.");
+                            throw new InvalidOperationException("Persisted client tool checkpoint is inconsistent: "
+                                + $"pending call '{pendingToolCallId}', active call '{call.Id}', index {nextToolIndex}.");
                         }
 
                         ClientToolResult clientResult;
@@ -1787,49 +1788,52 @@ public sealed partial class RunProcessor : BackgroundService
             await SaveCheckpointAsync().ConfigureAwait(false);
             try
             {
-                // A single pending command can accumulate days of reports without
-                // another tool turn. Archive completed monitoring exchanges at the
-                // usual threshold even when the ordinary recent-tool window has
-                // no older tool batch to discard.
-                if (ContextPlanner.EstimateTokens(messages) >= ContextPlanner.ComputeInputTokenBudget(contextLength, null)
-                    && CodingContextCompactor.Plan(messages, contextLength, workingState,
-                        includeWorkingStateInBudget: false, force: true) is { } monitorCompaction)
+                if (await _repository.HasPendingSteeringAsync(runId, cancellationToken).ConfigureAwait(false)) return;
+                var instruction = CommandMonitoringPolicy.Instruction(call, progress);
+                var monitoringPrompt = ModelRuntimeClient.PrepareLanguageBoundMessages(
+                    CommandMonitoringPolicy.CreatePrompt(ExtractOriginalTask(request), workingState, call, progress)).ToArray();
+                await using var steering = _repository.WatchSteering(runId, cancellationToken);
+                CommandMonitoringModelResult report;
+                try
                 {
-                    await using var lease = await _scheduler.AcquireAsync("command-monitoring-compaction", runId,
-                        SubagentLeaseMode(request.Subagent), cancellationToken).ConfigureAwait(false);
-                    await CompactWorkingContextAsync(monitorCompaction, contextLength, 0, cancellationToken,
-                        "Die fortlaufenden Prozessberichte erreichen die Kontextgrenze. ",
-                        tools: lastModelTools ?? contextTools ?? [], countRound: false).ConfigureAwait(false);
+                    report = await GenerateCommandMonitoringAsync(runId, progress.ProposalId, request, selection,
+                        contextLength, monitoringPrompt, steering.Token).ConfigureAwait(false);
                 }
-                messages.Add(new("user", CommandMonitoringPolicy.Instruction(call, progress)));
-                messages = ModelRuntimeClient.PrepareLanguageBoundMessages(messages).ToList();
-                preserveSessionPromptPrefix = true;
-                await SaveCheckpointAsync().ConfigureAwait(false);
-                var report = await GenerateCommandMonitoringAsync(runId, progress.ProposalId, request, selection, contextLength, messages,
-                    lastModelTools ?? contextTools ?? CreateModelToolDefinitions(availableTools, selectedToolName,
-                        isCoding || useStableSubagentToolCatalog, contextProfileVersion), cancellationToken).ConfigureAwait(false);
-                if (report.ContextBudget is { } overflow
-                    && CodingContextCompactor.Plan(messages, Math.Min(contextLength, overflow.ContextLength), workingState,
-                        includeWorkingStateInBudget: false, force: true) is { } exactCompaction)
+                catch (OperationCanceledException) when (steering.SteeringRequested)
                 {
-                    await using var lease = await _scheduler.AcquireAsync("command-monitoring-compaction", runId,
-                        SubagentLeaseMode(request.Subagent), cancellationToken).ConfigureAwait(false);
-                    await CompactWorkingContextAsync(exactCompaction, Math.Min(contextLength, overflow.ContextLength), 0,
-                        cancellationToken, "Der native Tokenzähler verlangt eine Verdichtung der Prozessberichte. ",
-                        tools: lastModelTools ?? contextTools ?? [], countRound: false).ConfigureAwait(false);
+                    await SaveCheckpointAsync().ConfigureAwait(false);
+                    return;
                 }
                 if (report.Response is { } modelResponse)
                 {
                     // Rejected text (for example a literal tool-call fragment)
                     // is not a valid assistant decision or execution history.
-                    if (report.Decision is not null)
-                        messages.Add(new("assistant", modelResponse.Content, ReasoningContent: modelResponse.ReasoningContent));
                     inputTokens += modelResponse.InputTokens;
                     outputTokens += modelResponse.OutputTokens;
                 }
+                var decision = report.Decision;
+                if (decision is null
+                    && await _repository.GetClientToolResultAsync(progress.ProposalId, cancellationToken).ConfigureAwait(false) is null
+                    && !await _repository.IsTerminalStateAsync(runId, cancellationToken).ConfigureAwait(false)
+                    && !await _repository.HasPendingSteeringAsync(runId, cancellationToken).ConfigureAwait(false))
+                    decision = CommandMonitoringPolicy.Fallback(progress);
+                if (decision is not null)
+                {
+                    messages.Add(new("user", instruction));
+                    messages.Add(report.Decision is not null && report.Response is { } acceptedResponse
+                        ? new("assistant", acceptedResponse.Content, ReasoningContent: acceptedResponse.ReasoningContent)
+                        : new("assistant", JsonSerializer.Serialize(new
+                        {
+                            decision.Message,
+                            decision.Action,
+                            Reason = decision.Reason,
+                        }, MissumAiProtocol.CreateJsonOptions())));
+                    messages = ModelRuntimeClient.PrepareLanguageBoundMessages(messages).ToList();
+                    preserveSessionPromptPrefix = true;
+                }
                 // A real process completion always wins over an older model
                 // observation, including a late stop recommendation.
-                if (report.Decision is { } decision
+                if (decision is not null
                     && await _repository.GetClientToolResultAsync(progress.ProposalId, cancellationToken).ConfigureAwait(false) is null
                     && !await _repository.IsTerminalStateAsync(runId, cancellationToken).ConfigureAwait(false))
                 {
@@ -1847,6 +1851,20 @@ public sealed partial class RunProcessor : BackgroundService
                     visibleTextLength += statusText.Length;
                 }
                 await SaveCheckpointAsync().ConfigureAwait(false);
+                // A single command can accumulate reports for days. Compact only
+                // after the current status is durable and visible, so context
+                // maintenance can never suppress the promised observation.
+                if (ContextPlanner.EstimateTokens(messages) >= ContextPlanner.ComputeInputTokenBudget(contextLength, null)
+                    && CodingContextCompactor.Plan(messages, contextLength, workingState,
+                        includeWorkingStateInBudget: false, force: true) is { } monitorCompaction)
+                {
+                    await using var lease = await _scheduler.AcquireAsync("command-monitoring-compaction", runId,
+                        SubagentLeaseMode(request.Subagent), cancellationToken).ConfigureAwait(false);
+                    await CompactWorkingContextAsync(monitorCompaction, contextLength, 0, cancellationToken,
+                        "Die fortlaufenden Prozessberichte erreichen die Kontextgrenze. ",
+                        tools: lastModelTools ?? contextTools ?? [], countRound: false).ConfigureAwait(false);
+                    await SaveCheckpointAsync().ConfigureAwait(false);
+                }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
             catch (Exception exception) when (exception is not OutOfMemoryException)
