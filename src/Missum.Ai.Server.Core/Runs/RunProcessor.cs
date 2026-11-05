@@ -477,7 +477,8 @@ public sealed partial class RunProcessor : BackgroundService
             var definition = _specializedAgents.Resolve(configuredAgent.ProfileId).Definition;
             specializedAgent = new(definition.Id, definition.Version,
                 string.IsNullOrWhiteSpace(configuredAgent.Goal) ? ExtractOriginalTask(request) : configuredAgent.Goal,
-                "specialized-" + definition.Id + "-" + runId);
+                "specialized-" + definition.Id + "-" + runId,
+                CycleTask: string.IsNullOrWhiteSpace(configuredAgent.Goal) ? ExtractOriginalTask(request) : configuredAgent.Goal);
         }
         if (appliedSteeringSequence > 0)
         {
@@ -2034,6 +2035,7 @@ public sealed partial class RunProcessor : BackgroundService
                     {
                         Phase = "main", InvocationId = null, Decision = null, FollowUpInputId = null, ReviewAttempts = 0,
                         Cycle = automatic && specializedAgent.Phase == "handoff" ? specializedAgent.Cycle + 1 : specializedAgent.Cycle,
+                        CycleTask = automatic ? SpecializedAgentFollowUpTask(input.Text, specializedAgent.Decision) : input.Text,
                         OriginalGoal = automatic ? specializedAgent.OriginalGoal
                             : specializedAgent.OriginalGoal + "\n\nWeitere Nutzeranweisung:\n" + input.Text,
                     };
@@ -2097,11 +2099,14 @@ public sealed partial class RunProcessor : BackgroundService
                 if (specializedAgent.Phase == "main")
                 {
                     var priorOpen = specializedAgent.Decision?.OpenPoints ?? [];
-                    specializedAgent = specializedAgent with { Phase = "review", InvocationId = "specialized-" + Guid.NewGuid().ToString("N"),
+                    var reviewContext = new SpecializedAgentReviewContext(specializedAgent.OriginalGoal, content,
+                        workingState, specializedAgent.Cycle, priorOpen, specializedAgent.CycleTask);
+                    specializedAgent = specializedAgent with { Phase = "review",
+                        AgentId = "specialized-" + specializedAgent.ProfileId + "-" + Guid.NewGuid().ToString("N"),
+                        InvocationId = "specialized-" + Guid.NewGuid().ToString("N"),
                         LastMainContent = content, Decision = null, FollowUpInputId = null, ReviewAttempts = 0,
                         ReviewedSteeringSequence = appliedSteeringSequence };
-                    messages.Add(new("user", profile.BuildReviewInstruction(new(specializedAgent.OriginalGoal, content,
-                        workingState, specializedAgent.Cycle, priorOpen))));
+                    messages.Add(new("user", profile.BuildReviewInstruction(reviewContext)));
                     await SaveCheckpointAsync().ConfigureAwait(false);
                 }
                 if (specializedAgent.Phase is "review" or "decision")
@@ -2145,7 +2150,7 @@ public sealed partial class RunProcessor : BackgroundService
                         return false;
                     }
                     specializedAgent = specializedAgent with { Phase = "main", Cycle = specializedAgent.Cycle + 1,
-                        InvocationId = null, ReviewAttempts = 0 };
+                        InvocationId = null, ReviewAttempts = 0, CycleTask = decision.NextPrompt };
                     await SaveCheckpointAsync().ConfigureAwait(false);
                     return false;
                 }
@@ -2160,6 +2165,15 @@ public sealed partial class RunProcessor : BackgroundService
                 cancellationToken).ConfigureAwait(false);
             if (finalized) _runtime.WriteLog("Information", "run.completed", $"Run {runId} erfolgreich beendet.");
             return finalized;
+        }
+
+        static string SpecializedAgentFollowUpTask(string text, SpecializedAgentDecision? decision)
+        {
+            if (!string.IsNullOrWhiteSpace(decision?.NextPrompt)) return decision.NextPrompt;
+            var value = text.Trim();
+            var separator = value.IndexOf("\n\n", StringComparison.Ordinal);
+            return separator > 0 && value[..separator].Contains("Folgeauftrag", StringComparison.OrdinalIgnoreCase)
+                ? value[(separator + 2)..].TrimStart() : value;
         }
     }
 

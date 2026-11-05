@@ -8,13 +8,36 @@ public sealed record SpecializedAgentDefinition(string Id, string Version, strin
     string ExecutionMode = "residentPrimarySerial", string Trigger = "afterMainCompletion", string? UiKind = null);
 
 public sealed record SpecializedAgentReviewContext(string Goal, string MainResult, CodingWorkingState? WorkingState,
-    long Cycle, IReadOnlyList<string> PreviousOpenPoints);
+    long Cycle, IReadOnlyList<string> PreviousOpenPoints, string? CycleTask = null);
 
 /// <summary>Profiles supply judgment instructions, not a second runtime or hidden project mutations.</summary>
 public interface ISpecializedAgentProfile
 {
     SpecializedAgentDefinition Definition { get; }
     string BuildReviewInstruction(SpecializedAgentReviewContext context);
+    string BuildActivityTitle(SpecializedAgentReviewContext context) =>
+        SpecializedAgentActivityTitle.Create(Definition.DisplayName, context.CycleTask ?? context.Goal);
+}
+
+internal static class SpecializedAgentActivityTitle
+{
+    internal static string Create(string displayName, string? task)
+    {
+        var title = (task ?? string.Empty).ReplaceLineEndings("\n")
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .FirstOrDefault(line => !line.StartsWith("Loop-Agent – Folgeauftrag:", StringComparison.OrdinalIgnoreCase))
+            ?? "Ziel und offenen Arbeitsstand prüfen";
+        title = title.TrimStart('#', '-', '*', ' ', '\t').Trim();
+        const int maximumLength = 100;
+        var prefix = displayName + " · ";
+        var available = Math.Max(24, maximumLength - prefix.Length);
+        if (title.Length > available)
+        {
+            var boundary = title.LastIndexOf(' ', available - 1);
+            title = title[..(boundary >= Math.Min(40, available / 2) ? boundary : available - 1)].TrimEnd() + "…";
+        }
+        return prefix + title;
+    }
 }
 
 /// <summary>Additional profiles register here; execution, persistence, handoffs and UI remain shared.</summary>
@@ -49,6 +72,9 @@ public sealed class LoopAgentProfile : ISpecializedAgentProfile
 {
     public SpecializedAgentDefinition Definition { get; } = new(SpecializedAgentProfiles.Loop, "1", "Loop-Agent", UiKind: "loopAgent");
 
+    public string BuildActivityTitle(SpecializedAgentReviewContext context) =>
+        SpecializedAgentActivityTitle.Create(Definition.DisplayName, context.CycleTask ?? context.Goal);
+
     public string BuildReviewInstruction(SpecializedAgentReviewContext context) => """
         [MISSUM_SPECIALIZED_AGENT_REVIEW]
         Du arbeitest jetzt ausschließlich als Loop-Agent nach dem abgeschlossenen Arbeitsabschnitt des Hauptagenten.
@@ -68,6 +94,9 @@ public sealed class LoopAgentProfile : ISpecializedAgentProfile
         Neue notwendige Arbeitsschritte darf der Hauptagent in den Plan aufnehmen. Er kann frühere Etappen korrigieren.
         Erfinde keine Belege oder erledigten Prüfungen. Falls aktuelle Dateien oder Berechnungen erneut kontrolliert
         werden müssen, beauftrage diese Prüfung ausdrücklich über nextPrompt, statt ihren Erfolg anzunehmen.
+        Fordere in nextPrompt keine neue Markdown-Datei, keine Loop-, Zwischenstands-, Kopie- oder Revisionsdatei an.
+        Bestehende kanonische Projektdateien werden direkt bearbeitet; im Claude-Science-Modus gilt dies insbesondere
+        für Publikation.md. Lege niemals Publikation-Loop.md oder entsprechend benannte Rundendateien nahe.
         completed ist nur zulässig, wenn alle benötigten Punkte tatsächlich absolviert sind und keine für das
         Nutzerziel notwendige Lücke verbleibt. needs_input ist für eine konkrete fehlende Nutzerentscheidung gedacht,
         nicht für hohen Aufwand. Du führst hier selbst keine Werkzeuge aus und lädst kein anderes Modell.
@@ -77,9 +106,11 @@ public sealed class LoopAgentProfile : ISpecializedAgentProfile
         """ + "\n" + JsonSerializer.Serialize(new
         {
             originalGoal = context.Goal, cycle = context.Cycle,
+            cycleTask = context.CycleTask,
             mainResult = "Der unmittelbar vorangehende Arbeitsabschnitt im Gesprächsverlauf; kein separat erfundener Ergebnisstand.",
             plan = context.WorkingState?.Plan, acceptanceCriteria = context.WorkingState?.AcceptanceCriteria,
             facts = context.WorkingState?.Facts, failures = context.WorkingState?.Failures,
             recentEvidence = context.WorkingState?.Evidence.TakeLast(32), previousOpenPoints = context.PreviousOpenPoints,
         }, MissumAiProtocol.CreateJsonOptions()) + "\n\n" + SpecializedAgentProtocol.BuildDecisionInstruction();
+
 }

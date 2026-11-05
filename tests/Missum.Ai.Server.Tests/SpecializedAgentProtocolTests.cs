@@ -56,6 +56,32 @@ public sealed class SpecializedAgentProtocolTests
         Assert.Contains("completed (Boolean)", repair);
     }
 
+    [Fact]
+    public void LoopActivityTitleUsesTheCurrentCycleTaskAndRemainsACompactFirstLine()
+    {
+        var profile = new LoopAgentProfile();
+        var title = profile.BuildActivityTitle(new("Gesamtziel", "Ergebnis", null, 3, [],
+            "Loop-Agent – Folgeauftrag:\n\nPrüfe den offenen Grenzfall B unabhängig und gleiche ihn mit der numerischen Referenz ab."));
+
+        Assert.StartsWith("Loop-Agent · Prüfe den offenen Grenzfall B unabhängig", title, StringComparison.Ordinal);
+        Assert.DoesNotContain('\n', title);
+        Assert.True(title.Length <= 100);
+        var longTitle = profile.BuildActivityTitle(new("Ziel", "Ergebnis", null, 4, [], new string('x', 180)));
+        Assert.Equal(100, longTitle.Length);
+        Assert.EndsWith("…", longTitle, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LoopInstructionForbidsMarkdownCopiesButKeepsCanonicalDirectEditing()
+    {
+        var profile = new LoopAgentProfile();
+        var instruction = profile.BuildReviewInstruction(new("Ziel", "Ergebnis", null, 2, [], "Nächste Etappe"));
+
+        Assert.Contains("keine neue Markdown-Datei", instruction, StringComparison.Ordinal);
+        Assert.Contains("Publikation-Loop.md", instruction, StringComparison.Ordinal);
+        Assert.Contains("kanonische Projektdateien werden direkt bearbeitet", instruction, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("{\"status\":\"completed\",\"begruendung\":\"Geprüft\",\"evidence\":\"Beleg\"}")]
     [InlineData("{\"point\":\"Prüfung\",\"evidence\":\"Beleg\"}")]

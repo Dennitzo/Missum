@@ -66,8 +66,22 @@ public sealed class SpecializedAgentProcessorTests
         Assert.Equal(accepted.AgentId, applied.AgentId);
         Assert.Equal(SpecializedAgentProfiles.Loop, applied.AgentProfile);
         Assert.Single(events, item => item.Type == RunEventTypes.RunCompleted);
-        Assert.Equal(2, events.Count(item => item.Type == RunEventTypes.SubagentStarted));
-        Assert.Equal(2, events.Count(item => item.Type == RunEventTypes.SubagentCompleted));
+        var started = events.Where(item => item.Type == RunEventTypes.SubagentStarted)
+            .Select(item => item.Data.Deserialize<SubagentRunEvent>(JsonOptions)!).ToArray();
+        var completed = events.Where(item => item.Type == RunEventTypes.SubagentCompleted)
+            .Select(item => item.Data.Deserialize<SubagentRunEvent>(JsonOptions)!).ToArray();
+        Assert.Equal(2, started.Length);
+        Assert.Equal(2, completed.Length);
+        Assert.Equal(2, started.Select(item => item.AgentId).Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(2, started.Select(item => item.RunId).Distinct(StringComparer.Ordinal).Count());
+        Assert.Contains(Goal, started[0].Task, StringComparison.Ordinal);
+        Assert.Contains("Prüfe als nächste Etappe den noch offenen Grenzfall B", started[1].Task, StringComparison.Ordinal);
+        Assert.StartsWith("Loop-Agent · Finde eine verallgemeinerte Gleichung", started[0].Task, StringComparison.Ordinal);
+        Assert.StartsWith("Loop-Agent · Prüfe als nächste Etappe den noch offenen Grenzfall B", started[1].Task, StringComparison.Ordinal);
+        Assert.All(started, item => Assert.True(item.Task.Split('\n')[0].Length <= 100));
+        Assert.DoesNotContain(started, item => item.Task.StartsWith("Loop-Agent · Zielprüfung", StringComparison.Ordinal));
+        Assert.All(started, child => Assert.Single(completed, terminal => terminal.AgentId == child.AgentId
+            && terminal.RunId == child.RunId));
         var visible = CodingTextReconciler.Project(events);
         Assert.Contains(FirstMainResult, visible);
         Assert.Contains(FinalMainResult, visible);
@@ -108,7 +122,7 @@ public sealed class SpecializedAgentProcessorTests
             Plan = [new("open-check", "Unabhängige Prüfung des Grenzfalls", "pending", [])],
         };
         await harness.Repository.SaveCheckpointAsync(run, new([new("user", Goal)], 0, 0, 0, 0,
-            WorkingState: state, SelectedModelId: NativeHandler.ModelId));
+            WorkingState: state, SelectedModelId: NativeHandler.ModelId, SciencePlanInitialized: true));
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(20));
 
         var failure = await Record.ExceptionAsync(() => harness.Processor.ProcessAsync(run, deadline.Token));
@@ -147,6 +161,13 @@ public sealed class SpecializedAgentProcessorTests
             Assert.Equal("none", body.GetProperty("tool_choice").GetString());
             Assert.Equal(harness.Handler.MainBodies[0].GetProperty("tools").GetRawText(), body.GetProperty("tools").GetRawText());
         });
+        var lifecycle = await harness.Repository.GetEventsAfterAsync(run, 0);
+        var started = Assert.Single(lifecycle, item => item.Type == RunEventTypes.SubagentStarted)
+            .Data.Deserialize<SubagentRunEvent>(JsonOptions)!;
+        var completed = Assert.Single(lifecycle, item => item.Type == RunEventTypes.SubagentCompleted)
+            .Data.Deserialize<SubagentRunEvent>(JsonOptions)!;
+        Assert.Equal(started.AgentId, completed.AgentId);
+        Assert.Equal(started.RunId, completed.RunId);
     }
 
     [Fact]
@@ -217,8 +238,8 @@ public sealed class SpecializedAgentProcessorTests
         await harness.Repository.SaveCheckpointAsync(run, new(
             [new("system", "Gespeicherter unveränderter Kontext."), new("user", Goal), new("assistant", FirstMainResult),
              new("user", ReviewMarker + "\n" + Goal), new("assistant", JsonSerializer.Serialize(decision, JsonOptions))],
-            1, 0, 0, 0, WorkingState: CodingWorkingState.Create(Goal), SelectedModelId: NativeHandler.ModelId,
-            PreserveSessionPromptPrefix: true, SpecializedAgent: saved));
+            1, 0, 0, 0, WorkingState: CompletedPlanState(), SelectedModelId: NativeHandler.ModelId,
+            PreserveSessionPromptPrefix: true, SpecializedAgent: saved, SciencePlanInitialized: true));
         if (alreadyAccepted)
             Assert.NotNull(await harness.Repository.TryAcceptSpecializedSteeringAsync(run,
                 new(Session, inputId, "Loop-Agent – Folgeauftrag:\n\n" + FollowUp), agentId, SpecializedAgentProfiles.Loop));
@@ -247,14 +268,16 @@ public sealed class SpecializedAgentProcessorTests
         using var harness = new Harness();
         harness.Handler.IsLoaded = modelStillResident;
         var run = await harness.CreateAsync();
-        var saved = new SpecializedAgentCheckpoint(SpecializedAgentProfiles.Loop, "1", Goal, "specialized-loop-" + run,
-            Phase: "review", InvocationId: "specialized-interrupted-review", LastMainContent: FirstMainResult);
+        var savedAgent = "specialized-loop-" + run;
+        const string savedInvocation = "specialized-interrupted-review";
+        var saved = new SpecializedAgentCheckpoint(SpecializedAgentProfiles.Loop, "1", Goal, savedAgent,
+            Phase: "review", InvocationId: savedInvocation, LastMainContent: FirstMainResult);
         await harness.Repository.AppendEventAsync(run, RunEventTypes.TextDelta, new TextDeltaEvent(FirstMainResult));
         await harness.Repository.SaveCheckpointAsync(run, new(
             [new("system", "Gespeicherter unveränderter Kontext."), new("user", Goal), new("assistant", FirstMainResult),
              new("user", ReviewMarker + "\n" + Goal)], 1, 0, 0, 0,
-            WorkingState: CodingWorkingState.Create(Goal), SelectedModelId: NativeHandler.ModelId,
-            PreserveSessionPromptPrefix: true, SpecializedAgent: saved));
+            WorkingState: CompletedPlanState(), SelectedModelId: NativeHandler.ModelId,
+            PreserveSessionPromptPrefix: true, SpecializedAgent: saved, SciencePlanInitialized: true));
         Assert.Contains(run, await harness.Repository.RecoverAsync());
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(20));
 
@@ -274,6 +297,11 @@ public sealed class SpecializedAgentProcessorTests
         Assert.DoesNotContain(harness.Handler.Paths, path => path.StartsWith("/agents/", StringComparison.Ordinal)
             || path == "/models/unload");
         Assert.Empty(await harness.Repository.GetSubagentRunsAsync(run));
+        var started = Assert.Single(events, item => item.Type == RunEventTypes.SubagentStarted)
+            .Data.Deserialize<SubagentRunEvent>(JsonOptions)!;
+        Assert.Equal(savedAgent, started.AgentId);
+        Assert.Equal(savedInvocation, started.RunId);
+        Assert.StartsWith("Loop-Agent · Finde eine verallgemeinerte Gleichung", started.Task, StringComparison.Ordinal);
     }
 
     private static SpecializedAgentDecision ContinueDecision() => new("continue", "Der Grenzfall B ist noch offen.",
@@ -281,6 +309,12 @@ public sealed class SpecializedAgentProcessorTests
 
     private static SpecializedAgentDecision CompletedDecision() => new("completed", "Alle angeforderten Punkte sind anhand des Arbeitsstands geprüft.",
         [new("Verallgemeinerung", true, "Herleitung und unabhängiger Vergleich beider Grenzfälle sind dokumentiert.")], []);
+
+    private static CodingWorkingState CompletedPlanState() => CodingWorkingState.Create(Goal) with
+    {
+        Phase = "final",
+        Plan = [new("phase-1", "Phase 1: Verallgemeinerung prüfen", "completed", [])],
+    };
 
     private static LmChatMessage[] Messages(JsonElement body) => body.GetProperty("messages").EnumerateArray().Select(message =>
         new LmChatMessage(message.GetProperty("role").GetString()!, message.TryGetProperty("content", out var content)
@@ -318,7 +352,14 @@ public sealed class SpecializedAgentProcessorTests
                 Limits: new(TimeoutSeconds: 0), SpecializedAgent: enabled ? new(SpecializedAgentProfiles.Loop, Goal) : null);
         }
 
-        internal async Task<string> CreateAsync() => (await Repository.CreateAsync(Request, null)).Snapshot.RunId;
+        internal async Task<string> CreateAsync()
+        {
+            var run = (await Repository.CreateAsync(Request, null)).Snapshot.RunId;
+            await Repository.SaveCheckpointAsync(run, new([new("user", Goal)], 0, 0, 0, 0,
+                WorkingState: CompletedPlanState(), SelectedModelId: NativeHandler.ModelId,
+                SciencePlanInitialized: true));
+            return run;
+        }
         public void Dispose() { _services.Dispose(); _http.Dispose(); _context.Dispose(); }
     }
 

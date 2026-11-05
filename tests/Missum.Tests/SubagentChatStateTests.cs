@@ -277,6 +277,30 @@ public sealed class SubagentChatStateTests
         Assert.True(child.IsRunning);
     }
 
+    [Fact]
+    public void DistinctLoopRoundsRemainDistinctSubagentsInTheStoredOverview()
+    {
+        var session = Guid.NewGuid();
+        var first = SubagentChatState.Create(new("parent", "loop-round-1", "loop-agent-1",
+            "Loop-Agent · Grundgleichung prüfen", "model", RunState.Completed, Specialization: "loopAgent"), session, Start);
+        var second = SubagentChatState.Create(new("parent", "loop-round-2", "loop-agent-2",
+            "Loop-Agent · Offenen Grenzfall untersuchen", "model", RunState.Completed, Specialization: "loopAgent"), session, Start.AddMinutes(1));
+        var parent = new ChatMessage(Guid.NewGuid(), session, ChatRole.Assistant, "", MessageStatus.Completed,
+            Start, Start.AddMinutes(2), ToolSteps:
+            [
+                Receipt(first, first.ReceiptId, JsonSerializer.Serialize(first, ProtocolJson)),
+                Receipt(second, second.ReceiptId, JsonSerializer.Serialize(second, ProtocolJson)),
+            ]);
+
+        var restored = SubagentChatState.ReadSummaries([parent]).OrderBy(child => child.RunId).ToArray();
+
+        Assert.Equal(2, restored.Length);
+        Assert.Equal(["loop-agent-1", "loop-agent-2"], restored.Select(child => child.AgentId));
+        Assert.Equal(["Loop-Agent · Grundgleichung prüfen", "Loop-Agent · Offenen Grenzfall untersuchen"],
+            restored.Select(child => child.Title));
+        Assert.All(restored, child => Assert.Equal("loopAgent", child.Kind));
+    }
+
     [Theory]
     [InlineData("cancelled", MessageStatus.Cancelled)]
     [InlineData("interrupted", MessageStatus.Interrupted)]

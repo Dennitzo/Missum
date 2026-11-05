@@ -22,7 +22,10 @@ public sealed partial class RunProcessor
         var definition = profile.Definition;
         var invocation = state.InvocationId ?? throw new InvalidDataException("Die Agentenprüfung besitzt keine gespeicherte Identität.");
         var frame = new SpecializedAgentReviewFrame(state, messages);
-        var assignedTask = definition.DisplayName + " · Zielprüfung, Runde " + state.Cycle
+        var reviewContext = new SpecializedAgentReviewContext(state.OriginalGoal, state.LastMainContent ?? "", workingState,
+            state.Cycle, state.Decision?.OpenPoints ?? [], state.CycleTask);
+        var activityTitle = profile.BuildActivityTitle(reviewContext);
+        var assignedTask = activityTitle + "\n\nZielprüfung, Runde " + state.Cycle
             + "\n\nPrüfe Ziel, Arbeitsplan, tatsächliche Belege und offene Probleme. Gib bei Bedarf einen konkreten nächsten Auftrag an den Hauptagenten.\n\nUrsprüngliches Nutzerziel:\n" + state.OriginalGoal;
         SubagentRunEvent Lifecycle(RunState status) => new(runId, invocation, state.AgentId, assignedTask,
             selection.ModelId, status, request.SessionId, Specialization: definition.UiKind ?? definition.Id, GpuIndex: 0);
@@ -137,7 +140,7 @@ public sealed partial class RunProcessor
             await _repository.EnsureSpecializedAgentEventAsync(runId, state.AgentId, invocation, RunEventTypes.TextDelta,
                 new TextDeltaEvent(SpecializedAgentProtocol.Render(definition, result)), cancellationToken).ConfigureAwait(false);
             await _repository.EnsureSpecializedAgentEventAsync(runId, state.AgentId, invocation, RunEventTypes.RunCompleted,
-                new RunCompletedEvent(definition.DisplayName + " · Runde " + state.Cycle, selection.ModelId,
+                new RunCompletedEvent(activityTitle, selection.ModelId,
                     frame.InputTokens, frame.OutputTokens), cancellationToken).ConfigureAwait(false);
             await _repository.EnsureSubagentLifecycleEventAsync(RunEventTypes.SubagentCompleted, Lifecycle(RunState.Completed), cancellationToken).ConfigureAwait(false);
             await _repository.EnsureSpecializedAgentResultConsumedAsync(runId, state.AgentId, invocation, cancellationToken).ConfigureAwait(false);
@@ -167,9 +170,12 @@ public sealed partial class RunProcessor
         var checkpoint = await _repository.GetCheckpointAsync(runId).ConfigureAwait(false);
         if (checkpoint?.SpecializedAgent is not { InvocationId: { } invocation } specialized || specialized.Phase is "main" or "completed") return;
         var request = await _repository.GetRequestAsync(runId).ConfigureAwait(false);
-        var definition = _specializedAgents.Resolve(specialized.ProfileId, specialized.Version).Definition;
+        var profile = _specializedAgents.Resolve(specialized.ProfileId, specialized.Version);
+        var definition = profile.Definition;
+        var title = profile.BuildActivityTitle(new(specialized.OriginalGoal, specialized.LastMainContent ?? "",
+            checkpoint.WorkingState, specialized.Cycle, specialized.Decision?.OpenPoints ?? [], specialized.CycleTask));
         await _repository.EnsureSubagentLifecycleEventAsync(RunEventTypes.SubagentCompleted,
-            new(runId, invocation, specialized.AgentId, definition.DisplayName + " · Zielprüfung, Runde " + specialized.Cycle,
+            new(runId, invocation, specialized.AgentId, title + "\n\nZielprüfung, Runde " + specialized.Cycle,
                 checkpoint.SelectedModelId ?? "", state, request?.SessionId,
                 Specialization: definition.UiKind ?? definition.Id, GpuIndex: 0)).ConfigureAwait(false);
     }
