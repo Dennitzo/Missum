@@ -9,6 +9,51 @@ namespace Missum.Ai.Server.Tests;
 public sealed class RunAtomicRecoveryTests
 {
     [Fact]
+    public async Task RecoveryRetiresObsoleteAutomaticFollowUpAndKeepsMainAnswerAndJournal()
+    {
+        using var context = new TestServerContext();
+        var repository = new RunRepository(context.Database, new RunEventNotifier());
+        const string session = "historical-loop-session";
+        var request = new RunRequest(MissumAiProtocol.Version, RunMode.Coding,
+            [new("user", [new("text", "Prüfe die Herleitung.")])], SessionId: session);
+        var run = (await repository.CreateAsync(request, "original-key")).Snapshot.RunId;
+        await repository.UpdateStateAsync(run, RunState.Running);
+        const string answer = "Die Herleitung ist geprüft.";
+        await repository.SaveCheckpointAsync(run, new([
+            new("user", "Prüfe die Herleitung."),
+            new("assistant", answer),
+            new("user", "[MISSUM_SPECIALIZED_AGENT_REVIEW]\nPrüfe das Ziel."),
+            new("assistant", """{"outcome":"continue"}"""),
+            new("user", "[MISSUM_SPECIALIZED_AGENT_DECISION]\nKorrigiere die Antwort."),
+            new("assistant", """{"outcome":"completed"}""")], 3, 0, 100, 20));
+        await repository.AcceptSteeringAsync(run, new(session, "legacy-follow-up", "Starte weitere Arbeit."));
+        await repository.AcceptSteeringAsync(run, new(session, "human-follow-up", "Prüfe auch die Randbedingung."));
+        await ExecuteSqlAsync(context, """
+            UPDATE runs SET request_json=json_set(request_json,'$.specializedAgent',json('{"profileId":"loop"}'));
+            UPDATE run_checkpoints SET checkpoint_json=json_set(checkpoint_json,'$.specializedAgent',
+                json('{"phase":"handoff","lastMainContent":"Die Herleitung ist geprüft."}'));
+            UPDATE run_events SET data_json=json_set(data_json,'$.agentProfile','loop','$.agentId','old-agent')
+                WHERE event_type='run.steering.accepted' AND json_extract(data_json,'$.inputId')='legacy-follow-up';
+            """);
+
+        Assert.Contains(run, await repository.RecoverAsync());
+        var replay = await repository.CreateAsync(request, "original-key");
+        Assert.False(replay.Created);
+        Assert.Equal(run, replay.Snapshot.RunId);
+        var checkpoint = (await repository.GetCheckpointAsync(run))!;
+        Assert.Equal(answer, checkpoint.RetiredReviewMainContent);
+        Assert.Equal(new[] { "Prüfe die Herleitung.", answer }, checkpoint.Messages.Select(message => message.Content));
+        var human = Assert.Single(await repository.GetPendingSteeringAsync(run));
+        Assert.Equal("human-follow-up", human.InputId);
+        await repository.SaveCheckpointAsync(run, checkpoint with { AppliedSteeringSequence = human.Sequence });
+        Assert.True(await repository.FinalizeConversationAsync(run, new("Herleitung", null, 100, 20)));
+        var events = await repository.GetEventsAfterAsync(run, 0);
+        Assert.Equal(2, events.Count(item => item.Type == RunSteeringEventTypes.Accepted));
+        Assert.Equal(human.InputId, Assert.Single(events, item => item.Type == RunSteeringEventTypes.Applied)
+            .Data.GetProperty("inputId").GetString());
+    }
+
+    [Fact]
     public async Task FinalizationFailureRollsBackStateEventAndCheckpointTogetherThenCompletesOnce()
     {
         using var context = new TestServerContext();

@@ -120,7 +120,7 @@ public sealed partial class MissumAiAssistantService
         var expanded = new List<ChatMessage>();
         foreach (var message in source)
         {
-            var inputs = (message.ToolSteps ?? []).Where(step => step.Tool == "assistant.steering")
+            var inputs = (message.ToolSteps ?? []).Where(step => step.Tool == "assistant.steering" && !WasAutomaticSteering(step))
                 .OrderBy(step => step.ContentOffset ?? message.Content.Length)
                 .ThenBy(SteeringSequence).ToArray();
             if (message.Role != ChatRole.Assistant || inputs.Length == 0) { expanded.Add(message); continue; }
@@ -148,6 +148,19 @@ public sealed partial class MissumAiAssistantService
             }
         }
         return expanded;
+    }
+
+    private static bool WasAutomaticSteering(AssistantToolStep step)
+    {
+        if (step.InputJson is not { } input) return false;
+        try
+        {
+            using var json = JsonDocument.Parse(input);
+            return json.RootElement.ValueKind == JsonValueKind.Object
+                && json.RootElement.TryGetProperty("agentProfile", out var profile)
+                && profile.ValueKind == JsonValueKind.String;
+        }
+        catch (JsonException) { return false; }
     }
 
     private static long SteeringSequence(AssistantToolStep step)

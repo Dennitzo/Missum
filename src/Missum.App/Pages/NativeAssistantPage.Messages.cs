@@ -40,8 +40,7 @@ public sealed partial class NativeAssistantPage
         if (start == DateTimeOffset.MinValue) return;
         var active = S(message, "status") is "streaming" or "pending";
         var end = active ? DateTimeOffset.UtcNow : DateTimeOffset.TryParse(S(message, "updatedAt"), out var finished) ? finished : start;
-        var elapsed = MessageActiveDuration(message, end);
-        var duration = $"{(long)elapsed.TotalMinutes} Min. {elapsed.Seconds} Sek.";
+        var duration = FormatMessageDuration(MessageActiveDuration(message, end), afterSince: active);
         var text = active
             ? $"In Bearbeitung seit {duration}"
             : start.ToLocalTime().ToString("dd.MM.yyyy · HH:mm 'Uhr'", CultureInfo.CurrentCulture) + " · " + duration + " lang gearbeitet";

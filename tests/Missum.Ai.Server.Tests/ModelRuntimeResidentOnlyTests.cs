@@ -75,7 +75,7 @@ public sealed class ModelRuntimeResidentOnlyTests
 
         var error = await Assert.ThrowsAsync<InvalidOperationException>(() => ReviewAsync(runtime));
 
-        Assert.StartsWith("specialized_agent.model_not_resident:", error.Message);
+        Assert.StartsWith("model.not_resident:", error.Message);
         Assert.Equal(0, handler.LoadCalls);
         Assert.Empty(handler.ChatBodies);
         Assert.Empty(handler.CacheBodies);
@@ -95,7 +95,7 @@ public sealed class ModelRuntimeResidentOnlyTests
             ModelId, [new("user", "Prüfe das Ziel.")], [], "session-owner", null,
             runtimeInstanceId: instance, residentOnly: true, suppressToolCalls: true));
 
-        Assert.StartsWith("specialized_agent.model_not_resident:", error.Message);
+        Assert.StartsWith("model.not_resident:", error.Message);
         Assert.Equal(0, handler.LoadCalls);
         Assert.Empty(handler.ChatBodies);
         Assert.Empty(handler.CacheBodies);
@@ -128,7 +128,7 @@ public sealed class ModelRuntimeResidentOnlyTests
             ModelId, [new("user", "Prüfe das Ziel.")], Tools(), "session-owner", null,
             residentOnly: true, suppressToolCalls: true));
 
-        Assert.StartsWith("specialized_agent.unexpected_tool_call:", error.Message);
+        Assert.StartsWith("model.unexpected_tool_call:", error.Message);
         Assert.Equal("none", Assert.Single(handler.ChatBodies).GetProperty("tool_choice").GetString());
         Assert.Equal(0, handler.LoadCalls);
     }

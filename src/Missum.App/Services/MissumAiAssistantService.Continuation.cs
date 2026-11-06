@@ -5,12 +5,18 @@ using Missum.Core.Extensions;
 using Missum.Core.Models;
 using System.Net;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Missum.App.Services;
 
 public sealed partial class MissumAiAssistantService
 {
     internal const string ContinuationStepTool = "assistant.continuation";
+    // Older prepared requests can contain fields retired from the wire protocol.
+    private static readonly JsonSerializerOptions StoredContinuationRequestJson = new(MissumAiProtocol.CreateJsonOptions())
+    {
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Skip,
+    };
 
     public async Task<ChatMessage> ResumeMessageAsync(Guid sessionId, Guid assistantMessageId,
         Func<MissumAiAssistantUpdate, Task> update, CancellationToken cancellationToken = default)
@@ -102,20 +108,10 @@ public sealed partial class MissumAiAssistantService
             if (pendingReceipt?.InputJson is { } frozenRequest)
             {
                 ValidateContinuationReceiptOwner(pendingReceipt, persisted!, assistant, requireServer: false);
-                recoveredRequest = JsonSerializer.Deserialize<RunRequest>(frozenRequest, JsonOptions)
+                recoveredRequest = JsonSerializer.Deserialize<RunRequest>(frozenRequest, StoredContinuationRequestJson)
                     ?? throw new InvalidDataException("Der vorbereitete Fortsetzungsauftrag ist ungültig.");
                 if (recoveredRequest.SessionId != sessionId.ToString("D"))
                     throw new InvalidDataException("Der vorbereitete Fortsetzungsauftrag gehört zu einer anderen Sitzung.");
-            }
-            if (recoveredRequest is not null) _activeSpecializedAgent = recoveredRequest.SpecializedAgent;
-            else if (session.ChatMode is ChatMode.Coding or ChatMode.ClaudeScience)
-            {
-                var agentStore = new SessionAgentProfileStore(settings.DataDirectory);
-                var selectedProfile = await agentStore.ReadAsync(sessionId, token).ConfigureAwait(false);
-                var savedGoal = await agentStore.ReadGoalAsync(sessionId, assistant.Id, token).ConfigureAwait(false);
-                var goal = savedGoal is not null && savedGoal.ProfileId == selectedProfile ? savedGoal.Goal ?? anchor.User.Content : anchor.User.Content;
-                _activeSpecializedAgent = selectedProfile is null ? null : SpecializedAgentSelection.Capture(selectedProfile, session.ChatMode,
-                    AppendSpecializedAgentUserInstructions(goal, assistant.ToolSteps));
             }
             modelPreparation = PrepareSubmittedModelAsync(_activeRunAction, preparationCancellation.Token,
                 recoveredRequest?.PreferredCodingModelId ?? recoveredRequest?.PreferredGeneralModelId,
@@ -287,17 +283,6 @@ public sealed partial class MissumAiAssistantService
             && !content.StartsWith("**Fehler", StringComparison.Ordinal)
             && !content.StartsWith("Der AI-Lauf ist fehlgeschlagen", StringComparison.Ordinal)
             && content != "Der Missum-AI-Auftrag konnte nicht abgeschlossen werden.";
-    }
-
-    internal static string AppendSpecializedAgentUserInstructions(string goal, IReadOnlyList<AssistantToolStep>? steps)
-    {
-        foreach (var step in (steps ?? []).Where(step => step.Tool == "assistant.steering").OrderBy(SteeringSequence))
-        {
-            using var input = JsonDocument.Parse(step.InputJson ?? "{}");
-            if (input.RootElement.TryGetProperty("agentProfile", out var origin) && origin.ValueKind == JsonValueKind.String) continue;
-            if (!string.IsNullOrWhiteSpace(step.Detail)) goal += "\n\nWeitere Nutzeranweisung:\n" + step.Detail;
-        }
-        return goal;
     }
 
     internal static bool HasOnlyManualCompactionReceipts(IEnumerable<(string Id, string Tool)> steps)

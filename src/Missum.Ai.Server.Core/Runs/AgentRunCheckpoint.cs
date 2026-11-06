@@ -45,10 +45,13 @@ public sealed record AgentRunCheckpoint(
     IReadOnlyList<LmToolDefinition>? ContextTools = null,
     string? ResearchStateStamp = null,
     string ContextScope = "session-v3",
-    SpecializedAgentCheckpoint? SpecializedAgent = null,
     bool SciencePlanInitialized = false,
     IReadOnlyList<LmToolDefinition>? LastModelTools = null,
-    CommandMonitoringCheckpoint? CommandMonitoring = null);
+    CommandMonitoringCheckpoint? CommandMonitoring = null)
+{
+    [System.Text.Json.Serialization.JsonIgnore]
+    internal string? RetiredReviewMainContent { get; init; }
+}
 
 public sealed record CommandMonitoringCheckpoint(string? ProposalId, long LastProgressRevision,
     DateTimeOffset? LastAttemptAt, IReadOnlyList<string> ClosedToolCallIds);

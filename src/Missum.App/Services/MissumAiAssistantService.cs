@@ -144,10 +144,6 @@ public sealed partial class MissumAiAssistantService(
     private string _activeRunClientId = "desktop";
     internal string ActiveRunClientId => _activeRunClientId;
     private ChatSession? _activeSubmittedSession;
-    private SpecializedAgentOptions? _activeSpecializedAgent;
-
-    internal string? ActiveSpecializedAgentProfile(Guid sessionId) => ActiveSessionId == sessionId && IsRunning
-        ? _activeSpecializedAgent?.ProfileId : null;
 
     public string? ActiveRunId => Volatile.Read(ref _activeServerRunId);
 
@@ -164,25 +160,19 @@ public sealed partial class MissumAiAssistantService(
         PromptTriggerMatch? trigger,
         Func<MissumAiAssistantUpdate, Task> update,
         CancellationToken cancellationToken = default) =>
-        SendCoreAsync(sessionId, prompt, trigger, update, null, null, cancellationToken);
+        SendCoreAsync(sessionId, prompt, trigger, update, null, cancellationToken);
 
     public Task<ChatMessage> SendAsync(Guid sessionId, string prompt, PromptTriggerMatch? trigger,
         Func<MissumAiAssistantUpdate, Task> update, ChatSession? submittedSession,
         CancellationToken cancellationToken = default) =>
-        SendCoreAsync(sessionId, prompt, trigger, update, submittedSession, null, cancellationToken);
-
-    public Task<ChatMessage> SendAsync(Guid sessionId, string prompt, PromptTriggerMatch? trigger,
-        Func<MissumAiAssistantUpdate, Task> update, ChatSession? submittedSession,
-        SpecializedAgentOptions? specializedAgent, CancellationToken cancellationToken = default) =>
-        SendCoreAsync(
-            sessionId, prompt, trigger, update, submittedSession, specializedAgent, cancellationToken);
+        SendCoreAsync(sessionId, prompt, trigger, update, submittedSession, cancellationToken);
 
     private async Task<ChatMessage> SendCoreAsync(
         Guid sessionId,
         string prompt,
         PromptTriggerMatch? trigger,
         Func<MissumAiAssistantUpdate, Task> update,
-        ChatSession? submittedSession, SpecializedAgentOptions? specializedAgent, CancellationToken cancellationToken)
+        ChatSession? submittedSession, CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         if (trigger?.Trigger.Action == PromptTriggerAction.TextToSpeech)
@@ -199,10 +189,8 @@ public sealed partial class MissumAiAssistantService(
         _activeSubmittedSession = submittedSession;
         try
         {
-            var session = await GetExecutionSessionAsync(sessionId, _activeCancellation.Token).ConfigureAwait(false)
+            _ = await GetExecutionSessionAsync(sessionId, _activeCancellation.Token).ConfigureAwait(false)
                 ?? throw new InvalidOperationException("Die AI-Sitzung wurde nicht gefunden.");
-            _activeSpecializedAgent = SpecializedAgentSelection.Capture(specializedAgent?.ProfileId,
-                session.ChatMode, specializedAgent?.Goal ?? prompt);
             var action = trigger?.Trigger.Action;
             _activeRunAction = action;
             // Loading weights must not wait for history, attachment uploads or
@@ -224,9 +212,6 @@ public sealed partial class MissumAiAssistantService(
                 sessionAttachments,
                 _activeCancellation.Token).ConfigureAwait(false);
             var assistant = turn.AssistantMessage;
-            if (_activeSpecializedAgent is { } selectedAgent)
-                await new SessionAgentProfileStore(settings.DataDirectory).WriteGoalAsync(sessionId, assistant.Id,
-                    selectedAgent, _activeCancellation.Token).ConfigureAwait(false);
             var initialModel = UsesCodingAgent(action) ? CurrentSettings.SelectedModel : CurrentSettings.SelectedModel;
             var contextLimit = ModelContextSelection.Resolve(CurrentSettings, initialModel ?? "", ModelContextProfiles.ResolveMaximum(initialModel, UsesCodingAgent(action) ? "coding" : "general"));
             await update(new(
@@ -424,7 +409,6 @@ public sealed partial class MissumAiAssistantService(
     public async Task StopPersistedRunsAtStartupAsync(CancellationToken cancellationToken = default)
     {
         await PreparePersistedRunsAtStartupAsync(cancellationToken).ConfigureAwait(false);
-        await RetryPendingRunKeyCancellationsAsync(cancellationToken).ConfigureAwait(false);
         await _startupCleanupGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -556,7 +540,6 @@ public sealed partial class MissumAiAssistantService(
     {
         _activeRunClientId = AssistantClientExecutionScope.ClientId;
         _activeSubmittedSession = null;
-        _activeSpecializedAgent = null;
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         lock (_activeRunLock)
         {
@@ -580,7 +563,6 @@ public sealed partial class MissumAiAssistantService(
                 _pendingModelSelection = null;
                 _activeCodingWorkspace = null;
                 _activeRunAction = null;
-                _activeSpecializedAgent = null;
                 _activeSubmittedSession = null;
                 Volatile.Write(ref _activeSessionId, null);
                 _activeCancellation?.Dispose();
@@ -651,7 +633,6 @@ public sealed partial class MissumAiAssistantService(
 
     private async Task RetryPendingRunCancellationsAsync(CancellationToken cancellationToken)
     {
-        await RetryPendingRunKeyCancellationsAsync(cancellationToken).ConfigureAwait(false);
         await _startupCleanupGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -3312,8 +3293,7 @@ public sealed partial class MissumAiAssistantService(
                 WorkflowProfile: isScienceSession ? "claude-science-v1" : null,
                 ClientTools: extensionClientTools,
                 ResearchOptions: researchOptions,
-                ContextProfileVersion: compactContext ? "compact-v1" : null,
-                SpecializedAgent: _activeSpecializedAgent);
+                ContextProfileVersion: compactContext ? "compact-v1" : null);
         }
         var contextProfile = audiobook
             ? SessionContextProfile.Audiobook
@@ -3437,8 +3417,7 @@ public sealed partial class MissumAiAssistantService(
             DeepResearch: trigger?.DeepResearch == true,
             ClientTools: extensionClientTools,
             ResearchOptions: generalResearchOptions,
-            ContextProfileVersion: compactContext ? "compact-v1" : null,
-            SpecializedAgent: _activeSpecializedAgent);
+            ContextProfileVersion: compactContext ? "compact-v1" : null);
     }
 
     internal static string? ResolvePreferredModel(AppSettings current) =>

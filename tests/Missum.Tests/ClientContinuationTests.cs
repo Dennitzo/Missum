@@ -99,41 +99,6 @@ public sealed class ClientContinuationTests
     }
 
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task ManualContinuationKeepsSelectedSpecializedAgentAndOriginalGoalButNeverRestoresAClearedChip(bool selected)
-    {
-        await using var environment = await TestEnvironment.CreateAsync();
-        var seeded = await SeedAsync(environment, MessageStatus.Cancelled, ChatMode.Coding);
-        var handler = new ContinuationHandler(RunState.Cancelled) { OriginalRunMode = RunMode.Coding };
-        using var host = await Host.CreateAsync(environment, handler);
-        await host.Settings.UpdateAsync(current => current with { SelectedModel = "fixture/selected" });
-        var store = new SessionAgentProfileStore(host.Settings.DataDirectory);
-        const string originalGoal = "Verallgemeinere die Gleichung \\Box \\psi = 0 und prüfe alle Grenzfälle.";
-        await store.WriteGoalAsync(seeded.Session.Id, seeded.Message.Id, new(SpecializedAgentProfiles.Loop, originalGoal));
-        await store.WriteAsync(seeded.Session.Id, selected ? SpecializedAgentProfiles.Loop : null);
-        await environment.Get<IChatRepository>().SaveToolStepAsync(seeded.Message.Id,
-            new("steering-auto", "assistant.steering", "completed", "Automatischer Folgeauftrag.",
-                InputJson: "{\"sequence\":1,\"agentProfile\":\"loop\"}"));
-        await environment.Get<IChatRepository>().SaveToolStepAsync(seeded.Message.Id,
-            new("steering-human", "assistant.steering", "completed", "Zusätzliche Randbedingung: rho gleich null.",
-                InputJson: "{\"sequence\":2}"));
-
-        var result = await host.Service.ResumeMessageAsync(seeded.Session.Id, seeded.Message.Id, _ => Task.CompletedTask);
-
-        Assert.Equal(MessageStatus.Completed, result.Status);
-        var agent = Assert.Single(handler.Requests).SpecializedAgent;
-        if (!selected) Assert.Null(agent);
-        else
-        {
-            Assert.NotNull(agent);
-            Assert.Equal(SpecializedAgentProfiles.Loop, agent.ProfileId);
-            Assert.Equal(originalGoal + "\n\nWeitere Nutzeranweisung:\nZusätzliche Randbedingung: rho gleich null.", agent.Goal);
-            Assert.DoesNotContain("Automatischer Folgeauftrag", agent.Goal);
-        }
-    }
-
-    [Theory]
     [InlineData("desktop")]
     [InlineData("mac-tab")]
     public async Task ManualContinuationUsesInvokingClientChoiceFrozenBeforePreparation(string clientId)
@@ -577,8 +542,10 @@ public sealed class ClientContinuationTests
         Assert.Equal(2, (await environment.Get<IChatRepository>().ListMessagesAsync(seeded.Session.Id)).Count);
     }
 
-    [Fact]
-    public async Task RecoveringOldScientificCreateKeepsItsFrozenToolCatalogAndIdempotencyKey()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RecoveringOldScientificCreateKeepsItsFrozenToolCatalogAndIdempotencyKey(bool hasRetiredAgentField)
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var seeded = await SeedAsync(environment, MessageStatus.Cancelled, ChatMode.ClaudeScience,
@@ -598,9 +565,11 @@ public sealed class ClientContinuationTests
             DeepResearch: true, ResearchOptions: new(ProjectId: "research-" + seeded.Session.Id.ToString("N"),
                 ProtocolVersion: 2));
         var frozenJson = JsonSerializer.Serialize(frozen, Json);
+        var storedJson = hasRetiredAgentField ? frozenJson.Insert(frozenJson.Length - 1,
+            ""","specializedAgent":{"profileId":"loop","goal":"Historischer Auftrag"}""") : frozenJson;
         await environment.Get<IChatRepository>().SaveToolStepAsync(seeded.Message.Id, new(
             "continuation:" + pending.IdempotencyKey, MissumAiAssistantService.ContinuationStepTool, "running",
-            InputJson: frozenJson, OutputJson: JsonSerializer.Serialize(new
+            InputJson: storedJson, OutputJson: JsonSerializer.Serialize(new
             {
                 sessionId = seeded.Session.Id, messageId = seeded.Message.Id, localRunId = pending.Id,
                 idempotencyKey = pending.IdempotencyKey, retainedPrefixLength = Partial.Length,

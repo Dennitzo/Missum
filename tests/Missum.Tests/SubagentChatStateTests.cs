@@ -278,7 +278,7 @@ public sealed class SubagentChatStateTests
     }
 
     [Fact]
-    public void DistinctLoopRoundsRemainDistinctSubagentsInTheStoredOverview()
+    public void HistoricalLoopRoundsRemainReadableInTheStoredSubagentOverview()
     {
         var session = Guid.NewGuid();
         var first = SubagentChatState.Create(new("parent", "loop-round-1", "loop-agent-1",

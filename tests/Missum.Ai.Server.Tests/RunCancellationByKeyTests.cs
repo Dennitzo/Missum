@@ -17,7 +17,7 @@ public sealed class RunCancellationByKeyTests
     private const string Session = "lost-create-ack-session";
     private static RunRequest Request() => new(MissumAiProtocol.Version, RunMode.Coding,
         [new("user", [new("text", Text: "Bearbeite die offene Forschung weiter.")])], SessionId: Session,
-        ClientCapabilities: ["coding", "workspace"], SpecializedAgent: new(SpecializedAgentProfiles.Loop));
+        ClientCapabilities: ["coding", "workspace"]);
 
     [Fact]
     public async Task CancelBeforeCreatePersistsOnlyATombstoneAndLaterCreateIsAlreadyCancelled()

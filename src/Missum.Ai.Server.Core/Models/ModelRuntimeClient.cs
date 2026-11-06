@@ -135,11 +135,8 @@ public sealed partial class ModelRuntimeClient : IDisposable
     private async Task<ModelPreparation> GetResidentPrimaryPreparationAsync(
         string modelId, string? runtimeInstanceId, CancellationToken cancellationToken)
     {
-        // Serial specialized agents borrow the owner's resident primary. They
-        // must never reconcile GPU placement, warm a companion or load weights.
-        // The ordinary owner turn has already established this residency. Reuse
-        // that exact observed instance for lightweight advisory turns instead of
-        // forcing /models?reload=1 and /props before every process heartbeat.
+        // Reuse the owner's observed primary instance for command monitoring
+        // without reconciling GPU placement or loading weights on a heartbeat.
         if (TryGetCachedResidentPrimaryPreparation(modelId, runtimeInstanceId, out var cached)) return cached;
         await _modelGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -150,7 +147,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
             if (owner is null || resident is null || owner.IsSubagent || resident.IsSubagent
                 || !string.Equals(owner.Id, resident.Id, StringComparison.OrdinalIgnoreCase)
                 || resident.State != "loaded" || resident.LoadedContextLength < 2048)
-                throw new InvalidOperationException("specialized_agent.model_not_resident: Der spezialisierte Agent benötigt das bereits aktive Hauptmodell. "
+                throw new InvalidOperationException("model.not_resident: Die Anfrage benötigt das bereits aktive Hauptmodell. "
                     + "Es wird kein anderes Modell und keine zusätzliche Instanz geladen.");
             return new(resident.Id, WasAlreadyLoaded: true, resident.LoadedContextLength);
         }
@@ -373,7 +370,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
         CancellationToken cancellationToken = default)
     {
         if (suppressToolCalls && (requireToolCall || requiredToolName is { Length: > 0 }))
-            throw new ArgumentException("Eine werkzeugfreie Agentenprüfung darf keinen Werkzeugaufruf verlangen.", nameof(suppressToolCalls));
+            throw new ArgumentException("Eine werkzeugfreie Anfrage darf keinen Werkzeugaufruf verlangen.", nameof(suppressToolCalls));
         ValidateToolChoice(tools, requireToolCall, requiredToolName);
         var coding = string.Equals(modelRole, "coding", StringComparison.Ordinal);
         if (coding && !IsCodingModel(modelId))
@@ -474,7 +471,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
             // Ordinary controllers can retain the exact response for a recoverable
             // non-execution receipt. Private reviewers keep strict validation.
             if (suppressToolCalls && !deferSuppressedToolCallValidation && result.ToolCalls.Count > 0)
-                throw new InvalidOperationException("specialized_agent.unexpected_tool_call: Das Modell hat während der werkzeugfreien Prüfung einen Werkzeugaufruf ausgegeben.");
+                throw new InvalidOperationException("model.unexpected_tool_call: Das Modell hat einen nicht angeforderten Werkzeugaufruf ausgegeben.");
             if (nativeProgress is not null)
             {
                 await nativeProgress(

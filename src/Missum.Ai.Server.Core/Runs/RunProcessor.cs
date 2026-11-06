@@ -12,7 +12,6 @@ using System.Text.Json;
 using System.Text;
 using System.Security.Cryptography;
 using System.Diagnostics;
-using Missum.Ai.Server.Core.Agents;
 
 namespace Missum.Ai.Server.Core.Runs;
 
@@ -43,7 +42,6 @@ public sealed partial class RunProcessor : BackgroundService
     private readonly ScientificMetadataService _scientificMetadata;
     private readonly Dictionary<string, CancellationTokenSource> _activeRuns = new(StringComparer.Ordinal);
     private readonly object _activeGate = new();
-    private readonly SpecializedAgentRegistry _specializedAgents;
 
     public RunProcessor(
         RunWorkChannel queue,
@@ -56,8 +54,7 @@ public sealed partial class RunProcessor : BackgroundService
         AgentToolExecutor toolExecutor,
         IOptions<MissumAiServerOptions> options,
         ServerRuntimeState runtime,
-        ScientificMetadataService scientificMetadata,
-        SpecializedAgentRegistry? specializedAgents = null)
+        ScientificMetadataService scientificMetadata)
     {
         _queue = queue;
         _repository = repository;
@@ -70,7 +67,6 @@ public sealed partial class RunProcessor : BackgroundService
         _options = options.Value;
         _runtime = runtime;
         _scientificMetadata = scientificMetadata;
-        _specializedAgents = specializedAgents ?? new SpecializedAgentRegistry();
     }
 
     public bool Cancel(string runId)
@@ -189,7 +185,6 @@ public sealed partial class RunProcessor : BackgroundService
     internal static int ResolveMaximumToolCalls(RunRequest request, MissumAiServerOptions options,
         IReadOnlyList<AgentToolSpec> effectiveTools)
     {
-        if (request.SpecializedAgent is not null && request.Subagent is null) return 0;
         if (request.Mode == RunMode.Coding) return CodingRunBudget.FromOptions(options).ToolCalls;
         return HasUnboundedResearchBudget(request) ? 0 : options.MaximumToolCalls;
     }
@@ -197,7 +192,6 @@ public sealed partial class RunProcessor : BackgroundService
     internal static int ResolveMaximumModelRounds(RunRequest request, MissumAiServerOptions options,
         IReadOnlyList<AgentToolSpec> effectiveTools)
     {
-        if (request.SpecializedAgent is not null && request.Subagent is null) return 0;
         if (request.Mode == RunMode.Coding) return CodingRunBudget.FromOptions(options).ModelRounds;
         if (HasUnboundedResearchBudget(request)) return 0;
         var generalRounds = request.ClientCapabilities?.Contains("workspace", StringComparer.OrdinalIgnoreCase) == true
@@ -219,8 +213,6 @@ public sealed partial class RunProcessor : BackgroundService
         CancellationToken cancellationToken)
     {
         request = OpenProjectWorkflow.NormalizeLegacyRequest(request);
-        if (request.Subagent is null && request.SpecializedAgent is { } specializedOptions)
-            _ = _specializedAgents.Resolve(specializedOptions.ProfileId);
         var isCoding = request.Mode == RunMode.Coding;
         var savedSelection = await _repository.GetCheckpointAsync(runId, cancellationToken).ConfigureAwait(false);
         var contextProfileVersion = savedSelection is null ? ResolveNewContextProfile(request) : savedSelection.ContextProfileVersion;
@@ -259,8 +251,7 @@ public sealed partial class RunProcessor : BackgroundService
                     ?? "Für eine unabhängige Subagenteninstanz ist keine freie Kapazität nachgewiesen."));
         }
         var maximumOutputTokens = ResolveMaximumOutputTokensPerTurn(request);
-        var codingBudget = request.SpecializedAgent is not null && request.Subagent is null
-            ? new CodingRunBudget(0, 0) : CodingRunBudget.FromOptions(_options);
+        var codingBudget = CodingRunBudget.FromOptions(_options);
         var subagentAvailable = await CanOfferSubagentToolsAsync(request,
             selection with { ContextLength = contextLength }, cancellationToken).ConfigureAwait(false);
         // Native templates can place the complete tool schema before all
@@ -468,18 +459,9 @@ public sealed partial class RunProcessor : BackgroundService
         var appliedSteeringSequence = checkpoint.AppliedSteeringSequence;
         var appliedModelSelectionEventId = checkpoint.AppliedModelSelectionEventId;
         var deepResearchCompleted = checkpoint.DeepResearchCompleted;
-        var specializedAgent = checkpoint.SpecializedAgent;
         var sciencePlanInitialized = checkpoint.SciencePlanInitialized && workingState?.Plan.Count > 0;
         if (!sciencePlanInitialized && ScienceInitialPlanGuard.Applies(request) && workingState?.Plan.Count > 0)
             sciencePlanInitialized = await _repository.HasSuccessfulInitialSciencePlanAsync(runId, cancellationToken).ConfigureAwait(false);
-        if (specializedAgent is null && request.Subagent is null && request.SpecializedAgent is { } configuredAgent)
-        {
-            var definition = _specializedAgents.Resolve(configuredAgent.ProfileId).Definition;
-            specializedAgent = new(definition.Id, definition.Version,
-                string.IsNullOrWhiteSpace(configuredAgent.Goal) ? ExtractOriginalTask(request) : configuredAgent.Goal,
-                "specialized-" + definition.Id + "-" + runId,
-                CycleTask: string.IsNullOrWhiteSpace(configuredAgent.Goal) ? ExtractOriginalTask(request) : configuredAgent.Goal);
-        }
         if (appliedSteeringSequence > 0)
         {
             stagedWebResearchRequested = false;
@@ -494,7 +476,10 @@ public sealed partial class RunProcessor : BackgroundService
             requiredToolCallRetryCount = 0;
         }
 
-        _ = await ApplySteeringAsync().ConfigureAwait(false);
+        var initiallySteered = await ApplySteeringAsync().ConfigureAwait(false);
+        if (!initiallySteered && checkpoint.RetiredReviewMainContent is { } retainedMainContent
+            && await CompleteRunAsync(retainedMainContent, textWasStreamed: true, retainedMainResponse: true).ConfigureAwait(false))
+            return;
         if (stagedWebResearchRequested
             && (request.DeepResearch ? !deepResearchCompleted : !StagedWebResearchPipeline.HasCompletedDossier(messages)))
         {
@@ -634,35 +619,6 @@ public sealed partial class RunProcessor : BackgroundService
                 messages.Add(new LmChatMessage("user", await _repository.GetInterruptedResearchReceiptAsync(runId, researchStart, cancellationToken).ConfigureAwait(false)));
                 await SaveCheckpointAsync().ConfigureAwait(false);
             }
-        }
-
-        if (specializedAgent?.Phase is "review" or "decision" or "handoff" or "completed")
-        {
-            if (specializedAgent.Decision is null && specializedAgent.Phase is "review" or "decision")
-            {
-                // A recovered review may outlive the native process that held its
-                // primary model. Restore only that selected main model through the
-                // ordinary owner preparation; the reviewer remains resident-only.
-                await using var recoveryLease = await _scheduler.AcquireAsync("specialized-agent-owner-recovery", runId,
-                    GpuLeaseMode.Shared, cancellationToken).ConfigureAwait(false);
-                var status = await _modelRuntime.GetStatusAsync(cancellationToken).ConfigureAwait(false);
-                var resident = ModelRuntimeClient.ResolveModelStatus(status.Models, selection.ModelId, selection.Role);
-                if (resident?.State == "loaded")
-                    contextLength = Math.Min(contextLength, resident.ContextTokens);
-                else
-                {
-                    var preparation = await _workers.PrepareLmModelWithStatusAsync(selection.ModelId, contextLength,
-                        async token => await _repository.AppendEventAsync(runId, RunEventTypes.ModelLoading,
-                            new ModelLoadingEvent(selection.ModelId, "loading", contextLength, contextLength), token).ConfigureAwait(false),
-                        cancellationToken).ConfigureAwait(false);
-                    if (!preparation.WasAlreadyLoaded)
-                        await _repository.AppendEventAsync(runId, RunEventTypes.ModelLoading,
-                            new ModelLoadingEvent(selection.ModelId, "loaded", contextLength, preparation.ContextLength),
-                            cancellationToken).ConfigureAwait(false);
-                    contextLength = ResolveLoadedContextLength(contextLength, preparation);
-                }
-            }
-            if (await CompleteRunAsync(specializedAgent.LastMainContent ?? "", textWasStreamed: true).ConfigureAwait(false)) return;
         }
 
         while (true)
@@ -1776,7 +1732,7 @@ public sealed partial class RunProcessor : BackgroundService
                 UseStableSubagentToolCatalog: useStableSubagentToolCatalog,
                 ResearchManagedByAgent: researchManagedByAgent,
                 ContextProfileVersion: contextProfileVersion, ToolCatalogSignature: toolCatalogSignature,
-                ContextTools: contextTools, SpecializedAgent: specializedAgent, SciencePlanInitialized: sciencePlanInitialized,
+                ContextTools: contextTools, SciencePlanInitialized: sciencePlanInitialized,
                 LastModelTools: lastModelTools, CommandMonitoring: commandMonitoring),
             cancellationToken);
 
@@ -2029,17 +1985,7 @@ public sealed partial class RunProcessor : BackgroundService
                 messages.Add(new LmChatMessage("user", input.Text));
                 request = request with { Messages = [.. request.Messages, new("user", [new("text", Text: input.Text)])] };
                 appliedSteeringSequence = input.Sequence;
-                var automatic = input.AgentProfile is not null;
-                if (specializedAgent is not null)
-                    specializedAgent = specializedAgent with
-                    {
-                        Phase = "main", InvocationId = null, Decision = null, FollowUpInputId = null, ReviewAttempts = 0,
-                        Cycle = automatic && specializedAgent.Phase == "handoff" ? specializedAgent.Cycle + 1 : specializedAgent.Cycle,
-                        CycleTask = automatic ? SpecializedAgentFollowUpTask(input.Text, specializedAgent.Decision) : input.Text,
-                        OriginalGoal = automatic ? specializedAgent.OriginalGoal
-                            : specializedAgent.OriginalGoal + "\n\nWeitere Nutzeranweisung:\n" + input.Text,
-                    };
-                if (workingState is not null && !automatic)
+                if (workingState is not null)
                     workingState = workingState with { OriginalTask = workingState.OriginalTask + "\n\nWeitere Nutzereingabe:\n" + input.Text,
                         NextStep = null, Phase = "planning", ConsecutivePlanNoOps = 0 };
             }
@@ -2058,10 +2004,9 @@ public sealed partial class RunProcessor : BackgroundService
             await _repository.AppendEventAsync(runId, RunEventTypes.TextDelta, delta, token).ConfigureAwait(false);
         }
 
-        async Task<bool> CompleteRunAsync(string content, bool textWasStreamed)
+        async Task<bool> CompleteRunAsync(string content, bool textWasStreamed, bool retainedMainResponse = false)
         {
-            var resumedReview = specializedAgent?.Phase is "review" or "decision" or "handoff" or "completed";
-            if (!resumedReview && workingState?.Science is not null)
+            if (!retainedMainResponse && workingState?.Science is not null)
             {
                 workingState = ScienceStagePolicy.Revalidate(workingState);
                 if (ScienceSkill.ResultOutcome(workingState) == "open")
@@ -2073,7 +2018,7 @@ public sealed partial class RunProcessor : BackgroundService
                 }
             }
             var finalResponse = ParseFinalResponse(content, request);
-            if (!resumedReview && !textWasStreamed)
+            if (!textWasStreamed)
             {
                 foreach (var delta in SplitDeltas(finalResponse.Message))
                 {
@@ -2085,76 +2030,12 @@ public sealed partial class RunProcessor : BackgroundService
                 }
             }
 
+            if (!retainedMainResponse)
             {
                 // The exact effective input was retained at response receipt. Append
                 // the generated tail so a new user turn can reuse it as well.
-                if (!resumedReview && !string.IsNullOrWhiteSpace(content))
+                if (!string.IsNullOrWhiteSpace(content))
                     messages.Add(new LmChatMessage("assistant", content, ReasoningContent: lastNativeReasoning));
-                await SaveCheckpointAsync().ConfigureAwait(false);
-            }
-            if (specializedAgent is not null && specializedAgent.Phase != "completed")
-            {
-                if (await _repository.HasPendingSteeringAsync(runId, cancellationToken).ConfigureAwait(false)) return false;
-                var profile = _specializedAgents.Resolve(specializedAgent.ProfileId, specializedAgent.Version);
-                if (specializedAgent.Phase == "main")
-                {
-                    var priorOpen = specializedAgent.Decision?.OpenPoints ?? [];
-                    var reviewContext = new SpecializedAgentReviewContext(specializedAgent.OriginalGoal, content,
-                        workingState, specializedAgent.Cycle, priorOpen, specializedAgent.CycleTask);
-                    specializedAgent = specializedAgent with { Phase = "review",
-                        AgentId = "specialized-" + specializedAgent.ProfileId + "-" + Guid.NewGuid().ToString("N"),
-                        InvocationId = "specialized-" + Guid.NewGuid().ToString("N"),
-                        LastMainContent = content, Decision = null, FollowUpInputId = null, ReviewAttempts = 0,
-                        ReviewedSteeringSequence = appliedSteeringSequence };
-                    messages.Add(new("user", profile.BuildReviewInstruction(reviewContext)));
-                    await SaveCheckpointAsync().ConfigureAwait(false);
-                }
-                if (specializedAgent.Phase is "review" or "decision")
-                {
-                    var beforeInput = inputTokens; var beforeOutput = outputTokens;
-                    var beforeRounds = roundCount; var beforeCompactions = compactionCount;
-                    var review = await ExecuteSpecializedAgentReviewAsync(runId, request, selection, contextLength,
-                        contextTools ?? CreateModelToolDefinitions(availableTools, null, directTools: true, contextProfileVersion),
-                        specializedAgent, messages, workingState,
-                        async frame =>
-                        {
-                            specializedAgent = frame.State; messages = frame.Messages;
-                            inputTokens = beforeInput + frame.InputTokens; outputTokens = beforeOutput + frame.OutputTokens;
-                            roundCount = beforeRounds + frame.Rounds; compactionCount = beforeCompactions + frame.Compactions;
-                            if (frame.Compactions > 0) workingStatePromptIncluded = false;
-                            await SaveCheckpointAsync().ConfigureAwait(false);
-                        }, cancellationToken).ConfigureAwait(false);
-                    specializedAgent = review.Frame.State; messages = review.Frame.Messages;
-                    if (review.Steered)
-                    {
-                        specializedAgent = specializedAgent with { Phase = "main", InvocationId = null, Decision = null, ReviewAttempts = 0 };
-                        await SaveCheckpointAsync().ConfigureAwait(false);
-                        return false;
-                    }
-                }
-                var decision = specializedAgent.Decision ?? throw new InvalidDataException("Die gespeicherte Agentenentscheidung fehlt.");
-                if (decision.Outcome == "continue")
-                {
-                    specializedAgent = specializedAgent with { Phase = "handoff",
-                        FollowUpInputId = specializedAgent.FollowUpInputId ?? "specialized-" + Guid.NewGuid().ToString("N") };
-                    await SaveCheckpointAsync().ConfigureAwait(false);
-                    var accepted = await _repository.TryAcceptSpecializedSteeringAsync(runId,
-                        new(request.SessionId!, specializedAgent.FollowUpInputId!, profile.Definition.DisplayName + " – Folgeauftrag:\n\n" + decision.NextPrompt),
-                        specializedAgent.AgentId, specializedAgent.ProfileId, cancellationToken).ConfigureAwait(false);
-                    if (accepted is null)
-                    {
-                        // Human steering/Stop always wins the transaction. No hidden extra round is scheduled.
-                        if (await _repository.IsTerminalStateAsync(runId, cancellationToken).ConfigureAwait(false)) return true;
-                        specializedAgent = specializedAgent with { Phase = "main", InvocationId = null, Decision = null };
-                        await SaveCheckpointAsync().ConfigureAwait(false);
-                        return false;
-                    }
-                    specializedAgent = specializedAgent with { Phase = "main", Cycle = specializedAgent.Cycle + 1,
-                        InvocationId = null, ReviewAttempts = 0, CycleTask = decision.NextPrompt };
-                    await SaveCheckpointAsync().ConfigureAwait(false);
-                    return false;
-                }
-                specializedAgent = specializedAgent with { Phase = "completed" };
                 await SaveCheckpointAsync().ConfigureAwait(false);
             }
             var finalized = await _repository.FinalizeConversationAsync(runId, new RunCompletedEvent(
@@ -2167,14 +2048,6 @@ public sealed partial class RunProcessor : BackgroundService
             return finalized;
         }
 
-        static string SpecializedAgentFollowUpTask(string text, SpecializedAgentDecision? decision)
-        {
-            if (!string.IsNullOrWhiteSpace(decision?.NextPrompt)) return decision.NextPrompt;
-            var value = text.Trim();
-            var separator = value.IndexOf("\n\n", StringComparison.Ordinal);
-            return separator > 0 && value[..separator].Contains("Folgeauftrag", StringComparison.OrdinalIgnoreCase)
-                ? value[(separator + 2)..].TrimStart() : value;
-        }
     }
 
     internal static string RenderExplicitDeepResearchReport(JsonElement result)
@@ -2923,7 +2796,6 @@ public sealed partial class RunProcessor : BackgroundService
     private async Task MarkCancelledAsync(string runId)
     {
         _ = await _repository.CancelAsync(runId).ConfigureAwait(false);
-        await CloseSpecializedAgentAsync(runId, RunState.Cancelled).ConfigureAwait(false);
         await CancelSubagentsForTerminalParentAsync(runId).ConfigureAwait(false);
         await FlushRunSessionCacheAsync(runId).ConfigureAwait(false);
         _runtime.WriteLog("Information", "run.cancelled", $"Run {runId} abgebrochen.");
@@ -2952,7 +2824,6 @@ public sealed partial class RunProcessor : BackgroundService
     private async Task MarkInterruptedAsync(string runId)
     {
         await _repository.UpdateStateAsync(runId, RunState.Interrupted, errorCode: "run.gateway_stopped").ConfigureAwait(false);
-        await CloseSpecializedAgentAsync(runId, RunState.Interrupted).ConfigureAwait(false);
         _runtime.WriteLog("Warning", "run.interrupted", $"Run {runId} durch Gateway-Stopp unterbrochen.");
     }
 
@@ -2969,7 +2840,6 @@ public sealed partial class RunProcessor : BackgroundService
             : RunMode.Auto;
         var failure = exception switch
         {
-            SpecializedAgentException agent => (Code: agent.Code, Message: agent.Message, Retryable: true),
             ExplicitMediaAnalysisFailedException media => (Code: media.ErrorCode, Message: media.Message, Retryable: true),
             CodingInvalidToolLoopException invalidTools => (
                 Code: "agent.invalid_tool_loop",
@@ -3045,7 +2915,6 @@ public sealed partial class RunProcessor : BackgroundService
                 failure.Message,
                 failure.Retryable)).ConfigureAwait(false);
         await _repository.UpdateStateAsync(runId, RunState.Failed, errorCode: failure.Code).ConfigureAwait(false);
-        await CloseSpecializedAgentAsync(runId, RunState.Failed).ConfigureAwait(false);
         await CancelSubagentsForTerminalParentAsync(runId).ConfigureAwait(false);
         await FlushRunSessionCacheAsync(runId).ConfigureAwait(false);
         _runtime.WriteLog(

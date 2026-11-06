@@ -397,10 +397,8 @@ public sealed partial class NativeAssistantPage
             if (child.SessionId != _session || !child.TabOpen)
             { SessionTabsPanel.Children.Remove(child.Container); continue; }
             var active = _activeSubagentId == child.AgentId && BodyGrid.Visibility == Visibility.Visible;
-            var isLoopAgent = S(child.Snapshot, "kind") == "loopAgent";
-            var kindLabel = child.IsDeepResearch ? "Deep Research" : isLoopAgent ? "Loop-Agent" : "Subagent";
-            SetTabText(child.Label, child.IsDeepResearch ? "Deep Research"
-                : isLoopAgent ? child.Title : kindLabel + " · " + child.Title);
+            var kindLabel = child.IsDeepResearch ? "Deep Research" : "Subagent";
+            SetTabText(child.Label, child.IsDeepResearch ? "Deep Research" : kindLabel + " · " + child.Title);
             ApplyTabAppearance(child.Container, child.Select, active);
             SetTabCloseForeground(child.Close);
             SetTabEnabled(child.Select, !_sessionTabNavigationBusy);

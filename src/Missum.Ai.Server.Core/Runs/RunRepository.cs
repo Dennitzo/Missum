@@ -1,5 +1,6 @@
 using Missum.Ai.Contracts;
 using Missum.Ai.Server.Core.Data;
+using Missum.Ai.Server.Core.Models;
 using Microsoft.Data.Sqlite;
 using System.Globalization;
 using System.Text.Json;
@@ -257,13 +258,27 @@ public sealed partial class RunRepository
         using var maintenance = await _database.EnterMaintenanceAsync(cancellationToken).ConfigureAwait(false);
         await using var connection = await _database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using (var retireFollowUps = connection.CreateCommand())
+        {
+            retireFollowUps.Transaction = (SqliteTransaction)transaction;
+            // Obsolete automatic follow-ups must not run after upgrade. The
+            // accepted events remain in the journal for historical display.
+            retireFollowUps.CommandText = """
+                DELETE FROM run_steering_inputs AS input
+                WHERE input.applied_at IS NULL AND EXISTS (
+                    SELECT 1 FROM run_events accepted
+                    WHERE accepted.run_id = input.run_id AND accepted.event_type = 'run.steering.accepted'
+                    AND json_extract(accepted.data_json, '$.inputId') = input.input_id
+                    AND json_extract(accepted.data_json, '$.agentProfile') = 'loop');
+                """;
+            _ = await retireFollowUps.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
         await using (var interrupt = connection.CreateCommand())
         {
             interrupt.Transaction = (SqliteTransaction)transaction;
             interrupt.CommandText = """
                 UPDATE runs SET state = $interrupted, error_code = 'run.gateway_restarted', updated_at = $now
                 WHERE state = $running AND mode != 'Coding'
-                    AND json_extract(request_json, '$.specializedAgent.profileId') IS NULL
                     AND COALESCE(json_extract(request_json, '$.deepResearch'), 0) != 1
                     AND NOT (COALESCE(json_extract(request_json, '$.researchOptions.protocolVersion'), 0) >= 2
                         AND EXISTS (SELECT 1 FROM json_each(json_extract(request_json, '$.clientCapabilities'))
@@ -282,7 +297,6 @@ public sealed partial class RunRepository
             resumeCoding.CommandText = """
                 UPDATE runs SET state = $queued, error_code = NULL, updated_at = $now
                 WHERE (mode = 'Coding'
-                    OR json_extract(request_json, '$.specializedAgent.profileId') IS NOT NULL
                     OR (mode IN ('General', 'Auto') AND json_extract(request_json, '$.deepResearch') = 1)
                     OR (COALESCE(json_extract(request_json, '$.researchOptions.protocolVersion'), 0) >= 2
                         AND EXISTS (SELECT 1 FROM json_each(json_extract(request_json, '$.clientCapabilities'))
@@ -735,16 +749,10 @@ public sealed partial class RunRepository
                 OR (r.mode IN ('Auto','General') AND json_extract(r.request_json, '$.sessionId') IS NOT NULL))
             ON CONFLICT(run_id) DO UPDATE SET checkpoint_json = excluded.checkpoint_json;
             INSERT INTO run_events(run_id, event_type, data_json, created_at)
-            SELECT $run, 'run.steering.applied', json_patch(json_object('inputId', input_id, 'sequence', sequence,
-                'sessionId', session_id, 'text', text, 'visibleTextOffset', $offset), json_object(
-                    'agentId', (SELECT json_extract(e.data_json, '$.agentId') FROM run_events e
-                        WHERE e.run_id = i.run_id AND e.event_type = 'run.steering.accepted'
-                            AND json_extract(e.data_json, '$.inputId') = i.input_id ORDER BY e.id DESC LIMIT 1),
-                    'agentProfile', (SELECT json_extract(e.data_json, '$.agentProfile') FROM run_events e
-                        WHERE e.run_id = i.run_id AND e.event_type = 'run.steering.accepted'
-                            AND json_extract(e.data_json, '$.inputId') = i.input_id ORDER BY e.id DESC LIMIT 1))), $updated
-            FROM run_steering_inputs i
-            WHERE i.run_id = $run AND sequence <= $steering AND applied_at IS NULL
+            SELECT $run, 'run.steering.applied', json_object('inputId', input_id, 'sequence', sequence,
+                'sessionId', session_id, 'text', text, 'visibleTextOffset', $offset), $updated
+            FROM run_steering_inputs
+            WHERE run_id = $run AND sequence <= $steering AND applied_at IS NULL
                 AND EXISTS (SELECT 1 FROM runs WHERE run_id = $run AND state IN ('Queued','Running','WaitingForClient','Interrupted'))
             ORDER BY sequence;
             UPDATE run_steering_inputs SET applied_at = $updated
@@ -976,7 +984,31 @@ public sealed partial class RunRepository
         // already condensed summaries. Rebuild from this session's chat history.
         if (!document.RootElement.TryGetProperty("contextScope", out var scope)
             || scope.GetString() != "session-v3") return null;
-        return JsonSerializer.Deserialize<AgentRunCheckpoint>(json, _checkpointJsonOptions);
+        var checkpoint = JsonSerializer.Deserialize<AgentRunCheckpoint>(json, _checkpointJsonOptions);
+        if (checkpoint is null || !document.RootElement.TryGetProperty("specializedAgent", out var retired)
+            || retired.ValueKind != JsonValueKind.Object) return checkpoint;
+
+        var messages = new List<LmChatMessage>(checkpoint.Messages.Count);
+        var discardResponse = false;
+        foreach (var message in checkpoint.Messages)
+        {
+            if (message is { Role: "user", Content: { } text }
+                && (text.StartsWith("[MISSUM_SPECIALIZED_AGENT_REVIEW]", StringComparison.Ordinal)
+                    || text.StartsWith("[MISSUM_SPECIALIZED_AGENT_DECISION]", StringComparison.Ordinal)))
+            {
+                discardResponse = true;
+                continue;
+            }
+            if (!discardResponse || message.Role != "assistant") messages.Add(message);
+            discardResponse = false;
+        }
+        var completedMain = retired.TryGetProperty("phase", out var phase) && phase.ValueKind == JsonValueKind.String
+            && phase.GetString() is "review" or "decision" or "handoff" or "completed";
+        var mainContent = completedMain
+            ? retired.TryGetProperty("lastMainContent", out var content) && content.ValueKind == JsonValueKind.String
+                ? content.GetString() : string.Empty
+            : null;
+        return checkpoint with { Messages = messages, RetiredReviewMainContent = mainContent };
     }
 
     private static RunRequest? DeserializeRequest(string json, JsonSerializerOptions options)
@@ -990,6 +1022,7 @@ public sealed partial class RunRepository
             var root = JsonNode.Parse(json)?.AsObject();
             if (root is null) throw;
             var changed = root.Remove("projectContext");
+            changed |= root.Remove("specializedAgent");
             if (string.Equals(root["mode"]?.GetValue<string>(), "code", StringComparison.OrdinalIgnoreCase))
             {
                 root["mode"] = "general";

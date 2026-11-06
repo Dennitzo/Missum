@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Missum.App.Pages;
 using Missum.App.Services;
 using Missum.Core.Models;
 
@@ -9,6 +10,19 @@ public sealed class ContinuationTimingTests
     private static readonly Guid SessionId = Guid.NewGuid();
     private static readonly Guid MessageId = Guid.NewGuid();
     private static readonly DateTimeOffset Created = new(2026, 10, 1, 10, 0, 0, TimeSpan.Zero);
+
+    [Theory]
+    [InlineData(0, 0, 0, 0, true, "0 Sekunden")]
+    [InlineData(0, 0, 0, 1, true, "1 Sekunde")]
+    [InlineData(0, 0, 1, 0, true, "1 Minute")]
+    [InlineData(8, 1, 2, 3, true, "8 Tagen 1 Stunde 2 Minuten 3 Sekunden")]
+    [InlineData(366, 1, 1, 1, true, "1 Jahr 1 Tag 1 Stunde 1 Minute 1 Sekunde")]
+    [InlineData(732, 2, 2, 2, true, "2 Jahren 2 Tagen 2 Stunden 2 Minuten 2 Sekunden")]
+    [InlineData(732, 2, 2, 2, false, "2 Jahre 2 Tage 2 Stunden 2 Minuten 2 Sekunden")]
+    public void HeaderFormatsElapsedTimeWithoutWeeks(int days, int hours, int minutes, int seconds, bool active, string expected)
+    {
+        Assert.Equal(expected, NativeAssistantPage.FormatMessageDuration(new TimeSpan(days, hours, minutes, seconds), afterSince: active));
+    }
 
     [Fact]
     public void StoppedInitialAttemptUsesEarlierPersistedRunEnd()

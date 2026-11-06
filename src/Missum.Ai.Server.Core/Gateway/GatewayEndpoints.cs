@@ -192,8 +192,6 @@ internal static partial class GatewayEndpoints
     {
         var request = await ReadJsonAsync<RunRequest>(context).ConfigureAwait(false);
         RunRequestValidator.Validate(request);
-        if (request.SpecializedAgent is { } specialized)
-            _ = context.RequestServices.GetRequiredService<Missum.Ai.Server.Core.Agents.SpecializedAgentRegistry>().Resolve(specialized.ProfileId);
         var idempotencyKey = context.Request.Headers[MissumAiHeaders.IdempotencyKey].FirstOrDefault();
         if (idempotencyKey?.Length > 128)
         {

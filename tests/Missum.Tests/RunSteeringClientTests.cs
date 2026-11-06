@@ -33,8 +33,13 @@ public sealed class RunSteeringClientTests
     {
         var now = DateTimeOffset.UtcNow;
         var message = new ChatMessage(Guid.NewGuid(), Guid.NewGuid(), ChatRole.Assistant, "Teilantwort", status, now, now,
-            ToolSteps: [new("steering-one", "assistant.steering", "completed", "Neue verbindliche Richtung",
-                InputJson: "{\"sequence\":1}", ContentOffset: 4)]);
+            ToolSteps:
+            [
+                new("steering-one", "assistant.steering", "completed", "Neue verbindliche Richtung",
+                    InputJson: "{\"sequence\":1}", ContentOffset: 4),
+                new("old-automatic", "assistant.steering", "running", "Automatische Fortsetzung",
+                    InputJson: "{\"sequence\":2,\"agentProfile\":\"loop\"}", ContentOffset: 7),
+            ]);
         var expanded = MissumAiAssistantService.ExpandSteeringHistory([message]);
         var user = Assert.Single(expanded, item => item.Role == ChatRole.User);
         Assert.Equal(MessageStatus.Completed, user.Status);

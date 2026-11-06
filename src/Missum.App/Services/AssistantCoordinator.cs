@@ -36,7 +36,7 @@ public sealed partial class AssistantCoordinator(
         AssistantClientExecutionScope.UpdateAsync(settings, update, cancellationToken);
 
     private const string DefaultSessionTitle = "Neue Sitzung";
-    private sealed record QueuedChatInput(ChatSession Session, PromptTriggerMatch? Match, SpecializedAgentOptions? SpecializedAgent);
+    private sealed record QueuedChatInput(ChatSession Session, PromptTriggerMatch? Match);
     private const string DefaultSystemPrompt = "Du bist ein allgemeiner lokaler AI-Assistent. Unterstütze die konkrete Aufgabe des Nutzers, etwa beim Programmieren, Schreiben, Lernen, Analysieren oder Planen. Passe Sprache, Detailtiefe und Vorgehen an die Frage an. Unterscheide belegte Informationen von Annahmen, benenne relevante Unsicherheiten und erfinde keine Fakten, Quellen oder Ergebnisse.";
     internal static string? DerivePromptSessionTitle(string prompt)
     {
@@ -358,7 +358,6 @@ public sealed partial class AssistantCoordinator(
             historyPage = new { page.HasMore, page.Before, page.TotalMessages },
             toolStepWindows = page.ToolStepWindows,
             workingPlan = await BuildWorkingPlanAsync(session.Id, cancellationToken).ConfigureAwait(false),
-            specializedAgentProfile = await SelectedAgentProfileAsync(session.Id, cancellationToken).ConfigureAwait(false),
             conversationRevision = session.ConversationRevision,
             documents = documentItems.Select(ToDocumentDto),
             attachments = attachmentItems.Select(ToAttachmentDto),
@@ -492,7 +491,6 @@ public sealed partial class AssistantCoordinator(
             historyPage = new { page.HasMore, page.Before, page.TotalMessages },
             toolStepWindows = page.ToolStepWindows,
             workingPlan = await BuildWorkingPlanAsync(sessionId, cancellationToken).ConfigureAwait(false),
-            specializedAgentProfile = await SelectedAgentProfileAsync(sessionId, cancellationToken).ConfigureAwait(false),
             chatMode = ChatModeName(conversation.Session.ChatMode),
             conversationRevision = conversation.Session.ConversationRevision,
             changesSummary = missumAi is null ? null : await missumAi.GetChangesSummaryAsync(sessionId, conversation.Messages, cancellationToken).ConfigureAwait(false),
@@ -712,9 +710,6 @@ public sealed partial class AssistantCoordinator(
                         update => EmitMissumAiUpdateAsync(update, emit, envelope.RequestId), cancellationToken).ConfigureAwait(false);
                 }
                 catch (MissumAiStreamDetachedException) { }
-                break;
-            case "session.agentProfile":
-                await SelectSessionAgentProfileAsync(envelope, emit, cancellationToken).ConfigureAwait(false);
                 break;
             case "chat.steer":
                 if (missumAi is null) throw new InvalidOperationException("AI-Verbindung ist nicht verfügbar.");
@@ -1384,10 +1379,7 @@ public sealed partial class AssistantCoordinator(
             session = session with { PersistentExtensionActionId = persistentActionId };
             await emit("session.changed", await BuildSnapshotAsync(cancellationToken).ConfigureAwait(false), envelope.RequestId).ConfigureAwait(false);
         }
-        var specializedAgent = CaptureSpecializedAgent(envelope.Payload, session, prompt);
-        if (specializedAgent is not null)
-            await AgentProfileSelections.WriteAsync(sessionId, specializedAgent.ProfileId, cancellationToken).ConfigureAwait(false);
-        var queuedInput = new QueuedChatInput(session, match, specializedAgent);
+        var queuedInput = new QueuedChatInput(session, match);
         await SaveDraftAsync(sessionId, string.Empty, cancellationToken).ConfigureAwait(false);
         var accepted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var ticket = _runScheduler.Enqueue<object?>(
@@ -1547,11 +1539,6 @@ public sealed partial class AssistantCoordinator(
         await SaveDraftAsync(sessionId, string.Empty, cancellationToken).ConfigureAwait(false);
         var match = queuedInput is not null ? queuedInput.Match
             : await ResolveRequestedMatchAsync(session, prompt, envelope.Payload, cancellationToken).ConfigureAwait(false);
-        var specializedAgent = queuedInput is not null ? queuedInput.SpecializedAgent
-            : CaptureSpecializedAgent(envelope.Payload, session, prompt);
-        if (queuedInput is null && specializedAgent is not null)
-            await AgentProfileSelections.WriteAsync(sessionId, specializedAgent.ProfileId, cancellationToken).ConfigureAwait(false);
-
         await ActivateSessionAsync(session, cancellationToken).ConfigureAwait(false);
         var speechMessageId = GetOptionalGuid(envelope.Payload, "speechMessageId");
         if (match?.Trigger.Action == PromptTriggerAction.TextToSpeech)
@@ -1611,7 +1598,6 @@ public sealed partial class AssistantCoordinator(
                 match,
                 update => EmitMissumAiUpdateAsync(update, emit, envelope.RequestId),
                 submittedSession: queuedInput?.Session,
-                specializedAgent: specializedAgent,
                 cancellationToken: cancellationToken).ConfigureAwait(false);
         }
         catch (MissumAiStreamDetachedException)
