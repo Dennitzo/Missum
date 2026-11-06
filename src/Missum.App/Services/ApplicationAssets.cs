@@ -9,24 +9,24 @@ internal static class ApplicationAssets
         "IL3000",
         Justification = "The Portable configuration extracts all bundled content before startup; the assembly directory is the bundle extraction root.")]
     public static string ResolvePath(params string[] segments)
+        => ResolvePathFromDirectories(Path.GetDirectoryName(Environment.ProcessPath), AppContext.BaseDirectory,
+            Path.GetDirectoryName(typeof(ApplicationAssets).Assembly.Location), segments);
+
+    internal static string ResolvePathFromDirectories(string? executableDirectory, string baseDirectory,
+        string? assemblyDirectory, params string[] segments)
     {
         ArgumentNullException.ThrowIfNull(segments);
-        var defaultPath = Path.Combine([AppContext.BaseDirectory, .. segments]);
-        if (File.Exists(defaultPath) || Directory.Exists(defaultPath))
+        // Portable extracts bundled files into a temporary base/assembly folder.
+        // External payloads, including PublicationTool, stay beside Missum.exe.
+        foreach (var directory in new[] { executableDirectory, baseDirectory, assemblyDirectory })
         {
-            return defaultPath;
-        }
-
-        var assemblyDirectory = Path.GetDirectoryName(typeof(ApplicationAssets).Assembly.Location);
-        if (!string.IsNullOrWhiteSpace(assemblyDirectory))
-        {
-            var extractedPath = Path.Combine([assemblyDirectory, .. segments]);
-            if (File.Exists(extractedPath) || Directory.Exists(extractedPath))
+            if (string.IsNullOrWhiteSpace(directory)) continue;
+            var path = Path.Combine([directory, .. segments]);
+            if (File.Exists(path) || Directory.Exists(path))
             {
-                return extractedPath;
+                return path;
             }
         }
-
-        return defaultPath;
+        return Path.Combine([baseDirectory, .. segments]);
     }
 }
