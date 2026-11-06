@@ -90,6 +90,18 @@ Installation ist nicht erforderlich.
 `ASSISTANT_NATIVE_BINARY_PATH` bleibt ein expliziter Administrator-Override; bei gesetztem Wert wird das
 automatische GitHub-Update bewusst übersprungen.
 
+Für ein manuelles Update des von Missum verwendeten Servers:
+
+```powershell
+.\windows\update-llama-server.ps1
+```
+
+Das Skript installiert den neuesten offiziellen Windows-x64-Build mit verifizierten CUDA-12.4-Archiven.
+Es prüft die CUDA-Geräte und startet Missums Modellrouter kurz auf einem separaten lokalen Port.
+Nach erfolgreicher Prüfung verwenden die Desktop-App und das Stack-Startskript die neue Version beim
+nächsten Runtime-Start. Eine laufende Runtime und frühere Installationen bleiben erhalten.
+`-ProbeModelRoot` wählt bei Bedarf den Modellordner für die Prüfung, `-ProbePort` ein anderes freies Portpaar.
+
 `-NativeModelRoot` wählt bei den Stackskripten einen anderen Cacheordner. Diesen Wert beim Bauen, Starten,
 Deployen und Aktualisieren konsistent übergeben. `-ModelRoot` bezeichnet bei diesen Skripten die separaten
 Worker-Modelle. Beim nativen Manager bezeichnet `-ModelRoot` hingegen die GGUF-Ablage; dort ist

@@ -9,6 +9,7 @@ param(
     # Keep one identity/log directory for repository and portable app launches.
     [string] $StateDirectory = (Join-Path $env:USERPROFILE '.missum\native-runtime'),
     [ValidateRange(1024, 65535)][int] $Port = 8081,
+    [ValidateSet('0.0.0.0', '127.0.0.1')][string] $ListenAddress,
     # Each GPU keeps this reserve; llama fits from the model's native context maximum.
     [ValidateRange(256, 32768)][int] $FitTargetMiB = 2048,
     [string] $GpuLayers = 'auto',
@@ -245,6 +246,7 @@ New-Item -ItemType Directory -Path $StateDirectory -Force | Out-Null
 if (Test-Path -LiteralPath $stopFile -PathType Leaf) { Remove-Item -LiteralPath $stopFile -Force }
 $arguments = @($catalogScript, '--model-root', [IO.Path]::GetFullPath($ModelRoot), '--binary', [IO.Path]::GetFullPath($BinaryPath),
     '--state-directory', $StateDirectory, '--port', [string]$Port, '--fit-target', [string]$FitTargetMiB, '--gpu-layers', $GpuLayers)
+if ($ListenAddress) { $arguments += @('--host', $ListenAddress) }
 $quotedArguments = ($arguments | ForEach-Object {
     ConvertTo-NativeQuotedArgument $_
 }) -join ' '
