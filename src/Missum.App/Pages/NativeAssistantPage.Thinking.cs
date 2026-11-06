@@ -50,8 +50,28 @@ public sealed partial class NativeAssistantPage
         if (DisplayMessages.TryGetValue(messageId, out var current)) WaitingForModel(messageId, current);
         if (!_chatActivityStates.TryGetValue(messageId, out var state)) _chatActivityStates[messageId] = state = new();
         DateTimeOffset? at = DateTimeOffset.TryParse(S(data, "generationUpdatedAt"), out var updated) ? updated : null;
-        if (state.ObservePhase(S(data, "generationState"), at)) InvalidateMessagePresentation(messageId);
+        var previousPercent = state.ContextProcessingPercent;
+        double? progress = data.TryGetProperty("promptProgress", out var value) && value.ValueKind == JsonValueKind.Number
+            && value.TryGetDouble(out var fraction) ? fraction : null;
+        var visibilityChanged = state.ObservePhase(S(data, "generationState"), at,
+            ReadCount("processedPromptTokens"), ReadCount("totalPromptTokens"), progress);
+        if (state.ContextProcessingPercent != previousPercent && _messageBlocks.TryGetValue(messageId, out var blocks))
+        {
+            // Update the existing activity row without reprojecting the message
+            // or replacing a realized virtual row on each progress event.
+            foreach (var (key, block) in blocks)
+                if (key.StartsWith("activity:", StringComparison.Ordinal)
+                    && (block is ActivitySlotView slot ? slot.Content : block) is ToolStepView activity)
+                    activity.SetThinkingLabel(state.ThinkingLabel);
+        }
+        if (visibilityChanged) InvalidateMessagePresentation(messageId);
+
+        int? ReadCount(string name) => data.TryGetProperty(name, out var count) && count.ValueKind == JsonValueKind.Number
+            && count.TryGetInt32(out var tokens) ? tokens : null;
     }
+
+    private string ThinkingLabelFor(string messageId) =>
+        _chatActivityStates.GetValueOrDefault(messageId)?.ThinkingLabel ?? NativeChatActivityState.DefaultThinkingLabel;
 
     private void ClearConversationThinkingState()
     {

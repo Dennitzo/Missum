@@ -8,6 +8,8 @@ internal sealed record NativeModelPhasePresentation(
     double? PromptProgress = null, DateTimeOffset? UpdatedAt = null)
 {
     internal bool IsProcessing => Phase == "promptProcessing";
+    internal double? MeasuredPromptFraction => PromptProgress ?? (TotalPromptTokens is > 0 && ProcessedPromptTokens is { } processed
+        ? Math.Clamp((double)processed / TotalPromptTokens.Value, 0, 1) : null);
 
     internal NativeModelPhasePresentation Observe(string? phase, int? processed, int? total,
         double? progress, DateTimeOffset? updatedAt)
@@ -32,10 +34,8 @@ internal sealed record NativeModelPhasePresentation(
     {
         get
         {
-            var fraction = PromptProgress ?? (TotalPromptTokens is > 0 && ProcessedPromptTokens is { } processed
-                ? Math.Clamp((double)processed / TotalPromptTokens.Value, 0, 1) : (double?)null);
             var text = "Kontext wird verarbeitet";
-            if (fraction is { } progress) text += " · " + progress.ToString("P0", CultureInfo.CurrentCulture);
+            if (MeasuredPromptFraction is { } progress) text += " · " + progress.ToString("P0", CultureInfo.CurrentCulture);
             if (ProcessedPromptTokens is { } count)
                 text += TotalPromptTokens is { } total
                     ? $" · {count:N0} von {total:N0} Eingangstoken"

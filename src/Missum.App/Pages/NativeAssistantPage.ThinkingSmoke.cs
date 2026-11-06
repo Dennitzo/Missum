@@ -66,6 +66,25 @@ public sealed partial class NativeAssistantPage
                 var height = slot.ActualHeight;
                 if (view.HasActivityDisclosure || view.ActivityLabel != "Denke nach" || view.IsExpanded)
                     throw new InvalidOperationException("Thinking must be static text without disclosure.");
+                void Phase(string state, double? progress, int seconds)
+                {
+                    ApplyEvent("status.changed", JsonSerializer.SerializeToElement(new
+                    {
+                        sessionId = owner, messageId = id, generationState = state,
+                        generationUpdatedAt = at.AddSeconds(seconds), promptProgress = progress,
+                    }));
+                }
+                Phase("promptProcessing", .97, 1);
+                UpdateLayout();
+                if (!ReferenceEquals(view, slot.Content) || view.ActivityLabel != "Denke nach · 97% verarbeitet"
+                    || Math.Abs(slot.ActualHeight - height) > 1)
+                    throw new InvalidOperationException("Gemessener Kontextfortschritt muss die bestehende Denkzeile aktualisieren.");
+                Phase("promptProcessing", .98, 2);
+                if (view.ActivityLabel != "Denke nach · 98% verarbeitet")
+                    throw new InvalidOperationException("Die Denkzeile zeigt nicht den aktuellen Kontextfortschritt.");
+                Phase("reasoningStarted", null, 3);
+                if (view.ActivityLabel != "Denke nach")
+                    throw new InvalidOperationException("Die Denkzeile zeigt nach der Kontextverarbeitung weiterhin Prozent an.");
                 foreach (var tool in new[] { "assistant.reasoning", "assistant.progress" })
                 {
                     ApplyEvent("conversation.toolStepChanged", JsonSerializer.SerializeToElement(new

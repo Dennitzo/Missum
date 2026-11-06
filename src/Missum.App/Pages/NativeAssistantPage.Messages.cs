@@ -235,6 +235,7 @@ public sealed partial class NativeAssistantPage
             toolView.DefaultExpanded = false;
             toolView.OpenDetails = () => OpenToolTabAsync(messageId, id);
             toolView.Update(step, tool == "assistant.activity" ? toolNumber : ++toolNumber);
+            if (toolView.IsActivity) toolView.SetThinkingLabel(ThinkingLabelFor(messageId));
             desired.Add(ActivityContainer(messageId, key, element, activity.ReplacesKey));
             ArtifactsAfterStep(id);
         }
@@ -397,8 +398,12 @@ public sealed partial class NativeAssistantPage
         internal bool IsActivity => _activity;
         internal string ActivityLabel => _thinkingLabel.Text;
         internal bool HasActivityDisclosure => _toggle.Visibility == Visibility.Visible;
-        private readonly TextBlock _thinkingLabel = new() { Text = "Denke nach", FontSize = 14,
+        private readonly TextBlock _thinkingLabel = new() { Text = NativeChatActivityState.DefaultThinkingLabel, FontSize = 14,
             Foreground = ThemeBrush("MissumMutedTextBrush", 160), VerticalAlignment = VerticalAlignment.Center };
+        internal void SetThinkingLabel(string label)
+        {
+            if (_activity && _thinkingLabel.Text != label) _thinkingLabel.Text = label;
+        }
         private readonly StackPanel _activityHeader = new() { Orientation = Orientation.Horizontal, Spacing = 8,
             Margin = new(6, 5, 6, 5), Visibility = Visibility.Collapsed };
         private Microsoft.UI.Xaml.Media.Animation.Storyboard? _shimmer;

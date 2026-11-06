@@ -15,7 +15,7 @@ public static class NativeIconPalette
     // and can also run for immutable saved-appearance snapshots off the UI thread.
     [ThreadStatic] private static Dictionary<string, SolidColorBrush>? _brushes;
 
-    private static string RoleFor(string key, string actionId) => key.ToLowerInvariant() switch
+    internal static string RoleFor(string key, string actionId) => key.ToLowerInvariant() switch
     {
         _ when actionId.Contains("audiobook", StringComparison.OrdinalIgnoreCase) => "speech",
         "danger" or "delete" or "stop" or "warning" => "caution",

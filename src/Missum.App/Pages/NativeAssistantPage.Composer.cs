@@ -98,14 +98,15 @@ public sealed partial class NativeAssistantPage
         style.Setters.Add(new Setter(FrameworkElement.WidthProperty, width));
         menu.FlyoutPresenterStyle = style;
         var rows = new StackPanel { Spacing = 0, Width = width - 10 };
+        var toolRows = new List<(Button Button, string IconRole, string IconKey)>();
         void Heading(string text) => rows.Children.Add(new TextBlock { Text = text, FontSize = 13, Foreground = ThemeBrush("MissumMutedTextBrush", 155), Margin = new(8, 6, 8, 5) });
-        void Row(string glyph, string name, string description, Action action, bool enabled = true, Brush? iconBrush = null)
+        void Row(string glyph, string name, string description, Action action, string iconKey, string actionId = "", bool enabled = true)
         {
             var content = new Grid { ColumnSpacing = 8 };
             content.ColumnDefinitions.Add(new() { Width = new(16) });
             content.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
             content.ColumnDefinitions.Add(new() { Width = new(1, GridUnitType.Star) });
-            content.Children.Add(new FontIcon { Glyph = glyph, FontSize = 15, Foreground = iconBrush ?? NativeIconPalette.BrushFor("tool"), VerticalAlignment = VerticalAlignment.Center });
+            content.Children.Add(new FontIcon { Glyph = glyph, FontSize = 15, Foreground = ToolGlyphBrush(iconKey, actionId), VerticalAlignment = VerticalAlignment.Center });
             var label = new TextBlock { Text = name, FontSize = 14, Foreground = ThemeBrush("MissumTextBrush", 220), VerticalAlignment = VerticalAlignment.Center };
             Grid.SetColumn(label, 1); content.Children.Add(label);
             var detail = new TextBlock { Text = description, FontSize = 14, Foreground = ThemeBrush("MissumMutedTextBrush", 145), VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
@@ -115,30 +116,53 @@ public sealed partial class NativeAssistantPage
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(button, name);
             ToolTipService.SetToolTip(button, description);
             button.Click += (_, _) => { menu.Hide(); action(); };
-            rows.Children.Add(button);
+            toolRows.Add((button, NativeIconPalette.RoleFor(iconKey, actionId), iconKey));
         }
         var actions = Items(_snapshot, "actionDescriptors").Where(a => S(a, "actionKind") == "selectableTool").ToArray();
         var document = actions.FirstOrDefault(a => S(a, "iconKey") == "document");
         var plan = actions.FirstOrDefault(a => S(a, "iconKey") == "plan");
         Heading("Hinzufügen");
-        Row("\uE723", "Dateien und Ordner", "", () => ShowFileChoices(), iconBrush: ToolGlyphBrush("attachment", ""));
+        Row("\uE723", "Dateien und Ordner", "", () => ShowFileChoices(), "attachment");
         Row("\uE8EF", "Kontext komprimieren", _running ? "Nach dem Beenden des AI-Laufs verfügbar" : "Aktuelle Sitzung verdichten; Chatverlauf behalten",
-            () => _ = CompactCurrentSessionAsync(), !_running && !_manualCompactionBusy && Items(_snapshot, "messages").Length > 0,
-            ToolGlyphBrush("research", "context.compact"));
+            () => _ = CompactCurrentSessionAsync(), "research", "context.compact",
+            !_running && !_manualCompactionBusy && Items(_snapshot, "messages").Length > 0);
         if (plan.ValueKind == JsonValueKind.Object)
-            Row("\uEA80", "Planmodus", "Planmodus einschalten", () => SelectComposerTool(S(plan, "actionId"), "Planmodus"), S(plan, "disabledReason").Length == 0, ToolGlyphBrush("plan", S(plan, "actionId")));
+            Row("\uEA80", "Planmodus", "Planmodus einschalten", () => SelectComposerTool(S(plan, "actionId"), "Planmodus"), "plan", S(plan, "actionId"), S(plan, "disabledReason").Length == 0);
         if (document.ValueKind == JsonValueKind.Object)
-            Row("\uE8A5", "Dokumente erstellen", "Word, PDF, Tabellen und Präsentationen", () => SelectComposerTool(S(document, "actionId"), "Dokumente erstellen"), S(document, "disabledReason").Length == 0, ToolGlyphBrush("document", S(document, "actionId")));
-        foreach (var action in actions.Where(a => !S(a, "actionId").StartsWith("builtin.", StringComparison.Ordinal)))
-            Row(ToolIconGlyph(S(action, "iconKey")), S(action, "displayName"), S(action, "description"), () => SelectComposerTool(S(action, "actionId"), S(action, "displayName")), S(action, "disabledReason").Length == 0, ToolGlyphBrush(S(action, "iconKey"), S(action, "actionId")));
-        foreach (var action in actions.Where(a => S(a, "actionId").StartsWith("builtin.", StringComparison.Ordinal) && S(a, "actionId") != BuiltInActionIds.DeepResearch && S(a, "iconKey") is not ("plan" or "document")))
-            Row(ToolIconGlyph(S(action, "iconKey")), S(action, "displayName"), S(action, "description"), () => SelectComposerTool(S(action, "actionId"), S(action, "displayName")), S(action, "disabledReason").Length == 0, ToolGlyphBrush(S(action, "iconKey"), S(action, "actionId")));
+            Row("\uE8A5", "Dokumente erstellen", "Word, PDF, Tabellen und Präsentationen", () => SelectComposerTool(S(document, "actionId"), "Dokumente erstellen"), "document", S(document, "actionId"), S(document, "disabledReason").Length == 0);
+        foreach (var action in actions.Where(a => !S(a, "actionId").StartsWith("builtin.", StringComparison.Ordinal)
+                     || (S(a, "actionId") != BuiltInActionIds.DeepResearch && S(a, "iconKey") is not ("plan" or "document"))))
+            Row(ToolIconGlyph(S(action, "iconKey")), S(action, "displayName"), S(action, "description"), () => SelectComposerTool(S(action, "actionId"), S(action, "displayName")), S(action, "iconKey"), S(action, "actionId"), S(action, "disabledReason").Length == 0);
         foreach (var action in Items(_snapshot, "actionDescriptors").Where(a =>
                      S(a, "actionKind") == "immediate"
                      && S(a, "actionId") != BuiltInActionIds.AttachFilesAndFolders
                      && (!S(a, "actionId").StartsWith("builtin.", StringComparison.Ordinal)
                          || S(a, "actionId") is BuiltInActionIds.ExportChatPdf or BuiltInActionIds.LiveCaptions)))
-            Row(ToolIconGlyph(S(action, "iconKey")), S(action, "displayName"), S(action, "description"), () => _ = InvokeImmediateActionAsync(S(action, "actionId")), S(action, "disabledReason").Length == 0, ToolGlyphBrush(S(action, "iconKey"), S(action, "actionId")));
+            Row(ToolIconGlyph(S(action, "iconKey")), S(action, "displayName"), S(action, "description"), () => _ = InvokeImmediateActionAsync(S(action, "actionId")), S(action, "iconKey"), S(action, "actionId"), S(action, "disabledReason").Length == 0);
+
+        // Place new tools in their existing icon color family, alongside actions with a related purpose.
+        foreach (var row in toolRows.OrderBy(row => row.IconRole switch
+                 {
+                     "documents" => 0,
+                     "research" => 1,
+                     "web" => 2,
+                     "code" => 3,
+                     "visual" => 4,
+                     "speech" => 5,
+                     "controls" => 6,
+                     "caution" => 7,
+                     _ => 8,
+                 }).ThenBy(row => (row.IconRole, row.IconKey) switch
+                 {
+                     ("visual", "video") => 1,
+                     ("speech", "captions") => 1,
+                     ("speech", "translate") => 2,
+                     ("speech", "speech") => 3,
+                     ("speech", "audiobook") => 4,
+                     _ => 0,
+                 }))
+            rows.Children.Add(row.Button);
+
         menu.Content = new ScrollViewer { Content = rows, MaxHeight = 308, HorizontalScrollMode = ScrollMode.Disabled, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
         menu.ShowAt(ComposerSurface);
         return menu;

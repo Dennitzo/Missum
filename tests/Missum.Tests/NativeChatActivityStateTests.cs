@@ -37,6 +37,27 @@ public sealed class NativeChatActivityStateTests
         state.ObservePhase("tokenProgress", DateTimeOffset.UtcNow);
         Assert.False(state.Waiting);
     }
+
+    [Fact]
+    public void OnlyMeasuredContextProcessingChangesTheThinkingLabel()
+    {
+        var state = new NativeChatActivityState();
+        var start = DateTimeOffset.UtcNow;
+        state.ObservePhase("promptProcessing", start);
+        Assert.Equal("Denke nach", state.ThinkingLabel);
+        state.ObservePhase("promptProcessing", start.AddSeconds(1), processed: 10, total: 100, progress: .97);
+        Assert.Equal("Denke nach · 97% verarbeitet", state.ThinkingLabel);
+        state.ObservePhase("codingWaiting", start.AddSeconds(2));
+        Assert.Equal("Denke nach · 97% verarbeitet", state.ThinkingLabel);
+        state.ObservePhase("promptProcessing", start.AddSeconds(3), processed: 98);
+        Assert.Equal("Denke nach · 98% verarbeitet", state.ThinkingLabel);
+        state.ObservePhase("tokenProgress", start.AddSeconds(4), processed: 100, total: 100, progress: 1);
+        Assert.Equal("Denke nach", state.ThinkingLabel);
+        state.ObservePhase("promptProcessing", start.AddSeconds(3), progress: .98);
+        Assert.Equal("Denke nach", state.ThinkingLabel);
+        state.ObservePhase("promptProcessing", start.AddSeconds(5));
+        Assert.Equal("Denke nach", state.ThinkingLabel);
+    }
     [Fact]
     public void StopAndNewNarrationConsumeModelWork()
     {

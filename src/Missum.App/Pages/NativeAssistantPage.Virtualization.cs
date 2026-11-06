@@ -365,7 +365,9 @@ public sealed partial class NativeAssistantPage
                 tool.ResearchHeader = step => ResearchStepHeader(id, step);
                 tool.DefaultExpanded = false;
                 tool.OpenDetails = () => OpenToolTabAsync(id, S(block.Data, "id"));
-                tool.Update(block.Data, block.Number); break;
+                tool.Update(block.Data, block.Number);
+                if (tool.IsActivity) tool.SetThinkingLabel(ThinkingLabelFor(id));
+                break;
             case ContinuationReceiptView receipt: receipt.Update(block.Data); break;
             case CompactionReceiptView receipt: receipt.Update(block.Data); break;
             case SubagentLifecycleView child: child.Update(block.Data, FindSubagentForStep(block.Data)); break;
