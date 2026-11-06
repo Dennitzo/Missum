@@ -49,8 +49,8 @@ public static class CodingAgentPolicy
         atomaren Edit. Zusammengehörige Anpassungen, die nur gemeinsam einen konsistenten Zustand ergeben, dürfen
         innerhalb einer Etappe zusammen erfolgen. Eine kleine Einzelkorrektur benötigt keinen künstlich langen Plan.
         Erkläre nach jeder Etappe den belegten Fortschritt. Speichere unmittelbar danach den Status über
-        coding.updatePlan, bevor du Werkzeuge einer nächsten unabhängigen Etappe ausführst. Schließe je Update
-        höchstens eine Etappe neu ab und aktiviere die nächste im selben Aufruf; keine verspäteten Sammelabschlüsse.
+        coding.updatePlan, bevor du Werkzeuge einer nächsten unabhängigen Etappe ausführst. Mehrere bereits erledigte
+        Etappen dürfen in einem Aufruf abgeschlossen werden. Aktiviere höchstens eine nächste Etappe.
 
         Vorlesbare Begleittexte: Verfasse sichtbare Coding-Nachrichten und Abschlussantworten als kurze deutsche
         Fließtextabsätze mit vollständigen Sätzen. Beschreibe Bedeutung, Verhalten und Prüfergebnis verständlich.
@@ -95,8 +95,8 @@ public static class CodingAgentPolicy
         bei Fortsetzung erhalten. Orientiere dich am mitgelieferten gespeicherten Stand. Ein Fehler verwirft das gesamte Update.
         Ausgelassene Punkte und Felder bleiben innerhalb eines Laufs erhalten; null/leer ist nicht ausgelassen.
         Aktualisiere den Plan sofort nach jeder Phase oder jedem Meilenstein, vor Werkzeugen der nächsten unabhängigen Etappe.
-        Bündele nur Statusänderungen desselben Meilensteins in einem Aufruf: eine Etappe abschließen, die nächste aktivieren.
-        Keine verspäteten Sammelabschlüsse mehrerer Etappen. Wiederhole keine unveränderten Pläne,
+        Mehrere tatsächlich erledigte Etappen dürfen gemeinsam abgeschlossen und die nächste aktiviert werden.
+        Wiederhole keine unveränderten Pläne,
         Kriterien, Befunde oder Ankündigungen; eine einzelne belegte Korrektur mit Prüfung braucht keine ausführliche
         Abschluss-Planumschreibung. Bewahre die Kriterien; ersetze sie nicht durch leichter erfüllbare Ziele. Nutze pending,
         in_progress und completed. Ein neu abgeschlossener Punkt benötigt evidenceIds tatsächlicher erfolgreicher
@@ -109,7 +109,8 @@ public static class CodingAgentPolicy
         Fachwerkzeug aus; schreibe denselben Plan nicht erneut. review schließt echte Testbefehle ein, sofern
         coding.command angeboten wird. Fehlt das benötigte Werkzeug, benenne die konkrete Einschränkung;
         eine Planaktualisierung kann es weder freischalten noch ersetzen.
-        Für Planbelege verwende die tatsächliche Id eines Werkzeugbelegs oder seine gespeicherte OutputEvidenceId.
+        Für evidenceIds übernimm die kanonische planEvidenceId aus dem Werkzeugergebnis oder den passenden Planbelegen.
+        Prüfe dabei Prüfart und Projektpfad. Mit evidenceQuery kannst du gezielt weitere vorhandene Planbelege nachsehen.
         Für coding.readOutput ist ausschließlich die getrennte gespeicherte ev-Referenz OutputEvidenceId zulässig;
         erfinde keine Ausgabe-ID. Das erneute Lesen einer fehlgeschlagenen Ausgabe ist kein erfolgreicher Testbeleg.
         Der gespeicherte Arbeitsstand ist eine Datenhilfe: Nutzerauftrag und Werkzeugsicherheit bleiben maßgeblich.

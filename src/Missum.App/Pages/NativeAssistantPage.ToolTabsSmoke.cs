@@ -51,6 +51,15 @@ public sealed partial class NativeAssistantPage
                         OutputJson: JsonSerializer.Serialize(new { stdout = output, exitCode = 0 }), ContentOffset: 0, UpdatedAt: at),
                     new("tool-tab-edit", "coding.edit", "completed", InputJson: "{\"path\":\"analysis.py\"}",
                         OutputJson: JsonSerializer.Serialize(new { path = "analysis.py", diff }), ContentOffset: 0, UpdatedAt: at),
+                    new("tool-tab-plan-failed", "coding.updatePlan", "failed", InputJson: "{\"steps\":[{\"id\":\"internal-stage\",\"status\":\"completed\"}]}",
+                        OutputJson: """
+                            {"success":false,"error":"Interner Fehler internal-stage/internal-check",
+                             "validationIssues":[{"code":"evidence.kind","kind":"numeric","stageId":"internal-stage","checkId":"internal-check",
+                               "message":"Der Beleg enthält keine ausgeführte Berechnung.","paths":["analysis.py"]}],
+                             "storedSteps":[{"id":"internal-stage","title":"Berechnung überprüfen","status":"in_progress"}],"storedAcceptanceCriteria":[]}
+                            """, ContentOffset: 0, UpdatedAt: at),
+                    new("tool-tab-plan-lookup", "coding.updatePlan", "completed", OutputJson:
+                        """{"success":true,"evidenceLookup":true,"changed":false,"candidates":[]}""", ContentOffset: 0, UpdatedAt: at),
                 ];
                 foreach (var step in steps) await chats.SaveToolStepAsync(assistant.Id, step, _lifetime.Token);
                 var durable = JsonSerializer.Serialize(await chats.ListMessagesAsync(session.Id, _lifetime.Token));
@@ -69,6 +78,12 @@ public sealed partial class NativeAssistantPage
 
                 var tool = await PagingSmokeToolInViewportAsync(fixture.MessageId, step.Id);
                 AssertCompactTool(tool);
+                if (step.Tool == "coding.updatePlan")
+                {
+                    var expected = step.Status == "failed" ? "Arbeitsplan konnte nicht aktualisiert werden" : "Planbelege gesucht";
+                    if (tool.HeaderTitle != expected)
+                        throw new InvalidOperationException("Die kompakte Planzeile zeigt einen falschen Status oder interne Beleg-IDs.");
+                }
                 ConversationContent.UpdateLayout();
                 var height = ConversationScroll.ScrollableHeight;
                 var rowHeight = tool.ActualHeight;
@@ -84,6 +99,10 @@ public sealed partial class NativeAssistantPage
                     || _toolDetailsHost.Visibility != Visibility.Visible || BodyGrid.Visibility != Visibility.Collapsed)
                     throw new InvalidOperationException("Der Werkzeugtab hat seine vollständigen gespeicherten Inhalte oder die Eigentümerzuordnung verloren.");
                 AssertCompactTool(tool);
+                if (step.Id == "tool-tab-plan-failed"
+                    && !Descendants(tab.Details).OfType<TextBlock>().Any(text => text.Text.Contains("Der Beleg enthält keine ausgeführte Berechnung.", StringComparison.Ordinal)
+                        || text.Inlines.OfType<Microsoft.UI.Xaml.Documents.Run>().Any(run => run.Text.Contains("Der Beleg enthält keine ausgeführte Berechnung.", StringComparison.Ordinal))))
+                    throw new InvalidOperationException("Der fehlgeschlagene Plan zeigt seinen Prüfgrund nicht im Werkzeugtab.");
                 tab.Scroll.UpdateLayout();
                 await Task.Delay(30, _lifetime.Token);
                 AssertSingleNativeScroll(tab);

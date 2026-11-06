@@ -38,11 +38,10 @@ public sealed partial record SubagentChatState
             for (var index = source.Count - 1; index >= 0; index--)
             {
                 var step = source[index];
-                if (step.Tool != "coding.updatePlan" || step.Status != "completed"
-                    || string.IsNullOrWhiteSpace(step.OutputJson)) continue;
+                if (!NativeWorkingPlanProjection.IsSuccessfulUpdate(step) || step.OutputJson is not { } outputJson) continue;
                 try
                 {
-                    using var document = JsonDocument.Parse(step.OutputJson);
+                    using var document = JsonDocument.Parse(outputJson);
                     var output = document.RootElement;
                     if (output.ValueKind != JsonValueKind.Object
                         || output.TryGetProperty("success", out var success) && success.ValueKind == JsonValueKind.False) continue;

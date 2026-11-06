@@ -168,6 +168,9 @@ public sealed class WorkerApiClient
             body: null,
             cancellationToken);
 
+    public Task<JsonElement> ReleaseRecognitionAsync(CancellationToken cancellationToken = default) =>
+        SendAsync<JsonElement>("speech", _options.SpeechWorkerUri, "/recognition/release", body: null, cancellationToken);
+
     public async Task<JsonElement> GetStatusAsync(
         string workerName,
         CancellationToken cancellationToken = default)

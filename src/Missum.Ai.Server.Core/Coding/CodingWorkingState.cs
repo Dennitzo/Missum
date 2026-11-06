@@ -14,7 +14,8 @@ public sealed record CodingToolEvidence(string Id, string Tool, bool Success, st
     int? ExitCode, string Summary, long Sequence, string? OutputEvidenceId = null,
     string? SourceRunId = null, bool Historical = false,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] bool FormalVerified = false,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? VerificationPath = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? VerificationPath = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? CommandTarget = null);
 [System.Text.Json.Serialization.JsonUnmappedMemberHandling(System.Text.Json.Serialization.JsonUnmappedMemberHandling.Skip)]
 public sealed record CodingActiveFile(string Path, int StartLine, string Snippet,
     bool Truncated, bool NeedsRead, string EvidenceId, long Sequence, string? OutputEvidenceId = null);
@@ -84,7 +85,7 @@ public static class CodingWorkingStateReducer
         var sourceRunId = call.Name == "coding.readOutput" ? Text(result, "sourceRunId") : null;
         var historical = call.Name == "coding.readOutput" && Boolean(result, "historical");
         var evidence = new CodingToolEvidence(call.Id, call.Name, success, path, exit, summary, sequence, outputEvidenceId,
-            sourceRunId, historical);
+            sourceRunId, historical, CommandTarget: call.Name == "coding.command" ? ReadCommandTarget(call.Arguments) : null);
         if (state.Science is not null)
         {
             evidence = ScienceStagePolicy.BindReceipt(state, evidence, outer);
@@ -230,14 +231,16 @@ public static class CodingWorkingStateReducer
             if (status is not ("pending" or "in_progress" or "completed") || !updatedIds.Add(id))
                 throw new ArgumentException("Planschritte benötigen eindeutige IDs und einen gültigen Status.");
             IReadOnlyList<string> evidence;
+            var issue = new PlanEvidenceIssue("missing_evidence", section + ".evidenceIds", id);
             if (item.TryGetProperty("evidenceIds", out _))
-                evidence = ReadEvidenceIds(state, item, status == "completed", requireSuccess: status == "completed");
+                evidence = ReadEvidenceIds(state, item, status == "completed", requireSuccess: status == "completed", issue);
             else
             {
                 evidence = previous?.EvidenceIds ?? [];
                 if (status == "completed" && (previous?.Status != "completed" || evidence.Count == 0
                     || evidence.Any(evidenceId => ResolveEvidence(state, evidenceId) is not { Success: true, Tool: not "coding.updatePlan" })))
-                    throw new ArgumentException("Ein neuer Abschluss benötigt tatsächliche erfolgreiche evidenceIds.");
+                    throw new PlanEvidenceValidationException(
+                        $"{section}, {id}: Ein neuer Abschluss benötigt tatsächliche erfolgreiche evidenceIds.", issue);
             }
             var updated = new CodingPlanItem(id, title, status, evidence);
             if (previousIndex >= 0) items[previousIndex] = updated;
@@ -262,25 +265,32 @@ public static class CodingWorkingStateReducer
         return facts.TakeLast(12).ToArray();
     }
 
-    private static List<string> ReadEvidenceIds(CodingWorkingState state, JsonElement item, bool required, bool requireSuccess)
+    private static List<string> ReadEvidenceIds(CodingWorkingState state, JsonElement item, bool required, bool requireSuccess,
+        PlanEvidenceIssue? context = null)
     {
+        var issue = context ?? new PlanEvidenceIssue("missing_evidence", "evidenceIds");
         if (!item.TryGetProperty("evidenceIds", out var ids))
-            return required ? throw new ArgumentException("Abgeschlossene Schritte und Erkenntnisse benötigen tatsächliche evidenceIds.") : [];
+            return required ? throw new PlanEvidenceValidationException(
+                "Abgeschlossene Schritte und Erkenntnisse benötigen tatsächliche evidenceIds.", issue) : [];
         if (ids.ValueKind != JsonValueKind.Array || ids.GetArrayLength() > 3 || required && ids.GetArrayLength() == 0)
-            throw new ArgumentException("evidenceIds muss 1 bis 3 tatsächliche Werkzeugbelege nennen.");
+            throw new PlanEvidenceValidationException("evidenceIds muss 1 bis 3 tatsächliche Werkzeugbelege nennen.", issue);
         var result = new List<string>();
         foreach (var id in ids.EnumerateArray())
         {
             var evidenceId = id.ValueKind == JsonValueKind.String ? id.GetString() : null;
             var evidence = ResolveEvidence(state, evidenceId);
-            if (evidence is null || requireSuccess && (!evidence.Success || evidence.Tool == "coding.updatePlan"))
+            if (evidence is null || requireSuccess && !ScienceStagePolicy.IsWorkReceipt(evidence))
             {
                 var shownId = evidenceId is null ? "null (keine Text-ID)" : JsonSerializer.Serialize(
                     evidenceId.Length <= 160 ? evidenceId : evidenceId[..160] + "… [gekürzt]");
                 var reason = evidence is null ? "ist unbekannt oder keinem eindeutigen Werkzeugbeleg zuordenbar"
                     : evidence.Tool == "coding.updatePlan" ? "ist ein Plan-Receipt und belegt keine ausgeführte Arbeit"
-                    : "bestätigt keinen erfolgreichen Werkzeugabschluss";
-                throw new ArgumentException($"Beleg-ID {shownId} {reason}. Verwende unverändert Evidence.Id oder OutputEvidenceId aus dem Arbeitsstand; eine Datei-SHA ist keine Beleg-ID.");
+                    : !evidence.Success ? "bestätigt keinen erfolgreichen Werkzeugabschluss"
+                    : "belegt den Abruf einer Ausgabe; verwende das eigentliche Werkzeugergebnis";
+                var code = evidence is null ? "unknown_evidence_id" : !evidence.Success ? "unsuccessful_evidence" : "wrong_evidence_kind";
+                throw new PlanEvidenceValidationException(
+                    $"Beleg-ID {shownId} {reason}. Übernimm die planEvidenceId aus dem passenden Werkzeugergebnis.",
+                    issue with { Code = code, RejectedIds = evidenceId is { Length: <= 100 } ? [evidenceId] : [] });
             }
             if (!result.Contains(evidence.Id, StringComparer.Ordinal)) result.Add(evidence.Id);
         }
@@ -327,6 +337,24 @@ public static class CodingWorkingStateReducer
             || result.TryGetProperty("success", out var success) && success.ValueKind == JsonValueKind.False
             || Integer(result, "exitCode") is { } exit && exit != 0
             || result.TryGetProperty("result", out var nested) && IsFailedResult(nested));
+
+    private static string? ReadCommandTarget(JsonElement arguments)
+    {
+        if (Text(arguments, "executable") is not { } executable) return null;
+        if (arguments.TryGetProperty("arguments", out var argv) && argv.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var argument in argv.EnumerateArray())
+            {
+                if (argument.ValueKind != JsonValueKind.String || argument.GetString() is not { Length: <= 240 } value
+                    || value.StartsWith('-')) continue;
+                var extension = Path.GetExtension(value);
+                if (extension.Equals(".py", StringComparison.OrdinalIgnoreCase)
+                    || extension.Equals(".ps1", StringComparison.OrdinalIgnoreCase))
+                    return Bound(executable + " " + value, 240);
+            }
+        }
+        return Bound(executable, 240);
+    }
 
     internal static JsonElement Unwrap(JsonElement value) => value.ValueKind == JsonValueKind.Object
         && value.TryGetProperty("result", out var nested) && nested.ValueKind == JsonValueKind.Object ? nested : value;

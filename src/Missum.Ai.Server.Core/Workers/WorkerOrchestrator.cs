@@ -10,7 +10,7 @@ using System.Text.Json;
 
 namespace Missum.Ai.Server.Core.Workers;
 
-public sealed class WorkerOrchestrator : IDisposable
+public sealed partial class WorkerOrchestrator : IDisposable
 {
     internal const string ResidentSpeechWorkerName = "speech";
 
@@ -50,7 +50,10 @@ public sealed class WorkerOrchestrator : IDisposable
             GpuLeaseMode.Speech,
             cancellationToken).ConfigureAwait(false);
         await PrepareWorkerAsync("speech", cancellationToken).ConfigureAwait(false);
-        return await _workers.TranscribeAsync(request, cancellationToken).ConfigureAwait(false);
+        var owner = "transcription-" + Guid.NewGuid().ToString("N");
+        await AcquireRecognitionAsync(owner, LiveCaptionProfile.Dictation, cancellationToken).ConfigureAwait(false);
+        try { return await _workers.TranscribeAsync(request, cancellationToken).ConfigureAwait(false); }
+        finally { await ReleaseRecognitionAsync(owner).ConfigureAwait(false); }
     }
 
     public async Task<TranscriptionResponse> TranscribeLiveCaptionAsync(
@@ -69,15 +72,14 @@ public sealed class WorkerOrchestrator : IDisposable
             GpuLeaseMode.Speech,
             cancellationToken).ConfigureAwait(false);
         await PrepareWorkerAsync("speech", cancellationToken).ConfigureAwait(false);
-        return await _workers.TranscribeLiveCaptionAsync(
-            waveAudio,
-            language,
-            mode,
-            profile,
-            isFinal,
-            sessionId,
-            previousContext,
-            cancellationToken).ConfigureAwait(false);
+        var owner = "caption-chunk-" + Guid.NewGuid().ToString("N");
+        await AcquireRecognitionAsync(owner, profile, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await _workers.TranscribeLiveCaptionAsync(
+                waveAudio, language, mode, profile, isFinal, sessionId, previousContext, cancellationToken).ConfigureAwait(false);
+        }
+        finally { await ReleaseRecognitionAsync(owner).ConfigureAwait(false); }
     }
 
     public async Task PrepareLiveCaptionResourcesAsync(
@@ -91,11 +93,7 @@ public sealed class WorkerOrchestrator : IDisposable
             GpuLeaseMode.Speech,
             cancellationToken).ConfigureAwait(false);
         await PrepareWorkerAsync("speech", cancellationToken).ConfigureAwait(false);
-        _ = await _workers.LoadSpeechComponentAsync("stt", cancellationToken).ConfigureAwait(false);
-        if (profile == LiveCaptionProfile.Captions)
-        {
-            _ = await _workers.LoadSpeechComponentAsync("speaker", cancellationToken).ConfigureAwait(false);
-        }
+        await AcquireRecognitionAsync(sessionId, profile, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<(IReadOnlyList<TranscriptionSegment> Segments, string ModelId)> TranslateCaptionSegmentsAsync(
@@ -202,13 +200,12 @@ public sealed class WorkerOrchestrator : IDisposable
     {
         await using var lease = await _scheduler.AcquireAsync("speech-startup-warmup", "server-startup", GpuLeaseMode.Speech, cancellationToken).ConfigureAwait(false);
         await PrepareWorkerAsync("speech", cancellationToken).ConfigureAwait(false);
-        _ = await _workers.LoadSpeechComponentAsync("stt", cancellationToken).ConfigureAwait(false);
-        _ = await _workers.LoadSpeechComponentAsync("speaker", cancellationToken).ConfigureAwait(false);
+        await ReleaseIdleRecognitionAsync().ConfigureAwait(false);
         _ = await _workers.LoadSpeechComponentAsync("tts", cancellationToken).ConfigureAwait(false);
         _runtime.WriteLog(
             "Information",
             "speech.warm",
-            "Whisper, ECAPA und Supertonic F5 Ultra wurden dauerhaft vorgewärmt.");
+            "Supertonic F5 Ultra wurde vorgewärmt. Spracherkennung wird erst bei aktiver Sprachsteuerung, Untertiteln oder einer Transkription geladen.");
     }
 
     public async Task WarmAuxiliaryWorkersAsync(CancellationToken cancellationToken = default)
@@ -230,7 +227,7 @@ public sealed class WorkerOrchestrator : IDisposable
     public async Task WarmAllStartupResourcesAsync(CancellationToken cancellationToken = default)
     {
         await WarmSpeechResourcesAsync(cancellationToken).ConfigureAwait(false);
-        // Only speech input, speaker separation and TTS are resident for the
+        // Only TTS is resident for the
         // Docker-stack lifetime. Startup never selects an native llama model: an
         // already loaded model is preserved and the next AI run chooses its target.
         _runtime.WriteLog(
@@ -634,6 +631,7 @@ public sealed class WorkerOrchestrator : IDisposable
         }
         _speechSessions.Clear();
         _resourceTransitionGate.Dispose();
+        _recognitionGate.Dispose();
     }
 
     private async Task<ArtifactDescriptor> ImportAsync(

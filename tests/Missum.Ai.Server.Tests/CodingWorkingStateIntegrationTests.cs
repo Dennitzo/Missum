@@ -231,7 +231,7 @@ public sealed class CodingWorkingStateIntegrationTests
         Assert.Throws<ArgumentException>(() => CodingWorkingStateReducer.ApplyPlanUpdate(state, missingFields));
         var missingEvidence = JsonSerializer.Deserialize<JsonElement>("""{"steps":[{"id":"change","status":"completed"}]}""");
         catalog.Validate(tool, missingEvidence);
-        Assert.Throws<ArgumentException>(() => CodingWorkingStateReducer.ApplyPlanUpdate(state, missingEvidence));
+        Assert.Throws<PlanEvidenceValidationException>(() => CodingWorkingStateReducer.ApplyPlanUpdate(state, missingEvidence));
     }
 
     [Fact]
@@ -1632,6 +1632,81 @@ public sealed class CodingWorkingStateIntegrationTests
         Assert.Equal(4, harness.Handler.Requests.Count);
         var events = await harness.Repository.GetEventsAfterAsync(run, 0);
         Assert.Equal("clarified", Assert.Single(events, item => item.Type == RunEventTypes.RunCompleted).Data.GetProperty("scientificOutcome").GetString());
+    }
+
+    private static readonly string[] PublicationEvidence = ["publication-receipt"];
+    private static readonly string[] ProcessEvidence = ["process-receipt"];
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PublicationCandidatesAreVisibleBeforeBatchCompletionAndWrongKindIsAtomic(bool useProcessForPublication)
+    {
+        using var harness = new Harness();
+        var request = Request("Publikation und Rechnung prüfen.") with
+        { WorkflowProfile = ScienceSkill.Profile, ContextProfileVersion = "compact-v1", CodingOptions = new(WorkspacePath: "C:/science") };
+        var run = (await harness.Repository.CreateAsync(request, null)).Snapshot.RunId;
+        var state = CodingWorkingStateReducer.ApplyPlanUpdate(
+            CodingWorkingState.Create("Publikation und Rechnung prüfen.") with { Science = new(ScienceSkill.Profile, []) },
+            JsonSerializer.Deserialize<JsonElement>("""
+                {"steps":[{"id":"s1","title":"Phase 1: Publikation prüfen","status":"in_progress"},{"id":"s2","title":"Phase 2: Rechnung prüfen"}],
+                 "scienceStages":[{"id":"s1","question":"Ist die Publikation konsistent?","strategy":"Publikation lesen","checks":[
+                   {"id":"pub-phase1","kind":"publication","required":true,"paths":["Publikation.md"]}]},
+                 {"id":"s2","question":"Ist die Rechnung konsistent?","strategy":"Numerisch prüfen","dependsOn":["s1"],"checks":[
+                   {"id":"calc","kind":"numeric","required":true}]}]}
+                """));
+        state = CodingWorkingStateReducer.ObserveToolResult(state,
+            new("publication-receipt", "coding.edit", JsonSerializer.Deserialize<JsonElement>("""{"path":"Publikation.md"}""")),
+            """{"success":true,"applied":true,"path":"Publikation.md"}""");
+        state = CodingWorkingStateReducer.ObserveToolResult(state,
+            new("process-receipt", "coding.command", JsonSerializer.Deserialize<JsonElement>("{}")),
+            """{"success":true,"exitCode":0,"stdout":"gamma_n_check.py: OK"}""");
+        await harness.Repository.SaveCheckpointAsync(run,
+            new(RunProcessor.CreateInitialMessages(request, "coding", [], "compact-v1"), 1, 0, 0, 0,
+                WorkingState: state, SciencePlanInitialized: true, ContextProfileVersion: "compact-v1"));
+        harness.Handler.CompletionOverride = (round, _) =>
+        {
+            if (round > 1)
+                return Task.FromResult(useProcessForPublication ? harness.Handler.ReadResponse("read-for-repair") : harness.Handler.CompleteResponse());
+            var content = harness.Handler.Requests[^1].GetProperty("messages").EnumerateArray()
+                .Select(message => message.GetProperty("content")).Where(value => value.ValueKind == JsonValueKind.String)
+                .Select(value => value.GetString()!).Single(value => value.Contains(CodingPlanEvidenceContext.Marker, StringComparison.Ordinal));
+            var candidateRow = content.Split('\n').Where(line => line.StartsWith('{')).Select(line => JsonSerializer.Deserialize<JsonElement>(line))
+                .Single(row => row.TryGetProperty("checkId", out var check) && check.GetString() == "pub-phase1");
+            var candidate = Assert.Single(candidateRow.GetProperty("candidates").EnumerateArray());
+            var planEvidenceId = candidate.GetProperty("planEvidenceId").GetString();
+            Assert.Equal("publication-receipt", planEvidenceId);
+            Assert.Equal("Publikation.md", candidate.GetProperty("path").GetString());
+            var publicationId = useProcessForPublication ? "process-receipt" : planEvidenceId!;
+            return Task.FromResult(harness.Handler.ToolBatchResponse([new("batch-completion", "coding.updatePlan",
+                JsonSerializer.SerializeToElement(new
+                {
+                    steps = new[] {
+                        new { id = "s1", title = "Phase 1: Publikation prüfen", status = "completed", evidenceIds = PublicationEvidence },
+                        new { id = "s2", title = "Phase 2: Rechnung prüfen", status = "completed", evidenceIds = ProcessEvidence },
+                    },
+                    scienceStages = new[] {
+                        new { id = "s1", outcome = "clarified", checks = new[] { new { id = "pub-phase1", kind = "publication", required = true, evidenceIds = new[] { publicationId } } } },
+                        new { id = "s2", outcome = "clarified", checks = new[] { new { id = "calc", kind = "numeric", required = true, evidenceIds = ProcessEvidence } } },
+                    },
+                }))]));
+        };
+        await harness.TickAsync(run);
+        var receipt = Assert.Single(await harness.Repository.GetServerToolCompletedEventsAsync(run));
+        var result = receipt.Data.GetProperty("result");
+        Assert.Equal(!useProcessForPublication, receipt.Data.GetProperty("success").GetBoolean());
+        if (useProcessForPublication)
+        {
+            var issue = Assert.Single(result.GetProperty("validationIssues").EnumerateArray());
+            Assert.Equal("wrong_evidence_kind", issue.GetProperty("code").GetString());
+            Assert.Equal("pub-phase1", issue.GetProperty("checkId").GetString());
+            Assert.Equal("publication-receipt", Assert.Single(issue.GetProperty("candidates").EnumerateArray())
+                .GetProperty("planEvidenceId").GetString());
+            Assert.Equal("in_progress", result.GetProperty("storedSteps")[0].GetProperty("status").GetString());
+            Assert.Equal("pending", (await harness.Repository.GetCheckpointAsync(run))!.WorkingState!.Plan[1].Status);
+        }
+        else
+            Assert.All(result.GetProperty("storedSteps").EnumerateArray(), step => Assert.Equal("completed", step.GetProperty("status").GetString()));
     }
 
     private sealed class Harness : IDisposable

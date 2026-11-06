@@ -16,12 +16,45 @@ internal static class NativeWorkingPlanProjection
     internal static Snapshot FromToolStep(AssistantToolStep? step)
     {
         if (step?.Tool != "coding.updatePlan") return Snapshot.Empty;
-        return Read(Parse(step.OutputJson), Parse(step.InputJson));
+        return Read(Parse(step.OutputJson), step.Status is "failed" or "denied" or "cancelled" or "interrupted" ? default : Parse(step.InputJson));
     }
 
-    internal static Snapshot Read(JsonElement output, JsonElement input = default) => new(
-        ReadItems(FirstArray(output, "storedSteps", "steps", "plan"), Property(input, "steps"), numberPhases: true),
-        ReadItems(FirstArray(output, "storedAcceptanceCriteria", "acceptanceCriteria"), Property(input, "acceptanceCriteria"), numberPhases: false));
+    internal static Snapshot Read(JsonElement output, JsonElement input = default)
+    {
+        // Rejected requests must never appear as saved state. Canonical lists in
+        // their receipt are readable, but the proposed input is not a fallback.
+        if (Property(output, "success").ValueKind == JsonValueKind.False
+            || Property(output, "evidenceLookup").ValueKind == JsonValueKind.True) input = default;
+        return new(
+            ReadItems(FirstArray(output, "storedSteps", "steps", "plan"), Property(input, "steps"), numberPhases: true),
+            ReadItems(FirstArray(output, "storedAcceptanceCriteria", "acceptanceCriteria"), Property(input, "acceptanceCriteria"), numberPhases: false));
+    }
+
+    internal static bool IsSuccessfulUpdate(AssistantToolStep step)
+    {
+        if (step.Tool != "coding.updatePlan" || step.Status != "completed") return false;
+        var output = Parse(step.OutputJson);
+        return output.ValueKind == JsonValueKind.Object
+            && AssistantToolStepHeaders.GetPlanReceiptKind(step.Status, output) == "update";
+    }
+
+    internal static string ReceiptKind(JsonElement step)
+    {
+        var output = Parse(Text(step, "outputJson"));
+        var kind = AssistantToolStepHeaders.GetPlanReceiptKind(Text(step, "status"), output);
+        if (kind == "failed") return kind;
+        var saved = Text(Property(step, "displayHeader"), "planReceiptKind");
+        return saved is "failed" or "lookup" ? saved : kind;
+    }
+
+    internal static bool OpensCurrentPlan(JsonElement step) => ReceiptKind(step) == "update";
+
+    internal static string ReceiptTitle(JsonElement step) => ReceiptKind(step) switch
+    {
+        "failed" => "Arbeitsplan konnte nicht aktualisiert werden",
+        "lookup" => "Planbelege gesucht",
+        _ => Text(step, "status") is "running" or "pending" ? "Arbeitsplan wird aktualisiert" : "Arbeitsplan aktualisiert",
+    };
 
     private static List<Item> ReadItems(JsonElement primary, JsonElement fallback, bool numberPhases)
     {

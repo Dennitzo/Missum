@@ -10,6 +10,40 @@ public sealed class ConversationWorkingPlanTests
 {
     private static readonly string[] PendingScientificFields = ["question", "strategy"];
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task EvidenceLookupCannotReplaceTheCurrentPlanInLegacyOrNormalizedStorage(bool normalized)
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var chats = environment.Get<IChatRepository>();
+        var snapshots = environment.Get<IConversationSnapshotRepository>();
+        var session = await chats.CreateSessionAsync("Plan und Belegsuche");
+        var message = await chats.AddMessageAsync(session.Id, ChatRole.Assistant, "", MessageStatus.Completed);
+        var accepted = Plan("saved", new { }, new
+        {
+            success = true, storedSteps = new[] { new { id = "a", title = "Gespeicherte Etappe", status = "in_progress" } },
+            storedAcceptanceCriteria = Array.Empty<object>(),
+        });
+        var lookup = Plan("lookup", new { }, new
+        {
+            success = true, evidenceLookup = true, changed = false, candidates = Array.Empty<object>(),
+            storedSteps = Array.Empty<object>(), storedAcceptanceCriteria = Array.Empty<object>(),
+        });
+        if (normalized)
+        {
+            await chats.SaveToolStepAsync(message.Id, accepted);
+            await chats.SaveToolStepAsync(message.Id, lookup);
+        }
+        else await SetLegacyStepsAsync(environment, message.Id, [accepted, lookup]);
+        var current = await snapshots.GetWorkingPlanAsync(session.Id);
+        Assert.Equal("saved", current!.Id);
+        Assert.Equal("Phase 1: Gespeicherte Etappe", Assert.Single(NativeWorkingPlanProjection.FromToolStep(current).Steps).Title);
+        Assert.Equal(current.OutputJson, (await snapshots.GetWorkingPlanAtAsync(session.Id, message.Id, "lookup"))!.OutputJson);
+        var originalLookup = await snapshots.GetToolStepAsync(session.Id, message.Id, "lookup");
+        Assert.Equal(lookup.OutputJson, originalLookup!.OutputJson);
+    }
+
     [Fact]
     public async Task ProvisionalSciencePlanSurvivesAFailedUpdateAndReloadsAsTheCompleteCanonicalPlan()
     {

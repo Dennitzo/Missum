@@ -1,4 +1,5 @@
 ﻿using Missum.Ai.Contracts;
+using Missum.Ai.Server.Core.Coding;
 using Missum.Ai.Server.Core.Models;
 using Missum.Ai.Server.Core.Policies;
 using System.Text;
@@ -14,6 +15,7 @@ internal static class ScientificRunContextPlanner
         LegacyResearchContext.RecoveryMarker, LegacyResearchContext.VerificationRepairMarker,
         "[MISSUM_SCIENCE_PROGRESS_HINT:", "[MISSUM_SCIENCE_TOOL_DIAGNOSIS:", "[MISSUM_SCIENCE_RESEARCH_DIAGNOSIS:",
         "[MISSUM_SCIENCE_COMPLETION_STAGNATION]",
+        CodingPlanEvidenceContext.Marker,
     ];
 
     internal static ContextPlan Prepare(IReadOnlyList<LmChatMessage> source, int contextLength, int? maximumOutputTokens,

@@ -77,6 +77,9 @@ public sealed class SubagentWorkingPlanTests
             AssistantMessage = child.AssistantMessage with { Id = Guid.NewGuid(), ToolSteps = [] } };
         AssertPlan(child.ForDisplay().WorkingPlan, "old-plan", "Alte Etappe");
         child = child with { AssistantMessage = child.AssistantMessage with { ToolSteps =
+            [Plan("lookup", "Nicht gespeichert", At.AddSeconds(1)) with { OutputJson = "{\"success\":true,\"evidenceLookup\":true,\"changed\":false,\"candidates\":[]}" }] } };
+        AssertPlan(child.ForDisplay().WorkingPlan, "old-plan", "Alte Etappe");
+        child = child with { AssistantMessage = child.AssistantMessage with { ToolSteps =
             [Plan("failed-plan", "Nicht gespeichert", At.AddSeconds(1)) with { OutputJson = "{\"success\":false}" }] } };
         AssertPlan(child.ForDisplay().WorkingPlan, "old-plan", "Alte Etappe");
         child = child with { AssistantMessage = child.AssistantMessage with { ToolSteps =

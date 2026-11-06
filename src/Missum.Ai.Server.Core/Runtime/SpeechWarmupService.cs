@@ -24,7 +24,7 @@ public sealed class SpeechWarmupService : BackgroundService
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
         catch (Exception exception)
         {
-            _runtime.WriteLog("Warning", "speech.warm.failed", "Sprachmodelle konnten beim Start nicht vorgewärmt werden.");
+            _runtime.WriteLog("Warning", "speech.warm.failed", "Die Vorlesestimme konnte beim Start nicht vorgewärmt werden.");
             _ = exception;
         }
     }

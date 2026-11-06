@@ -10,6 +10,30 @@ namespace Missum.Tests;
 
 public sealed class AssistantStreamingProjectionTests
 {
+    [Theory]
+    [InlineData("{\"success\":false,\"error\":\"Abgelehnt\"}")]
+    [InlineData("{\"success\":true,\"evidenceLookup\":true,\"changed\":false,\"candidates\":[]}")]
+    public async Task FailedAndLookupReceiptsDoNotPublishAReplacementWorkingPlan(string output)
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        var chats = environment.Get<IChatRepository>();
+        var session = await chats.CreateSessionAsync("Planbelege", ChatMode.ClaudeScience);
+        var message = await chats.AddMessageAsync(session.Id, ChatRole.Assistant, "", MessageStatus.Streaming);
+        var step = new AssistantToolStep("plan", "coding.updatePlan", "completed", OutputJson: output);
+        var coordinator = CreateCoordinator(environment, settings, environment.Get<IConversationSnapshotRepository>(), environment.Get<IChatArtifactRepository>());
+        var events = new List<string>();
+        await coordinator.EmitMissumAiUpdateAsync(new(MissumAiAssistantUpdateKind.Status,
+            message with { ToolSteps = [step] }, ToolStep: step), (type, _, _) =>
+        {
+            events.Add(type);
+            return Task.CompletedTask;
+        }, "plan-receipt");
+        Assert.DoesNotContain("workingPlan.changed", events);
+        Assert.Contains("status.changed", events);
+    }
+
     [Fact]
     public async Task InitialSciencePlanIsPublishedBeforeLaterToolUpdatesWithoutWaitingForHistoryHydration()
     {

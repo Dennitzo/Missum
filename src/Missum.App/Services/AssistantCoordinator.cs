@@ -1828,7 +1828,7 @@ public sealed partial class AssistantCoordinator(
         // The UI can request an expanded step reentrantly from emit, before
         // write-behind acknowledges this event. Publish its full source first.
         ObserveLiveToolStep(update);
-        if (update.ToolStep is { Tool: "coding.updatePlan", Status: "completed" } planStep)
+        if (update.ToolStep is { } planStep && NativeWorkingPlanProjection.IsSuccessfulUpdate(planStep))
             await emit("workingPlan.changed", new { sessionId = update.Message.SessionId, workingPlan = WorkingPlanDto(planStep) },
                 requestId).ConfigureAwait(false);
         if (update.Kind == MissumAiAssistantUpdateKind.SubagentChanged && update.Subagent is { } subagent)

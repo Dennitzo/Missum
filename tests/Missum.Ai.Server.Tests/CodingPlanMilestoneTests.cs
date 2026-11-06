@@ -9,7 +9,7 @@ public sealed class CodingPlanMilestoneTests
 {
     private static readonly string[] VerificationArguments = ["verify.py"];
     [Fact]
-    public void DelayedCompletionOfSeveralStagesIsRejectedWithoutChangingTheSavedState()
+    public void SeveralStagesCanBeCompletedInOneAtomicUpdate()
     {
         var before = InitialState();
         var saved = JsonSerializer.Serialize(before);
@@ -20,11 +20,8 @@ public sealed class CodingPlanMilestoneTests
               {"id":"review","status":"in_progress"}],"phase":"review"}
             """);
 
-        var error = Assert.Throws<ArgumentException>(() => CodingPlanMilestoneGuard.ValidateTransition(before, candidate));
-
-        Assert.Contains("Höchstens eine Etappe", error.Message, StringComparison.Ordinal);
-        Assert.Contains("vorhandenen erfolgreichen Belege", error.Message, StringComparison.Ordinal);
-        Assert.Contains("kein Feld wurde geändert", error.Message, StringComparison.Ordinal);
+        Assert.Equal(2, candidate.Plan.Count(step => step.Status == "completed"));
+        Assert.Equal("in_progress", candidate.Plan[2].Status);
         Assert.Equal(saved, JsonSerializer.Serialize(before));
         Assert.Equal("in_progress", before.Plan[0].Status);
         Assert.Equal("pending", before.Plan[1].Status);
@@ -39,8 +36,6 @@ public sealed class CodingPlanMilestoneTests
               {"id":"inspect","status":"completed","evidenceIds":["verified-result"]},
               {"id":"change","status":"in_progress"}],"phase":"editing"}
             """);
-
-        CodingPlanMilestoneGuard.ValidateTransition(before, after);
 
         Assert.Equal("completed", after.Plan[0].Status);
         Assert.Equal("verified-result", Assert.Single(after.Plan[0].EvidenceIds));
@@ -59,8 +54,6 @@ public sealed class CodingPlanMilestoneTests
               {"id":"review","title":"Ergebnis prüfen","status":"in_progress"}]}
             """);
 
-        CodingPlanMilestoneGuard.ValidateTransition(before, after);
-
         Assert.Equal(2, after.Plan.Count(step => step.Status == "completed"));
         Assert.Equal(before.Plan[0].Title, after.Plan[0].Title);
         Assert.Equal(before.Plan[0].EvidenceIds, after.Plan[0].EvidenceIds);
@@ -75,8 +68,6 @@ public sealed class CodingPlanMilestoneTests
         {
             steps = before.Plan.Select(step => new { id = step.Id, title = step.Title, status = step.Status, evidenceIds = step.EvidenceIds }),
         }));
-
-        CodingPlanMilestoneGuard.ValidateTransition(before, after);
 
         Assert.Equal(before.Plan, after.Plan);
         Assert.Equal(1, after.ConsecutivePlanNoOps);
@@ -95,8 +86,6 @@ public sealed class CodingPlanMilestoneTests
               {"id":"checked","status":"completed","evidenceIds":["verified-result"]}]}
             """);
 
-        CodingPlanMilestoneGuard.ValidateTransition(before, after);
-
         Assert.All(after.AcceptanceCriteria, criterion => Assert.Equal("completed", criterion.Status));
         Assert.Single(after.Plan, step => step.Status == "completed");
     }
@@ -109,15 +98,12 @@ public sealed class CodingPlanMilestoneTests
             {"steps":[{"id":"inspect","status":"in_progress"},{"id":"change","status":"pending"}],
              "explanation":"Eine neue Beobachtung erfordert eine erneute Ursachenprüfung."}
             """);
-        CodingPlanMilestoneGuard.ValidateTransition(completed, reopened);
         reopened = ObserveSuccessfulCommand(reopened, "rechecked-result");
         var checkedAgain = Apply(reopened, """
             {"steps":[
               {"id":"inspect","status":"completed","evidenceIds":["rechecked-result"]},
               {"id":"change","status":"in_progress"}]}
             """);
-
-        CodingPlanMilestoneGuard.ValidateTransition(reopened, checkedAgain);
 
         Assert.Equal("completed", checkedAgain.Plan[0].Status);
         Assert.Equal("rechecked-result", Assert.Single(checkedAgain.Plan[0].EvidenceIds));

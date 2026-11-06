@@ -24,7 +24,8 @@ public sealed partial class NativeAssistantPage
         if (!owner.TryGetValue(messageId, out var message)) return Task.CompletedTask;
         var step = MessageSteps(message).FirstOrDefault(item => S(item, "id") == stepId);
         if (step.ValueKind != JsonValueKind.Object) return Task.CompletedTask;
-        if (S(step, "tool") == "coding.updatePlan") return OpenWorkingPlanTabAsync(child?.AgentId);
+        if (S(step, "tool") == "coding.updatePlan" && Services.NativeWorkingPlanProjection.OpensCurrentPlan(step))
+            return OpenWorkingPlanTabAsync(child?.AgentId);
         var tab = _toolTabs.FirstOrDefault(item => item.SessionId == _session && item.MessageId == messageId
             && item.StepId == stepId && item.AgentId == child?.AgentId);
         if (tab is null)

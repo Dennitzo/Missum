@@ -72,10 +72,10 @@ public sealed class LiveCaptionService : BackgroundService
             if (expired is not null)
             {
                 await DrainAsync(expired).ConfigureAwait(false);
+                await _workers.ReleaseLiveCaptionResourcesAsync(expired.SessionId).ConfigureAwait(false);
                 _runtime.WriteLog("Information", "caption.session.expired", $"Live-Untertitel {expired.SessionId} wegen Inaktivität beendet.");
             }
 
-            var now = DateTimeOffset.UtcNow;
             var sessionId = $"caption-{Guid.NewGuid():N}";
             await _workers.PrepareLiveCaptionResourcesAsync(
                 sessionId,
@@ -84,6 +84,7 @@ public sealed class LiveCaptionService : BackgroundService
             await _lifecycleGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
             try
             {
+                var now = DateTimeOffset.UtcNow;
                 _active = new CaptionSession(
                     sessionId,
                     request,
@@ -394,6 +395,7 @@ public sealed class LiveCaptionService : BackgroundService
                     _lifecycleGate.Release();
                 }
 
+                await _workers.ReleaseLiveCaptionResourcesAsync(session.SessionId).ConfigureAwait(false);
                 _runtime.WriteLog("Information", "caption.session.completed", $"Live-Untertitel {session.SessionId} beendet.");
                 return snapshot;
             }
@@ -762,6 +764,7 @@ public sealed class LiveCaptionService : BackgroundService
             if (session is not null)
             {
                 await DrainAsync(session).ConfigureAwait(false);
+                await _workers.ReleaseLiveCaptionResourcesAsync(session.SessionId).ConfigureAwait(false);
             }
         }
         finally
@@ -796,6 +799,7 @@ public sealed class LiveCaptionService : BackgroundService
             }
 
             await DrainAsync(session).ConfigureAwait(false);
+            await _workers.ReleaseLiveCaptionResourcesAsync(session.SessionId).ConfigureAwait(false);
             _runtime.WriteLog("Information", "caption.session.expired", $"Live-Untertitel {session.SessionId} wegen Inaktivität beendet.");
         }
         finally

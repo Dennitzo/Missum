@@ -62,7 +62,7 @@ public sealed class SciencePlanInitializationTests
         Assert.Empty(stage.Question);
         Assert.Empty(stage.Strategy);
         state = Observe(state, "math.numeric");
-        var error = Assert.Throws<ArgumentException>(() => Apply(state, """
+        var error = Assert.ThrowsAny<ArgumentException>(() => Apply(state, """
             {"steps":[{"id":"s","status":"completed","evidenceIds":["actual-result"]}],
              "scienceStages":[{"id":"s","outcome":"clarified"}]}
             """));
@@ -82,7 +82,7 @@ public sealed class SciencePlanInitializationTests
         state = Apply(state, """{"scienceStages":[{"id":"s","question":"Gilt das Ergebnis im Grenzfall?"}]}""");
         Assert.False(state.Science!.Stages[0].DetailsPending);
         Assert.True(Assert.Single(state.Science.Stages[0].Checks).Required);
-        Assert.Throws<ArgumentException>(() => Apply(state, """{"scienceStages":[{"id":"s","checks":[{"id":"n","kind":"numeric","required":false}]}]}"""));
+        Assert.ThrowsAny<ArgumentException>(() => Apply(state, """{"scienceStages":[{"id":"s","checks":[{"id":"n","kind":"numeric","required":false}]}]}"""));
         state = Observe(state, "math.numeric");
         state = Apply(state, """
             {"steps":[{"id":"s","status":"completed","evidenceIds":["actual-result"]}],
@@ -96,8 +96,8 @@ public sealed class SciencePlanInitializationTests
     public void ExplicitInvalidDetailsAreStillRejectedAtomicallyAndThePendingMarkerCannotBeForged()
     {
         var state = Apply(Start(), """{"steps":[{"id":"s","title":"Untersuchen"}]}""");
-        Assert.Throws<ArgumentException>(() => Apply(state, """{"scienceStages":[{"id":"s","question":null}]}"""));
-        Assert.Throws<ArgumentException>(() => Apply(state, """{"scienceStages":[{"id":"s","detailsPending":false}]}"""));
+        Assert.ThrowsAny<ArgumentException>(() => Apply(state, """{"scienceStages":[{"id":"s","question":null}]}"""));
+        Assert.ThrowsAny<ArgumentException>(() => Apply(state, """{"scienceStages":[{"id":"s","detailsPending":false}]}"""));
         Assert.Empty(state.Science!.Stages[0].Question);
         Assert.True(state.Science.Stages[0].DetailsPending);
     }
@@ -116,7 +116,7 @@ public sealed class SciencePlanInitializationTests
         Assert.Equal("completed", completed.Plan[0].Status);
         Assert.Equal("clarified", ScienceSkill.ResultOutcome(completed));
         var failed = Observe(Configure(kind), tool, success: false);
-        Assert.Throws<ArgumentException>(() => Apply(failed, Completion(kind)));
+        Assert.ThrowsAny<ArgumentException>(() => Apply(failed, Completion(kind)));
     }
 
     [Theory]
@@ -129,7 +129,7 @@ public sealed class SciencePlanInitializationTests
     public void MatchingARealMathToolDoesNotWeakenOtherEvidenceKinds(string tool, string kind)
     {
         var state = Observe(Configure(kind), tool);
-        Assert.Throws<ArgumentException>(() => Apply(state, Completion(kind)));
+        Assert.ThrowsAny<ArgumentException>(() => Apply(state, Completion(kind)));
     }
 
     [Theory]
@@ -142,7 +142,7 @@ public sealed class SciencePlanInitializationTests
         Assert.False(Assert.Single(state.Evidence).Success);
         Assert.Equal("error_recovery", state.Phase);
         Assert.Equal("math.numeric", Assert.Single(state.Failures).Tool);
-        Assert.Throws<ArgumentException>(() => Apply(state, Completion("numeric")));
+        Assert.ThrowsAny<ArgumentException>(() => Apply(state, Completion("numeric")));
     }
 
     [Fact]
@@ -150,11 +150,29 @@ public sealed class SciencePlanInitializationTests
     {
         var state = Configure("publication");
         state = CodingWorkingStateReducer.ObserveToolResult(state, new("actual-result", "coding.command", J("{}")), "{\"success\":true,\"exitCode\":0,\"stdout\":\"PDF created\"}");
-        var error = Assert.Throws<ArgumentException>(() => Apply(state, Completion("publication")));
-        Assert.Contains("PDF-Befehl", error.Message);
-        Assert.Contains("Publikationsinhalt", error.Message);
+        var error = Assert.Throws<PlanEvidenceValidationException>(() => Apply(state, Completion("publication")));
+        Assert.Equal("wrong_evidence_kind", Assert.Single(error.Issues).Code);
+        Assert.Contains("Publikationsprüfung", error.Message);
     }
 
+    [Fact]
+    public void CompletionReportsAllMissingScientificFieldsTogetherWithoutSavingTheRejectedDraft()
+    {
+        var state = Apply(Start(), """
+            {"steps":[{"id":"s","title":"Phase 1: Prüfen","status":"in_progress"}]}
+            """);
+        state = CodingWorkingStateReducer.ObserveToolResult(state, new("read", "coding.read", J("""{"path":"Publikation.md"}""")),
+            """{"success":true,"path":"Publikation.md","content":"Originaltext"}""");
+        var error = Assert.Throws<PlanEvidenceValidationException>(() => Apply(state, """
+            {"steps":[{"id":"s","status":"completed","evidenceIds":["read"]}]}
+            """));
+        Assert.Equal(3, error.Issues.Count);
+        Assert.Contains(error.Issues, issue => issue.Field == "scienceStages.question");
+        Assert.Contains(error.Issues, issue => issue.Field == "scienceStages.strategy");
+        Assert.Contains(error.Issues, issue => issue.Field == "scienceStages.outcome");
+        Assert.Equal("in_progress", state.Plan[0].Status);
+        Assert.Empty(state.Science!.Stages[0].Question);
+    }
     [Fact]
     public void PendingDetailsSurviveCheckpointAndContinuationWhileLegacyConfiguredStagesRemainCompatible()
     {

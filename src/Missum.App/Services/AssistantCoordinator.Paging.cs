@@ -91,7 +91,7 @@ public sealed partial class AssistantCoordinator
             else step = FindLiveToolStep(sessionId, messageId, stepId)
                 ?? await Task.Run(() => conversationSnapshots.GetToolStepAsync(sessionId, messageId, stepId, token), token).ConfigureAwait(false);
             if (step is null) throw new InvalidOperationException("Dieser Werkzeugschritt ist nicht mehr vorhanden.");
-            if (step is { Tool: "coding.updatePlan", Status: "completed" }
+            if (NativeWorkingPlanProjection.IsSuccessfulUpdate(step)
                 && GetOptionalGuid(envelope.Payload, "parentMessageId") is null
                 && !HasFullWorkingPlan(step)
                 && await conversationSnapshots.GetWorkingPlanAtAsync(sessionId, messageId, stepId, token).ConfigureAwait(false) is { } completePlan)

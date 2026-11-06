@@ -8,7 +8,7 @@ namespace Missum.Core.Models;
 
 /// <summary>Small display-only facts. Large tool inputs, outputs and code remain independently deferred.</summary>
 public sealed record ToolStepDisplayHeader(int Version = 1, string Summary = "", string FilePath = "",
-    long? AddedLines = null, long? RemovedLines = null);
+    long? AddedLines = null, long? RemovedLines = null, string? PlanReceiptKind = null);
 
 public static class AssistantToolStepHeaders
 {
@@ -47,14 +47,22 @@ public static class AssistantToolStepHeaders
             && diff.Length > 0 && !Flag(output, "diffTruncated") && !Flag(output, "isBinary"))
             counts = UnifiedDiffCounts(diff);
         return new(CurrentVersion, Summary(step.Tool, input, output, path),
-            OneLine(path, MaximumFilePathCharacters), counts?.Added, counts?.Removed);
+            OneLine(path, MaximumFilePathCharacters), counts?.Added, counts?.Removed,
+            step.Tool == "coding.updatePlan" ? GetPlanReceiptKind(step.Status, output) : null);
     }
+
+    public static string GetPlanReceiptKind(string status, JsonElement output) =>
+        status is "failed" or "denied" or "cancelled" or "interrupted" || Property(output, "success").ValueKind == JsonValueKind.False
+            ? "failed" : Flag(output, "evidenceLookup") ? "lookup" : "update";
 
     public static string Summary(string tool, JsonElement input, JsonElement output, string? fallbackPath = null) =>
         OneLine(BuildSummary(tool, input, output, fallbackPath), MaximumSummaryCharacters);
 
     private static string BuildSummary(string tool, JsonElement input, JsonElement output, string? fallbackPath)
     {
+        // Plan failures and evidence lookups have their own concise native labels.
+        // IDs and validation messages belong to the detail tab, never the chat row.
+        if (tool == "coding.updatePlan") return "";
         if (tool == "research.update" && Property(input, "changes") is { ValueKind: JsonValueKind.Array } changes)
         {
             var count = 0;

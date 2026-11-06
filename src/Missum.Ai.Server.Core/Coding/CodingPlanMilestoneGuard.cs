@@ -11,8 +11,8 @@ internal static class CodingPlanMilestoneGuard
         + "Übernimm bei bestehenden Schritten gespeicherte IDs und Originaltitel unverändert. "
         + "Aktualisiere coding.updatePlan unmittelbar nach jeder abgeschlossenen Phase oder jedem Meilenstein, "
         + "bevor du Werkzeuge für die nächste unabhängige Etappe ausführst. "
-        + "Speichere den gerade erreichten Status mit tatsächlichen evidenceIds und setze die nächste Etappe im selben Aufruf in_progress. "
-        + "Melde höchstens eine neu abgeschlossene Etappe pro Update; sammle keine Abschlüsse mehrerer Etappen für später. "
+        + "Speichere den erreichten Status mit passenden planEvidenceId-Werten in evidenceIds und aktiviere die nächste Etappe. "
+        + "Mehrere bereits erledigte Etappen dürfen im selben Aufruf abgeschlossen werden; diese Regel ersetzt frühere Einzelabschlussgrenzen. "
         + "Schon completed gespeicherte Etappen dürfen in der vollständigen Liste unverändert stehen bleiben. "
         + "Bei Blockade oder Rücksprung den betroffenen Schritt sofort auf pending beziehungsweise in_progress setzen und explanation angeben. "
         + "Mehrere zusammengehörige Werkzeuge innerhalb derselben Etappe sind erlaubt; aktualisiere nicht nach jedem einzelnen Werkzeug. "
@@ -26,18 +26,5 @@ internal static class CodingPlanMilestoneGuard
         if (!messages.Any(message => message.Role == "system" && message.Content == instruction
             || message.Role == "user" && message.Content == "Missum-Laufanweisung:\n" + instruction))
             messages.Add(new("system", instruction));
-    }
-
-    internal static void ValidateTransition(CodingWorkingState before, CodingWorkingState after)
-    {
-        var completed = after.Plan.Where(step => step.Status == "completed"
-            && before.Plan.FirstOrDefault(previous => previous.Id == step.Id)?.Status != "completed").ToArray();
-        if (completed.Length > 1)
-            throw new ArgumentException("Arbeitsplan: Höchstens eine Etappe darf pro Update neu completed werden. "
-                + "Aktualisiere den Plan unmittelbar an jedem Etappenende, bevor du die nächste Etappe bearbeitest. "
-                + "Bereits ausgeführte Arbeit nicht wiederholen: Ordne ihre vorhandenen erfolgreichen Belege zuerst der aktuellen Etappe zu "
-                + "und bestätige weitere schon ausgeführte Etappen anschließend einzeln. "
-                + "Unveränderte bereits abgeschlossene Einträge und Akzeptanzkriterien sind davon nicht betroffen. "
-                + "Das gesamte Update wurde abgelehnt; kein Feld wurde geändert.");
     }
 }

@@ -425,6 +425,18 @@ public sealed partial class RunProcessor : BackgroundService
         var contextTools = compactContext || useStableSubagentToolCatalog ? checkpoint.ContextTools?.ToArray()
             ?? CreateModelToolDefinitions(availableTools, null, directTools: true, contextProfileVersion) : null;
         var toolCatalogSignature = checkpoint.ToolCatalogSignature;
+        if (isCoding && request.Subagent is null && contextTools is not null)
+        {
+            var stalePlan = Array.FindIndex(contextTools, tool => tool.Name == CodingWorkingStateTools.PlanTool
+                && (!tool.Parameters.TryGetProperty("properties", out var fields)
+                    || fields.ValueKind != JsonValueKind.Object || !fields.TryGetProperty("evidenceQuery", out _)));
+            if (stalePlan >= 0 && CreateModelToolDefinitions(availableTools, null, directTools: true, contextProfileVersion)
+                    .FirstOrDefault(tool => tool.Name == CodingWorkingStateTools.PlanTool) is { } currentPlan)
+            {
+                contextTools[stalePlan] = currentPlan;
+                toolCatalogSignature = ToolContextProfiles.Signature(contextTools, selection.ModelId);
+            }
+        }
         var lastModelTools = checkpoint.LastModelTools;
         var commandMonitoring = checkpoint.CommandMonitoring ?? new(null, 0, null, []);
         var roundCount = checkpoint.RoundCount;
@@ -659,6 +671,7 @@ public sealed partial class RunProcessor : BackgroundService
                         : activeCalls[nextToolIndex];
                     activeCalls[nextToolIndex] = call;
                     AgentToolSpec tool;
+                    CodingWorkingState? revalidatedPlan = null;
                     try
                     {
                         if (ScienceInitialPlanGuard.Applies(request) && !sciencePlanInitialized && pendingProposalId is null
@@ -669,7 +682,23 @@ public sealed partial class RunProcessor : BackgroundService
                         // A pending client operation must still be collected exactly once.
                         if (isCoding
                             && string.IsNullOrWhiteSpace(pendingProposalId))
-                            CodingLoopGuard.ThrowIfRepeatedFailure(messages, call, workingState);
+                        {
+                            try { CodingLoopGuard.ThrowIfRepeatedFailure(messages, call, workingState); }
+                            catch (AgentRunLimitException) when (workingState is not null
+                                && call.Name == CodingWorkingStateTools.PlanTool && !CodingWorkingStateTools.IsEvidenceQuery(call.Arguments))
+                            {
+                                // A plan update is pure until committed. An earlier failure
+                                // may no longer apply after a new receipt or a resumed run.
+                                try
+                                {
+                                    var reloaded = await _repository.RestorePlanEvidenceAsync(runId, workingState, call.Arguments, cancellationToken).ConfigureAwait(false);
+                                    var candidate = CodingWorkingStateReducer.ApplyPlanUpdate(reloaded, call.Arguments);
+                                    if (CodingPlanProgressGuard.HasChanged(workingState, candidate)) revalidatedPlan = candidate;
+                                }
+                                catch (ArgumentException) { }
+                                if (revalidatedPlan is null) throw;
+                            }
+                        }
                         tool = _toolCatalog.Resolve(call.Name, availableTools);
                         _toolCatalog.Validate(tool, call.Arguments);
                         if (!ResearchSubagentAllowsTool(request.Subagent, tool))
@@ -725,14 +754,13 @@ public sealed partial class RunProcessor : BackgroundService
                             pendingToolCallId = null;
                             continue;
                         }
-                        messages.Add(CommandMonitoringPolicy.ToolResult(call,
-                            isCoding
-                                ? CodingLoopGuard.BoundToolResult(SerializeClientToolResult(clientResult), call.Name) : SerializeClientToolResult(clientResult),
-                            commandMonitoring));
+                        var rawResult = SerializeClientToolResult(clientResult);
+                        var observedCall = WithOperationIdentity(runId, "main", activeCallRound ?? roundCount, nextToolIndex, call);
                         if (workingState is not null)
-                            workingState = CodingWorkingStateReducer.ObserveToolResult(workingState, WithOperationIdentity(runId, "main", activeCallRound ?? roundCount, nextToolIndex, call), SerializeClientToolResult(clientResult));
-                        if (!commandMonitoring.ClosedToolCallIds.Contains(call.Id, StringComparer.Ordinal))
-                            ScienceSkill.AttachEvidence(messages, workingState, call.Id, WithOperationIdentity(runId, "main", activeCallRound ?? roundCount, nextToolIndex, call).Id);
+                            workingState = CodingWorkingStateReducer.ObserveToolResult(workingState, observedCall, rawResult);
+                        var projectedResult = ScienceSkill.ProjectToolEvidence(
+                            isCoding ? CodingLoopGuard.BoundToolResult(rawResult, call.Name) : rawResult, workingState, observedCall.Id);
+                        messages.Add(CommandMonitoringPolicy.ToolResult(call, projectedResult, commandMonitoring));
                         if (call.Name == ClientToolNames.CodingRenderHtml) htmlRenderUsed = true;
                         pendingProposalId = null;
                         pendingToolCallId = null;
@@ -769,27 +797,30 @@ public sealed partial class RunProcessor : BackgroundService
                                 if (initialSciencePlan) ScienceInitialPlanGuard.ValidateInitialUpdate(call.Arguments);
                                 var priorPlanSequence = workingState?.Sequence ?? 0;
                                 var beforePlan = workingState ?? CodingWorkingState.Create(ExtractOriginalTask(request));
-                                var updatedPlan = CodingWorkingStateReducer.ApplyPlanUpdate(beforePlan, call.Arguments);
-                                if (ScienceInitialPlanGuard.Applies(request))
-                                    CodingPlanMilestoneGuard.ValidateTransition(beforePlan, updatedPlan);
-                                workingState = updatedPlan;
-                                if (initialSciencePlan && workingState.Plan.Count > 0)
+                                if (CodingWorkingStateTools.IsEvidenceQuery(call.Arguments))
+                                    result = new(await _repository.QueryPlanEvidenceAsync(runId, beforePlan, call.Arguments, cancellationToken).ConfigureAwait(false), []);
+                                else
                                 {
-                                    // Re-acknowledging an inherited open plan is a
-                                    // valid run entrance, not a repeated-work loop.
-                                    workingState = workingState with { ConsecutivePlanNoOps = 0,
-                                        Sequence = Math.Max(workingState.Sequence, priorPlanSequence + 1) };
-                                    sciencePlanInitialized = true;
+                                    beforePlan = await _repository.RestorePlanEvidenceAsync(runId, beforePlan, call.Arguments, cancellationToken).ConfigureAwait(false);
+                                    workingState = revalidatedPlan ?? CodingWorkingStateReducer.ApplyPlanUpdate(beforePlan, call.Arguments);
+                                    if (initialSciencePlan && workingState.Plan.Count > 0)
+                                    {
+                                        // Re-acknowledging an inherited open plan is a
+                                        // valid run entrance, not a repeated-work loop.
+                                        workingState = workingState with { ConsecutivePlanNoOps = 0,
+                                            Sequence = Math.Max(workingState.Sequence, priorPlanSequence + 1) };
+                                        sciencePlanInitialized = true;
+                                    }
+                                    result = workingState.ConsecutivePlanNoOps > 0
+                                        ? CodingPlanProgressGuard.NoOpReceipt(workingState, availableTools)
+                                        : new(CodingWorkingStateTools.CreatePlanReceipt(workingState, call.Arguments), []);
+                                    // Plan validation depends on the saved IDs and statuses. A real
+                                    // change can make a previously rejected delta valid; no-op receipts
+                                    // must not reset this guard or unrelated tool failure signatures.
+                                    if (result.Succeeded && workingState.Failures.Any(static failure => failure.Tool == CodingWorkingStateTools.PlanTool))
+                                        workingState = workingState with { Failures = workingState.Failures
+                                            .Where(static failure => failure.Tool != CodingWorkingStateTools.PlanTool).ToArray() };
                                 }
-                                result = workingState.ConsecutivePlanNoOps > 0
-                                    ? CodingPlanProgressGuard.NoOpReceipt(workingState, availableTools)
-                                    : new(CodingWorkingStateTools.CreatePlanReceipt(workingState, call.Arguments), []);
-                                // Plan validation depends on the saved IDs and statuses. A real
-                                // change can make a previously rejected delta valid; no-op receipts
-                                // must not reset this guard or unrelated tool failure signatures.
-                                if (result.Succeeded && workingState.Failures.Any(static failure => failure.Tool == CodingWorkingStateTools.PlanTool))
-                                    workingState = workingState with { Failures = workingState.Failures
-                                        .Where(static failure => failure.Tool != CodingWorkingStateTools.PlanTool).ToArray() };
                             }
                             catch (RunSteeringBoundaryException)
                             {
@@ -799,7 +830,8 @@ public sealed partial class RunProcessor : BackgroundService
                             }
                             catch (ArgumentException exception)
                             {
-                                result = new(JsonSerializer.SerializeToElement(new { success = false, errorCode = "agent.invalid_state_action", error = exception.Message }), [],
+                                var saved = workingState ?? CodingWorkingState.Create(ExtractOriginalTask(request));
+                                result = new(CodingWorkingStateTools.RejectedPlan(saved, call.Arguments, exception), [],
                                     Succeeded: false, ErrorCode: "agent.invalid_state_action", ErrorMessage: exception.Message);
                             }
                         }
@@ -853,23 +885,23 @@ public sealed partial class RunProcessor : BackgroundService
                                 result.ErrorCode ?? "server_tool.failed",
                                 $"Run {runId}: Serverwerkzeug {tool.Name} konnte nicht ausgeführt werden; der Agentenlauf wird fortgesetzt.");
                         }
-                        messages.Add(CommandMonitoringPolicy.ToolResult(call,
-                            isCoding
-                                ? CodingLoopGuard.BoundToolResult(result.Result.GetRawText(), call.Name) : result.Result.GetRawText(),
-                            commandMonitoring));
-                        if (tool.Name == SubagentToolNames.Wait && result.Succeeded
-                            && !await _repository.HasConsumedSubagentResultAsync(runId,
-                                call.Arguments.GetProperty("runId").GetString()!, cancellationToken).ConfigureAwait(false))
-                            _ = AppendSubagentResultAcceptanceInstruction(messages, result.Result, request);
+                        var rawResult = result.Result.GetRawText();
+                        var observedCall = WithOperationIdentity(runId, "main", activeCallRound ?? roundCount, nextToolIndex, call);
                         // Successful plan acknowledgements are not work evidence. State-validation
                         // failures still need durable tracking, including resumed project runs.
                         if (workingState is not null && (tool.Name != CodingWorkingStateTools.PlanTool
                             || result.ErrorCode == "agent.invalid_state_action"))
-                            workingState = CodingWorkingStateReducer.ObserveToolResult(workingState, WithOperationIdentity(runId, "main", activeCallRound ?? roundCount, nextToolIndex, call), result.Result.GetRawText());
-                        if (workingState?.Science is not null && tool.Name == SubagentToolNames.Wait && result.Succeeded)
+                            workingState = CodingWorkingStateReducer.ObserveToolResult(workingState, observedCall, rawResult);
+                        if (workingState is not null && (tool.Name is SubagentToolNames.Wait or SubagentToolNames.Spawn) && result.Succeeded)
                             workingState = ScienceStagePolicy.ImportDelegatedEvidence(workingState, result.Result);
-                        if (tool.Name != CodingWorkingStateTools.PlanTool && !commandMonitoring.ClosedToolCallIds.Contains(call.Id, StringComparer.Ordinal))
-                            ScienceSkill.AttachEvidence(messages, workingState, call.Id, WithOperationIdentity(runId, "main", activeCallRound ?? roundCount, nextToolIndex, call).Id);
+                        var projectedResult = isCoding ? CodingLoopGuard.BoundToolResult(rawResult, call.Name) : rawResult;
+                        if (tool.Name != CodingWorkingStateTools.PlanTool)
+                            projectedResult = ScienceSkill.ProjectToolEvidence(projectedResult, workingState, observedCall.Id);
+                        messages.Add(CommandMonitoringPolicy.ToolResult(call, projectedResult, commandMonitoring));
+                        if (tool.Name == SubagentToolNames.Wait && result.Succeeded
+                            && !await _repository.HasConsumedSubagentResultAsync(runId,
+                                call.Arguments.GetProperty("runId").GetString()!, cancellationToken).ConfigureAwait(false))
+                            _ = AppendSubagentResultAcceptanceInstruction(messages, result.Result, request);
                         nextToolIndex++;
                         if (request.DeepResearch && !researchManagedByAgent && tool.Name == CodingDeepResearchPipeline.ToolName
                             && result.ErrorCode != "run.steered")
@@ -963,6 +995,7 @@ public sealed partial class RunProcessor : BackgroundService
             }
             var initialSciencePlanRequired = ScienceInitialPlanGuard.Applies(request) && !sciencePlanInitialized;
             if (ScienceInitialPlanGuard.Applies(request)) CodingPlanMilestoneGuard.EnsureInstructions(messages);
+            ScienceSkill.EnsurePlanEvidenceContext(messages, workingState);
             // Historical-session preparation is an internal summary, just like
             // rolling compaction. Do not inherit the main model's (possibly
             // maximum) thinking default while rephrasing established history.
@@ -1457,10 +1490,9 @@ public sealed partial class RunProcessor : BackgroundService
                 messages.Add(new LmChatMessage("user", SubagentToolNames.ResultContextMarker + "Die delegierten Teilaufgaben sind beendet. "
                     + "Verwende diese tatsächlichen Ergebnisse direkt für deine abschließende Verarbeitung; "
                     + "wiederhole oder überprüfe die abgeschlossenen Teilaufgaben nicht:\n"
-                    + JsonSerializer.Serialize(delegatedResults, MissumAiProtocol.CreateJsonOptions())));
+                    + JsonSerializer.Serialize(delegatedResults.Select(ProjectDelegatedResult).ToArray(), MissumAiProtocol.CreateJsonOptions())));
                 foreach (var delegated in delegatedResults)
                 {
-                    if (workingState?.Science is not null) workingState = ScienceStagePolicy.ImportDelegatedEvidence(workingState, delegated);
                     _ = AppendSubagentResultAcceptanceInstruction(messages, delegated, request);
                 }
                 streamingTurnStartEventId = null;
@@ -1879,6 +1911,7 @@ public sealed partial class RunProcessor : BackgroundService
             }
             messages = CodingContextCompactor.Complete(compaction, condensed.Content).ToList();
             workingStatePromptIncluded = false;
+            ScienceSkill.EnsurePlanEvidenceContext(messages, workingState);
             inputTokens += condensed.InputTokens; outputTokens += condensed.OutputTokens;
             if (countRound) roundCount++;
             compactionCount++;
@@ -1918,10 +1951,9 @@ public sealed partial class RunProcessor : BackgroundService
                 {
                     messages.Add(new LmChatMessage("user", SubagentToolNames.ResultContextMarker
                         + "Vor dem Modellwechsel abgeschlossene delegierte Ergebnisse direkt übernehmen:\n"
-                        + JsonSerializer.Serialize(delegatedForModelSwitch, MissumAiProtocol.CreateJsonOptions())));
+                        + JsonSerializer.Serialize(delegatedForModelSwitch.Select(ProjectDelegatedResult).ToArray(), MissumAiProtocol.CreateJsonOptions())));
                     foreach (var delegated in delegatedForModelSwitch)
                     {
-                        if (workingState?.Science is not null) workingState = ScienceStagePolicy.ImportDelegatedEvidence(workingState, delegated);
                         _ = AppendSubagentResultAcceptanceInstruction(messages, delegated, request);
                     }
                 }
@@ -1949,6 +1981,13 @@ public sealed partial class RunProcessor : BackgroundService
             await _repository.AppendEventAsync(runId, RunModelSelectionEvents.Applied,
                 new RunModelSelectionApplied(next.ModelId, next.Role, request.ReasoningEffort,
                     $"Ich arbeite jetzt mit {next.ModelId}. Reasoning: {request.ReasoningEffort ?? "Automatisch"}."), cancellationToken).ConfigureAwait(false);
+        }
+
+        JsonElement ProjectDelegatedResult(JsonElement result)
+        {
+            if (workingState is null) return result;
+            workingState = ScienceStagePolicy.ImportDelegatedEvidence(workingState, result);
+            return ScienceSkill.ProjectDelegatedEvidence(result, workingState);
         }
 
         async Task<bool> ApplySteeringAsync()

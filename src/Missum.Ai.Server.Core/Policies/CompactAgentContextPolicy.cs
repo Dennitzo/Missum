@@ -73,11 +73,12 @@ public static class CompactAgentContextPolicy
         Bestehende Titel unverändert übernehmen. IDs gelten erst nach erfolgreichem Speichern im aktuellen Stand;
         übernommene offene Science-Pläne derselben Sitzung behalten ihre IDs.
         Unmittelbar nach jeder Phase/jedem Meilenstein den Plan speichern, vor Werkzeugen der nächsten unabhängigen
-        Etappe. Je Update höchstens eine Etappe neu abschließen und die nächste aktivieren; keine verspäteten Sammelabschlüsse.
-        Nur geänderte Punkte desselben Meilensteins senden; ausgelassene Punkte bleiben erhalten, null/leer ist nicht
+        Etappe. Mehrere tatsächlich erledigte Etappen dürfen gemeinsam abgeschlossen und die nächste aktiviert werden.
+        Nur neue oder geänderte Punkte senden; ausgelassene Punkte bleiben erhalten, null/leer ist nicht
         ausgelassen. storedSteps/storedAcceptanceCriteria enthalten stets den vollständigen geordneten Plan;
-        behalte auch erledigte Etappen in Planung und Darstellung. completed benötigt echte erfolgreiche Werkzeug-Id oder OutputEvidenceId, kein Plan-
-        oder Textbeleg. changed=false ist keine Arbeit; führe nextStep aus. Phasen planning/exploration/editing/
+        behalte auch erledigte Etappen in Planung und Darstellung. completed benötigt echte erfolgreiche
+        planEvidenceId-Werte in evidenceIds. Wähle Belege nach Prüfart und Pfad; evidenceQuery sucht weitere passende
+        IDs. changed=false ist keine Arbeit; führe nextStep aus. Phasen planning/exploration/editing/
         error_recovery/review/final passend setzen; review enthält echte Tests. readOutput benötigt gespeicherte
         OutputEvidenceId; historische _missumCompletedArguments/_goCompletedArguments sind keine neuen Argumente.
         coding.command startet genau ein Windows-Programm mit getrennten Argumenten; Workspace ist keine

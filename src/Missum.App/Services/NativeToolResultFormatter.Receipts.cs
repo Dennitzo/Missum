@@ -85,12 +85,21 @@ internal static partial class NativeToolResultFormatter
             yield return Code(failed ? "Nicht gespeicherter Python-Code" : "Python-Code", First(Text(input, "code"), Text(input, "content")), "python", path, 1);
         else if (tool == "coding.updatePlan")
         {
-            var plan = NativeWorkingPlanProjection.Read(output, input);
+            if (Property(output, "evidenceLookup").ValueKind == JsonValueKind.True && !failed)
+            {
+                yield return new("Planbelege gesucht", First(Text(output, "message"), "Vorhandene Belege wurden gesucht. Der Arbeitsplan bleibt unverändert."), "text");
+                foreach (var block in PlanCandidates(Property(output, "candidates"))) yield return block;
+                if (Property(output, "nextCursor").ValueKind == JsonValueKind.Object)
+                    yield return new("Hinweis", "Weitere Belege sind für eine nächste Suchseite verfügbar.", "text");
+                yield break;
+            }
+            if (failed)
+                foreach (var block in PlanValidationIssues(output)) yield return block;
+            var plan = NativeWorkingPlanProjection.Read(output, failed ? default : input);
             foreach (var (title, items) in new[] { ("Arbeitsschritte", plan.Steps), ("Abnahmekriterien", plan.AcceptanceCriteria) })
                 if (items.Count > 0)
-                    yield return new(title, string.Join("\n", items.Select(item =>
+                    yield return new((failed ? "Gespeicherte " : "") + title, string.Join("\n", items.Select(item =>
                         (item.Status == "completed" ? "✓ " : item.Status == "in_progress" ? "◌ " : "○ ") + item.Title)), "text");
-            if (failed) foreach (var block in Essentials(output, errorsOnly: true)) yield return block;
         }
         else
         {
@@ -118,6 +127,68 @@ internal static partial class NativeToolResultFormatter
     {
         var count = text.Length == 0 ? 0 : text.Count(character => character == '\n') + (text.EndsWith('\n') ? 0 : 1);
         return new(title + (count > 0 ? $" · Zeilen {start}–{start + count - 1}" : " · keine Zeilen"), text, language, path);
+    }
+
+    private static IEnumerable<Block> PlanValidationIssues(JsonElement output)
+    {
+        var issues = Array(output, "validationIssues").Where(item => item.ValueKind == JsonValueKind.Object).ToArray();
+        if (issues.Length == 0)
+        {
+            yield return new("Arbeitsplan konnte nicht aktualisiert werden",
+                First(Text(output, "error"), Text(output, "message"), "Die Änderung wurde nicht übernommen."), "text");
+        }
+        foreach (var issue in issues)
+        {
+            var stageId = Text(issue, "stageId");
+            var stage = Array(output, "scienceStages").FirstOrDefault(item => Text(item, "id") == stageId);
+            var check = Array(stage, "checks").FirstOrDefault(item => Text(item, "id") == Text(issue, "checkId"));
+            var stageTitle = Text(Array(output, "storedSteps").FirstOrDefault(item => Text(item, "id") == stageId), "title");
+            var kind = First(Text(issue, "kind"), Text(check, "kind"));
+            var title = PlanCheckLabel(kind) + (stageTitle.Length > 0 ? " · " + stageTitle : "");
+            var lines = new List<string>();
+            if (Text(stage, "question") is { Length: > 0 } question) lines.Add("Leitfrage: " + question);
+            lines.Add(First(Text(issue, "message"), Text(issue, "reason"), Text(output, "error"), "Die Prüfung konnte nicht bestätigt werden."));
+            var paths = Array(issue, "paths").Select(Scalar).Where(path => path.Length > 0).ToArray();
+            if (paths.Length > 0) lines.Add("Betroffene Dateien:\n" + string.Join("\n", paths));
+            yield return new(title, string.Join("\n\n", lines), "text");
+            foreach (var candidate in PlanCandidates(Property(issue, "candidates"))) yield return candidate;
+        }
+        if (First(Text(output, "retryNote"), Text(output, "retry")) is { Length: > 0 } retry)
+            yield return new("Nächster Schritt", retry, "text");
+    }
+
+    private static string PlanCheckLabel(string kind) => kind switch
+    {
+        "source" => "Quellenprüfung", "analytic" => "Analytische Prüfung", "lean" => "Lean-Prüfung",
+        "numeric" => "Numerische Prüfung", "plot" => "Plot-Prüfung", "publication" => "Publikationsprüfung",
+        _ => "Planprüfung",
+    };
+
+    private static IEnumerable<Block> PlanCandidates(JsonElement candidates)
+    {
+        if (candidates.ValueKind != JsonValueKind.Array) yield break;
+        if (candidates.GetArrayLength() == 0)
+        {
+            yield return new("Vorhandene Belege", "Keine passenden Belege gefunden.", "text");
+            yield break;
+        }
+        foreach (var candidate in candidates.EnumerateArray())
+        {
+            var lines = new List<string>();
+            if (Text(candidate, "tool") is { Length: > 0 } tool) lines.Add("Werkzeug: " + tool);
+            if (Text(candidate, "path") is { Length: > 0 } path) lines.Add("Datei: " + path);
+            if (Text(candidate, "commandTarget") is { Length: > 0 } target) lines.Add("Befehl: " + target);
+            if (First(Text(candidate, "shortResult"), Text(candidate, "summary")) is { Length: > 0 } summary) lines.Add(summary);
+            var kinds = Array(candidate, "eligibleKinds").Select(Scalar).Select(PlanCheckLabel).Distinct().ToArray();
+            if (kinds.Length > 0) lines.Add("Geeignet für: " + string.Join(", ", kinds));
+            if (Text(candidate, "exitCode") is { Length: > 0 } exit) lines.Add("Exitcode: " + exit);
+            if (Property(candidate, "formalVerified").ValueKind == JsonValueKind.True) lines.Add("Lean-Kernel hat den Beweis bestätigt.");
+            if (Property(candidate, "historical").ValueKind == JsonValueKind.True) lines.Add("Beleg aus einem früheren Lauf.");
+            var success = Property(candidate, "success");
+            if (success.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                lines.Add(success.ValueKind == JsonValueKind.True ? "Ausführung erfolgreich" : "Ausführung fehlgeschlagen");
+            if (lines.Count > 0) yield return new("Vorhandener Beleg", string.Join("\n", lines), "text");
+        }
     }
 
     private static IEnumerable<Block> Essentials(JsonElement value, bool errorsOnly = false, bool descend = true, int depth = 0)

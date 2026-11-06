@@ -95,7 +95,8 @@ public sealed partial class SqliteConversationSnapshotRepository
                 AND NOT EXISTS(SELECT 1 FROM chat_tool_step_messages normalized WHERE normalized.message_id=m.id)
         )
         WHERE CASE WHEN json_valid(json_extract(payload,'$.outputJson'))
-            THEN COALESCE(json_extract(json_extract(payload,'$.outputJson'),'$.success'),1) ELSE 0 END
+            THEN COALESCE(json_extract(json_extract(payload,'$.outputJson'),'$.success'),1)
+                AND NOT COALESCE(json_extract(json_extract(payload,'$.outputJson'),'$.evidenceLookup'),0) ELSE 0 END
         """;
 
     private static AssistantToolStep CompactWorkingPlan(AssistantToolStep step, JsonElement output) => step with

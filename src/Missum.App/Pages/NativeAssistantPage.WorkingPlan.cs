@@ -286,7 +286,8 @@ public sealed partial class NativeAssistantPage
 
     private (string MessageId, JsonElement Step) LatestSubagentPlan(NativeSubagentState child) =>
         child.Messages.Values.OrderBy(MessageCreatedAt)
-            .SelectMany(message => MessageSteps(message).Where(step => S(step, "tool") == "coding.updatePlan" && S(step, "status") == "completed")
+            .SelectMany(message => MessageSteps(message).Where(step => S(step, "tool") == "coding.updatePlan" && S(step, "status") == "completed"
+                && NativeWorkingPlanProjection.OpensCurrentPlan(step))
                 .Select(step => (MessageId: S(message, "id"), Step: step))).LastOrDefault();
 
     private static Viewbox CreateWorkingPlanTabIcon(double size = 13)

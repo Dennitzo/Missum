@@ -267,6 +267,19 @@ public sealed class MissumAiDatabase : IDisposable
             updated_at TEXT NOT NULL,
             FOREIGN KEY(run_id) REFERENCES runs(run_id) ON DELETE CASCADE
         );
+        CREATE TABLE IF NOT EXISTS run_plan_evidence (
+            run_id TEXT NOT NULL,
+            evidence_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL,
+            is_work INTEGER NOT NULL,
+            kinds TEXT NOT NULL,
+            path TEXT COLLATE NOCASE NULL,
+            receipt_json TEXT NOT NULL,
+            PRIMARY KEY(run_id, evidence_id),
+            FOREIGN KEY(run_id) REFERENCES runs(run_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS ix_run_plan_evidence_page
+            ON run_plan_evidence(run_id, sequence DESC, evidence_id);
         CREATE TABLE IF NOT EXISTS run_provider_retries (
             run_id TEXT PRIMARY KEY,
             attempt INTEGER NOT NULL,

@@ -11,6 +11,7 @@ public static class ScienceSkill
     public const string Profile = "claude-science-v1";
     internal const string Marker = "MISSUM_SCIENCE_SKILL_V1\n";
     internal const string ResearchStandardMarker = "MISSUM_SCIENCE_SKILL_MODULE_V1:research-standard-v3\n";
+    private static readonly JsonSerializerOptions EvidenceJsonOptions = MissumAiProtocol.CreateJsonOptions();
     private static readonly Dictionary<string, string> Modules = new[] { "SKILL", "stages", "verification", "publication", "research-standard" }
         .ToDictionary(name => name, name => Read(name));
     public static bool Enabled(RunRequest request) => request.WorkflowProfile == Profile;
@@ -164,12 +165,12 @@ public static class ScienceSkill
             {"type":"array","minItems":1,"maxItems":16,"description":"Optionale wissenschaftliche Details zu steps-IDs. Ein schlichter Anfangsplan und partielle Details werden gespeichert; fehlende question/strategy bleiben ausdrücklich offen. Vor einem fachlichen Abschluss beide Details ausdrücklich festlegen. Bestehende ausgelassene Felder bleiben erhalten.","items":{"type":"object","additionalProperties":false,"properties":{
             "id":{"type":"string","minLength":1,"maxLength":80},"question":{"type":"string","minLength":1,"maxLength":800},"strategy":{"type":"string","minLength":1,"maxLength":1200},
             "dependsOn":{"type":"array","maxItems":16,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":80}},
-            "outcome":{"type":"string","enum":["open","clarified","refuted"]},
+            "outcome":{"type":"string","enum":["open","clarified","refuted"],"description":"Für completed derselben steps-ID ausdrücklich clarified oder refuted senden. open erlaubt keinen Abschluss."},
             "openQuestions":{"type":"array","maxItems":12,"items":{"type":"string","minLength":1,"maxLength":600}},
             "blockers":{"type":"array","maxItems":12,"items":{"type":"string","minLength":1,"maxLength":600}},
             "checks":{"type":"array","maxItems":8,"items":{"type":"object","additionalProperties":false,"properties":{
             "id":{"type":"string","minLength":1,"maxLength":80},"kind":{"type":"string","enum":["source","analytic","lean","numeric","plot","publication"],"description":"numeric: math.numeric/math.evaluate oder erfolgreicher Rechenprozess. analytic: math.symbolic/math.smt/math.evaluate, Rechenprozess oder geprüfter Lean-Beweis. Numerische Näherung allein ist kein analytischer/Lean-Beweis. publication: tatsächlicher Lese-/Schreib-/Bearbeitungsbeleg zur Publikation; ein bloßer PDF-Prozess reicht nicht."},"required":{"type":"boolean"},
-            "evidenceIds":{"type":"array","maxItems":3,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":100}},
+            "evidenceIds":{"type":"array","maxItems":3,"uniqueItems":true,"description":"Kopiere planEvidenceId aus dem tatsächlichen Werkzeugbeleg oder aus einem separaten Aufruf mit evidenceQuery. Prüfe Werkzeug, eligibleKinds, Pfad und fachliche Zuordnung. Ein erfolgreicher Rechen- oder PDF-Befehl belegt die Ausführung. Verwende für den Publikationsinhalt einen Lese- oder Änderungsbeleg. outputEvidenceId ist die Referenz für gespeicherte Ausgaben.","items":{"type":"string","minLength":1,"maxLength":100}},
             "paths":{"type":"array","maxItems":16,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":1024}}},"required":["id","kind","required"]}}
             },"required":["id"]}}
             """);
@@ -181,27 +182,61 @@ public static class ScienceSkill
         };
     }
 
-    internal static void AttachEvidence(List<LmChatMessage> messages, CodingWorkingState? state, string callId, string? evidenceId = null)
+    internal static void EnsurePlanEvidenceContext(List<LmChatMessage> messages, CodingWorkingState? state)
     {
         if (state?.Science is null) return;
-        var index = messages.FindLastIndex(message => message.Role == "tool" && message.ToolCallId == callId);
-        if (index < 0) return;
-        var receipt = CodingWorkingStateReducer.ResolveEvidence(state, evidenceId ?? callId);
-        if (receipt is null) return;
-        var metadata = JsonSerializer.Serialize(new { receipt.Id, receipt.Tool, receipt.Success, receipt.FormalVerified,
-            delegatedEvidence = state.Evidence.Where(item => item.Historical && item.SourceRunId is not null).TakeLast(12) }, MissumAiProtocol.CreateJsonOptions());
-        // Only this newly appended, unevaluated result is annotated; existing KV prefixes stay byte-stable.
+        var current = CodingPlanEvidenceContext.Build(state);
+        for (var index = messages.Count - 1; index >= 0; index--)
+        {
+            var previous = InstructionContent(messages[index]);
+            if (previous?.StartsWith(CodingPlanEvidenceContext.Marker, StringComparison.Ordinal) != true) continue;
+            current ??= CodingPlanEvidenceContext.Empty;
+            if (previous == current) return;
+            break;
+        }
+        if (current is not null) messages.Add(new("system", current));
+    }
+
+    internal static string ProjectToolEvidence(string result, CodingWorkingState? state, string evidenceId)
+    {
+        if (state is null || CodingWorkingStateReducer.ResolveEvidence(state, evidenceId) is not { } receipt) return result;
+        var metadata = JsonSerializer.SerializeToNode(CodingPlanEvidenceContext.Describe(receipt), EvidenceJsonOptions)!.AsObject();
+
+        // Annotate the new model-facing result only. The raw receipt and any
+        // already evaluated native context stay unchanged.
         try
         {
-            if (JsonNode.Parse(messages[index].Content!) is JsonObject output)
+            if (JsonNode.Parse(result) is JsonObject output)
             {
-                output["_missumEvidence"] = JsonNode.Parse(metadata);
-                messages[index] = messages[index] with { Content = output.ToJsonString() };
-                return;
+                if (receipt.Tool is SubagentToolNames.Wait or SubagentToolNames.Spawn)
+                    AddDelegatedPlanEvidence(output, state);
+                output.Remove("_missumEvidence");
+                output.Insert(0, "_missumEvidence", metadata);
+                return output.ToJsonString();
             }
         }
         catch (JsonException) { } // Bounded legacy tool bodies can be plain text.
-        messages[index] = messages[index] with { Content = messages[index].Content + "\nMISSUM_TOOL_EVIDENCE_V1\n" + metadata };
+        return "MISSUM_TOOL_EVIDENCE_V1\n" + metadata.ToJsonString() + "\n" + result;
+    }
+
+    internal static JsonElement ProjectDelegatedEvidence(JsonElement result, CodingWorkingState state)
+    {
+        if (result.ValueKind != JsonValueKind.Object || JsonNode.Parse(result.GetRawText()) is not JsonObject output) return result;
+        return AddDelegatedPlanEvidence(output, state) ? JsonSerializer.SerializeToElement(output, EvidenceJsonOptions) : result;
+    }
+
+    private static bool AddDelegatedPlanEvidence(JsonObject result, CodingWorkingState state)
+    {
+        if (result["status"] is not JsonValue status || !status.TryGetValue<string>(out var statusText) || statusText != "completed"
+            || result["runId"] is not JsonValue id || !id.TryGetValue<string>(out var runId) || string.IsNullOrWhiteSpace(runId)) return false;
+        var candidates = state.Evidence.Where(receipt => receipt.Historical && receipt.SourceRunId == runId
+                && ScienceStagePolicy.IsWorkReceipt(receipt))
+            .OrderByDescending(receipt => receipt.Sequence).ThenBy(receipt => receipt.Id, StringComparer.Ordinal)
+            .Take(12).Select(CodingPlanEvidenceContext.Describe).ToArray();
+        if (candidates.Length == 0) return false;
+        result.Remove("delegatedPlanEvidence");
+        result.Insert(0, "delegatedPlanEvidence", JsonSerializer.SerializeToNode(candidates, EvidenceJsonOptions));
+        return true;
     }
 
     internal static string ResultOutcome(CodingWorkingState? state) => state?.Science is null ? "open"

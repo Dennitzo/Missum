@@ -36,8 +36,13 @@ ausgelassene Felder bleiben erhalten. Für die fachliche Ausarbeitung benötigen
 checks werden nach id ergänzt.
 Ein Check enthält id, kind (source, analytic, lean, numeric, plot oder publication), required (Boolean),
 optional evidenceIds und paths (relative tatsächlich geprüfte Dateien). Deklariere Pflichtprüfungen früh.
-Belege erst nach tatsächlicher Prüfung zuordnen; initial darf evidenceIds fehlen. Bei belegtem Check
-nenne die echten Werkzeug-IDs. Dateien dürfen direkt bearbeitet und überschrieben werden;
+Belege erst nach tatsächlicher Prüfung zuordnen; initial darf evidenceIds fehlen. Übernimm für
+evidenceIds die exakte planEvidenceId aus dem Werkzeugergebnis oder dem Planbeleg-Nachtrag.
+Prüfe Prüfart und Pfad. Weitere Kandidaten liefert ein separater Aufruf mit evidenceQuery.
+Beispiel: Schließe eine Etappe mit der planEvidenceId ihres erfolgreich ausgeführten PDF-Befehls
+in steps[].evidenceIds ab. Binde am publication-Prüfpunkt in scienceStages[].checks[].evidenceIds
+die planEvidenceId eines Lese- oder Bearbeitungsergebnisses für Publikation.md.
+Dateien dürfen direkt bearbeitet und überschrieben werden;
 ein vorheriger Leseaufruf oder eine Hashbestätigung ist nicht erforderlich. paths kann die zugehörigen
 Skripte, Daten oder die Publikation zur Orientierung nennen. Der Planabschluss verwendet tatsächliche
 Werkzeugergebnisse, ohne Dateien automatisch erneut einzulesen.

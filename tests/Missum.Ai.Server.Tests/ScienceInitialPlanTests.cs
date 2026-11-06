@@ -208,7 +208,7 @@ public sealed class ScienceInitialPlanTests
     }
 
     [Fact]
-    public async Task LateBatchCompletionIsRejectedAtomicallyAndSingleStageCorrectionSucceeds()
+    public async Task CodexCanCompleteSeveralStagesInOneUpdate()
     {
         using var harness = new Harness("compact-v1", science: false);
         var run = await harness.CreateAsync();
@@ -222,22 +222,41 @@ public sealed class ScienceInitialPlanTests
             {"steps":[{"id":"s1","title":"Erste Prüfung","status":"completed","evidenceIds":["actual-read"]},
                       {"id":"s2","title":"Zweite Prüfung","status":"completed","evidenceIds":["actual-read"]}],"phase":"final"}
             """))]);
-        harness.Handler.Responses.Enqueue([new("one-stage", "coding.updatePlan", J("""
-            {"steps":[{"id":"s1","title":"Erste Prüfung","status":"completed","evidenceIds":["actual-read"]},
-                      {"id":"s2","title":"Zweite Prüfung","status":"in_progress"}],"phase":"review"}
-            """))]);
         harness.Handler.Responses.Enqueue([Read]);
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(20));
         await Assert.ThrowsAsync<RunWaitingForClientException>(() => harness.Processor.ProcessAsync(run, deadline.Token));
         var receipts = await harness.Repository.GetServerToolCompletedEventsAsync(run);
-        Assert.Equal(2, receipts.Count);
-        Assert.False(receipts[0].Data.GetProperty("success").GetBoolean());
-        Assert.Contains("Höchstens eine Etappe", receipts[0].Data.GetProperty("result").GetProperty("error").GetString());
-        Assert.True(receipts[1].Data.GetProperty("success").GetBoolean());
+        Assert.True(Assert.Single(receipts).Data.GetProperty("success").GetBoolean());
         var saved = (await harness.Repository.GetCheckpointAsync(run))!.WorkingState!;
-        Assert.Equal("completed", saved.Plan[0].Status);
-        Assert.Equal("in_progress", saved.Plan[1].Status);
-        Assert.Equal("review", saved.Phase);
+        Assert.All(saved.Plan, step => Assert.Equal("completed", step.Status));
+        Assert.Equal("final", saved.Phase);
+    }
+
+    [Fact]
+    public async Task PreviouslyRejectedCompletionIsRevalidatedWhenItsActualEvidenceBecomesAvailable()
+    {
+        using var harness = new Harness("compact-v1", science: false);
+        var run = await harness.CreateAsync();
+        var state = CodingWorkingStateReducer.ApplyPlanUpdate(CodingWorkingState.Create("Prüfung"),
+            J("""{"steps":[{"id":"s","title":"Phase 1: Prüfen","status":"in_progress"}]}"""));
+        var retry = new LmToolCall("retry", "coding.updatePlan",
+            J("""{"steps":[{"id":"s","title":"Phase 1: Prüfen","status":"completed","evidenceIds":["arrived-later"]}]}"""));
+        for (var attempt = 0; attempt < 2; attempt++)
+            state = CodingWorkingStateReducer.ObserveToolResult(state, retry with { Id = "failed-" + attempt },
+                """{"success":false,"errorCode":"agent.invalid_state_action","error":"Unbekannter Beleg"}""");
+        Assert.Equal(2, Assert.Single(state.Failures).Count);
+        state = CodingWorkingStateReducer.ObserveToolResult(state,
+            new("arrived-later", "coding.read", J("""{"path":"Publikation.md"}""")),
+            """{"success":true,"path":"Publikation.md","content":"Tatsächlicher Beleg"}""");
+        await harness.Repository.SaveCheckpointAsync(run, new(RunProcessor.CreateInitialMessages(harness.Request, "coding", [], "compact-v1"),
+            1, 1, 0, 0, WorkingState: state, SelectedModelId: Handler.Model, ContextProfileVersion: "compact-v1", SciencePlanInitialized: true));
+        harness.Handler.Responses.Enqueue([retry]);
+        harness.Handler.Responses.Enqueue([Read]);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        await Assert.ThrowsAsync<RunWaitingForClientException>(() => harness.Processor.ProcessAsync(run, deadline.Token));
+        var receipt = Assert.Single(await harness.Repository.GetServerToolCompletedEventsAsync(run));
+        Assert.True(receipt.Data.GetProperty("success").GetBoolean());
+        Assert.Equal("completed", Assert.Single((await harness.Repository.GetCheckpointAsync(run))!.WorkingState!.Plan).Status);
     }
 
     private sealed class Harness : IDisposable

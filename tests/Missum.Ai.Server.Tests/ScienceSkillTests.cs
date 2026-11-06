@@ -129,11 +129,11 @@ public sealed class ScienceSkillTests
     public void MissingFailedAndWrongKindEvidenceCannotCompleteRequiredCheck()
     {
         var state = Plan(Start(), "numeric");
-        Assert.Throws<ArgumentException>(() => Complete(state, kind: "numeric"));
+        Assert.ThrowsAny<ArgumentException>(() => Complete(state, kind: "numeric"));
         state = Observe(state, "calc", "coding.command", "{}", "{\"success\":false,\"exitCode\":1}");
-        Assert.Throws<ArgumentException>(() => Complete(state, kind: "numeric"));
+        Assert.ThrowsAny<ArgumentException>(() => Complete(state, kind: "numeric"));
         state = Read(state, "read", Hash);
-        Assert.Throws<ArgumentException>(() => Complete(state, "read", "numeric", paths: true));
+        Assert.Throws<PlanEvidenceValidationException>(() => Complete(state, "read", "numeric", paths: true));
         Assert.Equal("in_progress", state.Plan.Single().Status);
     }
 
@@ -162,9 +162,9 @@ public sealed class ScienceSkillTests
     {
         var state = Plan(Start(), "lean");
         state = Observe(state, "init", "math.formalProof", "{}", "{\"success\":true,\"formalVerification\":\"NotEstablished\"}");
-        Assert.Throws<ArgumentException>(() => Complete(state, "init", "lean"));
+        Assert.Throws<PlanEvidenceValidationException>(() => Complete(state, "init", "lean"));
         state = Observe(state, "fake", "coding.command", "{}", "{\"success\":true,\"exitCode\":0,\"formalVerification\":\"KernelAccepted\",\"axiomAudit\":\"passed\",\"sourceFileSha256\":\"" + Hash + "\"}");
-        Assert.Throws<ArgumentException>(() => Complete(state, "fake", "lean"));
+        Assert.Throws<PlanEvidenceValidationException>(() => Complete(state, "fake", "lean"));
         state = Observe(state, "proof", "math.formalProof", "{}", "{\"status\":\"completed\",\"result\":{\"success\":true,\"formalVerification\":\"KernelAccepted\",\"axiomAudit\":\"passed\",\"source\":\"work/check.py\",\"sourceFileSha256\":\"" + Hash + "\"}}");
         Assert.Equal("clarified", ScienceSkill.ResultOutcome(Complete(state, "proof", "lean")));
         state = Read(state, "proof-read", Hash);
@@ -178,12 +178,18 @@ public sealed class ScienceSkillTests
         var state = Plan(Start(), "publication");
         state = Observe(state, "actual-edit", "coding.edit", "{\"path\":\"work/check.py\"}", "{\"success\":true,\"path\":\"work/check.py\",\"sha256\":\"" + Hash + "\"}");
         state = Observe(state, "read-only", "web.fetch", "{}", "{\"success\":true}");
-        var error = Assert.Throws<ArgumentException>(() => Complete(state, "read-only", "publication", paths: true));
+        var error = Assert.Throws<PlanEvidenceValidationException>(() => Complete(state, "read-only", "publication", paths: true));
         Assert.Contains("Ersetze evidenceIds", error.Message);
         Assert.Contains("actual-edit", error.Message);
         Assert.Contains("web.fetch", error.Message);
         Assert.Contains("coding.edit", error.Message);
-        var pendingError = Assert.Throws<ArgumentException>(() => CodingWorkingStateReducer.ApplyPlanUpdate(state, J("""
+        var issue = Assert.Single(error.Issues);
+        Assert.Equal("wrong_evidence_kind", issue.Code);
+        Assert.Equal("scienceStages.checks.evidenceIds", issue.Field);
+        Assert.Equal("a", issue.StageId);
+        Assert.Equal("check", issue.CheckId);
+        Assert.Equal("read-only", Assert.Single(issue.RejectedIds!));
+        var pendingError = Assert.Throws<PlanEvidenceValidationException>(() => CodingWorkingStateReducer.ApplyPlanUpdate(state, J("""
             {"phase":"review","scienceStages":[{"id":"a","checks":[{"id":"check","kind":"publication","required":true,"evidenceIds":["read-only"],"paths":["work/check.py"]}]}]}
             """)));
         Assert.Contains("actual-edit", pendingError.Message);
@@ -221,8 +227,42 @@ public sealed class ScienceSkillTests
         state = Read(state, "review", Hash);
         state = Observe(state, "unrelated-read", "coding.read", "{\"path\":\"other.md\"}",
             "{\"success\":true,\"path\":\"other.md\",\"sha256\":\"" + Hash + "\"}");
-        Assert.Throws<ArgumentException>(() => Complete(state, "unrelated-read", "publication", paths: true));
+        var error = Assert.Throws<PlanEvidenceValidationException>(() => Complete(state, "unrelated-read", "publication", paths: true));
+        Assert.Equal("wrong_evidence_path", Assert.Single(error.Issues).Code);
         Assert.Equal("clarified", ScienceSkill.ResultOutcome(Complete(state, "review", "publication", paths: true)));
+    }
+
+    [Fact]
+    public void PublicationCandidatesUseTheSamePathKindAndReopenRulesAsValidation()
+    {
+        var state = Plan(Start(), "publication");
+        state = Observe(state, "old-edit", "coding.edit", "{}", """{"success":true,"path":"work/Publikation.md"}""");
+        var afterSequence = state.Sequence;
+        state = Observe(state, "actual-edit", "coding.edit", "{}", """{"success":true,"path":"work/Publikation.md"}""");
+        state = Observe(state, "another-file", "coding.read", "{}", """{"success":true,"path":"work/Anhang.md"}""");
+        state = Observe(state, "process", "coding.command", "{}", """{"success":true,"exitCode":0,"path":"work/Publikation.md"}""");
+        state = Observe(state, "paged-output", "coding.readOutput", "{}", """{"success":true,"path":"work/Publikation.md"}""");
+
+        string[] paths = [@".\work\Publikation.md"];
+        var stage = state.Science!.Stages[0] with { ReopenedAtSequence = afterSequence };
+        var check = stage.Checks[0] with { Paths = paths };
+        var candidate = Assert.Single(ScienceStagePolicy.FindCandidates(state, check.Kind, paths, afterSequence));
+        Assert.Equal("actual-edit", candidate.Id);
+        Assert.DoesNotContain(ScienceStagePolicy.FindCandidates(state, null), receipt => receipt.Id == "paged-output");
+        ScienceStagePolicy.ValidateCheck(state, stage, check with { EvidenceIds = [candidate.Id] });
+
+        foreach (var (ids, expectedCode) in new (string[] Ids, string Code)[]
+                 {
+                     ([], "missing_evidence_ids"), (["invented"], "unknown_evidence_id"),
+                     (["old-edit"], "evidence_before_reopen"), (["another-file"], "wrong_evidence_path"),
+                     (["process"], "wrong_evidence_kind"),
+                 })
+        {
+            var error = Assert.Throws<PlanEvidenceValidationException>(() => ScienceStagePolicy.ValidateCheck(state, stage, check with { EvidenceIds = ids }));
+            Assert.Equal(expectedCode, Assert.Single(error.Issues).Code);
+            Assert.Contains(candidate.Id, error.Message);
+            Assert.DoesNotContain("PDF", error.Message);
+        }
     }
 
     [Fact]
@@ -257,7 +297,7 @@ public sealed class ScienceSkillTests
             """));
         Assert.Equal("b", state.Plan.Single(step => step.Status == "in_progress").Id);
         Assert.Equal("open", ScienceSkill.ResultOutcome(state));
-        Assert.Throws<ArgumentException>(() => CodingWorkingStateReducer.ApplyPlanUpdate(state, J("""
+        Assert.Throws<PlanEvidenceValidationException>(() => CodingWorkingStateReducer.ApplyPlanUpdate(state, J("""
             {"scienceStages":[{"id":"b","dependsOn":["a"]}]}
             """)));
     }
@@ -269,9 +309,9 @@ public sealed class ScienceSkillTests
         state = Observe(state, "calc", "math.evaluate", "{}", "{\"success\":true}");
         state = Complete(state);
         const string reopen = """{"steps":[{"id":"a","title":"A prüfen","status":"in_progress"}]}""";
-        Assert.Throws<ArgumentException>(() => CodingWorkingStateReducer.ApplyPlanUpdate(state, J(reopen)));
+        Assert.Throws<PlanEvidenceValidationException>(() => CodingWorkingStateReducer.ApplyPlanUpdate(state, J(reopen)));
         state = CodingWorkingStateReducer.ApplyPlanUpdate(state, J(reopen[..^1] + ",\"explanation\":\"Voraussetzung war unvollständig\"}"));
-        Assert.Throws<ArgumentException>(() => Complete(state));
+        Assert.Throws<PlanEvidenceValidationException>(() => Complete(state));
         state = Observe(state, "new-calc", "math.evaluate", "{}", "{\"success\":true}");
         Assert.Equal("clarified", ScienceSkill.ResultOutcome(Complete(state, "new-calc")));
     }
@@ -315,15 +355,16 @@ public sealed class ScienceSkillTests
     }
 
     [Fact]
-    public void AnnotationKeepsJsonAndPreviouslyEvaluatedPrefixUnchanged()
+    public void AnnotationKeepsRawReceiptSeparateFromProjectedMetadata()
     {
         var state = Observe(Plan(Start()), "calc", "math.evaluate", "{}", "{\"success\":true}");
-        state = Observe(state, "later-child", "coding.command", "{}", "{\"success\":true,\"exitCode\":0}");
-        var messages = new List<LmChatMessage> { new("system", "fixed"), new("tool", "{\"success\":true}", ToolCallId: "call") };
-        ScienceSkill.AttachEvidence(messages, state, "call", "calc");
-        Assert.Equal("fixed", messages[0].Content);
-        Assert.Equal("calc", J(messages[1].Content!).GetProperty("_missumEvidence").GetProperty("id").GetString());
-        Assert.Equal("math.evaluate", J(messages[1].Content!).GetProperty("_missumEvidence").GetProperty("tool").GetString());
+        const string raw = "{\"success\":true,\"result\":\"unchanged\"}";
+        var projected = J(ScienceSkill.ProjectToolEvidence(raw, state, "calc"));
+        var evidence = projected.GetProperty("_missumEvidence");
+        Assert.Equal("calc", evidence.GetProperty("planEvidenceId").GetString());
+        Assert.Equal("math.evaluate", evidence.GetProperty("tool").GetString());
+        Assert.Equal("unchanged", projected.GetProperty("result").GetString());
+        Assert.False(J(raw).TryGetProperty("_missumEvidence", out _));
     }
 
     [Fact]

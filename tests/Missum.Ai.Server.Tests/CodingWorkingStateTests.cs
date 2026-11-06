@@ -15,6 +15,35 @@ public sealed class CodingWorkingStateTests
     private static readonly string[] MissingInterpreterArguments = ["-c", new string('#', 2048)];
 
     [Fact]
+    public void EvidenceLookupPagesThroughDelegatedReceiptsSharingTheSameSequenceWithoutChangingThePlan()
+    {
+        var state = CodingWorkingStateReducer.ApplyPlanUpdate(CodingWorkingState.Create("Verify publication"),
+            Args(new { steps = new[] { new { id = "s", title = "Publication", status = "in_progress" } } })) with
+        {
+            Evidence = Enumerable.Range(1, 12).Select(index => new CodingToolEvidence($"read-{index:00}", "coding.read",
+                true, "./Publikation.md", null, "Publication", 2, SourceRunId: "child", Historical: true)).ToArray(),
+        };
+        var first = CodingWorkingStateTools.QueryEvidence(state, Args(new { evidenceQuery = new { kind = "publication", path = "Publikation.md" } }));
+        var cursor = first.GetProperty("nextCursor");
+        var second = CodingWorkingStateTools.QueryEvidence(state, Args(new
+        {
+            evidenceQuery = new
+            {
+                kind = "publication", path = "Publikation.md",
+                beforeSequence = cursor.GetProperty("beforeSequence").GetInt64(), beforeId = cursor.GetProperty("beforeId").GetString(),
+            },
+        }));
+        Assert.True(first.GetProperty("evidenceLookup").GetBoolean());
+        Assert.False(first.GetProperty("changed").GetBoolean());
+        Assert.Equal(10, first.GetProperty("candidates").GetArrayLength());
+        Assert.Equal(2, second.GetProperty("candidates").GetArrayLength());
+        Assert.Equal(12, first.GetProperty("candidates").EnumerateArray().Concat(second.GetProperty("candidates").EnumerateArray())
+            .Select(candidate => candidate.GetProperty("planEvidenceId").GetString()).Distinct().Count());
+        Assert.Equal("in_progress", Assert.Single(state.Plan).Status);
+        Assert.Equal(0, state.ConsecutivePlanNoOps);
+    }
+
+    [Fact]
     public void PartialPlanUpdatesKeepEveryCompletedAndPendingStageInCanonicalOrderAndReceipt()
     {
         var state = CodingWorkingStateReducer.ObserveToolResult(CodingWorkingState.Create("A sixteen-stage research task"),
@@ -131,11 +160,11 @@ public sealed class CodingWorkingStateTests
             Json(new { status = "failed", result = new { success = false, exitCode = 7, evidence = new { evidenceId = outputId } } }));
         state = CodingWorkingStateReducer.ObserveToolResult(state, Call("server-read-output", "coding.readOutput", new { evidenceId = outputId }),
             Json(new { status = "completed", result = new { evidenceId = outputId, text = "actual failed test output" } }));
-        var failed = Assert.Throws<ArgumentException>(() => CompleteWithAlias(state, outputId));
+        var failed = Assert.Throws<PlanEvidenceValidationException>(() => CompleteWithAlias(state, outputId));
         Assert.Contains(outputId, failed.Message, StringComparison.Ordinal);
         Assert.Contains("keinen erfolgreichen Werkzeugabschluss", failed.Message, StringComparison.Ordinal);
         const string invented = "ev-ffffffffffffffffffffffffffffffff";
-        var unknown = Assert.Throws<ArgumentException>(() => CompleteWithAlias(state, invented));
+        var unknown = Assert.Throws<PlanEvidenceValidationException>(() => CompleteWithAlias(state, invented));
         Assert.Contains(invented, unknown.Message, StringComparison.Ordinal);
         Assert.Contains("unbekannt", unknown.Message, StringComparison.Ordinal);
     }
@@ -148,12 +177,12 @@ public sealed class CodingWorkingStateTests
             Call("server-first", "coding.read", new { path = "one.py" }), Json(new { status = "completed", evidenceId = outputId, content = "one" }));
         state = CodingWorkingStateReducer.ObserveToolResult(state, Call("server-second", "coding.read", new { path = "two.py" }),
             Json(new { status = "completed", evidenceId = outputId, content = "two" }));
-        var ambiguous = Assert.Throws<ArgumentException>(() => CompleteWithAlias(state, outputId));
+        var ambiguous = Assert.Throws<PlanEvidenceValidationException>(() => CompleteWithAlias(state, outputId));
         Assert.Contains(outputId, ambiguous.Message, StringComparison.Ordinal);
         Assert.Contains("eindeutigen Werkzeugbeleg", ambiguous.Message, StringComparison.Ordinal);
         var planning = CodingWorkingStateReducer.ObserveToolResult(CodingWorkingState.Create("Do the work."),
             Call("server-plan", "coding.updatePlan", new { }), Json(new { status = "completed", evidenceId = outputId }));
-        var plan = Assert.Throws<ArgumentException>(() => CompleteWithAlias(planning, outputId));
+        var plan = Assert.Throws<PlanEvidenceValidationException>(() => CompleteWithAlias(planning, outputId));
         Assert.Contains(outputId, plan.Message, StringComparison.Ordinal);
         Assert.Contains("Plan-Receipt", plan.Message, StringComparison.Ordinal);
     }
@@ -167,10 +196,9 @@ public sealed class CodingWorkingStateTests
             Call("actual-edit-operation", "coding.edit", new { path = "source.py" }),
             Json(new { success = true, sha256 = hash, evidence = new { evidenceId = actualId } }));
         var mistakenId = "ev-" + hash;
-        var failure = Assert.Throws<ArgumentException>(() => CompleteWithAlias(state, mistakenId));
+        var failure = Assert.Throws<PlanEvidenceValidationException>(() => CompleteWithAlias(state, mistakenId));
         Assert.Contains(Json(mistakenId), failure.Message, StringComparison.Ordinal);
-        Assert.Contains("eine Datei-SHA ist keine Beleg-ID", failure.Message, StringComparison.Ordinal);
-        Assert.Contains("Evidence.Id oder OutputEvidenceId", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("planEvidenceId", failure.Message, StringComparison.Ordinal);
         Assert.Empty(state.Plan);
         var corrected = CompleteWithAlias(state, actualId);
         Assert.Equal("actual-edit-operation", Assert.Single(Assert.Single(corrected.Plan).EvidenceIds));
@@ -227,7 +255,7 @@ public sealed class CodingWorkingStateTests
     {
         var state = CodingWorkingStateReducer.ApplyPlanUpdate(CodingWorkingState.Create("Do real work."),
             Args(new { steps = new[] { new { id = "work", title = "Do the work", status = "pending" } } }));
-        Assert.Throws<ArgumentException>(() => CodingWorkingStateReducer.ApplyPlanUpdate(state,
+        Assert.Throws<PlanEvidenceValidationException>(() => CodingWorkingStateReducer.ApplyPlanUpdate(state,
             Args(new { steps = new[] { new { id = "work", status = "completed" } } })));
         Assert.Throws<ArgumentException>(() => CodingWorkingStateReducer.ApplyPlanUpdate(state,
             Args(new { steps = new[] { new { id = "new", status = "pending" } } })));
@@ -305,10 +333,10 @@ public sealed class CodingWorkingStateTests
             Json(new { path = "source.py", content = "1: actual source", sha256 = new string('a', 64), startLine = 1 }));
         state = CodingWorkingStateReducer.ObserveToolResult(state, Call("failed-1", "coding.command", new { executable = "python", arguments = Array.Empty<string>() }),
             Json(new { success = false, exitCode = 7, stderr = "actual failure" }));
-        Assert.Throws<ArgumentException>(() => CodingWorkingStateReducer.ApplyPlanUpdate(state, Args(new
+        Assert.Throws<PlanEvidenceValidationException>(() => CodingWorkingStateReducer.ApplyPlanUpdate(state, Args(new
         { steps = new[] { new { id = "one", title = "Inspect source", status = "completed" } } })));
         foreach (var evidenceIds in new[] { UnknownEvidenceIds, FailedEvidenceIds })
-            Assert.Throws<ArgumentException>(() => CodingWorkingStateReducer.ApplyPlanUpdate(state, Args(new
+            Assert.Throws<PlanEvidenceValidationException>(() => CodingWorkingStateReducer.ApplyPlanUpdate(state, Args(new
             { steps = new[] { new { id = "one", title = "Inspect source", status = "completed", evidenceIds } } })));
         state = CodingWorkingStateReducer.ApplyPlanUpdate(state, Args(new
         {
@@ -467,7 +495,7 @@ public sealed class CodingWorkingStateTests
         Assert.False(Assert.Single(state.Evidence).Success);
         Assert.Empty(state.Failures);
         state = CodingWorkingStateReducer.ObserveToolResult(state, Call("plan", "coding.updatePlan", new { }), "{\"success\":true}");
-        Assert.Throws<ArgumentException>(() => CodingWorkingStateReducer.ApplyPlanUpdate(state, Args(new
+        Assert.Throws<PlanEvidenceValidationException>(() => CodingWorkingStateReducer.ApplyPlanUpdate(state, Args(new
         { steps = new[] { new { id = "work", title = "Everything complete", status = "completed", evidenceIds = PlanEvidenceIds } } })));
         var call = Call("git", "coding.gitDiff", new { });
         CodingLoopGuard.ThrowIfRepeatedFailure([new("assistant", ToolCalls: [call]), new("tool", "{\"exitCode\":null}", ToolCallId: "git")], call);

@@ -765,6 +765,7 @@ public sealed partial class RunRepository
         command.Parameters.AddWithValue("$steering", checkpoint.AppliedSteeringSequence);
         command.Parameters.AddWithValue("$offset", visibleSteeringOffset);
         _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        await ArchivePlanEvidenceAsync(connection, transaction, runId, checkpoint.WorkingState, cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         _notifier.Notify(runId);
     }

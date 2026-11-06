@@ -520,7 +520,7 @@ public sealed partial class NativeAssistantPage
                 "subagent" or "subagent.spawn" => "Subagent", "subagent.wait" => "Subagent-Ergebnis",
                 "coding.read" => "Datei lesen", "coding.write" or "coding.edit" or "coding.undo" => "Datei bearbeiten",
                 "coding.command" => "Befehl ausgeführt", "coding.list" => "Dateien aufgelistet", "coding.search" => "Dateien durchsucht",
-                "coding.gitDiff" => "Änderungen geprüft", "coding.updatePlan" => "Arbeitsplan aktualisiert", "assistant.reasoning" => "Denkprozess",
+                "coding.gitDiff" => "Änderungen geprüft", "coding.updatePlan" => NativeWorkingPlanProjection.ReceiptTitle(step), "assistant.reasoning" => "Denkprozess",
                 "research.code.write" => "Python-Datei vorbereiten", "research.code.execute" => "Python-Analyse ausführen",
                 "research.code.test" => "Berechnung prüfen", "research.code.benchmark" => "Berechnung vergleichen",
                 "research.deliverables.verify" => "Forschungsergebnisse prüfen",
@@ -563,7 +563,7 @@ public sealed partial class NativeAssistantPage
                     && headerJson.Deserialize<ToolStepDisplayHeader>(JsonOptions) is { Version: AssistantToolStepHeaders.CurrentVersion } header)
                 {
                     _filePath = header.FilePath ?? "";
-                    _summary = header.Summary ?? "";
+                    _summary = tool == "coding.updatePlan" ? "" : header.Summary ?? "";
                     if (_fileMutation && header.AddedLines is { } added && header.RemovedLines is { } removed)
                     {
                         _hasCounts = true;
@@ -648,7 +648,8 @@ public sealed partial class NativeAssistantPage
         private void UpdateHeader()
         {
             var expanded = _details.Visibility == Visibility.Visible;
-            _title.Text = _label + (_summary.Length > 0 ? " · " + _summary : "");
+            var isPlan = S(_step, "tool") == "coding.updatePlan";
+            _title.Text = _label + (!isPlan && _summary.Length > 0 ? " · " + _summary : "");
             var research = S(_step, "tool") == "web.deepResearch";
             _compactIcon.Visibility = research ? Visibility.Collapsed : Visibility.Visible;
             if (research)
@@ -666,13 +667,13 @@ public sealed partial class NativeAssistantPage
             }
             else if (_researchIcon is not null) _researchIcon.Visibility = Visibility.Collapsed;
             if (_running) _title.Text += " …";
-            if (S(_step, "tool") != "context.compact"
+            if (!isPlan && S(_step, "tool") != "context.compact"
                 && S(_step, "status") is "failed" or "denied" or "cancelled" or "interrupted") _title.Text += " · " + _status.Text;
             _counts.Visibility = _fileMutation && _hasCounts ? Visibility.Visible : Visibility.Collapsed;
             _title.FontWeight = Microsoft.UI.Text.FontWeights.Normal;
             _title.Foreground = ThemeBrush("MissumMutedTextBrush", 160);
             _chevron.Glyph = "\uE76C";
-            var plan = S(_step, "tool") == "coding.updatePlan";
+            var plan = isPlan && NativeWorkingPlanProjection.OpensCurrentPlan(_step);
             ToolTipService.SetToolTip(_toggle, IsResearchNavigation ? _title.Text + "\nDeep-Research-Tab öffnen"
                 : plan ? "Aktuellen Arbeitsplan öffnen" : _title.Text);
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_toggle,

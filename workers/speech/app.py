@@ -5,6 +5,7 @@ import binascii
 import gc
 import io
 import json
+import logging
 import os
 import re
 import subprocess
@@ -14,6 +15,7 @@ import unicodedata
 import uuid
 import wave
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -95,6 +97,7 @@ SUPERTONIC_WARMUP_SILENCE_DURATION = 0.15
 SUPERTONIC_PROVIDER = "supertonic-3-f5-cuda"
 MAX_PARALLEL_SPEECH_OPERATIONS = 2
 PROCESS_GATE = threading.BoundedSemaphore(MAX_PARALLEL_SPEECH_OPERATIONS)
+LOGGER = logging.getLogger(__name__)
 TTS_EXECUTOR = ThreadPoolExecutor(
     max_workers=1,
     thread_name_prefix="missum-ai-tts",
@@ -332,6 +335,16 @@ def _release_process_slots(count: int) -> None:
         PROCESS_GATE.release()
 
 
+def _empty_cuda_cache(*devices: int) -> None:
+    if not torch.cuda.is_available():
+        return
+    device_count = torch.cuda.device_count()
+    for device_index in sorted(set(devices)):
+        if device_index < device_count:
+            with torch.cuda.device(device_index):
+                torch.cuda.empty_cache()
+
+
 LANGUAGE_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,16}$")
 CAPTION_SESSION_PATTERN = re.compile(r"^caption-[a-f0-9]{32}$")
 
@@ -430,6 +443,9 @@ class SpeechWorkerSession:
 class ModelRegistry:
     def __init__(self) -> None:
         self._gate = threading.RLock()
+        self._recognition_gate = threading.Condition()
+        self._recognition_users = 0
+        self._recognition_release_pending = False
         self._stt = None
         self._tts = None
         self._tts_voice_style = None
@@ -450,6 +466,7 @@ class ModelRegistry:
             return {
                 "status": "ready" if files_available else "model-missing",
                 "sttLoaded": self._stt is not None,
+                "recognitionReleasePending": self._recognition_release_pending,
                 "sttCudaDevice": WHISPER_CUDA_DEVICE,
                 "sttModel": "faster-whisper-large-v3",
                 "sttComputeType": WHISPER_COMPUTE_TYPE,
@@ -645,6 +662,44 @@ class ModelRegistry:
             self._last_used = time.time()
             return self._speaker
 
+    @contextmanager
+    def use_recognition(self):
+        with self._recognition_gate:
+            self._recognition_gate.wait_for(lambda: not self._recognition_release_pending)
+            self._recognition_users += 1
+        try:
+            yield
+        finally:
+            with self._recognition_gate:
+                self._recognition_users -= 1
+                if self._recognition_users == 0 and self._recognition_release_pending:
+                    self._unload_recognition()
+
+    def release_recognition(self) -> None:
+        with self._recognition_gate:
+            self._recognition_release_pending = True
+            if self._recognition_users == 0:
+                self._unload_recognition()
+
+    def _unload_recognition(self) -> None:
+        # The recognition gate excludes new inference and loads until all model
+        # references in active recognition calls have been released.
+        try:
+            with self._gate:
+                was_loaded = self._stt is not None or self._speaker is not None
+                self._stt = None
+                self._speaker = None
+            with SPEAKER_TRACKER_GATE:
+                SPEAKER_TRACKERS.clear()
+            if was_loaded:
+                gc.collect()
+                _empty_cuda_cache(WHISPER_CUDA_DEVICE, SPEAKER_CUDA_DEVICE)
+        except RuntimeError:
+            LOGGER.warning("Recognition CUDA cache cleanup failed", exc_info=True)
+        finally:
+            self._recognition_release_pending = False
+            self._recognition_gate.notify_all()
+
     def release(self) -> None:
         def release_tts_on_owner_thread() -> None:
             # ONNX Runtime sessions are created and destroyed on the same
@@ -655,26 +710,17 @@ class ModelRegistry:
                 self._tts_voice_style = None
 
         TTS_EXECUTOR.submit(release_tts_on_owner_thread).result(timeout=120)
+        self.release_recognition()
         with self._gate:
-            self._stt = None
-            self._speaker = None
             self._last_used = None
         gc.collect()
-        if torch.cuda.is_available():
-            for device_index in sorted({
-                WHISPER_CUDA_DEVICE,
-                SPEAKER_CUDA_DEVICE,
-                SUPERTONIC_CUDA_DEVICE,
-            }):
-                if device_index >= torch.cuda.device_count():
-                    continue
-                with torch.cuda.device(device_index):
-                    torch.cuda.empty_cache()
+        _empty_cuda_cache(SUPERTONIC_CUDA_DEVICE)
 
 models = ModelRegistry()
 app = FastAPI(title="Missum AI Speech Worker", docs_url=None, redoc_url=None, openapi_url=None)
 SPEECH_SESSIONS: dict[str, SpeechWorkerSession] = {}
 SPEECH_SESSION_GATE = threading.RLock()
+SPEECH_RELEASE_GATE = threading.Lock()
 
 
 def _require_speech_session(session_id: str) -> SpeechWorkerSession:
@@ -749,13 +795,10 @@ def _speaker_tracker(session_id: str) -> SpeakerTracker:
 
 
 def _preload_models() -> None:
-    # Missum keeps speech input, speaker separation and TTS resident for the complete
-    # server lifetime, including while another AI workload is active.
-    for loader in (models.load_stt, models.load_speaker, models.load_tts):
-        try:
-            loader()
-        except Exception:
-            pass
+    try:
+        models.load_tts()
+    except Exception:
+        pass
 
 @app.on_event("startup")
 def preload_configured_models() -> None:
@@ -777,32 +820,39 @@ def status() -> dict:
 def load(request: LoadRequest) -> dict:
     slots = _acquire_process_slots()
     try:
-        if request.component == "stt":
-            models.load_stt()
-        elif request.component == "speaker":
-            models.load_speaker()
-        else:
+        if request.component == "tts":
             models.load_tts()
+        else:
+            with models.use_recognition():
+                if request.component == "stt":
+                    models.load_stt()
+                else:
+                    models.load_speaker()
         return models.status()
     finally:
         _release_process_slots(slots)
+
+
+@app.post("/recognition/release")
+def release_recognition() -> dict:
+    models.release_recognition()
+    return models.status()
 
 
 @app.post("/release")
 def release() -> dict:
-    with SPEECH_SESSION_GATE:
-        for session in SPEECH_SESSIONS.values():
-            session.cancel_event.set()
-    slots = _acquire_process_slots(MAX_PARALLEL_SPEECH_OPERATIONS)
-    try:
+    with SPEECH_RELEASE_GATE:
         with SPEECH_SESSION_GATE:
-            SPEECH_SESSIONS.clear()
-        models.release()
-        with SPEAKER_TRACKER_GATE:
-            SPEAKER_TRACKERS.clear()
-        return models.status()
-    finally:
-        _release_process_slots(slots)
+            for session in SPEECH_SESSIONS.values():
+                session.cancel_event.set()
+        slots = _acquire_process_slots(MAX_PARALLEL_SPEECH_OPERATIONS)
+        try:
+            with SPEECH_SESSION_GATE:
+                SPEECH_SESSIONS.clear()
+            models.release()
+            return models.status()
+        finally:
+            _release_process_slots(slots)
 
 
 @app.post("/speech/sessions")
@@ -847,32 +897,37 @@ def transcribe(request: TranscriptionRequest) -> dict:
             str(DATA_ROOT / "uploads" / request.uploadId / "payload.bin"),
             str(DATA_ROOT / "uploads"),
         )
-        model = models.load_stt()
-        segments, info = model.transcribe(
-            str(source),
-            language=request.language,
-            beam_size=WHISPER_FILE_BEAM_SIZE,
-            best_of=WHISPER_BEST_OF,
-            patience=WHISPER_FILE_PATIENCE,
-            temperature=WHISPER_FILE_TEMPERATURES,
-            word_timestamps=False,
-            vad_filter=True,
-            condition_on_previous_text=True,
-            language_detection_segments=WHISPER_LANGUAGE_DETECTION_SEGMENTS,
-        )
-        rows = [
-            {"start": round(segment.start, 3), "end": round(segment.end, 3), "text": segment.text.strip()}
-            for segment in segments
-        ]
-        return {
-            "text": " ".join(row["text"] for row in rows).strip(),
-            "language": info.language,
-            "languageProbability": round(info.language_probability, 6),
-            "segments": rows,
-            "provider": "whisper-large-v3",
-        }
+        with models.use_recognition():
+            return _transcribe_file(source, request.language)
     finally:
         _release_process_slots(slots)
+
+
+def _transcribe_file(source: Path, language: str | None) -> dict:
+    model = models.load_stt()
+    segments, info = model.transcribe(
+        str(source),
+        language=language,
+        beam_size=WHISPER_FILE_BEAM_SIZE,
+        best_of=WHISPER_BEST_OF,
+        patience=WHISPER_FILE_PATIENCE,
+        temperature=WHISPER_FILE_TEMPERATURES,
+        word_timestamps=False,
+        vad_filter=True,
+        condition_on_previous_text=True,
+        language_detection_segments=WHISPER_LANGUAGE_DETECTION_SEGMENTS,
+    )
+    rows = [
+        {"start": round(segment.start, 3), "end": round(segment.end, 3), "text": segment.text.strip()}
+        for segment in segments
+    ]
+    return {
+        "text": " ".join(row["text"] for row in rows).strip(),
+        "language": info.language,
+        "languageProbability": round(info.language_probability, 6),
+        "segments": rows,
+        "provider": "whisper-large-v3",
+    }
 
 
 def _speaker_labels(temporary: Path, rows: list[dict], session_id: str) -> None:
@@ -908,6 +963,22 @@ def _transcribe_live_caption(
     is_final: bool,
 ) -> dict:
     slots = _acquire_process_slots()
+    try:
+        with models.use_recognition():
+            return _transcribe_live_audio(audio, language, task, context, session_id, profile, is_final)
+    finally:
+        _release_process_slots(slots)
+
+
+def _transcribe_live_audio(
+    audio: bytes,
+    language: str | None,
+    task: str,
+    context: str | None,
+    session_id: str,
+    profile: str,
+    is_final: bool,
+) -> dict:
     temporary: Path | None = None
     try:
         model = models.load_stt()
@@ -983,7 +1054,6 @@ def _transcribe_live_caption(
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
-        _release_process_slots(slots)
 
 
 @app.post("/live-captions")

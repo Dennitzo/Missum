@@ -2,7 +2,7 @@
 
 Nach einem belegten Zwischenergebnis den Fortschritt in gut vorlesbaren deutschen Sätzen erklären. Keine pauschale generische Startankündigung.
 Unmittelbar nach jeder Phase oder jedem Meilenstein coding.updatePlan ausführen, bevor Werkzeuge der nächsten unabhängigen Etappe folgen.
-Je Update höchstens eine Etappe neu abschließen und die nächste aktivieren; keine Abschlüsse mehrerer Etappen nachträglich sammeln.
+Mehrere bereits erledigte Etappen dürfen im selben Update abgeschlossen werden. Aktiviere dabei höchstens eine nächste Etappe.
 Blockaden und Rücksprünge ebenfalls sofort mit Status und Erklärung speichern. Zusammengehörige Werkzeuge innerhalb einer Etappe dürfen gebündelt bleiben.
 Aufgaben, Zielgenauigkeit, Voraussetzungen, Einheiten und Abhängigkeiten explizit klären.
 Ein Gesamtplan beschreibt die Richtung, nicht die vollständige Lösung aller späteren Probleme.
