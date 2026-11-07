@@ -1,13 +1,14 @@
 namespace Missum.Ai.Contracts;
 
 /// <summary>An additional instruction for the same active conversation, model and workspace.</summary>
-public sealed record RunSteeringRequest(string SessionId, string InputId, string Text);
+public sealed record RunSteeringRequest(string SessionId, string InputId, string Text, string? ContextText = null, IReadOnlyList<string>? UploadIds = null);
 
 public sealed record RunSteeringAccepted(string RunId, string InputId, long Sequence, string State, bool Duplicate);
 
 /// <summary>VisibleTextOffset is an absolute character offset in canonical persisted main text (RunVisibleText.Canonicalize), not raw model bytes.</summary>
 public sealed record RunSteeringEvent(string InputId, long Sequence, string SessionId, string Text,
-    int? VisibleTextOffset = null, string? AgentId = null, string? AgentProfile = null);
+    int? VisibleTextOffset = null, string? AgentId = null, string? AgentProfile = null,
+    string? ContextText = null, IReadOnlyList<string>? UploadIds = null);
 
 public static class RunSteeringEventTypes
 {

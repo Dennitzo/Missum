@@ -8,7 +8,7 @@ namespace Missum.Core.Models;
 
 /// <summary>Small display-only facts. Large tool inputs, outputs and code remain independently deferred.</summary>
 public sealed record ToolStepDisplayHeader(int Version = 1, string Summary = "", string FilePath = "",
-    long? AddedLines = null, long? RemovedLines = null, string? PlanReceiptKind = null);
+    long? AddedLines = null, long? RemovedLines = null, string? PlanReceiptKind = null, long? SteeringSequence = null);
 
 public static class AssistantToolStepHeaders
 {
@@ -23,6 +23,7 @@ public static class AssistantToolStepHeaders
     public static ToolStepDisplayHeader Create(AssistantToolStep step)
     {
         ArgumentNullException.ThrowIfNull(step);
+        if (step.Tool == "assistant.steering" && step.InputJson is null && step.DisplayHeader is { Version: CurrentVersion } steeringHeader) return steeringHeader;
         if (step.DetailsDeferred && step.DisplayHeader is { Version: CurrentVersion } saved) return saved;
         // Repeated display ticks retain the same immutable receipt objects. A new
         // streaming record gets its own projection, without retaining old payloads.
@@ -37,6 +38,9 @@ public static class AssistantToolStepHeaders
         using var outputDocument = ReadObject(step.OutputJson);
         var input = inputDocument?.RootElement ?? default;
         var output = outputDocument?.RootElement ?? default;
+        if (step.Tool == "assistant.steering")
+            return new(CurrentVersion, SteeringSequence: input.ValueKind == JsonValueKind.Object
+                && input.TryGetProperty("sequence", out var sequence) && sequence.ValueKind == JsonValueKind.Number && sequence.TryGetInt64(out var parsedSequence) ? parsedSequence : null);
         var detail = step.Detail ?? step.Explanation ?? "";
         var diff = ReadDiff(detail, output);
         var path = ReadDetailPath(detail);

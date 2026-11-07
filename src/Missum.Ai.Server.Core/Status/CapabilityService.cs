@@ -102,6 +102,7 @@ public sealed class CapabilityService
             true),
         SupportsCodingSessionContext: true,
         SupportsRunSteering: true,
+        SupportsSteeringAttachments: true,
         Extensions:
         [
             new("builtin.web", "1.0.0", "active", ["web.search", "web.fetch", "web.deepResearch"]),

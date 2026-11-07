@@ -8,12 +8,17 @@ namespace Missum.Ai.Server.Tests;
 public sealed class StorageCleanupServiceTests
 {
     [Theory]
-    [InlineData("Running")]
-    [InlineData("Completed")]
-    [InlineData("Failed")]
-    [InlineData("Cancelled")]
-    [InlineData("Interrupted")]
-    public async Task CleanupKeepsExpiredUploadReferencedByAnyRetainedRun(string state)
+    [InlineData("Running", false)]
+    [InlineData("Completed", false)]
+    [InlineData("Failed", false)]
+    [InlineData("Cancelled", false)]
+    [InlineData("Interrupted", false)]
+    [InlineData("Running", true)]
+    [InlineData("Completed", true)]
+    [InlineData("Failed", true)]
+    [InlineData("Cancelled", true)]
+    [InlineData("Interrupted", true)]
+    public async Task CleanupKeepsExpiredUploadReferencedByAnyRetainedRun(string state, bool steering)
     {
         using var context = new TestServerContext();
         var uploadId = "upload-" + Guid.NewGuid().ToString("N");
@@ -40,8 +45,11 @@ public sealed class StorageCleanupServiceTests
         var (run, _) = await repository.CreateAsync(new RunRequest(
             MissumAiProtocol.Version,
             RunMode.Coding,
-            [new RunMessage("user", [new ContentPart("upload", UploadId: uploadId)])],
-            UploadIds: [uploadId]), null);
+            [new RunMessage("user", steering ? [new ContentPart("text", Text: "Task")] : [new ContentPart("upload", UploadId: uploadId)])],
+            UploadIds: steering ? null : [uploadId]), null);
+        if (steering)
+            await repository.AppendEventAsync(run.RunId, RunSteeringEventTypes.Accepted,
+                new RunSteeringEvent("input", 1, "session", "Neue Datei", UploadIds: [uploadId]));
         await using (var connection = await context.Database.OpenConnectionAsync())
         {
             await using var command = connection.CreateCommand();

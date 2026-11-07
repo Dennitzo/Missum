@@ -99,6 +99,11 @@ public sealed class RunSteeringClientTests
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         var resume = service.ResumePendingAsync(update => { updates.Enqueue(update); return Task.CompletedTask; }, deadline.Token);
         await shared.StreamReady.Task.WaitAsync(deadline.Token);
+        using (var document = new MemoryStream(Encoding.UTF8.GetBytes("Neue Messdaten: 42")))
+            Assert.True((await environment.Get<IDocumentIngestor>().ImportAsync(session.Id, "Messdaten.txt", document, deadline.Token)).Success);
+        using (var image = new MemoryStream(Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aP3sAAAAASUVORK5CYII=")))
+            await environment.Get<IAssistantAttachmentRepository>().ImportAsync(session.Id, "Referenz.png", "image/png", image, deadline.Token);
+
         await Assert.ThrowsAsync<InvalidOperationException>(() => service.SteerAsync(Guid.NewGuid(), "Fremd", "wrong", "run-steer", deadline.Token));
         await Assert.ThrowsAsync<InvalidOperationException>(() => service.SteerAsync(session.Id, "Anderer Lauf", "wrong-run", "stale-run", deadline.Token));
         var coordinator = new AssistantCoordinator(chats, environment.Get<IDocumentIngestor>(),
@@ -114,6 +119,10 @@ public sealed class RunSteeringClientTests
             if (type == "chat.steer.accepted") accepted = JsonSerializer.SerializeToElement(payload, JsonSerializerOptions.Web);
             return Task.CompletedTask;
         }, deadline.Token);
+        var sent = await shared.Steered.Task;
+        Assert.Equal("steering-upload", Assert.Single(sent.UploadIds!));
+        Assert.Contains("Messdaten.txt", sent.ContextText);
+        Assert.Contains("Referenz.png", sent.ContextText);
         var acceptedLocally = (await chats.GetMessageAsync(turn.AssistantMessage.Id))!;
         var acceptedStep = Assert.Single(acceptedLocally.ToolSteps!, step => step.Id == "steering-input-one");
         Assert.Equal("running", acceptedStep.Status);
@@ -140,18 +149,19 @@ public sealed class RunSteeringClientTests
         Assert.Equal("Nur die Änderung erklären.", input.Detail);
         Assert.Equal("completed", input.Status);
         Assert.Equal("", (await chats.GetSessionAsync(session.Id))!.Draft);
-        Assert.Single(shared.Requests, request => request.StartsWith("POST ", StringComparison.Ordinal));
+        Assert.Single(shared.Requests, request => request == "POST /v1/runs/run-steer/steer");
         Assert.Contains("POST /v1/runs/run-steer/steer", shared.Requests);
         Assert.DoesNotContain(updates, update => update.Kind is MissumAiAssistantUpdateKind.Cancelled or MissumAiAssistantUpdateKind.Failed);
         var history = MissumAiAssistantService.BuildHistoryMessages(await chats.ListMessagesAsync(session.Id), 10_000);
         Assert.Equal(["user", "assistant", "user", "assistant"], history.Select(message => message.Role));
-        Assert.Equal(["Ursprünglicher Auftrag", visiblePrefix, "Nur die Änderung erklären.", rawTail.Replace("\r\n", "\n", StringComparison.Ordinal)],
+        Assert.Equal(["Ursprünglicher Auftrag", visiblePrefix, "Nur die Änderung erklären.\n\n" + sent.ContextText, rawTail.Replace("\r\n", "\n", StringComparison.Ordinal)],
             history.Select(message => string.Concat(message.Content.Select(part => part.Text))));
 
         await chats.SaveDraftAsync(session.Id, "Ein neuer Entwurf nach Abschluss");
         await chats.RenameSessionAsync(session.Id, "Titel einer neueren Eingabe");
         var duplicate = await service.SteerAsync(session.Id, "Nur die Änderung erklären.", "input-one", "run-steer", deadline.Token);
         Assert.True(duplicate.Duplicate);
+        Assert.Single(shared.Requests, request => request == "POST /v1/uploads");
         Assert.Equal(accepted.Value.GetProperty("runId").GetString(), duplicate.RunId);
         await coordinator.HandleAsync(steeringEnvelope, static (_, _, _) => Task.CompletedTask, deadline.Token);
         Assert.Equal("Titel einer neueren Eingabe", (await chats.GetSessionAsync(session.Id))!.Title);
@@ -265,6 +275,7 @@ public sealed class RunSteeringClientTests
         internal string? InitialDelta { get; init; }
         internal int VisibleTextOffset { get; init; } = 5;
         internal TextDeltaEvent Continuation { get; init; } = new("Neu.");
+        internal UploadManifest? UploadManifest { get; set; }
         internal ConcurrentQueue<string> Requests { get; } = new();
         internal TaskCompletionSource StreamReady { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal TaskCompletionSource<RunSteeringRequest> Steered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -278,7 +289,17 @@ public sealed class RunSteeringClientTests
         {
             var path = request.RequestUri!.AbsolutePath;
             shared.Requests.Enqueue(request.Method + " " + path);
-            if (path == "/v1/capabilities") return Response(new { protocolVersion = "1.0", supportsRunSteering = true });
+            if (path == "/v1/capabilities") return Response(new { protocolVersion = "1.0", supportsRunSteering = true, supportsSteeringAttachments = true });
+            if (path == "/v1/uploads")
+            {
+                shared.UploadManifest = JsonSerializer.Deserialize<UploadManifest>(await request.Content!.ReadAsStringAsync(cancellationToken), Json)!;
+                return Response(new UploadCreated("steering-upload", MissumAiProtocol.UploadChunkSize, 1, [], DateTimeOffset.UtcNow.AddHours(1)));
+            }
+            if (path == "/v1/uploads/steering-upload/chunks/0")
+                return Response(new UploadChunkReceipt("steering-upload", 0, shared.UploadManifest!.Sha256, shared.UploadManifest.Length, true));
+            if (path == "/v1/uploads/steering-upload/complete")
+                return Response(new UploadCompleted("steering-upload", shared.UploadManifest!.FileName, shared.UploadManifest.MediaType,
+                    shared.UploadManifest.Length, shared.UploadManifest.Sha256, DateTimeOffset.UtcNow.AddHours(1)));
             if (path.EndsWith("/steer", StringComparison.Ordinal))
             {
                 var input = JsonSerializer.Deserialize<RunSteeringRequest>(await request.Content!.ReadAsStringAsync(cancellationToken), Json)!;
@@ -293,8 +314,8 @@ public sealed class RunSteeringClientTests
                 await shared.ReleaseEvents.Task.WaitAsync(cancellationToken);
                 var events = new List<(string Type, object Data)>();
                 if (shared.InitialDelta is { } prefix) events.Add((RunEventTypes.TextDelta, new TextDeltaEvent(prefix)));
-                events.Add((RunSteeringEventTypes.Accepted, new RunSteeringEvent(input.InputId, 1, input.SessionId, input.Text)));
-                events.Add((RunSteeringEventTypes.Applied, new RunSteeringEvent(input.InputId, 1, input.SessionId, input.Text, shared.VisibleTextOffset)));
+                events.Add((RunSteeringEventTypes.Accepted, new RunSteeringEvent(input.InputId, 1, input.SessionId, input.Text, ContextText: input.ContextText, UploadIds: input.UploadIds)));
+                events.Add((RunSteeringEventTypes.Applied, new RunSteeringEvent(input.InputId, 1, input.SessionId, input.Text, shared.VisibleTextOffset, ContextText: input.ContextText, UploadIds: input.UploadIds)));
                 events.Add((RunEventTypes.TextDelta, shared.Continuation));
                 events.Add((RunEventTypes.RunCompleted, new RunCompletedEvent("Titel aus AI-Antwort", "fixture", 20, 5)));
                 var stream = string.Concat(events.Select((value, index) => "data: " + JsonSerializer.Serialize(new RunEvent(index + 1,

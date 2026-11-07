@@ -2010,8 +2010,10 @@ public sealed partial class RunProcessor : BackgroundService
             preserveSessionPromptPrefix = true;
             foreach (var input in inputs)
             {
-                messages.Add(new LmChatMessage("user", input.Text));
-                request = request with { Messages = [.. request.Messages, new("user", [new("text", Text: input.Text)])] };
+                var steeringContext = string.IsNullOrWhiteSpace(input.ContextText) ? input.Text : input.Text + "\n\n" + input.ContextText;
+                messages.Add(new LmChatMessage("user", steeringContext));
+                request = request with { Messages = [.. request.Messages, new("user", [new("text", Text: steeringContext)])],
+                    UploadIds = (request.UploadIds ?? []).Concat(input.UploadIds ?? []).Distinct(StringComparer.Ordinal).ToArray() };
                 appliedSteeringSequence = input.Sequence;
                 if (workingState is not null)
                     workingState = workingState with { OriginalTask = workingState.OriginalTask + "\n\nWeitere Nutzereingabe:\n" + input.Text,

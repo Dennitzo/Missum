@@ -54,6 +54,8 @@ public sealed class StorageCleanupService : BackgroundService
                     WHERE (
                         EXISTS (SELECT 1 FROM json_each(run.request_json, '$.uploadIds') item WHERE item.value = upload.upload_id)
                         OR EXISTS (SELECT 1 FROM json_tree(run.request_json) item WHERE item.key = 'uploadId' AND item.value = upload.upload_id)
+                        OR EXISTS (SELECT 1 FROM run_events e, json_each(e.data_json,'$.uploadIds') item
+                            WHERE e.run_id=run.run_id AND e.event_type='run.steering.accepted' AND item.value=upload.upload_id)
                       )
                   )
                 UNION ALL
@@ -78,6 +80,8 @@ public sealed class StorageCleanupService : BackgroundService
                     WHERE (
                         EXISTS (SELECT 1 FROM json_each(run.request_json, '$.uploadIds') item WHERE item.value = upload.upload_id)
                         OR EXISTS (SELECT 1 FROM json_tree(run.request_json) item WHERE item.key = 'uploadId' AND item.value = upload.upload_id)
+                        OR EXISTS (SELECT 1 FROM run_events e, json_each(e.data_json,'$.uploadIds') item
+                            WHERE e.run_id=run.run_id AND e.event_type='run.steering.accepted' AND item.value=upload.upload_id)
                       )
                   );
                 DELETE FROM artifacts AS artifact WHERE {ExpiredPlaybackArtifact};

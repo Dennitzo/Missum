@@ -36,7 +36,15 @@ public sealed partial class RunRepository
         command.CommandText = "SELECT request_json FROM runs WHERE run_id = $id;";
         command.Parameters.AddWithValue("$id", runId);
         var json = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) as string;
-        return json is null ? null : DeserializeRequest(json, _database.JsonOptions);
+        var request = json is null ? null : DeserializeRequest(json, _database.JsonOptions);
+        if (request is null) return null;
+        // The original POST remains the immutable idempotency binding. Applied
+        // steering grants are a durable runtime projection, not a request rewrite.
+        command.CommandText = "SELECT DISTINCT j.value FROM run_events e, json_each(e.data_json,'$.uploadIds') j WHERE e.run_id=$id AND e.event_type='run.steering.applied' AND j.type='text';";
+        var uploads = (request.UploadIds ?? []).ToHashSet(StringComparer.Ordinal);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false)) uploads.Add(reader.GetString(0));
+        return uploads.Count == (request.UploadIds?.Count ?? 0) ? request : request with { UploadIds = uploads.ToArray() };
     }
 
     public async Task<RunSnapshot?> GetAsync(string runId, CancellationToken cancellationToken = default)
@@ -750,8 +758,7 @@ public sealed partial class RunRepository
                 OR (r.mode IN ('Auto','General') AND json_extract(r.request_json, '$.sessionId') IS NOT NULL))
             ON CONFLICT(run_id) DO UPDATE SET checkpoint_json = excluded.checkpoint_json;
             INSERT INTO run_events(run_id, event_type, data_json, created_at)
-            SELECT $run, 'run.steering.applied', json_object('inputId', input_id, 'sequence', sequence,
-                'sessionId', session_id, 'text', text, 'visibleTextOffset', $offset), $updated
+            SELECT $run, 'run.steering.applied', json_set(COALESCE((SELECT data_json FROM run_events e WHERE e.run_id=run_steering_inputs.run_id AND e.event_type='run.steering.accepted' AND json_extract(e.data_json,'$.inputId')=run_steering_inputs.input_id ORDER BY e.id DESC LIMIT 1), json_object('inputId',input_id,'sequence',sequence,'sessionId',session_id,'text',text)), '$.visibleTextOffset', $offset), $updated
             FROM run_steering_inputs
             WHERE run_id = $run AND sequence <= $steering AND applied_at IS NULL
                 AND EXISTS (SELECT 1 FROM runs WHERE run_id = $run AND state IN ('Queued','Running','WaitingForClient','Interrupted'))
@@ -879,7 +886,7 @@ public sealed partial class RunRepository
             if (steering?.VisibleTextOffset is not { } offset || offset < segmentStart || offset > visible.Length) return null;
             var segment = visible[segmentStart..offset];
             if (!string.IsNullOrWhiteSpace(segment)) history.Add(new("assistant", [new("text", Text: segment)]));
-            history.Add(new("user", [new("text", Text: steering.Text)]));
+            history.Add(new("user", [new("text", Text: string.IsNullOrWhiteSpace(steering.ContextText) ? steering.Text : steering.Text + "\n\n" + steering.ContextText)]));
             segmentStart = offset;
         }
         // The persisted request remains the immutable Create idempotency binding.

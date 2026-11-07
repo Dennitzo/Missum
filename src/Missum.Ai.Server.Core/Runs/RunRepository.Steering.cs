@@ -16,6 +16,10 @@ public sealed partial class RunRepository
             || string.IsNullOrWhiteSpace(input.InputId) || input.InputId.Length > 128
             || string.IsNullOrWhiteSpace(input.Text) || input.Text.Length > 128_000)
             throw new ArgumentException("Umlenkung benötigt sessionId, eine eindeutige inputId und Text (höchstens 128000 Zeichen).");
+        if (input.ContextText?.Length > 28_000 || input.UploadIds?.Count > 32
+            || input.UploadIds?.Any(id => string.IsNullOrWhiteSpace(id) || id.Length > 128) == true
+            || input.UploadIds?.Distinct(StringComparer.Ordinal).Count() != input.UploadIds?.Count)
+            throw new ArgumentException("Ungültige Anhangsdaten der Umlenkung.");
         await using var connection = await _database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         // An immediate write transaction serializes acceptance with terminal completion.
         await using var transaction = connection.BeginTransaction(deferred: false);
@@ -49,6 +53,9 @@ public sealed partial class RunRepository
                 if (!string.Equals(reader.GetString(1), input.Text, StringComparison.Ordinal))
                     throw new InvalidOperationException("inputId ist bereits an einen anderen Umlenkungstext gebunden.");
                 var origin = reader.IsDBNull(3) ? null : JsonSerializer.Deserialize<RunSteeringEvent>(reader.GetString(3), _database.JsonOptions);
+                if (!string.Equals(origin?.ContextText, input.ContextText, StringComparison.Ordinal)
+                    || !(origin?.UploadIds ?? []).SequenceEqual(input.UploadIds ?? [], StringComparer.Ordinal))
+                    throw new InvalidOperationException("inputId ist bereits an andere Anhänge gebunden.");
                 if (origin is { AgentId: not null } or { AgentProfile: not null })
                     throw new InvalidOperationException("inputId ist bereits an einen anderen Absender gebunden.");
                 if (reader.IsDBNull(2)) _steeringNotifier.Notify(runId);
@@ -59,6 +66,15 @@ public sealed partial class RunRepository
             throw new InvalidOperationException("Dieser Lauf ist bereits beendet und kann nicht mehr umgelenkt werden.");
         if (request.Workload?.Kind is RunWorkloadKind.ImageGeneration or RunWorkloadKind.MediaAnalysis)
             throw new InvalidOperationException("Nur General- und Coding-Konversationen können umgelenkt werden.");
+        foreach (var upload in input.UploadIds ?? [])
+        {
+            command.CommandText = "SELECT COUNT(*) FROM uploads WHERE upload_id=$upload AND state='complete' AND expires_at > $expires;";
+            command.Parameters.AddWithValue("$upload", upload);
+            command.Parameters.AddWithValue("$expires", MissumAiDatabase.FormatTimestamp(DateTimeOffset.UtcNow));
+            if (Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 1)
+                throw new ArgumentException("Ein Anhang fehlt, ist unvollständig oder bereits abgelaufen.");
+            command.Parameters.RemoveAt("$upload"); command.Parameters.RemoveAt("$expires");
+        }
         command.Parameters.AddWithValue("$session", input.SessionId);
         command.Parameters.AddWithValue("$text", input.Text);
         command.Parameters.AddWithValue("$now", MissumAiDatabase.FormatTimestamp(DateTimeOffset.UtcNow));
@@ -71,7 +87,7 @@ public sealed partial class RunRepository
         command.CommandText = "INSERT INTO run_events(run_id, event_type, data_json, created_at) VALUES($run, $type, $data, $now);";
         command.Parameters.AddWithValue("$type", RunSteeringEventTypes.Accepted);
         command.Parameters.AddWithValue("$data", JsonSerializer.Serialize(
-            new RunSteeringEvent(input.InputId, sequence, input.SessionId, input.Text), _database.JsonOptions));
+            new RunSteeringEvent(input.InputId, sequence, input.SessionId, input.Text, ContextText: input.ContextText, UploadIds: input.UploadIds), _database.JsonOptions));
         _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         _notifier.Notify(runId);
@@ -85,14 +101,20 @@ public sealed partial class RunRepository
         await using var connection = await _database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT input_id, sequence, session_id, text
-            FROM run_steering_inputs WHERE run_id = $run AND applied_at IS NULL ORDER BY sequence;
+            SELECT input_id, sequence, session_id, text,
+                (SELECT data_json FROM run_events e WHERE e.run_id=i.run_id AND e.event_type='run.steering.accepted'
+                 AND json_extract(e.data_json,'$.inputId')=i.input_id ORDER BY e.id DESC LIMIT 1)
+            FROM run_steering_inputs i WHERE run_id = $run AND applied_at IS NULL ORDER BY sequence;
             """;
         command.Parameters.AddWithValue("$run", runId);
         List<RunSteeringEvent> result = [];
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            result.Add(new(reader.GetString(0), reader.GetInt64(1), reader.GetString(2), reader.GetString(3)));
+        {
+            var accepted = reader.IsDBNull(4) ? null : JsonSerializer.Deserialize<RunSteeringEvent>(reader.GetString(4), _database.JsonOptions);
+            result.Add(new(reader.GetString(0), reader.GetInt64(1), reader.GetString(2), reader.GetString(3),
+                ContextText: accepted?.ContextText, UploadIds: accepted?.UploadIds));
+        }
         return result;
     }
 

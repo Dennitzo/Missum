@@ -29,9 +29,9 @@ public sealed partial class SqliteConversationSnapshotRepository
         prompts.AddRange((await ReadSteeringPromptsAsync(connection, transaction, sessionId, cancellationToken).ConfigureAwait(false))
             .Select(target => target.Prompt));
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return prompts.OrderBy(prompt => prompt.CreatedAt)
+        return prompts.OrderBy(prompt => prompt.ParentCreatedAt ?? prompt.CreatedAt)
             .ThenBy(prompt => prompt.ParentMessageId ?? prompt.Id)
-            .ThenBy(prompt => prompt.StepOrdinal ?? -1).ThenBy(prompt => prompt.Id).ToArray();
+            .ThenBy(prompt => prompt.SteeringSequence ?? prompt.StepOrdinal ?? -1).ThenBy(prompt => prompt.StepOrdinal ?? -1).ThenBy(prompt => prompt.Id).ToArray();
     }
 
     public async Task<ConversationPage?> GetPromptPageAsync(Guid sessionId, Guid promptId, CancellationToken cancellationToken = default)
@@ -109,7 +109,9 @@ public sealed partial class SqliteConversationSnapshotRepository
             SELECT m.id,m.created_at,s.step_id,s.ordinal,s.content_offset,
                 COALESCE(json_extract(s.header_json,'$.startedAt'),json_extract(s.header_json,'$.completedAt'),
                     json_extract(s.header_json,'$.updatedAt'),m.created_at),
-                substr(COALESCE(json_extract(s.header_json,'$.detail'),json_extract(s.step_json,'$.detail')),1,256)
+                substr(COALESCE(json_extract(s.header_json,'$.detail'),json_extract(s.step_json,'$.detail')),1,256),
+                COALESCE(json_extract(s.header_json,'$.displayHeader.steeringSequence'),
+                    json_extract(CASE WHEN json_valid(json_extract(s.step_json,'$.inputJson')) THEN json_extract(s.step_json,'$.inputJson') ELSE '{}' END,'$.sequence'))
             FROM chat_messages m JOIN chat_tool_steps s ON s.message_id=m.id
             WHERE m.session_id=$session AND m.role='assistant' AND s.tool_name='assistant.steering'
                 AND EXISTS(SELECT 1 FROM chat_tool_step_messages normalized WHERE normalized.message_id=m.id)
@@ -117,7 +119,8 @@ public sealed partial class SqliteConversationSnapshotRepository
             UNION ALL
             SELECT m.id,m.created_at,json_extract(s.value,'$.id'),CAST(s.key AS INTEGER),json_extract(s.value,'$.contentOffset'),
                 COALESCE(json_extract(s.value,'$.startedAt'),json_extract(s.value,'$.completedAt'),
-                    json_extract(s.value,'$.updatedAt'),m.created_at),substr(json_extract(s.value,'$.detail'),1,256)
+                    json_extract(s.value,'$.updatedAt'),m.created_at),substr(json_extract(s.value,'$.detail'),1,256),
+                json_extract(CASE WHEN json_valid(json_extract(s.value,'$.inputJson')) THEN json_extract(s.value,'$.inputJson') ELSE '{}' END,'$.sequence')
             FROM chat_messages m,json_each(CASE WHEN json_valid(m.tool_steps_json) THEN m.tool_steps_json ELSE '[]' END) s
             WHERE m.session_id=$session AND m.role='assistant'
                 AND NOT EXISTS(SELECT 1 FROM chat_tool_step_messages normalized WHERE normalized.message_id=m.id)
@@ -136,7 +139,8 @@ public sealed partial class SqliteConversationSnapshotRepository
             var created = !reader.IsDBNull(5) && DateTimeOffset.TryParse(reader.GetString(5),
                 System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var at) ? at : parentAt;
             targets.Add(new(new(SteeringPromptIdentity.Create(parent, stepId), created, reader.GetString(6), parent, stepId,
-                reader.IsDBNull(4) ? null : reader.GetInt32(4), reader.GetInt64(3)), parent, parentAt));
+                reader.IsDBNull(4) ? null : reader.GetInt32(4), reader.GetInt64(3), parentAt,
+                reader.IsDBNull(7) ? null : reader.GetInt64(7)), parent, parentAt));
         }
         return targets;
     }

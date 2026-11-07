@@ -73,11 +73,16 @@ public sealed partial class NativeAssistantPage
             var stepId = "steering-" + Guid.NewGuid().ToString("N");
             const string steering = "Vergleiche zusätzlich den Grenzfall.";
             await chats.SaveToolStepDeltaAsync(assistant.Id, new(stepId, "assistant.steering", "completed", steering,
-                ContentOffset: assistant.Content.Length, UpdatedAt: DateTimeOffset.UtcNow), _lifetime.Token);
+                ContentOffset: assistant.Content.Length, InputJson: """{"sequence":1}""", UpdatedAt: DateTimeOffset.UtcNow), _lifetime.Token);
             var steeringId = MissumAiAssistantService.SteeringPromptMessageId(assistant.Id, stepId).ToString("D");
+            var newestStepId = "steering-" + Guid.NewGuid().ToString("N");
+            await chats.SaveToolStepDeltaAsync(assistant.Id, new(newestStepId, "assistant.steering", "running", "Prüfe nun die neue Abbildung.",
+                ContentOffset: assistant.Content.Length, InputJson: """{"sequence":2}""", StartedAt: DateTimeOffset.UtcNow.AddYears(-5),
+                UpdatedAt: DateTimeOffset.UtcNow), _lifetime.Token);
+            var newestSteeringId = MissumAiAssistantService.SteeringPromptMessageId(assistant.Id, newestStepId).ToString("D");
             await ShowStoredSessionAsync(session.Id);
             await ApplyStoredIndexAsync(session.Id);
-            AssertPromptIds(first.Id.ToString("D"), second.Id.ToString("D"), steeringId);
+            AssertPromptIds(first.Id.ToString("D"), second.Id.ToString("D"), steeringId, newestSteeringId);
             if (new ButtonAutomationPeer(_promptTimelineMarkers[steeringId].HitTarget).GetPattern(PatternInterface.Invoke) is not IInvokeProvider invoke)
                 throw new InvalidOperationException("Der gespeicherte Umlenkungsprompt besitzt keinen bedienbaren Zeitachsenmarker.");
             invoke.Invoke();
@@ -85,14 +90,17 @@ public sealed partial class NativeAssistantPage
                 && _promptNavigation?.Id == steeringId && double.IsFinite(_promptTimelineMarkers[steeringId].TargetOffset),
                 "Der gespeicherte Umlenkungsprompt lässt sich nicht über seine stabile Identität ansteuern.");
             CancelPromptTimelineNavigation();
+            OnScrollToBottom(this, new RoutedEventArgs());
+            await WaitForPagingSmokeAsync(() => _activePromptTimelineId == newestSteeringId,
+                "Die neueste gespeicherte Umlenkung wurde trotz Annahmesequenz nicht als aktuellster Prompt erkannt.");
 
             var revision = (await chats.GetSessionAsync(session.Id, _lifetime.Token))!.ConversationRevision;
             await ApplyStoredIndexAsync(other.Id);
-            AssertPromptIds(first.Id.ToString("D"), second.Id.ToString("D"), steeringId);
+            AssertPromptIds(first.Id.ToString("D"), second.Id.ToString("D"), steeringId, newestSteeringId);
             await ShowStoredSessionAsync(other.Id);
             AssertPromptIds();
             await ShowStoredSessionAsync(session.Id);
-            AssertPromptIds(first.Id.ToString("D"), second.Id.ToString("D"), steeringId);
+            AssertPromptIds(first.Id.ToString("D"), second.Id.ToString("D"), steeringId, newestSteeringId);
 
             var agentId = "prompt-identity:" + Guid.NewGuid().ToString("N");
             var childPrompt = Guid.NewGuid().ToString("D");
@@ -113,7 +121,7 @@ public sealed partial class NativeAssistantPage
             await ApplyStoredIndexAsync(session.Id);
             AssertPromptIds(childPrompt);
             ShowParentConversation();
-            AssertPromptIds(first.Id.ToString("D"), second.Id.ToString("D"), steeringId);
+            AssertPromptIds(first.Id.ToString("D"), second.Id.ToString("D"), steeringId, newestSteeringId);
             if ((await chats.GetSessionAsync(session.Id, _lifetime.Token))!.ConversationRevision != revision)
                 throw new InvalidOperationException("Die Zeitachsenprüfung hat beim Navigieren den gespeicherten Verlauf verändert.");
 
@@ -137,7 +145,7 @@ public sealed partial class NativeAssistantPage
                     repeatedDatabaseEventsIdempotent = true, identicalTextRetainsDistinctIds = true,
                     staleEmptyIndexKeepsNewPrompts = true, chronologicalNumbering = true,
                     answerStreamingKeepsPromptCount = true, storedSteeringHasStableMarker = true,
-                    steeringMarkerNavigates = true, foreignIndexIgnored = true, sessionIsolation = true,
+                    steeringMarkerNavigates = true, skewedSteeringClockKeepsOrder = true, latestSteeringSelected = true, foreignIndexIgnored = true, sessionIsolation = true,
                     subagentIsolation = true, authoritativeEmptySnapshotClearsMarkers = true,
                     navigationLeavesDurableRevisionUnchanged = true, modelRequests = 0, userDataModified = false,
                 }, JsonOptions), _lifetime.Token);

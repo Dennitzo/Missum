@@ -29,7 +29,8 @@ public sealed partial class NativeAssistantPage
     private bool _promptHistoryGapLoading;
     private sealed record PromptHistoryGap(string Key, ConversationCursor Before, ConversationCursor After);
     private sealed record PromptTimelineEntry(string Id, DateTimeOffset CreatedAt, PromptTimelinePreviewContent Preview,
-        string MessageId, string? StepId = null, int? ContentOffset = null, long? StepOrdinal = null);
+        string MessageId, string? StepId = null, int? ContentOffset = null, long? StepOrdinal = null,
+        DateTimeOffset? ParentCreatedAt = null, long? SteeringSequence = null, bool DatabaseIndexed = false);
     private bool HasPromptTimelineTarget => _promptNavigation?.IsCurrent(ConversationViewKey, _conversationScrollIntent) == true;
     private bool IsPromptTimelineNavigationPending => HasPromptTimelineTarget;
     private readonly HashSet<string> _targetedPromptWindows = new(StringComparer.Ordinal);
@@ -117,7 +118,7 @@ public sealed partial class NativeAssistantPage
                 { _promptTimelineEntries.Remove(id); continue; }
                 if (string.IsNullOrWhiteSpace(detail)) continue;
                 _promptTimelineEntries.TryGetValue(id, out var prior);
-                var at = prior?.CreatedAt ?? (DateTimeOffset.TryParse(S(step, "startedAt", S(step, "completedAt", S(step, "updatedAt"))), out var created)
+                var at = prior?.DatabaseIndexed == true ? prior.CreatedAt : (DateTimeOffset.TryParse(S(step, "startedAt", S(step, "completedAt", S(step, "updatedAt"))), out var created)
                     ? created : MessageCreatedAt(message));
                 int? position = int.TryParse(S(step, "contentOffset"), out var parsedOffset) ? parsedOffset : null;
                 var content = MessageContent(message);
@@ -125,14 +126,15 @@ public sealed partial class NativeAssistantPage
                 var answer = content.Substring(start, Math.Min(256, content.Length - start));
                 _promptTimelineEntries[id] = new(id, at, new(NativePromptTimelineState.PreviewText(detail, 118),
                     NativePromptTimelineState.PreviewText(answer, 190)), messageId, stepId, position,
-                    ProjectionFor(message).StepOrdinal(stepId) ?? prior?.StepOrdinal ?? ordinal);
+                    ProjectionFor(message).StepOrdinal(stepId) ?? prior?.StepOrdinal ?? ordinal,
+                    prior?.ParentCreatedAt ?? MessageCreatedAt(message),
+                    step.TryGetProperty("displayHeader", out var displayHeader) && long.TryParse(S(displayHeader, "steeringSequence"), out var sequence)
+                        ? sequence : prior?.SteeringSequence, prior?.DatabaseIndexed == true);
             }
         }
         if (ActiveSubagent is null && !_selectionInputSmokeActive && _promptIndexLoadedOwner != ConversationViewKey)
             _ = LoadPromptTimelineIndexAsync();
-        var prompts = _promptTimelineEntries.Values.OrderBy(prompt => prompt.CreatedAt)
-            .ThenBy(prompt => prompt.MessageId, StringComparer.Ordinal).ThenBy(prompt => prompt.StepOrdinal ?? -1)
-            .ThenBy(prompt => prompt.Id, StringComparer.Ordinal).ToArray();
+        var prompts = OrderedPromptTimelineEntries().ToArray();
         var visibility = prompts.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
         if (PromptTimeline.Visibility != visibility) PromptTimeline.Visibility = visibility;
         if (prompts.Length == 0)
@@ -411,7 +413,9 @@ public sealed partial class NativeAssistantPage
             long? ordinal = long.TryParse(S(prompt, "stepOrdinal"), out var stepOrdinal) ? stepOrdinal : null;
             _promptTimelineEntries[id] = new(id, MessageCreatedAt(prompt), prior?.Preview
                 ?? new(NativePromptTimelineState.PreviewText(S(prompt, "preview"), 118), ""),
-                parent, stepId.Length == 0 ? null : stepId, offset, ordinal);
+                parent, stepId.Length == 0 ? null : stepId, offset, ordinal,
+                DateTimeOffset.TryParse(S(prompt, "parentCreatedAt"), out var parentAt) ? parentAt : null,
+                long.TryParse(S(prompt, "steeringSequence"), out var sequence) ? sequence : null, DatabaseIndexed: true);
         }
         _promptIndexLoadedOwner = ConversationViewKey;
         RenderPromptTimeline();
@@ -515,11 +519,20 @@ public sealed partial class NativeAssistantPage
         finally { _promptHistoryGapLoading = false; }
     }
 
+    private IOrderedEnumerable<PromptTimelineEntry> OrderedPromptTimelineEntries() =>
+        _promptTimelineEntries.Values.OrderBy(prompt => prompt.ParentCreatedAt ?? prompt.CreatedAt)
+            .ThenBy(prompt => prompt.MessageId, StringComparer.Ordinal)
+            .ThenBy(prompt => prompt.SteeringSequence ?? prompt.StepOrdinal ?? -1)
+            .ThenBy(prompt => prompt.StepOrdinal ?? -1).ThenBy(prompt => prompt.Id, StringComparer.Ordinal);
+
     private void UpdatePromptTimelineSelection()
     {
         if (PromptTimeline is null || PromptTimeline.Visibility != Visibility.Visible) return;
-        var active = HasPromptTimelineTarget ? _promptNavigation!.Id : NativePromptTimelineState.SelectActive(
-            _promptTimelineMarkers.Select(item => (item.Key, item.Value.TargetOffset)),
+        var chronology = OrderedPromptTimelineEntries().ToArray();
+        var atLatest = ConversationScroll.ScrollableHeight - ConversationScroll.VerticalOffset < 8;
+        var active = HasPromptTimelineTarget ? _promptNavigation!.Id
+            : atLatest ? chronology.LastOrDefault()?.Id : NativePromptTimelineState.SelectActive(
+            chronology.Select(item => (item.Id, _promptTimelineMarkers.TryGetValue(item.Id, out var marker) ? marker.TargetOffset : double.NaN)),
             ConversationScroll.VerticalOffset, ConversationScroll.ViewportHeight, ConversationScroll.ScrollableHeight);
         _activePromptTimelineId = active;
         foreach (var (id, marker) in _promptTimelineMarkers)

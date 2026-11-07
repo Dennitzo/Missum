@@ -18,6 +18,21 @@ public sealed class RunSteeringProcessorTests
     [Theory]
     [InlineData(RunMode.General)]
     [InlineData(RunMode.Coding)]
+    public async Task SteeringDocumentContextReachesTheNextModelTurnTogetherWithTheOriginalPrompt(RunMode mode)
+    {
+        using var harness = new Harness(mode);
+        var run = await harness.CreateAsync();
+        const string context = "MISSUM_DOCUMENT_ATTACHMENTS\nDokument doc-steer, Datei: Messdaten.txt. Inhalte über documents.readPages lesen.";
+        await harness.Repository.AcceptSteeringAsync(run, new("steering-session", "with-document", "Prüfe die neuen Messdaten.", context));
+        await harness.Processor.ProcessAsync(run, CancellationToken.None);
+        var prompt = Assert.Single(harness.Handler.Prompts);
+        Assert.Contains(prompt, message => message.Role == "user" && message.Content == "Prüfe die neuen Messdaten.\n\n" + context);
+        Assert.Equal(RunState.Completed, (await harness.Repository.GetAsync(run))!.State);
+    }
+
+    [Theory]
+    [InlineData(RunMode.General)]
+    [InlineData(RunMode.Coding)]
     public async Task LatestModelSelectionIsAppliedBeforeNextInferenceAndKeepsItsDurableReceipt(RunMode mode)
     {
         using var harness = new Harness(mode);

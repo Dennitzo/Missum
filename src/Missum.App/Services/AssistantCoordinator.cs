@@ -791,7 +791,6 @@ public sealed partial class AssistantCoordinator(
         Stream content,
         CancellationToken cancellationToken = default)
     {
-        EnsureContextCanChange(sessionId);
         var result = await documents.ImportAsync(sessionId, fileName, content, cancellationToken).ConfigureAwait(false);
         if (!result.Success)
         {
@@ -824,7 +823,6 @@ public sealed partial class AssistantCoordinator(
         Stream content,
         CancellationToken cancellationToken = default)
     {
-        EnsureContextCanChange(sessionId);
         _ = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Die Sitzung wurde nicht gefunden.");
         _ = await attachments.ImportAsync(sessionId, fileName, contentType, content, cancellationToken).ConfigureAwait(false);

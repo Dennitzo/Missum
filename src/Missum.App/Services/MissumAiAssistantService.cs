@@ -2197,7 +2197,7 @@ public sealed partial class MissumAiAssistantService(
                             steeringOffsets[steeringId] = ShiftContinuationOffset(visibleOffset, continuationPrefix.Length);
                         await RecordToolStepAsync(steeringId, "assistant.steering",
                             item.Type == RunSteeringEventTypes.Applied ? "completed" : "running", steering.Text,
-                            inputJson: JsonSerializer.Serialize(new { steering.InputId, steering.Sequence, steering.Text, steering.AgentId, steering.AgentProfile }, JsonOptions),
+                            inputJson: JsonSerializer.Serialize(new { steering.InputId, steering.Sequence, steering.Text, steering.AgentId, steering.AgentProfile, steering.ContextText, steering.UploadIds }, JsonOptions),
                             outputJson: JsonSerializer.Serialize(new { applied = item.Type == RunSteeringEventTypes.Applied,
                                 steering.VisibleTextOffset, lastEventId = item.Id }, JsonOptions), eventAt: item.CreatedAt).ConfigureAwait(false);
                         await update(new(MissumAiAssistantUpdateKind.Delta, assistant,

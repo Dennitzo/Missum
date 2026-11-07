@@ -10,6 +10,33 @@ namespace Missum.Tests;
 public sealed class ConversationPromptIndexTests
 {
     [Fact]
+    public async Task SteeringOrderUsesStoredSequenceAndParentChronologyDespiteClockSkewAndReversedArrival()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var chats = environment.Get<IChatRepository>();
+        var snapshots = environment.Get<IConversationSnapshotRepository>();
+        var session = await chats.CreateSessionAsync("Steering chronology");
+        var first = await chats.AddMessageAsync(session.Id, ChatRole.User, "Start", MessageStatus.Completed);
+        var parent = await chats.AddMessageAsync(session.Id, ChatRole.Assistant, "Streaming", MessageStatus.Streaming);
+        var next = await chats.AddMessageAsync(session.Id, ChatRole.User, "Next run", MessageStatus.Completed);
+        var at = DateTimeOffset.Parse("2026-10-01T00:00:00Z", CultureInfo.InvariantCulture);
+        await SetCreatedAsync(environment, first.Id, at);
+        await SetCreatedAsync(environment, parent.Id, at.AddSeconds(1));
+        await SetCreatedAsync(environment, next.Id, at.AddSeconds(5));
+        await chats.SaveToolStepDeltaAsync(parent.Id, new("second", "assistant.steering", "running", "Second steering",
+            InputJson: """{"sequence":20}""", StartedAt: at.AddYears(-5)));
+        await chats.SaveToolStepDeltaAsync(parent.Id, new("first", "assistant.steering", "completed", "First steering",
+            InputJson: """{"sequence":10}""", StartedAt: at.AddYears(5)));
+        var prompts = await snapshots.GetPromptsAsync(session.Id);
+        Assert.Equal(new[] { first.Id, SteeringPromptIdentity.Create(parent.Id, "first"), SteeringPromptIdentity.Create(parent.Id, "second"), next.Id },
+            prompts.Select(prompt => prompt.Id));
+        Assert.Equal(10, prompts[1].SteeringSequence);
+        Assert.Equal(20, prompts[2].SteeringSequence);
+        Assert.Equal(at.AddSeconds(1), prompts[1].ParentCreatedAt);
+        Assert.Equal(prompts, await snapshots.GetPromptsAsync(session.Id));
+    }
+
+    [Fact]
     public async Task FirstStoredPromptIsCountedOnceAndIdenticalLaterPromptsRemainDistinct()
     {
         await using var environment = await TestEnvironment.CreateAsync();

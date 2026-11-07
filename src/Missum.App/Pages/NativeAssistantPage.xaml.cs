@@ -57,6 +57,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     public NativeAssistantPage()
     {
         InitializeComponent();
+        Composer.Paste += OnComposerPaste;
         NativeNotice.Attach(ErrorBar);
         _conversationSelection = new NativeConversationSelection(ConversationContent, MessagesPanel, ConversationScroll)
         {
@@ -895,7 +896,10 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                 {
                     if (_session == steeringSession && Composer.Text.Length == 0) Composer.Text = steeringDraft;
                 }
-                else await RefreshForExternalActivationAsync();
+                else
+                {
+                    await RefreshForExternalActivationAsync();
+                }
             }
             finally { _sendPending = false; SetRunning(); }
             return;
@@ -1003,6 +1007,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     }
     private async void OnAttach(object sender, RoutedEventArgs e)
     {
+        var ownerSession = _session;
         try
         {
             var picker = new FileOpenPicker(); picker.FileTypeFilter.Add("*");
@@ -1012,9 +1017,10 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             {
                 using var stream = await file.OpenStreamForReadAsync();
                 if (_coordinator.SupportedDocumentExtensions.Contains(Path.GetExtension(file.Name)))
-                    await _coordinator.ImportDocumentAsync(_session, file.Name, stream, _lifetime.Token);
-                else await _coordinator.ImportAttachmentAsync(_session, file.Name, file.ContentType, stream, _lifetime.Token);
+                    await _coordinator.ImportDocumentAsync(ownerSession, file.Name, stream, _lifetime.Token);
+                else await _coordinator.ImportAttachmentAsync(ownerSession, file.Name, file.ContentType, stream, _lifetime.Token);
             }
+            if (_session != ownerSession) return;
             await SetInspectorVisibleAsync(true);
             await RefreshForExternalActivationAsync();
         }
