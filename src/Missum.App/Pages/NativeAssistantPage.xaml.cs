@@ -318,6 +318,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                 SyncSessionTabs();
                 RenderMessages();
                 RenderSources(data);
+                RenderComposerAttachments(data);
                 var workspace = S(data, "workspacePath");
                 WorkspaceText.Text = string.IsNullOrEmpty(workspace) ? "Kein Projekt ausgewählt" : Path.GetFileName(workspace.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
                 ToolTipService.SetToolTip(InspectorProjectRow, workspace);
@@ -847,6 +848,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     private void SetRunning()
     {
         RefreshWorkingPlanTab();
+        UpdateComposerAttachmentControls();
         var hasText = !string.IsNullOrWhiteSpace(Composer.Text);
         var captionRunning = _captionActive && _captionSessionId == _session;
         var preparingContinuation = IsContinuationPreparing;
@@ -950,6 +952,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         RefreshWorkingPlanTab();
         ComposerInteractionHost.IsEnabled = _navigationState.CanEditComposer && ActiveSubagent is null;
         Composer.IsReadOnly = !_navigationState.CanEditComposer || ActiveSubagent is not null;
+        UpdateComposerAttachmentControls();
     }
     private async Task<string?> FinishDictationForNavigationAsync(Guid sessionId, string? draft)
     {
@@ -968,6 +971,25 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     }
     private async void OnComposerKeyDown(object sender, KeyRoutedEventArgs e)
     {
+        var control = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control).HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
+        var shift = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Shift).HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
+        if ((e.Key == VirtualKey.V && control && !shift || e.Key == VirtualKey.Insert && shift) && !Composer.IsReadOnly)
+        {
+            try
+            {
+                var data = Clipboard.GetContent();
+                if (data.Contains(StandardDataFormats.StorageItems) || data.Contains(StandardDataFormats.Bitmap))
+                {
+                    // The native TextBox may disable Paste for non-text formats;
+                    // handle the shortcut before its text-only command filter.
+                    e.Handled = true;
+                    await ImportComposerClipboardAsync(data, _session);
+                    return;
+                }
+            }
+            catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { return; }
+            catch (Exception exception) when (exception is not OutOfMemoryException) { ShowError(exception.Message); return; }
+        }
         if (e.Key == VirtualKey.Enter && !Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Shift).HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down))
         { e.Handled = true; if (!string.IsNullOrWhiteSpace(Composer.Text)) await SendAsync(); }
     }
@@ -1008,11 +1030,15 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     private async void OnAttach(object sender, RoutedEventArgs e)
     {
         var ownerSession = _session;
+        var importing = false;
         try
         {
             var picker = new FileOpenPicker(); picker.FileTypeFilter.Add("*");
             InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(App.Current.MainWindow));
             var files = await picker.PickMultipleFilesAsync();
+            if (files.Count == 0) return;
+            importing = true;
+            SetComposerAttachmentImportBusy(ownerSession, true);
             foreach (var file in files)
             {
                 using var stream = await file.OpenStreamForReadAsync();
@@ -1020,11 +1046,17 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                     await _coordinator.ImportDocumentAsync(ownerSession, file.Name, stream, _lifetime.Token);
                 else await _coordinator.ImportAttachmentAsync(ownerSession, file.Name, file.ContentType, stream, _lifetime.Token);
             }
-            if (_session != ownerSession) return;
-            await SetInspectorVisibleAsync(true);
-            await RefreshForExternalActivationAsync();
         }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
         catch (Exception ex) { ShowError(ex.Message); }
+        finally
+        {
+            if (importing)
+            {
+                SetComposerAttachmentImportBusy(ownerSession, false);
+                await RefreshComposerAfterImportAsync(ownerSession);
+            }
+        }
     }
     private static string EffortLabel(string? effort) => effort switch
     {

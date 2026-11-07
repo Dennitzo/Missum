@@ -131,6 +131,13 @@
      <StackPanel Grid.Row="1" MaxWidth="960" HorizontalAlignment="Stretch">
       <Border x:Name="ComposerSurface" Background="{ThemeResource MissumInputBrush}" BorderBrush="{ThemeResource MissumStrokeBrush}" BorderThickness="1" CornerRadius="26" Padding="12,10,10,9">
        <ContentControl x:Name="ComposerInteractionHost" IsTabStop="False" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch">
+       <StackPanel Spacing="9">
+        <StackPanel x:Name="ComposerAttachmentsHost" Visibility="Collapsed" Spacing="5" Margin="8,2,8,0" AutomationProperties.Name="Angehängte Dateien">
+         <TextBlock x:Name="ComposerAttachmentStatus" Visibility="Collapsed" FontSize="12" Foreground="{ThemeResource MissumMutedTextBrush}" Text="Dateien werden hinzugefügt…"/>
+         <ScrollViewer x:Name="ComposerAttachmentsScroll" Visibility="Collapsed" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled" HorizontalScrollMode="Enabled" VerticalScrollMode="Disabled">
+          <StackPanel x:Name="ComposerAttachmentsPanel" Orientation="Horizontal" Spacing="6"/>
+         </ScrollViewer>
+        </StackPanel>
        <Grid RowSpacing="9"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="36"/></Grid.RowDefinitions>
         <TextBox x:Name="Composer" PlaceholderText="Frag etwas" FontSize="16" MinHeight="48" MaxHeight="240" AcceptsReturn="True" TextWrapping="Wrap" Background="Transparent" BorderThickness="0" Padding="12,6" TextChanged="OnDraftChanged" GotFocus="OnComposerGotFocus" LostFocus="OnComposerLostFocus" AutomationProperties.Name="Nachricht">
          <TextBox.Resources>
@@ -168,6 +175,7 @@
          </Button>
         </Grid>
        </Grid>
+       </StackPanel>
        </ContentControl>
       </Border>
      </StackPanel>

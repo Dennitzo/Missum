@@ -19,6 +19,17 @@ public sealed partial class NativeAssistantPage
             var image = data.Contains(StandardDataFormats.Bitmap);
             if (!files && !image) return; // Text uses the native editor, including during steering.
             e.Handled = true;
+            await ImportComposerClipboardAsync(data, ownerSession);
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (Exception exception) when (exception is not OutOfMemoryException) { ShowError(exception.Message); }
+    }
+    private async Task ImportComposerClipboardAsync(DataPackageView data, Guid ownerSession)
+    {
+        var files = data.Contains(StandardDataFormats.StorageItems);
+        SetComposerAttachmentImportBusy(ownerSession, true);
+        try
+        {
             if (files)
             {
                 var items = (await data.GetStorageItemsAsync()).OfType<StorageFile>().ToArray();
@@ -43,13 +54,14 @@ public sealed partial class NativeAssistantPage
                 await encoder.FlushAsync();
                 encoded.Seek(0);
                 using var stream = encoded.AsStreamForRead();
-                await _coordinator.ImportAttachmentAsync(ownerSession, $"Clipboard-{Guid.NewGuid():N}.png", "image/png", stream, _lifetime.Token);
+                await _coordinator.ImportAttachmentAsync(ownerSession, $"Eingefügtes Bild {DateTime.Now:HH-mm-ss}.png", "image/png", stream, _lifetime.Token);
             }
-            if (_disposed || _session != ownerSession) return;
-            await SetInspectorVisibleAsync(true);
-            await RefreshForExternalActivationAsync();
         }
-        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
-        catch (Exception exception) when (exception is not OutOfMemoryException) { ShowError(exception.Message); }
+        finally
+        {
+            SetComposerAttachmentImportBusy(ownerSession, false);
+            await RefreshComposerAfterImportAsync(ownerSession);
+        }
     }
+
 }

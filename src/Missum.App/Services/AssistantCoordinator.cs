@@ -483,9 +483,14 @@ public sealed partial class AssistantCoordinator(
             ?? throw new InvalidOperationException("Die Chat-Sitzung wurde nicht gefunden.");
         var conversation = page.Conversation;
         var auxiliary = await PrepareDisplayedPageAsync(page, cancellationToken).ConfigureAwait(false);
+        var documentItems = await documents.ListAsync(sessionId, cancellationToken).ConfigureAwait(false);
+        var attachmentItems = await attachments.ListAsync(sessionId, cancellationToken).ConfigureAwait(false);
         return new
         {
             activeSessionId = sessionId,
+            documents = documentItems.Select(ToDocumentDto),
+            attachments = attachmentItems.Select(ToAttachmentDto),
+            documentGroupStatus = BuildDocumentGroupStatus(documentItems, attachmentItems.Count),
             subagents = ToSubagentDtos(ReadActivitySummaries(auxiliary)),
             auxiliaryMessages = auxiliary.Select(message => new { id = message.Id, toolSteps = message.ToolSteps }),
             historyPage = new { page.HasMore, page.Before, page.TotalMessages },
