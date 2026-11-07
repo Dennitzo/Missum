@@ -9,7 +9,7 @@ namespace Missum.Ai.Server.Core.Data;
 
 public sealed class MissumAiDatabase : IDisposable
 {
-    private const int CurrentSchemaVersion = 4;
+    private const int CurrentSchemaVersion = 5;
     private readonly MissumAiServerOptions _options;
     private readonly JsonSerializerOptions _jsonOptions = MissumAiProtocol.CreateJsonOptions();
     private readonly SemaphoreSlim _initializeGate = new(1, 1);
@@ -49,12 +49,14 @@ public sealed class MissumAiDatabase : IDisposable
             if (previousVersion > CurrentSchemaVersion)
                 throw new InvalidDataException("The gateway database was created by a newer Missum version.");
             await using var command = connection.CreateCommand();
-            command.CommandText = "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='session_context_heads');";
+            command.CommandText = "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name IN ('session_context_heads','run_plan_evidence'));";
             if (Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0)
             {
+                // Pooling would keep the one-off backup handle open and lock the file.
                 await using var backup = new SqliteConnection(new SqliteConnectionStringBuilder
                 {
-                    DataSource = _options.DatabasePath + ".pre-session-only-" + Guid.NewGuid().ToString("N") + ".bak",
+                    DataSource = _options.DatabasePath + ".pre-plan-v2-" + Guid.NewGuid().ToString("N") + ".bak",
+                    Pooling = false,
                 }.ToString());
                 await backup.OpenAsync(cancellationToken).ConfigureAwait(false);
                 connection.BackupDatabase(backup);
@@ -71,8 +73,9 @@ public sealed class MissumAiDatabase : IDisposable
                 versionCommand.CommandText = """
                     INSERT OR IGNORE INTO schema_migrations(version, applied_at)
                     VALUES(3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-                          (4, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
-                    PRAGMA user_version=4;
+                          (4, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                          (5, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+                    PRAGMA user_version=5;
                     """;
                 _ = await versionCommand.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             }
@@ -267,19 +270,7 @@ public sealed class MissumAiDatabase : IDisposable
             updated_at TEXT NOT NULL,
             FOREIGN KEY(run_id) REFERENCES runs(run_id) ON DELETE CASCADE
         );
-        CREATE TABLE IF NOT EXISTS run_plan_evidence (
-            run_id TEXT NOT NULL,
-            evidence_id TEXT NOT NULL,
-            sequence INTEGER NOT NULL,
-            is_work INTEGER NOT NULL,
-            kinds TEXT NOT NULL,
-            path TEXT COLLATE NOCASE NULL,
-            receipt_json TEXT NOT NULL,
-            PRIMARY KEY(run_id, evidence_id),
-            FOREIGN KEY(run_id) REFERENCES runs(run_id) ON DELETE CASCADE
-        );
-        CREATE INDEX IF NOT EXISTS ix_run_plan_evidence_page
-            ON run_plan_evidence(run_id, sequence DESC, evidence_id);
+        DROP TABLE IF EXISTS run_plan_evidence;
         CREATE TABLE IF NOT EXISTS run_provider_retries (
             run_id TEXT PRIMARY KEY,
             attempt INTEGER NOT NULL,

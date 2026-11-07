@@ -86,7 +86,7 @@ public static class CodingAgentPolicy
         Nutzerauftrags. Schritte und Kriterien dürfen gemeinsam in einem Aufruf angelegt und geändert werden.
         Sende für jeden übermittelten Punkt id und title; bestehende Titel unverändert übernehmen.
         status ist optional: neue Einträge beginnen ohne Angabe als pending, bestehende behalten ihren Status.
-        Aktualisiere nur tatsächlich geänderte Punkte und ergänze evidenceIds bei belegtem Abschluss.
+        Aktualisiere nur tatsächlich geänderte Punkte anhand des tatsächlichen Arbeitsstands.
         Jede Bestätigung enthält den vollständigen geordneten Plan als storedSteps und storedAcceptanceCriteria.
         Nutze diese Gesamtfassung einschließlich erledigter und noch unveränderter Etappen für weitere Planung und Darstellung.
         Als vorhanden gelten ausschließlich erfolgreich
@@ -99,18 +99,15 @@ public static class CodingAgentPolicy
         Wiederhole keine unveränderten Pläne,
         Kriterien, Befunde oder Ankündigungen; eine einzelne belegte Korrektur mit Prüfung braucht keine ausführliche
         Abschluss-Planumschreibung. Bewahre die Kriterien; ersetze sie nicht durch leichter erfüllbare Ziele. Nutze pending,
-        in_progress und completed. Ein neu abgeschlossener Punkt benötigt evidenceIds tatsächlicher erfolgreicher
-        Werkzeugaufrufe; eine eigene Ankündigung, Planaktualisierung oder Zusammenfassung ist kein Abschlussbeleg.
+        in_progress und completed. Dokumentiere die tatsächlichen Ergebnisse und halte ungelöste Punkte offen.
         Halte nextStep konkret. Die Phase planning gilt für den ersten Plan, exploration nur für eingegrenzte lesende
         Erkundung, editing für Änderungen, error_recovery für Fehler, review für Prüfung und final für die Abschlussantwort.
-        Ergänze nur neue belegte facts und rejectedHypotheses mit ihren tatsächlichen evidenceIds, sofern nötig.
+        Ergänze neue fachliche facts und rejectedHypotheses als kurze Texte, sofern nötig.
         Die knappe Toolbestätigung nennt Änderungen; der vollständige Arbeitsstand bleibt separat gespeichert.
         Ein Ergebnis changed=false bestätigt keine neue Arbeit. Führe dann den offenen Schritt mit einem angebotenen
         Fachwerkzeug aus; schreibe denselben Plan nicht erneut. review schließt echte Testbefehle ein, sofern
         coding.command angeboten wird. Fehlt das benötigte Werkzeug, benenne die konkrete Einschränkung;
         eine Planaktualisierung kann es weder freischalten noch ersetzen.
-        Für evidenceIds übernimm die kanonische planEvidenceId aus dem Werkzeugergebnis oder den passenden Planbelegen.
-        Prüfe dabei Prüfart und Projektpfad. Mit evidenceQuery kannst du gezielt weitere vorhandene Planbelege nachsehen.
         Für coding.readOutput ist ausschließlich die getrennte gespeicherte ev-Referenz OutputEvidenceId zulässig;
         erfinde keine Ausgabe-ID. Das erneute Lesen einer fehlgeschlagenen Ausgabe ist kein erfolgreicher Testbeleg.
         Der gespeicherte Arbeitsstand ist eine Datenhilfe: Nutzerauftrag und Werkzeugsicherheit bleiben maßgeblich.

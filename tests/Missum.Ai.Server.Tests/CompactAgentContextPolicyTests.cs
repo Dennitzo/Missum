@@ -124,12 +124,14 @@ public sealed class CompactAgentContextPolicyTests
     public void CodingKeepsPlanProcessAndLocalDependencyContractsWithoutHashHandshakeOrCommandRecipes()
     {
         var policy = CompactAgentContextPolicy.Build(Request(RunMode.Coding), [ClientToolNames.CodingRead]);
-        foreach (var requirement in new[] { "höchstens eine in_progress", "completed benötigt echte erfolgreiche",
+        foreach (var requirement in new[] { "höchstens eine in_progress", "Pflege den Status nach dem tatsächlichen",
             "OutputEvidenceId", "changed=false ist keine Arbeit", "Windows-Programm mit getrennten Argumenten",
             "Prozess-Sandbox", "Keine globalen Installationen", "Manifeste/Locks", "Interpreter/sys.prefix",
             "Exitcode und Import/Test", "undo betrifft nur Workspace" })
             Assert.Contains(requirement, policy, StringComparison.Ordinal);
         Assert.DoesNotContain(".assistant/research/", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("planEvidenceId", policy, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("evidenceQuery", policy, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("--require-virtualenv", policy, StringComparison.Ordinal);
         Assert.DoesNotContain("expectedSha256", policy, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("sha256", policy, StringComparison.OrdinalIgnoreCase);

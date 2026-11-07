@@ -96,7 +96,18 @@ public sealed partial class SqliteConversationSnapshotRepository
         )
         WHERE CASE WHEN json_valid(json_extract(payload,'$.outputJson'))
             THEN COALESCE(json_extract(json_extract(payload,'$.outputJson'),'$.success'),1)
-                AND NOT COALESCE(json_extract(json_extract(payload,'$.outputJson'),'$.evidenceLookup'),0) ELSE 0 END
+                AND (
+                    json_type(json_extract(payload,'$.outputJson'),'$.storedSteps')='array'
+                    OR json_type(json_extract(payload,'$.outputJson'),'$.storedAcceptanceCriteria')='array'
+                    OR json_type(json_extract(payload,'$.outputJson'),'$.steps')='array'
+                    OR json_type(json_extract(payload,'$.outputJson'),'$.acceptanceCriteria')='array'
+                    OR json_type(json_extract(payload,'$.outputJson'),'$.plan')='array'
+                    OR json_type(json_extract(payload,'$.outputJson'),'$.updatedSteps')='array'
+                    OR json_type(json_extract(payload,'$.outputJson'),'$.updatedAcceptanceCriteria')='array'
+                    OR CASE WHEN json_valid(json_extract(payload,'$.inputJson'))
+                        THEN json_type(json_extract(payload,'$.inputJson'),'$.steps')='array'
+                            OR json_type(json_extract(payload,'$.inputJson'),'$.acceptanceCriteria')='array' ELSE 0 END
+                ) ELSE 0 END
         """;
 
     private static AssistantToolStep CompactWorkingPlan(AssistantToolStep step, JsonElement output) => step with

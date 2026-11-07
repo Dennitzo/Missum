@@ -1,0 +1,2 @@
+{"timestamp":"2026-11-06T23:20:18.8801075+01:00","level":"Warning","eventId":"agent.invalid_tool_call","message":"Werkzeug subagent.spawn in Lauf run-72f9e0f889554868b1e6c841ffd3784d abgelehnt: Dieser Lauf ben\u00F6tigt zuerst einen g\u00FCltigen Arbeitsplan. Sende genau einen coding.updatePlan-Aufruf mit nichtleeren steps; dieser Aufruf wurde nicht ausgef\u00FChrt."}
+{"timestamp":"2026-11-06T23:20:18.8950615+01:00","level":"Information","eventId":"gpu.lease.acquired","message":"GPU-Lane f\u00FCr llm-coding belegt (Shared, lease-1023d885d8b241aba32428ee54c7924f)."}

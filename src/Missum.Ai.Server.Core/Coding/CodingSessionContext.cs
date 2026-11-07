@@ -35,7 +35,7 @@ internal static class CodingSessionContext
                 + "Nicht abgeschlossene Aufrufe haben einen unbekannten Ausgang und dürfen nicht blind wiederholt werden. "
                 + "Der folgende neue Nutzerauftrag ist maßgeblich.\n" + CodingEvidenceContext.Build(state).Content));
         result.Add(new LmChatMessage("user", "MISSUM_CODING_RUN_PLAN_SCOPE\n"
-            + (science && RestoreWorkingState(previous) is { } prior && PreserveSciencePlan(prior) ? "Science-Fortsetzung: Der gespeicherte Etappenplan derselben Sitzung bleibt gültig. Verwende dessen IDs; prüfe offene und veraltete Belege. "
+            + (science && RestoreWorkingState(previous) is { } prior && PreserveSciencePlan(prior) ? "Science-Fortsetzung: Der gespeicherte Etappenplan derselben Sitzung bleibt gültig. Verwende dessen IDs; prüfe offene Fragen und den aktuellen Ergebnisstand. "
                 : "Aktueller Lauf: steps und acceptanceCriteria starten leer. Plan-IDs und Planbestätigungen oben gehören zum vorherigen Lauf. ")
             + "Bestätige oder erstelle zu Beginn dieses Hauptlaufs verpflichtend den Arbeitsplan. Sende pro übermitteltem Eintrag id und title; status ist optional: neue Einträge pending, gespeicherte unverändert. "
             + "bei Updates den Originaltitel unverändert beibehalten und nur geänderte Einträge senden. "

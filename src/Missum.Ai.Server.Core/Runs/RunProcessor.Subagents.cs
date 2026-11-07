@@ -228,7 +228,7 @@ public sealed partial class RunProcessor
                 SelectedReasoningEffort: childRequest.ReasoningEffort, UseStableSubagentToolCatalog: true,
                 ContextProfileVersion: childContextProfile, ContextTools: childTools,
                 ToolCatalogSignature: childContextProfile is not null ? ToolContextProfiles.Signature(childTools, selection.ModelId) : null,
-                ResearchStateStamp: parentCheckpoint?.ResearchStateStamp);
+                ResearchStateStamp: parentCheckpoint?.ResearchStateStamp, PlanFormatVersion: CodingPlanFormat.CurrentVersion);
             var child = await _repository.CreateSubagentAsync(childRequest, checkpoint, operationId, cancellationToken).ConfigureAwait(false);
             await EnsureSubagentStartedAsync(child, childRequest, cancellationToken).ConfigureAwait(false);
             await _repository.AppendEventAsync(child.RunId, "subagent.contextForked", new

@@ -572,7 +572,7 @@ public sealed class SubagentOrchestrationTests
         var expected = JsonSerializer.SerializeToElement(ModelRuntimeClient.PrepareTransportTools(ModelId, tools));
         Assert.Equal(expected.GetRawText(), actual.GetRawText());
         Assert.DoesNotContain("research-shared-parent-project", actual.GetRawText());
-        Assert.Equal(JsonSerializer.Serialize(checkpoint),
+        Assert.Equal(JsonSerializer.Serialize(checkpoint with { PlanFormatVersion = CodingPlanFormat.CurrentVersion }),
             JsonSerializer.Serialize(await repository.GetCheckpointAsync(parent.Snapshot.RunId)));
         Assert.Empty(await repository.GetSubagentRunsAsync(parent.Snapshot.RunId));
     }
@@ -612,7 +612,8 @@ public sealed class SubagentOrchestrationTests
 
         Assert.Equal("subagent.preparation_timeout", result.ErrorCode);
         Assert.Equal(RunState.Cancelled, (await repository.GetAsync(oldChild.RunId))!.State);
-        Assert.Equal(JsonSerializer.Serialize(oldCheckpoint), JsonSerializer.Serialize(await repository.GetCheckpointAsync(oldChild.RunId)));
+        Assert.Equal(JsonSerializer.Serialize(oldCheckpoint with { PlanFormatVersion = CodingPlanFormat.CurrentVersion }),
+            JsonSerializer.Serialize(await repository.GetCheckpointAsync(oldChild.RunId)));
         Assert.Empty(await repository.GetSubagentRunsAsync(parent.Snapshot.RunId));
         Assert.Equal(0, handler.ChildTurns);
     }

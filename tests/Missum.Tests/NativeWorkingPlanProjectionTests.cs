@@ -9,12 +9,13 @@ public sealed class NativeWorkingPlanProjectionTests
     [Theory]
     [InlineData("failed", "{\"success\":false}", "failed", "Arbeitsplan konnte nicht aktualisiert werden")]
     [InlineData("completed", "{\"success\":false}", "failed", "Arbeitsplan konnte nicht aktualisiert werden")]
-    [InlineData("completed", "{\"success\":true,\"evidenceLookup\":true,\"changed\":false}", "lookup", "Planbelege gesucht")]
-    public void FailedAndLookupReceiptsKeepTheirOwnTitleAndDetailRoutingAfterLazyProjection(string status, string output,
+    [InlineData("completed", "{\"success\":true,\"evidenceLookup\":true,\"changed\":false}", "receipt", "Arbeitsplan")]
+    [InlineData("completed", "{\"success\":true,\"items\":[1,2]}", "receipt", "Arbeitsplan")]
+    public void FailedAndNonPlanReceiptsKeepTheirOwnTitleAndDetailRoutingAfterLazyProjection(string status, string output,
         string expectedKind, string expectedTitle)
     {
         var step = new AssistantToolStep("internal-step-id", "coding.updatePlan", status,
-            InputJson: "{\"steps\":[{\"id\":\"stage-123\",\"status\":\"completed\"}]}", OutputJson: output);
+            InputJson: "{}", OutputJson: output);
         var header = AssistantToolStepHeaders.Create(step);
         Assert.Equal(expectedKind, header.PlanReceiptKind);
         Assert.Empty(header.Summary);
@@ -41,38 +42,47 @@ public sealed class NativeWorkingPlanProjectionTests
     }
 
     [Fact]
-    public void FailedPlanDetailsShowCheckReasonFilesAndStoredPlanWithoutInventingSuccess()
+    public void FailedPlanDetailsShowStructuralReasonAndStoredPlanWithoutInventingSuccess()
     {
         var output = JsonSerializer.Deserialize<JsonElement>("""
-            {"success":false,"error":"Interne Details stage-123/check-987",
+            {"success":false,"error":"Interne Details stage-123",
              "storedSteps":[{"id":"stage-123","title":"Doppelspalt überprüfen","status":"in_progress"}],"storedAcceptanceCriteria":[],
-             "scienceStages":[{"id":"stage-123","question":"Stimmt die Verteilung?","checks":[{"id":"check-987","kind":"numeric"}]}],
-             "validationIssues":[{"code":"evidence.invalid_kind","stageId":"stage-123","checkId":"check-987","kind":"numeric",
-                "message":"Die gelesene Datei belegt keine ausgeführte Berechnung.","paths":["work/compare.py"],"rejectedIds":["ev-internal"],
-                "candidates":[{"id":"candidate-internal","tool":"coding.command","path":"work/compare.py","success":true,"exitCode":0,"summary":"Abweichung 0,002"}]}],
-             "retryNote":"Mit dem vorhandenen Rechenbeleg erneut prüfen."}
+             "scienceStages":[{"id":"stage-123","question":"Stimmt die Verteilung?"}],
+             "validationIssues":[{"code":"invalid_status","stageId":"stage-123","field":"steps",
+                "message":"Der angegebene Status ist ungültig."}],
+             "retryNote":"Status korrigieren und erneut speichern."}
             """);
         var blocks = NativeToolResultFormatter.Receipt("coding.updatePlan", default, output, "completed").ToArray();
-        Assert.Equal("Numerische Prüfung · Doppelspalt überprüfen", blocks[0].Title);
-        Assert.Contains("Die gelesene Datei belegt keine ausgeführte Berechnung.", blocks[0].Text);
-        Assert.Contains("work/compare.py", blocks[0].Text);
-        Assert.Contains(blocks, block => block.Title == "Vorhandener Beleg" && block.Text.Contains("Abweichung 0,002", StringComparison.Ordinal));
+        Assert.Equal("Planprüfung · Doppelspalt überprüfen", blocks[0].Title);
+        Assert.Contains("Der angegebene Status ist ungültig.", blocks[0].Text);
         Assert.Contains(blocks, block => block.Title == "Gespeicherte Arbeitsschritte" && block.Text.Contains("◌ Phase 1: Doppelspalt überprüfen", StringComparison.Ordinal));
-        Assert.DoesNotContain(blocks, block => block.Title.Contains("stage-123", StringComparison.Ordinal) || block.Text.Contains("ev-internal", StringComparison.Ordinal));
+        Assert.DoesNotContain(blocks, block => block.Title.Contains("stage-123", StringComparison.Ordinal));
     }
 
     [Fact]
-    public void EvidenceLookupDetailsAreReadOnlyAndShowTheirCandidates()
+    public void HistoricalNonPlanReceiptRemainsReadableWithoutCandidateUi()
     {
         var output = JsonSerializer.Deserialize<JsonElement>("""
-            {"success":true,"evidenceLookup":true,"changed":false,"candidates":[],
-             "storedSteps":[{"id":"stage","title":"Bestehender Plan","status":"pending"}]}
+            {"success":true,"evidenceLookup":true,"changed":false,"candidates":[{"id":"old","tool":"coding.command"}]}
             """);
         var blocks = NativeToolResultFormatter.Receipt("coding.updatePlan", default, output, "completed").ToArray();
-        Assert.Equal("Planbelege gesucht", blocks[0].Title);
-        Assert.Contains("unverändert", blocks[0].Text);
-        Assert.Equal("Keine passenden Belege gefunden.", blocks[1].Text);
-        Assert.DoesNotContain(blocks, block => block.Title == "Arbeitsschritte");
+        Assert.Equal("Arbeitsplan", Assert.Single(blocks).Title);
+        Assert.Equal("Dieser Werkzeugaufruf enthält keine gespeicherten Arbeitsschritte.", blocks[0].Text);
+        Assert.Empty(NativeWorkingPlanProjection.Read(output).Steps);
+    }
+
+    [Theory]
+    [InlineData("{\"success\":true,\"storedSteps\":[],\"storedAcceptanceCriteria\":[]}", "{}")]
+    [InlineData("{\"success\":true}", "{\"steps\":[{\"id\":\"a\",\"title\":\"Prüfen\"}]}")]
+    [InlineData("{\"success\":true,\"updatedSteps\":[{\"id\":\"a\",\"status\":\"completed\"}]}", "{}")]
+    public void ActualCanonicalAndLegacyPlanUpdatesStillUpdateAndNavigateToTheWorkingPlan(string output, string input)
+    {
+        var step = new AssistantToolStep("actual-plan", "coding.updatePlan", "completed", InputJson: input, OutputJson: output);
+        Assert.True(NativeWorkingPlanProjection.IsSuccessfulUpdate(step));
+        var header = AssistantToolStepHeaders.Create(step);
+        Assert.Equal("update", header.PlanReceiptKind);
+        var lazy = step with { InputJson = null, OutputJson = null, DetailsDeferred = true, DisplayHeader = header };
+        Assert.True(NativeWorkingPlanProjection.OpensCurrentPlan(JsonSerializer.SerializeToElement(lazy, JsonSerializerOptions.Web)));
     }
 
     private static readonly string[] ExpectedPhases = ["Phase 1: Ursachen prüfen", "Phase 2: Änderung erstellen", "Phase 3: Ergebnis prüfen"];

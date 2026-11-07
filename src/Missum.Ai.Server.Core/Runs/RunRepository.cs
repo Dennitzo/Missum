@@ -720,6 +720,7 @@ public sealed partial class RunRepository
         AgentRunCheckpoint checkpoint,
         CancellationToken cancellationToken = default)
     {
+        checkpoint = Missum.Ai.Server.Core.Coding.CodingPlanFormat.UpgradeCheckpoint(checkpoint);
         var visibleSteeringOffset = 0;
         if (checkpoint.AppliedSteeringSequence > 0
             && (await GetPendingSteeringAsync(runId, cancellationToken).ConfigureAwait(false))
@@ -765,7 +766,6 @@ public sealed partial class RunRepository
         command.Parameters.AddWithValue("$steering", checkpoint.AppliedSteeringSequence);
         command.Parameters.AddWithValue("$offset", visibleSteeringOffset);
         _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        await ArchivePlanEvidenceAsync(connection, transaction, runId, checkpoint.WorkingState, cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         _notifier.Notify(runId);
     }
@@ -986,6 +986,7 @@ public sealed partial class RunRepository
         if (!document.RootElement.TryGetProperty("contextScope", out var scope)
             || scope.GetString() != "session-v3") return null;
         var checkpoint = JsonSerializer.Deserialize<AgentRunCheckpoint>(json, _checkpointJsonOptions);
+        if (checkpoint is not null) checkpoint = Missum.Ai.Server.Core.Coding.CodingPlanFormat.UpgradeCheckpoint(checkpoint);
         if (checkpoint is null || !document.RootElement.TryGetProperty("specializedAgent", out var retired)
             || retired.ValueKind != JsonValueKind.Object) return checkpoint;
 

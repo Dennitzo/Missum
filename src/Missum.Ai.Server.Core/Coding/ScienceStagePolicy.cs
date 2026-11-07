@@ -3,21 +3,18 @@ using Missum.Ai.Server.Core.Models;
 
 namespace Missum.Ai.Server.Core.Coding;
 
-internal sealed record PlanEvidenceIssue(string Code, string Field, string? StageId = null, string? CheckId = null,
-    string? Kind = null, IReadOnlyList<string>? Paths = null, IReadOnlyList<string>? RejectedIds = null,
-    long AfterSequence = 0, string? Message = null);
+internal sealed record PlanValidationIssue(string Code, string Field, string? StageId = null, string? CheckId = null,
+    string? Kind = null, IReadOnlyList<string>? Paths = null, string? Message = null);
 
-internal sealed class PlanEvidenceValidationException(string message, params PlanEvidenceIssue[] issues)
+internal sealed class PlanValidationException(string message, params PlanValidationIssue[] issues)
     : ArgumentException(message)
 {
-    public IReadOnlyList<PlanEvidenceIssue> Issues { get; } = issues;
+    public IReadOnlyList<PlanValidationIssue> Issues { get; } = issues;
 }
 
 internal static class ScienceStagePolicy
 {
-    private const string EvidenceField = "scienceStages.checks.evidenceIds";
-
-    internal static CodingWorkingState Apply(CodingWorkingState before, CodingWorkingState updated, JsonElement args, bool verifyReceipts = true)
+    internal static CodingWorkingState Apply(CodingWorkingState before, CodingWorkingState updated, JsonElement args)
     {
         if (before.Science is null)
         {
@@ -35,7 +32,7 @@ internal static class ScienceStagePolicy
                 var id = Text(item, "id", 80);
                 if (!ids.Add(id) || !updated.Plan.Any(step => step.Id == id))
                     Reject($"Science-Etappe {id}: eindeutige vorhandene steps-ID erforderlich; steps darf im selben Aufruf angelegt werden.",
-                        new PlanEvidenceIssue("invalid_stage_id", "scienceStages.id", id));
+                        new PlanValidationIssue("invalid_stage_id", "scienceStages.id", id));
                 var prior = stages.FirstOrDefault(stage => stage.Id == id);
                 var question = item.TryGetProperty("question", out _) ? Text(item, "question", 800) : prior?.Question ?? "";
                 var strategy = item.TryGetProperty("strategy", out _) ? Text(item, "strategy", 1200) : prior?.Strategy ?? "";
@@ -43,7 +40,7 @@ internal static class ScienceStagePolicy
                     && before.Plan.Any(step => step.Id == id && step.Status == "completed")
                     && (prior.Question != question || prior.Strategy != strategy))
                     Reject($"Etappe {id}: geänderte Leitfrage oder Prüfstrategie benötigt zuerst einen begründeten Rücksprung.",
-                        new PlanEvidenceIssue("stage_reopen_required", "steps.status", id));
+                        new PlanValidationIssue("stage_reopen_required", "steps.status", id));
                 var checks = prior?.Checks.ToList() ?? [];
                 if (item.TryGetProperty("checks", out var suppliedChecks))
                 {
@@ -51,7 +48,7 @@ internal static class ScienceStagePolicy
                     var checkIds = new HashSet<string>();
                     foreach (var check in suppliedChecks.EnumerateArray())
                     {
-                        Fields(check, ["id", "kind", "required", "evidenceIds", "paths"]);
+                        Fields(check, ["id", "kind", "required", "paths"]);
                         var checkId = Text(check, "id", 80); var kind = Text(check, "kind", 20);
                         if (!checkIds.Add(checkId) || kind is not ("source" or "analytic" or "lean" or "numeric" or "plot" or "publication")) Fail("Check benötigt eindeutige id und gültigen kind.");
                         if (!check.TryGetProperty("required", out var required) || required.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) Fail("Check.required muss true oder false sein.");
@@ -60,30 +57,20 @@ internal static class ScienceStagePolicy
                         var paths = Strings(check, "paths", 16, 1024, old?.Paths ?? []).Select(NormalizeProjectPath).ToArray();
                         if (paths.Any(path => path is null))
                             Reject("Prüfpfade müssen relative Projektpfade ohne .. oder .git sein.",
-                                new PlanEvidenceIssue("invalid_evidence_paths", "scienceStages.checks.paths", id, checkId, kind));
+                                new PlanValidationIssue("invalid_check_paths", "scienceStages.checks.paths", id, checkId, kind));
                         var normalizedPaths = paths.OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-                        var afterSequence = prior?.ReopenedAtSequence ?? 0;
-                        var suppliedIds = Strings(check, "evidenceIds", 3, 100, old?.EvidenceIds ?? []);
-                        var evidence = suppliedIds.Select(evidenceId =>
-                        {
-                            var receipt = CodingWorkingStateReducer.ResolveEvidence(before, evidenceId);
-                            if (receipt is null)
-                                RejectEvidence(before, new("unknown_evidence_id", EvidenceField, id, checkId, kind, normalizedPaths, [evidenceId], afterSequence),
-                                    $"Unbekannte evidenceId {evidenceId}; verwende eine vorhandene Beleg-ID.");
-                            return receipt.Id;
-                        }).Distinct(StringComparer.Ordinal).ToArray();
                         checks.RemoveAll(value => value.Id == checkId);
-                        checks.Add(new(checkId, kind, required.GetBoolean(), evidence, normalizedPaths));
+                        checks.Add(new(checkId, kind, required.GetBoolean(), normalizedPaths));
                     }
                 }
                 if (checks.Count > 8) Fail("Eine Etappe darf höchstens acht gespeicherte Prüfungen enthalten.");
                 var outcome = item.TryGetProperty("outcome", out _) ? Text(item, "outcome", 20) : prior?.Outcome ?? "open";
                 if (outcome is not ("open" or "clarified" or "refuted"))
                     Reject("outcome muss open, clarified oder refuted sein.",
-                        new PlanEvidenceIssue("invalid_stage_outcome", "scienceStages.outcome", id));
+                        new PlanValidationIssue("invalid_stage_outcome", "scienceStages.outcome", id));
                 if (checks.SelectMany(check => check.Paths).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 16) Fail("Eine Etappe darf höchstens 16 unterschiedliche Prüfdateien binden; in Teilaufgaben zerlegen.");
                 var stage = new ScienceStage(id, question, strategy, Strings(item, "dependsOn", 16, 80, prior?.DependsOn ?? []), checks,
-                    Strings(item, "openQuestions", 12, 600, prior?.OpenQuestions ?? []), Strings(item, "blockers", 12, 600, prior?.Blockers ?? []), outcome, prior?.ReopenedAtSequence ?? 0,
+                    Strings(item, "openQuestions", 12, 600, prior?.OpenQuestions ?? []), Strings(item, "blockers", 12, 600, prior?.Blockers ?? []), outcome,
                     DetailsPending: string.IsNullOrWhiteSpace(question) || string.IsNullOrWhiteSpace(strategy));
                 stages.RemoveAll(value => value.Id == id); stages.Add(stage);
             }
@@ -106,126 +93,39 @@ internal static class ScienceStagePolicy
         var reopened = before.Plan.Where(old => old.Status == "completed" && updated.Plan.Any(now => now.Id == old.Id && now.Status != "completed")).Select(step => step.Id).ToHashSet();
         if (reopened.Count > 0 && !args.TryGetProperty("explanation", out _))
             Reject("Rücksprung benötigt eine konkrete explanation.",
-                reopened.Select(id => new PlanEvidenceIssue("missing_reopen_explanation", "explanation", id)).ToArray());
+                reopened.Select(id => new PlanValidationIssue("missing_reopen_explanation", "explanation", id)).ToArray());
         var affected = new HashSet<string>(reopened);
         bool grew;
         do { grew = false; foreach (var stage in stages) if (stage.DependsOn.Any(affected.Contains)) grew |= affected.Add(stage.Id); } while (grew);
         if (affected.Count > 0)
         {
-            updated = updated with { Plan = updated.Plan.Select(step => affected.Contains(step.Id) && !reopened.Contains(step.Id) ? step with { Status = "pending", EvidenceIds = [] } : step).ToArray() };
-            stages = stages.Select(stage => affected.Contains(stage.Id) ? stage with
-            { Outcome = "open", ReopenedAtSequence = updated.Sequence, Checks = stage.Checks.Select(check => check with { EvidenceIds = [] }).ToArray() } : stage).ToList();
+            updated = updated with { Plan = updated.Plan.Select(step => affected.Contains(step.Id) && !reopened.Contains(step.Id) ? step with { Status = "pending" } : step).ToArray() };
+            stages = stages.Select(stage => affected.Contains(stage.Id) ? stage with { Outcome = "open" } : stage).ToList();
         }
         updated = updated with { Science = before.Science with { Stages = stages } };
-        var issues = new List<PlanEvidenceIssue>();
+        var issues = new List<PlanValidationIssue>();
         foreach (var stage in stages)
         {
             var step = updated.Plan.Single(step => step.Id == stage.Id);
             if (step.Status is "in_progress" or "completed" && stage.DependsOn.Any(id => updated.Plan.Single(step => step.Id == id).Status != "completed"))
                 issues.Add(new("stage_dependencies_open", "scienceStages.dependsOn", stage.Id,
                     Message: $"Etappe {stage.Id}: abhängige Etappe ist noch nicht freigegeben."));
-            if (step.Status != "completed")
-            {
-                // Assigning a receipt is already a verifiable claim. Do not
-                // acknowledge an invalid kind as saved, then reject it only on
-                // closure; that produced misleading review/update loops.
-                if (verifyReceipts)
-                    foreach (var check in stage.Checks.Where(check => check.EvidenceIds.Count > 0))
-                        Check(stage, check);
-                continue;
-            }
+            if (step.Status != "completed") continue;
             if (stage.DetailsPending || string.IsNullOrWhiteSpace(stage.Question) || string.IsNullOrWhiteSpace(stage.Strategy))
                 issues.AddRange(new[] { (Field: "question", Value: stage.Question), (Field: "strategy", Value: stage.Strategy) }
                         .Where(item => string.IsNullOrWhiteSpace(item.Value))
-                        .Select(item => new PlanEvidenceIssue("missing_stage_details", "scienceStages." + item.Field, stage.Id,
+                        .Select(item => new PlanValidationIssue("missing_stage_details", "scienceStages." + item.Field, stage.Id,
                             Message: $"Etappe {stage.Id}: question oder strategy fehlt. Sende Leitfrage und Prüfstrategie ausdrücklich in scienceStages erneut mit.")));
             if (stage.Outcome == "open" || stage.Blockers.Count > 0)
                 issues.Add(new("stage_outcome_open", stage.Blockers.Count > 0 ? "scienceStages.blockers" : "scienceStages.outcome", stage.Id,
                     Message: stage.Blockers.Count > 0
                         ? $"Etappe {stage.Id}: dokumentierte Blockaden verhindern completed. Halte die offene Etappe pending oder bearbeite die Blockaden."
                         : $"Etappe {stage.Id}: Für completed ist scienceStages.outcome ausdrücklich clarified oder refuted erforderlich. Ist das Ergebnis offen, bleibt die Etappe pending."));
-            if (verifyReceipts)
-                foreach (var check in stage.Checks.Where(check => check.Required || check.EvidenceIds.Count > 0))
-                    Check(stage, check);
         }
         if (issues.Count > 0)
             Reject(string.Join(" ", issues.Select(issue => issue.Message).Where(message => message is not null).Distinct()), issues.ToArray());
         return updated;
 
-        void Check(ScienceStage stage, ScienceCheck check)
-        {
-            try { ValidateCheck(updated, stage, check); }
-            catch (PlanEvidenceValidationException error)
-            {
-                issues.AddRange(error.Issues.Select(issue => issue with { Message = error.Message }));
-            }
-        }
-    }
-
-    internal static void ValidateCheck(CodingWorkingState state, ScienceStage stage, ScienceCheck check)
-    {
-        if (check.EvidenceIds.Count == 0)
-            RejectEvidence(state, Issue("missing_evidence_ids"), $"Etappe {stage.Id}: Pflichtprüfung {check.Id} hat keine evidenceIds.");
-        foreach (var id in check.EvidenceIds)
-        {
-            var receipt = CodingWorkingStateReducer.ResolveEvidence(state, id);
-            var code = EligibilityIssue(receipt, check.Kind, check.Paths, stage.ReopenedAtSequence);
-            if (code is null) continue;
-            var reason = code switch
-            {
-                "unknown_evidence_id" => $"Unbekannte evidenceId {id}.",
-                "unsuccessful_evidence" => $"Der Werkzeugaufruf zu {id} war nicht erfolgreich.",
-                "evidence_before_reopen" => $"Beleg {id} stammt aus der Zeit vor dem Rücksprung. Verwende einen neuen Nachweis.",
-                "wrong_evidence_path" => $"Beleg {id} gehört nicht zur angegebenen Publikation.",
-                _ => $"{id} stammt von {receipt?.Tool} und ist kein erfolgreicher {check.Kind}-Nachweis."
-                    + (check.Kind == "publication" && receipt?.Tool == "coding.command"
-                        ? " Der Prozessbeleg dokumentiert die Ausführung des Befehls. Verwende für die Publikationsprüfung einen Lese- oder Änderungsbeleg der betreffenden Publikation."
-                        : ""),
-            };
-            RejectEvidence(state, Issue(code, [id]),
-                $"Etappe {stage.Id}, Check {check.Id}: Ersetze evidenceIds. {reason}");
-        }
-
-        PlanEvidenceIssue Issue(string code, IReadOnlyList<string>? ids = null) =>
-            new(code, EvidenceField, stage.Id, check.Id, check.Kind, check.Paths, ids, stage.ReopenedAtSequence);
-    }
-
-    internal static string[] EligibleKinds(CodingToolEvidence receipt) => !receipt.Success ? [] : receipt.Tool switch
-    {
-        "math.formalProof" when receipt.FormalVerified => ["lean", "analytic"],
-        "coding.command" when receipt.ExitCode == 0 => ["numeric", "analytic", "plot"],
-        "math.evaluate" => ["numeric", "analytic"],
-        "math.numeric" => ["numeric"],
-        "math.symbolic" or "math.smt" => ["analytic"],
-        "web.fetch" or "documents.readPages" => ["source"],
-        "coding.read" => ["source", "publication"],
-        "coding.edit" or "coding.write" or "document.create" => ["publication"],
-        "image.generate" => ["plot"],
-        _ => [],
-    };
-
-    internal static bool IsWorkReceipt(CodingToolEvidence receipt) => receipt.Success
-        && receipt.Tool is not (CodingWorkingStateTools.PlanTool or "coding.readOutput" or "coding.searchRunEvidence");
-
-    internal static CodingToolEvidence[] FindCandidates(CodingWorkingState state, string? kind,
-        IReadOnlyList<string>? paths = null, long afterSequence = 0, bool includeFailed = false) => state.Evidence
-        .Where(receipt => kind is null && includeFailed && !receipt.Success
-            ? receipt.Sequence > afterSequence : EligibilityIssue(receipt, kind, paths, afterSequence) is null)
-        .OrderByDescending(receipt => receipt.Sequence).ThenBy(receipt => receipt.Id, StringComparer.Ordinal).ToArray();
-
-    private static string? EligibilityIssue(CodingToolEvidence? receipt, string? kind, IReadOnlyList<string>? paths,
-        long afterSequence)
-    {
-        if (receipt is null) return "unknown_evidence_id";
-        if (!receipt.Success) return "unsuccessful_evidence";
-        if (kind is null ? !IsWorkReceipt(receipt) : !EligibleKinds(receipt).Contains(kind, StringComparer.Ordinal))
-            return "wrong_evidence_kind";
-        if (receipt.Sequence <= afterSequence) return "evidence_before_reopen";
-        if (kind == "publication" && paths is { Count: > 0 }
-            && (NormalizeProjectPath(receipt.Path) is not { } path
-                || !paths.Any(expected => string.Equals(NormalizeProjectPath(expected), path, StringComparison.OrdinalIgnoreCase))))
-            return "wrong_evidence_path";
-        return null;
     }
 
     internal static string? NormalizeProjectPath(string? path)
@@ -240,44 +140,8 @@ internal static class ScienceStagePolicy
     }
 
     [System.Diagnostics.CodeAnalysis.DoesNotReturn]
-    private static void RejectEvidence(CodingWorkingState state, PlanEvidenceIssue issue, string message)
-    {
-        var candidates = FindCandidates(state, issue.Kind, issue.Paths, issue.AfterSequence).Take(3)
-            .Select(receipt => new { id = receipt.Id, tool = receipt.Tool, path = receipt.VerificationPath ?? receipt.Path }).ToArray();
-        Reject(message + (candidates.Length > 0
-                ? " Vorhandene passende Werkzeugbelege (fachliche Zuordnung selbst prüfen): " + JsonSerializer.Serialize(candidates)
-                : " Kein passender erfolgreicher Beleg vorhanden. Führe die gewählte Prüfung aus und verwende ihre Beleg-ID."),
-            issue with { Message = message });
-    }
-
-    [System.Diagnostics.CodeAnalysis.DoesNotReturn]
-    private static void Reject(string message, params PlanEvidenceIssue[] issues) => throw new PlanEvidenceValidationException(
+    private static void Reject(string message, params PlanValidationIssue[] issues) => throw new PlanValidationException(
         message + " Das gesamte Planupdate wurde abgelehnt.", issues.Select(issue => issue with { Message = issue.Message ?? message }).ToArray());
-
-    internal static CodingWorkingState Revalidate(CodingWorkingState state)
-    {
-        if (state.Science is null) return state;
-        var invalid = new HashSet<string>();
-        foreach (var stage in state.Science.Stages.Where(stage => state.Plan.Any(step => step.Id == stage.Id && step.Status == "completed")))
-        {
-            if (stage.DetailsPending || string.IsNullOrWhiteSpace(stage.Question) || string.IsNullOrWhiteSpace(stage.Strategy))
-                invalid.Add(stage.Id);
-            foreach (var check in stage.Checks.Where(check => check.Required || check.EvidenceIds.Count > 0))
-            {
-                try { ValidateCheck(state, stage, check); }
-                catch (ArgumentException) { invalid.Add(stage.Id); }
-            }
-        }
-        bool grew;
-        do { grew = false; foreach (var stage in state.Science.Stages) if (stage.DependsOn.Any(invalid.Contains)) grew |= invalid.Add(stage.Id); } while (grew);
-        if (invalid.Count == 0) return state;
-        return state with
-        {
-            Plan = state.Plan.Select(step => invalid.Contains(step.Id) ? step with { Status = "pending", EvidenceIds = [] } : step).ToArray(),
-            Science = state.Science with { Stages = state.Science.Stages.Select(stage => invalid.Contains(stage.Id) ? stage with
-            { Outcome = "open", ReopenedAtSequence = state.Sequence, Checks = stage.Checks.Select(check => check with { EvidenceIds = [] }).ToArray() } : stage).ToArray() },
-        };
-    }
 
     internal static CodingToolEvidence BindReceipt(CodingWorkingState state, CodingToolEvidence receipt, JsonElement result)
     {
@@ -322,7 +186,7 @@ internal static class ScienceStagePolicy
         var additions = child.Evidence.Where(item => item.Success && !existing.Contains(item.Id)).Select(item => item with
         { SourceRunId = run.GetString(), Historical = true, Sequence = state.Sequence + 1 }).ToArray();
         if (additions.Length == 0) return state;
-        return state with { Evidence = CodingWorkingStateReducer.KeepEvidence(state, state.Evidence.Concat(additions)), Sequence = state.Sequence + 1 };
+        return state with { Evidence = CodingWorkingStateReducer.KeepEvidence(state.Evidence.Concat(additions)), Sequence = state.Sequence + 1 };
 
     }
     private static JsonElement FindProof(JsonElement value, int depth = 0)

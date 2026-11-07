@@ -13,7 +13,8 @@ public sealed class AssistantStreamingProjectionTests
     [Theory]
     [InlineData("{\"success\":false,\"error\":\"Abgelehnt\"}")]
     [InlineData("{\"success\":true,\"evidenceLookup\":true,\"changed\":false,\"candidates\":[]}")]
-    public async Task FailedAndLookupReceiptsDoNotPublishAReplacementWorkingPlan(string output)
+    [InlineData("{\"success\":true,\"items\":[]}")]
+    public async Task FailedAndNonPlanReceiptsDoNotPublishAReplacementWorkingPlan(string output)
     {
         await using var environment = await TestEnvironment.CreateAsync();
         using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());

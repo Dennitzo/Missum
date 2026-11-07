@@ -55,7 +55,8 @@ public sealed class SubagentContextCompactionTests
         var parentCheckpoint = new AgentRunCheckpoint(parentMessages, 2, 1, 100, 10, ActiveToolCalls: [pending],
             SelectedModelId: Model, ContextTools: tools, UseStableSubagentToolCatalog: true, PreserveSessionPromptPrefix: true);
         await repository.SaveCheckpointAsync(parent.RunId, parentCheckpoint);
-        var parentBefore = JsonSerializer.Serialize(parentCheckpoint);
+        // Saving stamps the plan-format marker; every other field must stay byte-identical.
+        var parentBefore = JsonSerializer.Serialize(parentCheckpoint with { PlanFormatVersion = CodingPlanFormat.CurrentVersion });
         var childRequest = request with { SessionId = "independent-child-context", Messages = [new("user", [new("text", task)])],
             Subagent = new(parent.RunId, "compacting-child", task, request.SessionId, Instance, GpuIndex: 1) };
         var fork = RunProcessor.ForkSubagentMessages(parentMessages, task, childRequest.Subagent.AgentId);

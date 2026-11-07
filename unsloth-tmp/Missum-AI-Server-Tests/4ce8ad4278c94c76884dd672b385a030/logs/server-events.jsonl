@@ -1,0 +1,4 @@
+{"timestamp":"2026-11-06T23:20:18.8962256+01:00","level":"Information","eventId":"gpu.lease.acquired","message":"GPU-Lane f\u00FCr coding-deep-research belegt (Shared, lease-cf72ccc1994347df9ba04cc1d727cc7a)."}
+{"timestamp":"2026-11-06T23:20:18.8989176+01:00","level":"Information","eventId":"gpu.lease.released","message":"GPU-Lane freigegeben (lease-cf72ccc1994347df9ba04cc1d727cc7a)."}
+{"timestamp":"2026-11-06T23:20:18.9277665+01:00","level":"Information","eventId":"gpu.lease.acquired","message":"GPU-Lane f\u00FCr coding-deep-research belegt (Shared, lease-aaaf9cc96e2b4e65a8973298a2636e90)."}
+{"timestamp":"2026-11-06T23:20:18.9628505+01:00","level":"Information","eventId":"gpu.lease.released","message":"GPU-Lane freigegeben (lease-aaaf9cc96e2b4e65a8973298a2636e90)."}

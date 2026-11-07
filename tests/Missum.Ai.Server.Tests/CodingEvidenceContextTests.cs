@@ -14,9 +14,9 @@ public sealed class CodingEvidenceContextTests
         var state = CodingWorkingState.Create("A long staged task") with
         {
             Plan = Enumerable.Range(1, 16).Select(index => new CodingPlanItem($"s{index}", title,
-                index < 8 ? "completed" : index == 8 ? "in_progress" : "pending", [])).ToArray(),
-            AcceptanceCriteria = Enumerable.Range(1, 16).Select(index => new CodingPlanItem($"a{index}", title, "pending", [])).ToArray(),
-            Facts = [new("OPTIONAL_EVIDENCE_DETAIL", [])],
+                index < 8 ? "completed" : index == 8 ? "in_progress" : "pending")).ToArray(),
+            AcceptanceCriteria = Enumerable.Range(1, 16).Select(index => new CodingPlanItem($"a{index}", title, "pending")).ToArray(),
+            Facts = [new("OPTIONAL_EVIDENCE_DETAIL")],
         };
         var context = CodingEvidenceContext.Build(state, 2048).Content!;
         var sections = context.Split('\n').Where(static line => line.StartsWith('{')).Select(static line => JsonSerializer.Deserialize<JsonElement>(line)).ToArray();

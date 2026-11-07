@@ -16,6 +16,8 @@ public static class AssistantToolStepHeaders
     public const int MaximumSummaryCharacters = 320;
     public const int MaximumFilePathCharacters = 1024;
     private static readonly ConditionalWeakTable<AssistantToolStep, ToolStepDisplayHeader> Headers = new();
+    private static readonly string[] PlanArrayFields =
+        ["storedSteps", "storedAcceptanceCriteria", "steps", "acceptanceCriteria", "plan", "updatedSteps", "updatedAcceptanceCriteria"];
 
     /// <summary>Projects current complete data without modifying the durable step or its model-context payload.</summary>
     public static ToolStepDisplayHeader Create(AssistantToolStep step)
@@ -48,19 +50,25 @@ public static class AssistantToolStepHeaders
             counts = UnifiedDiffCounts(diff);
         return new(CurrentVersion, Summary(step.Tool, input, output, path),
             OneLine(path, MaximumFilePathCharacters), counts?.Added, counts?.Removed,
-            step.Tool == "coding.updatePlan" ? GetPlanReceiptKind(step.Status, output) : null);
+            step.Tool == "coding.updatePlan" ? GetPlanReceiptKind(step.Status, output, input) : null);
     }
 
-    public static string GetPlanReceiptKind(string status, JsonElement output) =>
+    public static string GetPlanReceiptKind(string status, JsonElement output, JsonElement input = default) =>
         status is "failed" or "denied" or "cancelled" or "interrupted" || Property(output, "success").ValueKind == JsonValueKind.False
-            ? "failed" : Flag(output, "evidenceLookup") ? "lookup" : "update";
+            ? "failed" : HasPlanContent(output, input) ? "update" : "receipt";
+
+    public static bool HasPlanContent(JsonElement output, JsonElement input = default) =>
+        PlanArrayFields
+            .Any(key => Property(output, key).ValueKind == JsonValueKind.Array)
+        || Property(input, "steps").ValueKind == JsonValueKind.Array
+        || Property(input, "acceptanceCriteria").ValueKind == JsonValueKind.Array;
 
     public static string Summary(string tool, JsonElement input, JsonElement output, string? fallbackPath = null) =>
         OneLine(BuildSummary(tool, input, output, fallbackPath), MaximumSummaryCharacters);
 
     private static string BuildSummary(string tool, JsonElement input, JsonElement output, string? fallbackPath)
     {
-        // Plan failures and evidence lookups have their own concise native labels.
+        // Plan receipts have their own concise native labels.
         // IDs and validation messages belong to the detail tab, never the chat row.
         if (tool == "coding.updatePlan") return "";
         if (tool == "research.update" && Property(input, "changes") is { ValueKind: JsonValueKind.Array } changes)

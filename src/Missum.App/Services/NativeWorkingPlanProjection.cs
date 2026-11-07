@@ -23,8 +23,7 @@ internal static class NativeWorkingPlanProjection
     {
         // Rejected requests must never appear as saved state. Canonical lists in
         // their receipt are readable, but the proposed input is not a fallback.
-        if (Property(output, "success").ValueKind == JsonValueKind.False
-            || Property(output, "evidenceLookup").ValueKind == JsonValueKind.True) input = default;
+        if (Property(output, "success").ValueKind == JsonValueKind.False) input = default;
         return new(
             ReadItems(FirstArray(output, "storedSteps", "steps", "plan"), Property(input, "steps"), numberPhases: true),
             ReadItems(FirstArray(output, "storedAcceptanceCriteria", "acceptanceCriteria"), Property(input, "acceptanceCriteria"), numberPhases: false));
@@ -35,16 +34,16 @@ internal static class NativeWorkingPlanProjection
         if (step.Tool != "coding.updatePlan" || step.Status != "completed") return false;
         var output = Parse(step.OutputJson);
         return output.ValueKind == JsonValueKind.Object
-            && AssistantToolStepHeaders.GetPlanReceiptKind(step.Status, output) == "update";
+            && AssistantToolStepHeaders.GetPlanReceiptKind(step.Status, output, Parse(step.InputJson)) == "update";
     }
 
     internal static string ReceiptKind(JsonElement step)
     {
         var output = Parse(Text(step, "outputJson"));
-        var kind = AssistantToolStepHeaders.GetPlanReceiptKind(Text(step, "status"), output);
+        var kind = AssistantToolStepHeaders.GetPlanReceiptKind(Text(step, "status"), output, Parse(Text(step, "inputJson")));
         if (kind == "failed") return kind;
         var saved = Text(Property(step, "displayHeader"), "planReceiptKind");
-        return saved is "failed" or "lookup" ? saved : kind;
+        return saved is "failed" or "update" or "receipt" ? saved : kind;
     }
 
     internal static bool OpensCurrentPlan(JsonElement step) => ReceiptKind(step) == "update";
@@ -52,8 +51,8 @@ internal static class NativeWorkingPlanProjection
     internal static string ReceiptTitle(JsonElement step) => ReceiptKind(step) switch
     {
         "failed" => "Arbeitsplan konnte nicht aktualisiert werden",
-        "lookup" => "Planbelege gesucht",
-        _ => Text(step, "status") is "running" or "pending" ? "Arbeitsplan wird aktualisiert" : "Arbeitsplan aktualisiert",
+        "update" => Text(step, "status") is "running" or "pending" ? "Arbeitsplan wird aktualisiert" : "Arbeitsplan aktualisiert",
+        _ => "Arbeitsplan",
     };
 
     private static List<Item> ReadItems(JsonElement primary, JsonElement fallback, bool numberPhases)

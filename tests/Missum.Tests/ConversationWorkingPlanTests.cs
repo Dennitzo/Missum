@@ -13,7 +13,7 @@ public sealed class ConversationWorkingPlanTests
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public async Task EvidenceLookupCannotReplaceTheCurrentPlanInLegacyOrNormalizedStorage(bool normalized)
+    public async Task HistoricalReceiptWithoutPlanContentCannotReplaceTheCurrentPlanInLegacyOrNormalizedStorage(bool normalized)
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var chats = environment.Get<IChatRepository>();
@@ -28,7 +28,6 @@ public sealed class ConversationWorkingPlanTests
         var lookup = Plan("lookup", new { }, new
         {
             success = true, evidenceLookup = true, changed = false, candidates = Array.Empty<object>(),
-            storedSteps = Array.Empty<object>(), storedAcceptanceCriteria = Array.Empty<object>(),
         });
         if (normalized)
         {

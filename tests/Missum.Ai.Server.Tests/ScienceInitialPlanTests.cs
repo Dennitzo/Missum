@@ -219,8 +219,8 @@ public sealed class ScienceInitialPlanTests
         await harness.Repository.SaveCheckpointAsync(run, new(RunProcessor.CreateInitialMessages(harness.Request, "coding", [], "compact-v1"),
             1, 1, 0, 0, WorkingState: state, SelectedModelId: Handler.Model, ContextProfileVersion: "compact-v1", SciencePlanInitialized: true));
         harness.Handler.Responses.Enqueue([new("batch", "coding.updatePlan", J("""
-            {"steps":[{"id":"s1","title":"Erste Prüfung","status":"completed","evidenceIds":["actual-read"]},
-                      {"id":"s2","title":"Zweite Prüfung","status":"completed","evidenceIds":["actual-read"]}],"phase":"final"}
+            {"steps":[{"id":"s1","title":"Erste Prüfung","status":"completed"},
+                      {"id":"s2","title":"Zweite Prüfung","status":"completed"}],"phase":"final"}
             """))]);
         harness.Handler.Responses.Enqueue([Read]);
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(20));
@@ -233,24 +233,24 @@ public sealed class ScienceInitialPlanTests
     }
 
     [Fact]
-    public async Task PreviouslyRejectedCompletionIsRevalidatedWhenItsActualEvidenceBecomesAvailable()
+    public async Task ALegacyPlanEvidenceBlockIsClearedOnceAndTheStageCompletesWithoutIt()
     {
         using var harness = new Harness("compact-v1", science: false);
         var run = await harness.CreateAsync();
         var state = CodingWorkingStateReducer.ApplyPlanUpdate(CodingWorkingState.Create("Prüfung"),
             J("""{"steps":[{"id":"s","title":"Phase 1: Prüfen","status":"in_progress"}]}"""));
-        var retry = new LmToolCall("retry", "coding.updatePlan",
+        // The block below comes from a session that was still gated by plan evidence.
+        var retired = new LmToolCall("retry", "coding.updatePlan",
             J("""{"steps":[{"id":"s","title":"Phase 1: Prüfen","status":"completed","evidenceIds":["arrived-later"]}]}"""));
         for (var attempt = 0; attempt < 2; attempt++)
-            state = CodingWorkingStateReducer.ObserveToolResult(state, retry with { Id = "failed-" + attempt },
-                """{"success":false,"errorCode":"agent.invalid_state_action","error":"Unbekannter Beleg"}""");
+            state = CodingWorkingStateReducer.ObserveToolResult(state, retired with { Id = "failed-" + attempt },
+                """{"success":false,"errorCode":"agent.invalid_state_action","error":"Unbekannte evidenceIds für Schritt s","rejectedIds":["arrived-later"],"candidates":[{"planEvidenceId":"actual-read"}]}""");
         Assert.Equal(2, Assert.Single(state.Failures).Count);
-        state = CodingWorkingStateReducer.ObserveToolResult(state,
-            new("arrived-later", "coding.read", J("""{"path":"Publikation.md"}""")),
-            """{"success":true,"path":"Publikation.md","content":"Tatsächlicher Beleg"}""");
         await harness.Repository.SaveCheckpointAsync(run, new(RunProcessor.CreateInitialMessages(harness.Request, "coding", [], "compact-v1"),
             1, 1, 0, 0, WorkingState: state, SelectedModelId: Handler.Model, ContextProfileVersion: "compact-v1", SciencePlanInitialized: true));
-        harness.Handler.Responses.Enqueue([retry]);
+        Assert.Empty((await harness.Repository.GetCheckpointAsync(run))!.WorkingState!.Failures);
+        harness.Handler.Responses.Enqueue([new("retry", "coding.updatePlan",
+            J("""{"steps":[{"id":"s","title":"Phase 1: Prüfen","status":"completed"}]}"""))]);
         harness.Handler.Responses.Enqueue([Read]);
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(20));
         await Assert.ThrowsAsync<RunWaitingForClientException>(() => harness.Processor.ProcessAsync(run, deadline.Token));

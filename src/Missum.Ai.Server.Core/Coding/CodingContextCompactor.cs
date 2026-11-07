@@ -146,7 +146,6 @@ internal static partial class CodingContextCompactor
         if (content?.StartsWith("MISSUM_SCIENCE_SKILL_MODULE_V1:", StringComparison.Ordinal) == true) return content.Split('\n', 2)[0];
         if (content?.StartsWith(ScienceCompletionGuard.Marker, StringComparison.Ordinal) == true) return ScienceCompletionGuard.Marker;
         if (content?.StartsWith(CodingPlanMilestoneGuard.Marker, StringComparison.Ordinal) == true) return CodingPlanMilestoneGuard.Marker;
-        if (content?.StartsWith(CodingPlanEvidenceContext.Marker, StringComparison.Ordinal) == true) return CodingPlanEvidenceContext.Marker;
         if (content?.StartsWith(CommandMonitoringPolicy.InstructionMarker, StringComparison.Ordinal) == true) return CommandMonitoringPolicy.InstructionMarker;
         if (content?.StartsWith(CodingRunBudget.PromptMarker, StringComparison.Ordinal) == true) return CodingRunBudget.PromptMarker;
         if (content == CodingCompletionGuard.RepairPrompt) return nameof(CodingCompletionGuard);

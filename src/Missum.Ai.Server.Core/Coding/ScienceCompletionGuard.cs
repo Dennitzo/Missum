@@ -35,7 +35,7 @@ internal static class ScienceCompletionGuard
             + "Bearbeite jetzt die nächste offene Etappe mit einem tatsächlichen angebotenen Werkzeug. "
             + "Nutze vorhandene Lese- und Werkzeugergebnisse; lies oder ändere bereits erledigte Arbeit nicht erneut. "
             + "Eine angekündigte Korrektur ist noch keine ausgeführte Änderung. Halte die ausdrücklichen Vorgaben des aktuellen Nutzerauftrags ein. "
-            + "Ist die Arbeit bereits ausgeführt, aktualisiere den Plan mit den echten gespeicherten Belegen. "
+            + "Ist die Arbeit bereits ausgeführt, aktualisiere den Plan anhand der tatsächlichen Ergebnisse. "
             + "Bei einer tatsächlichen Blockade dokumentiere sie konkret über coding.updatePlan in scienceStages.blockers, "
             + "belasse die betroffene Etappe pending/open und bearbeite unabhängige ausführbare Etappen weiter. "
             + "Ein ungelöstes wissenschaftliches Problem muss nicht als gelöst behauptet werden. "

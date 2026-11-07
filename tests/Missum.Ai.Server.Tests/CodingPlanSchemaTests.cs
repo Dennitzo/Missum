@@ -48,8 +48,8 @@ public sealed class CodingPlanSchemaTests
         var tool = CodingWorkingStateTools.CreateTools().Single();
         var state = CodingWorkingState.Create("Research") with
         {
-            Plan = [new("s1", "Inspect the current section", "pending", [])],
-            AcceptanceCriteria = [new("a1", "Preserve the user's research criteria", "pending", [])],
+            Plan = [new("s1", "Inspect the current section", "pending")],
+            AcceptanceCriteria = [new("a1", "Preserve the user's research criteria", "pending")],
         };
         var legacy = JsonSerializer.Deserialize<JsonElement>("""
             {"steps":[{"id":"s1","status":"in_progress"}],

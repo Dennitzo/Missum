@@ -47,7 +47,8 @@ public sealed record AgentRunCheckpoint(
     string ContextScope = "session-v3",
     bool SciencePlanInitialized = false,
     IReadOnlyList<LmToolDefinition>? LastModelTools = null,
-    CommandMonitoringCheckpoint? CommandMonitoring = null)
+    CommandMonitoringCheckpoint? CommandMonitoring = null,
+    int PlanFormatVersion = 0)
 {
     [System.Text.Json.Serialization.JsonIgnore]
     internal string? RetiredReviewMainContent { get; init; }

@@ -22,7 +22,7 @@ public sealed class CodingPlanProgressTests
         {
             state = CodingWorkingStateReducer.ApplyPlanUpdate(state, Args(new
             {
-                phase = "review", steps = new[] { new { evidenceIds = Array.Empty<string>(), status = "in_progress", id = "run-tests" } },
+                phase = "review", steps = new[] { new { status = "in_progress", id = "run-tests" } },
                 explanation = "This is another announcement, not execution.",
             }));
             Assert.Equal(sequence, state.Sequence);

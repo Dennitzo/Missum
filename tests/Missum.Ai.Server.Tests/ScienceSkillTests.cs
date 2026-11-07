@@ -9,7 +9,6 @@ namespace Missum.Ai.Server.Tests;
 
 public sealed class ScienceSkillTests
 {
-    private static readonly string Hash = new('a', 64);
     private static JsonElement J(string json) => JsonDocument.Parse(json).RootElement.Clone();
     private static CodingWorkingState Start() => CodingWorkingState.Create("Prüfe die Aussage") with { Science = new(ScienceSkill.Profile, []) };
     private static RunRequest Request(string? workflow = ScienceSkill.Profile) => new(MissumAiProtocol.Version, RunMode.Coding,
@@ -20,12 +19,10 @@ public sealed class ScienceSkillTests
         """.Replace("KIND", kind, StringComparison.Ordinal)));
     private static CodingWorkingState Observe(CodingWorkingState state, string id, string tool, string arguments, string result) =>
         CodingWorkingStateReducer.ObserveToolResult(state, new(id, tool, J(arguments)), result);
-    private static CodingWorkingState Read(CodingWorkingState state, string id, string hash) => Observe(state, id, "coding.read", "{\"path\":\"work/check.py\"}",
-        "{\"success\":true,\"path\":\"work/check.py\",\"sha256\":\"" + hash + "\",\"content\":\"assert 1 == 1\"}");
-    private static CodingWorkingState Complete(CodingWorkingState state, string id = "calc", string kind = "analytic", bool paths = false) =>
+    private static CodingWorkingState Complete(CodingWorkingState state) =>
         CodingWorkingStateReducer.ApplyPlanUpdate(state, J("""
-        {"steps":[{"id":"a","title":"A prüfen","status":"completed","evidenceIds":["ID"]}],"scienceStages":[{"id":"a","outcome":"clarified","checks":[{"id":"check","kind":"KIND","required":true,"evidenceIds":["ID"],"paths":PATHS}]}]}
-        """.Replace("ID", id, StringComparison.Ordinal).Replace("KIND", kind, StringComparison.Ordinal).Replace("PATHS", paths ? "[\"work/check.py\"]" : "[]", StringComparison.Ordinal)));
+            {"steps":[{"id":"a","title":"A prüfen","status":"completed"}],"scienceStages":[{"id":"a","outcome":"clarified"}]}
+            """));
 
     [Theory]
     [InlineData(null)]
@@ -125,195 +122,120 @@ public sealed class ScienceSkillTests
         Assert.Contains("check", plan.WorkingStateMessage!.Content);
     }
 
-    [Fact]
-    public void MissingFailedAndWrongKindEvidenceCannotCompleteRequiredCheck()
+    [Theory]
+    [InlineData("analytic")]
+    [InlineData("numeric")]
+    [InlineData("lean")]
+    [InlineData("source")]
+    [InlineData("publication")]
+    public void StageCompletionUsesStoredScientificStateWithoutReceiptBinding(string kind)
     {
-        var state = Plan(Start(), "numeric");
-        Assert.ThrowsAny<ArgumentException>(() => Complete(state, kind: "numeric"));
-        state = Observe(state, "calc", "coding.command", "{}", "{\"success\":false,\"exitCode\":1}");
-        Assert.ThrowsAny<ArgumentException>(() => Complete(state, kind: "numeric"));
-        state = Read(state, "read", Hash);
-        Assert.Throws<PlanEvidenceValidationException>(() => Complete(state, "read", "numeric", paths: true));
-        Assert.Equal("in_progress", state.Plan.Single().Status);
-    }
-
-    [Fact]
-    public void NumericEvidenceDoesNotRequireHashBoundReadsOrAutomaticallyReopenStages()
-    {
-        var state = Plan(Start(), "numeric");
-        state = Read(state, "input", Hash);
-        state = Observe(state, "calc", "coding.command", "{}", "{\"success\":true,\"exitCode\":0,\"stdout\":\"independent reference agrees\"}");
-        Assert.Equal("completed", Complete(state, kind: "numeric", paths: true).Plan[0].Status);
-        state = Read(state, "after", Hash);
-        state = Complete(state, kind: "numeric", paths: true);
-        state = CodingWorkingStateReducer.ApplyPlanUpdate(state, J("""
-            {"steps":[{"id":"b","title":"Folgerung","status":"completed","evidenceIds":["calc"]},{"id":"c","title":"Unabhängig","status":"completed","evidenceIds":["calc"]}],"scienceStages":[{"id":"b","question":"Folgt B?","strategy":"Folgerung","dependsOn":["a"],"outcome":"clarified"},{"id":"c","question":"Gilt C?","strategy":"Unabhängig","outcome":"clarified"}]}
-            """));
-        var changed = Read(state, "changed", new('b', 64));
-        Assert.Equal("completed", changed.Plan.Single(step => step.Id == "a").Status);
-        Assert.Equal("completed", changed.Plan.Single(step => step.Id == "b").Status);
-        Assert.Equal("completed", changed.Plan.Single(step => step.Id == "c").Status);
-        Assert.NotEmpty(changed.Science!.Stages.Single(stage => stage.Id == "a").Checks.Single().EvidenceIds);
-        Assert.Equal("clarified", ScienceSkill.ResultOutcome(Complete(changed, kind: "numeric", paths: true)));
-    }
-
-    [Fact]
-    public void LeanInitializationOrCommandThatPrintsAcceptedIsNotAProof()
-    {
-        var state = Plan(Start(), "lean");
-        state = Observe(state, "init", "math.formalProof", "{}", "{\"success\":true,\"formalVerification\":\"NotEstablished\"}");
-        Assert.Throws<PlanEvidenceValidationException>(() => Complete(state, "init", "lean"));
-        state = Observe(state, "fake", "coding.command", "{}", "{\"success\":true,\"exitCode\":0,\"formalVerification\":\"KernelAccepted\",\"axiomAudit\":\"passed\",\"sourceFileSha256\":\"" + Hash + "\"}");
-        Assert.Throws<PlanEvidenceValidationException>(() => Complete(state, "fake", "lean"));
-        state = Observe(state, "proof", "math.formalProof", "{}", "{\"status\":\"completed\",\"result\":{\"success\":true,\"formalVerification\":\"KernelAccepted\",\"axiomAudit\":\"passed\",\"source\":\"work/check.py\",\"sourceFileSha256\":\"" + Hash + "\"}}");
-        Assert.Equal("clarified", ScienceSkill.ResultOutcome(Complete(state, "proof", "lean")));
-        state = Read(state, "proof-read", Hash);
-        state = Complete(state, "proof", "lean");
+        var state = Complete(Plan(Start(), kind));
+        Assert.Equal("completed", Assert.Single(state.Plan).Status);
+        Assert.Empty(state.Evidence);
         Assert.Equal("clarified", ScienceSkill.ResultOutcome(state));
+        var json = JsonSerializer.SerializeToElement(state, MissumAiProtocol.CreateJsonOptions());
+        Assert.False(json.GetProperty("plan")[0].TryGetProperty("evidenceIds", out _));
+        Assert.False(json.GetProperty("science").GetProperty("stages")[0].GetProperty("checks")[0].TryGetProperty("evidenceIds", out _));
     }
 
     [Fact]
-    public void WrongPublicationReceiptNamesActualEditCandidateAndTheFieldToCorrect()
+    public void ToolFailuresAndLaterFileChangesDoNotReopenAnExplicitlyCompletedPlan()
     {
-        var state = Plan(Start(), "publication");
-        state = Observe(state, "actual-edit", "coding.edit", "{\"path\":\"work/check.py\"}", "{\"success\":true,\"path\":\"work/check.py\",\"sha256\":\"" + Hash + "\"}");
-        state = Observe(state, "read-only", "web.fetch", "{}", "{\"success\":true}");
-        var error = Assert.Throws<PlanEvidenceValidationException>(() => Complete(state, "read-only", "publication", paths: true));
-        Assert.Contains("Ersetze evidenceIds", error.Message);
-        Assert.Contains("actual-edit", error.Message);
-        Assert.Contains("web.fetch", error.Message);
-        Assert.Contains("coding.edit", error.Message);
-        var issue = Assert.Single(error.Issues);
-        Assert.Equal("wrong_evidence_kind", issue.Code);
-        Assert.Equal("scienceStages.checks.evidenceIds", issue.Field);
-        Assert.Equal("a", issue.StageId);
-        Assert.Equal("check", issue.CheckId);
-        Assert.Equal("read-only", Assert.Single(issue.RejectedIds!));
-        var pendingError = Assert.Throws<PlanEvidenceValidationException>(() => CodingWorkingStateReducer.ApplyPlanUpdate(state, J("""
-            {"phase":"review","scienceStages":[{"id":"a","checks":[{"id":"check","kind":"publication","required":true,"evidenceIds":["read-only"],"paths":["work/check.py"]}]}]}
-            """)));
-        Assert.Contains("actual-edit", pendingError.Message);
-        Assert.Empty(state.Science!.Stages[0].Checks[0].EvidenceIds);
-    }
-
-    [Fact]
-    public void SequentialPublicationEditsAndCurrentReadCanCloseTheSameStage()
-    {
-        var state = Plan(Start(), "publication");
-        state = Observe(state, "old-edit", "coding.edit", "{\"path\":\"work/check.py\"}",
-            "{\"success\":true,\"path\":\"work/check.py\",\"sha256\":\"" + new string('b', 64) + "\"}");
-        state = Observe(state, "final-edit", "coding.edit", "{\"path\":\"work/check.py\"}",
-            "{\"success\":true,\"path\":\"work/check.py\",\"sha256\":\"" + Hash + "\"}");
-        state = Read(state, "review", Hash);
-        var update = J("""
-            {"steps":[{"id":"a","title":"A prüfen","status":"completed","evidenceIds":["old-edit","final-edit"]}],
-             "scienceStages":[{"id":"a","outcome":"clarified","checks":[{"id":"check","kind":"publication","required":true,
-              "evidenceIds":["old-edit","final-edit","review"],"paths":["work/check.py"]}]}]}
-            """);
-        var completed = CodingWorkingStateReducer.ApplyPlanUpdate(state, update);
-        Assert.Equal("clarified", ScienceSkill.ResultOutcome(completed));
-        Assert.Equal("completed", Read(completed, "later-change", new('c', 64)).Plan[0].Status);
-        Assert.Equal("clarified", ScienceSkill.ResultOutcome(Complete(state, "review", "publication", paths: true)));
-        Assert.Equal("clarified", ScienceSkill.ResultOutcome(Complete(state, "old-edit", "publication", paths: true)));
-    }
-
-    [Fact]
-    public void PublicationReviewNeedsMatchingPathButNoFreshConfirmation()
-    {
-        var state = Plan(Start(), "publication");
-        state = Observe(state, "edit", "coding.edit", "{\"path\":\"work/check.py\"}",
-            "{\"success\":true,\"path\":\"work/check.py\",\"sha256\":\"" + Hash + "\"}");
-        Assert.Equal("clarified", ScienceSkill.ResultOutcome(Complete(state, "edit", "publication", paths: true)));
-        state = Read(state, "review", Hash);
-        state = Observe(state, "unrelated-read", "coding.read", "{\"path\":\"other.md\"}",
-            "{\"success\":true,\"path\":\"other.md\",\"sha256\":\"" + Hash + "\"}");
-        var error = Assert.Throws<PlanEvidenceValidationException>(() => Complete(state, "unrelated-read", "publication", paths: true));
-        Assert.Equal("wrong_evidence_path", Assert.Single(error.Issues).Code);
-        Assert.Equal("clarified", ScienceSkill.ResultOutcome(Complete(state, "review", "publication", paths: true)));
-    }
-
-    [Fact]
-    public void PublicationCandidatesUseTheSamePathKindAndReopenRulesAsValidation()
-    {
-        var state = Plan(Start(), "publication");
-        state = Observe(state, "old-edit", "coding.edit", "{}", """{"success":true,"path":"work/Publikation.md"}""");
-        var afterSequence = state.Sequence;
-        state = Observe(state, "actual-edit", "coding.edit", "{}", """{"success":true,"path":"work/Publikation.md"}""");
-        state = Observe(state, "another-file", "coding.read", "{}", """{"success":true,"path":"work/Anhang.md"}""");
-        state = Observe(state, "process", "coding.command", "{}", """{"success":true,"exitCode":0,"path":"work/Publikation.md"}""");
-        state = Observe(state, "paged-output", "coding.readOutput", "{}", """{"success":true,"path":"work/Publikation.md"}""");
-
-        string[] paths = [@".\work\Publikation.md"];
-        var stage = state.Science!.Stages[0] with { ReopenedAtSequence = afterSequence };
-        var check = stage.Checks[0] with { Paths = paths };
-        var candidate = Assert.Single(ScienceStagePolicy.FindCandidates(state, check.Kind, paths, afterSequence));
-        Assert.Equal("actual-edit", candidate.Id);
-        Assert.DoesNotContain(ScienceStagePolicy.FindCandidates(state, null), receipt => receipt.Id == "paged-output");
-        ScienceStagePolicy.ValidateCheck(state, stage, check with { EvidenceIds = [candidate.Id] });
-
-        foreach (var (ids, expectedCode) in new (string[] Ids, string Code)[]
-                 {
-                     ([], "missing_evidence_ids"), (["invented"], "unknown_evidence_id"),
-                     (["old-edit"], "evidence_before_reopen"), (["another-file"], "wrong_evidence_path"),
-                     (["process"], "wrong_evidence_kind"),
-                 })
-        {
-            var error = Assert.Throws<PlanEvidenceValidationException>(() => ScienceStagePolicy.ValidateCheck(state, stage, check with { EvidenceIds = ids }));
-            Assert.Equal(expectedCode, Assert.Single(error.Issues).Code);
-            Assert.Contains(candidate.Id, error.Message);
-            Assert.DoesNotContain("PDF", error.Message);
-        }
-    }
-
-    [Fact]
-    public void NativeLeanWrapperUsesNestedAuditAndItsExplicitSourcePath()
-    {
-        var state = Observe(Plan(Start(), "lean"), "source", "coding.read", "{\"path\":\"Original.lean\"}", "{\"success\":true,\"path\":\"Original.lean\",\"sha256\":\"" + Hash + "\"}");
-        state = Observe(state, "proof", "math.formalProof", "{\"path\":\"Original.lean\"}", """
-            {"success":true,"formalVerification":"KernelAccepted","inputHashes":{"work/lean/Proof.lean":"HASH"},
-            "lean":{"formalVerification":"KernelAccepted","axiomAudit":"passed","source":"lean/Proof.lean","sourceFileSha256":"HASH"}}
-            """.Replace("HASH", Hash, StringComparison.Ordinal));
-        var receipt = Assert.Single(state.Evidence, item => item.Id == "proof");
-        Assert.True(receipt.FormalVerified);
-        Assert.Equal("lean/Proof.lean", receipt.VerificationPath);
-        Assert.Equal("clarified", ScienceSkill.ResultOutcome(Complete(state, "proof", "lean")));
-        state = Observe(state, "confirm", "coding.read", "{\"path\":\"work/lean/Proof.lean\"}",
-            "{\"success\":true,\"path\":\"work/lean/Proof.lean\",\"sha256\":\"" + Hash + "\",\"content\":\"theorem checked : True := by trivial\"}");
-        state = Complete(state, "proof", "lean");
-        Assert.Equal("clarified", ScienceSkill.ResultOutcome(state));
-        state = Observe(state, "changed-original", "coding.read", "{\"path\":\"Original.lean\"}", "{\"success\":true,\"path\":\"Original.lean\",\"sha256\":\"" + new string('b', 64) + "\"}");
+        var state = Complete(Plan(Start(), "numeric"));
+        state = Observe(state, "failed-command", "coding.command", "{}", "{\"success\":false,\"exitCode\":1}");
+        Assert.False(Assert.Single(state.Evidence).Success);
         Assert.Equal("completed", state.Plan[0].Status);
+        state = Observe(state, "later-edit", "coding.edit", "{\"path\":\"Publikation.md\"}", "{\"success\":true,\"path\":\"Publikation.md\"}");
+        Assert.Equal("completed", state.Plan[0].Status);
+        Assert.Equal("clarified", ScienceSkill.ResultOutcome(state));
+    }
+
+    [Theory]
+    [InlineData("KernelAccepted", "passed", true)]
+    [InlineData("KernelAccepted", "failed", false)]
+    [InlineData("Rejected", "passed", false)]
+    public void ActualLeanResultStillReportsKernelAndAxiomStatus(string verification, string audit, bool verified)
+    {
+        var state = Observe(Start(), "proof", "math.formalProof", "{}", JsonSerializer.Serialize(new
+        {
+            success = true, formalVerification = verification, axiomAudit = audit, source = "work/Proof.lean",
+        }));
+        var receipt = Assert.Single(state.Evidence);
+        Assert.Equal(verified, receipt.FormalVerified);
+        Assert.Equal(verified ? "work/Proof.lean" : null, receipt.VerificationPath);
     }
 
     [Fact]
-    public void OpenEtappeDoesNotBlockIndependentWorkAndCannotWeakenRequiredChecks()
+    public void OpenStagesAllowIndependentWorkAndRequiredChecksKeepTheirDeclaredMeaning()
     {
         var state = Plan(Start(), "lean");
         Assert.Throws<ArgumentException>(() => CodingWorkingStateReducer.ApplyPlanUpdate(state, J("""
             {"scienceStages":[{"id":"a","checks":[{"id":"check","kind":"lean","required":false}]}]}
             """)));
         state = CodingWorkingStateReducer.ApplyPlanUpdate(state, J("""
-            {"steps":[{"id":"a","title":"A prüfen","status":"pending"},{"id":"b","title":"Unabhängig","status":"in_progress"}],"scienceStages":[{"id":"a","blockers":["Hilfslemma offen"]},{"id":"b","question":"Gilt B?","strategy":"Grenzfall untersuchen"}]}
+            {"steps":[{"id":"a","title":"A prüfen","status":"pending"},{"id":"b","title":"Unabhängig","status":"in_progress"}],
+             "scienceStages":[{"id":"a","blockers":["Hilfslemma offen"]},{"id":"b","question":"Gilt B?","strategy":"Grenzfall untersuchen"}]}
             """));
-        Assert.Equal("b", state.Plan.Single(step => step.Status == "in_progress").Id);
+        Assert.Equal("b", Assert.Single(state.Plan, step => step.Status == "in_progress").Id);
         Assert.Equal("open", ScienceSkill.ResultOutcome(state));
-        Assert.Throws<PlanEvidenceValidationException>(() => CodingWorkingStateReducer.ApplyPlanUpdate(state, J("""
+        Assert.Throws<PlanValidationException>(() => CodingWorkingStateReducer.ApplyPlanUpdate(state, J("""
             {"scienceStages":[{"id":"b","dependsOn":["a"]}]}
             """)));
     }
 
-    [Fact]
-    public void ExplicitReopenRequiresExplanationAndInvalidatesPriorReceipts()
+    [Theory]
+    [InlineData("../outside.md")]
+    [InlineData(".git/config")]
+    [InlineData("C:/absolute.md")]
+    public void CheckPathsRemainRelativeProjectReferences(string path)
     {
         var state = Plan(Start());
-        state = Observe(state, "calc", "math.evaluate", "{}", "{\"success\":true}");
-        state = Complete(state);
+        var update = JsonSerializer.SerializeToElement(new
+        {
+            scienceStages = new[]
+            {
+                new { id = "a", checks = new[] { new { id = "check", kind = "analytic", required = true, paths = new[] { path } } } },
+            },
+        });
+        Assert.Throws<PlanValidationException>(() => CodingWorkingStateReducer.ApplyPlanUpdate(state, update));
+        Assert.Empty(state.Science!.Stages[0].Checks[0].Paths);
+    }
+
+    [Fact]
+    public void CyclicDependenciesAndDocumentedBlockersStillPreventCompletion()
+    {
+        var state = Plan(Start());
+        Assert.Throws<ArgumentException>(() => CodingWorkingStateReducer.ApplyPlanUpdate(state, J("""
+            {"steps":[{"id":"b","title":"Folgerung"}],
+             "scienceStages":[{"id":"a","dependsOn":["b"]},{"id":"b","dependsOn":["a"]}]}
+            """)));
+        state = CodingWorkingStateReducer.ApplyPlanUpdate(state, J("""
+            {"scienceStages":[{"id":"a","blockers":["Ungeklärter Grenzfall"]}]}
+            """));
+        var error = Assert.Throws<PlanValidationException>(() => Complete(state));
+        Assert.Contains(error.Issues, issue => issue.Field == "scienceStages.blockers");
+        Assert.Equal("in_progress", state.Plan[0].Status);
+    }
+
+    [Fact]
+    public void ExplicitReopenRequiresExplanationAndResetsOnlyDependentWork()
+    {
+        var state = Complete(Plan(Start()));
+        state = CodingWorkingStateReducer.ApplyPlanUpdate(state, J("""
+            {"steps":[{"id":"b","title":"Folgerung","status":"completed"},{"id":"c","title":"Unabhängig","status":"completed"}],
+             "scienceStages":[{"id":"b","question":"Folgt B?","strategy":"Folgerung","dependsOn":["a"],"outcome":"clarified"},
+                              {"id":"c","question":"Gilt C?","strategy":"Unabhängig","outcome":"clarified"}]}
+            """));
         const string reopen = """{"steps":[{"id":"a","title":"A prüfen","status":"in_progress"}]}""";
-        Assert.Throws<PlanEvidenceValidationException>(() => CodingWorkingStateReducer.ApplyPlanUpdate(state, J(reopen)));
+        Assert.Throws<PlanValidationException>(() => CodingWorkingStateReducer.ApplyPlanUpdate(state, J(reopen)));
         state = CodingWorkingStateReducer.ApplyPlanUpdate(state, J(reopen[..^1] + ",\"explanation\":\"Voraussetzung war unvollständig\"}"));
-        Assert.Throws<PlanEvidenceValidationException>(() => Complete(state));
-        state = Observe(state, "new-calc", "math.evaluate", "{}", "{\"success\":true}");
-        Assert.Equal("clarified", ScienceSkill.ResultOutcome(Complete(state, "new-calc")));
+        Assert.Equal("in_progress", state.Plan[0].Status);
+        Assert.Equal("pending", state.Plan[1].Status);
+        Assert.Equal("completed", state.Plan[2].Status);
+        Assert.Equal("open", state.Science!.Stages.Single(stage => stage.Id == "a").Outcome);
+        Assert.Equal("open", state.Science.Stages.Single(stage => stage.Id == "b").Outcome);
+        Assert.Equal("completed", Complete(state).Plan[0].Status);
     }
 
     [Fact]
@@ -333,7 +255,7 @@ public sealed class ScienceSkillTests
     [Fact]
     public void SettledPlanRemainsHistoricalAndNewTaskCanReuseStageIdsWithoutOldRequirements()
     {
-        var state = Complete(Observe(Plan(Start()), "calc", "math.evaluate", "{}", "{\"success\":true}"));
+        var state = Complete(Plan(Start()));
         var checkpoint = new AgentRunCheckpoint([new("system", "policy"), new("user", "old task")], 1, 0, 0, 0, WorkingState: state);
         var continued = CodingSessionContext.ContinueWorkingState(checkpoint, "Nächste unabhängige Aufgabe", science: true)!;
         Assert.Empty(continued.Plan);
@@ -341,34 +263,10 @@ public sealed class ScienceSkillTests
         Assert.Equal(state.Evidence, continued.Evidence);
         Assert.NotEmpty(checkpoint.WorkingState!.Plan);
         Assert.NotEmpty(Plan(continued, "numeric").Science!.Stages);
-        var messages = CodingSessionContext.Continue(checkpoint, [new("system", "policy"), new("user", "next task")], science: true);
-        Assert.Contains(messages, message => message.Content!.Contains("steps und acceptanceCriteria starten leer", StringComparison.Ordinal));
     }
 
     [Fact]
-    public void SourceBasedTaskNeedsNoLeanOrFileHashConfirmation()
-    {
-        var state = Read(Plan(Start(), "source"), "source", Hash);
-        state = Complete(state, "source", "source");
-        Assert.Equal("clarified", ScienceSkill.ResultOutcome(state));
-        Assert.Equal("clarified", ScienceSkill.ResultOutcome(Read(state, "new-source", new('c', 64))));
-    }
-
-    [Fact]
-    public void AnnotationKeepsRawReceiptSeparateFromProjectedMetadata()
-    {
-        var state = Observe(Plan(Start()), "calc", "math.evaluate", "{}", "{\"success\":true}");
-        const string raw = "{\"success\":true,\"result\":\"unchanged\"}";
-        var projected = J(ScienceSkill.ProjectToolEvidence(raw, state, "calc"));
-        var evidence = projected.GetProperty("_missumEvidence");
-        Assert.Equal("calc", evidence.GetProperty("planEvidenceId").GetString());
-        Assert.Equal("math.evaluate", evidence.GetProperty("tool").GetString());
-        Assert.Equal("unchanged", projected.GetProperty("result").GetString());
-        Assert.False(J(raw).TryGetProperty("_missumEvidence", out _));
-    }
-
-    [Fact]
-    public void DelegatedProofUsesTrustedKernelReceiptWithoutParentFileConfirmation()
+    public void DelegatedProofHistoryKeepsTrustedKernelResultIndependentlyOfThePlan()
     {
         var state = Plan(Start(), "lean");
         var result = JsonSerializer.SerializeToElement(new
@@ -377,13 +275,15 @@ public sealed class ScienceSkillTests
             completionEvidence = new LmChatMessage[]
             {
                 new("assistant", ToolCalls: [new("child-proof", "math.formalProof", J("{}"))]),
-                new("tool", "{\"success\":true,\"formalVerification\":\"KernelAccepted\",\"axiomAudit\":\"passed\",\"source\":\"work/check.py\",\"sourceFileSha256\":\"" + Hash + "\"}", ToolCallId: "child-proof"),
+                new("tool", "{\"success\":true,\"formalVerification\":\"KernelAccepted\",\"axiomAudit\":\"passed\",\"source\":\"work/Proof.lean\"}", ToolCallId: "child-proof"),
             },
         }, MissumAiProtocol.CreateJsonOptions());
         state = ScienceStagePolicy.ImportDelegatedEvidence(state, result);
-        Assert.Equal("clarified", ScienceSkill.ResultOutcome(Complete(state, "child-proof", "lean")));
-        state = Read(state, "parent-read", Hash);
-        Assert.Equal("clarified", ScienceSkill.ResultOutcome(Complete(state, "child-proof", "lean")));
+        var receipt = Assert.Single(state.Evidence);
+        Assert.True(receipt.FormalVerified);
+        Assert.True(receipt.Historical);
+        Assert.Equal("child", receipt.SourceRunId);
+        Assert.Equal("in_progress", state.Plan[0].Status);
         Assert.Equal(state.Evidence.Count, ScienceStagePolicy.ImportDelegatedEvidence(state, result).Evidence.Count);
     }
 }

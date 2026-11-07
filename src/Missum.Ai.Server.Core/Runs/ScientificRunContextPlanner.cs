@@ -15,7 +15,6 @@ internal static class ScientificRunContextPlanner
         LegacyResearchContext.RecoveryMarker, LegacyResearchContext.VerificationRepairMarker,
         "[MISSUM_SCIENCE_PROGRESS_HINT:", "[MISSUM_SCIENCE_TOOL_DIAGNOSIS:", "[MISSUM_SCIENCE_RESEARCH_DIAGNOSIS:",
         "[MISSUM_SCIENCE_COMPLETION_STAGNATION]",
-        CodingPlanEvidenceContext.Marker,
     ];
 
     internal static ContextPlan Prepare(IReadOnlyList<LmChatMessage> source, int contextLength, int? maximumOutputTokens,

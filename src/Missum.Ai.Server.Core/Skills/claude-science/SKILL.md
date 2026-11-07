@@ -17,7 +17,7 @@ Lies gezielt in Etappen statt alles vorab.
 Für coding-Dateiwerkzeuge ausschließlich projektbezogene relative Pfade verwenden, etwa Publikation.md.
 Absolute Anzeigeorte aus Werkzeugantworten nicht als Argumentpfade übernehmen.
 Orientiere dich am Gesamtplan; vertiefe im Reasoning die aktuelle Leitfrage und parke spätere unabhängige Fragen.
-Missum kontrolliert keine Gedanken, sondern Planübergänge und tatsächliche Nachweise.
+Missum speichert den Arbeitsstand und prüft die Planstruktur. Beurteile fachliche Ergebnisse selbst anhand der tatsächlich ausgeführten Arbeit.
 
 Für mathematische und physikalische Forschung den beigefügten Forschungsstandard automatisch anwenden.
 Bei anderen Aufgaben Prüfmethoden nach Aussageart wählen.
@@ -34,29 +34,23 @@ id (dieselbe steps-ID), question (Leitfrage), strategy (Prüfstrategie), optiona
 openQuestions, blockers und outcome (open, clarified oder refuted). Alle Felder außer id sind Änderungen;
 ausgelassene Felder bleiben erhalten. Für die fachliche Ausarbeitung benötigen Etappen question und strategy.
 checks werden nach id ergänzt.
-Ein Check enthält id, kind (source, analytic, lean, numeric, plot oder publication), required (Boolean),
-optional evidenceIds und paths (relative tatsächlich geprüfte Dateien). Deklariere Pflichtprüfungen früh.
-Belege erst nach tatsächlicher Prüfung zuordnen; initial darf evidenceIds fehlen. Übernimm für
-evidenceIds die exakte planEvidenceId aus dem Werkzeugergebnis oder dem Planbeleg-Nachtrag.
-Prüfe Prüfart und Pfad. Weitere Kandidaten liefert ein separater Aufruf mit evidenceQuery.
-Beispiel: Schließe eine Etappe mit der planEvidenceId ihres erfolgreich ausgeführten PDF-Befehls
-in steps[].evidenceIds ab. Binde am publication-Prüfpunkt in scienceStages[].checks[].evidenceIds
-die planEvidenceId eines Lese- oder Bearbeitungsergebnisses für Publikation.md.
+Ein Check enthält id, kind (source, analytic, lean, numeric, plot oder publication), required (Boolean)
+und optional paths mit relativen Projektdateien zur Orientierung. Deklariere Pflichtprüfungen früh.
 Dateien dürfen direkt bearbeitet und überschrieben werden;
 ein vorheriger Leseaufruf oder eine Hashbestätigung ist nicht erforderlich. paths kann die zugehörigen
-Skripte, Daten oder die Publikation zur Orientierung nennen. Der Planabschluss verwendet tatsächliche
-Werkzeugergebnisse, ohne Dateien automatisch erneut einzulesen.
+Skripte, Daten oder die Publikation zur Orientierung nennen. Aktualisiere den Plan entsprechend der
+tatsächlich ausgeführten Arbeit und deiner fachlichen Beurteilung.
 Fehlermeldungen nennen fehlende Details. Fehler lehnen den gesamten Aufruf ab: Noch nicht gespeicherte
 Schritte zusammen mit ihren korrigierten Details erneut senden; nur bereits gespeicherte IDs dürfen allein
 aktualisiert werden. Keine erfundenen IDs oder leeren Wiederholungen.
 Beispiel: steps=[{id:"s1",title:"Identität prüfen",status:"in_progress"}],
 scienceStages=[{id:"s1",question:"Gilt die Identität unter den Voraussetzungen?",strategy:"Herleitung und symbolische Gegenprobe",
 checks:[{id:"algebra",kind:"analytic",required:true}]}]. JSON-Werkzeugargumente natürlich als gültiges JSON senden.
-Ein fachlicher Abschluss braucht outcome=clarified oder refuted und erfolgreiche passende Belege.
+Ein fachlicher Abschluss braucht outcome=clarified oder refuted. Erledigte Arbeit nach jedem Meilenstein zeitnah speichern.
 Bei Blockaden bleibt status=pending, outcome=open mit konkreten blockers/openQuestions; unabhängige Etappen fortsetzen.
 Für Rücksprünge eine Erklärung mitsenden und die frühere Etappe öffnen. Abhängige Freigaben werden entwertet.
 Eine normale Textantwort oder Arbeitsankündigung beendet keine noch ausführbare Etappe. Setze offene Arbeit
-mit tatsächlichen Werkzeugen fort; aktualisiere erledigte Etappen mit den vorhandenen Belegen.
+mit tatsächlichen Werkzeugen fort; aktualisiere erledigte Etappen anhand des tatsächlichen Arbeitsstands.
 Ein Teilabschluss mit offenen Punkten ist bei konkreten dokumentierten Blockaden zulässig. Halte diese
 in scienceStages.blockers fest und bearbeite zuvor alle unabhängigen noch ausführbaren Etappen.
 Nutzerstopp und ausdrückliche Einschränkungen des aktuellen Auftrags bleiben maßgeblich.

@@ -1,0 +1,14 @@
+[2026-11-06 23:17:14.514] [00006298] === Logging started ===
+[2026-11-06 23:17:14.520] [00006298] Executing: "C:\Program Files\dotnet\dotnet.exe" build tests/Missum.Tests/Missum.Tests.csproj -c Release --nologo -v q, PID: 25240, PPID: 29024
+[2026-11-06 23:17:14.522] [00006298] IsElevated: False
+[2026-11-06 23:17:14.522] [00006298] Is64BitProcess: True
+[2026-11-06 23:17:14.522] [00006298] RebootPending: False
+[2026-11-06 23:17:14.522] [00006298] ProcessorArchitecture: amd64
+[2026-11-06 23:17:14.522] [00006298] HostArchitecture: x64
+[2026-11-06 23:17:14.522] [00006298] SdkDirectory: 10.0.401
+[2026-11-06 23:17:14.522] [00006298] VerifySignatures: False
+[2026-11-06 23:17:14.522] [00006298] SDK feature band: 10.0.400
+[2026-11-06 23:18:01.893] [00006298] Shutting down
+[2026-11-06 23:18:01.893] [00006298] Shutdown completed.
+[2026-11-06 23:18:01.893] [00006298] Restart required: False
+[2026-11-06 23:18:01.894] [00006298] === Logging ended ===

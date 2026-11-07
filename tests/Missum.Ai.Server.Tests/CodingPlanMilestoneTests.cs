@@ -15,8 +15,8 @@ public sealed class CodingPlanMilestoneTests
         var saved = JsonSerializer.Serialize(before);
         var candidate = Apply(before, """
             {"steps":[
-              {"id":"inspect","status":"completed","evidenceIds":["verified-result"]},
-              {"id":"change","status":"completed","evidenceIds":["verified-result"]},
+              {"id":"inspect","status":"completed"},
+              {"id":"change","status":"completed"},
               {"id":"review","status":"in_progress"}],"phase":"review"}
             """);
 
@@ -33,12 +33,11 @@ public sealed class CodingPlanMilestoneTests
         var before = InitialState();
         var after = Apply(before, """
             {"steps":[
-              {"id":"inspect","status":"completed","evidenceIds":["verified-result"]},
+              {"id":"inspect","status":"completed"},
               {"id":"change","status":"in_progress"}],"phase":"editing"}
             """);
 
         Assert.Equal("completed", after.Plan[0].Status);
-        Assert.Equal("verified-result", Assert.Single(after.Plan[0].EvidenceIds));
         Assert.Equal("in_progress", after.Plan[1].Status);
         Assert.Equal("pending", after.Plan[2].Status);
     }
@@ -49,14 +48,13 @@ public sealed class CodingPlanMilestoneTests
         var before = CompleteFirstStage();
         var after = Apply(before, """
             {"steps":[
-              {"id":"inspect","title":"Ursache prüfen","status":"completed","evidenceIds":["verified-result"]},
-              {"id":"change","title":"Korrektur umsetzen","status":"completed","evidenceIds":["verified-result"]},
+              {"id":"inspect","title":"Ursache prüfen","status":"completed"},
+              {"id":"change","title":"Korrektur umsetzen","status":"completed"},
               {"id":"review","title":"Ergebnis prüfen","status":"in_progress"}]}
             """);
 
         Assert.Equal(2, after.Plan.Count(step => step.Status == "completed"));
         Assert.Equal(before.Plan[0].Title, after.Plan[0].Title);
-        Assert.Equal(before.Plan[0].EvidenceIds, after.Plan[0].EvidenceIds);
         Assert.Equal("in_progress", after.Plan[2].Status);
     }
 
@@ -66,7 +64,7 @@ public sealed class CodingPlanMilestoneTests
         var before = CompleteFirstStage();
         var after = Apply(before, JsonSerializer.Serialize(new
         {
-            steps = before.Plan.Select(step => new { id = step.Id, title = step.Title, status = step.Status, evidenceIds = step.EvidenceIds }),
+            steps = before.Plan.Select(step => new { id = step.Id, title = step.Title, status = step.Status }),
         }));
 
         Assert.Equal(before.Plan, after.Plan);
@@ -79,11 +77,11 @@ public sealed class CodingPlanMilestoneTests
         var before = InitialState();
         var after = Apply(before, """
             {"steps":[
-              {"id":"inspect","status":"completed","evidenceIds":["verified-result"]},
+              {"id":"inspect","status":"completed"},
               {"id":"change","status":"in_progress"}],
              "acceptanceCriteria":[
-              {"id":"correct","status":"completed","evidenceIds":["verified-result"]},
-              {"id":"checked","status":"completed","evidenceIds":["verified-result"]}]}
+              {"id":"correct","status":"completed"},
+              {"id":"checked","status":"completed"}]}
             """);
 
         Assert.All(after.AcceptanceCriteria, criterion => Assert.Equal("completed", criterion.Status));
@@ -91,7 +89,7 @@ public sealed class CodingPlanMilestoneTests
     }
 
     [Fact]
-    public void AReopenedStageCanBeCompletedAgainWithActualNewEvidence()
+    public void AReopenedStageIsCompletedAgainAfterTheCheckRunsOnceMore()
     {
         var completed = CompleteFirstStage();
         var reopened = Apply(completed, """
@@ -101,13 +99,13 @@ public sealed class CodingPlanMilestoneTests
         reopened = ObserveSuccessfulCommand(reopened, "rechecked-result");
         var checkedAgain = Apply(reopened, """
             {"steps":[
-              {"id":"inspect","status":"completed","evidenceIds":["rechecked-result"]},
+              {"id":"inspect","status":"completed"},
               {"id":"change","status":"in_progress"}]}
             """);
 
         Assert.Equal("completed", checkedAgain.Plan[0].Status);
-        Assert.Equal("rechecked-result", Assert.Single(checkedAgain.Plan[0].EvidenceIds));
         Assert.Equal("in_progress", checkedAgain.Plan[1].Status);
+        Assert.Contains(checkedAgain.Evidence, item => item.Id == "rechecked-result");
     }
 
     [Fact]
@@ -193,7 +191,7 @@ public sealed class CodingPlanMilestoneTests
 
     private static CodingWorkingState CompleteFirstStage() => Apply(InitialState(), """
         {"steps":[
-          {"id":"inspect","status":"completed","evidenceIds":["verified-result"]},
+          {"id":"inspect","status":"completed"},
           {"id":"change","status":"in_progress"}]}
         """);
 

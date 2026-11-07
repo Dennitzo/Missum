@@ -57,7 +57,7 @@ public static class CompactAgentContextPolicy
         Ohne Bild vorhandene Befunde nutzen, keine neue Sichtprüfung behaupten.
         """;
 
-    private const string Coding = """
+    internal const string Coding = """
         Coding-Agent: Implementiere im gewählten Projekt in kurzen überprüfbaren Etappen. Begleittexte
         sind deutsche vorlesbare Fließtextabsätze ohne Tabellen/Stichpunktketten; genaue Technik nur bei Bedarf
         separat, Werkzeugargumente bleiben exakt. Sobald Ursache und passende Änderung klar sind, umsetzen.
@@ -76,9 +76,8 @@ public static class CompactAgentContextPolicy
         Etappe. Mehrere tatsächlich erledigte Etappen dürfen gemeinsam abgeschlossen und die nächste aktiviert werden.
         Nur neue oder geänderte Punkte senden; ausgelassene Punkte bleiben erhalten, null/leer ist nicht
         ausgelassen. storedSteps/storedAcceptanceCriteria enthalten stets den vollständigen geordneten Plan;
-        behalte auch erledigte Etappen in Planung und Darstellung. completed benötigt echte erfolgreiche
-        planEvidenceId-Werte in evidenceIds. Wähle Belege nach Prüfart und Pfad; evidenceQuery sucht weitere passende
-        IDs. changed=false ist keine Arbeit; führe nextStep aus. Phasen planning/exploration/editing/
+        behalte auch erledigte Etappen in Planung und Darstellung. Pflege den Status nach dem tatsächlichen
+        Arbeitsstand. changed=false ist keine Arbeit; führe nextStep aus. Phasen planning/exploration/editing/
         error_recovery/review/final passend setzen; review enthält echte Tests. readOutput benötigt gespeicherte
         OutputEvidenceId; historische _missumCompletedArguments/_goCompletedArguments sind keine neuen Argumente.
         coding.command startet genau ein Windows-Programm mit getrennten Argumenten; Workspace ist keine

@@ -1,0 +1,14 @@
+[2026-11-06 23:20:28.987] [0000939C] === Logging started ===
+[2026-11-06 23:20:28.993] [0000939C] Executing: "C:\Program Files\dotnet\dotnet.exe" test tests/Missum.Ai.Server.Tests/Missum.Ai.Server.Tests.csproj -c Release --no-build --nologo, PID: 37788, PPID: 29468
+[2026-11-06 23:20:28.995] [0000939C] IsElevated: False
+[2026-11-06 23:20:28.995] [0000939C] Is64BitProcess: True
+[2026-11-06 23:20:28.995] [0000939C] RebootPending: False
+[2026-11-06 23:20:28.995] [0000939C] ProcessorArchitecture: amd64
+[2026-11-06 23:20:28.995] [0000939C] HostArchitecture: x64
+[2026-11-06 23:20:28.995] [0000939C] SdkDirectory: 10.0.401
+[2026-11-06 23:20:28.995] [0000939C] VerifySignatures: False
+[2026-11-06 23:20:28.995] [0000939C] SDK feature band: 10.0.400
+[2026-11-06 23:22:28.844] [0000939C] Shutting down
+[2026-11-06 23:22:28.844] [0000939C] Shutdown completed.
+[2026-11-06 23:22:28.844] [0000939C] Restart required: False
+[2026-11-06 23:22:28.845] [0000939C] === Logging ended ===

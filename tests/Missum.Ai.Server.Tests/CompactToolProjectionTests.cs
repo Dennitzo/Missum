@@ -62,7 +62,7 @@ public sealed class CompactToolProjectionTests
         Assert.Contains("offen", description, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("Ein neuer Lauf beginnt mit leeren Planlisten", description, StringComparison.Ordinal);
         var fields = function.GetProperty("parameters").GetProperty("properties");
-        Assert.Contains("stageId", fields.GetProperty("evidenceQuery").GetProperty("description").GetString(), StringComparison.Ordinal);
+        Assert.False(fields.TryGetProperty("evidenceQuery", out _));
         Assert.True(fields.TryGetProperty("scienceStages", out var stages));
         Assert.Contains("offen", stages.GetProperty("description").GetString(), StringComparison.OrdinalIgnoreCase);
         if (profile == ToolContextProfiles.Current)
@@ -74,7 +74,7 @@ public sealed class CompactToolProjectionTests
         var regular = CodingWorkingStateTools.CreateTools().Single().ToLmDefinition() with { ContextProfileVersion = profile };
         var checkFields = stages.GetProperty("items").GetProperty("properties").GetProperty("checks")
             .GetProperty("items").GetProperty("properties");
-        Assert.Contains("planEvidenceId", checkFields.GetProperty("evidenceIds").GetProperty("description").GetString(), StringComparison.Ordinal);
+        Assert.False(checkFields.TryGetProperty("evidenceIds", out _));
         var regularFunction = ModelRuntimeClient.PrepareTransportTools("coding/Qwen3.8", [regular])[0].GetProperty("function");
         Assert.False(regularFunction.GetProperty("parameters").GetProperty("properties").TryGetProperty("scienceStages", out _));
     }

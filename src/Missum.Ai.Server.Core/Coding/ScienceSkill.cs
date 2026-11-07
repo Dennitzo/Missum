@@ -11,7 +11,6 @@ public static class ScienceSkill
     public const string Profile = "claude-science-v1";
     internal const string Marker = "MISSUM_SCIENCE_SKILL_V1\n";
     internal const string ResearchStandardMarker = "MISSUM_SCIENCE_SKILL_MODULE_V1:research-standard-v3\n";
-    private static readonly JsonSerializerOptions EvidenceJsonOptions = MissumAiProtocol.CreateJsonOptions();
     private static readonly Dictionary<string, string> Modules = new[] { "SKILL", "stages", "verification", "publication", "research-standard" }
         .ToDictionary(name => name, name => Read(name));
     public static bool Enabled(RunRequest request) => request.WorkflowProfile == Profile;
@@ -39,7 +38,7 @@ public static class ScienceSkill
             activeStage = stage is null ? null : new
             {
                 stage.Id, stage.Question, stage.Strategy, stage.DependsOn, stage.Outcome, stage.DetailsPending,
-                checks = stage.Checks.Select(check => new { check.Id, check.Kind, check.Required, check.EvidenceIds, boundFiles = check.Paths.Count }),
+                checks = stage.Checks.Select(check => new { check.Id, check.Kind, check.Required, boundFiles = check.Paths.Count }),
                 blockers = stage.Blockers.Take(3), openQuestions = stage.OpenQuestions.Take(3),
             }, activeStatus = active?.Status,
             pendingStages = state.Plan.Where(item => item.Status != "completed").Select(item => new { item.Id, item.Status }),
@@ -169,8 +168,7 @@ public static class ScienceSkill
             "openQuestions":{"type":"array","maxItems":12,"items":{"type":"string","minLength":1,"maxLength":600}},
             "blockers":{"type":"array","maxItems":12,"items":{"type":"string","minLength":1,"maxLength":600}},
             "checks":{"type":"array","maxItems":8,"items":{"type":"object","additionalProperties":false,"properties":{
-            "id":{"type":"string","minLength":1,"maxLength":80},"kind":{"type":"string","enum":["source","analytic","lean","numeric","plot","publication"],"description":"numeric: math.numeric/math.evaluate oder erfolgreicher Rechenprozess. analytic: math.symbolic/math.smt/math.evaluate, Rechenprozess oder geprüfter Lean-Beweis. Numerische Näherung allein ist kein analytischer/Lean-Beweis. publication: tatsächlicher Lese-/Schreib-/Bearbeitungsbeleg zur Publikation; ein bloßer PDF-Prozess reicht nicht."},"required":{"type":"boolean"},
-            "evidenceIds":{"type":"array","maxItems":3,"uniqueItems":true,"description":"Kopiere planEvidenceId aus dem tatsächlichen Werkzeugbeleg oder aus einem separaten Aufruf mit evidenceQuery. Prüfe Werkzeug, eligibleKinds, Pfad und fachliche Zuordnung. Ein erfolgreicher Rechen- oder PDF-Befehl belegt die Ausführung. Verwende für den Publikationsinhalt einen Lese- oder Änderungsbeleg. outputEvidenceId ist die Referenz für gespeicherte Ausgaben.","items":{"type":"string","minLength":1,"maxLength":100}},
+            "id":{"type":"string","minLength":1,"maxLength":80},"kind":{"type":"string","enum":["source","analytic","lean","numeric","plot","publication"],"description":"Gewählte fachliche Prüfstrategie: Quellen, analytische Herleitung, Lean, Numerik, Plot oder Publikation."},"required":{"type":"boolean"},
             "paths":{"type":"array","maxItems":16,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":1024}}},"required":["id","kind","required"]}}
             },"required":["id"]}}
             """);
@@ -178,65 +176,8 @@ public static class ScienceSkill
         {
             Schema = JsonSerializer.SerializeToElement(schema),
             AllowedProperties = tool.AllowedProperties.Append("scienceStages").ToHashSet(StringComparer.Ordinal),
-            Description = tool.Description + " Science-Skill: Ein schlichter Anfangsplan mit steps ist sofort speicherbar. scienceStages ergänzt Leitfrage, Prüfstrategie, Abhängigkeiten, Checks, offene Fragen, Blockaden und outcome. Fehlende Leitfrage/Prüfstrategie bleiben als DetailsPending offen und werden nicht erfunden; vor fachlichem completed beide ausdrücklich festlegen. Offene Science-Pläne bleiben bei Fortsetzen derselben Sitzung gespeichert. Ein abgeschlossener Schritt benötigt clarified/refuted und aktuelle Pflichtnachweise; blockierte/offene Schritte bleiben pending. Für Rücksprünge explanation mitsenden.",
+            Description = tool.Description + " Science-Skill: Ein schlichter Anfangsplan mit steps ist sofort speicherbar. scienceStages ergänzt Leitfrage, Prüfstrategie, Abhängigkeiten, Checks, offene Fragen, Blockaden und outcome. Fehlende Leitfrage/Prüfstrategie bleiben als DetailsPending offen und werden nicht erfunden; vor fachlichem completed beide ausdrücklich festlegen. Offene Science-Pläne bleiben bei Fortsetzen derselben Sitzung gespeichert. Ein abgeschlossener Schritt benötigt clarified/refuted; blockierte/offene Schritte bleiben pending. Beurteile den fachlichen Abschluss anhand der tatsächlich ausgeführten Arbeit. Für Rücksprünge explanation mitsenden.",
         };
-    }
-
-    internal static void EnsurePlanEvidenceContext(List<LmChatMessage> messages, CodingWorkingState? state)
-    {
-        if (state?.Science is null) return;
-        var current = CodingPlanEvidenceContext.Build(state);
-        for (var index = messages.Count - 1; index >= 0; index--)
-        {
-            var previous = InstructionContent(messages[index]);
-            if (previous?.StartsWith(CodingPlanEvidenceContext.Marker, StringComparison.Ordinal) != true) continue;
-            current ??= CodingPlanEvidenceContext.Empty;
-            if (previous == current) return;
-            break;
-        }
-        if (current is not null) messages.Add(new("system", current));
-    }
-
-    internal static string ProjectToolEvidence(string result, CodingWorkingState? state, string evidenceId)
-    {
-        if (state is null || CodingWorkingStateReducer.ResolveEvidence(state, evidenceId) is not { } receipt) return result;
-        var metadata = JsonSerializer.SerializeToNode(CodingPlanEvidenceContext.Describe(receipt), EvidenceJsonOptions)!.AsObject();
-
-        // Annotate the new model-facing result only. The raw receipt and any
-        // already evaluated native context stay unchanged.
-        try
-        {
-            if (JsonNode.Parse(result) is JsonObject output)
-            {
-                if (receipt.Tool is SubagentToolNames.Wait or SubagentToolNames.Spawn)
-                    AddDelegatedPlanEvidence(output, state);
-                output.Remove("_missumEvidence");
-                output.Insert(0, "_missumEvidence", metadata);
-                return output.ToJsonString();
-            }
-        }
-        catch (JsonException) { } // Bounded legacy tool bodies can be plain text.
-        return "MISSUM_TOOL_EVIDENCE_V1\n" + metadata.ToJsonString() + "\n" + result;
-    }
-
-    internal static JsonElement ProjectDelegatedEvidence(JsonElement result, CodingWorkingState state)
-    {
-        if (result.ValueKind != JsonValueKind.Object || JsonNode.Parse(result.GetRawText()) is not JsonObject output) return result;
-        return AddDelegatedPlanEvidence(output, state) ? JsonSerializer.SerializeToElement(output, EvidenceJsonOptions) : result;
-    }
-
-    private static bool AddDelegatedPlanEvidence(JsonObject result, CodingWorkingState state)
-    {
-        if (result["status"] is not JsonValue status || !status.TryGetValue<string>(out var statusText) || statusText != "completed"
-            || result["runId"] is not JsonValue id || !id.TryGetValue<string>(out var runId) || string.IsNullOrWhiteSpace(runId)) return false;
-        var candidates = state.Evidence.Where(receipt => receipt.Historical && receipt.SourceRunId == runId
-                && ScienceStagePolicy.IsWorkReceipt(receipt))
-            .OrderByDescending(receipt => receipt.Sequence).ThenBy(receipt => receipt.Id, StringComparer.Ordinal)
-            .Take(12).Select(CodingPlanEvidenceContext.Describe).ToArray();
-        if (candidates.Length == 0) return false;
-        result.Remove("delegatedPlanEvidence");
-        result.Insert(0, "delegatedPlanEvidence", JsonSerializer.SerializeToNode(candidates, EvidenceJsonOptions));
-        return true;
     }
 
     internal static string ResultOutcome(CodingWorkingState? state) => state?.Science is null ? "open"
@@ -246,9 +187,9 @@ public static class ScienceSkill
             ? "open" : state.Science.Stages.Any(stage => stage.Outcome == "refuted") ? "refuted" : "clarified";
 }
 
-public sealed record ScienceCheck(string Id, string Kind, bool Required, IReadOnlyList<string> EvidenceIds, IReadOnlyList<string> Paths);
+public sealed record ScienceCheck(string Id, string Kind, bool Required, IReadOnlyList<string> Paths);
 public sealed record ScienceStage(string Id, string Question, string Strategy, IReadOnlyList<string> DependsOn,
-    IReadOnlyList<ScienceCheck> Checks, IReadOnlyList<string> OpenQuestions, IReadOnlyList<string> Blockers, string Outcome = "open", long ReopenedAtSequence = 0,
+    IReadOnlyList<ScienceCheck> Checks, IReadOnlyList<string> OpenQuestions, IReadOnlyList<string> Blockers, string Outcome = "open",
     [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)] bool DetailsPending = false);
 [System.Text.Json.Serialization.JsonUnmappedMemberHandling(System.Text.Json.Serialization.JsonUnmappedMemberHandling.Skip)]
 public sealed record ScienceState(string Profile, IReadOnlyList<ScienceStage> Stages);

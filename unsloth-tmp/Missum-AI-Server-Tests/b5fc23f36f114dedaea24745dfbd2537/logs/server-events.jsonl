@@ -1,0 +1,14 @@
+{"timestamp":"2026-11-06T23:20:16.1023671+01:00","level":"Information","eventId":"run.model.selected","message":"Run run-ca0c95fb716f4864b114e330fc5c2757: Modellrolle general gew\u00E4hlt."}
+{"timestamp":"2026-11-06T23:20:16.2347799+01:00","level":"Information","eventId":"gpu.lease.acquired","message":"GPU-Lane f\u00FCr llm-general belegt (Shared, lease-7ffb0db7026a4fb49c8107fdf019022a)."}
+{"timestamp":"2026-11-06T23:20:16.3592271+01:00","level":"Information","eventId":"gpu.lease.released","message":"GPU-Lane freigegeben (lease-7ffb0db7026a4fb49c8107fdf019022a)."}
+{"timestamp":"2026-11-06T23:20:16.3963275+01:00","level":"Information","eventId":"run.completed","message":"Run run-ca0c95fb716f4864b114e330fc5c2757 erfolgreich beendet."}
+{"timestamp":"2026-11-06T23:20:16.4634276+01:00","level":"Information","eventId":"run.model.selected","message":"Run run-9e1a6fd1794d479e9372fe70bbc08a03: Modellrolle general gew\u00E4hlt."}
+{"timestamp":"2026-11-06T23:20:16.4994345+01:00","level":"Information","eventId":"gpu.lease.acquired","message":"GPU-Lane f\u00FCr llm-general belegt (Shared, lease-53cac1c7d5344e969c93cc06aae6c3e5)."}
+{"timestamp":"2026-11-06T23:20:16.5652898+01:00","level":"Information","eventId":"gpu.lease.released","message":"GPU-Lane freigegeben (lease-53cac1c7d5344e969c93cc06aae6c3e5)."}
+{"timestamp":"2026-11-06T23:20:16.5964257+01:00","level":"Information","eventId":"run.completed","message":"Run run-9e1a6fd1794d479e9372fe70bbc08a03 erfolgreich beendet."}
+{"timestamp":"2026-11-06T23:20:16.6495984+01:00","level":"Information","eventId":"run.model.selected","message":"Run run-31f5d4ddb9d34f3b8afad4a9a50c2aed: Modellrolle general gew\u00E4hlt."}
+{"timestamp":"2026-11-06T23:20:16.6739765+01:00","level":"Information","eventId":"gpu.lease.acquired","message":"GPU-Lane f\u00FCr llm-general belegt (Shared, lease-2623880a14284eb6b2bda42d8523b3fc)."}
+{"timestamp":"2026-11-06T23:20:16.7199635+01:00","level":"Information","eventId":"gpu.lease.released","message":"GPU-Lane freigegeben (lease-2623880a14284eb6b2bda42d8523b3fc)."}
+{"timestamp":"2026-11-06T23:20:16.7552272+01:00","level":"Information","eventId":"run.completed","message":"Run run-31f5d4ddb9d34f3b8afad4a9a50c2aed erfolgreich beendet."}
+{"timestamp":"2026-11-06T23:20:16.7778715+01:00","level":"Information","eventId":"run.model.selected","message":"Run run-91ee1c44617e4d8e95ccedd2a7660bd2: Modellrolle general gew\u00E4hlt."}
+{"timestamp":"2026-11-06T23:20:16.80185+01:00","level":"Information","eventId":"gpu.lease.acquired","message":"GPU-Lane f\u00FCr llm-general belegt (Shared, lease-bb819a0750a243b7b6375217c1e814b5)."}

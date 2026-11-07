@@ -8,17 +8,11 @@ namespace Missum.Ai.Server.Tests;
 public sealed class SciencePlanInitializationTests
 {
     private static readonly string[] IncompleteStageIds = ["q1", "q2", "q3", "q6"];
-    private static readonly string[] ActualResultEvidence = ["actual-result"];
     private static CodingWorkingState Start() => CodingWorkingState.Create("Prüfe den vollständigen Forschungsauftrag.")
         with { Science = new(ScienceSkill.Profile, []) };
     private static JsonElement J(string value) => JsonSerializer.Deserialize<JsonElement>(value);
     private static CodingWorkingState Apply(CodingWorkingState state, string value) =>
         CodingWorkingStateReducer.ApplyPlanUpdate(state, J(value));
-    private static CodingWorkingState Observe(CodingWorkingState state, string tool, bool success = true) =>
-        CodingWorkingStateReducer.ObserveToolResult(state, new("actual-result", tool, J("{}")),
-            JsonSerializer.Serialize(new { status = "completed", result = new { success, verificationStatus = success ? "ProcessSucceeded" : "ProcessFailed",
-                runs = new[] { new { success, exitCode = success ? 0 : 2, stdout = "Tatsächlich berechnetes Ergebnis", stderr = "" } } } }));
-
     [Fact]
     public void PartialInitialScienceMetadataNeverDiscardsTheRestOfThePlan()
     {
@@ -61,9 +55,8 @@ public sealed class SciencePlanInitializationTests
         Assert.True(stage.DetailsPending);
         Assert.Empty(stage.Question);
         Assert.Empty(stage.Strategy);
-        state = Observe(state, "math.numeric");
         var error = Assert.ThrowsAny<ArgumentException>(() => Apply(state, """
-            {"steps":[{"id":"s","status":"completed","evidenceIds":["actual-result"]}],
+            {"steps":[{"id":"s","status":"completed"}],
              "scienceStages":[{"id":"s","outcome":"clarified"}]}
             """));
         Assert.Contains("question oder strategy", error.Message);
@@ -83,10 +76,9 @@ public sealed class SciencePlanInitializationTests
         Assert.False(state.Science!.Stages[0].DetailsPending);
         Assert.True(Assert.Single(state.Science.Stages[0].Checks).Required);
         Assert.ThrowsAny<ArgumentException>(() => Apply(state, """{"scienceStages":[{"id":"s","checks":[{"id":"n","kind":"numeric","required":false}]}]}"""));
-        state = Observe(state, "math.numeric");
         state = Apply(state, """
-            {"steps":[{"id":"s","status":"completed","evidenceIds":["actual-result"]}],
-             "scienceStages":[{"id":"s","outcome":"clarified","checks":[{"id":"n","kind":"numeric","required":true,"evidenceIds":["actual-result"]}]}]}
+            {"steps":[{"id":"s","status":"completed"}],
+             "scienceStages":[{"id":"s","outcome":"clarified","checks":[{"id":"n","kind":"numeric","required":true}]}]}
             """);
         Assert.Equal("completed", state.Plan[0].Status);
         Assert.Equal("clarified", ScienceSkill.ResultOutcome(state));
@@ -103,56 +95,44 @@ public sealed class SciencePlanInitializationTests
     }
 
     [Theory]
-    [InlineData("math.numeric", "numeric")]
-    [InlineData("math.evaluate", "numeric")]
-    [InlineData("math.symbolic", "analytic")]
-    [InlineData("math.smt", "analytic")]
-    [InlineData("math.evaluate", "analytic")]
-    public void SuccessfulMathToolContractsCanBeBoundToTheirCorrespondingCheckKinds(string tool, string kind)
+    [InlineData("source")]
+    [InlineData("analytic")]
+    [InlineData("lean")]
+    [InlineData("numeric")]
+    [InlineData("plot")]
+    [InlineData("publication")]
+    public void DeclaredChecksDoNotRequireProofIdentifiersForPlanUpdates(string kind)
     {
         var state = Configure(kind);
-        state = Observe(state, tool);
-        var completed = Apply(state, Completion(kind));
+        var completed = Apply(state, """
+            {"steps":[{"id":"s","status":"completed"}],"scienceStages":[{"id":"s","outcome":"clarified"}]}
+            """);
         Assert.Equal("completed", completed.Plan[0].Status);
         Assert.Equal("clarified", ScienceSkill.ResultOutcome(completed));
-        var failed = Observe(Configure(kind), tool, success: false);
-        Assert.ThrowsAny<ArgumentException>(() => Apply(failed, Completion(kind)));
+        Assert.Empty(completed.Evidence);
     }
 
-    [Theory]
-    [InlineData("math.numeric", "analytic")]
-    [InlineData("math.symbolic", "numeric")]
-    [InlineData("coding.edit", "analytic")]
-    [InlineData("coding.write", "numeric")]
-    [InlineData("math.numeric", "lean")]
-    [InlineData("math.symbolic", "lean")]
-    public void MatchingARealMathToolDoesNotWeakenOtherEvidenceKinds(string tool, string kind)
+    [Fact]
+    public void RemovedCheckEvidenceParameterIsNotAcceptedAsFallback()
     {
-        var state = Observe(Configure(kind), tool);
-        Assert.ThrowsAny<ArgumentException>(() => Apply(state, Completion(kind)));
+        var state = Configure("publication");
+        Assert.ThrowsAny<ArgumentException>(() => Apply(state, """
+            {"scienceStages":[{"id":"s","checks":[{"id":"check","kind":"publication","required":true,"evidenceIds":[]}]}]}
+            """));
+        Assert.Equal("in_progress", state.Plan[0].Status);
     }
 
     [Theory]
     [InlineData("{\"success\":true,\"verificationStatus\":\"ProcessFailed\"}")]
     [InlineData("{\"success\":true,\"verificationStatus\":\"ProcessSucceeded\",\"runs\":[{\"success\":true,\"exitCode\":2}]}")]
     [InlineData("{\"success\":true,\"verificationStatus\":\"ProcessSucceeded\",\"runs\":[{\"success\":false,\"exitCode\":0}]}")]
-    public void ContradictoryMathManifestCannotOverrideAFailedProcess(string manifest)
+    public void ContradictoryMathManifestStillRecordsTheActualProcessFailure(string manifest)
     {
         var state = CodingWorkingStateReducer.ObserveToolResult(Configure("numeric"), new("actual-result", "math.numeric", J("{}")), manifest);
         Assert.False(Assert.Single(state.Evidence).Success);
         Assert.Equal("error_recovery", state.Phase);
         Assert.Equal("math.numeric", Assert.Single(state.Failures).Tool);
-        Assert.ThrowsAny<ArgumentException>(() => Apply(state, Completion("numeric")));
-    }
-
-    [Fact]
-    public void ASuccessfulPdfProcessIsNotSilentlyPromotedToAContentReview()
-    {
-        var state = Configure("publication");
-        state = CodingWorkingStateReducer.ObserveToolResult(state, new("actual-result", "coding.command", J("{}")), "{\"success\":true,\"exitCode\":0,\"stdout\":\"PDF created\"}");
-        var error = Assert.Throws<PlanEvidenceValidationException>(() => Apply(state, Completion("publication")));
-        Assert.Equal("wrong_evidence_kind", Assert.Single(error.Issues).Code);
-        Assert.Contains("Publikationsprüfung", error.Message);
+        Assert.Equal("in_progress", state.Plan[0].Status);
     }
 
     [Fact]
@@ -163,8 +143,8 @@ public sealed class SciencePlanInitializationTests
             """);
         state = CodingWorkingStateReducer.ObserveToolResult(state, new("read", "coding.read", J("""{"path":"Publikation.md"}""")),
             """{"success":true,"path":"Publikation.md","content":"Originaltext"}""");
-        var error = Assert.Throws<PlanEvidenceValidationException>(() => Apply(state, """
-            {"steps":[{"id":"s","status":"completed","evidenceIds":["read"]}]}
+        var error = Assert.Throws<PlanValidationException>(() => Apply(state, """
+            {"steps":[{"id":"s","status":"completed"}]}
             """));
         Assert.Equal(3, error.Issues.Count);
         Assert.Contains(error.Issues, issue => issue.Field == "scienceStages.question");
@@ -189,9 +169,4 @@ public sealed class SciencePlanInitializationTests
         steps = new[] { new { id = "s", title = "Prüfen", status = "in_progress" } },
         scienceStages = new[] { new { id = "s", question = "Gilt die Aussage?", strategy = "Unabhängig prüfen", checks = new[] { new { id = "check", kind, required = true } } } },
     }));
-    private static string Completion(string kind) => JsonSerializer.Serialize(new
-    {
-        steps = new[] { new { id = "s", status = "completed", evidenceIds = ActualResultEvidence } },
-        scienceStages = new[] { new { id = "s", outcome = "clarified", checks = new[] { new { id = "check", kind, required = true, evidenceIds = ActualResultEvidence } } } },
-    });
 }

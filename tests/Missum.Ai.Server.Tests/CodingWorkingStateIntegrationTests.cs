@@ -122,7 +122,7 @@ public sealed class CodingWorkingStateIntegrationTests
         LmToolCall[] calls = [new("retired", "agent.start", JsonSerializer.SerializeToElement(new { task = "Old request", kind = "review" })),
             new("read", "coding.read", JsonSerializer.SerializeToElement(new { path = "source.cs" }))];
         await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Task"), new("assistant", null, ToolCalls: calls)],
-            1, 2, 0, 0, ActiveToolCalls: calls, WorkingState: CodingWorkingState.Create("Task")));
+            1, 2, 0, 0, ActiveToolCalls: calls, WorkingState: CodingWorkingState.Create("Task"), PlanFormatVersion: CodingPlanFormat.CurrentVersion));
         await harness.TickAsync(run);
         var restored = (await harness.Repository.GetCheckpointAsync(run))!;
         Assert.Contains(restored.Messages, message => message.ToolCallId == "retired" && message.Content!.Contains("agent.invalid_tool_call", StringComparison.Ordinal));
@@ -181,7 +181,7 @@ public sealed class CodingWorkingStateIntegrationTests
     }
 
     [Fact]
-    public void PlanSchemaExposesCriteriaAndEvidenceBackedFactsWithoutRequiringAnUnchangedPlan()
+    public void PlanSchemaExposesCriteriaAndFactsWithoutRequiringAnUnchangedPlan()
     {
         var catalog = new AgentToolCatalog();
         var tool = catalog.Resolve(CodingWorkingStateTools.PlanTool, catalog.GetAvailableTools(Request()));
@@ -196,9 +196,9 @@ public sealed class CodingWorkingStateIntegrationTests
         var state = CodingWorkingStateReducer.ObserveToolResult(CodingWorkingState.Create("Keep the source correct"), call,
             "{\"success\":true,\"content\":\"verified target\"}");
         var args = JsonSerializer.Deserialize<JsonElement>("""
-            {"acceptanceCriteria":[{"id":"correct","title":"Source verified","status":"completed","evidenceIds":["read-a"]}],
-             "facts":[{"text":"target.cs was read","evidenceIds":["read-a"]}],
-             "rejectedHypotheses":[{"text":"No unread-source claim is necessary","evidenceIds":["read-a"]}],
+            {"acceptanceCriteria":[{"id":"correct","title":"Source verified","status":"completed"}],
+             "facts":[{"text":"target.cs was read"}],
+             "rejectedHypotheses":[{"text":"No unread-source claim is necessary"}],
              "nextStep":"Review the targeted change","phase":"review"}
             """);
         catalog.Validate(tool, args);
@@ -210,14 +210,14 @@ public sealed class CodingWorkingStateIntegrationTests
     }
 
     [Fact]
-    public void PlanCompatibilityValidatorAcceptsLegacyDeltasButNewItemsAndCompletionStillRequireTheirFieldsAndEvidence()
+    public void PlanValidatorAcceptsStatusDeltasButNewItemsStillRequireTheirFields()
     {
         var catalog = new AgentToolCatalog();
         var tool = catalog.Resolve(CodingWorkingStateTools.PlanTool, catalog.GetAvailableTools(Request()));
         var state = CodingWorkingState.Create("Keep criteria") with
         {
-            Plan = [new("change", "Apply the targeted change", "pending", [])],
-            AcceptanceCriteria = [new("correct", "The targeted behavior remains correct", "pending", [])],
+            Plan = [new("change", "Apply the targeted change", "pending")],
+            AcceptanceCriteria = [new("correct", "The targeted behavior remains correct", "pending")],
         };
         var statusOnly = JsonSerializer.Deserialize<JsonElement>("""{"steps":[{"id":"change","status":"in_progress"}]}""");
         catalog.Validate(tool, statusOnly);
@@ -229,9 +229,15 @@ public sealed class CodingWorkingStateIntegrationTests
         var missingFields = JsonSerializer.Deserialize<JsonElement>("""{"steps":[{"id":"new","status":"pending"}]}""");
         catalog.Validate(tool, missingFields);
         Assert.Throws<ArgumentException>(() => CodingWorkingStateReducer.ApplyPlanUpdate(state, missingFields));
-        var missingEvidence = JsonSerializer.Deserialize<JsonElement>("""{"steps":[{"id":"change","status":"completed"}]}""");
-        catalog.Validate(tool, missingEvidence);
-        Assert.Throws<PlanEvidenceValidationException>(() => CodingWorkingStateReducer.ApplyPlanUpdate(state, missingEvidence));
+
+        // Completing an existing step needs nothing beyond its own status.
+        var completion = JsonSerializer.Deserialize<JsonElement>("""{"steps":[{"id":"change","status":"completed"}]}""");
+        catalog.Validate(tool, completion);
+        Assert.Equal("completed", Assert.Single(CodingWorkingStateReducer.ApplyPlanUpdate(state, completion).Plan).Status);
+
+        // The retired evidence fields are neither accepted nor remapped.
+        var retiredEvidence = JsonSerializer.Deserialize<JsonElement>("""{"steps":[{"id":"change","status":"completed","evidenceIds":["read-a"]}]}""");
+        Assert.Throws<ArgumentException>(() => catalog.Validate(tool, retiredEvidence));
     }
 
     [Fact]
@@ -243,17 +249,17 @@ public sealed class CodingWorkingStateIntegrationTests
             new("proof-read", "coding.read", JsonSerializer.SerializeToElement(new { path = "source.cs" })),
             JsonSerializer.Serialize(new { success = true, content = "FULL_CODE_EVIDENCE_" + new string('x', 1500) })) with
         {
-            Plan = [new("change", "Apply the targeted change", "in_progress", []), new("next", "Retain this untouched step", "pending", [])],
-            AcceptanceCriteria = [new("correct", "Retain this acceptance criterion", "pending", [])],
-            Facts = [new("Retain a verified fact", ["proof-read"])],
+            Plan = [new("change", "Apply the targeted change", "in_progress"), new("next", "Retain this untouched step", "pending")],
+            AcceptanceCriteria = [new("correct", "Retain this acceptance criterion", "pending")],
+            Facts = [new("Retain a verified fact")],
         };
         var arguments = JsonSerializer.Deserialize<JsonElement>("""
-            {"steps":[{"id":"change","status":"completed","evidenceIds":["proof-read"]}],"phase":"review","nextStep":"Inspect source.cs"}
+            {"steps":[{"id":"change","status":"completed"}],"phase":"review","nextStep":"Inspect source.cs"}
             """);
         LmToolCall[] calls = [new("plan-small", "coding.updatePlan", arguments),
             new("read-next", "coding.read", JsonSerializer.SerializeToElement(new { path = "source.cs" }))];
         await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Task"), new("assistant", null, ToolCalls: calls)],
-            1, 2, 1, 1, ActiveToolCalls: calls, WorkingState: state));
+            1, 2, 1, 1, ActiveToolCalls: calls, WorkingState: state, PlanFormatVersion: CodingPlanFormat.CurrentVersion));
         await harness.TickAsync(run);
 
         var checkpoint = (await harness.Repository.GetCheckpointAsync(run))!;
@@ -262,7 +268,8 @@ public sealed class CodingWorkingStateIntegrationTests
         Assert.Equal(JsonSerializer.Serialize(state.AcceptanceCriteria), JsonSerializer.Serialize(checkpoint.WorkingState.AcceptanceCriteria));
         Assert.Equal(JsonSerializer.Serialize(state.Facts), JsonSerializer.Serialize(checkpoint.WorkingState.Facts));
         Assert.Contains("FULL_CODE_EVIDENCE_", Assert.Single(checkpoint.WorkingState.ActiveFiles).Snippet, StringComparison.Ordinal);
-        var receiptText = Assert.Single(checkpoint.Messages, message => message.ToolCallId == "plan-small").Content!;
+        var completedPlanEvent = Assert.Single(await harness.Repository.GetServerToolCompletedEventsAsync(run));
+        var receiptText = completedPlanEvent.Data.GetProperty("result").GetRawText();
         Assert.DoesNotContain("FULL_CODE_EVIDENCE_", receiptText, StringComparison.Ordinal);
         Assert.DoesNotContain("Retain a verified fact", receiptText, StringComparison.Ordinal);
         var receipt = JsonSerializer.Deserialize<JsonElement>(receiptText);
@@ -280,7 +287,7 @@ public sealed class CodingWorkingStateIntegrationTests
         Assert.Equal("change", storedSteps[0].GetProperty("id").GetString());
         Assert.Equal("Apply the targeted change", storedSteps[0].GetProperty("title").GetString());
         Assert.Equal("completed", storedSteps[0].GetProperty("status").GetString());
-        Assert.Equal("proof-read", Assert.Single(storedSteps[0].GetProperty("evidenceIds").EnumerateArray()).GetString());
+        Assert.False(storedSteps[0].TryGetProperty("evidenceIds", out _));
         Assert.Equal("next", storedSteps[1].GetProperty("id").GetString());
         Assert.Equal("Retain this untouched step", storedSteps[1].GetProperty("title").GetString());
         Assert.Equal("pending", storedSteps[1].GetProperty("status").GetString());
@@ -298,8 +305,8 @@ public sealed class CodingWorkingStateIntegrationTests
         var state = CodingWorkingState.Create("A long task") with
         {
             Phase = "review", NextStep = new string('x', 1000),
-            Plan = [new("done", "Previously completed work", "completed", ["proof-read"])],
-            AcceptanceCriteria = [new("check", "Preserve acceptance criterion", "pending", [])],
+            Plan = [new("done", "Previously completed work", "completed")],
+            AcceptanceCriteria = [new("check", "Preserve acceptance criterion", "pending")],
         };
         var receipt = CodingWorkingStateTools.CreatePlanReceipt(state, JsonSerializer.Deserialize<JsonElement>("""{"phase":"review"}"""));
         Assert.True(receipt.GetProperty("success").GetBoolean());
@@ -314,8 +321,11 @@ public sealed class CodingWorkingStateIntegrationTests
     [InlineData("coding.updatePlan", "{}")]
     [InlineData("coding.updatePlan", "{\"steps\":[{}]}")]
     [InlineData("coding.updatePlan", "{\"steps\":[{\"id\":\"a\",\"status\":\"invented\"}]}")]
-    [InlineData("coding.updatePlan", "{\"facts\":[{\"text\":\"unverified\"}]}")]
+    [InlineData("coding.updatePlan", "{\"facts\":[{}]}")]
+    [InlineData("coding.updatePlan", "{\"facts\":[{\"text\":\"x\",\"evidenceIds\":[\"read-a\"]}]}")]
     [InlineData("coding.updatePlan", "{\"rejectedHypotheses\":[{\"text\":\"x\",\"evidenceIds\":[\"1\",\"2\",\"3\",\"4\"]}]}")]
+    [InlineData("coding.updatePlan", "{\"steps\":[{\"id\":\"s\",\"title\":\"Phase 1: Prüfen\",\"status\":\"completed\",\"evidenceIds\":[\"read-a\"]}]}")]
+    [InlineData("coding.updatePlan", "{\"evidenceQuery\":{\"kind\":\"publication\"}}")]
     [InlineData("coding.readOutput", "{\"evidenceId\":\"../../outside\"}")]
     [InlineData("coding.readOutput", "{\"evidenceId\":\"ev-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"maximumCharacters\":32001}")]
     [InlineData("coding.searchRunEvidence", "{\"query\":\"q\",\"maximumResults\":21}")]
@@ -333,7 +343,7 @@ public sealed class CodingWorkingStateIntegrationTests
         var args = JsonSerializer.SerializeToElement(new { });
         LmToolCall[] invalidCalls = [new("bad-a", "coding.read", args), new("bad-b", "coding.read", args), new("bad-c", "coding.read", args), new("valid", "coding.read", JsonSerializer.SerializeToElement(new { path = "source.cs" }))];
         await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Task"), new("assistant", null, ToolCalls: invalidCalls)],
-            1, 3, 1, 1, ActiveToolCalls: invalidCalls, WorkingState: CodingWorkingState.Create("Task")));
+            1, 3, 1, 1, ActiveToolCalls: invalidCalls, WorkingState: CodingWorkingState.Create("Task"), PlanFormatVersion: CodingPlanFormat.CurrentVersion));
         await harness.TickAsync(run);
         var saved = (await harness.Repository.GetCheckpointAsync(run))!;
         Assert.Contains(saved.WorkingState!.Failures, failure => failure.Count >= 2);
@@ -366,11 +376,11 @@ public sealed class CodingWorkingStateIntegrationTests
         LmToolCall[] firstCalls = [new("bad-a", CodingWorkingStateTools.PlanTool, invalid),
             new("bad-b", CodingWorkingStateTools.PlanTool, invalid), new("pause-for-read", "coding.read", read)];
         await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Task"), new("assistant", ToolCalls: firstCalls)],
-            1, 3, 1, 1, ActiveToolCalls: firstCalls, WorkingState: CodingWorkingState.Create("Task")));
+            1, 3, 1, 1, ActiveToolCalls: firstCalls, WorkingState: CodingWorkingState.Create("Task"), PlanFormatVersion: CodingPlanFormat.CurrentVersion));
         await harness.TickAsync(run);
         var first = (await harness.Repository.GetCheckpointAsync(run))!;
         Assert.Equal(2, Assert.Single(first.WorkingState!.Failures).Count);
-        Assert.Empty(first.WorkingState.Plan);
+        Assert.All(first.WorkingState.Plan, step => Assert.Equal("fixture-prerequisite", step.Id));
         Assert.Empty(first.WorkingState.AcceptanceCriteria);
         Assert.DoesNotContain(first.WorkingState.Evidence, item => item.Tool == CodingWorkingStateTools.PlanTool && item.Success);
         await harness.Repository.SaveClientToolResultAsync(run, new(first.PendingProposalId!, "completed",
@@ -393,10 +403,10 @@ public sealed class CodingWorkingStateIntegrationTests
         var blocked = Assert.Single(saved.Messages, message => message.Role == "tool" && message.ToolCallId == "bad-c").Content!;
         Assert.Contains("agent.repeated_tool_failure", blocked, StringComparison.Ordinal);
         Assert.Contains("steps und acceptanceCriteria", blocked, StringComparison.Ordinal);
-        Assert.Single(saved.WorkingState!.Plan);
+        Assert.Single(saved.WorkingState!.Plan, step => step.Id != "fixture-prerequisite");
         Assert.Single(saved.WorkingState.AcceptanceCriteria);
-        Assert.Equal("Inspect the work", saved.WorkingState.Plan[0].Title);
-        Assert.Equal("in_progress", saved.WorkingState.Plan[0].Status);
+        Assert.Equal("Inspect the work", saved.WorkingState.Plan.Single(step => step.Id != "fixture-prerequisite").Title);
+        Assert.Equal("in_progress", saved.WorkingState.Plan.Single(step => step.Id != "fixture-prerequisite").Status);
         Assert.Equal("The required behavior is verified", saved.WorkingState.AcceptanceCriteria[0].Title);
         Assert.Equal("pending", saved.WorkingState.AcceptanceCriteria[0].Status);
         Assert.DoesNotContain(saved.WorkingState.Failures, item => item.Tool == CodingWorkingStateTools.PlanTool);
@@ -419,15 +429,17 @@ public sealed class CodingWorkingStateIntegrationTests
             new("valid-delta", CodingWorkingStateTools.PlanTool, delta),
             new("next-work", "coding.read", JsonSerializer.SerializeToElement(new { path = "source.cs" }))];
         await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Task"), new("assistant", ToolCalls: calls)],
-            1, 5, 1, 1, ActiveToolCalls: calls, WorkingState: initial));
+            1, 5, 1, 1, ActiveToolCalls: calls, WorkingState: initial, PlanFormatVersion: CodingPlanFormat.CurrentVersion));
 
         await harness.TickAsync(run);
 
         var saved = (await harness.Repository.GetCheckpointAsync(run))!;
-        Assert.Equal("in_progress", Assert.Single(saved.WorkingState!.Plan).Status);
+        Assert.Equal("in_progress", Assert.Single(saved.WorkingState!.Plan, step => step.Id != "fixture-prerequisite").Status);
         Assert.Equal("coding.read", Assert.Single(saved.WorkingState.Failures).Tool);
-        var receipt = Assert.Single(saved.Messages, message => message.Role == "tool" && message.ToolCallId == "valid-delta").Content!;
-        Assert.True(JsonSerializer.Deserialize<JsonElement>(receipt).GetProperty("success").GetBoolean());
+        var receipt = Assert.Single(await harness.Repository.GetServerToolCompletedEventsAsync(run),
+            item => item.Data.GetProperty("result").TryGetProperty("updatedSteps", out var steps)
+                && steps.EnumerateArray().Any(step => step.TryGetProperty("status", out var status) && status.GetString() == "in_progress"));
+        Assert.True(receipt.Data.GetProperty("success").GetBoolean());
         Assert.DoesNotContain(saved.WorkingState.Evidence, item => item.Tool == CodingWorkingStateTools.PlanTool && item.Success);
     }
 
@@ -443,7 +455,7 @@ public sealed class CodingWorkingStateIntegrationTests
             new("bad-c", CodingWorkingStateTools.PlanTool, invalid),
             new("next-work", "coding.read", JsonSerializer.SerializeToElement(new { path = "source.cs" }))];
         await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Task"), new("assistant", ToolCalls: calls)],
-            1, 5, 1, 1, ActiveToolCalls: calls, WorkingState: CodingWorkingState.Create("Task")));
+            1, 5, 1, 1, ActiveToolCalls: calls, WorkingState: CodingWorkingState.Create("Task"), PlanFormatVersion: CodingPlanFormat.CurrentVersion));
 
         await harness.TickAsync(run);
 
@@ -451,7 +463,7 @@ public sealed class CodingWorkingStateIntegrationTests
         Assert.Contains(saved.Messages, message => message.ToolCallId == "bad-c"
             && message.Content!.Contains("agent.repeated_tool_failure", StringComparison.Ordinal));
         Assert.Contains(saved.WorkingState!.Failures, item => item.Error == "agent.invalid_state_action" && item.Count == 2);
-        Assert.Empty(saved.WorkingState.Plan);
+        Assert.All(saved.WorkingState.Plan, step => Assert.Equal("fixture-prerequisite", step.Id));
     }
 
     [Theory]
@@ -464,7 +476,7 @@ public sealed class CodingWorkingStateIntegrationTests
         var run = (await harness.Repository.CreateAsync(request, null)).Snapshot.RunId;
         LmToolCall[] calls = [new("read", "coding.read", JsonSerializer.SerializeToElement(new { path = "source.cs" }))];
         await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Task"), new("assistant", null, ToolCalls: calls)],
-            1, 1, 1, 1, ActiveToolCalls: calls));
+            1, 1, 1, 1, ActiveToolCalls: calls, PlanFormatVersion: CodingPlanFormat.CurrentVersion));
         await harness.TickAsync(run);
         var saved = (await harness.Repository.GetCheckpointAsync(run))!;
         Assert.NotNull(saved.WorkingState);
@@ -552,7 +564,7 @@ public sealed class CodingWorkingStateIntegrationTests
         harness.Handler.CompletionOverride = (attempt, _) => Task.FromResult(attempt == 1
             ? harness.Handler.ToolBatchResponse(original) : harness.Handler.CompleteResponse());
 
-        await Assert.ThrowsAsync<AgentRunLimitException>(() => harness.Processor.ProcessAsync(run, CancellationToken.None));
+        await Assert.ThrowsAsync<AgentRunLimitException>(() => harness.ProcessAsync(run, CancellationToken.None));
 
         var saved = (await harness.Repository.GetCheckpointAsync(run))!;
         Assert.Equal(2, saved.ToolCallCount);
@@ -568,7 +580,7 @@ public sealed class CodingWorkingStateIntegrationTests
         var run = await harness.CreateAsync();
         harness.Handler.CompletionOverride = (attempt, _) => Task.FromResult(harness.Handler.InvalidEditBatchResponse(attempt, 111));
 
-        await Assert.ThrowsAsync<CodingInvalidToolLoopException>(() => harness.Processor.ProcessAsync(run, CancellationToken.None));
+        await Assert.ThrowsAsync<CodingInvalidToolLoopException>(() => harness.ProcessAsync(run, CancellationToken.None));
 
         var saved = (await harness.Repository.GetCheckpointAsync(run))!;
         Assert.Equal(3, saved.InvalidToolTurnCount);
@@ -589,10 +601,10 @@ public sealed class CodingWorkingStateIntegrationTests
         using var harness = new Harness();
         var run = await harness.CreateAsync();
         await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Task")], 2, 2, 0, 0,
-            WorkingState: CodingWorkingState.Create("Task"), InvalidToolTurnCount: 2));
+            WorkingState: CodingWorkingState.Create("Task"), InvalidToolTurnCount: 2, PlanFormatVersion: CodingPlanFormat.CurrentVersion));
         harness.Handler.CompletionOverride = (attempt, _) => Task.FromResult(harness.Handler.InvalidEditBatchResponse(attempt, 1));
 
-        await Assert.ThrowsAsync<CodingInvalidToolLoopException>(() => harness.Processor.ProcessAsync(run, CancellationToken.None));
+        await Assert.ThrowsAsync<CodingInvalidToolLoopException>(() => harness.ProcessAsync(run, CancellationToken.None));
 
         Assert.Single(harness.Handler.Requests);
         Assert.Equal(3, (await harness.Repository.GetCheckpointAsync(run))!.InvalidToolTurnCount);
@@ -606,7 +618,7 @@ public sealed class CodingWorkingStateIntegrationTests
         var request = Request() with { CodingOptions = new(ReasoningPolicy: "adaptive") };
         var run = (await harness.Repository.CreateAsync(request, null)).Snapshot.RunId;
         await harness.Repository.SaveCheckpointAsync(run, new([new("system", "Main policy"), new("user", "Task")], 0, 0, 0, 0,
-            WorkingState: CodingWorkingState.Create("Task") with { Phase = "exploration" }));
+            WorkingState: CodingWorkingState.Create("Task") with { Phase = "exploration" }, PlanFormatVersion: CodingPlanFormat.CurrentVersion));
         await harness.DriveUntilCompletedAsync(run);
         Assert.Equal("xhigh", Assert.Single(harness.Handler.Efforts));
         var visible = CodingTextReconciler.Project(await harness.Repository.GetEventsAfterAsync(run, 0));
@@ -622,7 +634,7 @@ public sealed class CodingWorkingStateIntegrationTests
         var request = Request() with { ReasoningEffort = "low" };
         var run = (await harness.Repository.CreateAsync(request, null)).Snapshot.RunId;
         await harness.Repository.SaveCheckpointAsync(run, new([new("system", "Main policy"), new("user", "Task")], 0, 0, 0, 0,
-            WorkingState: CodingWorkingState.Create("Task") with { Phase = "exploration" }));
+            WorkingState: CodingWorkingState.Create("Task") with { Phase = "exploration" }, PlanFormatVersion: CodingPlanFormat.CurrentVersion));
         await harness.DriveUntilCompletedAsync(run);
         Assert.NotEmpty(harness.Handler.Efforts);
         Assert.All(harness.Handler.Efforts, effort => Assert.Equal("low", effort));
@@ -645,7 +657,7 @@ public sealed class CodingWorkingStateIntegrationTests
                     ? CodingAgentPolicy.ForWorkingState(true) : "Legacy coding policy. Preserve existing rules."));
             // Even a complete quotation in user data must not suppress the actual system instruction.
             history.Add(new("user", "Source identifier: parse_value; path: src/Parser.cs\n" + CodingAgentPolicy.ResponseLanguagePrompt));
-            await harness.Repository.SaveCheckpointAsync(run, new(history, 0, 0, 0, 0));
+            await harness.Repository.SaveCheckpointAsync(run, new(history, 0, 0, 0, 0, PlanFormatVersion: CodingPlanFormat.CurrentVersion));
         }
         await harness.DriveUntilCompletedAsync(run);
         var sent = Assert.Single(harness.Handler.Requests);
@@ -666,7 +678,7 @@ public sealed class CodingWorkingStateIntegrationTests
         var run = await harness.CreateAsync();
         LmToolCall[] calls = [new("read", "coding.read", JsonSerializer.SerializeToElement(new { path = "source.cs" }))];
         await harness.Repository.SaveCheckpointAsync(run, new([new("system", "Legacy policy"), new("user", "Task"),
-            new("assistant", null, ToolCalls: calls)], 1, 1, 1, 1, ActiveToolCalls: calls));
+            new("assistant", null, ToolCalls: calls)], 1, 1, 1, 1, ActiveToolCalls: calls, PlanFormatVersion: CodingPlanFormat.CurrentVersion));
         await harness.TickAsync(run);
         var first = (await harness.Repository.GetCheckpointAsync(run))!;
         await harness.TickAsync(run);
@@ -689,7 +701,7 @@ public sealed class CodingWorkingStateIntegrationTests
         LmToolCall[] calls = [new("write", "coding.write", JsonSerializer.SerializeToElement(new { path = "source.cs", content = "changed" }))];
         await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Task"), new("assistant", null, ToolCalls: calls)],
             1, 1, 1, 1, ActiveToolCalls: calls, ActiveCallsReadOnly: true,
-            WorkingState: CodingWorkingState.Create("Task") with { Phase = "exploration" }));
+            WorkingState: CodingWorkingState.Create("Task") with { Phase = "exploration" }, PlanFormatVersion: CodingPlanFormat.CurrentVersion));
         await harness.TickAsync(run);
         var proposal = Assert.Single((await harness.Repository.GetEventsAfterAsync(run, 0)), item => item.Type == RunEventTypes.ClientToolProposed);
         Assert.Equal("coding.write", proposal.Data.GetProperty("name").GetString());
@@ -703,8 +715,8 @@ public sealed class CodingWorkingStateIntegrationTests
         harness.Handler.AdaptiveScenario = true;
         var run = (await harness.Repository.CreateAsync(Request() with { CodingOptions = new(ReasoningPolicy: "adaptive") }, null)).Snapshot.RunId;
         await harness.Repository.SaveCheckpointAsync(run, new([new("system", "Main policy"), new("user", "Task")], 1, 0, 0, 0,
-            WorkingState: CodingWorkingState.Create("Task") with { Phase = "exploration" }));
-        await Assert.ThrowsAsync<AgentRunLimitException>(() => harness.Processor.ProcessAsync(run, CancellationToken.None));
+            WorkingState: CodingWorkingState.Create("Task") with { Phase = "exploration" }, PlanFormatVersion: CodingPlanFormat.CurrentVersion));
+        await Assert.ThrowsAsync<AgentRunLimitException>(() => harness.ProcessAsync(run, CancellationToken.None));
         Assert.Equal("xhigh", Assert.Single(harness.Handler.Efforts));
     }
 
@@ -757,8 +769,8 @@ public sealed class CodingWorkingStateIntegrationTests
         }
         await harness.Repository.SaveCheckpointAsync(run, new(history, 1, 64, 0, 0,
             WorkingState: CodingWorkingState.Create("Task") with { Phase = "exploration",
-                Failures = failureRevision < 0 ? [] : [new("signature", "coding.command", "args", "failed", 1, failureRevision, "receipt")] }));
-        await Assert.ThrowsAsync<AgentRunLimitException>(() => harness.Processor.ProcessAsync(run, CancellationToken.None));
+                Failures = failureRevision < 0 ? [] : [new("signature", "coding.command", "args", "failed", 1, failureRevision, "receipt")] }, PlanFormatVersion: CodingPlanFormat.CurrentVersion));
+        await Assert.ThrowsAsync<AgentRunLimitException>(() => harness.ProcessAsync(run, CancellationToken.None));
         Assert.Equal(2, harness.Handler.Efforts.Count);
         Assert.Equal(summaryEffort, harness.Handler.Efforts[0]);
         Assert.Equal("xhigh", harness.Handler.Efforts[1]);
@@ -792,7 +804,7 @@ public sealed class CodingWorkingStateIntegrationTests
         }));
         await harness.Repository.SaveCheckpointAsync(run, new(
             [new("user", "Apply and verify the change."), new("assistant", null, ToolCalls: [edit])],
-            4, 1, 100, 20, ActiveToolCalls: [edit], WorkingState: CodingWorkingState.Create("Apply and verify the change.")));
+            4, 1, 100, 20, ActiveToolCalls: [edit], WorkingState: CodingWorkingState.Create("Apply and verify the change."), PlanFormatVersion: CodingPlanFormat.CurrentVersion));
         await harness.TickAsync(run);
         var pending = (await harness.Repository.GetCheckpointAsync(run))!;
         await harness.Repository.SaveClientToolResultAsync(run, new(pending.PendingProposalId!, "completed",
@@ -842,13 +854,13 @@ public sealed class CodingWorkingStateIntegrationTests
         var run = (await harness.Repository.CreateAsync(request, null)).Snapshot.RunId;
         if (scienceSubagent)
             await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Prüfe den Beweis.")],
-                0, 0, 0, 0, CanonicalStateReadRequired: false));
+                0, 0, 0, 0, CanonicalStateReadRequired: false, PlanFormatVersion: CodingPlanFormat.CurrentVersion));
         else
             await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Bearbeite den Auftrag.")],
-                0, 0, 0, 0, WorkingState: RecoveryWorkingState("Bearbeite den Auftrag."), SciencePlanInitialized: true));
+                0, 0, 0, 0, WorkingState: RecoveryWorkingState("Bearbeite den Auftrag."), SciencePlanInitialized: true, PlanFormatVersion: CodingPlanFormat.CurrentVersion));
         harness.Handler.CompletionOverride = (_, _) => Task.FromResult(NativeHandler.EmptyResponse(reasoning));
 
-        await Assert.ThrowsAsync<ModelEmptyResponseException>(() => harness.Processor.ProcessAsync(run, CancellationToken.None));
+        await Assert.ThrowsAsync<ModelEmptyResponseException>(() => harness.ProcessAsync(run, CancellationToken.None));
 
         Assert.Equal(3, harness.Handler.Requests.Count);
         var checkpoint = (await harness.Repository.GetCheckpointAsync(run))!;
@@ -874,10 +886,10 @@ public sealed class CodingWorkingStateIntegrationTests
         var run = await harness.CreateAsync();
         await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Continue the saved work.")],
             5, 2, 123, 45, WorkingState: RecoveryWorkingState("Continue the saved work."), EmptyResponseRetryCount: 2,
-            SciencePlanInitialized: true));
+            SciencePlanInitialized: true, PlanFormatVersion: CodingPlanFormat.CurrentVersion));
         harness.Handler.CompletionOverride = (_, _) => Task.FromResult(NativeHandler.EmptyResponse(reasoning: true));
 
-        await Assert.ThrowsAsync<ModelEmptyResponseException>(() => harness.Processor.ProcessAsync(run, CancellationToken.None));
+        await Assert.ThrowsAsync<ModelEmptyResponseException>(() => harness.ProcessAsync(run, CancellationToken.None));
 
         Assert.Single(harness.Handler.Requests);
         var checkpoint = (await harness.Repository.GetCheckpointAsync(run))!;
@@ -901,7 +913,7 @@ public sealed class CodingWorkingStateIntegrationTests
         };
         var run = (await harness.Repository.CreateAsync(request, null)).Snapshot.RunId;
         await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Prüfe den Beweis.")],
-            0, 0, 0, 0, CanonicalStateReadRequired: false));
+            0, 0, 0, 0, CanonicalStateReadRequired: false, PlanFormatVersion: CodingPlanFormat.CurrentVersion));
         harness.Handler.CompletionOverride = (attempt, _) => Task.FromResult(attempt == 1
             ? NativeHandler.EmptyResponse(reasoning: true, streaming: true)
             : harness.Handler.ToolResponse("recovered-read", "coding.read", new { path = "proof.lean" }));
@@ -924,10 +936,11 @@ public sealed class CodingWorkingStateIntegrationTests
         using var harness = new Harness();
         var run = await harness.CreateAsync();
         await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Bearbeite den Auftrag.")],
-            0, 0, 0, 0, WorkingState: RecoveryWorkingState("Bearbeite den Auftrag."), SciencePlanInitialized: true));
+            0, 0, 0, 0, WorkingState: RecoveryWorkingState("Bearbeite den Auftrag."), SciencePlanInitialized: true, PlanFormatVersion: CodingPlanFormat.CurrentVersion));
         harness.Handler.CompletionOverride = (_, _) => Task.FromResult(NativeHandler.EmptyResponse(reasoning: true, streaming: true));
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         using var subscription = harness.Notifier.Subscribe(run);
+        await harness.PrepareAsync(run);
         await harness.Processor.StartAsync(deadline.Token);
         try
         {
@@ -974,6 +987,7 @@ public sealed class CodingWorkingStateIntegrationTests
             : harness.Handler.CompleteResponse());
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         using var subscription = harness.Notifier.Subscribe(run);
+        await harness.PrepareAsync(run);
         await harness.Processor.StartAsync(deadline.Token);
         try
         {
@@ -1049,7 +1063,7 @@ public sealed class CodingWorkingStateIntegrationTests
             }
             return NativeHandler.EmptyResponse(reasoning: true);
         };
-        var processing = harness.Processor.ProcessAsync(run, stop.Token);
+        var processing = harness.ProcessAsync(run, stop.Token);
         await secondRequest.Task.WaitAsync(TimeSpan.FromSeconds(10));
         await stop.CancelAsync();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => processing);
@@ -1097,7 +1111,7 @@ public sealed class CodingWorkingStateIntegrationTests
             ? NativeHandler.EmptyResponse(reasoning, streaming)
             : harness.Handler.CompleteResponse());
 
-        await harness.Processor.ProcessAsync(run, CancellationToken.None);
+        await harness.ProcessAsync(run, CancellationToken.None);
 
         Assert.Equal(RunState.Completed, (await harness.Repository.GetAsync(run))!.State);
         Assert.Equal(2, harness.Handler.Requests.Count);
@@ -1131,7 +1145,7 @@ public sealed class CodingWorkingStateIntegrationTests
             }
             return NativeHandler.EmptyResponse(reasoning: true, streaming: true);
         };
-        var processing = harness.Processor.ProcessAsync(run, stop.Token);
+        var processing = harness.ProcessAsync(run, stop.Token);
         await secondRequest.Task.WaitAsync(TimeSpan.FromSeconds(10));
         await stop.CancelAsync();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => processing);
@@ -1144,7 +1158,7 @@ public sealed class CodingWorkingStateIntegrationTests
         harness.Handler.CompletionOverride = (attempt, _) => Task.FromResult(attempt == 3
             ? NativeHandler.EmptyResponse(reasoning: true, streaming: true)
             : harness.Handler.CompleteResponse());
-        await harness.Processor.ProcessAsync(run, CancellationToken.None);
+        await harness.ProcessAsync(run, CancellationToken.None);
 
         Assert.Equal(RunState.Completed, (await harness.Repository.GetAsync(run))!.State);
         Assert.Null(await harness.Repository.GetCheckpointAsync(run));
@@ -1167,6 +1181,7 @@ public sealed class CodingWorkingStateIntegrationTests
         harness.Handler.CompletionOverride = (_, _) => Task.FromResult(NativeHandler.EmptyResponse(reasoning: true, streaming: true));
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         using var subscription = harness.Notifier.Subscribe(run);
+        await harness.PrepareAsync(run);
         await harness.Processor.StartAsync(deadline.Token);
         try
         {
@@ -1190,7 +1205,7 @@ public sealed class CodingWorkingStateIntegrationTests
         var request = GeneralRecoveryRequest(RunMode.Auto, null) with { ClientCapabilities = ["visual-tools"] };
         var run = (await harness.Repository.CreateAsync(request, null)).Snapshot.RunId;
         await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Prüfe das Bild.")],
-            0, 0, 0, 0, SelectedToolName: WorkspaceTools.ImageInput, SelectedModelId: NativeHandler.ModelId));
+            0, 0, 0, 0, SelectedToolName: WorkspaceTools.ImageInput, SelectedModelId: NativeHandler.ModelId, PlanFormatVersion: CodingPlanFormat.CurrentVersion));
         harness.Handler.CompletionOverride = (attempt, _) => Task.FromResult(attempt == 1
             ? NativeHandler.EmptyResponse(reasoning: true, streaming: true)
             : harness.Handler.ToolResponse("actual-image", WorkspaceTools.ImageInput, new { operation = "file", path = "test.png" }));
@@ -1216,12 +1231,12 @@ public sealed class CodingWorkingStateIntegrationTests
         await harness.Repository.SaveCheckpointAsync(run, new(
             [new("user", "Philosophiere über KI-Beratung."), new("assistant", null, ToolCalls: [priorCall]),
              new("tool", "{\"results\":[\"Bisherige Quelle\"]}", ToolCallId: priorCall.Id)],
-            1, 1, 10, 5, SelectedModelId: NativeHandler.ModelId));
+            1, 1, 10, 5, SelectedModelId: NativeHandler.ModelId, PlanFormatVersion: CodingPlanFormat.CurrentVersion));
         harness.Handler.CompletionOverride = (attempt, _) => Task.FromResult(attempt == 1
             ? NativeHandler.EmptyResponse(reasoning: true, streaming: true)
             : harness.Handler.CompleteResponse());
 
-        await harness.Processor.ProcessAsync(run, CancellationToken.None);
+        await harness.ProcessAsync(run, CancellationToken.None);
 
         Assert.Equal(RunState.Completed, (await harness.Repository.GetAsync(run))!.State);
         Assert.Equal(2, harness.Handler.Requests.Count);
@@ -1240,7 +1255,7 @@ public sealed class CodingWorkingStateIntegrationTests
 
     private static CodingWorkingState RecoveryWorkingState(string task) => CodingWorkingState.Create(task) with
     {
-        Plan = [new("recovery-step", "Prüfung fortsetzen", "in_progress", [])],
+        Plan = [new("recovery-step", "Prüfung fortsetzen", "in_progress")],
     };
 
     [Fact]
@@ -1273,9 +1288,9 @@ public sealed class CodingWorkingStateIntegrationTests
         using var harness = new Harness();
         var run = await harness.CreateAsync("Implement the requested change.");
         await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Implement the requested change.")],
-            2, 0, 100, 10, IncompleteResponseRetryCount: 2));
+            2, 0, 100, 10, IncompleteResponseRetryCount: 2, PlanFormatVersion: CodingPlanFormat.CurrentVersion));
         harness.Handler.CompletionOverride = (_, _) => Task.FromResult(harness.Handler.AnnouncementResponse());
-        await Assert.ThrowsAsync<AgentRunLimitException>(() => harness.Processor.ProcessAsync(run, CancellationToken.None));
+        await Assert.ThrowsAsync<AgentRunLimitException>(() => harness.ProcessAsync(run, CancellationToken.None));
         Assert.Equal(3, (await harness.Repository.GetCheckpointAsync(run))!.IncompleteResponseRetryCount);
         Assert.DoesNotContain(await harness.Repository.GetEventsAfterAsync(run, 0), item => item.Type == RunEventTypes.RunCompleted);
     }
@@ -1294,23 +1309,24 @@ public sealed class CodingWorkingStateIntegrationTests
             Sequence = 224,
             Evidence = Enumerable.Range(0, 224).Select(i => new CodingToolEvidence("historic-" + i,
                 "coding.read", true, "source.cs", null, new string('x', 1600), i)).ToArray(),
-            Facts = [new("Confirmed project architecture", ["historic-1"])],
+            Facts = [new("Confirmed project architecture")],
         };
         await harness.Repository.SaveCheckpointAsync(first, new(
             [new("system", "Old policy"), new("user", "Original task"), new("assistant", null, ToolCalls: [call]),
              new("tool", "FULL_PREVIOUS_FILE_CONTENT", ToolCallId: call.Id), new("assistant", "Previous conclusion")],
-            8, 4, 100, 20, WorkingState: priorState));
+            8, 4, 100, 20, WorkingState: priorState, PlanFormatVersion: CodingPlanFormat.CurrentVersion));
         if (terminal == "Completed") await harness.Repository.FinalizeConversationAsync(first, new(null, "qwen", 100, 20));
         else await harness.Repository.UpdateStateAsync(first, RunState.Cancelled);
         await harness.Repository.DeleteCheckpointAsync(first);
         Assert.Null(await harness.Repository.GetCheckpointAsync(first));
+        harness.PreserveNewRunStartup = true;
         var next = (await harness.Repository.CreateAsync(request, null)).Snapshot.RunId;
-        harness.Handler.CompletionOverride = (_, _) => Task.FromResult(harness.Handler.ReadResponse("new-read"));
+        harness.Handler.CompletionOverride = (ordinal, _) => Task.FromResult(ordinal == 1 ? harness.Handler.PrerequisitePlanResponse() : harness.Handler.ReadResponse("new-read"));
         await harness.TickAsync(next);
         var checkpoint = (await harness.Repository.GetCheckpointAsync(next))!;
         Assert.Contains(checkpoint.Messages, m => m.Role == "tool" && m.Content == "FULL_PREVIOUS_FILE_CONTENT");
         Assert.Contains(checkpoint.Messages, m => m.Content == "Previous conclusion");
-        Assert.Equal(1, checkpoint.RoundCount);
+        Assert.Equal(2, checkpoint.RoundCount);
         Assert.Equal(0, checkpoint.CompactionCount);
         Assert.Equal("Confirmed project architecture", Assert.Single(checkpoint.WorkingState!.Facts).Text);
         Assert.Equal(224, checkpoint.WorkingState.Evidence.Count);
@@ -1338,6 +1354,9 @@ public sealed class CodingWorkingStateIntegrationTests
         Assert.Contains(retained.Messages, m => m.Content == "Verified result.");
         Assert.Contains(retained.Messages, m => m.Content == "FULL_PREVIOUS_FILE_CONTENT");
         Assert.Contains(retained.Messages, m => m.Role == "tool" && m.Content!.Contains("NEW_READ_CONTENT", StringComparison.Ordinal));
+        var beforeThird = harness.Handler.Requests.Count;
+        harness.Handler.CompletionOverride = (ordinal, _) => Task.FromResult(ordinal == beforeThird + 1
+            ? harness.Handler.PrerequisitePlanResponse() : harness.Handler.CompleteResponse());
         await harness.TickAsync(third);
         var continuedNative = harness.Handler.Requests.Last().GetProperty("messages");
         // The actual HTTP prompt, including tool definitions/messages and internal
@@ -1399,6 +1418,8 @@ public sealed class CodingWorkingStateIntegrationTests
         Assert.False(editArguments.RootElement.TryGetProperty("_missumCompletedArguments", out _));
         Assert.Equal("Prüfplan für diesen Modellturn.", replayedEdit.GetProperty("reasoning_content").GetString());
 
+        harness.PreserveNewRunStartup = true;
+        harness.Handler.CompletionOverride = (ordinal, _) => Task.FromResult(ordinal == 4 ? harness.Handler.PrerequisitePlanResponse() : harness.Handler.CompleteResponse());
         var next = (await harness.Repository.CreateAsync(request with
         {
             Messages = [new("user", [new("text", "Which file did you just change?")])],
@@ -1435,7 +1456,7 @@ public sealed class CodingWorkingStateIntegrationTests
         var run = (await harness.Repository.CreateAsync(request, null)).Snapshot.RunId;
         var initial = CodingWorkingStateReducer.ApplyPlanUpdate(CodingWorkingState.Create("Run tests"),
             JsonSerializer.Deserialize<JsonElement>("""{"steps":[{"id":"run-tests","title":"Run unit tests","status":"in_progress"}],"phase":"review"}"""));
-        await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Run the tests twice.")], 0, 0, 0, 0, WorkingState: initial));
+        await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Run the tests twice.")], 0, 0, 0, 0, WorkingState: initial, PlanFormatVersion: CodingPlanFormat.CurrentVersion));
         harness.Handler.CompletionOverride = (ordinal, _) =>
         {
             var offered = harness.Handler.Requests[^1].GetProperty("tools").EnumerateArray()
@@ -1443,7 +1464,7 @@ public sealed class CodingWorkingStateIntegrationTests
             Assert.Contains(ModelRuntimeClient.ToTransportToolName(ClientToolNames.CodingCommand), offered);
             if (ordinal <= 2)
                 return Task.FromResult(harness.Handler.ToolResponse("plan-noop-" + ordinal, CodingWorkingStateTools.PlanTool,
-                    new { steps = new[] { new { id = "run-tests", status = "in_progress", evidenceIds = Array.Empty<string>() } }, phase = "review" }));
+                    new { steps = new[] { new { id = "run-tests", status = "in_progress" } }, phase = "review" }));
             if (ordinal == 3)
                 Assert.DoesNotContain(ModelRuntimeClient.ToTransportToolName(CodingWorkingStateTools.PlanTool), offered);
             else
@@ -1486,7 +1507,7 @@ public sealed class CodingWorkingStateIntegrationTests
         using var harness = new Harness();
         var run = await harness.CreateAsync();
         var state = CodingWorkingState.Create("Inspect real files") with { Phase = "review" };
-        await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Inspect real files")], 0, 0, 0, 0, WorkingState: state));
+        await harness.Repository.SaveCheckpointAsync(run, new([new("user", "Inspect real files")], 0, 0, 0, 0, WorkingState: state, PlanFormatVersion: CodingPlanFormat.CurrentVersion));
         harness.Handler.CompletionOverride = (ordinal, _) => Task.FromResult(
             harness.Handler.ToolResponse("unchanged-" + ordinal, CodingWorkingStateTools.PlanTool, new { phase = "review" }));
         var error = await Assert.ThrowsAsync<AgentRunLimitException>(() => harness.TickAsync(run));
@@ -1542,7 +1563,7 @@ public sealed class CodingWorkingStateIntegrationTests
             JsonSerializer.SerializeToElement(new { uploadId = "upload-00000000000000000000000000000000", prompt = "Analyze the image." }))];
         await harness.Repository.SaveCheckpointAsync(run,
             new([new("user", "Analyze the image or explain why it cannot be read."), new("assistant", ToolCalls: calls)],
-                1, 1, 0, 0, ActiveToolCalls: calls));
+                1, 1, 0, 0, ActiveToolCalls: calls, PlanFormatVersion: CodingPlanFormat.CurrentVersion));
         await harness.TickAsync(run);
         Assert.Equal(RunState.Completed, (await harness.Repository.GetAsync(run))!.State);
         var events = await harness.Repository.GetEventsAfterAsync(run, 0);
@@ -1582,7 +1603,7 @@ public sealed class CodingWorkingStateIntegrationTests
                 """));
         await harness.Repository.SaveCheckpointAsync(run,
             new(RunProcessor.CreateInitialMessages(request, "coding", []), 1, 0, 0, 0,
-                WorkingState: state, SciencePlanInitialized: true));
+                WorkingState: state, SciencePlanInitialized: true, PlanFormatVersion: CodingPlanFormat.CurrentVersion));
         await harness.DriveUntilCompletedAsync(run);
         var events = await harness.Repository.GetEventsAfterAsync(run, 0);
         var completed = Assert.Single(events, item => item.Type == RunEventTypes.RunCompleted);
@@ -1608,11 +1629,14 @@ public sealed class CodingWorkingStateIntegrationTests
             if (round == 2) return harness.Handler.ReadResponse("read");
             if (round == 3)
             {
-                var evidence = (await harness.Repository.GetCheckpointAsync(run, CancellationToken.None))!.WorkingState!.Evidence.Single(item => item.Tool == "coding.read").Id;
+                // The read receipt stays in the working state as an independent record;
+                // the plan closes its stage from the documented outcome alone.
+                Assert.Single((await harness.Repository.GetCheckpointAsync(run, CancellationToken.None))!
+                    .WorkingState!.Evidence, item => item.Tool == "coding.read");
                 return harness.Handler.ToolBatchResponse([new("close", "coding.updatePlan", JsonSerializer.SerializeToElement(new
                 {
-                    steps = new[] { new { id = "s", title = "Quelle prüfen", status = "completed", evidenceIds = new[] { evidence } } },
-                    scienceStages = new[] { new { id = "s", outcome = "clarified", checks = new[] { new { id = "source", kind = "source", required = true, evidenceIds = new[] { evidence } } } } },
+                    steps = new[] { new { id = "s", title = "Quelle prüfen", status = "completed" } },
+                    scienceStages = new[] { new { id = "s", outcome = "clarified" } },
                 }))]);
             }
             return harness.Handler.CompleteResponse();
@@ -1634,13 +1658,10 @@ public sealed class CodingWorkingStateIntegrationTests
         Assert.Equal("clarified", Assert.Single(events, item => item.Type == RunEventTypes.RunCompleted).Data.GetProperty("scientificOutcome").GetString());
     }
 
-    private static readonly string[] PublicationEvidence = ["publication-receipt"];
-    private static readonly string[] ProcessEvidence = ["process-receipt"];
-
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task PublicationCandidatesAreVisibleBeforeBatchCompletionAndWrongKindIsAtomic(bool useProcessForPublication)
+    public async Task SeveralStagesCompleteInOneBatchAndAnOpenOutcomeRejectsTheWholeUpdateAtomically(bool outcomeStillOpen)
     {
         using var harness = new Harness();
         var request = Request("Publikation und Rechnung prüfen.") with
@@ -1663,45 +1684,35 @@ public sealed class CodingWorkingStateIntegrationTests
             """{"success":true,"exitCode":0,"stdout":"gamma_n_check.py: OK"}""");
         await harness.Repository.SaveCheckpointAsync(run,
             new(RunProcessor.CreateInitialMessages(request, "coding", [], "compact-v1"), 1, 0, 0, 0,
-                WorkingState: state, SciencePlanInitialized: true, ContextProfileVersion: "compact-v1"));
+                WorkingState: state, SciencePlanInitialized: true, ContextProfileVersion: "compact-v1", PlanFormatVersion: CodingPlanFormat.CurrentVersion));
         harness.Handler.CompletionOverride = (round, _) =>
         {
             if (round > 1)
-                return Task.FromResult(useProcessForPublication ? harness.Handler.ReadResponse("read-for-repair") : harness.Handler.CompleteResponse());
-            var content = harness.Handler.Requests[^1].GetProperty("messages").EnumerateArray()
-                .Select(message => message.GetProperty("content")).Where(value => value.ValueKind == JsonValueKind.String)
-                .Select(value => value.GetString()!).Single(value => value.Contains(CodingPlanEvidenceContext.Marker, StringComparison.Ordinal));
-            var candidateRow = content.Split('\n').Where(line => line.StartsWith('{')).Select(line => JsonSerializer.Deserialize<JsonElement>(line))
-                .Single(row => row.TryGetProperty("checkId", out var check) && check.GetString() == "pub-phase1");
-            var candidate = Assert.Single(candidateRow.GetProperty("candidates").EnumerateArray());
-            var planEvidenceId = candidate.GetProperty("planEvidenceId").GetString();
-            Assert.Equal("publication-receipt", planEvidenceId);
-            Assert.Equal("Publikation.md", candidate.GetProperty("path").GetString());
-            var publicationId = useProcessForPublication ? "process-receipt" : planEvidenceId!;
+                return Task.FromResult(outcomeStillOpen ? harness.Handler.ReadResponse("read-for-repair") : harness.Handler.CompleteResponse());
             return Task.FromResult(harness.Handler.ToolBatchResponse([new("batch-completion", "coding.updatePlan",
                 JsonSerializer.SerializeToElement(new
                 {
                     steps = new[] {
-                        new { id = "s1", title = "Phase 1: Publikation prüfen", status = "completed", evidenceIds = PublicationEvidence },
-                        new { id = "s2", title = "Phase 2: Rechnung prüfen", status = "completed", evidenceIds = ProcessEvidence },
+                        new { id = "s1", title = "Phase 1: Publikation prüfen", status = "completed" },
+                        new { id = "s2", title = "Phase 2: Rechnung prüfen", status = "completed" },
                     },
                     scienceStages = new[] {
-                        new { id = "s1", outcome = "clarified", checks = new[] { new { id = "pub-phase1", kind = "publication", required = true, evidenceIds = new[] { publicationId } } } },
-                        new { id = "s2", outcome = "clarified", checks = new[] { new { id = "calc", kind = "numeric", required = true, evidenceIds = ProcessEvidence } } },
+                        new { id = "s1", outcome = outcomeStillOpen ? "open" : "clarified" },
+                        new { id = "s2", outcome = "clarified" },
                     },
                 }))]));
         };
         await harness.TickAsync(run);
         var receipt = Assert.Single(await harness.Repository.GetServerToolCompletedEventsAsync(run));
         var result = receipt.Data.GetProperty("result");
-        Assert.Equal(!useProcessForPublication, receipt.Data.GetProperty("success").GetBoolean());
-        if (useProcessForPublication)
+        Assert.Equal(!outcomeStillOpen, receipt.Data.GetProperty("success").GetBoolean());
+        // Candidate lists belonged to the retired evidence lookup.
+        Assert.DoesNotContain("candidates", result.GetRawText(), StringComparison.Ordinal);
+        if (outcomeStillOpen)
         {
             var issue = Assert.Single(result.GetProperty("validationIssues").EnumerateArray());
-            Assert.Equal("wrong_evidence_kind", issue.GetProperty("code").GetString());
-            Assert.Equal("pub-phase1", issue.GetProperty("checkId").GetString());
-            Assert.Equal("publication-receipt", Assert.Single(issue.GetProperty("candidates").EnumerateArray())
-                .GetProperty("planEvidenceId").GetString());
+            Assert.Equal("stage_outcome_open", issue.GetProperty("code").GetString());
+            Assert.Equal("s1", issue.GetProperty("stageId").GetString());
             Assert.Equal("in_progress", result.GetProperty("storedSteps")[0].GetProperty("status").GetString());
             Assert.Equal("pending", (await harness.Repository.GetCheckpointAsync(run))!.WorkingState!.Plan[1].Status);
         }
@@ -1736,9 +1747,32 @@ public sealed class CodingWorkingStateIntegrationTests
         }
         internal async Task<string> CreateAsync(string? prompt = null) =>
             (await Repository.CreateAsync(prompt is null ? Request() : Request(prompt), null)).Snapshot.RunId;
+        internal bool PreserveNewRunStartup { get; set; }
+        internal async Task PrepareAsync(string run)
+        {
+            // These scenarios exercise post-planning execution. The mandatory first
+            // plan round is covered independently by ScienceInitialPlanTests.
+            var checkpoint = await Repository.GetCheckpointAsync(run);
+            var request = await Repository.GetRequestAsync(run);
+            if (checkpoint is null && PreserveNewRunStartup) return;
+            if (request?.Mode == RunMode.Coding && request.WorkflowProfile != ScienceSkill.Profile
+                && checkpoint?.SciencePlanInitialized != true)
+            {
+                var state = checkpoint?.WorkingState ?? CodingWorkingState.Create("Fixture execution");
+                if (state.Plan.Count == 0)
+                    state = state with { Plan = [new("fixture-prerequisite", "Phase 1: Fixture execution", "completed")] };
+                checkpoint ??= new(RunProcessor.CreateInitialMessages(request, "coding", []), 0, 0, 0, 0);
+                await Repository.SaveCheckpointAsync(run, checkpoint with { WorkingState = state, SciencePlanInitialized = true });
+            }
+        }
+        internal async Task ProcessAsync(string run, CancellationToken token)
+        {
+            await PrepareAsync(run);
+            await Processor.ProcessAsync(run, token);
+        }
         internal async Task TickAsync(string run)
         {
-            try { await Processor.ProcessAsync(run, CancellationToken.None); }
+            try { await ProcessAsync(run, CancellationToken.None); }
             catch (RunWaitingForClientException) { }
         }
         internal async Task DriveUntilCompletedAsync(string run)
@@ -1819,6 +1853,8 @@ public sealed class CodingWorkingStateIntegrationTests
         }
         internal bool EmitReasoning { get; set; }
         internal const string EmptyTurnReasoning = "REASONING_ONLY_NOT_AN_EXECUTABLE_CALL: Die gespeicherte Änderung als Nächstes prüfen.";
+        internal HttpResponseMessage PrerequisitePlanResponse() => ToolResponse("initial-plan", "coding.updatePlan",
+            new { steps = new[] { new { id = "fixture-prerequisite", title = "Phase 1: Fixture execution", status = "completed" } } });
         internal HttpResponseMessage CompleteResponse() => Answer("Verified result.");
         internal HttpResponseMessage ToolBatchResponse(IEnumerable<LmToolCall> calls) => Answer(null,
             calls.Select(call => (object)new

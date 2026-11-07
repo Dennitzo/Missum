@@ -51,7 +51,7 @@ internal static class CodingPlanProgressGuard
                 : "Führe einen tatsächlich verfügbaren Arbeitsschritt aus. coding.command ist für diesen Lauf nicht freigegeben; falls ein Testbefehl benötigt wird, benenne diese Einschränkung konkret. ")
             + (state.ConsecutivePlanNoOps >= 2
                 ? "coding.updatePlan wird bis zum nächsten anderen Werkzeugergebnis vorübergehend nicht angeboten. Wiederhole diesen Plan nicht."
-                : "Wiederhole diesen Plan nicht; eine Ankündigung oder ein Planbeleg ersetzt keine Ausführung.");
+                : "Wiederhole diesen Plan nicht; eine Ankündigung ersetzt keine Ausführung.");
         return new(JsonSerializer.SerializeToElement(new
         {
             success = false, changed = false, errorCode = "agent.plan_unchanged", message,
@@ -62,13 +62,8 @@ internal static class CodingPlanProgressGuard
 
     private static bool SamePlan(IReadOnlyList<CodingPlanItem> left, IReadOnlyList<CodingPlanItem> right) =>
         left.Count == right.Count && left.Zip(right).All(pair => pair.First.Id == pair.Second.Id
-            && pair.First.Title == pair.Second.Title && pair.First.Status == pair.Second.Status
-            && SameEvidence(pair.First.EvidenceIds, pair.Second.EvidenceIds));
+            && pair.First.Title == pair.Second.Title && pair.First.Status == pair.Second.Status);
 
     private static bool SameFacts(IReadOnlyList<CodingStateFact> left, IReadOnlyList<CodingStateFact> right) =>
-        left.Count == right.Count && left.All(item => right.Any(other => item.Text == other.Text
-            && SameEvidence(item.EvidenceIds, other.EvidenceIds)));
-
-    private static bool SameEvidence(IReadOnlyList<string> left, IReadOnlyList<string> right) =>
-        left.Count == right.Count && left.All(value => right.Contains(value, StringComparer.Ordinal));
+        left.Count == right.Count && left.All(item => right.Any(other => item.Text == other.Text));
 }

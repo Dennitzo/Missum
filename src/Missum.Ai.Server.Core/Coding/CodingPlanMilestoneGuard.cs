@@ -11,7 +11,7 @@ internal static class CodingPlanMilestoneGuard
         + "Übernimm bei bestehenden Schritten gespeicherte IDs und Originaltitel unverändert. "
         + "Aktualisiere coding.updatePlan unmittelbar nach jeder abgeschlossenen Phase oder jedem Meilenstein, "
         + "bevor du Werkzeuge für die nächste unabhängige Etappe ausführst. "
-        + "Speichere den erreichten Status mit passenden planEvidenceId-Werten in evidenceIds und aktiviere die nächste Etappe. "
+        + "Speichere den tatsächlichen Arbeitsstand und aktiviere die nächste Etappe. "
         + "Mehrere bereits erledigte Etappen dürfen im selben Aufruf abgeschlossen werden; diese Regel ersetzt frühere Einzelabschlussgrenzen. "
         + "Schon completed gespeicherte Etappen dürfen in der vollständigen Liste unverändert stehen bleiben. "
         + "Bei Blockade oder Rücksprung den betroffenen Schritt sofort auf pending beziehungsweise in_progress setzen und explanation angeben. "
