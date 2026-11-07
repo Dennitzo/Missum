@@ -120,6 +120,14 @@ public sealed class RunSteeringClientTests
             return Task.CompletedTask;
         }, deadline.Token);
         var sent = await shared.Steered.Task;
+        Assert.Empty(await environment.Get<IAssistantAttachmentRepository>().ListAsync(session.Id));
+        var promptArtifacts = await environment.Get<IChatArtifactRepository>().ListForMessageAsync(turn.AssistantMessage.Id);
+        Assert.Equal(2, promptArtifacts.Count);
+        Assert.All(promptArtifacts, artifact => Assert.Equal("steering-input-one", artifact.StepId));
+        Assert.Contains(promptArtifacts, artifact => artifact.FileName == "Referenz.png" && artifact.Metadata!["role"] == "original");
+        Assert.Contains(promptArtifacts, artifact => artifact.FileName == "Messdaten.txt");
+        var submittedDocuments = await environment.Get<IChatArtifactRepository>().ListSubmittedDocumentIdsAsync(session.Id);
+        Assert.Equal((await environment.Get<IDocumentIngestor>().ListAsync(session.Id)).Select(document => document.Id).Order(), submittedDocuments.Order());
         Assert.Equal("steering-upload", Assert.Single(sent.UploadIds!));
         Assert.Contains("Messdaten.txt", sent.ContextText);
         Assert.Contains("Referenz.png", sent.ContextText);
@@ -161,6 +169,8 @@ public sealed class RunSteeringClientTests
         await chats.RenameSessionAsync(session.Id, "Titel einer neueren Eingabe");
         var duplicate = await service.SteerAsync(session.Id, "Nur die Änderung erklären.", "input-one", "run-steer", deadline.Token);
         Assert.True(duplicate.Duplicate);
+        Assert.Equal(2, (await environment.Get<IChatArtifactRepository>().ListForMessageAsync(turn.AssistantMessage.Id)).Count);
+        Assert.Contains(updates, update => update.Kind == MissumAiAssistantUpdateKind.Completed && update.Artifacts?.Count == 2);
         Assert.Single(shared.Requests, request => request == "POST /v1/uploads");
         Assert.Equal(accepted.Value.GetProperty("runId").GetString(), duplicate.RunId);
         await coordinator.HandleAsync(steeringEnvelope, static (_, _, _) => Task.CompletedTask, deadline.Token);

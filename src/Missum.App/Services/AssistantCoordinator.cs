@@ -360,6 +360,7 @@ public sealed partial class AssistantCoordinator(
             workingPlan = await BuildWorkingPlanAsync(session.Id, cancellationToken).ConfigureAwait(false),
             conversationRevision = session.ConversationRevision,
             documents = documentItems.Select(ToDocumentDto),
+            submittedDocumentIds = await artifacts.ListSubmittedDocumentIdsAsync(session.Id, cancellationToken).ConfigureAwait(false),
             attachments = attachmentItems.Select(ToAttachmentDto),
             actionDescriptors = BuildActionDescriptors(selectedChatMode, page.TotalMessages, extensionWorkspaceRoot),
             documentGroupStatus,
@@ -489,6 +490,7 @@ public sealed partial class AssistantCoordinator(
         {
             activeSessionId = sessionId,
             documents = documentItems.Select(ToDocumentDto),
+            submittedDocumentIds = await artifacts.ListSubmittedDocumentIdsAsync(sessionId, cancellationToken).ConfigureAwait(false),
             attachments = attachmentItems.Select(ToAttachmentDto),
             documentGroupStatus = BuildDocumentGroupStatus(documentItems, attachmentItems.Count),
             subagents = ToSubagentDtos(ReadActivitySummaries(auxiliary)),
@@ -730,6 +732,8 @@ public sealed partial class AssistantCoordinator(
                     && await chats.GetSessionAsync(steeringSessionId, CancellationToken.None).ConfigureAwait(false) is { } steeringSession)
                     await SaveSubmittedPromptTitleAsync(steeringSession, steeringPrompt, emit, envelope.RequestId,
                         CancellationToken.None).ConfigureAwait(false);
+                await emit("conversation.snapshot", await BuildConversationSnapshotAsync(steeringSessionId,
+                    CancellationToken.None).ConfigureAwait(false), envelope.RequestId).ConfigureAwait(false);
                 await emit("chat.steer.accepted", new { inputId = steeringAccepted.InputId,
                     sessionId = steeringSessionId, runId = steeringAccepted.RunId, sequence = steeringAccepted.Sequence }, envelope.RequestId).ConfigureAwait(false);
                 break;
@@ -812,6 +816,8 @@ public sealed partial class AssistantCoordinator(
             throw new InvalidOperationException("Das Dokument enthält keinen extrahierbaren Text. OCR ist in dieser Version nicht enthalten.");
         }
 
+        if (result.Document is { } selectedDocument)
+            await artifacts.RegisterDocumentSelectionAsync(sessionId, selectedDocument.Id, cancellationToken).ConfigureAwait(false);
         var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Die Sitzung wurde nicht gefunden.");
         await recentActivity.RecordAsync(

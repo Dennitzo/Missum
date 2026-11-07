@@ -7,7 +7,8 @@ namespace Missum.App.Services;
 public sealed partial class MissumAiAssistantService
 {
     private readonly SemaphoreSlim _steeringUploadGate = new(1, 1);
-    private readonly Dictionary<string, RunSteeringRequest> _steeringPayloads = new(StringComparer.Ordinal);
+    private sealed record PreparedSteeringInput(RunSteeringRequest Request, IReadOnlyList<AssistantAttachment> Files, IReadOnlyList<StoredDocument> Documents);
+    private readonly Dictionary<string, PreparedSteeringInput> _steeringPayloads = new(StringComparer.Ordinal);
 
     private sealed record ActiveSteeringSink(Guid SessionId, Guid MessageId, Func<AssistantToolStep, Task> Persist);
 
@@ -39,7 +40,9 @@ public sealed partial class MissumAiAssistantService
         ArgumentException.ThrowIfNullOrWhiteSpace(inputId);
         if (prompt.Length > 100_000 || inputId.Length > 128) throw new ArgumentException("Die Umlenkung ist zu lang.");
         var attachmentSnapshot = await attachments.ListAsync(sessionId, cancellationToken).ConfigureAwait(false);
-        var documentSnapshot = await documents.ListAsync(sessionId, cancellationToken).ConfigureAwait(false);
+        var promptFiles = new PromptAttachmentService(attachments, artifacts, blobs);
+        var documentSnapshot = await promptFiles.PendingDocumentsAsync(sessionId,
+            await documents.ListAsync(sessionId, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
         if (!IsRunning || ActiveSessionId != sessionId)
         {
             // A lost HTTP acknowledgement can be retried after completion. The
@@ -74,11 +77,12 @@ public sealed partial class MissumAiAssistantService
             if ((attachmentSnapshot.Count > 0 || documentSnapshot.Count > 0) && !capabilities.SupportsSteeringAttachments)
                 throw new InvalidOperationException("Der AI-Server unterstützt Anhänge beim Umlenken noch nicht. Aktualisiere den Gateway; die Eingabe bleibt erhalten.");
             RunSteeringRequest payload;
+            PreparedSteeringInput prepared;
             var key = targetRunId + ":" + inputId;
             await _steeringUploadGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                if (!_steeringPayloads.TryGetValue(key, out payload!))
+                if (!_steeringPayloads.TryGetValue(key, out prepared!))
                 {
                     var localRun = await runs.GetByServerRunIdAsync(targetRunId, cancellationToken).ConfigureAwait(false)
                         ?? throw new InvalidOperationException("Der lokale Auftrag wurde nicht gefunden.");
@@ -94,14 +98,21 @@ public sealed partial class MissumAiAssistantService
                                 fileName = item.Attachment.FileName, mediaType = item.Attachment.ContentType }), JsonOptions);
                     payload = new(sessionId.ToString("D"), inputId, prompt.Trim(),
                         string.IsNullOrWhiteSpace(context) ? null : context.Trim(), uploaded.Select(item => item.Upload.UploadId).ToArray());
-                    _steeringPayloads[key] = payload;
+                    _steeringPayloads[key] = prepared = new(payload, attachmentSnapshot, documentSnapshot);
                     while (_steeringPayloads.Count > 64) _steeringPayloads.Remove(_steeringPayloads.Keys.First());
                 }
+                payload = prepared.Request;
                 if (payload.Text != prompt.Trim()) throw new InvalidOperationException("Diese Umlenkungskennung gehört bereits zu einer anderen Eingabe.");
             }
             finally { _steeringUploadGate.Release(); }
             var receipt = await client.SteerRunAsync(targetRunId, payload, cancellationToken).ConfigureAwait(false);
             await PersistAcceptedSteeringAsync(receipt, prompt.Trim(), payload).ConfigureAwait(false);
+            var acceptedRun = await runs.GetByServerRunIdAsync(receipt.RunId, CancellationToken.None).ConfigureAwait(false)
+                ?? throw new InvalidOperationException("Der lokale Auftrag zur angenommenen Umlenkung fehlt.");
+            var owner = await chats.GetMessageTextAsync(acceptedRun.AssistantMessageId, CancellationToken.None).ConfigureAwait(false)
+                ?? throw new InvalidOperationException("Die Nachricht zur angenommenen Umlenkung fehlt.");
+            await promptFiles.BindAsync(owner, prepared.Files, prepared.Documents, "steering-" + receipt.InputId,
+                CancellationToken.None).ConfigureAwait(false);
             await chats.ClearDraftIfMatchesAsync(sessionId, prompt, CancellationToken.None).ConfigureAwait(false);
             return receipt;
         }

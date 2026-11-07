@@ -426,6 +426,56 @@ public sealed class SqliteChatArtifactRepository(
     SqliteDatabase database,
     IBinaryObjectStore blobs) : IChatArtifactRepository
 {
+    public Task RegisterDocumentSelectionAsync(Guid sessionId, Guid documentId, CancellationToken cancellationToken = default) =>
+        database.WriteAsync(async (connection, transaction, token) =>
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = """
+                INSERT INTO composer_document_selections(document_id,selection_id)
+                SELECT id,$selection FROM documents WHERE id=$document AND session_id=$session
+                ON CONFLICT(document_id) DO UPDATE SET selection_id=excluded.selection_id;
+                """;
+            command.Parameters.AddWithValue("$document", documentId.ToString("D"));
+            command.Parameters.AddWithValue("$session", sessionId.ToString("D"));
+            command.Parameters.AddWithValue("$selection", Guid.NewGuid().ToString("N"));
+            if (await command.ExecuteNonQueryAsync(token).ConfigureAwait(false) != 1)
+                throw new InvalidOperationException("Das Dokument gehört nicht zur Sitzung.");
+        }, cancellationToken);
+
+    public async Task<IReadOnlyDictionary<Guid, string>> ListDocumentSelectionsAsync(Guid sessionId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT s.document_id,s.selection_id FROM composer_document_selections s JOIN documents d ON d.id=s.document_id WHERE d.session_id=$session;";
+        command.Parameters.AddWithValue("$session", sessionId.ToString("D"));
+        var selections = new Dictionary<Guid, string>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false)) selections.Add(Guid.Parse(reader.GetString(0)), reader.GetString(1));
+        return selections;
+    }
+
+    public async Task<IReadOnlySet<Guid>> ListSubmittedDocumentIdsAsync(Guid sessionId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT json_extract(a.metadata_json,'$.sourceDocumentId')
+            FROM chat_messages m JOIN chat_artifacts a ON a.message_id=m.id
+            LEFT JOIN composer_document_selections s ON s.document_id=json_extract(a.metadata_json,'$.sourceDocumentId')
+            WHERE m.session_id=$session AND a.provider='prompt-attachment'
+              AND json_extract(a.metadata_json,'$.sourceDocumentId') IS NOT NULL
+              AND COALESCE(json_extract(a.metadata_json,'$.sourceDocumentSelectionId'),json_extract(a.metadata_json,'$.sourceDocumentId'))
+                  = COALESCE(s.selection_id,json_extract(a.metadata_json,'$.sourceDocumentId'));
+            """;
+        command.Parameters.AddWithValue("$session", sessionId.ToString("D"));
+        var ids = new HashSet<Guid>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            if (Guid.TryParse(reader.GetString(0), out var id)) ids.Add(id);
+        return ids;
+    }
+
     public async Task<IReadOnlyList<ChatArtifact>> ListForMessageAsync(Guid messageId, CancellationToken cancellationToken = default)
     {
         await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);

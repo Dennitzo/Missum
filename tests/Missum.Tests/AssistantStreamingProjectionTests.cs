@@ -563,6 +563,12 @@ public sealed class AssistantStreamingProjectionTests
 
     private sealed class CountingArtifacts(IChatArtifactRepository inner) : IChatArtifactRepository
     {
+        public Task<IReadOnlySet<Guid>> ListSubmittedDocumentIdsAsync(Guid sessionId, CancellationToken cancellationToken = default) =>
+            inner.ListSubmittedDocumentIdsAsync(sessionId, cancellationToken);
+        public Task RegisterDocumentSelectionAsync(Guid sessionId, Guid documentId, CancellationToken cancellationToken = default) =>
+            inner.RegisterDocumentSelectionAsync(sessionId, documentId, cancellationToken);
+        public Task<IReadOnlyDictionary<Guid, string>> ListDocumentSelectionsAsync(Guid sessionId, CancellationToken cancellationToken = default) =>
+            inner.ListDocumentSelectionsAsync(sessionId, cancellationToken);
         public int MessageReads { get; private set; }
         public Task<IReadOnlyList<ChatArtifact>> ListForMessageAsync(Guid messageId, CancellationToken cancellationToken = default)
         {

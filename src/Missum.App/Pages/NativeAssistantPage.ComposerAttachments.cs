@@ -14,7 +14,8 @@ public sealed partial class NativeAssistantPage
 
     private void RenderComposerAttachments(JsonElement data)
     {
-        var entries = Items(data, "documents").Select(item => (Item: item, Document: true))
+        var submitted = Items(data, "submittedDocumentIds").Select(item => item.GetString()).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var entries = Items(data, "documents").Where(item => !submitted.Contains(S(item, "id"))).Select(item => (Item: item, Document: true))
             .Concat(Items(data, "attachments").Select(item => (Item: item, Document: false))).ToArray();
         var signature = _session + "|" + ThemeBrush("MissumTextBrush", 220).Color + "|"
             + string.Join("|", entries.Select(entry => (entry.Document ? "doc:" : "file:") + S(entry.Item, "id")

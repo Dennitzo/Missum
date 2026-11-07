@@ -199,7 +199,8 @@ public sealed record StoredDocument(
     DocumentPreparationStatus PreparationStatus = DocumentPreparationStatus.Ready,
     int PreparationProgress = 100,
     bool WasReused = false,
-    string? PreparationError = null);
+    string? PreparationError = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] string? ComposerSelectionId = null);
 
 public enum DocumentPreparationStatus
 {

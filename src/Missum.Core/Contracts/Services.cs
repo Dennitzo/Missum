@@ -152,6 +152,9 @@ public interface IAssistantAttachmentRepository
 
 public interface IChatArtifactRepository
 {
+    Task<IReadOnlySet<Guid>> ListSubmittedDocumentIdsAsync(Guid sessionId, CancellationToken cancellationToken = default);
+    Task RegisterDocumentSelectionAsync(Guid sessionId, Guid documentId, CancellationToken cancellationToken = default);
+    Task<IReadOnlyDictionary<Guid, string>> ListDocumentSelectionsAsync(Guid sessionId, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<ChatArtifact>> ListForMessageAsync(Guid messageId, CancellationToken cancellationToken = default);
     Task<IReadOnlyDictionary<Guid, IReadOnlyList<ChatArtifact>>> ListForSessionAsync(Guid sessionId, CancellationToken cancellationToken = default);
     Task<ChatArtifact?> GetAsync(Guid id, CancellationToken cancellationToken = default);

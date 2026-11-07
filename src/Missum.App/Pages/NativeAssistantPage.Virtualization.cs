@@ -179,7 +179,11 @@ public sealed partial class NativeAssistantPage
                 firstVisibleBlock = false;
             }
         }
-        if (!assistant) Text("userText", content, 0);
+        if (!assistant)
+        {
+            Text("userText", content, 0);
+            if (artifacts.Length > 0) result.Add(new("artifacts", "artifacts", "", 0, default, artifacts));
+        }
         else
         {
             var artifactGroups = artifacts.Where(artifact => S(artifact, "stepId").Length > 0)

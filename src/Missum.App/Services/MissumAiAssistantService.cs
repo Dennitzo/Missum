@@ -199,6 +199,9 @@ public sealed partial class MissumAiAssistantService(
             modelPreparation = PrepareSubmittedModelAsync(action, preparationCancellation.Token);
             var historyBeforePrompt = await LoadModelHistoryAsync(sessionId, _activeCancellation.Token).ConfigureAwait(false);
             var sessionAttachments = await attachments.ListAsync(sessionId, _activeCancellation.Token).ConfigureAwait(false);
+            var promptFiles = new PromptAttachmentService(attachments, artifacts, blobs);
+            var promptDocuments = await promptFiles.PendingDocumentsAsync(sessionId,
+                await documents.ListAsync(sessionId, _activeCancellation.Token).ConfigureAwait(false), _activeCancellation.Token).ConfigureAwait(false);
             var contentProfile = action == PromptTriggerAction.Audiobook
                 ? MessageContentProfile.Audiobook
                 : MessageContentProfile.General;
@@ -207,10 +210,8 @@ public sealed partial class MissumAiAssistantService(
                 prompt.Trim(),
                 contentProfile,
                 _activeCancellation.Token).ConfigureAwait(false);
-            sessionAttachments = await BindCapturedMediaToMessageAsync(
-                turn.UserMessage,
-                sessionAttachments,
-                _activeCancellation.Token).ConfigureAwait(false);
+            sessionAttachments = await promptFiles.BindAsync(turn.UserMessage, sessionAttachments, promptDocuments,
+                null, CancellationToken.None).ConfigureAwait(false);
             var assistant = turn.AssistantMessage;
             var initialModel = UsesCodingAgent(action) ? CurrentSettings.SelectedModel : CurrentSettings.SelectedModel;
             var contextLimit = ModelContextSelection.Resolve(CurrentSettings, initialModel ?? "", ModelContextProfiles.ResolveMaximum(initialModel, UsesCodingAgent(action) ? "coding" : "general"));
@@ -226,7 +227,7 @@ public sealed partial class MissumAiAssistantService(
             {
                 var completed = action switch
                 {
-                    PromptTriggerAction.Transcription => await CompleteTranscriptionAsync(assistant, trigger!, update, _activeCancellation.Token).ConfigureAwait(false),
+                    PromptTriggerAction.Transcription => await CompleteTranscriptionAsync(assistant, trigger!, sessionAttachments, update, _activeCancellation.Token).ConfigureAwait(false),
                     PromptTriggerAction.VoiceInput => await CompleteVoiceInputAsync(assistant, update, _activeCancellation.Token).ConfigureAwait(false),
                     PromptTriggerAction.LiveCaptions or PromptTriggerAction.LiveTranslation =>
                         await CompleteLiveCaptionsAsync(assistant, trigger!, update, _activeCancellation.Token).ConfigureAwait(false),
@@ -1096,58 +1097,6 @@ public sealed partial class MissumAiAssistantService(
     }
 
 
-    private async Task<IReadOnlyList<AssistantAttachment>> BindCapturedMediaToMessageAsync(
-        ChatMessage userMessage,
-        IReadOnlyList<AssistantAttachment> sessionAttachments,
-        CancellationToken cancellationToken)
-    {
-        if (!sessionAttachments.Any(IsCapturedMedia))
-        {
-            return sessionAttachments;
-        }
-
-        var runAttachments = new List<AssistantAttachment>(sessionAttachments.Count);
-        foreach (var attachment in sessionAttachments)
-        {
-            if (!IsCapturedMedia(attachment))
-            {
-                runAttachments.Add(attachment);
-                continue;
-            }
-
-            var isVideo = attachment.ContentType.StartsWith("video/", StringComparison.OrdinalIgnoreCase);
-            var isAudio = attachment.ContentType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase);
-            await using var source = await blobs.OpenReadAsync(attachment.BlobId, cancellationToken).ConfigureAwait(false);
-            var artifact = await artifacts.ImportAsync(
-                userMessage.Id,
-                $"client-capture-{attachment.Id:N}",
-                attachment.FileName,
-                attachment.ContentType,
-                attachment.Sha256,
-                attachment.Length,
-                "screen-capture",
-                null,
-                new Dictionary<string, string>(StringComparer.Ordinal)
-                {
-                    ["source"] = isVideo
-                        ? "screenClip.capture"
-                        : isAudio
-                            ? "audioCapture.capture"
-                            : "screen.capture",
-                },
-                source,
-                cancellationToken).ConfigureAwait(false);
-
-            // The artifact now owns the same content in the local blob store. Removing
-            // the pending attachment keeps the one-shot capture out of later context runs,
-            // while this run still reads it through the artifact's retained blob.
-            await attachments.RemoveAsync(attachment.Id, cancellationToken).ConfigureAwait(false);
-            runAttachments.Add(attachment with { BlobId = artifact.BlobId });
-        }
-
-        return runAttachments;
-    }
-
     internal static bool IsCapturedMedia(AssistantAttachment attachment) =>
         attachment.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase)
             && attachment.FileName.StartsWith("Missum-Screenshot-", StringComparison.OrdinalIgnoreCase)
@@ -1888,6 +1837,9 @@ public sealed partial class MissumAiAssistantService(
             await FinishOpenToolStepsAsync("interrupted").ConfigureAwait(false);
             await EndResearchProgressAsync(localRun, "unresolved").ConfigureAwait(false);
             model = selectedModel ?? model;
+            // Steering can commit prompt attachments independently of the SSE pump.
+            collectedArtifacts.Clear();
+            collectedArtifacts.AddRange(await artifacts.ListForMessageAsync(assistant.Id, CancellationToken.None).ConfigureAwait(false));
             if (string.IsNullOrWhiteSpace(content))
             {
                 content = collectedArtifacts.Count > 0
@@ -2507,10 +2459,8 @@ public sealed partial class MissumAiAssistantService(
                             model ?? "Missum AI Server",
                             descriptor.StepId ?? activeServerStepId,
                             cancellationToken).ConfigureAwait(false);
-                        if (collectedArtifacts.All(value => value.Id != imported.Id))
-                        {
-                            collectedArtifacts.Add(imported);
-                        }
+                        collectedArtifacts.Clear();
+                        collectedArtifacts.AddRange(await artifacts.ListForMessageAsync(assistant.Id, cancellationToken).ConfigureAwait(false));
                         await update(new(
                             MissumAiAssistantUpdateKind.ArtifactsChanged,
                             assistant,
@@ -3111,10 +3061,10 @@ public sealed partial class MissumAiAssistantService(
     private async Task<ChatMessage> CompleteTranscriptionAsync(
         ChatMessage assistant,
         PromptTriggerMatch trigger,
+        IReadOnlyList<AssistantAttachment> sessionAttachments,
         Func<MissumAiAssistantUpdate, Task> update,
         CancellationToken cancellationToken)
     {
-        var sessionAttachments = await attachments.ListAsync(assistant.SessionId, cancellationToken).ConfigureAwait(false);
         var audio = sessionAttachments.LastOrDefault(item => item.ContentType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase))
             ?? throw new InvalidOperationException("Hänge zuerst eine Audiodatei an.");
         using var client = await connection.CreateClientAsync(cancellationToken).ConfigureAwait(false);

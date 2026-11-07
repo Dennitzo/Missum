@@ -3,6 +3,11 @@ using System.Text.Json;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Missum.Core.Contracts;
+using Missum.App.Controls;
+using Missum.App.Services;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Automation.Peers;
+using Microsoft.UI.Xaml.Automation.Provider;
 using Missum.Core.Models;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Graphics.Imaging;
@@ -59,11 +64,46 @@ public sealed partial class NativeAssistantPage
             RequireAttachments(3, "Messdaten.txt");
             if (_composerAttachmentRemoveButtons.Any(button => !button.IsEnabled))
                 throw new InvalidOperationException("Anhangsaktionen bleiben nach dem Lauf gesperrt.");
+            var artifactRepository = App.Current.GetService<IChatArtifactRepository>();
+            var files = App.Current.GetService<IAssistantAttachmentRepository>();
+            var documents = App.Current.GetService<IDocumentIngestor>();
+            var promptFiles = new PromptAttachmentService(files, artifactRepository, App.Current.GetService<IBinaryObjectStore>());
+            var turn = await chats.AddTurnAsync(session.Id, Composer.Text, cancellationToken: _lifetime.Token);
+            await promptFiles.BindAsync(turn.UserMessage, await files.ListAsync(session.Id),
+                await promptFiles.PendingDocumentsAsync(session.Id, await documents.ListAsync(session.Id), _lifetime.Token), null, _lifetime.Token);
+            await ShowAttachmentsAsync(session.Id, false);
+            RenderMessagesNow(); UpdateLayout();
+            if (ComposerAttachmentsHost.Visibility != Visibility.Collapsed || ComposerAttachmentsPanel.Children.Count != 0)
+                throw new InvalidOperationException("Gesendete Anhänge verbleiben im Promptfenster.");
+            var ownerId = turn.UserMessage.Id.ToString("D");
+            if (!_messageBlocks.TryGetValue(ownerId, out var blocks) || !blocks.TryGetValue("artifacts", out var view)
+                || view is not NativeArtifactLinks links)
+                throw new InvalidOperationException("Die Nutzernachricht zeigt ihre gespeicherten Anhänge nicht an.");
+            await WaitArtifactImageSmokeAsync(() => Descendants(links).OfType<NativeArtifactImagePreview>().Any(preview => preview.HasImage));
+            var stored = await artifactRepository.ListForMessageAsync(turn.UserMessage.Id);
+            var picture = stored.Single(artifact => artifact.ContentType == "image/png");
+            var opened = false;
+            links.OpenFileSmokeAdapter = async file =>
+            {
+                var original = await File.ReadAllBytesAsync(file.Path, _lifetime.Token);
+                using var expected = new MemoryStream();
+                image.Seek(0); await image.AsStreamForRead().CopyToAsync(expected, _lifetime.Token);
+                if (!original.SequenceEqual(expected.ToArray())) throw new InvalidOperationException("Öffnen verwendet nicht das Originalbild.");
+                opened = true; return true;
+            };
+            var openButton = Descendants(links).OfType<Button>().Single(button =>
+                AutomationProperties.GetAutomationId(button) == "artifact-" + picture.Id.ToString("N"));
+            ((IInvokeProvider)new ButtonAutomationPeer(openButton).GetPattern(PatternInterface.Invoke)).Invoke();
+            await WaitArtifactImageSmokeAsync(() => opened);
+            links.OpenFileSmokeAdapter = null;
+            await ShowAttachmentsAsync(other.Id, false);
+            await ShowAttachmentsAsync(session.Id, false);
+            if (ComposerAttachmentsPanel.Children.Count != 0) throw new InvalidOperationException("Gesendete Anhänge erscheinen erneut im Promptfenster.");
             await File.WriteAllTextAsync(Path.Combine(App.Current.DataDirectory, "native-composer-attachments-validation.json"),
                 JsonSerializer.Serialize(new { passed = true, renderer = "WinUI3", storedDocumentVisible = true,
                     clipboardFileVisible = true, clipboardImageVisible = true, liveRunKeepsAttachmentsVisible = true,
                     busyFeedbackVisible = true, draftPreserved = true, sessionIsolation = true,
-                    sessionReloadRestoresAttachments = true, systemClipboardModified = false, modelRequests = 0, userDataModified = false }), _lifetime.Token);
+                    sessionReloadRestoresAttachments = true, submittedFilesInChat = true, composerClearedAfterSubmission = true, originalImageOpened = true, systemClipboardModified = false, modelRequests = 0, userDataModified = false }), _lifetime.Token);
         }
         finally
         {

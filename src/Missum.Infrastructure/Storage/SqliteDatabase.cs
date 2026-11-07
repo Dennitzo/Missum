@@ -8,7 +8,7 @@ namespace Missum.Infrastructure.Storage;
 
 public sealed class SqliteDatabase : IMissumDatabase, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 57;
+    public const int CurrentSchemaVersion = 58;
     private static readonly Action<ILogger, string, Exception?> DatabaseInitialized = LoggerMessage.Define<string>(
         LogLevel.Information, new EventId(1000, nameof(DatabaseInitialized)), "SQLite-Datenbank {DatabasePath} wurde initialisiert.");
     private static readonly Action<ILogger, string?, Exception?> IntegrityCheckFailed = LoggerMessage.Define<string?>(
@@ -111,6 +111,7 @@ public sealed class SqliteDatabase : IMissumDatabase, IAsyncDisposable
             await ApplyMigrationFiftyFiveAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationFiftySixAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplySessionOnlyContextMigrationAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationFiftyEightAsync(connection, cancellationToken).ConfigureAwait(false);
             // A full scan belongs to migrations/recovery and explicit diagnostics, not every ordinary launch.
             if (previousVersion != CurrentSchemaVersion
                 || previousSchema != await ReadSchemaCookieAsync(connection, cancellationToken).ConfigureAwait(false))
@@ -2709,6 +2710,20 @@ public sealed class SqliteDatabase : IMissumDatabase, IAsyncDisposable
         command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToDb());
         await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
         await transaction.CommitAsync(token).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationFiftyEightAsync(SqliteConnection connection, CancellationToken token)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            CREATE TABLE IF NOT EXISTS composer_document_selections(
+                document_id TEXT PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
+                selection_id TEXT NOT NULL
+            ) STRICT;
+            INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(58,$now);
+            """;
+        command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToDb());
+        await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
     }
 
     private static async Task ApplyMarkerMigrationAsync(SqliteConnection connection, int version, CancellationToken cancellationToken)

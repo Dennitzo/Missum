@@ -116,7 +116,12 @@ public sealed partial class MissumAiAssistantService
             modelPreparation = PrepareSubmittedModelAsync(_activeRunAction, preparationCancellation.Token,
                 recoveredRequest?.PreferredCodingModelId ?? recoveredRequest?.PreferredGeneralModelId,
                 recoveredRequest?.Limits?.MaximumContextTokens, gatewayReady: true);
-            var attachmentsForRun = await attachments.ListAsync(sessionId, token).ConfigureAwait(false);
+            var submittedFiles = (await artifacts.ListForMessageAsync(anchor.User.Id, token).ConfigureAwait(false))
+                .Concat(await artifacts.ListForMessageAsync(assistant.Id, token).ConfigureAwait(false))
+                .Where(item => item.Provider == "prompt-attachment" && item.Metadata?.ContainsKey("sourceAttachmentId") == true).ToArray();
+            // A continuation uses its submitted originals, never an unsent composer selection.
+            var attachmentsForRun = submittedFiles.Select(item => new AssistantAttachment(Guid.Parse(item.Metadata!["sourceAttachmentId"]),
+                sessionId, item.BlobId, item.FileName, item.ContentType, item.Sha256, item.Length, item.CreatedAt)).ToArray();
             var uploaded = await UploadAttachmentsAsync(client, attachmentsForRun, update, assistant, token).ConfigureAwait(false);
             var retainUploads = false;
             try
