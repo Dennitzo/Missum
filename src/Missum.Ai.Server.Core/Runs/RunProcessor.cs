@@ -410,6 +410,8 @@ public sealed partial class RunProcessor : BackgroundService
             .Select(static message => string.Join(Environment.NewLine,
                 message.Content.Where(static part => !string.IsNullOrWhiteSpace(part.Text)).Select(static part => part.Text)))
             .ToArray();
+        if (CommandMonitoringPolicy.UpgradeHistory(messages, originalUserTexts))
+            checkpoint = checkpoint with { PreserveSessionPromptPrefix = false };
         RetiredRepositoryInstructions.RemoveFrom(messages, originalUserTexts);
         if (ScienceSkill.Enabled(request)) ScienceSkill.RemoveRetiredStartupInstructions(messages, originalUserTexts);
         if (!ScienceSkill.Enabled(request) && !checkpoint.PreserveSessionPromptPrefix && !compactContext && isCoding && request.Subagent is null)
@@ -1559,7 +1561,9 @@ public sealed partial class RunProcessor : BackgroundService
             var unfinishedSciencePlan = false;
             if (isCoding && response.ToolCalls.Count == 0)
             {
-                if (workingState?.Science is not null)
+                if (commandMonitoring.ProposalId is not null && CommandMonitoringPolicy.IsDecision(response.Content))
+                    completionRepair = CommandMonitoringPolicy.ResumePrompt;
+                if (completionRepair is null && workingState?.Science is not null)
                 {
                     completionRepair = ScienceCompletionGuard.RepairPrompt(workingState);
                     unfinishedSciencePlan = completionRepair is not null;
@@ -1772,7 +1776,6 @@ public sealed partial class RunProcessor : BackgroundService
             try
             {
                 if (await _repository.HasPendingSteeringAsync(runId, cancellationToken).ConfigureAwait(false)) return;
-                var instruction = CommandMonitoringPolicy.Instruction(call, progress);
                 var monitoringPrompt = ModelRuntimeClient.PrepareLanguageBoundMessages(
                     CommandMonitoringPolicy.CreatePrompt(ExtractOriginalTask(request), workingState, call, progress)).ToArray();
                 await using var steering = _repository.WatchSteering(runId, cancellationToken);
@@ -1802,15 +1805,8 @@ public sealed partial class RunProcessor : BackgroundService
                     decision = CommandMonitoringPolicy.Fallback(progress);
                 if (decision is not null)
                 {
-                    messages.Add(new("user", instruction));
-                    messages.Add(report.Decision is not null && report.Response is { } acceptedResponse
-                        ? new("assistant", acceptedResponse.Content, ReasoningContent: acceptedResponse.ReasoningContent)
-                        : new("assistant", JsonSerializer.Serialize(new
-                        {
-                            decision.Message,
-                            decision.Action,
-                            Reason = decision.Reason,
-                        }, MissumAiProtocol.CreateJsonOptions())));
+                    messages.Add(CommandMonitoringPolicy.Observation(call, progress, decision));
+                    messages.Add(new("assistant", decision.Message));
                     messages = ModelRuntimeClient.PrepareLanguageBoundMessages(messages).ToList();
                     preserveSessionPromptPrefix = true;
                 }

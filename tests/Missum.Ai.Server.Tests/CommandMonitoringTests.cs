@@ -19,6 +19,53 @@ public sealed class CommandMonitoringTests
     private static readonly LmToolCall Read = new("following-read", ClientToolNames.CodingRead, J("""{"path":"result.json"}"""));
 
     [Fact]
+    public void LegacyMonitoringInstructionsAreRemovedWithoutChangingUserRequests()
+    {
+        var instruction = CommandMonitoringPolicy.Instruction(Command, new("p", 1, 30000, "output", "", false));
+        var messages = new List<LmChatMessage> { new("user", "Arbeite am Nutzerauftrag weiter."), new("user", instruction),
+            new("assistant", """{"message":"Prozess gezielt stoppen.","action":"stop","reason":"Konkreter Fehler."}""", ReasoningContent: "Internal JSON decision") };
+        Assert.True(CommandMonitoringPolicy.UpgradeHistory(messages));
+        Assert.Equal("Arbeite am Nutzerauftrag weiter.", messages[0].Content);
+        Assert.Contains(CommandMonitoringPolicy.ObservationMarker, messages[1].Content);
+        Assert.Equal("Prozess gezielt stoppen.", messages[2].Content);
+        Assert.Null(messages[2].ReasoningContent);
+        Assert.False(CommandMonitoringPolicy.UpgradeHistory(messages));
+        var quotedUserRequest = new List<LmChatMessage> { new("user", instruction) };
+        Assert.False(CommandMonitoringPolicy.UpgradeHistory(quotedUserRequest, [instruction]));
+        Assert.Equal(instruction, quotedUserRequest[0].Content);
+    }
+
+    [Fact]
+    public async Task StoppedCommandContinuesThroughNextToolAndRejectsMonitorJsonAsFinalAnswer()
+    {
+        using var harness = new Harness();
+        harness.Handler.Decision = """{"message":"Ich stoppe nur diesen fehlerhaften Prozess.","action":"stop","reason":"Konkreter Ausgabefehler."}""";
+        var run = await harness.SeedPendingAsync();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        await Assert.ThrowsAsync<RunWaitingForClientException>(() => harness.Processor.ProcessAsync(run, timeout.Token));
+        await harness.Repository.SaveClientToolResultAsync(run, new(Harness.ProposalId, "failed", J("""{"success":false,"exitCode":1,"stderr":"Process stopped for diagnosis"}""")));
+        await Assert.ThrowsAsync<RunWaitingForClientException>(() => harness.Processor.ProcessAsync(run, timeout.Token));
+        var pending = (await harness.Repository.GetCheckpointAsync(run))!;
+        Assert.Equal(Read.Id, pending.PendingToolCallId);
+        await harness.Repository.SaveClientToolResultAsync(run, new(pending.PendingProposalId!, "completed", J("""{"content":"Independent diagnosis completed"}""")));
+        harness.Handler.MainResponses.Enqueue(harness.Handler.Decision);
+        harness.Handler.MainResponses.Enqueue("Die unabhängige Diagnose wurde ausgewertet; der Auftrag ist abgeschlossen.");
+        await harness.Processor.ProcessAsync(run, timeout.Token);
+        Assert.Equal(RunState.Completed, (await harness.Repository.GetAsync(run))!.State);
+        var main = harness.Handler.Bodies.Where(body => !body.TryGetProperty("response_format", out _)).ToArray();
+        Assert.Equal(2, main.Length);
+        Assert.DoesNotContain(main[0].GetProperty("messages").EnumerateArray(), message =>
+            message.GetProperty("content").GetString()?.Contains(CommandMonitoringPolicy.InstructionMarker, StringComparison.Ordinal) == true);
+        var events = await harness.Repository.GetEventsAfterAsync(run, 0);
+        Assert.Contains(events, item => item.Type == RunEventTypes.ModelGeneration
+            && item.Data.GetProperty("state").GetString() == "responseRecovery");
+        Assert.DoesNotContain(events, item => item.Type == RunEventTypes.TextDelta
+            && item.Data.GetProperty("delta").GetString()!.Contains("\"action\"", StringComparison.Ordinal));
+        Assert.Contains(events, item => item.Type == RunEventTypes.TextDelta
+            && item.Data.GetProperty("delta").GetString()!.Contains("unabhängige Diagnose", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void MonitoringStartsAfterThirtySecondsAndRequiresFreshObservationsAfterEachMinute()
     {
         var now = new DateTimeOffset(2026, 11, 5, 12, 0, 0, TimeSpan.Zero);
@@ -158,8 +205,9 @@ public sealed class CommandMonitoringTests
         messages.Add(new("tool", "running", ToolCallId: Command.Id));
         for (var index = 0; index < 30; index++)
         {
-            messages.Add(new("user", CommandMonitoringPolicy.Instruction(Command, new("p", index + 1, 30_000 + index * 60_000, new string('x', 1000), "", false))));
-            messages.Add(new("assistant", "{\"message\":\"Weiter\",\"action\":\"continue\"}"));
+            messages.Add(CommandMonitoringPolicy.Observation(Command,
+                new("p", index + 1, 30_000 + index * 60_000, new string('x', 1000), "", false), new("Weiter", "continue", null)));
+            messages.Add(new("assistant", "Weiter"));
         }
         var latest = messages[^2];
         messages.Add(CommandMonitoringPolicy.ToolResult(Command, "Tatsächlicher späterer Abschluss", monitoring));
@@ -167,7 +215,7 @@ public sealed class CommandMonitoringTests
         Assert.Equal("Ursprüngliche Forschungsfrage", plan.CurrentRequest.Content);
         var compacted = CodingContextCompactor.Complete(plan, "Prozess war aktiv und ist nun abgeschlossen.");
         Assert.Contains(latest, compacted);
-        Assert.Single(compacted, item => item.Content?.Contains(CommandMonitoringPolicy.InstructionMarker, StringComparison.Ordinal) == true);
+        Assert.Single(compacted, item => item.Content?.Contains(CommandMonitoringPolicy.ObservationMarker, StringComparison.Ordinal) == true);
         Assert.True(compacted.Length < messages.Count);
     }
 
@@ -364,6 +412,7 @@ public sealed class CommandMonitoringTests
         internal List<JsonElement> Bodies { get; } = [];
         internal List<string> Paths { get; } = [];
         internal string Decision { get; set; } = """{"message":"Die Berechnung läuft mit aktiver CPU weiter; fehlende Ausgabe allein belegt keine Endlosschleife.","action":"continue"}""";
+        internal Queue<string> MainResponses { get; } = new();
         internal bool FailGeneration { get; set; }
         internal Func<Task>? DuringGeneration { get; set; }
         internal int Loads { get; private set; }
@@ -382,7 +431,8 @@ public sealed class CommandMonitoringTests
             if (DuringGeneration is { } during) await during();
             if (FailGeneration) return new(HttpStatusCode.InternalServerError)
                 { Content = new StringContent("{\"error\":\"model temporarily unavailable\"}", Encoding.UTF8, "application/json") };
-            return Response(new { choices = new[] { new { message = new { role = "assistant", content = Decision }, finish_reason = "stop" } },
+            var content = Bodies[^1].TryGetProperty("response_format", out _) || MainResponses.Count == 0 ? Decision : MainResponses.Dequeue();
+            return Response(new { choices = new[] { new { message = new { role = "assistant", content }, finish_reason = "stop" } },
                 usage = new { prompt_tokens = 128, completion_tokens = 8 } });
         }
         private static HttpResponseMessage Response(object body) => new(HttpStatusCode.OK)
