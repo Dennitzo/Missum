@@ -779,9 +779,8 @@ public sealed partial class RunRepository
         command.CommandText = "SELECT checkpoint_json FROM run_checkpoints WHERE run_id = $run;";
         command.Parameters.AddWithValue("$run", runId);
         var json = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) as string;
-        return json is null
-            ? null
-            : DeserializeSessionCheckpoint(json);
+        var checkpoint = json is null ? null : DeserializeSessionCheckpoint(json);
+        return checkpoint is null ? null : await RestoreMissingPlanReceiptsAsync(runId, checkpoint, cancellationToken).ConfigureAwait(false);
     }
 
     internal async Task<AgentRunCheckpoint?> GetSessionContextAsync(
@@ -817,6 +816,7 @@ public sealed partial class RunRepository
             interrupted = reader.GetString(2) != "Completed";
         }
         if (checkpoint is null) return null;
+        checkpoint = await RestoreMissingPlanReceiptsAsync(previousRun, checkpoint, cancellationToken).ConfigureAwait(false);
         return (interrupted ? RestoreInterruptedVisibleTail(checkpoint,
             await GetContinuationEventsAsync(previousRun, 0, cancellationToken).ConfigureAwait(false)) : checkpoint,
             previousRun, interrupted);

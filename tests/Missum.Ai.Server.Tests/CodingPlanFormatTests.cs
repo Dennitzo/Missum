@@ -11,6 +11,38 @@ namespace Missum.Ai.Server.Tests;
 
 public sealed class CodingPlanFormatTests
 {
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    public async Task MissingPlanReceiptIsRestoredOnlyFromACompletedJournalOperation(bool completed, bool pending)
+    {
+        using var context = new TestServerContext();
+        var repository = new RunRepository(context.Database, new RunEventNotifier());
+        var run = (await repository.CreateAsync(new(MissumAiProtocol.Version, RunMode.Coding,
+            [new("user", [new("text", Text: "Task")])]), null)).Snapshot.RunId;
+        var args = J("""{"steps":[{"id":"s1","title":"Phase 1: Task","status":"completed"}]}""");
+        var call = new LmToolCall("model-plan", "coding.updatePlan", args);
+        await repository.AppendEventAsync(run, RunEventTypes.ServerToolStarted,
+            new { tool = call.Name, toolCallId = "actual-operation", arguments = args });
+        if (completed)
+            await repository.AppendEventAsync(run, RunEventTypes.ServerToolCompleted,
+                new { tool = call.Name, toolCallId = "actual-operation", success = true,
+                    result = new { success = true, storedSteps = new[] { new { id = "s1", title = "Phase 1: Task", status = "completed" } } } });
+        await repository.SaveCheckpointAsync(run, new([new("user", "Task"), new("assistant", ToolCalls: [call])],
+            1, 1, 0, 0, ActiveToolCalls: pending ? [call] : null, PreserveSessionPromptPrefix: true, PlanFormatVersion: CodingPlanFormat.CurrentVersion));
+        var restored = (await repository.GetCheckpointAsync(run))!;
+        Assert.Equal(completed && !pending ? 3 : 2, restored.Messages.Count);
+        if (completed && !pending)
+        {
+            Assert.Equal(call.Id, restored.Messages[^1].ToolCallId);
+            Assert.True(J(restored.Messages[^1].Content!).GetProperty("success").GetBoolean());
+            Assert.False(restored.PreserveSessionPromptPrefix);
+            await repository.SaveCheckpointAsync(run, restored);
+            Assert.Equal(3, (await repository.GetCheckpointAsync(run))!.Messages.Count);
+        }
+    }
+
     [Fact]
     public void RetiredSavedToolCatalogsAreReplacedAndInvalidateTheEvaluatedPrefix()
     {

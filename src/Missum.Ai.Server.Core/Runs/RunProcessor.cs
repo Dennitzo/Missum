@@ -890,7 +890,8 @@ public sealed partial class RunProcessor : BackgroundService
                         if (workingState is not null && (tool.Name is SubagentToolNames.Wait or SubagentToolNames.Spawn) && result.Succeeded)
                             workingState = ScienceStagePolicy.ImportDelegatedEvidence(workingState, result.Result);
                         var projectedResult = isCoding ? CodingLoopGuard.BoundToolResult(rawResult, call.Name) : rawResult;
-                        if (tool.Name != CodingWorkingStateTools.PlanTool)
+                        // Every dispatched call needs its matching model-context receipt,
+                        // including plan acknowledgements that are not work evidence.
                         messages.Add(CommandMonitoringPolicy.ToolResult(call, projectedResult, commandMonitoring));
                         if (tool.Name == SubagentToolNames.Wait && result.Succeeded
                             && !await _repository.HasConsumedSubagentResultAsync(runId,

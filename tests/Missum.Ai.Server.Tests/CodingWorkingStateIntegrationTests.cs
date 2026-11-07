@@ -268,6 +268,7 @@ public sealed class CodingWorkingStateIntegrationTests
         Assert.Equal(JsonSerializer.Serialize(state.AcceptanceCriteria), JsonSerializer.Serialize(checkpoint.WorkingState.AcceptanceCriteria));
         Assert.Equal(JsonSerializer.Serialize(state.Facts), JsonSerializer.Serialize(checkpoint.WorkingState.Facts));
         Assert.Contains("FULL_CODE_EVIDENCE_", Assert.Single(checkpoint.WorkingState.ActiveFiles).Snippet, StringComparison.Ordinal);
+        Assert.Single(checkpoint.Messages, message => message.Role == "tool" && message.ToolCallId == "plan-small");
         var completedPlanEvent = Assert.Single(await harness.Repository.GetServerToolCompletedEventsAsync(run));
         var receiptText = completedPlanEvent.Data.GetProperty("result").GetRawText();
         Assert.DoesNotContain("FULL_CODE_EVIDENCE_", receiptText, StringComparison.Ordinal);
@@ -440,6 +441,7 @@ public sealed class CodingWorkingStateIntegrationTests
             item => item.Data.GetProperty("result").TryGetProperty("updatedSteps", out var steps)
                 && steps.EnumerateArray().Any(step => step.TryGetProperty("status", out var status) && status.GetString() == "in_progress"));
         Assert.True(receipt.Data.GetProperty("success").GetBoolean());
+        Assert.Single(saved.Messages, message => message.Role == "tool" && message.ToolCallId == "valid-delta");
         Assert.DoesNotContain(saved.WorkingState.Evidence, item => item.Tool == CodingWorkingStateTools.PlanTool && item.Success);
     }
 
