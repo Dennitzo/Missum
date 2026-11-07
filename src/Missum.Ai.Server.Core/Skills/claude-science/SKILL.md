@@ -58,3 +58,6 @@ Die bestehende Planregel mit leeren Listen bei neuen Läufen gilt nicht für for
 Missum liefert den gespeicherten Sitzungsstand. Verwende dessen IDs unverändert.
 Ist der gesamte frühere Plan fachlich abgeschlossen, startet ein neuer Auftrag mit leeren Planlisten;
 seine Befunde und Werkzeugbelege bleiben im Sitzungsverlauf verfügbar.
+
+Publikation.md enthält fachliche Abschnitte, kein manuelles Inhaltsverzeichnis oder zusätzliches
+Ersatzverzeichnis wie „Aufbau dieser Arbeit“. Missum erzeugt das einzige Inhaltsverzeichnis automatisch.

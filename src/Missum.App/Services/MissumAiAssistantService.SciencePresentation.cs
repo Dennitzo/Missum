@@ -23,7 +23,7 @@ public sealed partial class MissumAiAssistantService
         return prompt + "\n\nPublikation dieses Projekts: " + relative
             + ". Diese direkt bearbeitbare Markdown-Datei ist der aktuelle Projektstand; Missum setzt daraus automatisch die PDF im vorhandenen Layout mit Inhaltsverzeichnis. "
             + "Gliedere Hauptthemen mit ##, Unterthemen mit ### und weitere Ebenen entsprechend; Missum nummeriert Überschriften und Inhaltsverzeichnis gemeinsam als 1, 1.1, 1.2, 2 usw. "
-            + "Der Dokumenttitel mit # bleibt unnummeriert; eigene Nummern oder ein manuelles Inhaltsverzeichnis sind nicht nötig. "
+            + "Der Dokumenttitel mit # bleibt unnummeriert. Missum erzeugt das einzige Inhaltsverzeichnis automatisch; lege in Publikation.md weder ein manuelles Inhaltsverzeichnis noch einen zusätzlichen Navigationsabschnitt wie „Aufbau dieser Arbeit“, „Gliederung der Arbeit“ oder eine Kapitelübersicht an. Verwende keine eigenen Kapitelnummern. "
             + "Führe verwendete Literatur und Datengrundlagen am Ende unter ## Literatur und Daten, gegliedert in ### Fachliteratur und ### Forschungsdaten. "
             + "Erhalte eindeutige Zitierschlüssel und verlinke die tatsächlich verwendeten Quellen, Datensätze oder Projektdateien mit knappen bibliografischen Angaben; erfinde keine Einträge. "
             + "Abschnitte können mit den normalen Projektwerkzeugen ergänzt, geändert oder gelöscht werden. "

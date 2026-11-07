@@ -14,6 +14,38 @@ public sealed class ScientificPublicationLayoutTests
     private static readonly string[] MeasuredExperimentIds = ["simulation-real"];
     private static readonly string[] OlderExperimentIds = ["simulation-old"];
     [Fact]
+    [Trait("Category", "Live")]
+    public async Task PublicationHasOneAutomaticContentsAndPreservesSubstantiveOverviewProse()
+    {
+        if (Environment.GetEnvironmentVariable("MISSUM_PUBLICATION_LAYOUT_LIVE") != "1") return;
+        var root = Path.Combine(Path.GetTempPath(), "missum-single-contents", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var source = Path.Combine(root, "Publikation.md");
+            const string markdown = "# Untersuchung\n\n## Inhaltsverzeichnis\n\n- [MANUELLESVERZEICHNIS](#modell)\n\n"
+                + "## 1. Aufbau dieser Arbeit\n\n- DOPPELTEKAPITELLISTE\n\n"
+                + "## Modell\n\nDie Voraussetzungen werden hier beschrieben.\n\n### Herleitung\n\nEs gilt $E=mc^2$.\n\n"
+                + "## Aufbau dieser Arbeit\n\nFACHLICHERFLIESSTEXT bleibt als echter Inhalt erhalten.\n";
+            await File.WriteAllTextAsync(source, markdown);
+            using var exporter = new DocumentPdfExporter(NullLogger<DocumentPdfExporter>.Instance);
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+            var pdfPath = await exporter.EnsureCurrentAsync(source, true, scientificPublication: true, cancellationToken: timeout.Token);
+            Assert.NotNull(pdfPath);
+            using var pdf = PdfDocument.Open(pdfPath);
+            var words = pdf.GetPages().SelectMany(page => page.GetWords()).Select(word => word.Text).ToArray();
+            Assert.Single(words, word => word == "Inhaltsverzeichnis");
+            Assert.DoesNotContain("MANUELLESVERZEICHNIS", words);
+            Assert.DoesNotContain("DOPPELTEKAPITELLISTE", words);
+            Assert.Contains("FACHLICHERFLIESSTEXT", words);
+            var contents = pdf.GetPages().Single(page => page.GetWords().Any(word => word.Text == "Inhaltsverzeichnis"));
+            Assert.Equal(3, contents.GetAnnotations().Select(annotation => annotation.Action).OfType<GoToAction>().Count());
+            Assert.Equal(markdown, await File.ReadAllTextAsync(source));
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
     public void HistoricalNumberedSectionsUseNaturalOrderIncludingLetteredAdditions()
     {
         var state = State(Section("aa-ten", "10 Neues Thema"), Section("ab-ten-a", "10a Ergänzung"),

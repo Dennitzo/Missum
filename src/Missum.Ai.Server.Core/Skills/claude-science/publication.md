@@ -6,7 +6,10 @@ logisch abhängige Themen und Literatur und Daten führen. Beim jeweiligen Thema
 Konventionen, Voraussetzungen, Herleitung mit erläuterten LaTeX-Gleichungen, mathematischen Beweis,
 Lean-Nachweis, ausgeführte Python-Gegenprüfung, Ergebnis und Gültigkeitsgrenzen passend ausarbeiten.
 Vorhandenes Layout und automatische Gliederung nutzen: # Titel, ## Hauptthemen, ### Unterthemen.
-Keine manuellen Kapitelnummern oder doppeltes Inhaltsverzeichnis anlegen.
+Missum erzeugt das einzige Inhaltsverzeichnis automatisch aus den fachlichen Überschriften.
+In Publikation.md kein eigenes Inhaltsverzeichnis und keinen zusätzlichen Navigationsabschnitt wie
+„Aufbau dieser Arbeit“, „Gliederung der Arbeit“ oder eine Kapitelübersicht anlegen; keine Kapitellisten
+als Ersatzverzeichnis. Keine manuellen Kapitelnummern anlegen.
 Verlangte oder hilfreiche Plots direkt beim zugehörigen Thema einbetten und fachlich auswerten:
 relative Bildpfade, Einheiten, Beschriftung und Erklärung; ein bloßer Anhang genügt nicht.
 Geprüfte Lean-Beweise wie in einer Mathematikvorlesung darstellen: Voraussetzungen, Satz, nachvollziehbare

@@ -458,6 +458,21 @@ $html = @"
       }
     }
     if (document.body.classList.contains('scientific-publication')) {
+      // The renderer owns navigation. Ignore legacy authored TOC lists before
+      // numbering, bookmarks and the single generated TOC are derived. Genuine
+      // prose sections are preserved, even when they use the same heading.
+      for (const heading of documentContent.querySelectorAll('h2, h3, h4, h5, h6')) {
+        const label = heading.textContent.trim().replace(/^\d+(?:\.\d+)*[.)]?\s+/, '');
+        if (!/^(?:Inhaltsverzeichnis|Table of contents|Aufbau dieser Arbeit|Gliederung der Arbeit|Kapitelübersicht)$/i.test(label)) continue;
+        const blocks = [];
+        let next = heading.nextElementSibling;
+        while (next && !/^H[1-6]$/.test(next.tagName)) {
+          blocks.push(next); next = next.nextElementSibling;
+        }
+        if (blocks.length && blocks.every(block => block.tagName === 'UL' || block.tagName === 'OL')) {
+          blocks.forEach(block => block.remove()); heading.remove();
+        }
+      }
       const title = documentContent.querySelector(':scope > h1');
       const headingText = title ? title.textContent.trim() : 'Wissenschaftliche Untersuchung';
       const chapterText = headingText;
