@@ -15,7 +15,7 @@ if ([string]::IsNullOrWhiteSpace($PublishDirectory)) {
 }
 
 $publishRoot = [IO.Path]::GetFullPath($PublishDirectory)
-$executable = Join-Path $publishRoot 'Missum.exe'
+$executable = Join-Path $publishRoot 'Missum Labs.exe'
 if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
     throw "Portable Missum executable is missing: $executable"
 }

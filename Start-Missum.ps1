@@ -1,8 +1,8 @@
 #requires -Version 5.1
 $ErrorActionPreference = 'Stop'
-$releaseApp = Join-Path $PSScriptRoot 'src\Missum.App\bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\Missum.exe'
+$releaseApp = Join-Path $PSScriptRoot 'src\Missum.App\bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\Missum Labs.exe'
 $candidates = @(
-    (Join-Path $PSScriptRoot 'artifacts\portable\win-x64\Missum.exe'),
+    (Join-Path $PSScriptRoot 'artifacts\portable\win-x64\Missum Labs.exe'),
     $releaseApp
 )
 $latest = $candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
@@ -13,6 +13,6 @@ if (-not (Test-Path -LiteralPath $app -PathType Leaf)) {
     if ($LASTEXITCODE -ne 0) { throw 'Missum konnte nicht gebaut werden.' }
 }
 if (-not (Test-Path -LiteralPath $app -PathType Leaf)) {
-    throw "Missum.exe wurde nach dem Build nicht gefunden: $app"
+    throw "Missum Labs.exe wurde nach dem Build nicht gefunden: $app"
 }
 Start-Process -FilePath $app -WorkingDirectory $PSScriptRoot

@@ -98,18 +98,20 @@ public sealed partial class NativeAssistantPage
         style.Setters.Add(new Setter(FrameworkElement.WidthProperty, width));
         menu.FlyoutPresenterStyle = style;
         var rows = new StackPanel { Spacing = 0, Width = width - 10 };
+        // Keep the entire tool menu monochrome, independently of thematic icon colors elsewhere.
+        var menuForeground = ThemeBrush("MissumTextBrush", 220);
         var toolRows = new List<(Button Button, string IconRole, string IconKey)>();
-        void Heading(string text) => rows.Children.Add(new TextBlock { Text = text, FontSize = 13, Foreground = ThemeBrush("MissumMutedTextBrush", 155), Margin = new(8, 6, 8, 5) });
+        void Heading(string text) => rows.Children.Add(new TextBlock { Text = text, FontSize = 13, Foreground = menuForeground, Margin = new(8, 6, 8, 5) });
         void Row(string glyph, string name, string description, Action action, string iconKey, string actionId = "", bool enabled = true)
         {
             var content = new Grid { ColumnSpacing = 8 };
             content.ColumnDefinitions.Add(new() { Width = new(16) });
             content.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
             content.ColumnDefinitions.Add(new() { Width = new(1, GridUnitType.Star) });
-            content.Children.Add(new FontIcon { Glyph = glyph, FontSize = 15, Foreground = ToolGlyphBrush(iconKey, actionId), VerticalAlignment = VerticalAlignment.Center });
-            var label = new TextBlock { Text = name, FontSize = 14, Foreground = ThemeBrush("MissumTextBrush", 220), VerticalAlignment = VerticalAlignment.Center };
+            content.Children.Add(new FontIcon { Glyph = glyph, FontSize = 15, Foreground = menuForeground, VerticalAlignment = VerticalAlignment.Center });
+            var label = new TextBlock { Text = name, FontSize = 14, Foreground = menuForeground, VerticalAlignment = VerticalAlignment.Center };
             Grid.SetColumn(label, 1); content.Children.Add(label);
-            var detail = new TextBlock { Text = description, FontSize = 14, Foreground = ThemeBrush("MissumMutedTextBrush", 145), VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
+            var detail = new TextBlock { Text = description, FontSize = 14, Foreground = menuForeground, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
             Grid.SetColumn(detail, 2); content.Children.Add(detail);
             var button = new Button { Content = content, HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch,
                 Padding = new(8, 5, 8, 5), MinHeight = 28, CornerRadius = new(15), IsEnabled = enabled, BorderThickness = new(0), Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent) };
@@ -140,7 +142,7 @@ public sealed partial class NativeAssistantPage
                          || S(a, "actionId") is BuiltInActionIds.ExportChatPdf or BuiltInActionIds.LiveCaptions)))
             Row(ToolIconGlyph(S(action, "iconKey")), S(action, "displayName"), S(action, "description"), () => _ = InvokeImmediateActionAsync(S(action, "actionId")), S(action, "iconKey"), S(action, "actionId"), S(action, "disabledReason").Length == 0);
 
-        // Place new tools in their existing icon color family, alongside actions with a related purpose.
+        // Place new tools alongside actions with a related purpose; preserve these semantic groups even in the monochrome menu.
         foreach (var row in toolRows.OrderBy(row => row.IconRole switch
                  {
                      "documents" => 0,
@@ -184,9 +186,10 @@ public sealed partial class NativeAssistantPage
     private void ShowFileChoices()
     {
         var menu = new MenuFlyout();
-        var files = new MenuFlyoutItem { Text = "Dateien hinzufügen", Icon = new FontIcon { Glyph = "\uE8A5", Foreground = NativeIconPalette.BrushFor("attachment") } };
+        var menuForeground = ThemeBrush("MissumTextBrush", 220);
+        var files = new MenuFlyoutItem { Text = "Dateien hinzufügen", Foreground = menuForeground, Icon = new FontIcon { Glyph = "\uE8A5", Foreground = menuForeground } };
         files.Click += OnAttach;
-        var folder = new MenuFlyoutItem { Text = "Projektordner auswählen", Icon = new FontIcon { Glyph = "\uE8B7", Foreground = NativeIconPalette.BrushFor("folder") } };
+        var folder = new MenuFlyoutItem { Text = "Projektordner auswählen", Foreground = menuForeground, Icon = new FontIcon { Glyph = "\uE8B7", Foreground = menuForeground } };
         folder.Click += OnAddProject;
         menu.Items.Add(files); menu.Items.Add(folder); menu.ShowAt(ComposerSurface);
     }

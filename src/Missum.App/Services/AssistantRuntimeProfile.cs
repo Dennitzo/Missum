@@ -75,7 +75,7 @@ public sealed record AssistantRuntimeProfile(
         var pinnedNativeBinary = requestedNativeBinary is null ? ResolvePinnedNativeBinaryPath(stackDataRoot) : null;
         var nativeBinaryPath = requestedNativeBinary ?? pinnedNativeBinary
             ?? ResolveNativeBinaryPath(stackDataRoot, userProfile);
-        var productName = FirstNonEmpty(Environment.GetEnvironmentVariable("ASSISTANT_PRODUCT_NAME")) ?? "Missum";
+        var productName = FirstNonEmpty(Environment.GetEnvironmentVariable("ASSISTANT_PRODUCT_NAME")) ?? "Missum Labs";
         var requestedInstanceKey = FirstNonEmpty(
             Environment.GetEnvironmentVariable("ASSISTANT_INSTANCE_KEY"),
             Environment.GetEnvironmentVariable("MISSUM_SMOKE_INSTANCE_KEY"));

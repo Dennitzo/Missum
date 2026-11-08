@@ -10,17 +10,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\build.ps1
 
 Tests bleiben separat über `windows/test.ps1`, `windows/test-agent-context.ps1` und `windows/smoke.ps1` verfügbar.
 Das Buildskript enthält keine Testaufrufe oder Testoptionen. Prüfungen werden separat gestartet.
-Die Veröffentlichung erstellt weiterhin das Manifest und prüft die SHA-256 der erzeugten `Missum.exe`.
+Die Veröffentlichung erstellt weiterhin das Manifest und prüft die SHA-256 der erzeugten `Missum Labs.exe`.
 
 Die vollständige Portable-Werkzeugabnahme verwendet eine zuvor veröffentlichte,
-manifest- und SHA-256-geprüfte `Missum.exe` und führt die nativen Vertragsprüfungen sowie die
+manifest- und SHA-256-geprüfte `Missum Labs.exe` und führt die nativen Vertragsprüfungen sowie die
 realen Gateway-, Medien-, Sprach-, Dokument-, Coding- und Claude-Science-Suiten seriell aus. Die Medienabnahme
 enumeriert dabei echte Windows-Fenster, erstellt einen Desktop-Screenshot und zeichnet einen kurzen Bildschirmclip auf:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\test-portable-tools.ps1 `
   -Configuration Release `
-  -PortableExecutable .\artifacts\portable\win-x64\Missum.exe
+  -PortableExecutable ".\artifacts\portable\win-x64\Missum Labs.exe"
 ```
 
 Voraussetzungen sind ein laufender und gesunder Missum-AI-Stack unter `http://127.0.0.1:8080`, eine erreichbare
@@ -36,7 +36,7 @@ Installation und ein abweichender Gateway lassen sich festlegen:
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\windows\test-portable-tools.ps1 `
   -Configuration Release `
-  -PortableExecutable .\artifacts\portable\win-x64\Missum.exe `
+  -PortableExecutable ".\artifacts\portable\win-x64\Missum Labs.exe" `
   -ServerUrl 'http://127.0.0.1:8080' `
   -DeepSeekModelId 'coding/DeepSeek-...~revision' `
   -DeepSeekVisionModelId 'vision/DeepSeek-...~revision'
@@ -63,7 +63,7 @@ lokalen Hugging-Face-Cache gelesen. Docker betreibt
 das Missum-Gateway sowie die Sprach-, Bild- und Recherche-Worker. Der Gatewayzugriff auf die native Modellruntime
 erfolgt über `http://host.docker.internal:8081`; der Missum-Client verbindet sich mit dem Gateway auf Port 8080.
 
-Die portable `Missum.exe` prüft beim Start einer noch nicht laufenden nativen Laufzeit automatisch die aktuelle
+Die portable `Missum Labs.exe` prüft beim Start einer noch nicht laufenden nativen Laufzeit automatisch die aktuelle
 GitHub-Version, lädt die offiziellen Windows-CUDA-Archive und verifiziert deren von GitHub veröffentlichte
 SHA-256-Digests. Vollständig installierte Versionen bleiben getrennt erhalten. Ist GitHub vorübergehend nicht
 erreichbar, wird die zuletzt vollständig geprüfte Version verwendet. Eine laufende Modellinstanz wird durch

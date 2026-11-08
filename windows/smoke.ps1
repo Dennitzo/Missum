@@ -19,7 +19,7 @@ if (-not (Test-Path -LiteralPath $PublishDirectory -PathType Container)) {
     throw "Publish directory does not exist: $PublishDirectory"
 }
 
-$requiredFiles = @('Missum.exe')
+$requiredFiles = @('Missum Labs.exe')
 foreach ($file in $requiredFiles) {
     $path = Join-Path $PublishDirectory $file
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
@@ -38,9 +38,9 @@ $manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
 if ($manifest.schema -ne 'missum.windows.publish.v1' -or $manifest.mode -ne $Mode -or $manifest.runtimeIdentifier -ne 'win-x64') {
     throw 'Smoke check failed; publish manifest does not match the Missum schema, mode or runtime.'
 }
-$executable = Join-Path $PublishDirectory 'Missum.exe'
+$executable = Join-Path $PublishDirectory 'Missum Labs.exe'
 if ((Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash -ne $manifest.executableSha256) {
-    throw 'Smoke check failed; Missum.exe does not match the publish manifest.'
+    throw 'Smoke check failed; Missum Labs.exe does not match the publish manifest.'
 }
 $publishedFiles = @(Get-ChildItem -LiteralPath $PublishDirectory -Recurse -File)
 $manifestFiles = @($manifest.files)
@@ -81,7 +81,7 @@ else {
     }
 
 
-    $runtimeSidecars = @(Get-ChildItem -LiteralPath $PublishDirectory -File | Where-Object { $_.Name -ne 'Missum.exe' })
+    $runtimeSidecars = @(Get-ChildItem -LiteralPath $PublishDirectory -File | Where-Object { $_.Name -ne 'Missum Labs.exe' })
     if ($runtimeSidecars.Count -ne 0) {
         throw ("Smoke check failed; SingleFile directory contains runtime sidecars: " +
             (($runtimeSidecars | ForEach-Object { $_.FullName }) -join ', '))
@@ -533,9 +533,9 @@ try {
     }
     $runtimeContentDirectory = $PublishDirectory
     if ($Mode -eq 'SingleFile') {
-        $extractedAssemblies = @(Get-ChildItem -LiteralPath $env:DOTNET_BUNDLE_EXTRACT_BASE_DIR -Recurse -File -Filter 'Missum.dll' -ErrorAction SilentlyContinue)
+        $extractedAssemblies = @(Get-ChildItem -LiteralPath $env:DOTNET_BUNDLE_EXTRACT_BASE_DIR -Recurse -File -Filter 'Missum Labs.dll' -ErrorAction SilentlyContinue)
         if ($extractedAssemblies.Count -ne 1) {
-            throw "Runtime smoke failed; expected one extracted Missum.dll under $env:DOTNET_BUNDLE_EXTRACT_BASE_DIR, found $($extractedAssemblies.Count)."
+            throw "Runtime smoke failed; expected one extracted Missum Labs.dll under $env:DOTNET_BUNDLE_EXTRACT_BASE_DIR, found $($extractedAssemblies.Count)."
         }
         $runtimeContentDirectory = $extractedAssemblies[0].DirectoryName
     }

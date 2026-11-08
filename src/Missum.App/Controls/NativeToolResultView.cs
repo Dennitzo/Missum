@@ -55,7 +55,8 @@ public sealed class NativeToolResultView : StackPanel
     public static Border CodeCard(string title, string source, string language, string? path = null, bool embedded = false)
     {
         FrameworkElement body;
-        if (language == "diff") body = new NativeDiffView(source, wrapLines: embedded);
+        if (language == "prose") body = new NativeStreamingMarkdown(source) { Margin = new(12) };
+        else if (language == "diff") body = new NativeDiffView(source, wrapLines: embedded);
         else
         {
             var text = new TextBlock { FontFamily = new("Cascadia Mono"), Foreground = NativeThemeBrushes.Text, FontSize = language == "text" ? 14 : 13, LineHeight = 23, IsTextSelectionEnabled = true, TextWrapping = embedded || language == "text" ? TextWrapping.Wrap : TextWrapping.NoWrap, Margin = new(12) };

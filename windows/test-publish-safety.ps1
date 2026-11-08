@@ -40,37 +40,37 @@ function Assert-PublishSafety {
 try {
     New-Item -ItemType Directory -Path $output | Out-Null
     New-Item -ItemType Directory -Path $stage | Out-Null
-    Set-Content -LiteralPath (Join-Path $output 'Missum.exe') -Value 'previous executable fixture' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $output 'Missum Labs.exe') -Value 'previous executable fixture' -Encoding UTF8
     Set-Content -LiteralPath ($output + '.manifest.json') -Value '{"generation":"previous"}' -Encoding UTF8
     Set-Content -LiteralPath ($output + '.native-old.json') -Value '{"generation":"previous"}' -Encoding UTF8
     Set-Content -LiteralPath ($output + '.user-notes.txt') -Value 'Preserve unrelated companion files.' -Encoding UTF8
-    Set-Content -LiteralPath (Join-Path $stage 'Missum.exe') -Value 'new executable fixture' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $stage 'Missum Labs.exe') -Value 'new executable fixture' -Encoding UTF8
     Set-Content -LiteralPath ($stage + '.manifest.json') -Value '{"generation":"new"}' -Encoding UTF8
     Set-Content -LiteralPath ($stage + '.native-new.png') -Value 'new preview fixture' -Encoding UTF8
-    $previousHash = (Get-FileHash -LiteralPath (Join-Path $output 'Missum.exe') -Algorithm SHA256).Hash
+    $previousHash = (Get-FileHash -LiteralPath (Join-Path $output 'Missum Labs.exe') -Algorithm SHA256).Hash
     $previousManifestHash = (Get-FileHash -LiteralPath ($output + '.manifest.json') -Algorithm SHA256).Hash
-    $nextHash = (Get-FileHash -LiteralPath (Join-Path $stage 'Missum.exe') -Algorithm SHA256).Hash
+    $nextHash = (Get-FileHash -LiteralPath (Join-Path $stage 'Missum Labs.exe') -Algorithm SHA256).Hash
 
-    $script:PublishSafetyFakeProcess = [pscustomobject]@{ HasExited = $false; Id = 424242; Path = (Join-Path $output 'Missum.exe') }
+    $script:PublishSafetyFakeProcess = [pscustomobject]@{ HasExited = $false; Id = 424242; Path = (Join-Path $output 'Missum Labs.exe') }
     $blocked = $false
     try { $null = Install-MissumPublishStage -StageDirectory $stage -OutputDirectory $output }
     catch { $blocked = $_.Exception.Message -like '*in use by process*' }
     finally { $script:PublishSafetyFakeProcess = $null }
     Assert-PublishSafety $blocked 'A running executable must block replacement without being stopped.'
-    Assert-PublishSafety ((Get-FileHash -LiteralPath (Join-Path $output 'Missum.exe') -Algorithm SHA256).Hash -eq $previousHash) 'The live-directory guard changed the previous artifact.'
+    Assert-PublishSafety ((Get-FileHash -LiteralPath (Join-Path $output 'Missum Labs.exe') -Algorithm SHA256).Hash -eq $previousHash) 'The live-directory guard changed the previous artifact.'
 
     $script:PublishSafetyFailOnce = $true
     $rolledBack = $false
     try { $null = Install-MissumPublishStage -StageDirectory $stage -OutputDirectory $output }
     catch { $rolledBack = $_.Exception.Message -like '*Intentional sidecar move failure*' }
     Assert-PublishSafety $rolledBack 'The forced metadata move failure was not reported.'
-    Assert-PublishSafety ((Get-FileHash -LiteralPath (Join-Path $output 'Missum.exe') -Algorithm SHA256).Hash -eq $previousHash) 'Failed installation did not restore the previous executable.'
+    Assert-PublishSafety ((Get-FileHash -LiteralPath (Join-Path $output 'Missum Labs.exe') -Algorithm SHA256).Hash -eq $previousHash) 'Failed installation did not restore the previous executable.'
     Assert-PublishSafety ((Get-FileHash -LiteralPath ($output + '.manifest.json') -Algorithm SHA256).Hash -eq $previousManifestHash) 'Failed installation did not restore the previous manifest.'
     Assert-PublishSafety (Test-Path -LiteralPath ($output + '.native-old.json')) 'Failed installation did not restore the previous smoke sidecar.'
     Assert-PublishSafety (Test-Path -LiteralPath ($stage + '.native-new.png')) 'Rollback lost the new staging sidecar.'
 
     $null = Install-MissumPublishStage -StageDirectory $stage -OutputDirectory $output
-    Assert-PublishSafety ((Get-FileHash -LiteralPath (Join-Path $output 'Missum.exe') -Algorithm SHA256).Hash -eq $nextHash) 'Successful installation did not publish the new executable.'
+    Assert-PublishSafety ((Get-FileHash -LiteralPath (Join-Path $output 'Missum Labs.exe') -Algorithm SHA256).Hash -eq $nextHash) 'Successful installation did not publish the new executable.'
     Assert-PublishSafety ((Get-Content -LiteralPath ($output + '.manifest.json') -Raw | ConvertFrom-Json).generation -eq 'new') 'Successful installation did not publish the new manifest.'
     Assert-PublishSafety (Test-Path -LiteralPath ($output + '.native-new.png')) 'New smoke sidecar was not renamed to the final artifact.'
     Assert-PublishSafety (-not (Test-Path -LiteralPath ($output + '.native-old.json'))) 'Old smoke sidecars remain attached to the new artifact.'

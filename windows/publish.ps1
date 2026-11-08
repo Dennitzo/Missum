@@ -66,7 +66,7 @@ Invoke-MissumDotNet -CommandArguments @(
 )
 
 $null = Assert-MissumArtifactTree -Path $stageDirectory
-$executable = Join-Path $stageDirectory 'Missum.exe'
+$executable = Join-Path $stageDirectory 'Missum Labs.exe'
 if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
     throw "Published Missum executable is missing: $executable"
 }

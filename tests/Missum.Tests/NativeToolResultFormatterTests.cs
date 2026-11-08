@@ -5,6 +5,23 @@ namespace Missum.Tests;
 
 public sealed class NativeToolResultFormatterTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void MediaAnalysisDecodesJsonOnceAndPreservesLiteralBackslashes(bool legacyDetail)
+    {
+        const string analysis = "## Menü – Größe → rechts\n\n**Prüfung:** $\\alpha + \\beta$\nPfad: C:\\users\\new\nLiteral: \\u00FC";
+        var json = JsonSerializer.Serialize(new { kind = "image", analysis,
+            visualReview = new { findings = analysis } });
+        using var document = JsonDocument.Parse(json);
+        var output = legacyDetail ? default : JsonSerializer.SerializeToElement(new { result = document.RootElement });
+        var block = Assert.Single(NativeToolResultFormatter.Receipt("media.analyze", default, output,
+            "completed", detail: legacyDetail ? "```json\n" + json + "\n```" : ""));
+        Assert.Equal(analysis, block.Text);
+        Assert.Equal("prose", block.Language);
+        Assert.DoesNotContain("\\u2013", block.Text);
+    }
+
     [Fact]
     public void ReadReceiptShowsOnlyExactSourceWithFileAndLines()
     {

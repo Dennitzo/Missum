@@ -14,6 +14,18 @@ internal static partial class NativeToolResultFormatter
         var language = First(System.IO.Path.GetExtension(path).TrimStart('.'), "text");
         var failed = status is "failed" or "denied" or "cancelled" or "interrupted"
             || Property(output, "success").ValueKind == JsonValueKind.False;
+        if (tool is "media.analyze" or "media.inspect")
+        {
+            var analysis = MediaAnalysis(output);
+            if (analysis.Length == 0) analysis = MediaAnalysis(JsonSerializer.SerializeToElement(detail));
+            if (analysis.Length > 0)
+            {
+                yield return new("Medienanalyse", analysis, "prose");
+                if (failed)
+                    foreach (var block in Essentials(output, errorsOnly: true)) yield return block;
+                yield break;
+            }
+        }
         if (tool == "math.formalProof")
         {
             var lean = Property(output, "lean");
@@ -115,6 +127,30 @@ internal static partial class NativeToolResultFormatter
         }
         if (Property(output, "truncated").ValueKind == JsonValueKind.True || Property(output, "diffTruncated").ValueKind == JsonValueKind.True)
             yield return new("Hinweis", "Die Werkzeugausgabe ist gekürzt.", "text");
+    }
+
+    private static string MediaAnalysis(JsonElement value, int depth = 0)
+    {
+        if (depth > 4) return "";
+        if (value.ValueKind == JsonValueKind.String)
+        {
+            var text = value.GetString()!.Trim();
+            if (text.StartsWith("```json", StringComparison.OrdinalIgnoreCase) && text.EndsWith("```", StringComparison.Ordinal))
+                text = text[7..^3].Trim();
+            if (!text.StartsWith('{')) return "";
+            try
+            {
+                using var document = JsonDocument.Parse(text);
+                return MediaAnalysis(document.RootElement, depth + 1);
+            }
+            catch (JsonException) { return ""; }
+        }
+        if (value.ValueKind != JsonValueKind.Object) return "";
+        if (Property(value, "analysis") is { ValueKind: JsonValueKind.String } analysis)
+            return analysis.GetString() ?? "";
+        foreach (var key in new[] { "result", "data" })
+            if (MediaAnalysis(Property(value, key), depth + 1) is { Length: > 0 } nested) return nested;
+        return "";
     }
 
     private static Block Code(string title, string text, string language, string path, int start)

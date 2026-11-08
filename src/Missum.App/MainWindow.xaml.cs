@@ -129,7 +129,7 @@ public sealed partial class MainWindow : Window
     private void OnMenuInspector(object sender, RoutedEventArgs e) => _assistantPage?.OnToggleInspector(sender, e);
     private async void OnMenuAbout(object sender, RoutedEventArgs e)
     {
-        await new ContentDialog { XamlRoot = Content.XamlRoot, Title = "Missum", Content = "Native WinUI 3 · Lokaler AI-Arbeitsbereich\nChat und Codex mit der Werkzeug- und Docker-Anbindung aus Missum.", CloseButtonText = "Schließen" }.ShowAsync();
+        await new ContentDialog { XamlRoot = Content.XamlRoot, Title = "Missum Labs", Content = "Native WinUI 3 · Lokaler AI-Arbeitsbereich\nChat und Codex mit der Werkzeug- und Docker-Anbindung aus Missum Labs.", CloseButtonText = "Schließen" }.ShowAsync();
     }
     private void ConfigureTitleBar()
     {
@@ -280,7 +280,7 @@ public sealed partial class MainWindow : Window
             nameof(NativeAssistantPage) => "AI Assistent",
             nameof(LogsPage) => "Logs",
             nameof(SettingsPage) => "Einstellungen",
-            _ => "Missum",
+            _ => "Missum Labs",
         };
     }
 

@@ -11,7 +11,7 @@ storage, local tool broker, model runtime and Docker gateway.
 Windows 10 19041+ / Windows 11, .NET SDK 10, Windows App SDK.
 
     dotnet build src/Missum.App/Missum.App.csproj -c Release -p:Platform=x64
-    .\src\Missum.App\bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\Missum.exe
+    & ".\src\Missum.App\bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\Missum Labs.exe"
 
     .\Start-Missum.ps1
 
@@ -20,7 +20,7 @@ Release if neither exists. For a self-contained portable distribution:
 
     .\windows\build.ps1
 
-This produces `artifacts/portable/win-x64/Missum.exe` and its separate
+This produces `artifacts/portable/win-x64/Missum Labs.exe` and its separate
 `ExtensionHost` companion folder. Keep that folder beside the executable for
 extension tools. The desktop executable extracts its bundled native runtime and
 XAML resources automatically. `-Mode Folder` creates a conventional distribution

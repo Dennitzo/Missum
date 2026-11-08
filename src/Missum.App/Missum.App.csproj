@@ -4,7 +4,11 @@
     <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
     <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
     <RootNamespace>Missum.App</RootNamespace>
-    <AssemblyName>Missum</AssemblyName>
+    <AssemblyName>Missum Labs</AssemblyName>
+    <AssemblyTitle>Missum Labs</AssemblyTitle>
+    <Title>Missum Labs</Title>
+    <Product>Missum Labs</Product>
+    <Description>Missum Labs</Description>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\AppLogo.ico</ApplicationIcon>
     <Configurations>Debug;Release;Portable</Configurations>

@@ -47,11 +47,11 @@ if (-not $SkipPublish) {
         -OutputDirectory $PortableOutputDirectory `
         -SkipSmoke
 
-    $portableExecutable = Join-Path $PortableOutputDirectory 'Missum.exe'
+    $portableExecutable = Join-Path $PortableOutputDirectory 'Missum Labs.exe'
     $portableManifest = Assert-MissumArtifactPath -Path ($PortableOutputDirectory + '.manifest.json')
     if (-not (Test-Path -LiteralPath $portableExecutable -PathType Leaf) -or
         -not (Test-Path -LiteralPath $portableManifest -PathType Leaf)) {
-        throw 'Portable build did not produce Missum.exe and its publish manifest.'
+        throw 'Portable build did not produce Missum Labs.exe and its publish manifest.'
     }
     $manifest = Get-Content -LiteralPath $portableManifest -Raw | ConvertFrom-Json
     $actualExecutableHash = Get-MissumFileSha256 -LiteralPath $portableExecutable
