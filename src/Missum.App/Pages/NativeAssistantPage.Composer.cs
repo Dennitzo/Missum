@@ -91,16 +91,11 @@ public sealed partial class NativeAssistantPage
         _lastToolChipLabel = label;
         var action = Items(_snapshot, "actionDescriptors").FirstOrDefault(a => S(a, "actionId") == _selectedAction);
         var glyph = ToolIconGlyph(S(action, "iconKey"));
+        // Program integration chips must remain their static action name, including for future
+        // integrations. Connection, project and review status belong outside the composer chip.
         var text = _selectedAction == BuiltInActionIds.PlanMode ? "Planen" : label;
-        var blenderSelected = _selectedAction == "com.missum.blender/edit";
-        if (blenderSelected) text = "Blender";
-        var integration = blenderSelected ? null : Services.ProgramIntegrationStatusReader.Find(_selectedAction);
-        var integrationSelected = !blenderSelected && (integration is not null
-            || S(action, "groupId") == BuiltInExtensionCatalog.GroupIntegrations);
-        if (integrationSelected) text = $"{text} · {integration?.ChipSuffix ?? "nicht verbunden"}";
         SelectedToolChip.SetTool(text, glyph, ComposerGroupIconBrush(S(action, "groupId", BuiltInExtensionCatalog.GroupIntegrations)));
         SelectedToolChip.Visibility = Visibility.Visible;
-        KeepIntegrationChipFresh(integrationSelected);
     }
 
     private SolidColorBrush ComposerGroupIconBrush(string groupId)
@@ -121,42 +116,6 @@ public sealed partial class NativeAssistantPage
         var fraction = level * 0.085;
         byte Adjust(byte channel) => (byte)Math.Round(channel + (endpoint - channel) * fraction);
         return new SolidColorBrush(Windows.UI.Color.FromArgb(255, Adjust(accent.R), Adjust(accent.G), Adjust(accent.B)));
-    }
-
-    private Microsoft.UI.Xaml.DispatcherTimer? _integrationChipTimer;
-
-    /// <summary>
-    /// An integration chip is live data: the scene name changes when the user saves or opens another
-    /// file, and an open visual review has to disappear once the picture was analysed. The composer is
-    /// otherwise only redrawn on user input, so while an integration is chosen the chip re-reads its
-    /// status on its own. It stops by itself as soon as no integration is selected any more.
-    /// </summary>
-    private void KeepIntegrationChipFresh(bool integrationSelected)
-    {
-        if (!integrationSelected)
-        {
-            _integrationChipTimer?.Stop();
-            return;
-        }
-
-        _integrationChipTimer ??= CreateIntegrationChipTimer();
-        if (!_integrationChipTimer.IsEnabled) _integrationChipTimer.Start();
-    }
-
-    private Microsoft.UI.Xaml.DispatcherTimer CreateIntegrationChipTimer()
-    {
-        var timer = new Microsoft.UI.Xaml.DispatcherTimer { Interval = TimeSpan.FromSeconds(4) };
-        timer.Tick += (_, _) =>
-        {
-            if (_disposed || _selectedAction is null)
-            {
-                timer.Stop();
-                return;
-            }
-
-            UpdateSelectedToolChip(_lastToolChipLabel);
-        };
-        return timer;
     }
 
     private Flyout ShowComposerTools()

@@ -116,6 +116,7 @@ public sealed partial class NativeAssistantPage
     {
         if (_disposed || _mode != "claudescience") return;
         HideWorkingPlanView();
+        HidePlanModeTab();
         HideToolView();
         HideSubagentOverview();
         _activeSourcesSession = null; _sourcesHost.Visibility = Visibility.Collapsed;

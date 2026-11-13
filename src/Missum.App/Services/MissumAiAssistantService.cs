@@ -2944,12 +2944,27 @@ public sealed partial class MissumAiAssistantService(
                     JsonSerializer.SerializeToElement(new { failed = true }, JsonOptions),
                     "blender.action_not_selected", "Wähle Blender für diesen Codex-Lauf aus.");
             }
+            else if (proposal.Name.StartsWith("unreal.", StringComparison.Ordinal)
+                && (localRun.Action != PromptTriggerAction.Coding || localRun.ExtensionActionId != "com.missum.unreal/edit"
+                    || researchActorAgentId is not null))
+            {
+                result = new ClientToolResult(proposal.ProposalId, "rejected",
+                    JsonSerializer.SerializeToElement(new { failed = true }, JsonOptions),
+                    "unreal.action_not_selected", "Wähle Unreal Engine für diesen Codex-Lauf aus.");
+            }
             else if (proposal.Name == "blender.status" && !BlenderReviewHasVisionReceipt(
                 proposal.Arguments, precedingToolSteps ?? [], localRun.CreatedAt))
             {
                 result = new ClientToolResult(proposal.ProposalId, "rejected",
                     JsonSerializer.SerializeToElement(new { failed = true }, JsonOptions),
                     "blender.vision_receipt_missing", "Die Sichtprüfung ist ausstehend. Werte die aktuelle Aufnahme mit media.analyze aus und übergib deren operationId und Bild-Hash.");
+            }
+            else if (proposal.Name == "unreal.status" && !UnrealReviewHasVisionReceipt(
+                proposal.Arguments, precedingToolSteps ?? [], localRun.CreatedAt))
+            {
+                result = new ClientToolResult(proposal.ProposalId, "rejected",
+                    JsonSerializer.SerializeToElement(new { failed = true }, JsonOptions),
+                    "unreal.vision_receipt_missing", "Die Sichtprüfung ist ausstehend. Werte die aktuelle Aufnahme mit media.analyze aus und übergib deren operationId und Bild-Hash.");
             }
             else if (!IsClientToolAllowed(localRun.Action, proposal.Name, proposal.RiskClass))
             {
@@ -3293,6 +3308,8 @@ public sealed partial class MissumAiAssistantService(
         }
         if (trigger?.Trigger.ExtensionActionId == "com.missum.blender/edit")
             originalPrompt = BlenderWorkflowPrompt + "\n\n" + originalPrompt;
+        if (trigger?.Trigger.ExtensionActionId == "com.missum.unreal/edit")
+            originalPrompt = UnrealWorkflowPrompt + "\n\n" + originalPrompt;
         if (action == PromptTriggerAction.DocumentCreate) originalPrompt = "Lies, bearbeite oder erstelle die angeforderten Dokumente direkt mit document.read/document.create und geeigneten Workspace-Werkzeugen. Prüfe das Ergebnis. Dokumentauftrag: " + originalPrompt;
         var audiobook = action == PromptTriggerAction.Audiobook;
         var isScienceSession = codingSession.ChatMode == ChatMode.ClaudeScience;
@@ -4123,6 +4140,23 @@ public sealed partial class MissumAiAssistantService(
         Bei verdict=deviation korrigiere die benannten Abweichungen per Blender-Python, speichere und
         prüfe die neue Aufnahme erneut. Melde verbleibende Abweichungen offen. Ist die Sichtprüfung
         technisch nicht möglich, protokolliere unavailable mit dem konkreten Fehler und melde sie als ausstehend.
+        """;
+
+    private const string UnrealWorkflowPrompt = """
+        UNREAL-ENGINE-WORKFLOW
+        Prüfe mit unreal.status die verfügbaren Editorfenster und Projektdateien. Verwende unreal.connect,
+        um das gewünschte Projekt im aktuellen Projektordner mit dem Missum-Editor zu öffnen. Nutze bei
+        mehreren Projektdateien oder Engine-Versionen die Auswahlparameter. Ein bereits separat geöffnetes
+        Fenster ist sichtbar; die Bearbeitung erfolgt in der von Missum gestarteten Sitzung.
+        Untersuche Blueprint-Assets und Graphen mit unreal.blueprint.read. Erstelle und bearbeite
+        Blueprint-Assets, Variablen, Komponenten, Knoten und Pin-Verbindungen mit den angebotenen
+        unreal.blueprint-Werkzeugen. Kompiliere die betroffenen Blueprints, behebe Fehler und speichere.
+        Prüfe nach unbekanntem Werkzeugausgang den aktuellen Zustand, bevor du eine Änderung wiederholst.
+        Wenn der Auftrag eine Sichtprüfung verlangt, erfasse den passenden Viewport oder eine benannte
+        Kamera mit unreal.view.capture. Lade das PNG mit image.input und prüfe den exakten Upload mit
+        media.analyze. Vergleiche vorhandene Bildvorlagen mit referenceUploadIds. Melde operationId,
+        Bild-SHA-256 und den tatsächlichen Befund mit unreal.status visionReview. Bei Abweichungen
+        korrigiere und prüfe erneut; bei technischen Fehlern melde die Sichtprüfung als ausstehend.
         """;
 
     internal static string RemoveDocumentEvidenceFooter(string content)

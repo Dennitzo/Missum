@@ -9,6 +9,7 @@
   <Project Path="src/Missum.Core/Missum.Core.csproj" />
   <Project Path="src/Missum.Infrastructure/Missum.Infrastructure.csproj" />
   <Project Path="src/Missum.BlenderAdapter/Missum.BlenderAdapter.csproj" />
+  <Project Path="src/Missum.UnrealAdapter/Missum.UnrealAdapter.csproj" />
   <Project Path="tools/Missum.ExtensionPackager/Missum.ExtensionPackager.csproj" />
   <Project Path="tests/ExtensionHost.TestExtension/ExtensionHost.TestExtension.csproj" />
   <Project Path="tests/Missum.Tests/Missum.Tests.csproj" />

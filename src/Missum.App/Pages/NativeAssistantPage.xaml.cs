@@ -473,6 +473,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         _targetedPromptWindows.Clear();
         _promptTailRestoreRequests.Clear();
         ClearToolTabs();
+        ClearPlanModeTabs();
         CancelPromptTimelineNavigation();
         _autoScrollGesture.Reset();
         _pendingConversationViewportAnchor = null;
@@ -811,7 +812,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     private void OnAssistantPointerWheelChanged(object sender, PointerRoutedEventArgs e)
     {
         if (_activeResearchSessionId == _session || _activeSourcesSession == _session
-            || _activeSubagentOverviewSession == _session || _activeWorkingPlanSession == _session) return;
+            || _activeSubagentOverviewSession == _session || _activeWorkingPlanSession == _session || _activePlanModeTab is not null) return;
         // Only unhandled wheel input reaches this frame. Nested text/diff viewers
         // consume their own scrolling. The independent outputs sidebar never
         // forwards a wheel gesture into the conversation at its scroll limits.
@@ -1019,7 +1020,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         }
         catch (Exception ex) { ShowError(ex.Message); }
     }
-    private void ClearToolSelection() { _selectedAction = null; _composerInstruction = null; _persistentAction = null; _integrationChipTimer?.Stop(); SelectedToolChip.Visibility = Visibility.Collapsed; }
+    private void ClearToolSelection() { _selectedAction = null; _composerInstruction = null; _persistentAction = null; SelectedToolChip.Visibility = Visibility.Collapsed; }
     private async void OnClearTool(object sender, RoutedEventArgs e)
     {
         if (_composerToolSelectionBusy) return;
@@ -1181,6 +1182,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         _ = StopNativeDictationAsync();
         DisposeMessageActions();
         ClearToolTabs(returnToChat: false);
+        ClearPlanModeTabs(returnToChat: false);
         DisposeScienceViews();
         _researchRefreshTimer?.Stop();
         _ = CancelNativeMediaCaptureAsync();
@@ -1188,7 +1190,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         _hostSubscription.Dispose();
         _reasoningFlyout?.Hide(); _modelSelectionFlyout?.Hide();
         HideWorkingPlanView();
-        _disposed = true; _draftTimer.Stop(); _renderTimer.Stop(); _integrationChipTimer?.Stop(); _microphone.TurnChanged -= OnTranscript; _lifetime.Cancel(); _lifetime.Dispose();
+        _disposed = true; _draftTimer.Stop(); _renderTimer.Stop(); _microphone.TurnChanged -= OnTranscript; _lifetime.Cancel(); _lifetime.Dispose();
     }
 }
 

@@ -152,6 +152,7 @@ public sealed partial class NativeAssistantPage
     private void ShowReviewTab(ChangesReviewTab tab)
     {
         HideWorkingPlanView();
+        HidePlanModeTab();
         HideToolView();
         HideSubagentOverview();
         _activeSourcesSession = null; _sourcesHost.Visibility = Visibility.Collapsed;
@@ -166,6 +167,7 @@ public sealed partial class NativeAssistantPage
     private void ShowChatView()
     {
         HideWorkingPlanView();
+        HidePlanModeTab();
         HideToolView();
         HideSubagentOverview();
         _activeSourcesSession = null; _sourcesHost.Visibility = Visibility.Collapsed;

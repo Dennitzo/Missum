@@ -30,6 +30,7 @@ public sealed partial class NativeAssistantPage
         if (_disposed) return;
         SyncReviewSession();
         SyncToolTabsSession();
+        SyncPlanModeTabsSession();
         var snapshotMode = S(_snapshot, "chatMode", _mode);
         var knownSessions = new Dictionary<Guid, string>();
         foreach (var session in Items(_snapshot, "sessions"))
@@ -113,7 +114,7 @@ public sealed partial class NativeAssistantPage
 
             var tab = _sessionTabs.FirstOrDefault(item => item.Id == _session);
             if (tab is null) continue;
-            var active = ActiveSubagent is null && tab.Id == _session && _activeReviewRunId is null && _activeResearchSessionId is null && _activeSourcesSession is null && _activeSubagentOverviewSession is null && _activeToolTab is null && _activeWorkingPlanSession is null;
+            var active = ActiveSubagent is null && tab.Id == _session && _activeReviewRunId is null && _activeResearchSessionId is null && _activeSourcesSession is null && _activeSubagentOverviewSession is null && _activeToolTab is null && _activeWorkingPlanSession is null && _activePlanModeTab is null;
             SetTabText(tab.Label, tab.Title);
             ApplyTabAppearance(tab.Container, tab.Select, active);
             SetTabEnabled(tab.Select, !_sessionTabNavigationBusy);
@@ -123,7 +124,7 @@ public sealed partial class NativeAssistantPage
             PositionTab(tab.Container, position);
             position++;
         }
-        RenderReviewTabs(RenderToolTabs(RenderSubagentOverviewTab(RenderSourcesTab(RenderSubagentTabs(RenderWorkingPlanTab(position))))));
+        RenderReviewTabs(RenderToolTabs(RenderSubagentOverviewTab(RenderSourcesTab(RenderSubagentTabs(RenderPlanModeTabs(RenderWorkingPlanTab(position)))))));
     }
 
     private async Task ActivateSessionTabAsync(Guid sessionId)

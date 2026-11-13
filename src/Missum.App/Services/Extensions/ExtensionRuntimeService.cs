@@ -24,6 +24,7 @@ public sealed class ExtensionRuntimeService(
     IExtensionHostSupervisor hostSupervisor) : IExtensionRuntimeService, IHostedService
 {
     private const string BlenderAction = "com.missum.blender/edit";
+    private const string UnrealAction = "com.missum.unreal/edit";
     private readonly ConcurrentDictionary<string, ActiveExtension> _actions = new(StringComparer.Ordinal);
     private readonly ConcurrentQueue<string> _startupErrors = new();
     private string? _hostExecutable;
@@ -87,6 +88,8 @@ public sealed class ExtensionRuntimeService(
             return "Die Erweiterung benötigt einen geöffneten Workspace als Zugriffsgrenze.";
         if (actionId == BlenderAction && !File.Exists(Path.Combine(extension.ContentDirectory, "runtime", "bootstrap.py")))
             return "Für die automatische Blender-Verbindung wird die Missum-Erweiterung Blender ab Version 1.1 benötigt.";
+        if (actionId == UnrealAction && !File.Exists(Path.Combine(extension.ContentDirectory, "runtime", "MissumBridge", "MissumBridge.uplugin")))
+            return "Das Unreal-Editor-Plugin fehlt im Erweiterungspaket.";
         return null;
     }
 
@@ -137,6 +140,12 @@ public sealed class ExtensionRuntimeService(
                 Arguments = await PrepareBlenderArgumentsAsync(extension.ContentDirectory, normalizedWorkspace!,
                     modelToolName, arguments, cancellationToken).ConfigureAwait(false),
             };
+        else if (actionId == UnrealAction)
+            invocation = invocation with
+            {
+                Arguments = await PrepareUnrealArgumentsAsync(extension.ContentDirectory, normalizedWorkspace!,
+                    modelToolName, arguments, cancellationToken).ConfigureAwait(false),
+            };
 
         await using var host = await hostSupervisor.StartAsync(new(
             hostExecutable,
@@ -161,6 +170,36 @@ public sealed class ExtensionRuntimeService(
         if (!string.Equals(response.Type, ExtensionHostMessageTypes.ActionResult, StringComparison.Ordinal))
             throw new InvalidDataException("ExtensionHost lieferte keine action.result-Antwort.");
         return ExtensionHostProtocol.ReadPayload<ExtensionActionResult>(response).Result.Clone();
+    }
+
+    private static async Task<JsonElement> PrepareUnrealArgumentsAsync(string contentDirectory, string workspace,
+        string? modelToolName, JsonElement arguments, CancellationToken cancellationToken)
+    {
+        UnrealApplicationEndpoint? endpoint;
+        if (modelToolName == "unreal.connect")
+        {
+            var projectPath = arguments.TryGetProperty("projectPath", out var project) && project.ValueKind == JsonValueKind.String
+                ? project.GetString() : null;
+            var engine = arguments.TryGetProperty("engineVersion", out var version) && version.ValueKind == JsonValueKind.String
+                ? version.GetString() : null;
+            endpoint = await UnrealApplicationLauncher.EnsureStartedAsync(contentDirectory, workspace, projectPath, engine, cancellationToken).ConfigureAwait(false);
+        }
+        else UnrealApplicationLauncher.TryGetEndpoint(workspace, out endpoint);
+        var enriched = JsonNode.Parse(arguments.GetRawText())!.AsObject();
+        enriched["_missumUnreal"] = endpoint is null ? null : new JsonObject
+        {
+            ["port"] = endpoint.Port,
+            ["processId"] = endpoint.ProcessId,
+            ["token"] = endpoint.Token,
+        };
+        enriched["_missumUnrealEngines"] = new JsonArray(UnrealApplicationLauncher.DiscoverInstallations()
+            .Select(engine => (JsonNode?)new JsonObject
+            {
+                ["association"] = engine.Association,
+                ["version"] = engine.Version.ToString(),
+                ["root"] = engine.Root,
+            }).ToArray());
+        return JsonSerializer.SerializeToElement(enriched);
     }
 
     private static async Task<JsonElement> PrepareBlenderArgumentsAsync(string contentDirectory, string workspace,

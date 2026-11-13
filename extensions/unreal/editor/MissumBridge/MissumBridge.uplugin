@@ -1,0 +1,13 @@
+{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "0.1.0",
+  "FriendlyName": "Missum Editor Bridge",
+  "Description": "Local editor bridge for the Missum workspace.",
+  "Category": "Editor",
+  "CanContainContent": false,
+  "Installed": false,
+  "Modules": [
+    { "Name": "MissumBridge", "Type": "Editor", "LoadingPhase": "PostEngineInit" }
+  ]
+}

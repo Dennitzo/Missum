@@ -1,0 +1,150 @@
+{
+  "schemaVersion": 1,
+  "id": "com.missum.unreal",
+  "version": "0.1.0",
+  "displayName": "Unreal Engine",
+  "publisher": "Missum",
+  "groups": [{ "groupId": "integrations", "label": "Programmintegrationen", "groupOrder": 60 }],
+  "entrypoints": [{ "kind": "desktop", "path": "adapter/Missum.UnrealAdapter.exe" }],
+  "permissions": ["fileWrite", "network"],
+  "actions": [{
+    "actionId": "com.missum.unreal/edit",
+    "displayName": "Unreal Engine",
+    "description": "Öffnet ein Unreal-Projekt im Workspace und bearbeitet Blueprint-Graphen im Editor.",
+    "iconKey": "unreal",
+    "groupId": "integrations",
+    "groupOrder": 60,
+    "itemOrder": 20,
+    "supportedChatModes": ["coding"],
+    "actionKind": "selectableTool",
+    "selectionBehavior": "toggle"
+  }],
+  "tools": [
+    {
+      "actionId": "com.missum.unreal/edit",
+      "modelToolName": "unreal.status",
+      "description": "Listet laufende Unreal-Fenster und zeigt die Verbindung. Meldet nach media.analyze mit visionReview den Sichtbefund.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "visionReview": {
+            "type": "object",
+            "properties": {
+              "operationId": { "type": "string" },
+              "analyzedSha256": { "type": "string" },
+              "verdict": { "type": "string", "enum": ["verified", "deviation", "unavailable"] },
+              "summary": { "type": "string" }
+            },
+            "required": ["operationId", "verdict", "summary"],
+            "additionalProperties": false
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "timeoutSeconds": 40,
+      "maximumOutputBytes": 131072,
+      "riskClass": "readOnly"
+    },
+    {
+      "actionId": "com.missum.unreal/edit",
+      "modelToolName": "unreal.connect",
+      "description": "Öffnet oder erstellt das Unreal-Arbeitsprojekt im Workspace und verbindet den Editor. Bei mehreren Projekten projectPath und bei mehreren Engine-Versionen engineVersion angeben.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "projectPath": { "type": "string", "description": "Gewünschte .uproject-Datei innerhalb des Workspace." },
+          "engineVersion": { "type": "string", "description": "Installierte UE-5-Version oder zugehörige Build-Kennung." }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "timeoutSeconds": 780,
+      "maximumOutputBytes": 131072,
+      "riskClass": "localMutation"
+    },
+    {
+      "actionId": "com.missum.unreal/edit",
+      "modelToolName": "unreal.blueprint.read",
+      "description": "Liest Blueprint-Graphen, Knoten, Pins und Verbindungen. assetPath liegt unter /Game/.",
+      "inputSchema": { "type": "object", "properties": { "assetPath": { "type": "string" } }, "required": ["assetPath"], "additionalProperties": false },
+      "timeoutSeconds": 60, "maximumOutputBytes": 524288, "riskClass": "readOnly"
+    },
+    {
+      "actionId": "com.missum.unreal/edit",
+      "modelToolName": "unreal.blueprint.create",
+      "description": "Erstellt einen Actor-Blueprint unter /Game/.",
+      "inputSchema": { "type": "object", "properties": { "assetPath": { "type": "string" }, "operationId": { "type": "string" }, "requireVisualReview": { "type": "boolean" } }, "required": ["assetPath"], "additionalProperties": false },
+      "timeoutSeconds": 120, "maximumOutputBytes": 262144, "riskClass": "localMutation"
+    },
+    {
+      "actionId": "com.missum.unreal/edit",
+      "modelToolName": "unreal.blueprint.edit",
+      "description": "Bearbeitet einen Blueprint mit graph.create/remove, variable.add/remove, component.add/remove/set, node.add/remove oder pin.connect/disconnect. Ein Auftrag enthält eine Operation. Graph und Pin-IDs zuvor mit unreal.blueprint.read ermitteln.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "assetPath": { "type": "string" },
+          "operation": { "type": "string", "enum": ["graph.create", "graph.remove", "variable.add", "variable.remove", "component.add", "component.remove", "component.set", "node.add", "node.remove", "pin.connect", "pin.disconnect"] },
+          "graph": { "type": "string" },
+          "name": { "type": "string" },
+          "type": { "type": "string", "enum": ["bool", "int", "float", "string", "name", "vector"] },
+          "defaultValue": { "type": "string" },
+          "property": { "type": "string" },
+          "value": { "type": "string" },
+          "kind": { "type": "string", "enum": ["event", "call", "get", "set"] },
+          "classPath": { "type": "string", "description": "Für component.add eine native ActorComponent-Klasse wie /Script/Engine.StaticMeshComponent." },
+          "x": { "type": "integer" },
+          "y": { "type": "integer" },
+          "fromNode": { "type": "string" },
+          "nodeId": { "type": "string" },
+          "fromPin": { "type": "string" },
+          "toNode": { "type": "string" },
+          "toPin": { "type": "string" },
+          "operationId": { "type": "string" },
+          "requireVisualReview": { "type": "boolean" }
+        },
+        "required": ["assetPath", "operation"],
+        "additionalProperties": false
+      },
+      "timeoutSeconds": 120, "maximumOutputBytes": 262144, "riskClass": "localMutation"
+    },
+    {
+      "actionId": "com.missum.unreal/edit",
+      "modelToolName": "unreal.blueprint.compile",
+      "description": "Kompiliert den Blueprint und gibt Compilerdiagnosen zurück.",
+      "inputSchema": { "type": "object", "properties": { "assetPath": { "type": "string" } }, "required": ["assetPath"], "additionalProperties": false },
+      "timeoutSeconds": 120, "maximumOutputBytes": 262144, "riskClass": "localMutation"
+    },
+    {
+      "actionId": "com.missum.unreal/edit",
+      "modelToolName": "unreal.blueprint.save",
+      "description": "Speichert das Blueprint-Asset im verbundenen Projekt.",
+      "inputSchema": { "type": "object", "properties": { "assetPath": { "type": "string" }, "operationId": { "type": "string" }, "requireVisualReview": { "type": "boolean" } }, "required": ["assetPath"], "additionalProperties": false },
+      "timeoutSeconds": 120, "maximumOutputBytes": 262144, "riskClass": "localMutation"
+    },
+    {
+      "actionId": "com.missum.unreal/edit",
+      "modelToolName": "unreal.camera.create",
+      "description": "Erstellt eine Kamera in der aktuellen Editor-Welt. Die Karte wird geändert, jedoch nicht gespeichert. Position in Unreal-Einheiten, Winkel in Grad.",
+      "inputSchema": { "type": "object", "properties": {
+        "cameraName": { "type": "string" },
+        "position": { "type": "object", "properties": { "x": { "type": "number" }, "y": { "type": "number" }, "z": { "type": "number" } }, "required": ["x", "y", "z"], "additionalProperties": false },
+        "rotation": { "type": "object", "properties": { "pitch": { "type": "number" }, "yaw": { "type": "number" }, "roll": { "type": "number" } }, "required": ["pitch", "yaw", "roll"], "additionalProperties": false },
+        "operationId": { "type": "string" }, "requireVisualReview": { "type": "boolean" }
+      }, "required": ["cameraName", "position", "rotation"], "additionalProperties": false },
+      "timeoutSeconds": 120, "maximumOutputBytes": 131072, "riskClass": "localMutation"
+    },
+    {
+      "actionId": "com.missum.unreal/edit",
+      "modelToolName": "unreal.view.capture",
+      "description": "Nimmt den Editor-Viewport oder eine benannte Projektkamera auf. Das PNG mit image.input und media.analyze auswerten.",
+      "inputSchema": { "type": "object", "properties": {
+        "source": { "type": "string", "enum": ["viewport", "camera"] },
+        "cameraName": { "type": "string" },
+        "operationId": { "type": "string" }
+      }, "required": ["source"], "additionalProperties": false },
+      "timeoutSeconds": 240, "maximumOutputBytes": 131072, "riskClass": "localMutation"
+    }
+  ]
+}

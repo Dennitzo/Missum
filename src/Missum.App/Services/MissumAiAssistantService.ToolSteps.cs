@@ -81,7 +81,18 @@ public sealed partial class MissumAiAssistantService
     }
 
     internal static bool BlenderReviewHasVisionReceipt(JsonElement arguments,
-        IReadOnlyList<AssistantToolStep> steps, DateTimeOffset runStartedAt)
+        IReadOnlyList<AssistantToolStep> steps, DateTimeOffset runStartedAt) =>
+        IntegrationReviewHasVisionReceipt(arguments, steps, runStartedAt, "blender.view.capture",
+            ["blender.scene.edit", "blender.custom.run"]);
+
+    internal static bool UnrealReviewHasVisionReceipt(JsonElement arguments,
+        IReadOnlyList<AssistantToolStep> steps, DateTimeOffset runStartedAt) =>
+        IntegrationReviewHasVisionReceipt(arguments, steps, runStartedAt, "unreal.view.capture",
+            ["unreal.blueprint.create", "unreal.blueprint.edit", "unreal.blueprint.save", "unreal.camera.create"]);
+
+    private static bool IntegrationReviewHasVisionReceipt(JsonElement arguments,
+        IReadOnlyList<AssistantToolStep> steps, DateTimeOffset runStartedAt, string captureTool,
+        string[] mutationTools)
     {
         if (arguments.ValueKind != JsonValueKind.Object || !arguments.TryGetProperty("visionReview", out var review)
             || review.ValueKind != JsonValueKind.Object)
@@ -96,8 +107,8 @@ public sealed partial class MissumAiAssistantService
                 var step = steps[i];
                 if (step.AgentId is not null || (step.StartedAt ?? step.CompletedAt ?? DateTimeOffset.MinValue) < runStartedAt)
                     continue;
-                if (step.Tool is "blender.scene.edit" or "blender.custom.run") break;
-                if (step.Tool is ("media.analyze" or "blender.view.capture") && step.Status is ("failed" or "denied" or "interrupted"))
+                if (mutationTools.Contains(step.Tool)) break;
+                if ((step.Tool == "media.analyze" || step.Tool == captureTool) && step.Status is ("failed" or "denied" or "interrupted"))
                     return !string.IsNullOrWhiteSpace(operationId);
             }
             return false;
@@ -111,8 +122,8 @@ public sealed partial class MissumAiAssistantService
             if (step.AgentId is not null || step.Status != "completed"
                 || (step.StartedAt ?? step.CompletedAt ?? DateTimeOffset.MinValue) < runStartedAt)
                 continue;
-            if (step.Tool is "blender.scene.edit" or "blender.custom.run") return false;
-            if (step.Tool == "blender.view.capture")
+            if (mutationTools.Contains(step.Tool)) return false;
+            if (step.Tool == captureTool)
             {
                 var capture = ReadToolOutputObject(step.OutputJson);
                 return analysisSeen && capture.GetValueOrDefault("operationId").ValueKind == JsonValueKind.String
