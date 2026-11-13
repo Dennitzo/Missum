@@ -1,0 +1,104 @@
+﻿{
+    "finishedAt":  "2026-11-09T23:53:11",
+    "blender":  "C:\\Program Files\\Blender Foundation\\Blender 5.2\\blender.exe",
+    "adapter":  "C:\\Users\\AMD\\Documents\\GitHub\\Missum\\artifacts\\blender-integration\\adapter\\Missum.BlenderAdapter.exe",
+    "project":  "C:\\Users\\AMD\\Documents\\GitHub\\Missum\\tmp\\test\\MissumTestScene.blend",
+    "other":  "C:\\Users\\AMD\\Documents\\GitHub\\Missum\\tmp\\test\\MissumOtherScene.blend",
+    "checks":  [
+                   {
+                       "name":  "status.connected",
+                       "passed":  true,
+                       "detail":  "connected=True instances=1"
+                   },
+                   {
+                       "name":  "status.instance-data",
+                       "passed":  true,
+                       "detail":  "instance=blender-5456-291017500 project=C:\\Users\\AMD\\Documents\\GitHub\\Missum\\tmp\\test\\MissumTestScene.blend"
+                   },
+                   {
+                       "name":  "scene.read.objects",
+                       "passed":  true,
+                       "detail":  "objectCount=3 scene=Scene"
+                   },
+                   {
+                       "name":  "scene.edit.steps",
+                       "passed":  true,
+                       "detail":  "appliedCount=6"
+                   },
+                   {
+                       "name":  "scene.edit.same-blend-file",
+                       "passed":  true,
+                       "detail":  "savedTo=C:\\Users\\AMD\\Documents\\GitHub\\Missum\\tmp\\test\\MissumTestScene.blend"
+                   },
+                   {
+                       "name":  "scene.edit.no-new-backup",
+                       "passed":  true,
+                       "detail":  "newBackupFiles="
+                   },
+                   {
+                       "name":  "scene.edit.backup-setting-restored",
+                       "passed":  true,
+                       "detail":  "before=1 used=0"
+                   },
+                   {
+                       "name":  "files.no-blend1-on-disk",
+                       "passed":  true,
+                       "detail":  "blend1 files in test folder: 0"
+                   },
+                   {
+                       "name":  "custom.run.backup-value-is-1-again",
+                       "passed":  true,
+                       "detail":  "saveVersion=1 backups="
+                   },
+                   {
+                       "name":  "capture.png",
+                       "passed":  true,
+                       "detail":  "path=C:\\Users\\AMD\\AppData\\Local\\Temp\\missum-program-integrations\\captures\\blender-viewport-20261109-235255-287-4517b5ea.png bytes=217078 signature=89504e470d0a1a0a method=render.workbench"
+                   },
+                   {
+                       "name":  "scene.edit.duplicate-protection",
+                       "passed":  true,
+                       "detail":  "outcome=already_applied applied="
+                   },
+                   {
+                       "name":  "switch.rebind-required",
+                       "passed":  true,
+                       "detail":  "rebindRequired=True connected=False"
+                   },
+                   {
+                       "name":  "switch.edit-blocked",
+                       "passed":  true,
+                       "detail":  "code=blender.rebind_required"
+                   },
+                   {
+                       "name":  "rebind.other-project-path",
+                       "passed":  true,
+                       "detail":  "projectPath=C:\\Users\\AMD\\Documents\\GitHub\\Missum\\tmp\\test\\MissumOtherScene.blend"
+                   },
+                   {
+                       "name":  "rebind.edit-went-to-other-file",
+                       "passed":  true,
+                       "detail":  "savedTo=C:\\Users\\AMD\\Documents\\GitHub\\Missum\\tmp\\test\\MissumOtherScene.blend"
+                   },
+                   {
+                       "name":  "rebind.old-objects-not-in-new-scene",
+                       "passed":  true,
+                       "detail":  "objects=Camera,Cube,KegelInAndererSzene,Light"
+                   },
+                   {
+                       "name":  "lost.status-reports-disconnected",
+                       "passed":  true,
+                       "detail":  "connected=False instances=0"
+                   },
+                   {
+                       "name":  "lost.edit-refused",
+                       "passed":  true,
+                       "detail":  "code=blender.rebind_required"
+                   },
+                   {
+                       "name":  "lost.capture-refused",
+                       "passed":  true,
+                       "detail":  "code=blender.rebind_required"
+                   }
+               ]
+}

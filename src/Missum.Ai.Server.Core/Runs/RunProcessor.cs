@@ -1559,6 +1559,7 @@ public sealed partial class RunProcessor : BackgroundService
             }
             string? completionRepair = null;
             var unfinishedSciencePlan = false;
+            var unfinishedBlenderReview = false;
             if (isCoding && response.ToolCalls.Count == 0)
             {
                 if (commandMonitoring.ProposalId is not null && CommandMonitoringPolicy.IsDecision(response.Content))
@@ -1567,6 +1568,11 @@ public sealed partial class RunProcessor : BackgroundService
                 {
                     completionRepair = ScienceCompletionGuard.RepairPrompt(workingState);
                     unfinishedSciencePlan = completionRepair is not null;
+                }
+                if (completionRepair is null && request.ClientTools?.Any(tool => tool.Name == "blender.view.capture") == true)
+                {
+                    completionRepair = await _repository.GetBlenderCompletionRepairAsync(runId, cancellationToken).ConfigureAwait(false);
+                    unfinishedBlenderReview = completionRepair is not null;
                 }
                 if (completionRepair is null && CodingCompletionGuard.IsActionAnnouncement(response.Content))
                     completionRepair = CodingCompletionGuard.RepairPrompt;
@@ -1583,12 +1589,15 @@ public sealed partial class RunProcessor : BackgroundService
                 if (incompleteResponseRetryCount > 2)
                     throw new AgentRunLimitException(unfinishedSciencePlan
                         ? "Das Modell hat dreimal ohne Werkzeugaufruf geantwortet, obwohl der Science-Arbeitsplan noch ausführbare Etappen enthält. Der Auftrag wurde nicht als erledigt markiert. Der Arbeitsstand bleibt für die Fortsetzung erhalten."
-                        : "Das Modell hat dreimal nur weitere Arbeit angekündigt, ohne sie auszuführen. Der Auftrag wurde nicht als erledigt markiert. Der Arbeitsstand bleibt für die Fortsetzung erhalten.");
+                        : unfinishedBlenderReview
+                            ? "Die Blender-Sichtprüfung oder Nacharbeit ist noch offen. Der Arbeitsstand bleibt für die Fortsetzung erhalten."
+                            : "Das Modell hat dreimal nur weitere Arbeit angekündigt, ohne sie auszuführen. Der Auftrag wurde nicht als erledigt markiert. Der Arbeitsstand bleibt für die Fortsetzung erhalten.");
                 _runtime.WriteLog("Warning", "coding.completion_deferred",
                     $"Run {runId}, Runde {roundCount}: vorzeitigen Abschluss verhindert; offener Science-Plan={unfinishedSciencePlan}, Korrekturversuch={incompleteResponseRetryCount}.");
                 await _repository.AppendEventAsync(runId, RunEventTypes.ModelGeneration,
                     new ModelGenerationEvent("responseRecovery", Attempt: incompleteResponseRetryCount,
-                        FailureKind: unfinishedSciencePlan ? "unfinished_science_plan" : "unfinished_action_announcement"), cancellationToken).ConfigureAwait(false);
+                        FailureKind: unfinishedSciencePlan ? "unfinished_science_plan"
+                            : unfinishedBlenderReview ? "unfinished_blender_review" : "unfinished_action_announcement"), cancellationToken).ConfigureAwait(false);
                 continue;
             }
             if (incompleteResponseRetryCount > 0)

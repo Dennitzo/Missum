@@ -59,6 +59,7 @@ public sealed class FileSystemAextPackageStore : IAextPackageStore, IDisposable
     }
 
     public async Task<IReadOnlyList<AextPackageInspection>> GetActivationCandidatesAsync(
+        Action<string>? reportFailure = null,
         CancellationToken cancellationToken = default)
     {
         var paths = Directory.EnumerateFiles(_pendingRoot, "*" + ExtensionPackageFormat.FileExtension,
@@ -68,14 +69,23 @@ public sealed class FileSystemAextPackageStore : IAextPackageStore, IDisposable
         var candidates = new List<AextPackageInspection>(paths.Length);
         foreach (var path in paths)
         {
-            var inspection = await _inspector.InspectAsync(path, cancellationToken).ConfigureAwait(false);
-            EnsureTrusted(inspection);
-            candidates.Add(inspection);
+            try
+            {
+                var inspection = await _inspector.InspectAsync(path, cancellationToken).ConfigureAwait(false);
+                EnsureTrusted(inspection);
+                candidates.Add(inspection);
+            }
+            catch (Exception exception) when (reportFailure is not null
+                && exception is InvalidDataException or IOException or UnauthorizedAccessException)
+            {
+                reportFailure($"{path}: {exception.Message}");
+            }
         }
         return candidates.AsReadOnly();
     }
 
     public async Task<IReadOnlyList<AextPackageInspection>> GetActivePackagesAsync(
+        Action<string>? reportFailure = null,
         CancellationToken cancellationToken = default)
     {
         var paths = Directory.EnumerateFiles(_activeRoot, "package" + ExtensionPackageFormat.FileExtension,
@@ -85,14 +95,22 @@ public sealed class FileSystemAextPackageStore : IAextPackageStore, IDisposable
         var packages = new List<AextPackageInspection>(paths.Length);
         foreach (var path in paths)
         {
-            var inspection = await _inspector.InspectAsync(path, cancellationToken).ConfigureAwait(false);
-            EnsureTrusted(inspection);
-            var contentDirectory = Path.Combine(Path.GetDirectoryName(path)
-                ?? throw new InvalidDataException("Aktiver Extension-Paketpfad besitzt kein Verzeichnis."), "content");
-            if (!Directory.Exists(contentDirectory))
-                throw new InvalidDataException($"Aktiver Extension-Inhalt für '{inspection.Manifest.Id}' fehlt.");
-            await VerifyExtractedContentAsync(inspection, contentDirectory, cancellationToken).ConfigureAwait(false);
-            packages.Add(inspection);
+            try
+            {
+                var inspection = await _inspector.InspectAsync(path, cancellationToken).ConfigureAwait(false);
+                EnsureTrusted(inspection);
+                var contentDirectory = Path.Combine(Path.GetDirectoryName(path)
+                    ?? throw new InvalidDataException("Aktiver Extension-Paketpfad besitzt kein Verzeichnis."), "content");
+                if (!Directory.Exists(contentDirectory))
+                    throw new InvalidDataException($"Aktiver Extension-Inhalt für '{inspection.Manifest.Id}' fehlt.");
+                await VerifyExtractedContentAsync(inspection, contentDirectory, cancellationToken).ConfigureAwait(false);
+                packages.Add(inspection);
+            }
+            catch (Exception exception) when (reportFailure is not null
+                && exception is InvalidDataException or IOException or UnauthorizedAccessException)
+            {
+                reportFailure($"{path}: {exception.Message}");
+            }
         }
         return packages.AsReadOnly();
     }

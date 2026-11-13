@@ -11,6 +11,8 @@ internal sealed partial class NativeSelectionInputSmoke : IDisposable
 {
     private const uint LeftDownFlag = 0x0002;
     private const uint LeftUpFlag = 0x0004;
+    private const uint RightDownFlag = 0x0008;
+    private const uint RightUpFlag = 0x0010;
     private const uint WheelFlag = 0x0800;
     private const uint MoveFlag = 0x0001;
     private const uint MoveNoCoalesceFlag = 0x2000;
@@ -25,6 +27,7 @@ internal sealed partial class NativeSelectionInputSmoke : IDisposable
     private readonly bool _originallyVisible;
     private bool _shownForSmoke;
     private bool _leftPressed;
+    private bool _rightPressed;
     private bool _disposed;
 
     internal NativeSelectionInputSmoke()
@@ -151,6 +154,23 @@ internal sealed partial class NativeSelectionInputSmoke : IDisposable
         LeftUp();
     }
 
+    internal async Task RightClickAsync()
+    {
+        await EnsureInputForegroundAsync();
+        VerifyCursorInClient();
+        SendMouse(RightDownFlag);
+        _rightPressed = true;
+        RightUp();
+    }
+
+    private void RightUp()
+    {
+        VerifyForeground();
+        if (!_rightPressed) return;
+        SendMouse(RightUpFlag);
+        _rightPressed = false;
+    }
+
     private void LeftUp()
     {
         VerifyForeground();
@@ -178,10 +198,11 @@ internal sealed partial class NativeSelectionInputSmoke : IDisposable
         {
             // A pressed synthetic button must be released, including on smoke failure.
             // Reacquire only our own QA window before sending that release.
-            if (_leftPressed)
+            if (_leftPressed || _rightPressed)
             {
                 if (GetForegroundWindow() != _windowHandle) ActivateOwnWindow();
                 LeftUp();
+                RightUp();
             }
             restoreForeground = GetForegroundWindow() == _windowHandle;
         }

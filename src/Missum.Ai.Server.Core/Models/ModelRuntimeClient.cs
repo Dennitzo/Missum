@@ -25,10 +25,6 @@ public sealed partial class ModelRuntimeClient : IDisposable
         LogLevel.Warning,
         new EventId(4102, "ModelInferenceRetry"),
         "Transient model inference failure; retrying before any tool is executed.");
-    private static readonly Action<ILogger, string, Exception?> LogSubagentPreloadUnavailable = LoggerMessage.Define<string>(
-        LogLevel.Warning,
-        new EventId(4104, "SubagentPreloadUnavailable"),
-        "The primary model {ModelId} remains loaded, but its companion preload could not be reconciled.");
     private static readonly Action<ILogger, int, string, int, string, int, bool, Exception?> LogStreamingAttempt =
         LoggerMessage.Define<int, string, int, string, int, bool>(
             LogLevel.Warning,
@@ -198,24 +194,12 @@ public sealed partial class ModelRuntimeClient : IDisposable
                 throw new ModelContextLengthException(selected.Id, contextLength, selected.MaximumContextLength);
             if (selected.State is "loaded" or "sleeping")
             {
-                if (selected.ManagedGpuPlacement && !selected.IsSubagent)
+                if (selected.ManagedGpuPlacement && !selected.IsSubagent && contextLength > 0)
                 {
-                    // The idempotent Windows load controller also warms the
-                    // admitted GPU1 companion. Reconcile a resident primary
-                    // after app/gateway restart without evicting either KV slot.
-                    try
-                    {
-                        await LoadRuntimeModelWithControlRetryAsync(selected.Id, managedGpuPlacement: true, timeout.Token, contextLength).ConfigureAwait(false);
-                        InvalidateStatus();
-                    }
-                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-                    catch (Exception exception) when ((contextLength <= 0 || contextLength == selected.LoadedContextLength)
-                        && exception is HttpRequestException or IOException or OperationCanceledException)
-                    {
-                        // An optional replica/control failure must not discard
-                        // the usable resident primary or abort its ordinary run.
-                        LogSubagentPreloadUnavailable(_logger, selected.Id, exception);
-                    }
+                    // The controller compares the requested context with the
+                    // resident allocation, including llama's context padding.
+                    await LoadRuntimeModelWithControlRetryAsync(selected.Id, managedGpuPlacement: true, timeout.Token, contextLength).ConfigureAwait(false);
+                    InvalidateStatus();
                 }
                 var resident = (await GetRuntimeModelsAsync(timeout.Token).ConfigureAwait(false)).FirstOrDefault(item => item.Id == selected.Id);
                 return new ModelPreparation(selected.Id, WasAlreadyLoaded: true, resident?.LoadedContextLength ?? selected.LoadedContextLength);
@@ -247,11 +231,6 @@ public sealed partial class ModelRuntimeClient : IDisposable
                 // A dropped load response can follow a successful native allocation. Reconcile once before retrying anything.
                 var recovered = (await GetRuntimeModelsAsync(timeout.Token).ConfigureAwait(false)).FirstOrDefault(model => model.Id == selected.Id);
                 if (recovered?.State is not ("loaded" or "sleeping" or "loading")) throw;
-                // A lost control response can arrive between primary and
-                // companion allocation. Reconcile the idempotent pair operation
-                // before declaring startup complete from the primary alone.
-                if (selected.ManagedGpuPlacement && !selected.IsSubagent)
-                    await LoadRuntimeModelAsync(selected.Id, timeout.Token, managedGpuPlacement: true, contextLength).ConfigureAwait(false);
             }
             while (true)
             {
@@ -819,9 +798,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
         catch (Exception exception) when (managedGpuPlacement && IsTransientInferenceFailure(exception)
             && !cancellationToken.IsCancellationRequested)
         {
-            // A resident primary or restored child can also lose the response
-            // between the two allocations. One idempotent reconciliation keeps
-            // resident KV slots intact and finishes the admitted companion.
+            // A control response can be lost after a successful allocation.
             await LoadRuntimeModelAsync(modelId, cancellationToken, managedGpuPlacement, contextLength).ConfigureAwait(false);
         }
     }
@@ -848,6 +825,25 @@ public sealed partial class ModelRuntimeClient : IDisposable
         while ((await ReadRuntimeCatalogAsync(timeout.Token).ConfigureAwait(false))
             .Any(model => model.Id == modelId && model.State is "loaded" or "loading" or "sleeping"))
             await Task.Delay(TimeSpan.FromMilliseconds(100), timeout.Token).ConfigureAwait(false);
+    }
+
+    internal async Task EjectSubagentAsync(string instanceId, CancellationToken cancellationToken)
+    {
+        if (!instanceId.EndsWith("@subagent", StringComparison.Ordinal))
+            throw new ArgumentException("Nur Subagent-Instanzen können hier entladen werden.", nameof(instanceId));
+        await _subagentTurnGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await _modelGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                if ((await ReadRuntimeCatalogAsync(cancellationToken).ConfigureAwait(false))
+                    .Any(model => model.Id == instanceId && model.State is "loaded" or "loading" or "sleeping"))
+                    await UnloadRuntimeInstanceAsync(instanceId, cancellationToken).ConfigureAwait(false);
+            }
+            finally { InvalidateStatus(); _modelGate.Release(); }
+        }
+        finally { _subagentTurnGate.Release(); }
     }
 
     private async Task<string?> UpdateSessionCacheAsync(string operation, string model, string? sessionKey,

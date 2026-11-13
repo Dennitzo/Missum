@@ -97,6 +97,8 @@ public static class AssistantToolStepHeaders
         var path = Text(output, "path", Text(output, "file", Text(input, "path")));
         if (path.Length == 0) path = fallbackPath ?? "";
         var target = path.Length > 0 ? path.Replace('\\', '/') : Text(input, "query", Text(input, "url"));
+        // Document envelopes name the document instead of carrying a filesystem path.
+        if (target.Length == 0) target = Text(output, "fileName");
         if (tool is "coding.command" or "research.code.execute" or "research.code.test" or "research.code.benchmark")
         {
             // Command-shaped receipts use either executable/arguments or a single command string.
@@ -120,7 +122,12 @@ public static class AssistantToolStepHeaders
                 && first > 0 && first <= long.MaxValue - count ? first : 1;
             facts.Add($"{count:N0} Zeilen gelesen" + (count > 0 ? $" ({start:N0}–{start + count - 1:N0})" : ""));
         }
-        foreach (var (key, label) in new[] { ("entries", "Einträge"), ("matches", "Treffer"), ("results", "Treffer"), ("sources", "Quellen") })
+        // Document tools answer with their own envelope arrays; only they count those keys so an
+        // unrelated tool payload can never gain a misleading "Seiten" or "Dokumente" fact.
+        var documentTool = tool is "document.read" or "documents.list" or "documents.search" or "documents.readPages";
+        foreach (var (key, label) in documentTool
+            ? new[] { ("evidence", "Treffer"), ("results", "Treffer"), ("pages", "Seiten"), ("units", "Einheiten"), ("documents", "Dokumente") }
+            : new[] { ("entries", "Einträge"), ("matches", "Treffer"), ("results", "Treffer"), ("sources", "Quellen") })
             if (Property(output, key) is { ValueKind: JsonValueKind.Array } array) facts.Add($"{array.GetArrayLength():N0} {label}");
         if (Text(output, "exitCode") is { Length: > 0 } exit) facts.Add("Exitcode " + OneLine(exit, 20));
         var error = Text(output, "error");

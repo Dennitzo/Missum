@@ -6,10 +6,16 @@ public sealed record ExtensionPermissionGrant(
     ExtensionPermissionKind[] Permissions,
     string? WorkspaceRoot);
 
+/// <summary>
+/// One action call. A selected action can unlock several model tools for the same run, so the call
+/// also names the model tool that was actually proposed. Packages written for a single tool ignore
+/// the additional value: it stays null when the caller does not know a tool name.
+/// </summary>
 public sealed record ExtensionActionInvocation(
     string ActionId,
     JsonElement Arguments,
-    ExtensionPermissionGrant Grant);
+    ExtensionPermissionGrant Grant,
+    string? ModelToolName = null);
 
 public sealed record ExtensionActionResult(
     JsonElement Result);

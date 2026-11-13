@@ -24,13 +24,11 @@ public sealed class GpuPlacementTests
         await runtime.EnsureModelLoadedAsync("coding/test", 0);
         Assert.Equal(port, handler.LoadUri!.Port);
         await runtime.EnsureModelLoadedAsync("coding/test", 0);
-        // The managed controller reconciles the already-loaded primary and its
-        // companion; a legacy router retains its original no-reload behavior.
-        Assert.Equal(managed ? 2 : 1, handler.Loads);
+        Assert.Equal(1, handler.Loads);
     }
 
     [Fact]
-    public async Task ResidentPrimaryRemainsUsableWhenCompanionControllerFails()
+    public async Task ResidentPrimaryDoesNotCallLoadControllerAgainWithoutContextChange()
     {
         using var handler = new PlacementHandler(true) { FailResidentReconciliation = true };
         using var http = new HttpClient(handler);
@@ -39,11 +37,11 @@ public sealed class GpuPlacementTests
         var prepared = await runtime.EnsureModelPreparedAsync("coding/test", 0, _ => throw new InvalidOperationException("A resident primary must not display a new main-model loading status."));
         Assert.Equal("coding/test", prepared.InstanceId);
         Assert.True(prepared.WasAlreadyLoaded);
-        Assert.Equal(3, handler.Loads);
+        Assert.Equal(1, handler.Loads);
     }
 
     [Fact]
-    public async Task ResidentPrimaryReconcilesMissingCompanionAfterDroppedControlResponse()
+    public async Task ResidentPrimaryDoesNotAttemptCompanionRecovery()
     {
         using var handler = new PlacementHandler(true) { DropResidentResponse = true };
         using var runtime = new ModelRuntimeClient(new HttpClient(handler), Options.Create(new MissumAiServerOptions
@@ -51,7 +49,7 @@ public sealed class GpuPlacementTests
         await runtime.EnsureModelLoadedAsync("coding/test", 0);
         var prepared = await runtime.EnsureModelPreparedAsync("coding/test", 0, null);
         Assert.True(prepared.WasAlreadyLoaded);
-        Assert.Equal(3, handler.Loads);
+        Assert.Equal(1, handler.Loads);
     }
 
     [Fact]
@@ -66,13 +64,13 @@ public sealed class GpuPlacementTests
     }
 
     [Fact]
-    public async Task ManagedColdLoadReconcilesBothSlotsAfterDroppedControlResponse()
+    public async Task ManagedColdLoadRecognizesResidentPrimaryAfterDroppedResponse()
     {
         using var handler = new PlacementHandler(true) { DropInitialResponse = true };
         using var http = new HttpClient(handler);
         using var runtime = new ModelRuntimeClient(http, Options.Create(new MissumAiServerOptions { ModelRuntimeUri = new("http://native.test:8081") }), NullLogger<ModelRuntimeClient>.Instance);
         Assert.Equal("coding/test", await runtime.EnsureModelLoadedAsync("coding/test", 0));
-        Assert.Equal(2, handler.Loads);
+        Assert.Equal(1, handler.Loads);
         Assert.Equal(8082, handler.LoadUri!.Port);
     }
 

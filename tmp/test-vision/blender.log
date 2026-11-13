@@ -1,0 +1,6 @@
+00:02.094  blend            | Read blend: "C:\Users\AMD\Documents\GitHub\Missum\tmp\test-vision\MissumVisionScene.blend"
+Info: Saved "MissumVisionScene.blend"
+Info: Saved "MissumVisionOther.blend"
+MISSUM_HARNESS port=8765 project=C:\Users\AMD\Documents\GitHub\Missum\tmp\test-vision\MissumVisionScene.blend save_version=1 instance=blender-43692-044577000 objects=3
+00:06.125  render           | Saved: 'C:\Users\AMD\AppData\Local\Temp\missum-program-integrations\captures\blender-viewport-20261110-013339-766-73f338ce.png'
+00:10.219  render           | Saved: 'C:\Users\AMD\AppData\Local\Temp\missum-program-integrations\captures\blender-viewport-20261110-013344-983-ef3c6e26.png'

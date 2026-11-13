@@ -72,6 +72,8 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             CopyFailed = message => ShowError(message),
         };
         ResetChangesSummary();
+        ComposerFooter.SizeChanged += (_, args) =>
+            RunUiCallback("ComposerFooter.SizeChanged", () => LayoutComposerChips(args.NewSize.Width));
         ComposerChipsScroll.SizeChanged += (_, _) => RunUiCallback("ComposerChips.SizeChanged", () =>
         {
             var width = Math.Clamp(ComposerChipsScroll.ActualWidth, 28, 220);
@@ -305,6 +307,8 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                     var action = Items(data, "actionDescriptors").FirstOrDefault(a => S(a, "actionId") == _persistentAction);
                     _selectedAction = _persistentAction; UpdateSelectedToolChip(S(action, "displayName", _persistentAction));
                 }
+                else if (_selectedAction is not null)
+                    UpdateSelectedToolChip(_lastToolChipLabel);
                 if (ActiveSubagent is null) Composer.PlaceholderText = _mode switch { "coding" => "Leg einfach los", "claudescience" => "Stelle eine Forschungsfrage", _ => "Frag etwas" };
                 _rendering = true;
                 if (changed) Composer.Text = S(data, "draft");
@@ -864,7 +868,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         RefreshContinuationSteps();
     }
     private async void OnSendClick(object sender, RoutedEventArgs e) => await SendAsync();
-    private async Task SendAsync()
+    private async Task SendAsync(string? planPrompt = null)
     {
         if (!_navigationState.CanEditComposer || ActiveSubagent is not null || _disposed || _sendPending) return;
         if (_dictationCapture is not null)
@@ -881,7 +885,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             await CommandAsync("chat.cancel", new { sessionId = _session });
             return;
         }
-        var prompt = Composer.Text.Trim();
+        var prompt = planPrompt ?? Composer.Text.Trim();
         if (prompt.Length == 0 && _captionActive && _captionSessionId == _session) { OnStopCaptions(this, new RoutedEventArgs()); return; }
         if (_running)
         {
@@ -891,17 +895,21 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             var inputId = Guid.NewGuid().ToString("N");
             _sendPending = true;
             _draftTimer.Stop(); Composer.Text = "";
+            var attachmentIds = ClearComposerAttachmentsAfterSubmit();
             OnScrollToBottom(this, new RoutedEventArgs());
             try
             {
-                if (!await CommandAsync("chat.steer", new { sessionId = steeringSession, prompt, inputId }))
+                if (!await CommandAsync("chat.steer", new { sessionId = steeringSession, prompt, inputId, attachmentIds }))
                 {
-                    if (_session == steeringSession && Composer.Text.Length == 0) Composer.Text = steeringDraft;
+                    if (_session == steeringSession)
+                    {
+                        RestoreComposerAttachmentsAfterSubmit(attachmentIds);
+                        if (Composer.Text.Length == 0) Composer.Text = steeringDraft;
+                        await RefreshForExternalActivationAsync();
+                    }
                 }
-                else
-                {
+                else if (_session == steeringSession)
                     await RefreshForExternalActivationAsync();
-                }
             }
             finally { _sendPending = false; SetRunning(); }
             return;
@@ -932,15 +940,19 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         OnScrollToBottom(this, new RoutedEventArgs());
         var promptEpoch = _changeReceiptState.BeginPrompt(session);
         ResetChangesSummary();
-        _draftTimer.Stop(); _rendering = true; Composer.Text = ""; _rendering = false;
+        _draftTimer.Stop();
+        if (planPrompt is null) { _rendering = true; Composer.Text = ""; _rendering = false; }
+        // The prompt takes its attachments with it, exactly like its text.
+        var submittedAttachmentIds = ClearComposerAttachmentsAfterSubmit();
         _finishedSessions.Remove(session); _running = true; SetRunning(); _chatErrors.Remove(session); RefreshChatNotices(); ChatStatus = "Anfrage wird vorbereitet …";
         var deepResearch = mode == "claudescience" && string.IsNullOrEmpty(selectedAction);
-        if (!await CommandAsync("chat.send", new { sessionId = session, prompt, extensionActionId = deepResearch ? null : selectedAction, deepResearch, deepResearchProfile = deepResearch ? "auto" : null }))
+        if (!await CommandAsync("chat.send", new { sessionId = session, prompt, attachmentIds = submittedAttachmentIds, extensionActionId = deepResearch ? null : selectedAction, deepResearch, deepResearchProfile = deepResearch ? "auto" : null }))
         {
             _changeReceiptState.CancelPrompt(session, promptEpoch);
             if (_session == session)
             {
                 _running = false; SetRunning();
+                RestoreComposerAttachmentsAfterSubmit(submittedAttachmentIds);
                 if (Composer.Text.Length == 0) { Composer.Text = draft; await FlushDraftAsync(); }
                 _ = RefreshForExternalActivationAsync();
             }
@@ -1007,7 +1019,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         }
         catch (Exception ex) { ShowError(ex.Message); }
     }
-    private void ClearToolSelection() { _selectedAction = null; _composerInstruction = null; _persistentAction = null; SelectedToolChip.Visibility = Visibility.Collapsed; }
+    private void ClearToolSelection() { _selectedAction = null; _composerInstruction = null; _persistentAction = null; _integrationChipTimer?.Stop(); SelectedToolChip.Visibility = Visibility.Collapsed; }
     private async void OnClearTool(object sender, RoutedEventArgs e)
     {
         if (_composerToolSelectionBusy) return;
@@ -1176,7 +1188,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         _hostSubscription.Dispose();
         _reasoningFlyout?.Hide(); _modelSelectionFlyout?.Hide();
         HideWorkingPlanView();
-        _disposed = true; _draftTimer.Stop(); _renderTimer.Stop(); _microphone.TurnChanged -= OnTranscript; _lifetime.Cancel(); _lifetime.Dispose();
+        _disposed = true; _draftTimer.Stop(); _renderTimer.Stop(); _integrationChipTimer?.Stop(); _microphone.TurnChanged -= OnTranscript; _lifetime.Cancel(); _lifetime.Dispose();
     }
 }
 

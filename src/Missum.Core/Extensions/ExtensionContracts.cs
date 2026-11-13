@@ -44,6 +44,15 @@ public enum ExtensionPermissionKind
     WorkspaceWrite,
 }
 
+/// <summary>
+/// A purpose group in the composer tool menu. Extensions may declare their own groups so a
+/// future integration can place itself beside related tools without a product-side change.
+/// </summary>
+public sealed record ExtensionGroupDescriptor(
+    string GroupId,
+    string Label,
+    int GroupOrder);
+
 public sealed record ExtensionActionDescriptor(
     string ActionId,
     string DisplayName,
@@ -79,7 +88,10 @@ public sealed record ExtensionManifest(
     ExtensionEntrypointDescriptor[] Entrypoints,
     ExtensionPermissionKind[] Permissions,
     ExtensionActionDescriptor[] Actions,
-    ExtensionToolDescriptor[] Tools);
+    ExtensionToolDescriptor[] Tools,
+    // Optional: labels for the groups this package's actions use. Unknown groups keep their raw id.
+    // Packages from before this field stays valid because it defaults to no declarations.
+    ExtensionGroupDescriptor[]? Groups = null);
 
 public sealed record ExtensionValidationResult(IReadOnlyList<string> Errors)
 {

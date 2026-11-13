@@ -107,6 +107,10 @@ internal static partial class NativeToolResultFormatter
                     yield return new((failed ? "Gespeicherte " : "") + title, string.Join("\n", items.Select(item =>
                         (item.Status == "completed" ? "✓ " : item.Status == "in_progress" ? "◌ " : "○ ") + item.Title)), "text");
         }
+        else if (!failed && tool is "document.read" or "document.search" or "documents.list" or "documents.search" or "documents.readPages")
+        {
+            foreach (var block in DocumentReceipt(tool, input, output)) yield return block;
+        }
         else
         {
             if (tool == "coding.command")
@@ -120,13 +124,158 @@ internal static partial class NativeToolResultFormatter
             else
             {
                 var text = First(Text(input, "command"), Text(input, "query"), Text(input, "task"), Text(input, "url"), detail);
-                // Do not fall back to dumping the raw machine receipt as JSON.
-                if (text.TrimStart().StartsWith('{') || text.TrimStart().StartsWith('[')) text = "";
+                // Do not fall back to dumping the raw machine receipt as JSON, not even when the
+                // stored detail line still carries the envelope inside a fenced code block.
+                var decoded = FencedJson(text);
+                var machineBlocks = decoded is { } machine
+                    ? Essentials(machine, errorsOnly: failed).ToArray()
+                    : System.Array.Empty<Block>();
+                if (machineBlocks.Length > 0)
+                {
+                    foreach (var block in machineBlocks) yield return block;
+                    yield break;
+                }
+                if (decoded is not null || text.TrimStart().StartsWith('{') || text.TrimStart().StartsWith('[')) text = "";
                 yield return new("Ergebnis", text.Length > 0 ? text : failed ? "Werkzeug fehlgeschlagen." : "Keine weitere Textausgabe.", "text");
             }
         }
         if (Property(output, "truncated").ValueKind == JsonValueKind.True || Property(output, "diffTruncated").ValueKind == JsonValueKind.True)
             yield return new("Hinweis", "Die Werkzeugausgabe ist gekürzt.", "text");
+    }
+
+    /// <summary>
+    /// Document tools answer the model with bounded JSON envelopes. The receipt renders the same
+    /// information as readable text, so a tool tab never shows raw envelope structure for a document.
+    /// </summary>
+    private static IEnumerable<Block> DocumentReceipt(string tool, JsonElement input, JsonElement output)
+    {
+        var body = DocumentBody(output);
+        var fileName = Text(body, "fileName");
+        if (tool == "documents.list" || Text(input, "mode") == "list")
+        {
+            var items = Array(body, "documents").ToArray();
+            yield return new("Sitzungsdokumente \u00b7 " + items.Length + (items.Length == 1 ? " Dokument" : " Dokumente"),
+                items.Length == 0
+                    ? "Diese Sitzung enth\u00e4lt keine aufbereiteten Dokumente."
+                    : string.Join("\n", items.Select((item, index) => (index + 1) + ". " + string.Join(" \u00b7 ", new[]
+                    {
+                        First(Text(item, "fileName"), "Dokument"),
+                        Text(item, "pageCount") is { Length: > 0 } pages ? pages + " Seiten" : "",
+                        Text(item, "format") is { Length: > 0 } format ? format.ToUpperInvariant() : "",
+                        Text(item, "revision") is { Length: > 0 } revision ? "Fassung " + revision : "",
+                        SourceWord(item), StatusWord(item),
+                    }.Where(part => part.Length > 0)))), "text");
+            yield break;
+        }
+        if (tool is "document.search" or "documents.search" || tool == "document.read" && Text(input, "mode") == "search")
+        {
+            var hits = Array(body, "evidence").Concat(Array(body, "results")).ToArray();
+            var query = First(Text(input, "query"), Text(body, "query"));
+            yield return new("Fundstellen" + (fileName.Length > 0 ? " \u00b7 " + fileName : "") + " \u00b7 " + hits.Length
+                + " Treffer"
+                + (Text(body, "searchMode").Length > 0 ? " \u00b7 " + Text(body, "searchMode") : ""),
+                hits.Length == 0
+                    ? "Keine passende Stelle in den Sitzungsdokumenten."
+                    : "Suchbegriff: " + query + "\nReihenfolge nach Trefferst\u00e4rke.", "text");
+            foreach (var hit in hits)
+                if (First(Text(hit, "text"), Text(hit, "snippet")) is { Length: > 0 } snippet)
+                    yield return new(PlaceLabel(hit, fileName) + ScoreSuffix(hit), snippet, "plain");
+            yield break;
+        }
+        if (tool == "documents.readPages")
+        {
+            var pages = Array(body, "pages").ToArray();
+            if (pages.Length == 0)
+            {
+                yield return new("Gelesene Seiten", "Der angeforderte Seitenbereich enth\u00e4lt keinen Text.", "text");
+                yield break;
+            }
+            if (pages.Length > 1) yield return new("Gelesene Seiten \u00b7 " + First(fileName, "Dokument"),
+                string.Join("\n", pages.Select(page => "- " + PlaceLabel(page, ""))), "text");
+            foreach (var page in pages)
+                if (Text(page, "text") is { Length: > 0 } pageText) yield return new(PlaceLabel(page, fileName), pageText, "plain");
+            yield break;
+        }
+        var units = Array(body, "units").ToArray();
+        if (Text(input, "mode") == "outline" || units.Any(item => Property(item, "preview").ValueKind == JsonValueKind.String))
+        {
+            yield return new("Gliederung \u00b7 " + First(fileName, "Dokument") + " \u00b7 "
+                + First(Text(body, "unitCount"), units.Length.ToString(System.Globalization.CultureInfo.CurrentCulture)) + " Einheiten",
+                units.Length == 0
+                    ? "Das Dokument enth\u00e4lt keine Einheiten."
+                    : string.Join("\n", units.Select(item => "- " + PlaceLabel(item, "")
+                        + (Text(item, "characters") is { Length: > 0 } characters ? " \u00b7 " + characters + " Zeichen" : "")
+                        + (Text(item, "preview") is { Length: > 0 } preview ? " \u00b7 " + preview : ""))), "text");
+            yield break;
+        }
+        if (units.Length == 0)
+        {
+            yield return new("Gelesener Text \u00b7 " + First(fileName, "Dokument"),
+                "Der angeforderte Bereich enth\u00e4lt keinen Text.", "text");
+            yield break;
+        }
+        if (units.Length > 1) yield return new("Gelesene Einheiten \u00b7 " + First(fileName, "Dokument"),
+            string.Join("\n", units.Select(item => "- " + PlaceLabel(item, ""))), "text");
+        foreach (var unit in units)
+            if (Text(unit, "text") is { Length: > 0 } text) yield return new(PlaceLabel(unit, fileName), text, "plain");
+        if (Property(body, "complete").ValueKind == JsonValueKind.False)
+        {
+            var next = Text(Property(body, "continuation"), "startUnit");
+            yield return new("Fortsetzung", next.Length > 0
+                ? "Der Text geht bei Einheit " + next + " weiter."
+                : "Der Text ist in diesem Fenster noch nicht vollständig.", "text");
+        }
+    }
+
+    /// <summary>Accepts both the bare tool payload and the envelope the client hands to the model.</summary>
+    private static JsonElement DocumentBody(JsonElement output)
+    {
+        string[] markers = ["pages", "evidence", "documents", "units", "results", "searchMode", "fileName"];
+        if (markers.Any(key => Property(output, key).ValueKind != JsonValueKind.Undefined)) return output;
+        var inner = Property(output, "result");
+        return inner.ValueKind == JsonValueKind.Object
+            && markers.Any(key => Property(inner, key).ValueKind != JsonValueKind.Undefined) ? inner : output;
+    }
+
+    private static string PlaceLabel(JsonElement item, string fileName)
+    {
+        var page = Text(item, "pageNumber");
+        var label = page.Length > 0 ? "Seite " + page
+            : First(Text(item, "label"), Text(item, "sectionId"),
+                Text(item, "unit").Length > 0 ? "Einheit " + Text(item, "unit") : "Fundstelle");
+        return string.Join(" \u00b7 ", new[] { First(fileName, Text(item, "fileName")), label }.Where(part => part.Length > 0));
+    }
+
+    private static string ScoreSuffix(JsonElement item) =>
+        Text(item, "score") is { Length: > 0 } score ? " \u00b7 Trefferst\u00e4rke " + score : "";
+
+    private static string SourceWord(JsonElement item) => Text(item, "source") switch
+    {
+        "attached" => "Anhang",
+        "generated" => "erstellt",
+        "artifact" => "Artefakt",
+        var other => other,
+    };
+
+    private static string StatusWord(JsonElement item) => Text(item, "status") switch
+    {
+        "ready" => "bereit",
+        "preparing" => "wird aufbereitet",
+        "failed" => "fehlgeschlagen",
+        var other => other,
+    };
+
+    private static JsonElement? FencedJson(string text)
+    {
+        var trimmed = text.Trim();
+        if (!trimmed.StartsWith("```", StringComparison.Ordinal)) return null;
+        var breakAt = trimmed.IndexOf('\n');
+        if (breakAt > 0) trimmed = trimmed[(breakAt + 1)..];
+        if (trimmed.EndsWith("```", StringComparison.Ordinal)) trimmed = trimmed[..^3];
+        trimmed = trimmed.Trim();
+        if (!trimmed.StartsWith('{') && !trimmed.StartsWith('[')) return null;
+        try { return JsonSerializer.Deserialize<JsonElement>(trimmed); }
+        catch (JsonException) { return null; }
     }
 
     private static string MediaAnalysis(JsonElement value, int depth = 0)

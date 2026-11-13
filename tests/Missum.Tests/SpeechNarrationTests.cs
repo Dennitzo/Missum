@@ -18,7 +18,7 @@ public sealed class SpeechNarrationTests
         for (var length = 1; length <= prefix.Length; length++)
             Assert.Empty(buffer.Take(prefix[..length]));
         var sentence = prefix + "der Knopf sendet die Nachricht. ";
-        Assert.Equal("Die Eingabetaste " + spoken + " der Knopf sendet die Nachricht.", Assert.Single(buffer.Take(sentence)));
+        Assert.Equal("Die Eingabetaste " + spoken + " der Knopf sendet die Nachricht.", Assert.Single(buffer.Take(sentence)).Text);
         Assert.Empty(buffer.Take(sentence, complete: true));
     }
 
@@ -27,7 +27,7 @@ public sealed class SpeechNarrationTests
     {
         var buffer = new SpeechStreamingTextBuffer();
         Assert.Empty(buffer.Take("Ich prüfe ggf.", flushSentence: true));
-        Assert.Equal("Ich prüfe gegebenenfalls den Knopf.", Assert.Single(buffer.Take("Ich prüfe ggf. den Knopf.", flushSentence: true)));
+        Assert.Equal("Ich prüfe gegebenenfalls den Knopf.", Assert.Single(buffer.Take("Ich prüfe ggf. den Knopf.", flushSentence: true)).Text);
     }
 
     [Fact]
@@ -47,8 +47,8 @@ public sealed class SpeechNarrationTests
             + "Auch der Senden-Knopf und das automatische Scrollen sind vorhanden. ";
         var buffer = new SpeechStreamingTextBuffer();
         var chunks = new List<string>();
-        for (var length = 1; length <= narration.Length; length++) chunks.AddRange(buffer.Take(narration[..length]));
-        chunks.AddRange(buffer.Take(narration, complete: true));
+        for (var length = 1; length <= narration.Length; length++) chunks.AddRange(buffer.Take(narration[..length]).Select(chunk => chunk.Text));
+        chunks.AddRange(buffer.Take(narration, complete: true).Select(chunk => chunk.Text));
         Assert.Equal(4, chunks.Count);
         Assert.StartsWith("Alle vier gewünschten Funktionen", chunks[0], StringComparison.Ordinal);
         var prepared = string.Join(" ", chunks.Select(MicrophoneTranscriptionService.PrepareSpeechText));

@@ -7,7 +7,7 @@ internal sealed class SpeechStreamingSession : IDisposable
 {
     private readonly object _gate = new();
     private readonly SpeechStreamingTextBuffer _buffer;
-    private readonly Channel<string> _queue = Channel.CreateUnbounded<string>(new UnboundedChannelOptions
+    private readonly Channel<SpeechStreamingChunk> _queue = Channel.CreateUnbounded<SpeechStreamingChunk>(new UnboundedChannelOptions
     {
         SingleReader = true,
         AllowSynchronousContinuations = false,
@@ -17,11 +17,11 @@ internal sealed class SpeechStreamingSession : IDisposable
     private bool _finished;
     private readonly HashSet<string> _spokenNarrations = new(StringComparer.Ordinal);
 
-    public SpeechStreamingSession(ChatMessage initialMessage, Func<string, CancellationToken, Task> play,
+    public SpeechStreamingSession(ChatMessage initialMessage, Func<SpeechStreamingChunk, CancellationToken, Task> play,
         CancellationToken cancellationToken = default)
         : this(initialMessage, play, null, null, cancellationToken) { }
 
-    public SpeechStreamingSession(ChatMessage initialMessage, Func<string, CancellationToken, Task> play,
+    public SpeechStreamingSession(ChatMessage initialMessage, Func<SpeechStreamingChunk, CancellationToken, Task> play,
         Func<CancellationToken, Task>? waitForResume, IDisposable? playbackLifetime = null,
         CancellationToken cancellationToken = default)
     {
@@ -66,17 +66,20 @@ internal sealed class SpeechStreamingSession : IDisposable
             foreach (var step in update.Message.ToolSteps ?? [])
             {
                 if (step.Tool != "assistant.narration" || step.Status != "completed" || !_spokenNarrations.Add(step.Id)) continue;
-                foreach (var chunk in new SpeechStreamingTextBuffer().Take(step.Detail ?? "", complete: true)) _queue.Writer.TryWrite(chunk);
+                foreach (var chunk in new SpeechStreamingTextBuffer().Take(step.Detail ?? "", complete: true))
+                    _queue.Writer.TryWrite(chunk with { SourceStepId = step.Id });
             }
             var complete = update.Kind == MissumAiAssistantUpdateKind.Completed;
             var chunks = _buffer.Take(update.Message.Content, complete, flushSentence,
                 flushBlock: WaitForActionBoundary && flushSentence);
-            if (WaitForActionBoundary)
+            if (WaitForActionBoundary && chunks.Count > 0)
             {
-                var block = string.Join(" ", chunks.Select(static text => text.Trim()));
-                if (!string.IsNullOrWhiteSpace(block)) _queue.Writer.TryWrite(block);
+                var block = string.Join(" ", chunks.Select(static chunk => chunk.Text.Trim()));
+                var start = chunks[0].SourceOffset;
+                var end = chunks[^1].SourceOffset + chunks[^1].SourceMarkdown.Length;
+                _queue.Writer.TryWrite(new(block, start, update.Message.Content[start..end]));
             }
-            else foreach (var text in chunks) _queue.Writer.TryWrite(text);
+            else foreach (var chunk in chunks) _queue.Writer.TryWrite(chunk);
             if (_buffer.HasConflictingRevision)
             {
                 Cancel();
@@ -101,20 +104,20 @@ internal sealed class SpeechStreamingSession : IDisposable
         }
     }
 
-    private async Task PlayQueuedAsync(Func<string, CancellationToken, Task> play,
+    private async Task PlayQueuedAsync(Func<SpeechStreamingChunk, CancellationToken, Task> play,
         Func<CancellationToken, Task>? waitForResume, IDisposable? playbackLifetime)
     {
         try
         {
             while (await _queue.Reader.WaitToReadAsync(_token).ConfigureAwait(false))
             {
-                while (_queue.Reader.TryRead(out var text))
+                while (_queue.Reader.TryRead(out var chunk))
                 {
                     _token.ThrowIfCancellationRequested();
                     if (waitForResume is not null) await waitForResume(_token).ConfigureAwait(false);
                     _token.ThrowIfCancellationRequested();
                     HasPlayed = true;
-                    await play(text, _token).ConfigureAwait(false);
+                    await play(chunk, _token).ConfigureAwait(false);
                     _token.ThrowIfCancellationRequested();
                 }
             }

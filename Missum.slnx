@@ -8,6 +8,8 @@
   <Project Path="src/Missum.App/Missum.App.csproj" />
   <Project Path="src/Missum.Core/Missum.Core.csproj" />
   <Project Path="src/Missum.Infrastructure/Missum.Infrastructure.csproj" />
+  <Project Path="src/Missum.BlenderAdapter/Missum.BlenderAdapter.csproj" />
+  <Project Path="tools/Missum.ExtensionPackager/Missum.ExtensionPackager.csproj" />
   <Project Path="tests/ExtensionHost.TestExtension/ExtensionHost.TestExtension.csproj" />
   <Project Path="tests/Missum.Tests/Missum.Tests.csproj" />
   <Project Path="tests/Missum.Ai.Server.Tests/Missum.Ai.Server.Tests.csproj" />

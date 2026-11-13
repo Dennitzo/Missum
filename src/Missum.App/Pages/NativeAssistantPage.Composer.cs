@@ -75,12 +75,88 @@ public sealed partial class NativeAssistantPage
         finally { _composerToolSelectionBusy = false; }
     }
 
+    private string _lastToolChipLabel = "";
+
+    private void LayoutComposerChips(double footerWidth)
+    {
+        // Long model names leave too little room for a usable chip in a narrow composer.
+        var useSeparateRow = footerWidth < 545;
+        Grid.SetRow(ComposerChipsScroll, useSeparateRow ? 0 : 1);
+        Grid.SetColumn(ComposerChipsScroll, useSeparateRow ? 0 : 1);
+        Grid.SetColumnSpan(ComposerChipsScroll, useSeparateRow ? 5 : 1);
+    }
+
     private void UpdateSelectedToolChip(string label)
     {
+        _lastToolChipLabel = label;
         var action = Items(_snapshot, "actionDescriptors").FirstOrDefault(a => S(a, "actionId") == _selectedAction);
         var glyph = ToolIconGlyph(S(action, "iconKey"));
-        SelectedToolChip.SetTool(_selectedAction == BuiltInActionIds.PlanMode ? "Planen" : label, glyph, ToolGlyphBrush(S(action, "iconKey"), _selectedAction ?? ""));
+        var text = _selectedAction == BuiltInActionIds.PlanMode ? "Planen" : label;
+        var blenderSelected = _selectedAction == "com.missum.blender/edit";
+        if (blenderSelected) text = "Blender";
+        var integration = blenderSelected ? null : Services.ProgramIntegrationStatusReader.Find(_selectedAction);
+        var integrationSelected = !blenderSelected && (integration is not null
+            || S(action, "groupId") == BuiltInExtensionCatalog.GroupIntegrations);
+        if (integrationSelected) text = $"{text} · {integration?.ChipSuffix ?? "nicht verbunden"}";
+        SelectedToolChip.SetTool(text, glyph, ComposerGroupIconBrush(S(action, "groupId", BuiltInExtensionCatalog.GroupIntegrations)));
         SelectedToolChip.Visibility = Visibility.Visible;
+        KeepIntegrationChipFresh(integrationSelected);
+    }
+
+    private SolidColorBrush ComposerGroupIconBrush(string groupId)
+    {
+        var level = groupId switch
+        {
+            BuiltInExtensionCatalog.GroupFiles => 0,
+            BuiltInExtensionCatalog.GroupPlanning => 1,
+            BuiltInExtensionCatalog.GroupResearch => 2,
+            BuiltInExtensionCatalog.GroupVisual => 3,
+            BuiltInExtensionCatalog.GroupSpeech => 4,
+            _ => 5,
+        };
+        var surface = ThemeBrush("MissumLayerStrongBrush", 44).Color;
+        var accent = App.ReadableAccentColor(ThemeBrush("MissumAccentBrush", 160).Color,
+            [surface, ThemeBrush("MissumInputBrush", 44).Color]);
+        var endpoint = ActualTheme == ElementTheme.Light ? 0 : 255;
+        var fraction = level * 0.085;
+        byte Adjust(byte channel) => (byte)Math.Round(channel + (endpoint - channel) * fraction);
+        return new SolidColorBrush(Windows.UI.Color.FromArgb(255, Adjust(accent.R), Adjust(accent.G), Adjust(accent.B)));
+    }
+
+    private Microsoft.UI.Xaml.DispatcherTimer? _integrationChipTimer;
+
+    /// <summary>
+    /// An integration chip is live data: the scene name changes when the user saves or opens another
+    /// file, and an open visual review has to disappear once the picture was analysed. The composer is
+    /// otherwise only redrawn on user input, so while an integration is chosen the chip re-reads its
+    /// status on its own. It stops by itself as soon as no integration is selected any more.
+    /// </summary>
+    private void KeepIntegrationChipFresh(bool integrationSelected)
+    {
+        if (!integrationSelected)
+        {
+            _integrationChipTimer?.Stop();
+            return;
+        }
+
+        _integrationChipTimer ??= CreateIntegrationChipTimer();
+        if (!_integrationChipTimer.IsEnabled) _integrationChipTimer.Start();
+    }
+
+    private Microsoft.UI.Xaml.DispatcherTimer CreateIntegrationChipTimer()
+    {
+        var timer = new Microsoft.UI.Xaml.DispatcherTimer { Interval = TimeSpan.FromSeconds(4) };
+        timer.Tick += (_, _) =>
+        {
+            if (_disposed || _selectedAction is null)
+            {
+                timer.Stop();
+                return;
+            }
+
+            UpdateSelectedToolChip(_lastToolChipLabel);
+        };
+        return timer;
     }
 
     private Flyout ShowComposerTools()
@@ -98,17 +174,35 @@ public sealed partial class NativeAssistantPage
         style.Setters.Add(new Setter(FrameworkElement.WidthProperty, width));
         menu.FlyoutPresenterStyle = style;
         var rows = new StackPanel { Spacing = 0, Width = width - 10 };
-        // Keep the entire tool menu monochrome, independently of thematic icon colors elsewhere.
+        // Keep text neutral. Use one shade of the native accent for each group of icons.
         var menuForeground = ThemeBrush("MissumTextBrush", 220);
-        var toolRows = new List<(Button Button, string IconRole, string IconKey)>();
-        void Heading(string text) => rows.Children.Add(new TextBlock { Text = text, FontSize = 13, Foreground = menuForeground, Margin = new(8, 6, 8, 5) });
-        void Row(string glyph, string name, string description, Action action, string iconKey, string actionId = "", bool enabled = true)
+        var entries = new List<ComposerToolEntry>();
+
+        static int IntField(JsonElement value, string name, int fallback) =>
+            value.ValueKind == JsonValueKind.Object && value.TryGetProperty(name, out var field)
+            && field.ValueKind == JsonValueKind.Number && field.TryGetInt32(out var parsed) ? parsed : fallback;
+
+        // Group headings come from the action catalog, so a package can name its own group.
+        // The fallbacks keep the two composer-owned rows (attachments, compaction) in the right group.
+        var groupMeta = new Dictionary<string, (int Order, string Label)>(StringComparer.Ordinal);
+        foreach (var group in Items(_snapshot, "actionGroups"))
         {
+            var declaredId = S(group, "groupId");
+            if (declaredId.Length > 0) groupMeta[declaredId] = (IntField(group, "groupOrder", 9_000), S(group, "label", declaredId));
+        }
+        (int Order, string Label) GroupFor(string groupId, int fallbackOrder, string fallbackLabel) =>
+            groupMeta.TryGetValue(groupId, out var known) ? known : (fallbackOrder, fallbackLabel);
+
+        void AddEntry(string groupId, int fallbackGroupOrder, string fallbackGroupLabel, int itemOrder,
+            string glyph, string name, string description, Action action, string iconKey,
+            string actionId = "", bool enabled = true)
+        {
+            var group = GroupFor(groupId, fallbackGroupOrder, fallbackGroupLabel);
             var content = new Grid { ColumnSpacing = 8 };
             content.ColumnDefinitions.Add(new() { Width = new(16) });
             content.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
             content.ColumnDefinitions.Add(new() { Width = new(1, GridUnitType.Star) });
-            content.Children.Add(new FontIcon { Glyph = glyph, FontSize = 15, Foreground = menuForeground, VerticalAlignment = VerticalAlignment.Center });
+            content.Children.Add(new FontIcon { Glyph = glyph, FontSize = 15, Foreground = ComposerGroupIconBrush(groupId), VerticalAlignment = VerticalAlignment.Center });
             var label = new TextBlock { Text = name, FontSize = 14, Foreground = menuForeground, VerticalAlignment = VerticalAlignment.Center };
             Grid.SetColumn(label, 1); content.Children.Add(label);
             var detail = new TextBlock { Text = description, FontSize = 14, Foreground = menuForeground, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
@@ -118,57 +212,83 @@ public sealed partial class NativeAssistantPage
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(button, name);
             ToolTipService.SetToolTip(button, description);
             button.Click += (_, _) => { menu.Hide(); action(); };
-            toolRows.Add((button, NativeIconPalette.RoleFor(iconKey, actionId), iconKey));
+            _ = iconKey; _ = actionId;
+            entries.Add(new ComposerToolEntry(group.Order, groupId, group.Label, itemOrder, button));
         }
-        var actions = Items(_snapshot, "actionDescriptors").Where(a => S(a, "actionKind") == "selectableTool").ToArray();
+
+        void AddCatalogEntry(JsonElement descriptor, Func<string, Action> invoke, int fallbackItemOrder = 100)
+        {
+            var actionId = S(descriptor, "actionId");
+            // Program integrations report their live connection, so the note tells the user which
+            // scene is open or that the editor is still missing. Same text color as every note.
+            var note = Services.ProgramIntegrationStatusReader.Find(actionId)?.MenuNote;
+            var description = note is null
+                ? S(descriptor, "description")
+                : $"{S(descriptor, "description")} · {note}";
+            AddEntry(S(descriptor, "groupId", BuiltInExtensionCatalog.GroupIntegrations),
+                IntField(descriptor, "groupOrder", 60), "Erweiterungen",
+                IntField(descriptor, "itemOrder", fallbackItemOrder),
+                ToolIconGlyph(S(descriptor, "iconKey")), S(descriptor, "displayName"), description,
+                invoke(actionId), S(descriptor, "iconKey"), actionId, S(descriptor, "disabledReason").Length == 0);
+        }
+
+        var descriptors = Items(_snapshot, "actionDescriptors");
+        var actions = descriptors.Where(a => S(a, "actionKind") == "selectableTool").ToArray();
         var document = actions.FirstOrDefault(a => S(a, "iconKey") == "document");
         var plan = actions.FirstOrDefault(a => S(a, "iconKey") == "plan");
-        Heading("Hinzufügen");
-        Row("\uE723", "Dateien und Ordner", "", () => ShowFileChoices(), "attachment");
-        Row("\uE8EF", "Kontext komprimieren", _running ? "Nach dem Beenden des AI-Laufs verfügbar" : "Aktuelle Sitzung verdichten; Chatverlauf behalten",
+        var attachGroup = S(descriptors.FirstOrDefault(a => S(a, "actionId") == BuiltInActionIds.AttachFilesAndFolders), "groupId", "files");
+        var planningGroup = S(plan, "groupId", "planning");
+
+        AddEntry(attachGroup, 10, "Dateien und Dokumente", 10,
+            "\uE723", "Dateien und Ordner", "", () => ShowFileChoices(), "attachment");
+        if (document.ValueKind == JsonValueKind.Object)
+            AddCatalogEntry(document, id => () => SelectComposerTool(id, "Dokumente erstellen"), 20);
+        AddEntry(planningGroup, 20, "Planung und Kontext", 20,
+            "\uE8EF", "Kontext komprimieren", _running ? "Nach dem Beenden des AI-Laufs verfügbar" : "Aktuelle Sitzung verdichten; Chatverlauf behalten",
             () => _ = CompactCurrentSessionAsync(), "research", "context.compact",
             !_running && !_manualCompactionBusy && Items(_snapshot, "messages").Length > 0);
         if (plan.ValueKind == JsonValueKind.Object)
-            Row("\uEA80", "Planmodus", "Planmodus einschalten", () => SelectComposerTool(S(plan, "actionId"), "Planmodus"), "plan", S(plan, "actionId"), S(plan, "disabledReason").Length == 0);
-        if (document.ValueKind == JsonValueKind.Object)
-            Row("\uE8A5", "Dokumente erstellen", "Word, PDF, Tabellen und Präsentationen", () => SelectComposerTool(S(document, "actionId"), "Dokumente erstellen"), "document", S(document, "actionId"), S(document, "disabledReason").Length == 0);
+            AddCatalogEntry(plan, id => () => SelectComposerTool(id, "Planmodus"), 10);
         foreach (var action in actions.Where(a => !S(a, "actionId").StartsWith("builtin.", StringComparison.Ordinal)
                      || (S(a, "actionId") != BuiltInActionIds.DeepResearch && S(a, "iconKey") is not ("plan" or "document"))))
-            Row(ToolIconGlyph(S(action, "iconKey")), S(action, "displayName"), S(action, "description"), () => SelectComposerTool(S(action, "actionId"), S(action, "displayName")), S(action, "iconKey"), S(action, "actionId"), S(action, "disabledReason").Length == 0);
-        foreach (var action in Items(_snapshot, "actionDescriptors").Where(a =>
+            AddCatalogEntry(action, id => () => SelectComposerTool(id, S(action, "displayName")));
+        foreach (var action in descriptors.Where(a =>
                      S(a, "actionKind") == "immediate"
                      && S(a, "actionId") != BuiltInActionIds.AttachFilesAndFolders
                      && (!S(a, "actionId").StartsWith("builtin.", StringComparison.Ordinal)
                          || S(a, "actionId") is BuiltInActionIds.ExportChatPdf or BuiltInActionIds.LiveCaptions)))
-            Row(ToolIconGlyph(S(action, "iconKey")), S(action, "displayName"), S(action, "description"), () => _ = InvokeImmediateActionAsync(S(action, "actionId")), S(action, "iconKey"), S(action, "actionId"), S(action, "disabledReason").Length == 0);
+            AddCatalogEntry(action, id => () => _ = InvokeImmediateActionAsync(id));
 
-        // Place new tools alongside actions with a related purpose; preserve these semantic groups even in the monochrome menu.
-        foreach (var row in toolRows.OrderBy(row => row.IconRole switch
-                 {
-                     "documents" => 0,
-                     "research" => 1,
-                     "web" => 2,
-                     "code" => 3,
-                     "visual" => 4,
-                     "speech" => 5,
-                     "controls" => 6,
-                     "caution" => 7,
-                     _ => 8,
-                 }).ThenBy(row => (row.IconRole, row.IconKey) switch
-                 {
-                     ("visual", "video") => 1,
-                     ("speech", "captions") => 1,
-                     ("speech", "translate") => 2,
-                     ("speech", "speech") => 3,
-                     ("speech", "audiobook") => 4,
-                     _ => 0,
-                 }))
-            rows.Children.Add(row.Button);
+        // A group heading appears only when the current chat mode actually offers an entry for it.
+        foreach (var group in entries
+                     .GroupBy(static entry => entry.GroupId, StringComparer.Ordinal)
+                     .OrderBy(static group => group.Min(static entry => entry.GroupOrder))
+                     .ThenBy(static group => group.Key, StringComparer.Ordinal))
+        {
+            rows.Children.Add(new TextBlock
+            {
+                Text = group.First().GroupLabel,
+                FontSize = 13,
+                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+                Foreground = menuForeground,
+                Margin = new(10, 7, 10, 3),
+            });
+            foreach (var entry in group.OrderBy(static item => item.ItemOrder))
+                rows.Children.Add(entry.Button);
+        }
 
-        menu.Content = new ScrollViewer { Content = rows, MaxHeight = 308, HorizontalScrollMode = ScrollMode.Disabled, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+        menu.Content = new ScrollViewer { Content = rows, MaxHeight = 344, HorizontalScrollMode = ScrollMode.Disabled, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
         menu.ShowAt(ComposerSurface);
         return menu;
     }
+
+    /// <summary>One tool row with the catalog data that places it in a purpose group.</summary>
+    private sealed record ComposerToolEntry(
+        int GroupOrder,
+        string GroupId,
+        string GroupLabel,
+        int ItemOrder,
+        Button Button);
 
     private bool _manualCompactionBusy;
 

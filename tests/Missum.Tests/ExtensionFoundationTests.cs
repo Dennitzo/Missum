@@ -198,6 +198,24 @@ public sealed class ExtensionFoundationTests : IDisposable
             Path.Combine(activated.ContentDirectory, "desktop", "entry.dll"),
             "tampered-extension-entry");
         await Assert.ThrowsAsync<InvalidDataException>(() => store.GetActivePackagesAsync());
+
+        var updatedPath = Path.Combine(_root, "sample-updated.aext");
+        var updatedManifest = CreateManifest() with { Version = "2.0.0" };
+        await CreatePackageAsync(updatedPath, updatedManifest, signature: null);
+        var updatedUnsigned = await new AextPackageInspector().InspectAsync(updatedPath);
+        await CreatePackageAsync(updatedPath, updatedManifest, signature with { ContentSha256 = updatedUnsigned.ContentSha256 });
+        await store.StageAsync(updatedPath);
+        var invalidPending = Path.Combine(_root, "store", "pending", "invalid.aext");
+        await File.WriteAllTextAsync(invalidPending, "invalid-package");
+        var pendingErrors = new List<string>();
+        var updated = Assert.Single(await store.GetActivationCandidatesAsync(reportFailure: pendingErrors.Add));
+        Assert.Contains("invalid.aext", Assert.Single(pendingErrors), StringComparison.Ordinal);
+        await store.ActivateAsync(updated);
+
+        var activeErrors = new List<string>();
+        var valid = Assert.Single(await store.GetActivePackagesAsync(reportFailure: activeErrors.Add));
+        Assert.Equal("2.0.0", valid.Manifest.Version);
+        Assert.Contains("desktop/entry.dll", Assert.Single(activeErrors), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -444,6 +462,7 @@ public sealed class ExtensionFoundationTests : IDisposable
     {
         public string? ActionId { get; private set; }
         public string? WorkspaceRoot { get; private set; }
+        public string? ModelToolName { get; private set; }
         public JsonElement Arguments { get; private set; }
 
         public string? GetDisabledReason(string actionId, string? workspaceRoot) => null;
@@ -452,11 +471,13 @@ public sealed class ExtensionFoundationTests : IDisposable
             string actionId,
             JsonElement arguments,
             string? workspaceRoot,
+            string? modelToolName = null,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
             ActionId = actionId;
             WorkspaceRoot = workspaceRoot;
+            ModelToolName = modelToolName;
             Arguments = arguments.Clone();
             return Task.FromResult(JsonSerializer.SerializeToElement(new { accepted = true }));
         }

@@ -3,6 +3,8 @@ using Missum.Ai.Contracts;
 
 namespace Missum.App.Services;
 
+internal sealed record SpeechStreamingChunk(string Text, int SourceOffset, string SourceMarkdown, string? SourceStepId = null);
+
 // Consumes only cumulative assistant-message text. Tool inputs/results never enter
 // this buffer. A replay cannot speak an already consumed prefix a second time.
 internal sealed class SpeechStreamingTextBuffer(string initialContent = "")
@@ -14,7 +16,7 @@ internal sealed class SpeechStreamingTextBuffer(string initialContent = "")
 
     public bool HasConflictingRevision { get; private set; }
 
-    public IReadOnlyList<string> Take(string content, bool complete = false, bool flushSentence = false, bool flushBlock = false)
+    public IReadOnlyList<SpeechStreamingChunk> Take(string content, bool complete = false, bool flushSentence = false, bool flushBlock = false)
     {
         if (_completed || HasConflictingRevision) return [];
         if (_source.StartsWith(content, StringComparison.Ordinal) && content.Length < _source.Length) return [];
@@ -24,15 +26,16 @@ internal sealed class SpeechStreamingTextBuffer(string initialContent = "")
             return [];
         }
         _source = content;
-        var output = new List<string>();
+        var output = new List<SpeechStreamingChunk>();
         while (_consumed < _source.Length)
         {
             var end = FindBoundary(_source, _consumed, complete || flushBlock, flushSentence, _initialFence);
             if (end <= _consumed) break;
-            var text = NarrationOnly(_source[_consumed..end], _initialFence);
+            var markdown = _source[_consumed..end];
+            var text = NarrationOnly(markdown, _initialFence);
+            if (!string.IsNullOrWhiteSpace(text)) output.Add(new(text, _consumed, markdown));
             _consumed = end;
             _initialFence = default;
-            if (!string.IsNullOrWhiteSpace(text)) output.Add(text);
         }
         _completed = complete;
         return output;
@@ -85,18 +88,29 @@ internal sealed class SpeechStreamingTextBuffer(string initialContent = "")
             else if (character == '(') parentheses++;
             else if (character == ')' && parentheses > 0) parentheses--;
             if (brackets != 0 || parentheses != 0) continue;
-            if (character == '\n') return index + 1;
+            if (character == '\n' && IsBlockBoundary(text, index + 1)) return index + 1;
             if (character is '.' or '!' or '?' or '。' or '！' or '？')
             {
                 if (GermanSpeechAbbreviations.IsAbbreviationPeriod(text, index)) continue;
                 var end = index + 1;
-                while (end < text.Length && text[end] is '.' or '!' or '?' or '"' or '\'' or '”' or '“' or '»' or '«' or '*' or '_') end++;
+                while (end < text.Length && text[end] is '.' or '!' or '?' or '。' or '！' or '？'
+                    or '"' or '\'' or '”' or '“' or '»' or '«' or '*' or '_') end++;
                 if (end < text.Length && char.IsWhiteSpace(text[end])) return end + 1;
+                if (end < text.Length && character is ('。' or '！' or '？')) return end;
                 if (end == text.Length && flushSentence) return end;
             }
             if (index - start >= 600 && char.IsWhiteSpace(character)) return index + 1;
         }
         return complete ? text.Length : -1;
+    }
+
+    private static bool IsBlockBoundary(string text, int nextLineStart)
+    {
+        var lineEnd = text.IndexOf('\n', nextLineStart);
+        var nextLine = text.AsSpan(nextLineStart, (lineEnd < 0 ? text.Length : lineEnd) - nextLineStart);
+        return lineEnd >= 0 && nextLine.Trim().IsEmpty
+            || nextLine.TrimStart().StartsWith("~~~", StringComparison.Ordinal)
+            || !nextLine.IsEmpty && SpeechSourceSegmentation.StartsBlock(nextLine.ToString());
     }
 
     private static int CountMarker(string text, int start)

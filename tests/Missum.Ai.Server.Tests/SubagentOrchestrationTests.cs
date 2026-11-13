@@ -43,7 +43,11 @@ public sealed class SubagentOrchestrationTests
         var call = new LmToolCall("delegated-report", toolName, JsonSerializer.SerializeToElement(new { task = "Originalquellen auswerten." }));
         await repository.SaveCheckpointAsync(parent.RunId, new(
             [new("system", "Stable parent policy"), new("user", "Vollständige Recherche übernehmen."), new("assistant", ToolCalls: [call])],
-            1, 0, 0, 0, ActiveToolCalls: [call], SelectedModelId: ModelId, UseStableSubagentToolCatalog: true));
+            1, 0, 0, 0, ActiveToolCalls: [call], SelectedModelId: ModelId, UseStableSubagentToolCatalog: true,
+            WorkingState: CodingWorkingState.Create("Vollständige Recherche übernehmen.") with
+            {
+                Plan = [new("s1", "Recherche delegieren und Bericht übernehmen", "in_progress")],
+            }, PlanFormatVersion: CodingPlanFormat.CurrentVersion, SciencePlanInitialized: true));
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
 
         await provider.GetRequiredService<RunProcessor>().ProcessAsync(parent.RunId, timeout.Token);
@@ -55,6 +59,7 @@ public sealed class SubagentOrchestrationTests
         Assert.Equal(report, receipt.RootElement.GetProperty(reportField).GetString());
         Assert.False(receipt.RootElement.TryGetProperty("truncated", out _));
         Assert.Equal(1, handler.ChildTurns);
+        await handler.ReplicaUnloaded.Task.WaitAsync(timeout.Token);
         var child = Assert.Single(await repository.GetSubagentRunsAsync(parent.RunId));
         Assert.Equal(report, CodingTextReconciler.Project(await repository.GetVisibleTextEventsAsync(child.Snapshot.RunId)));
         Assert.True(await repository.HasConsumedSubagentResultAsync(parent.RunId, child.Snapshot.RunId));
@@ -927,6 +932,7 @@ public sealed class SubagentOrchestrationTests
         public string? ChildReport { get; init; }
         public bool EmitChildReasoning { get; init; }
         public string? FinalDelegatedReceipt { get; private set; }
+        public TaskCompletionSource ReplicaUnloaded { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
@@ -938,6 +944,14 @@ public sealed class SubagentOrchestrationTests
             } });
             if (path == "/props") return Json(new { default_generation_settings = new { n_ctx = 32768 } });
             if (path == "/release") return Json(new { success = true });
+            if (path == "/models/unload")
+            {
+                using var unload = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken));
+                Assert.Equal(ModelId + "@subagent", unload.RootElement.GetProperty("model").GetString());
+                _secondaryLoaded = false;
+                ReplicaUnloaded.TrySetResult();
+                return Json(new { success = true });
+            }
             if (path == "/models/load")
             {
                 using var load = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken));
@@ -961,6 +975,7 @@ public sealed class SubagentOrchestrationTests
                     if (PrepareFailure == "transport") throw new TaskCanceledException("Native preparation transport deadline.");
                     if (PrepareFailure == "native") return Json(new { allowed = false, reason = "subagent.preparation_timeout",
                         detail = "Fünf Minuten ohne Promptfortschritt.", modelId = ModelId });
+                    if (!SharedPrimary && !denySubagent && _primaryLoaded) _secondaryLoaded = true;
                 }
                 if (!_primaryLoaded) DeniedBeforeLoad = true;
                 return Json(new { allowed = !denySubagent && _primaryLoaded, reason = !_primaryLoaded ? "subagent.primary_not_loaded" : denySubagent ? "subagent.insufficient_vram" : null, modelId = ModelId,
@@ -1043,10 +1058,12 @@ public sealed class SubagentOrchestrationTests
             }
             if (parentTurn == (emitInitialSpawn ? 2 : 1))
             {
+                var receipts = messages.Where(static item => item.GetProperty("role").GetString() == "tool")
+                    .Select(static item => item.GetProperty("content").GetString()).ToArray();
+                var receipt = receipts.FirstOrDefault(static text => text?.Contains("\"status\":\"started\"", StringComparison.Ordinal) == true);
+                Assert.True(receipt is not null, string.Join("\n", receipts));
                 await _childStarted.Task.WaitAsync(cancellationToken);
                 ParentWorkedWhileChildActive = true;
-                var receipt = messages.Where(static item => item.GetProperty("role").GetString() == "tool")
-                    .Select(static item => item.GetProperty("content").GetString()).First(static text => text?.Contains("\"status\":\"started\"", StringComparison.Ordinal) == true);
                 using var receiptJson = JsonDocument.Parse(receipt!);
                 return Tool(SubagentToolNames.Wait, new { runId = receiptJson.RootElement.GetProperty("runId").GetString() });
             }

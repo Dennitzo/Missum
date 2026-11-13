@@ -14,7 +14,7 @@ internal static class ScienceInitialPlanGuard
     // same entrance protocol now applies to Codex; internal summaries and child
     // agents retain their own bounded workflows.
     internal static bool Applies(RunRequest request) => request.Mode == RunMode.Coding
-        && request.Subagent is null && request.ConversationProfile != ConversationProfile.ContextPreparation;
+        && request.Subagent is null && request.ConversationProfile is not (ConversationProfile.ContextPreparation or ConversationProfile.PlanMode);
 
     internal static bool IsPlanOnly(IReadOnlyList<LmToolCall> calls) => calls.Count == 1
         && calls[0].Name == CodingWorkingStateTools.PlanTool;

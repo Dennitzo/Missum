@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Missum.Core.Extensions;
 using Microsoft.Extensions.Hosting;
 
@@ -13,6 +14,7 @@ public interface IExtensionRuntimeService
         string actionId,
         JsonElement arguments,
         string? workspaceRoot,
+        string? modelToolName = null,
         CancellationToken cancellationToken = default);
 }
 
@@ -21,6 +23,7 @@ public sealed class ExtensionRuntimeService(
     IExtensionActionCatalog actionCatalog,
     IExtensionHostSupervisor hostSupervisor) : IExtensionRuntimeService, IHostedService
 {
+    private const string BlenderAction = "com.missum.blender/edit";
     private readonly ConcurrentDictionary<string, ActiveExtension> _actions = new(StringComparer.Ordinal);
     private readonly ConcurrentQueue<string> _startupErrors = new();
     private string? _hostExecutable;
@@ -30,7 +33,7 @@ public sealed class ExtensionRuntimeService(
         _hostExecutable = ResolveHostExecutable();
         try
         {
-            var pending = await packageStore.GetActivationCandidatesAsync(cancellationToken).ConfigureAwait(false);
+            var pending = await packageStore.GetActivationCandidatesAsync(_startupErrors.Enqueue, cancellationToken).ConfigureAwait(false);
             foreach (var candidate in pending)
             {
                 try { _ = await packageStore.ActivateAsync(candidate, cancellationToken).ConfigureAwait(false); }
@@ -46,7 +49,7 @@ public sealed class ExtensionRuntimeService(
         }
 
         IReadOnlyList<AextPackageInspection> active;
-        try { active = await packageStore.GetActivePackagesAsync(cancellationToken).ConfigureAwait(false); }
+        try { active = await packageStore.GetActivePackagesAsync(_startupErrors.Enqueue, cancellationToken).ConfigureAwait(false); }
         catch (Exception exception) when (exception is InvalidDataException or IOException or UnauthorizedAccessException)
         {
             _startupErrors.Enqueue(exception.Message);
@@ -82,6 +85,8 @@ public sealed class ExtensionRuntimeService(
                 : "Die Aktion besitzt keinen Desktop-Entrypoint.";
         if (RequiresWorkspace(extension.Manifest.Permissions) && !IsExistingDirectory(workspaceRoot))
             return "Die Erweiterung benötigt einen geöffneten Workspace als Zugriffsgrenze.";
+        if (actionId == BlenderAction && !File.Exists(Path.Combine(extension.ContentDirectory, "runtime", "bootstrap.py")))
+            return "Für die automatische Blender-Verbindung wird die Missum-Erweiterung Blender ab Version 1.1 benötigt.";
         return null;
     }
 
@@ -89,6 +94,7 @@ public sealed class ExtensionRuntimeService(
         string actionId,
         JsonElement arguments,
         string? workspaceRoot,
+        string? modelToolName = null,
         CancellationToken cancellationToken = default)
     {
         var disabledReason = GetDisabledReason(actionId, workspaceRoot);
@@ -102,15 +108,35 @@ public sealed class ExtensionRuntimeService(
             ?? throw new InvalidOperationException("Für die Erweiterungsaktion fehlt ein passender Sidecar-Entrypoint.");
         var normalizedWorkspace = string.IsNullOrWhiteSpace(workspaceRoot) ? null : Path.GetFullPath(workspaceRoot);
         var grant = new ExtensionPermissionGrant([.. extension.Manifest.Permissions], normalizedWorkspace);
-        var invocation = new ExtensionActionInvocation(actionId, arguments.Clone(), grant);
+        var invocation = new ExtensionActionInvocation(actionId, arguments.Clone(), grant, modelToolName);
         ExtensionInvocationPolicy.Validate(invocation, extension.Manifest.Permissions, normalizedWorkspace);
         var timeout = TimeSpan.FromSeconds(60);
         var maximumOutputBytes = 1024 * 1024;
-        if (actionCatalog.TryGetTool(actionId, out var tool) && tool is not null)
+        // An action can unlock several model tools. The limits belong to the tool that was actually
+        // proposed, so a quick status read does not inherit the budget of a long render call.
+        ExtensionToolDescriptor? limitsTool = null;
+        if (!string.IsNullOrWhiteSpace(modelToolName)
+            && actionCatalog.TryGetToolByModelName(modelToolName, out var proposed)
+            && proposed is not null
+            && string.Equals(proposed.ActionId, actionId, StringComparison.Ordinal))
+            limitsTool = proposed;
+        else if (actionCatalog.TryGetTools(actionId, out var siblings) && siblings is { Count: > 0 })
+            limitsTool = siblings
+                .OrderByDescending(static tool => tool.TimeoutSeconds)
+                .ThenByDescending(static tool => tool.MaximumOutputBytes)
+                .First();
+        if (limitsTool is not null)
         {
-            timeout = TimeSpan.FromSeconds(tool.TimeoutSeconds);
-            maximumOutputBytes = tool.MaximumOutputBytes;
+            timeout = TimeSpan.FromSeconds(limitsTool.TimeoutSeconds);
+            maximumOutputBytes = limitsTool.MaximumOutputBytes;
         }
+
+        if (actionId == BlenderAction)
+            invocation = invocation with
+            {
+                Arguments = await PrepareBlenderArgumentsAsync(extension.ContentDirectory, normalizedWorkspace!,
+                    modelToolName, arguments, cancellationToken).ConfigureAwait(false),
+            };
 
         await using var host = await hostSupervisor.StartAsync(new(
             hostExecutable,
@@ -135,6 +161,37 @@ public sealed class ExtensionRuntimeService(
         if (!string.Equals(response.Type, ExtensionHostMessageTypes.ActionResult, StringComparison.Ordinal))
             throw new InvalidDataException("ExtensionHost lieferte keine action.result-Antwort.");
         return ExtensionHostProtocol.ReadPayload<ExtensionActionResult>(response).Result.Clone();
+    }
+
+    private static async Task<JsonElement> PrepareBlenderArgumentsAsync(string contentDirectory, string workspace,
+        string? modelToolName, JsonElement arguments, CancellationToken cancellationToken)
+    {
+        var status = modelToolName == "blender.status";
+        var projectPath = status && arguments.TryGetProperty("projectPath", out var project)
+            && project.ValueKind == JsonValueKind.String ? project.GetString() : null;
+        // Opening an editor window is a deliberate step and belongs to blender.status. Every other
+        // tool uses only a window that already exists: a read or a picture request must never start a
+        // second Blender beside the window the user opened by hand.
+        var observeOnly = !status
+            || (arguments.TryGetProperty("connect", out var connect) && connect.ValueKind == JsonValueKind.False)
+            || arguments.TryGetProperty("instanceId", out _)
+            || arguments.TryGetProperty("visionReview", out _);
+
+        BlenderApplicationEndpoint? endpoint;
+        if (observeOnly)
+            BlenderApplicationLauncher.TryGetEndpoint(workspace, out endpoint);
+        else
+            endpoint = await BlenderApplicationLauncher.EnsureStartedAsync(contentDirectory, workspace, projectPath, cancellationToken).ConfigureAwait(false);
+
+        // The launch receipt is local and is never accepted from the model or returned to it.
+        var enriched = JsonNode.Parse(arguments.GetRawText())!.AsObject();
+        enriched["_missumBlender"] = endpoint is null ? null : new JsonObject
+        {
+            ["port"] = endpoint.Port,
+            ["processId"] = endpoint.ProcessId,
+            ["token"] = endpoint.Token,
+        };
+        return JsonSerializer.SerializeToElement(enriched);
     }
 
     private void Register(AextPackageInspection package)

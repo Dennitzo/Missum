@@ -1,0 +1,4 @@
+MISSUM_GUI enabled=True port=8765 running=True instance=blender-12716-570040900 timer_registered=True python_allowed=True objects=3
+MISSUM_GUI ready
+00:12.234  render           | Saved: 'C:\Users\AMD\AppData\Local\Temp\missum-program-integrations\captures\blender-viewport-20261110-190413-842-0b8040e2.png'
+00:12.234  render           | OpenGL Render written to 'C:\Users\AMD\AppData\Local\Temp\missum-program-integrations\captures\blender-viewport-20261110-190413-842-0b8040e2.png'

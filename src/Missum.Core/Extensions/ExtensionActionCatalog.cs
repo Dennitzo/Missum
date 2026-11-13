@@ -5,8 +5,10 @@ namespace Missum.Core.Extensions;
 public interface IExtensionActionCatalog
 {
     IReadOnlyList<ExtensionActionDescriptor> GetActions(ExtensionChatMode mode);
+    IReadOnlyList<ExtensionGroupDescriptor> GetGroups();
     bool TryGetAction(string actionId, out ExtensionActionDescriptor? descriptor);
     bool TryGetTool(string actionId, out ExtensionToolDescriptor? descriptor);
+    bool TryGetTools(string actionId, out IReadOnlyList<ExtensionToolDescriptor>? descriptors);
     bool TryGetToolByModelName(string modelToolName, out ExtensionToolDescriptor? descriptor);
     void Register(ExtensionManifest manifest);
 }
@@ -15,13 +17,18 @@ public sealed class ExtensionActionCatalog : IExtensionActionCatalog
 {
     private readonly Lock _gate = new();
     private readonly Dictionary<string, ExtensionActionDescriptor> _actions = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, ExtensionToolDescriptor> _toolsByAction = new(StringComparer.Ordinal);
+    // A selected action can unlock several model tools for the same run. The first entry keeps
+    // working for integrations that were written against a single tool per action.
+    private readonly Dictionary<string, List<ExtensionToolDescriptor>> _toolsByAction = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _actionsByToolName = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, ExtensionGroupDescriptor> _groups =
+        BuiltInExtensionCatalog.Groups.ToDictionary(static group => group.GroupId, StringComparer.Ordinal);
 
     public static ExtensionActionCatalog CreateWithBuiltIns()
     {
         var catalog = new ExtensionActionCatalog();
-        catalog.RegisterDescriptors(BuiltInExtensionCatalog.Actions, BuiltInExtensionCatalog.Tools);
+        catalog.RegisterDescriptors(BuiltInExtensionCatalog.Actions, BuiltInExtensionCatalog.Tools,
+            BuiltInExtensionCatalog.Groups);
         return catalog;
     }
 
@@ -35,6 +42,17 @@ public sealed class ExtensionActionCatalog : IExtensionActionCatalog
                 .ThenBy(static action => action.ItemOrder)
                 .ThenBy(static action => action.DisplayName, StringComparer.OrdinalIgnoreCase)
                 .Select(CloneAction)
+                .ToArray();
+        }
+    }
+
+    public IReadOnlyList<ExtensionGroupDescriptor> GetGroups()
+    {
+        lock (_gate)
+        {
+            return _groups.Values
+                .OrderBy(static group => group.GroupOrder)
+                .ThenBy(static group => group.GroupId, StringComparer.OrdinalIgnoreCase)
                 .ToArray();
         }
     }
@@ -60,14 +78,30 @@ public sealed class ExtensionActionCatalog : IExtensionActionCatalog
         ArgumentException.ThrowIfNullOrWhiteSpace(actionId);
         lock (_gate)
         {
-            if (_toolsByAction.TryGetValue(actionId, out var found))
+            if (_toolsByAction.TryGetValue(actionId, out var found) && found.Count > 0)
             {
-                descriptor = CloneTool(found);
+                descriptor = CloneTool(found[0]);
                 return true;
             }
         }
 
         descriptor = null;
+        return false;
+    }
+
+    public bool TryGetTools(string actionId, out IReadOnlyList<ExtensionToolDescriptor>? descriptors)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(actionId);
+        lock (_gate)
+        {
+            if (_toolsByAction.TryGetValue(actionId, out var found) && found.Count > 0)
+            {
+                descriptors = found.Select(CloneTool).ToArray();
+                return true;
+            }
+        }
+
+        descriptors = null;
         return false;
     }
 
@@ -77,7 +111,8 @@ public sealed class ExtensionActionCatalog : IExtensionActionCatalog
         lock (_gate)
         {
             if (_actionsByToolName.TryGetValue(modelToolName, out var actionId)
-                && _toolsByAction.TryGetValue(actionId, out var found))
+                && _toolsByAction.TryGetValue(actionId, out var registered)
+                && registered.FirstOrDefault(tool => string.Equals(tool.ModelToolName, modelToolName, StringComparison.Ordinal)) is { } found)
             {
                 descriptor = CloneTool(found);
                 return true;
@@ -91,15 +126,18 @@ public sealed class ExtensionActionCatalog : IExtensionActionCatalog
     public void Register(ExtensionManifest manifest)
     {
         ExtensionManifestValidator.Validate(manifest).ThrowIfInvalid();
-        RegisterDescriptors(manifest.Actions, manifest.Tools);
+        RegisterDescriptors(manifest.Actions, manifest.Tools, manifest.Groups ?? []);
     }
 
     private void RegisterDescriptors(
         IReadOnlyCollection<ExtensionActionDescriptor> actions,
-        IReadOnlyCollection<ExtensionToolDescriptor> tools)
+        IReadOnlyCollection<ExtensionToolDescriptor> tools,
+        IReadOnlyCollection<ExtensionGroupDescriptor> groups)
     {
         ArgumentNullException.ThrowIfNull(actions);
         ArgumentNullException.ThrowIfNull(tools);
+        ArgumentNullException.ThrowIfNull(groups);
+        var groupCopies = groups.ToArray();
 
         var actionCopies = actions.Select(CloneAction).ToArray();
         var toolCopies = tools.Select(CloneTool).ToArray();
@@ -107,7 +145,6 @@ public sealed class ExtensionActionCatalog : IExtensionActionCatalog
         if (incomingActionIds.Count != actionCopies.Length)
             throw new InvalidDataException("Der Action-Katalog enthält doppelte Action-IDs.");
         var incomingToolNames = new HashSet<string>(StringComparer.Ordinal);
-        var incomingToolActions = new HashSet<string>(StringComparer.Ordinal);
         foreach (var action in actionCopies)
         {
             var separator = action.ActionId.IndexOf('/');
@@ -122,8 +159,6 @@ public sealed class ExtensionActionCatalog : IExtensionActionCatalog
                 throw new InvalidDataException(toolError);
             if (!incomingToolNames.Add(tool.ModelToolName))
                 throw new InvalidDataException($"Modell-Toolname '{tool.ModelToolName}' ist im Registrierungssatz doppelt.");
-            if (!incomingToolActions.Add(tool.ActionId))
-                throw new InvalidDataException($"Action '{tool.ActionId}' besitzt im Registrierungssatz mehrere Modell-Tools.");
             if (tool.InputSchema.ValueKind != JsonValueKind.Object)
                 throw new InvalidDataException($"InputSchema von '{tool.ModelToolName}' muss ein JSON-Objekt sein.");
             if (!Enum.IsDefined(tool.RiskClass))
@@ -142,9 +177,18 @@ public sealed class ExtensionActionCatalog : IExtensionActionCatalog
             foreach (var action in actionCopies) _actions.Add(action.ActionId, action);
             foreach (var tool in toolCopies)
             {
-                _toolsByAction.Add(tool.ActionId, tool);
+                if (!_toolsByAction.TryGetValue(tool.ActionId, out var registered))
+                {
+                    registered = [];
+                    _toolsByAction.Add(tool.ActionId, registered);
+                }
+                registered.Add(tool);
                 _actionsByToolName.Add(tool.ModelToolName, tool.ActionId);
             }
+            // A package may rename or add a group. The first declaration wins so the built-in
+            // purpose labels stay authoritative and a package cannot overwrite another package.
+            foreach (var group in groupCopies.Where(static group => group is not null))
+                _groups.TryAdd(group.GroupId, group);
         }
     }
 
@@ -160,35 +204,45 @@ public static class BuiltInExtensionCatalog
     private static readonly ExtensionChatMode[] AllModes =
         [ExtensionChatMode.General, ExtensionChatMode.Coding, ExtensionChatMode.ClaudeScience];
 
+    // Purpose groups for the composer tool menu. Every tool sits in the group that matches what it
+    // does, so an empty group simply disappears from the menu in the current chat mode.
+    public const string GroupFiles = "files";
+    public const string GroupPlanning = "planning";
+    public const string GroupResearch = "research";
+    public const string GroupVisual = "visual";
+    public const string GroupSpeech = "speech";
+    public const string GroupIntegrations = "integrations";
+
+    public static IReadOnlyList<ExtensionGroupDescriptor> Groups { get; } =
+    [
+        new(GroupFiles, "Dateien und Dokumente", 10),
+        new(GroupPlanning, "Planung und Kontext", 20),
+        new(GroupResearch, "Recherche", 30),
+        new(GroupVisual, "Bild und Video", 40),
+        new(GroupSpeech, "Sprache und Audio", 50),
+        new(GroupIntegrations, "Programmintegrationen", 60),
+    ];
+
     public static IReadOnlyDictionary<string, string> GroupLabels { get; } =
-        new Dictionary<string, string>(StringComparer.Ordinal)
-        {
-            ["add"] = "Hinzufügen",
-            ["planning"] = "Arbeitsweise",
-            ["research"] = "Recherche und Analyse",
-            ["create"] = "Erstellen",
-            ["export"] = "Exportieren",
-            ["speech"] = "Sprache und Audio",
-            ["extensions"] = "Erweiterungen",
-        };
+        Groups.ToDictionary(static group => group.GroupId, static group => group.Label, StringComparer.Ordinal);
 
     public static IReadOnlyList<ExtensionActionDescriptor> Actions { get; } =
     [
-        Immediate(BuiltInActionIds.AttachFilesAndFolders, "Dateien und Ordner", "Dateien oder Ordner zum aktuellen Chat hinzufügen", "attachment", "add", 10, 10),
-        SelectableCoding(BuiltInActionIds.PlanMode, "Planmodus", "Projekt schreibgeschützt analysieren und vor Änderungen einen umsetzbaren Plan abstimmen", "plan", "planning", 15, 10),
-        Selectable(BuiltInActionIds.WebSearch, "Websuche", "Aktuelle Quellen im Web durchsuchen", "web", "research", 20, 10),
-        Selectable(BuiltInActionIds.DeepResearch, "Deep Research", "Eine mehrstufige, quellenbasierte Recherche starten", "research", "research", 20, 20),
-        Selectable(BuiltInActionIds.Lean, "Lean", "Mathematische Aussagen mit Lean 4 und Mathlib formalisieren und Beweise prüfen", "lean", "research", 20, 25),
-        Selectable(BuiltInActionIds.ImageAnalysis, "Bild analysieren", "Bilder inhaltlich untersuchen", "image", "research", 20, 30),
-        Selectable(BuiltInActionIds.AudioAnalysis, "Audio analysieren", "Audiodateien inhaltlich untersuchen", "audio", "research", 20, 40),
-        Selectable(BuiltInActionIds.VideoAnalysis, "Video analysieren", "Videodateien inhaltlich untersuchen", "video", "research", 20, 50),
-        Selectable(BuiltInActionIds.CreateDocument, "Dokumente erstellen", "Word, PDF, Tabellen und Präsentationen erstellen", "document", "create", 30, 10),
-        Selectable(BuiltInActionIds.GenerateImage, "Bild erstellen", "Ein Bild aus einer Beschreibung erzeugen", "image", "create", 30, 20),
-        Selectable(BuiltInActionIds.CreateAudiobook, "Hörbuch erstellen", "Text als gegliedertes Hörbuch erzeugen", "audiobook", "create", 30, 30),
-        Immediate(BuiltInActionIds.ExportChatPdf, "Chat als PDF exportieren", "Den vollständigen Chat über den Speicherdialog als PDF exportieren", "pdf", "export", 40, 10),
-        Selectable(BuiltInActionIds.Translate, "Übersetzen", "Text in eine andere Sprache übertragen", "translate", "speech", 50, 10),
-        Selectable(BuiltInActionIds.ReadAloud, "Vorlesen", "Text mit lokaler Sprachausgabe vorlesen", "speech", "speech", 50, 20),
-        Immediate(BuiltInActionIds.LiveCaptions, "Live-Untertitel", "Untertitel für laufende Sprache ein- oder ausschalten", "captions", "speech", 50, 30),
+        Immediate(BuiltInActionIds.AttachFilesAndFolders, "Dateien und Ordner", "Dateien oder Ordner zum aktuellen Chat hinzufügen", "attachment", GroupFiles, 10, 10),
+        Selectable(BuiltInActionIds.CreateDocument, "Dokumente erstellen", "Word, PDF, Tabellen und Präsentationen erstellen", "document", GroupFiles, 10, 20),
+        Immediate(BuiltInActionIds.ExportChatPdf, "Chat als PDF exportieren", "Den vollständigen Chat über den Speicherdialog als PDF exportieren", "pdf", GroupFiles, 10, 30),
+        SelectableCoding(BuiltInActionIds.PlanMode, "Planmodus", "Projekt schreibgeschützt analysieren und vor Änderungen einen umsetzbaren Plan abstimmen", "plan", GroupPlanning, 20, 10),
+        Selectable(BuiltInActionIds.WebSearch, "Websuche", "Aktuelle Quellen im Web durchsuchen", "web", GroupResearch, 30, 10),
+        Selectable(BuiltInActionIds.DeepResearch, "Deep Research", "Eine mehrstufige, quellenbasierte Recherche starten", "research", GroupResearch, 30, 20),
+        Selectable(BuiltInActionIds.Lean, "Lean", "Mathematische Aussagen mit Lean 4 und Mathlib formalisieren und Beweise prüfen", "lean", GroupResearch, 30, 30),
+        Selectable(BuiltInActionIds.ImageAnalysis, "Bild analysieren", "Bilder inhaltlich untersuchen", "image", GroupVisual, 40, 10),
+        Selectable(BuiltInActionIds.VideoAnalysis, "Video analysieren", "Videodateien inhaltlich untersuchen", "video", GroupVisual, 40, 20),
+        Selectable(BuiltInActionIds.GenerateImage, "Bild erstellen", "Ein Bild aus einer Beschreibung erzeugen", "image", GroupVisual, 40, 30),
+        Selectable(BuiltInActionIds.ReadAloud, "Vorlesen", "Text mit lokaler Sprachausgabe vorlesen", "speech", GroupSpeech, 50, 10),
+        Selectable(BuiltInActionIds.Translate, "Übersetzen", "Text in eine andere Sprache übertragen", "translate", GroupSpeech, 50, 20),
+        Immediate(BuiltInActionIds.LiveCaptions, "Live-Untertitel", "Untertitel für laufende Sprache ein- oder ausschalten", "captions", GroupSpeech, 50, 30),
+        Selectable(BuiltInActionIds.CreateAudiobook, "Hörbuch erstellen", "Text als gegliedertes Hörbuch erzeugen", "audiobook", GroupSpeech, 50, 40),
+        Selectable(BuiltInActionIds.AudioAnalysis, "Audio analysieren", "Audiodateien inhaltlich untersuchen", "audio", GroupSpeech, 50, 50),
     ];
 
     public static IReadOnlyList<ExtensionToolDescriptor> Tools { get; } =

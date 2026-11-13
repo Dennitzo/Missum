@@ -79,6 +79,8 @@ public sealed partial class MicrophoneTranscriptionService(
     private Func<SpeechSegmentPlaybackUpdate, Task>? _playbackProgress;
     private int _activePlaybackSegmentIndex = -1;
     private IReadOnlyList<int> _activePlaybackSegmentIndexes = [];
+    private long _speechPlaybackEventSequence;
+    private bool _speechBuffering;
     private bool _active;
     private bool _starting;
     private bool _stopping;
@@ -605,6 +607,7 @@ public sealed partial class MicrophoneTranscriptionService(
             {
                 _playbackProgress = progress;
                 _activePlaybackSegmentIndex = -1;
+                _speechPlaybackEventSequence = 0;
                 UpdateSpeechPauseStatus();
             }
             RaiseChanged();
@@ -612,17 +615,14 @@ public sealed partial class MicrophoneTranscriptionService(
             await WaitForSpeechResumeAsync(linked.Token).ConfigureAwait(false);
 
             var playbackBatches = SpeechSourceSegmentation.CreatePlaybackBatches(playable);
-            var firstBatch = playbackBatches[0];
-            var firstSegment = firstBatch.SegmentIndexes.Count > 0
-                ? firstBatch.SegmentIndexes[0]
-                : 0;
-            await NotifyPlaybackProgressAsync(
-                progress,
-                new(
-                    firstSegment,
+            SpeechSegmentPlaybackUpdate initialProgress;
+            lock (_playbackGate)
+            {
+                initialProgress = new(-1,
                     _speechPause.IsPaused ? SpeechPlaybackState.Paused : SpeechPlaybackState.Buffering,
-                    speechProvider,
-                    firstBatch.SegmentIndexes)).ConfigureAwait(false);
+                    EventSequence: ++_speechPlaybackEventSequence);
+            }
+            await NotifyPlaybackProgressAsync(progress, initialProgress).ConfigureAwait(false);
 
             speechProvider = await RunSpeechPlaybackAsync(
                 client,
@@ -648,6 +648,7 @@ public sealed partial class MicrophoneTranscriptionService(
                 _playbackProgress = null;
                 _activePlaybackSegmentIndex = -1;
                 _activePlaybackSegmentIndexes = [];
+                _speechBuffering = false;
             }
             DeactivateMediaTransportControls();
             if (ReferenceEquals(_playbackCancellation, playbackCancellation))
@@ -694,13 +695,15 @@ public sealed partial class MicrophoneTranscriptionService(
             {
                 if (_speechPause.IsPaused)
                 {
-                    _activeOutput?.Play();
+                    if (!_speechBuffering) _activeOutput?.Play();
                     _speechPause.Toggle();
                     playbackUpdate = new(
                         _activePlaybackSegmentIndex,
-                        _activeOutput is null ? SpeechPlaybackState.Buffering : SpeechPlaybackState.Playing,
+                        _activeOutput is null || _speechBuffering || _activePlaybackSegmentIndex < 0
+                            ? SpeechPlaybackState.Buffering : SpeechPlaybackState.Playing,
                         _speechProvider,
-                        _activePlaybackSegmentIndexes);
+                        _activePlaybackSegmentIndexes,
+                        ++_speechPlaybackEventSequence);
                 }
                 else
                 {
@@ -710,7 +713,8 @@ public sealed partial class MicrophoneTranscriptionService(
                         _activePlaybackSegmentIndex,
                         SpeechPlaybackState.Paused,
                         _speechProvider,
-                        _activePlaybackSegmentIndexes);
+                        _activePlaybackSegmentIndexes,
+                        ++_speechPlaybackEventSequence);
                 }
             }
             catch (ObjectDisposedException)
@@ -1270,8 +1274,6 @@ public sealed partial class MicrophoneTranscriptionService(
         }
         RaiseChanged();
 
-        var activeSegment = -1;
-        var automaticallyPaused = false;
         try
         {
             lock (_playbackGate)
@@ -1285,53 +1287,17 @@ public sealed partial class MicrophoneTranscriptionService(
                 var outputPosition = output.GetPosition();
                 var position = Math.Min(outputPosition, Interlocked.Read(ref writtenBytes));
                 PreparedPlaybackBoundary? current = null;
+                bool allAppended;
                 lock (boundaryGate)
                 {
                     for (var index = boundaries.Count - 1; index >= 0; index--)
                     {
                         if (position >= boundaries[index].StartByte)
                         {
-                            current = boundaries[index];
+                            if (position < boundaries[index].EndByte) current = boundaries[index];
                             break;
                         }
                     }
-                }
-                if (current is not null && current.Part.Index != activeSegment)
-                {
-                    activeSegment = current.Part.Index;
-                    var snapshotChanged = false;
-                    SpeechPlaybackState playbackState;
-                    lock (_playbackGate)
-                    {
-                        _activePlaybackSegmentIndex = current.Part.Index;
-                        _activePlaybackSegmentIndexes = [current.Part.Index];
-                        var previousStatus = _status;
-                        UpdateSpeechPauseStatus();
-                        snapshotChanged = !string.Equals(_speechProvider, current.Provider, StringComparison.Ordinal)
-                            || !string.Equals(_status, previousStatus, StringComparison.Ordinal);
-                        _speechProvider = current.Provider;
-                        playbackState = _speechPause.IsPaused ? SpeechPlaybackState.Paused : SpeechPlaybackState.Playing;
-                    }
-                    // A sentence boundary is carried by speech.progress. Re-emitting
-                    // the otherwise unchanged microphone snapshot here caused the
-                    // WebView to rebuild every message between the old and new
-                    // highlight and made the marker visibly jump.
-                    if (snapshotChanged)
-                    {
-                        RaiseChanged();
-                    }
-                    await NotifyPlaybackProgressAsync(
-                        progress,
-                        new(
-                            current.Part.Index,
-                            playbackState,
-                            current.Provider,
-                            [current.Part.Index])).ConfigureAwait(false);
-                }
-
-                bool allAppended;
-                lock (boundaryGate)
-                {
                     allAppended = Volatile.Read(ref appendCompleted)
                         && appendedCount == expectedBatches.Length;
                 }
@@ -1346,26 +1312,47 @@ public sealed partial class MicrophoneTranscriptionService(
                     break;
                 }
 
+                SpeechSegmentPlaybackUpdate? playbackUpdate = null;
+                var snapshotChanged = false;
                 lock (_playbackGate)
                 {
                     // The same lock guards user pause and refill. An automatic
                     // buffer recovery must never restart an explicitly paused session.
                     if (!allAppended
                         && !_speechPause.IsPaused
-                        && !automaticallyPaused
+                        && !_speechBuffering
                         && buffer.BufferedDuration < TimeSpan.FromMilliseconds(160))
                     {
                         output.Pause();
-                        automaticallyPaused = true;
+                        _speechBuffering = true;
                     }
-                    else if (automaticallyPaused
+                    else if (_speechBuffering
                         && !_speechPause.IsPaused
                         && (buffer.BufferedDuration >= TimeSpan.FromMilliseconds(500) || allAppended))
                     {
                         output.Play();
-                        automaticallyPaused = false;
+                        _speechBuffering = false;
+                    }
+
+                    var segment = _speechBuffering ? null : current;
+                    var segmentIndex = segment?.Part.Index ?? -1;
+                    if (segmentIndex != _activePlaybackSegmentIndex)
+                    {
+                        _activePlaybackSegmentIndex = segmentIndex;
+                        _activePlaybackSegmentIndexes = segmentIndex < 0 ? [] : [segmentIndex];
+                        if (segment is not null)
+                        {
+                            snapshotChanged = !string.Equals(_speechProvider, segment.Provider, StringComparison.Ordinal);
+                            _speechProvider = segment.Provider;
+                        }
+                        var state = _speechPause.IsPaused ? SpeechPlaybackState.Paused
+                            : segment is null ? SpeechPlaybackState.Buffering : SpeechPlaybackState.Playing;
+                        playbackUpdate = new(segmentIndex, state, _speechProvider, _activePlaybackSegmentIndexes,
+                            ++_speechPlaybackEventSequence);
                     }
                 }
+                if (snapshotChanged) RaiseChanged();
+                if (playbackUpdate is not null) await NotifyPlaybackProgressAsync(progress, playbackUpdate).ConfigureAwait(false);
 
                 await Task.WhenAny(
                     stopped.Task,
@@ -1386,7 +1373,9 @@ public sealed partial class MicrophoneTranscriptionService(
                 if (ReferenceEquals(_activeOutput, output))
                 {
                     _activeOutput = null;
+                    _activePlaybackSegmentIndex = -1;
                     _activePlaybackSegmentIndexes = [];
+                    _speechBuffering = false;
                     UpdateSpeechPauseStatus();
                 }
             }

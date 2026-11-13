@@ -336,7 +336,15 @@ public sealed partial class MissumAiAssistantService
     private static PromptTriggerMatch? ContinuationTrigger(ChatSession session, ChatMessage assistant, MissumAiRunRecord? run)
     {
         var extension = run?.ExtensionActionId ?? session.PersistentExtensionActionId;
-        if (!string.IsNullOrWhiteSpace(extension)) return AssistantCoordinator.CreateExtensionMatch(extension, "Fortsetzen");
+        if (!string.IsNullOrWhiteSpace(extension))
+        {
+            var match = AssistantCoordinator.CreateExtensionMatch(extension, "Fortsetzen");
+            var coding = run?.Action == PromptTriggerAction.Coding
+                || (run?.Action is null && session.ChatMode == ChatMode.Coding);
+            return coding && match.Trigger.Action == PromptTriggerAction.Extension
+                ? match with { Trigger = match.Trigger with { Action = PromptTriggerAction.Coding } }
+                : match;
+        }
         var action = run?.Action ?? (session.ChatMode == ChatMode.Coding ? PromptTriggerAction.Coding
             : assistant.ContentProfile == MessageContentProfile.Audiobook ? PromptTriggerAction.Audiobook : (PromptTriggerAction?)null);
         if (action is null) return null;

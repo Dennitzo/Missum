@@ -1,0 +1,13 @@
+[
+  {
+    "actionId": "com.missum.blender/edit",
+    "extensionId": "com.missum.blender",
+    "connected": false,
+    "sceneName": null,
+    "projectName": null,
+    "detail": "Die Sichtpr\u00FCfung ben\u00F6tigt die verbundene Blender-Szene.",
+    "updatedAt": "2026-11-10T19:07:32.8294515\u002B01:00",
+    "visionState": "pending",
+    "visionDetail": "Visuelle Pr\u00FCfung ausstehend: blender-viewport-20261110-190413-842-0b8040e2.png"
+  }
+]

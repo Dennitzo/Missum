@@ -264,7 +264,13 @@ try {
     }
     $messageFooter = Get-Content -LiteralPath $messageFooterPath -Raw | ConvertFrom-Json
     if ($messageFooter.processId -ne $process.Id) { throw 'Streaming message footer evidence belongs to another process.' }
-    foreach ($messageFooterCheck in @('passed','streamingFooterVisible','buttonsRetainedAcrossDeltas','copyUsesLatestVisibleText','manualReadDuringStreaming','pauseResumeStop','automaticPlaybackControlled','queueControlIdsWithoutHighlights','stoppedPlaybackEventsIgnored','otherClientIgnored','controlsBelongToCorrectMessage','aiRunRemainsActive')) {
+    foreach ($messageFooterCheck in @(
+        'passed', 'streamingFooterVisible', 'buttonsRetainedAcrossDeltas', 'copyUsesLatestVisibleText',
+        'manualReadDuringStreaming', 'pauseResumeStop', 'automaticPlaybackControlled', 'queueControlIdsWithoutHighlights',
+        'stoppedPlaybackEventsIgnored', 'otherClientIgnored', 'controlsBelongToCorrectMessage', 'aiRunRemainsActive',
+        'sentenceHighlightFollowsPlayback', 'sentenceHighlightUsesAccent', 'sentenceHighlightStreamsAndVirtualizes',
+        'inactiveSpeechClearsHighlight', 'narrationHighlightScoped'
+    )) {
         if ($messageFooter.$messageFooterCheck -ne $true) { throw "Native message footer check failed: $messageFooterCheck" }
     }
     Copy-Item -LiteralPath $messageFooterPath -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-message-footer-streaming-validation.json')) -Force
@@ -273,7 +279,7 @@ try {
         throw 'Native streaming message footer preview is missing.'
     }
     Copy-Item -LiteralPath $messageFooterPreview -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-message-footer-streaming-preview.png')) -Force
-    Write-Host 'Native streaming copy/read footer, automatic audio owner and pause/resume/stop controls verified.'
+    Write-Host 'Native streaming copy/read footer, pause/resume/stop controls and accent-colored sentence highlighting verified.'
     $looseMathValidationPath = Join-Path $smokeData 'native-loose-math-validation.json'
     if (-not (Test-Path -LiteralPath $looseMathValidationPath -PathType Leaf) -or
         (Get-Item -LiteralPath $looseMathValidationPath).LastWriteTimeUtc -lt $startedAt.AddSeconds(-1)) {

@@ -23,7 +23,10 @@ public sealed record SpeechSourceUnit(
     int Start,
     int Length,
     string Text,
-    string SpeechText);
+    string SpeechText,
+    int? SentenceStart = null,
+    int? SentenceLength = null,
+    string? SentenceSource = null);
 
 public sealed record PreparedSpeechSegment(
     string Id,
@@ -44,7 +47,8 @@ public sealed record SpeechPlaybackProgress(
     IReadOnlyList<SpeechSourceUnit>? SourceUnits = null,
     Guid? ControlMessageId = null,
     Guid? ControlPlaybackId = null,
-    string? OwnerClientId = null);
+    string? OwnerClientId = null,
+    string? SourceStepId = null);
 
 public sealed record SpeechStartAnchor(string Kind, int BlockIndex);
 
@@ -52,7 +56,8 @@ internal sealed record SpeechSegmentPlaybackUpdate(
     int SegmentIndex,
     SpeechPlaybackState State,
     string? Provider = null,
-    IReadOnlyList<int>? SegmentIndexes = null);
+    IReadOnlyList<int>? SegmentIndexes = null,
+    long EventSequence = 0);
 
 internal sealed record SpeechPlaybackBatchPlan(
     string Id,
@@ -66,6 +71,7 @@ internal static class SpeechPlaybackProgressBridge
         progress.SessionId,
         progress.SourceMessageId,
         progress.SourceKind,
+        progress.SourceStepId,
         progress.ControlMessageId,
         progress.ControlPlaybackId,
         progress.OwnerClientId,
@@ -85,6 +91,9 @@ internal static class SpeechPlaybackProgressBridge
             unit.Start,
             unit.Length,
             unit.Text,
+            unit.SentenceStart,
+            unit.SentenceLength,
+            unit.SentenceSource,
         }),
     };
 }
@@ -95,7 +104,8 @@ internal static partial class SpeechSourceSegmentation
 
     public static IReadOnlyList<SpeechSourceUnit> CreateUnits(string? markdown)
     {
-        var source = (markdown ?? string.Empty).ReplaceLineEndings("\n");
+        var original = markdown ?? string.Empty;
+        var source = original.ReplaceLineEndings("\n");
         if (string.IsNullOrWhiteSpace(source))
         {
             return [];
@@ -106,6 +116,7 @@ internal static partial class SpeechSourceSegmentation
         var blockCounts = new Dictionary<string, int>(StringComparer.Ordinal);
         var blockNumber = 0;
         var unitNumber = 0;
+        var originalOffsets = OriginalOffsets(original, source);
 
         void AddBlock(
             string kind,
@@ -135,16 +146,32 @@ internal static partial class SpeechSourceSegmentation
             var blockIndex = blockCounts.GetValueOrDefault(kind);
             blockCounts[kind] = blockIndex + 1;
             var blockId = $"b{++blockNumber:0000}";
-            var spokenParts = atomic ? [spoken] : SplitForPlaybackParts(spoken);
+            string[] spokenSentences = atomic ? [spoken] : SentenceBounds(spoken)
+                .Select(bounds => spoken[bounds.Start..bounds.End]).ToArray();
+            var spokenParts = new List<(string Text, int SentenceIndex)>();
+            for (var sentenceIndex = 0; sentenceIndex < spokenSentences.Length; sentenceIndex++)
+            {
+                if (atomic)
+                {
+                    spokenParts.Add((spokenSentences[sentenceIndex], sentenceIndex));
+                }
+                else
+                {
+                    var parts = new List<string>();
+                    AddLongPart(spokenSentences[sentenceIndex], parts);
+                    spokenParts.AddRange(parts.Select(text => (text, sentenceIndex)));
+                }
+            }
             var visibleParts = atomic ? [visible] : SplitForPlayback(visible);
             if (spokenParts.Count == 0)
             {
-                spokenParts = [spoken];
+                spokenParts = [(spoken, 0)];
             }
             if (visibleParts.Count == 0)
             {
                 visibleParts = [visible];
             }
+            var ranges = kind == "code" ? [] : SourceSentenceRanges(raw, atomic);
 
             for (var partIndex = 0; partIndex < spokenParts.Count; partIndex++)
             {
@@ -153,6 +180,19 @@ internal static partial class SpeechSourceSegmentation
                     : partIndex == 0
                         ? visible
                         : visibleParts[^1];
+                var rangeIndex = ranges.Count == 1 ? 0 : spokenParts[partIndex].SentenceIndex;
+                int? sentenceStart = null;
+                int? sentenceLength = null;
+                string? sentenceSource = null;
+                if ((ranges.Count == 1 || ranges.Count == spokenSentences.Length) && rangeIndex < ranges.Count)
+                {
+                    var (rangeStart, rangeEnd) = ranges[rangeIndex];
+                    var rawStart = start + rangeStart;
+                    var rawEnd = start + rangeEnd;
+                    sentenceStart = originalOffsets?[rawStart] ?? rawStart;
+                    sentenceLength = (originalOffsets?[rawEnd] ?? rawEnd) - sentenceStart;
+                    sentenceSource = original.Substring(sentenceStart.Value, sentenceLength.Value);
+                }
                 units.Add(new(
                     $"u{++unitNumber:0000}",
                     blockId,
@@ -162,7 +202,10 @@ internal static partial class SpeechSourceSegmentation
                     start,
                     length,
                     matchingVisible,
-                    spokenParts[partIndex]));
+                    spokenParts[partIndex].Text,
+                    sentenceStart,
+                    sentenceLength,
+                    sentenceSource));
             }
         }
 
@@ -480,23 +523,31 @@ internal static partial class SpeechSourceSegmentation
         string text,
         List<string> sentences)
     {
+        foreach (var (start, end) in SentenceBounds(text))
+        {
+            AddLongPart(text[start..end], sentences);
+        }
+    }
+
+    private static IEnumerable<(int Start, int End)> SentenceBounds(string text)
+    {
         var start = 0;
         for (var index = 0; index < text.Length; index++)
         {
-            if (text[index] is not ('.' or '!' or '?')) continue;
+            if (text[index] is not ('.' or '!' or '?' or '。' or '！' or '？')) continue;
             if (Missum.Ai.Contracts.GermanSpeechAbbreviations.IsAbbreviationPeriod(text, index)) continue;
             var end = index + 1;
-            while (end < text.Length && text[end] is '.' or '!' or '?') end++;
+            while (end < text.Length && text[end] is '.' or '!' or '?' or '。' or '！' or '？') end++;
             while (end < text.Length && IsSpeechQuotation(text[end])) end++;
-            if (end < text.Length && !char.IsWhiteSpace(text[end])) continue;
-            AddLongPart(text[start..end], sentences);
+            if (end < text.Length && !char.IsWhiteSpace(text[end]) && text[index] is not ('。' or '！' or '？')) continue;
+            yield return (start, end);
             start = end;
             while (start < text.Length && char.IsWhiteSpace(text[start])) start++;
             index = start - 1;
         }
         if (start < text.Length)
         {
-            AddLongPart(text[start..], sentences);
+            yield return (start, text.Length);
         }
     }
 
@@ -533,14 +584,19 @@ internal static partial class SpeechSourceSegmentation
     private static bool IsStructuralStart(IReadOnlyList<MarkdownLine> lines, int index)
     {
         var value = lines[index].Text;
+        return StartsBlock(value)
+            || index + 1 < lines.Count && IsTableRow(value) && IsTableSeparator(lines[index + 1].Text);
+    }
+
+    internal static bool StartsBlock(string value)
+    {
         var trimmed = value.Trim();
         return trimmed.StartsWith("```", StringComparison.Ordinal)
             || StartsDisplayMath(trimmed)
             || HeadingRegex().IsMatch(value)
             || UnorderedListRegex().IsMatch(value)
             || OrderedListRegex().IsMatch(value)
-            || trimmed.StartsWith('>')
-            || index + 1 < lines.Count && IsTableRow(value) && IsTableSeparator(lines[index + 1].Text);
+            || trimmed.StartsWith('>');
     }
 
     private static bool StartsDisplayMath(string value) =>
@@ -569,6 +625,83 @@ internal static partial class SpeechSourceSegmentation
         text = InlineCodeRegex().Replace(text, "$1");
         text = MarkdownMarkersRegex().Replace(text, string.Empty);
         return WebUtility.HtmlDecode(text);
+    }
+
+    private static List<(int Start, int End)> SourceSentenceRanges(string markdown, bool atomic)
+    {
+        if (atomic) return [(0, markdown.Length)];
+
+        var hidden = new bool[markdown.Length];
+        HideMarkup(ImageRegex());
+        HideMarkup(LinkRegex());
+        HideMarkup(InlineCodeRegex());
+        foreach (Match marker in MarkdownMarkersRegex().Matches(markdown))
+        {
+            Array.Fill(hidden, true, marker.Index, marker.Length);
+        }
+
+        var text = new StringBuilder(markdown.Length);
+        var positions = new List<(int Start, int End)>(markdown.Length);
+        var entity = HtmlEntityRegex().Match(markdown);
+        for (var index = 0; index < markdown.Length; index++)
+        {
+            if (entity.Success && entity.Index == index)
+            {
+                var end = index + entity.Length;
+                if (!hidden[index])
+                {
+                    var decoded = WebUtility.HtmlDecode(entity.Value);
+                    text.Append(decoded);
+                    for (var part = 0; part < decoded.Length; part++) positions.Add((index, end));
+                }
+                index = end - 1;
+                entity = entity.NextMatch();
+            }
+            else if (!hidden[index])
+            {
+                text.Append(markdown[index]);
+                positions.Add((index, index + 1));
+            }
+        }
+
+        var visible = text.ToString();
+        var ranges = new List<(int Start, int End)>();
+        foreach (var (start, end) in SentenceBounds(visible))
+        {
+            var first = start;
+            var last = end - 1;
+            while (first <= last && char.IsWhiteSpace(visible[first])) first++;
+            while (last >= first && char.IsWhiteSpace(visible[last])) last--;
+            if (first <= last) ranges.Add((positions[first].Start, positions[last].End));
+        }
+        return ranges;
+
+        void HideMarkup(Regex regex)
+        {
+            foreach (Match match in regex.Matches(markdown))
+            {
+                var label = match.Groups[1];
+                Array.Fill(hidden, true, match.Index, label.Index - match.Index);
+                var labelEnd = label.Index + label.Length;
+                Array.Fill(hidden, true, labelEnd, match.Index + match.Length - labelEnd);
+            }
+        }
+    }
+
+    private static int[]? OriginalOffsets(string original, string normalized)
+    {
+        if (original.Length == normalized.Length) return null;
+
+        var offsets = new int[normalized.Length + 1];
+        var originalIndex = 0;
+        for (var index = 0; index < normalized.Length; index++)
+        {
+            offsets[index] = originalIndex;
+            originalIndex += original[originalIndex] == '\r'
+                && originalIndex + 1 < original.Length && original[originalIndex + 1] == '\n' ? 2 : 1;
+        }
+        offsets[^1] = originalIndex;
+        return offsets;
     }
 
     private static string NormalizeVisibleText(string value) =>
@@ -630,6 +763,9 @@ internal static partial class SpeechSourceSegmentation
 
     [GeneratedRegex(@"`([^`]+)`", RegexOptions.CultureInvariant)]
     private static partial Regex InlineCodeRegex();
+
+    [GeneratedRegex(@"&(?:#[0-9]+|#[xX][0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);", RegexOptions.CultureInvariant)]
+    private static partial Regex HtmlEntityRegex();
 
     [GeneratedRegex(@"^[ \t]*(?:#{1,6}|[-*\u2022]|\d+[.)]|>)[ \t]+|[*_~]", RegexOptions.Multiline | RegexOptions.CultureInvariant)]
     private static partial Regex MarkdownMarkersRegex();

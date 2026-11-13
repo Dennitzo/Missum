@@ -13,6 +13,7 @@ public sealed class NativeMathParagraph : UserControl
     private readonly List<(NativeStreamingMarkdown.MathInlineSpec Spec, Inline Inline, Run? Run)> _runs = [];
     private double _renderedFontSize;
     internal InlineCollection TrailingInlines => _paragraph.Inlines;
+    internal IList<TextHighlighter> TextHighlighters => _text.TextHighlighters;
     // InlineUIContainer children may not exist in the visual tree until the
     // first arrange. Async readiness must still see their logical workers.
     internal IEnumerable<NativeFormulaView> FormulaViews => _runs.SelectMany(run => Formulas(run.Inline));

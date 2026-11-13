@@ -92,6 +92,11 @@ public sealed partial class NativeAssistantPage
             await VerifyContextLimitSmokeAsync();
             return 0;
         }
+        if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_RESPONSIVENESS") == "speech-read-from")
+        {
+            await VerifyReadFromMenuSmokeAsync(_snapshot.Clone());
+            return 0;
+        }
         if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_RESPONSIVENESS") == "scrolling")
         {
             var scrollingSnapshot = _snapshot.Clone();
@@ -802,8 +807,9 @@ public sealed partial class NativeAssistantPage
             CaptionChip.Visibility = Microsoft.UI.Xaml.Visibility.Visible;
             ComposerSurface.Width = 460;
             ComposerSurface.UpdateLayout();
-            if (ComposerChipsScroll.ActualWidth <= 0 || ComposerChipsScroll.ScrollableWidth <= 0)
-                throw new InvalidOperationException("Multiple footer chips cannot scroll at narrow widths.");
+            if (Grid.GetRow(ComposerChipsScroll) != 0 || ComposerChipsScroll.ActualWidth < 250
+                || SelectedToolChip.ActualWidth < 100)
+                throw new InvalidOperationException("Footer chips do not get a visible row at narrow widths.");
             var send = SendButton.TransformToVisual(ComposerSurface).TransformPoint(new Windows.Foundation.Point());
             if (send.X + SendButton.ActualWidth > ComposerSurface.ActualWidth)
                 throw new InvalidOperationException("Footer chips pushed the send button out of the composer.");

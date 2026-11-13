@@ -160,19 +160,19 @@ public sealed partial class MissumAiAssistantService(
         PromptTriggerMatch? trigger,
         Func<MissumAiAssistantUpdate, Task> update,
         CancellationToken cancellationToken = default) =>
-        SendCoreAsync(sessionId, prompt, trigger, update, null, cancellationToken);
+        SendCoreAsync(sessionId, prompt, trigger, update, null, null, cancellationToken);
 
     public Task<ChatMessage> SendAsync(Guid sessionId, string prompt, PromptTriggerMatch? trigger,
         Func<MissumAiAssistantUpdate, Task> update, ChatSession? submittedSession,
-        CancellationToken cancellationToken = default) =>
-        SendCoreAsync(sessionId, prompt, trigger, update, submittedSession, cancellationToken);
+        IReadOnlySet<Guid>? submittedAttachmentIds = null, CancellationToken cancellationToken = default) =>
+        SendCoreAsync(sessionId, prompt, trigger, update, submittedSession, submittedAttachmentIds, cancellationToken);
 
     private async Task<ChatMessage> SendCoreAsync(
         Guid sessionId,
         string prompt,
         PromptTriggerMatch? trigger,
         Func<MissumAiAssistantUpdate, Task> update,
-        ChatSession? submittedSession, CancellationToken cancellationToken)
+        ChatSession? submittedSession, IReadOnlySet<Guid>? submittedAttachmentIds, CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         if (trigger?.Trigger.Action == PromptTriggerAction.TextToSpeech)
@@ -202,6 +202,11 @@ public sealed partial class MissumAiAssistantService(
             var promptFiles = new PromptAttachmentService(attachments, artifacts, blobs);
             var promptDocuments = await promptFiles.PendingDocumentsAsync(sessionId,
                 await documents.ListAsync(sessionId, _activeCancellation.Token).ConfigureAwait(false), _activeCancellation.Token).ConfigureAwait(false);
+            if (submittedAttachmentIds is not null)
+            {
+                sessionAttachments = sessionAttachments.Where(file => submittedAttachmentIds.Contains(file.Id)).ToArray();
+                promptDocuments = promptDocuments.Where(document => submittedAttachmentIds.Contains(document.Id)).ToArray();
+            }
             var contentProfile = action == PromptTriggerAction.Audiobook
                 ? MessageContentProfile.Audiobook
                 : MessageContentProfile.General;
@@ -710,6 +715,17 @@ public sealed partial class MissumAiAssistantService(
             startAnchor, expectedMessageUpdatedAt, null, cancellationToken, messageExcerpt);
     }
 
+    internal Task SpeakVisibleMessageAsync(Guid sessionId, Guid messageId, string text, int sourceOffset, string? sourceStepId,
+        Func<MissumAiSpeechUpdate, Task> update, Func<SpeechPlaybackProgress, Task> progress,
+        CancellationToken cancellationToken)
+    {
+        CancelAutomaticSpeech();
+        return SpeakCoreAsync(sessionId, text, messageId, update,
+            sourceStepId is null ? progress : playback => progress(playback with { SourceStepId = sourceStepId }), null, null,
+            new(text, "AI-Nachricht", null, messageId, MessageContentProfile.General, sourceOffset),
+            cancellationToken, resetPauseForDirectSource: true);
+    }
+
     private async Task SpeakCoreAsync(
         Guid sessionId,
         string? explicitText,
@@ -761,6 +777,7 @@ public sealed partial class MissumAiAssistantService(
             if (allSourceUnits.Count == 0)
             {
                 allSourceUnits = SpeechSourceSegmentation.CreateUnits(cleanedSource);
+                source = source with { SourceOffset = null };
             }
             var sourceUnits = SelectSpeechUnitsFromAnchor(allSourceUnits, startAnchor);
             if (startAnchor is not null)
@@ -785,6 +802,8 @@ public sealed partial class MissumAiAssistantService(
                 throw new InvalidOperationException("Es konnten keine vorlesbaren Sprachsegmente erstellt werden.");
             }
             var speechPlanHash = HashSpeechPlan(speechSegments);
+            var progressUnits = progress is null ? null : MapSpeechProgressUnits(source, sourceUnits);
+            var progressUnitsById = progressUnits?.ToDictionary(static unit => unit.Id, StringComparer.Ordinal);
 
             await update(new(
                 true,
@@ -804,14 +823,23 @@ public sealed partial class MissumAiAssistantService(
                     speechSegments.Count,
                     [],
                     SpeechPlaybackState.Buffering,
-                    source.MessageId is null ? null : sourceUnits)).ConfigureAwait(false);
+                    progressUnits)).ConfigureAwait(false);
             }
             string? speechProvider;
             var playbackStarted = 0;
+            var playbackProgressGate = new object();
+            long lastSegmentEvent = 0;
             speechProvider = await microphone.PlaySegmentsAsync(
                     speechSegments,
                     progress: async playback =>
                     {
+                        long eventSequence;
+                        lock (playbackProgressGate)
+                        {
+                            if (playback.EventSequence <= lastSegmentEvent) return;
+                            lastSegmentEvent = playback.EventSequence;
+                            eventSequence = Interlocked.Increment(ref playbackEventSequence);
+                        }
                         if (playback.State == SpeechPlaybackState.Playing
                             && Interlocked.CompareExchange(ref playbackStarted, 1, 0) == 0)
                         {
@@ -831,26 +859,34 @@ public sealed partial class MissumAiAssistantService(
                             throw new InvalidOperationException(
                                 "Die sichtbare Vorlesemarkierung hat den vorbereiteten Sprachplan verändert.");
                         }
-                        var activeIndex = Math.Clamp(playback.SegmentIndex, 0, speechSegments.Count - 1);
+                        var activeIndex = playback.SegmentIndex;
                         // The WebView highlights exactly one visible sentence. A
                         // synthesized technical split may continue to reference
                         // that same sentence, but it must never activate multiple
                         // source ranges at once.
-                        var sourceUnitId = speechSegments[activeIndex].SourceUnitIds
-                            .FirstOrDefault(static id => !string.IsNullOrWhiteSpace(id));
+                        var segmentSourceIds = activeIndex >= 0 && activeIndex < speechSegments.Count
+                            ? speechSegments[activeIndex].SourceUnitIds : [];
+                        var sourceUnitId = segmentSourceIds.Count > 0 ? segmentSourceIds[0] : null;
                         IReadOnlyList<string> sourceUnitIds = sourceUnitId is null
                             ? []
                             : [sourceUnitId];
+                        IReadOnlyList<SpeechSourceUnit>? activeUnits = null;
+                        if (playback.State == SpeechPlaybackState.Playing && sourceUnitId is not null
+                            && progressUnitsById?.GetValueOrDefault(sourceUnitId) is { SentenceStart: not null } activeUnit)
+                        {
+                            activeUnits = [activeUnit];
+                        }
                         await progress(new(
                             sessionId,
                             source.MessageId,
                             source.Kind,
                             playbackId,
-                            Interlocked.Increment(ref playbackEventSequence),
+                            eventSequence,
                             activeIndex,
                             speechSegments.Count,
                             sourceUnitIds,
-                            playback.State)).ConfigureAwait(false);
+                            playback.State,
+                            activeUnits)).ConfigureAwait(false);
                     },
                     profile: SpeechContentProfile.Prepared,
                     cancellationToken: speechCancellation.Token).ConfigureAwait(false);
@@ -922,6 +958,26 @@ public sealed partial class MissumAiAssistantService(
         }
     }
 
+    private static SpeechSourceUnit[]? MapSpeechProgressUnits(
+        SpeechSource source, IReadOnlyList<SpeechSourceUnit> units)
+    {
+        if (source.MessageId is null || source.SourceOffset is not { } offset) return null;
+
+        var rawUnits = source.SourceMarkdown is null ? units : SpeechSourceSegmentation.CreateUnits(source.SourceMarkdown);
+        if (rawUnits.Count != 1 && rawUnits.Count != units.Count) return null;
+
+        return units.Select((unit, index) =>
+        {
+            var raw = rawUnits[rawUnits.Count == 1 ? 0 : index];
+            return unit with
+            {
+                SentenceStart = raw.SentenceStart + offset,
+                SentenceLength = raw.SentenceLength,
+                SentenceSource = raw.SentenceSource,
+            };
+        }).ToArray();
+    }
+
     private async Task<SpeechSource> ResolveSpeechSourceAsync(
         Guid sessionId,
         string? explicitText,
@@ -952,14 +1008,24 @@ public sealed partial class MissumAiAssistantService(
                         ?? throw new InvalidOperationException("Der Nachrichtenstand für den Vorlesestart fehlt."),
                     startAnchor);
             }
+            int? sourceOffset = 0;
             if (messageExcerpt is not null)
+            {
                 ValidateSpeechExcerpt(selected, sessionId, expectedMessageUpdatedAt, messageExcerpt);
+                sourceOffset = SpeechExcerptOffset(selected.Content, messageExcerpt);
+                if (sourceOffset is { } offset
+                    && !selected.Content.AsSpan(offset).StartsWith(messageExcerpt, StringComparison.Ordinal))
+                {
+                    messageExcerpt = selected.Content[offset..];
+                }
+            }
             return new(
                 messageExcerpt ?? selected.Content,
                 selected.Role == ChatRole.User ? "Nutzernachricht" : "AI-Nachricht",
                 null,
                 selected.Id,
-                selected.ContentProfile);
+                selected.ContentProfile,
+                sourceOffset);
         }
 
         var sessionDocuments = await documents.ListAsync(sessionId, cancellationToken).ConfigureAwait(false);
@@ -1046,6 +1112,22 @@ public sealed partial class MissumAiAssistantService(
         if (string.IsNullOrWhiteSpace(excerpt)) throw new InvalidOperationException("Ab dieser Stelle ist kein vorlesbarer Text vorhanden.");
     }
 
+    internal static int? SpeechExcerptOffset(string source, string excerpt)
+    {
+        if (source.EndsWith(excerpt, StringComparison.Ordinal)) return source.Length - excerpt.Length;
+
+        var normalizedExcerpt = excerpt.ReplaceLineEndings("\n");
+        if (!source.ReplaceLineEndings("\n").EndsWith(normalizedExcerpt, StringComparison.Ordinal)) return null;
+
+        var start = source.Length;
+        for (var remaining = normalizedExcerpt.Length; remaining > 0; remaining--)
+        {
+            start--;
+            if (start > 0 && source[start] == '\n' && source[start - 1] == '\r') start--;
+        }
+        return start;
+    }
+
     internal static bool IsReadableSpeechMessage(ChatMessage message) =>
         message.Role is (ChatRole.Assistant or ChatRole.User)
         && (message.Status is (MessageStatus.Completed
@@ -1067,7 +1149,7 @@ public sealed partial class MissumAiAssistantService(
         if (saved.StartsWith(visible, StringComparison.Ordinal)) return stored;
         if (!visible.StartsWith(saved, StringComparison.Ordinal))
             throw new InvalidOperationException("Der sichtbare Antworttext passt nicht mehr zum gespeicherten Nachrichtenstand. Bitte erneut vorlesen.");
-        return stored with { Content = visible };
+        return stored with { Content = visibleText };
     }
 
     internal static IReadOnlyList<SpeechSourceUnit> SelectSpeechUnitsFromAnchor(
@@ -1229,11 +1311,15 @@ public sealed partial class MissumAiAssistantService(
             var ownerSession = await GetExecutionSessionAsync(assistant.SessionId, cancellationToken).ConfigureAwait(false);
             if (ownerSession?.ChatMode == ChatMode.ClaudeScience && !string.IsNullOrWhiteSpace(ownerSession.CodingWorkspacePath))
                 await CodingWorkspaceGit.EnsureRepositoryAsync(ownerSession.CodingWorkspacePath, cancellationToken).ConfigureAwait(false);
+            var selectedActionId = trigger?.Trigger.ExtensionActionId;
             var attempt = new MissumAiRunRecord(
                 Guid.NewGuid(), assistant.SessionId, assistant.Id, action, idempotencyKey, null, 0, "queued",
                 null, null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow,
                 WorkspacePath: UsesCodingAgent(action) ? _activeCodingWorkspace
-                    : (await GetExecutionSessionAsync(assistant.SessionId, cancellationToken).ConfigureAwait(false))?.CodingWorkspacePath);
+                    : (await GetExecutionSessionAsync(assistant.SessionId, cancellationToken).ConfigureAwait(false))?.CodingWorkspacePath,
+                ExtensionActionId: action == PromptTriggerAction.Coding
+                    && selectedActionId is not null && !selectedActionId.StartsWith("builtin.", StringComparison.Ordinal)
+                    ? selectedActionId : null);
             localRun = await runs.BeginAttemptAsync(attempt, cancellationToken).ConfigureAwait(false);
             await StartFileChangesAsync(localRun, assistant, resume: false, update, cancellationToken).ConfigureAwait(false);
             if (action == PromptTriggerAction.ImageGeneration)
@@ -2389,6 +2475,7 @@ public sealed partial class MissumAiAssistantService(
                             explanation: proposal.Summary,
                             eventAt: item.CreatedAt).ConfigureAwait(false);
                         var claimed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                        var precedingToolSteps = assistant.ToolSteps;
                         if (pump.Start(proposal.ProposalId, async token =>
                         {
                             try
@@ -2400,7 +2487,8 @@ public sealed partial class MissumAiAssistantService(
                                         await RecordToolStepAsync(proposal.ProposalId, proposal.Name, "running",
                                             FormatToolInputDetail(proposal) + "\n\n" + FormatProgressOutputDetail(progress),
                                             outputJson: SerializeToolProgress(progress)).ConfigureAwait(false);
-                                    }).AsTask(), evidenceStore, () => claimed.TrySetResult(), token).ConfigureAwait(false);
+                                    }).AsTask(), evidenceStore, () => claimed.TrySetResult(), token,
+                                    precedingToolSteps: precedingToolSteps).ConfigureAwait(false);
                                 await pump.PostAsync(async () =>
                                 {
                         commandProgressByStep.Remove(proposal.ProposalId, out var finalProgress);
@@ -2814,7 +2902,8 @@ public sealed partial class MissumAiAssistantService(
         CodingRunEvidenceStore? evidenceStore,
         Action executionClaimed,
         CancellationToken cancellationToken,
-        string? researchActorAgentId = null)
+        string? researchActorAgentId = null,
+        IReadOnlyList<AssistantToolStep>? precedingToolSteps = null)
     {
         var execution = await toolExecutions.GetAsync(proposal.ProposalId, cancellationToken).ConfigureAwait(false);
         if (execution is null)
@@ -2847,7 +2936,22 @@ public sealed partial class MissumAiAssistantService(
                 return rejected;
             }
             ClientToolResult result;
-            if (!IsClientToolAllowed(localRun.Action, proposal.Name, proposal.RiskClass))
+            if (proposal.Name.StartsWith("blender.", StringComparison.Ordinal)
+                && (localRun.Action != PromptTriggerAction.Coding || localRun.ExtensionActionId != "com.missum.blender/edit"
+                    || researchActorAgentId is not null))
+            {
+                result = new ClientToolResult(proposal.ProposalId, "rejected",
+                    JsonSerializer.SerializeToElement(new { failed = true }, JsonOptions),
+                    "blender.action_not_selected", "Wähle Blender für diesen Codex-Lauf aus.");
+            }
+            else if (proposal.Name == "blender.status" && !BlenderReviewHasVisionReceipt(
+                proposal.Arguments, precedingToolSteps ?? [], localRun.CreatedAt))
+            {
+                result = new ClientToolResult(proposal.ProposalId, "rejected",
+                    JsonSerializer.SerializeToElement(new { failed = true }, JsonOptions),
+                    "blender.vision_receipt_missing", "Die Sichtprüfung ist ausstehend. Werte die aktuelle Aufnahme mit media.analyze aus und übergib deren operationId und Bild-Hash.");
+            }
+            else if (!IsClientToolAllowed(localRun.Action, proposal.Name, proposal.RiskClass))
             {
                 result = new ClientToolResult(proposal.ProposalId, "rejected",
                     JsonSerializer.SerializeToElement(new { failed = true, planMode = true }, JsonOptions),
@@ -3178,10 +3282,17 @@ public sealed partial class MissumAiAssistantService(
         var extensionClientTools = ResolveExtensionClientTools(trigger);
         if (extensionClientTools is { Count: > 0 })
         {
-            originalPrompt = $"Nutze für diesen Auftrag das ausdrücklich ausgewählte Erweiterungswerkzeug "
-                + $"'{extensionClientTools[0].Name}'. Führe es aus, statt seine Wirkung nur zu beschreiben.\n\n"
-                + originalPrompt;
+            // A selected integration can unlock several tools for the same run (Blender: status,
+            // scene read, scene edit, view capture). Name all of them so the model uses them.
+            var toolNames = string.Join(", ", extensionClientTools.Select(static tool => $"'{tool.Name}'"));
+            originalPrompt = extensionClientTools.Count == 1
+                ? $"Nutze für diesen Auftrag das ausdrücklich ausgewählte Erweiterungswerkzeug {toolNames}."
+                    + " Führe es aus, statt seine Wirkung nur zu beschreiben.\n\n" + originalPrompt
+                : $"Nutze für diesen Auftrag die ausdrücklich ausgewählten Erweiterungswerkzeuge {toolNames}."
+                    + " Führe sie aus, statt ihre Wirkung nur zu beschreiben.\n\n" + originalPrompt;
         }
+        if (trigger?.Trigger.ExtensionActionId == "com.missum.blender/edit")
+            originalPrompt = BlenderWorkflowPrompt + "\n\n" + originalPrompt;
         if (action == PromptTriggerAction.DocumentCreate) originalPrompt = "Lies, bearbeite oder erstelle die angeforderten Dokumente direkt mit document.read/document.create und geeigneten Workspace-Werkzeugen. Prüfe das Ergebnis. Dokumentauftrag: " + originalPrompt;
         var audiobook = action == PromptTriggerAction.Audiobook;
         var isScienceSession = codingSession.ChatMode == ChatMode.ClaudeScience;
@@ -3236,8 +3347,9 @@ public sealed partial class MissumAiAssistantService(
                 CodingOptions: serverCapabilities.SupportsCodingSessionContext ? (codingConfiguration.Options ?? new CodingRunOptions()) with
                 {
                     WorkspacePath = Path.GetFullPath(_activeCodingWorkspace).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
-                    ContinueSessionContext = historyBeforePrompt.Count > 0,
+                    ContinueSessionContext = action != PromptTriggerAction.PlanMode && historyBeforePrompt.Count > 0,
                 } : codingConfiguration.Options,
+                ConversationProfile: action == PromptTriggerAction.PlanMode ? ConversationProfile.PlanMode : null,
                 ReasoningEffort: await ResolveRequestedReasoningAsync(client, codingModel, "coding", cancellationToken).ConfigureAwait(false),
                 DeepResearch: !isScienceSession && trigger?.DeepResearch == true,
                 WorkflowProfile: isScienceSession ? "claude-science-v1" : null,
@@ -3484,28 +3596,30 @@ public sealed partial class MissumAiAssistantService(
         var actionId = trigger?.Trigger.ExtensionActionId;
         if (string.IsNullOrWhiteSpace(actionId)
             || actionId.StartsWith("builtin.", StringComparison.Ordinal)
-            || extensionActions is null
-            || !extensionActions.TryGetTool(actionId, out var descriptor)
-            || descriptor is null)
+            || extensionActions is null)
             return null;
-        var risk = descriptor.RiskClass switch
+        // One selected action can unlock several model tools. Integrations that only declare a
+        // single tool keep working unchanged, because TryGetTools returns exactly that one entry.
+        if (extensionActions.TryGetTools(actionId, out var registered) && registered is { Count: > 0 } tools)
+            return [.. tools.Select(ToClientToolDescriptor)];
+        if (extensionActions.TryGetTool(actionId, out var single) && single is not null)
+            return [ToClientToolDescriptor(single)];
+        return null;
+    }
+
+    private static ToolDescriptor ToClientToolDescriptor(ExtensionToolDescriptor descriptor) => new(
+        descriptor.ModelToolName,
+        descriptor.Description,
+        descriptor.RiskClass switch
         {
             ExtensionToolRiskClass.ReadOnly => ToolRiskClass.ReadOnly,
             ExtensionToolRiskClass.LocalMutation => ToolRiskClass.LocalMutation,
             ExtensionToolRiskClass.Process => ToolRiskClass.Process,
             _ => throw new InvalidOperationException("Die Risikoklasse des Erweiterungswerkzeugs ist ungültig."),
-        };
-        return
-        [
-            new ToolDescriptor(
-                descriptor.ModelToolName,
-                descriptor.Description,
-                risk,
-                descriptor.InputSchema.Clone(),
-                descriptor.TimeoutSeconds,
-                descriptor.MaximumOutputBytes),
-        ];
-    }
+        },
+        descriptor.InputSchema.Clone(),
+        descriptor.TimeoutSeconds,
+        descriptor.MaximumOutputBytes);
 
     private static DeepResearchOptions? CreateDeepResearchOptions(
         PromptTriggerMatch? trigger,
@@ -3977,10 +4091,39 @@ public sealed partial class MissumAiAssistantService(
         + "Wenn eine Entscheidung fehlt, antworte mit einer kurzen Erklärung und genau einem maschinenlesbaren Block am Ende:\n"
         + "```assistant-plan\n{\"kind\":\"questions\",\"questions\":[{\"id\":\"q1\",\"text\":\"Frage\",\"options\":[{\"id\":\"a\",\"label\":\"Empfohlen\",\"description\":\"Auswirkung\"}],\"allowFreeText\":true}]}\n```\n"
         + "Stelle höchstens drei notwendige Fragen gleichzeitig und warte danach ohne Zeitlimit auf die Antwort.\n"
-        + "Sobald der Plan eindeutig ist, liefere einen kompakten Umsetzungsplan mit belegtem Ist-Zustand (Dateipfade), priorisierten Änderungen, Abhängigkeiten und konkreten Prüfkriterien. Trenne bestätigte Befunde von Annahmen. Führe die vorgeschlagenen Tests im Planmodus nicht aus. Liefere genau diesen Block am Ende:\n"
-        + "```assistant-plan\n{\"kind\":\"plan\",\"title\":\"Plan\"}\n```\n"
+        + "Sobald der Plan eindeutig ist, liefere einen kompakten Umsetzungsplan mit belegtem Ist-Zustand (Dateipfade), priorisierten Änderungen, Abhängigkeiten und konkreten Prüfkriterien. Trenne bestätigte Befunde von Annahmen. Führe die vorgeschlagenen Tests im Planmodus nicht aus. Schreibe den vollständigen Plan in das JSON-Feld markdown. Die Antwort endet mit genau einem solchen Block:\n"
+        + "```assistant-plan\n{\"kind\":\"plan\",\"title\":\"Plan\",\"markdown\":\"## Änderungen\\n1. Gezielte Änderung …\\n\\n## Prüfung\\n- Prüfkriterium …\"}\n```\n"
         + "Änderungen dürfen erst nach der UI-Aktion „Plan implementieren“ erfolgen.\n\nBENUTZERAUFTRAG\n"
         + prompt.Trim();
+
+    private const string BlenderWorkflowPrompt = """
+        BLENDER-WORKFLOW
+        Rufe nach dem Arbeitsplan blender.status mit connect=true auf. Missum findet Blender, startet bei Bedarf
+        das Arbeitsfenster und lädt die .blend im ausgewählten Projekt. Gibt es mehrere Projektdateien, wähle
+        die passende mit projectPath. Ohne Projektdatei legt Missum Szene.blend im Workspace an. Nutze bei
+        einer erneuten Bindung die gemeldete steuerbare instanceId. Suche keine Add-ons, Ports oder Startskripte.
+        Wenn der Auftrag ein Vorlagenbild enthält, lass media.analyze zuerst dessen tatsächlichen Bild-Upload
+        auswerten. Verwende nur die Upload-ID aus dem Kontext und leite sichtbare Form, Proportionen und
+        Materialien daraus ab. Kennzeichne aus der Perspektive geschätzte Maße als Annahmen.
+        Modelliere mit blender.custom.run und bpy. Nutze für zusammenhängende Modelle wie Gebäude zuerst
+        ein Grundmodell mit gemeinsamen Einheiten, Ursprung, Höhen und Bezugsebenen. Leite abhängige
+        Bauteile aus diesen Maßen ab. Bei scene.edit können Quader mit dimensions als vollen Kantenlängen
+        und location als Mittelpunkt angelegt werden. Richte Geschosse an ihren Auflagern und Fassadenteile an den tatsächlichen
+        Wandflächen und Öffnungen aus. Prüfe Lage, Abmessungen, Anschluss und ungewollte Lücken am Grundmodell
+        mit blender.scene.read (include=["bounds"], gezielte objectNames). worldBounds sind achsparallele
+        Weltgrenzen. Bei schrägen Bauteilen oder Öffnungen zusätzlich die betroffene Geometrie prüfen.
+        Kontrolliere bei komplexen Modellen die Silhouette und Proportionen aus einem zur Vorlage passenden
+        Blickwinkel, bevor Materialien und Details folgen. Nutze bei verdeckten Anschlüssen eine zweite Ansicht.
+        Speichere über save=true auf dieselbe Projektdatei. Gib Python-Ergebnisse als kurze JSON-Werte aus.
+        Prüfe bei einer unklaren Werkzeugantwort zuerst den Szenenzustand, bevor du Änderungen wiederholst.
+        Nimm nach der Bearbeitung das Blender-Fenster mit blender.view.capture (view=window) auf.
+        Lade das PNG mit image.input (operation=file), prüfe die zurückgegebene uploadId mit media.analyze
+        und übergib bei einer Bildvorlage deren Upload-ID in referenceUploadIds zum direkten Vergleich.
+        Melde operationId, Bild-SHA-256 und den tatsächlichen Befund mit blender.status visionReview.
+        Bei verdict=deviation korrigiere die benannten Abweichungen per Blender-Python, speichere und
+        prüfe die neue Aufnahme erneut. Melde verbleibende Abweichungen offen. Ist die Sichtprüfung
+        technisch nicht möglich, protokolliere unavailable mit dem konkreten Fehler und melde sie als ausstehend.
+        """;
 
     internal static string RemoveDocumentEvidenceFooter(string content)
     {
@@ -4385,7 +4528,9 @@ public sealed partial class MissumAiAssistantService(
         string Kind,
         string? Detail,
         Guid? MessageId,
-        MessageContentProfile ContentProfile);
+        MessageContentProfile ContentProfile,
+        int? SourceOffset = 0,
+        string? SourceMarkdown = null);
 
     private sealed record UploadedAttachment(AssistantAttachment Attachment, UploadCompleted Upload);
 }

@@ -75,7 +75,7 @@ public sealed class ExtensionActionDescriptorIntegrationTests
         }
 
         public Task<JsonElement> InvokeAsync(string actionId, JsonElement arguments, string? workspaceRoot,
-            CancellationToken cancellationToken = default) =>
+            string? modelToolName = null, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("Building a menu snapshot must never invoke an extension.");
     }
 }

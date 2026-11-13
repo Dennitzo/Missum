@@ -10,10 +10,10 @@ namespace Missum.App.Pages;
 public sealed partial class NativeAssistantPage
 {
     private readonly Dictionary<string, VirtualMessageState> _virtualMessages = new(StringComparer.Ordinal);
-    private sealed record NativeSourceAnchor(string MessageId, int Start, string Source);
+    private sealed record NativeSourceAnchor(string MessageId, int Start, string Source, string? StepId = null);
     internal sealed record LogicalBlock(string Key, string Kind, string Text, int Start, JsonElement Data,
         JsonElement[]? Artifacts = null, int Number = 0, string? ReplacesKey = null,
-        bool OwnsActivitySlot = false, NativeStreamingMarkdown.PreparedSource? Prepared = null);
+        bool OwnsActivitySlot = false, NativeStreamingMarkdown.PreparedSource? Prepared = null, string? SpeechStepId = null);
     private sealed class VirtualMessageState(NativeVirtualizingBlockPanel panel)
     {
         internal NativeVirtualizingBlockPanel Panel { get; } = panel;
@@ -29,7 +29,7 @@ public sealed partial class NativeAssistantPage
 
     private bool UpdateVirtualMessageBlocks(string id, JsonElement message, StackPanel body, StackPanel footer)
     {
-        var content = MessageContent(message);
+        var content = PlanDisplayContent(message);
         var steps = MessageSteps(message);
         var hasOlder = _toolStepWindows.TryGetValue(id, out var window) && S(window, "hasMore") == "True";
         if (!_virtualMessages.TryGetValue(id, out var state))
@@ -125,7 +125,7 @@ public sealed partial class NativeAssistantPage
                 || !_virtualMessages.TryGetValue(id, out var currentState) || !ReferenceEquals(state, currentState)
                 || !DisplayMessages.TryGetValue(id, out var current)) return;
             var hasOlder = _toolStepWindows.TryGetValue(id, out var latestWindow) && S(latestWindow, "hasMore") == "True";
-            var latest = new NativeChatRenderInput(MessageContent(current), MessageSteps(current),
+            var latest = new NativeChatRenderInput(PlanDisplayContent(current), MessageSteps(current),
                 VisibleNativeMessageArtifacts(Items(current, "artifacts")), S(current, "status"), hasOlder, WaitingForModel(id, current), S(current, "error"));
             if (!input.CanPublishBefore(latest) || _conversationSelection?.IsSelecting == true)
             {
@@ -157,7 +157,7 @@ public sealed partial class NativeAssistantPage
         if (assistant) result.Add(new("header", "header", "", 0, default));
         if (hasOlder) result.Add(new("earlierBlocks", "earlier", "Frühere Werkzeugschritte laden", 0, default));
         var usedIndices = new HashSet<string>(StringComparer.Ordinal);
-        void Text(string key, string value, int offset, bool activitySlot = false, string? replacesKey = null)
+        void Text(string key, string value, int offset, bool activitySlot = false, string? replacesKey = null, string? speechStepId = null)
         {
             if (string.IsNullOrWhiteSpace(value)) return;
             usedIndices.Add(key);
@@ -174,8 +174,8 @@ public sealed partial class NativeAssistantPage
                     if (!preparedSources.TryGetValue(blockKey, out prepared) || prepared.Source != block.Source)
                         preparedSources[blockKey] = prepared = NativeStreamingMarkdown.PrepareSource(block.Source);
                 }
-                result.Add(new(blockKey, "text", block.Source, offset + block.Start, default,
-                    ReplacesKey: firstVisibleBlock ? replacesKey : null, OwnsActivitySlot: activitySlot, Prepared: prepared));
+                result.Add(new(blockKey, "text", block.Source, offset < 0 ? offset : offset + block.Start, default,
+                    ReplacesKey: firstVisibleBlock ? replacesKey : null, OwnsActivitySlot: activitySlot, Prepared: prepared, SpeechStepId: speechStepId));
                 firstVisibleBlock = false;
             }
         }
@@ -230,7 +230,7 @@ public sealed partial class NativeAssistantPage
                 if (!IsDeepResearchReceipt(step) && !IsAcceptedSubagentManagementStep(step, receipts)
                     && (tool != "assistant.continuation" || S(step, "status") == "completed"))
                 {
-                    if (tool == "assistant.narration") Text(activity.Key, S(step, "detail"), -1, activitySlot: true, activity.ReplacesKey);
+                    if (tool == "assistant.narration") Text(activity.Key, S(step, "detail"), 0, activitySlot: true, activity.ReplacesKey, speechStepId: stepId);
                     else if (tool == "assistant.steering")
                     {
                         if (!string.IsNullOrWhiteSpace(S(step, "detail")))
@@ -275,7 +275,13 @@ public sealed partial class NativeAssistantPage
 
     private NativeVirtualizingBlockPanel.Row VirtualRow(string messageId, JsonElement message, LogicalBlock block)
     {
-        object version = block.Kind is "text" or "steering" ? block.Text : block.Kind is "tool" or "subagent" or "continuationReceipt" or "compactionReceipt" ? block.Data : MessageVersion(message);
+        object version = block.Kind switch
+        {
+            "text" => (block.Text, block.Start, block.SpeechStepId),
+            "steering" => block.Text,
+            "tool" or "subagent" or "continuationReceipt" or "compactionReceipt" => block.Data,
+            _ => MessageVersion(message),
+        };
         var estimate = block.Kind switch { "text" => Math.Max(38, block.Text.Length / 85d * 26 + 12),
             "steering" => Math.Max(38, block.Text.Length / 85d * 26 + 12) + 36, "artifacts" => 360, _ => 44 };
         return new(block.Key, version, estimate,
@@ -293,7 +299,7 @@ public sealed partial class NativeAssistantPage
                     Foreground = ThemeBrush("MissumMutedTextBrush", 160), TextWrapping = TextWrapping.Wrap } } };
                 break;
             case "text":
-                var anchor = new NativeSourceAnchor(id, block.Start, block.Text);
+                var anchor = new NativeSourceAnchor(id, block.Start, block.Text, block.SpeechStepId);
                 view = new ContentControl { Content = NativeVirtualizingTextView.CreateSourceBlock(block.Text, anchor, block.Prepared),
                     Tag = anchor, HorizontalContentAlignment = HorizontalAlignment.Stretch };
                 break;
@@ -357,9 +363,10 @@ public sealed partial class NativeAssistantPage
         switch (view)
         {
             case ContentControl text when block.Kind == "text":
-                var anchor = new NativeSourceAnchor(id, block.Start, block.Text);
+                var anchor = new NativeSourceAnchor(id, block.Start, block.Text, block.SpeechStepId);
                 text.Tag = anchor;
                 NativeVirtualizingTextView.UpdateSourceBlock(text, block.Text, anchor, block.Prepared);
+                if (text.Content is NativeStreamingMarkdown markdown) ApplyMessageSpeechHighlight(markdown);
                 break;
             case Border prompt when block.Kind == "steering": UpdateSteeringPromptView(prompt, id, message, block.Data); break;
             case ToolStepView tool:

@@ -11,12 +11,20 @@ public sealed partial class NativeAssistantPage
     private string? _composerAttachmentsSignature;
     private readonly List<Button> _composerAttachmentRemoveButtons = [];
     private readonly Dictionary<Guid, int> _composerAttachmentImports = [];
+    // A submitted prompt owns its attachments from that moment on. The server consumes the rows only
+    // when the run starts executing, so the composer hides exactly the submitted chips itself until the
+    // next authoritative snapshot agrees.
+    private Guid _submittedAttachmentOwner;
+    private readonly HashSet<string> _submittedAttachmentIds = new(StringComparer.OrdinalIgnoreCase);
 
     private void RenderComposerAttachments(JsonElement data)
     {
+        if (!_running && !_sendPending) ClearSubmittedAttachmentSuppression();
         var submitted = Items(data, "submittedDocumentIds").Select(item => item.GetString()).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var entries = Items(data, "documents").Where(item => !submitted.Contains(S(item, "id"))).Select(item => (Item: item, Document: true))
             .Concat(Items(data, "attachments").Select(item => (Item: item, Document: false))).ToArray();
+        if (_submittedAttachmentOwner == _session && _submittedAttachmentIds.Count > 0)
+            entries = entries.Where(entry => !_submittedAttachmentIds.Contains(S(entry.Item, "id"))).ToArray();
         var signature = _session + "|" + ThemeBrush("MissumTextBrush", 220).Color + "|"
             + string.Join("|", entries.Select(entry => (entry.Document ? "doc:" : "file:") + S(entry.Item, "id")
                 + ":" + S(entry.Item, "fileName") + ":" + S(entry.Item, "length") + ":" + S(entry.Item, "preparationStatus")));
@@ -51,7 +59,8 @@ public sealed partial class NativeAssistantPage
                 var document = entry.Document;
                 remove.Click += async (_, _) =>
                 {
-                    if (_disposed || _session != owner || _running) return;
+                    // Removable during a run: the running prompt already works on its frozen copy.
+                    if (_disposed || _session != owner) return;
                     remove.IsEnabled = false;
                     try
                     {
@@ -85,9 +94,39 @@ public sealed partial class NativeAssistantPage
         ComposerAttachmentsHost.Visibility = ActiveSubagent is null && (busy || hasFiles) ? Visibility.Visible : Visibility.Collapsed;
         foreach (var button in _composerAttachmentRemoveButtons)
         {
-            button.IsEnabled = !_running && !_sendPending && !busy;
-            ToolTipService.SetToolTip(button, _running ? "Der Anhang gehört zur Sitzung; Entfernen ist nach dem Lauf möglich." : "Anhang entfernen");
+            // An attachment stays withdrawable while the AI works, because that run reads the copy it
+            // received at send time. Only a submission in flight or a running import has to wait.
+            button.IsEnabled = !_sendPending && !busy;
+            ToolTipService.SetToolTip(button, "Anhang entfernen");
         }
+    }
+
+    /// <summary>Hides the chips of a prompt or steering prompt the moment it is submitted.</summary>
+    private Guid[] ClearComposerAttachmentsAfterSubmit()
+    {
+        if (_submittedAttachmentOwner != _session) _submittedAttachmentIds.Clear();
+        _submittedAttachmentOwner = _session;
+        var ids = ComposerAttachmentsPanel.Children.OfType<Border>().Select(chip => Guid.Parse((string)chip.Tag)).ToArray();
+        foreach (var id in ids) _submittedAttachmentIds.Add(id.ToString("D"));
+        ComposerAttachmentsPanel.Children.Clear();
+        _composerAttachmentRemoveButtons.Clear();
+        // The next authoritative snapshot has to rebuild the row, including chips a failed send left behind.
+        _composerAttachmentsSignature = null;
+        UpdateComposerAttachmentControls();
+        return ids;
+    }
+
+    /// <summary>A submission that never reached the assistant keeps its attachments in the composer.</summary>
+    private void RestoreComposerAttachmentsAfterSubmit(Guid[] ids)
+    {
+        foreach (var id in ids) _submittedAttachmentIds.Remove(id.ToString("D"));
+        _composerAttachmentsSignature = null;
+    }
+
+    private void ClearSubmittedAttachmentSuppression()
+    {
+        _submittedAttachmentOwner = Guid.Empty;
+        _submittedAttachmentIds.Clear();
     }
 
     private async Task RefreshComposerAfterImportAsync(Guid ownerSession)

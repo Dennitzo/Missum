@@ -1,0 +1,46 @@
+﻿{
+    "finishedAt":  "2026-11-09T23:51:03",
+    "mode":  "windowed blender, timer driven",
+    "checks":  [
+                   {
+                       "name":  "gui.bridge-laeuft-ueber-timer",
+                       "passed":  true,
+                       "detail":  "port 8765 erreichbar=True blenderExited=False"
+                   },
+                   {
+                       "name":  "gui.status-verbunden",
+                       "passed":  true,
+                       "detail":  "connected=True szene=Scene"
+                   },
+                   {
+                       "name":  "gui.aenderung-angewendet",
+                       "passed":  true,
+                       "detail":  "appliedCount=2 neue=GuiRing"
+                   },
+                   {
+                       "name":  "gui.aufnahme-aus-viewport",
+                       "passed":  true,
+                       "detail":  "pfad=C:\\Users\\AMD\\AppData\\Local\\Temp\\missum-program-integrations\\captures\\blender-viewport-20261109-235056-248-5a49acec.png byte=325797 methode=render.workbench signatur=89504e470d0a1a0a"
+                   },
+                   {
+                       "name":  "gui.speichern-ohne-pfad-hinweis",
+                       "passed":  true,
+                       "detail":  "saved=False code=blender.no_project_path text=Die Szene hat noch keinen Projektpfad. project.saveAs mit \u0027projectFile\u0027 (absoluter Pfad auf die .blend-Datei) zuerst ausführen."
+                   },
+                   {
+                       "name":  "gui.projektpfad-gesetzt",
+                       "passed":  true,
+                       "detail":  "savedTo=C:\\Users\\AMD\\Documents\\GitHub\\Missum\\tmp\\gui-test\\MissumGuiScene.blend"
+                   },
+                   {
+                       "name":  "gui.keine-blend1",
+                       "passed":  true,
+                       "detail":  "blend1-Dateien: 0"
+                   },
+                   {
+                       "name":  "gui.objekte-in-der-offenen-szene",
+                       "passed":  true,
+                       "detail":  "objekte=Camera,Cube,GuiBoden,GuiRing,Light"
+                   }
+               ]
+}

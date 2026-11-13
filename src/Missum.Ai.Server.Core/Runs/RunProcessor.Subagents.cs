@@ -120,7 +120,7 @@ public sealed partial class RunProcessor
 
     private async Task<bool> CanOfferSubagentToolsAsync(RunRequest request, ModelSelection selection, CancellationToken cancellationToken)
     {
-        if (request.ConversationProfile is ConversationProfile.ContextPreparation
+        if (request.ConversationProfile is ConversationProfile.ContextPreparation or ConversationProfile.PlanMode
             || request.ClientCapabilities?.Contains("subagents", StringComparer.OrdinalIgnoreCase) != true)
             return false;
         // Only the gateway can create this persisted relation. Inherit the
@@ -149,6 +149,7 @@ public sealed partial class RunProcessor
         if (toolName == SubagentToolNames.Wait)
             return await WaitForSubagentAsync(parentRunId, arguments.GetProperty("runId").GetString()!, cancellationToken).ConfigureAwait(false);
         await _subagentSpawnGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var releaseIdleReplica = false;
         try
         {
             if (await _repository.FindSubagentByOperationAsync(operationId, cancellationToken).ConfigureAwait(false) is { } previous)
@@ -167,8 +168,11 @@ public sealed partial class RunProcessor
                 return SubagentSpawnReceipt(previous, previousRequest);
             }
             if (arguments.TryGetProperty("resumeRunId", out _))
+            {
+                releaseIdleReplica = true;
                 return await ResumeSubagentAsync(arguments, parentRunId, operationId, parentRequest,
                     selection, parentMessages, cancellationToken).ConfigureAwait(false);
+            }
             var availability = await _modelRuntime.GetSubagentAvailabilityAsync(selection.ModelId, selection.ContextLength, cancellationToken).ConfigureAwait(false);
             if (!availability.IsParallelAdmitted)
                 return SubagentFailure("subagent.insufficient_vram", availability.Reason ?? availability.ParallelUnavailableReason
@@ -208,6 +212,7 @@ public sealed partial class RunProcessor
                 ?? CreateModelToolDefinitions(_toolCatalog.GetAvailableTools(parentRequest,
                     subagentAvailable: true), selectedToolName: null, directTools: true, childContextProfile);
             SubagentRuntimePreparation prepared;
+            releaseIdleReplica = true;
             try
             {
                 prepared = await _modelRuntime.PrepareSubagentAsync(selection.ModelId, parentCacheKey, childCacheKey,
@@ -241,7 +246,30 @@ public sealed partial class RunProcessor
             _ = StartSubagentRunner(child.RunId, childRequest);
             return SubagentSpawnReceipt(child, childRequest);
         }
-        finally { _subagentSpawnGate.Release(); }
+        finally
+        {
+            try
+            {
+                if (releaseIdleReplica) await EjectIdleSubagentAsync(selection.ModelId + "@subagent").ConfigureAwait(false);
+            }
+            finally { _subagentSpawnGate.Release(); }
+        }
+    }
+
+    // Caller holds the spawn gate so admission and cleanup cannot race.
+    private async Task EjectIdleSubagentAsync(string instanceId)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(70));
+        try
+        {
+            var active = await _repository.GetSubagentRunsAsync(activeOnly: true, cancellationToken: timeout.Token).ConfigureAwait(false);
+            if (active.Any(child => child.Request.Subagent?.RuntimeInstanceId == instanceId)) return;
+            await _modelRuntime.EjectSubagentAsync(instanceId, timeout.Token).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            _runtime.WriteLog("Warning", "subagent.eject_failed", exception.Message);
+        }
     }
 
     private static AgentToolExecutionResult SubagentFailure(string code, string message) =>
@@ -352,6 +380,12 @@ public sealed partial class RunProcessor
         { await MarkFailedAsync(runId, exception).ConfigureAwait(false); }
         finally
         {
+            if (relation.GpuIndex == 1 && relation.RuntimeInstanceId is { } instanceId)
+            {
+                await _subagentSpawnGate.WaitAsync().ConfigureAwait(false);
+                try { await EjectIdleSubagentAsync(instanceId).ConfigureAwait(false); }
+                finally { _subagentSpawnGate.Release(); }
+            }
             await relayCancellation.CancelAsync().ConfigureAwait(false);
             try { await relay.ConfigureAwait(false); }
             catch (OperationCanceledException) when (relayCancellation.IsCancellationRequested) { }

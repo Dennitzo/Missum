@@ -19,14 +19,19 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
     private string _publishedSource = string.Empty;
 
     /// <summary>Pure parser output, prepared before publishing a chronological UI block.</summary>
-    internal sealed record PreparedSource(string Source, IReadOnlyList<SectionSpec> Sections);
+    internal sealed record PreparedSource(string Source, IReadOnlyList<SectionSpec> Sections,
+        IReadOnlyList<SpeechSection?> SpeechSections);
 
     internal static PreparedSource PrepareSource(string source)
     {
         ArgumentNullException.ThrowIfNull(source);
-        try { return new(source, ParseSections(source)); }
+        try
+        {
+            var speechSections = new List<SpeechSection?>();
+            return new(source, ParseSections(source, speechSections), speechSections);
+        }
         catch (Exception exception) when (exception is ArgumentException or InvalidOperationException)
-        { return new(source, [new(SectionKind.Paragraph, source, 0, "")]); }
+        { return new(source, [new(SectionKind.Paragraph, source, 0, "")], [new(new(0), 0, source.Length)]); }
     }
     internal IReadOnlyList<Grid> RenderedTables => _sections.Where(section => section.Specification.Kind == SectionKind.Table)
         .Select(section => section.Table!.Grid).ToArray();
@@ -59,6 +64,7 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
     {
         ArgumentNullException.ThrowIfNull(prepared);
         if (Source == prepared.Source && _publishedSource == prepared.Source && !IsPreparing) return;
+        if (!prepared.Source.StartsWith(Source, StringComparison.Ordinal)) ClearSpeechHighlight();
         // An explicitly prepared complete block supersedes any older asynchronous
         // prefix, even when both sources belong to the same append-only stream.
         _preparations.AdoptPrepared(prepared.Source);
@@ -69,6 +75,7 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
     public void UpdateText(string text)
     {
         ArgumentNullException.ThrowIfNull(text);
+        if (!text.StartsWith(Source, StringComparison.Ordinal)) ClearSpeechHighlight();
         if (!_preparations.Request(text)) return;
         PreparePending();
     }
@@ -100,15 +107,19 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
     private void ApplyPrepared(PreparedSource prepared)
     {
         if (_publishedSource == prepared.Source) return;
+        _speechFallback = null;
         try { ApplySections(prepared.Sections); }
         catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or System.Runtime.InteropServices.COMException)
         {
             Children.Clear(); _sections.Clear();
-            Children.Add(new TextBlock { Text = prepared.Source, TextWrapping = TextWrapping.Wrap,
-                IsTextSelectionEnabled = true, FontSize = BodyFontSize, Foreground = NativeThemeBrushes.Text });
+            _speechFallback = new TextBlock { Text = prepared.Source, TextWrapping = TextWrapping.Wrap,
+                IsTextSelectionEnabled = true, FontSize = BodyFontSize, Foreground = NativeThemeBrushes.Text };
+            Children.Add(_speechFallback);
             RenderRevision++;
         }
         _publishedSource = prepared.Source;
+        _speechSections = prepared.SpeechSections;
+        ApplySpeechHighlight();
     }
 
     /// <summary>UI-owned queue: one active parser and at most one latest successor.</summary>
@@ -355,33 +366,55 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
         }
     }
 
-    internal static List<SectionSpec> ParseSections(string text)
+    internal static List<SectionSpec> ParseSections(string text) => ParseSections(text, []);
+
+    private static List<SectionSpec> ParseSections(string text, List<SpeechSection?> speechSections)
     {
         var result = new List<SectionSpec>();
         var pending = new StringBuilder();
         var tokenPrefix = MathTokenPrefix(text);
+        var sourceOffset = 0;
+        var offsets = new SpeechOffsets(0);
         foreach (var segment in NativeMathSyntax.SplitForRendering(text))
         {
             if (segment.IsMath && segment.Display)
             {
-                result.AddRange(ParseTextSections(pending.ToString(), tokenPrefix)); pending.Clear();
+                result.AddRange(ParseTextSections(pending.ToString(), tokenPrefix, offsets, speechSections));
+                pending.Clear();
                 result.Add(new SectionSpec(SectionKind.Math, segment.Text, 0, "latex"));
+                speechSections.Add(new(new(sourceOffset), 0, segment.Text.Length));
+                offsets = new SpeechOffsets(sourceOffset + segment.Text.Length);
             }
-            else pending.Append(segment.IsMath ? EncodeMathToken(segment, tokenPrefix) : segment.Text);
+            else if (segment.IsMath)
+            {
+                var token = EncodeMathToken(segment, tokenPrefix);
+                offsets.Replace(pending.Length, token.Length, sourceOffset, segment.Text.Length);
+                pending.Append(token);
+            }
+            else pending.Append(segment.Text);
+            sourceOffset += segment.Text.Length;
         }
-        result.AddRange(ParseTextSections(pending.ToString(), tokenPrefix));
+        result.AddRange(ParseTextSections(pending.ToString(), tokenPrefix, offsets, speechSections));
         return result;
     }
 
-    private static List<SectionSpec> ParseTextSections(string text, string tokenPrefix)
+    private static List<SectionSpec> ParseTextSections(string text, string tokenPrefix, SpeechOffsets offsets,
+        List<SpeechSection?> speechSections)
     {
         var result = new List<SectionSpec>();
         var code = new StringBuilder();
         var insideCode = false;
         var fenceCharacter = '`';
         var fenceLength = 3;
+        var fenceStart = 0;
         var language = string.Empty;
         var lines = text.ReplaceLineEndings("\n").Split('\n');
+        var starts = new int[lines.Length];
+        for (var index = 1; index < starts.Length; index++)
+        {
+            var end = starts[index - 1] + lines[index - 1].Length;
+            starts[index] = end + (text.AsSpan(end).StartsWith("\r\n", StringComparison.Ordinal) ? 2 : 1);
+        }
         for (var lineIndex = 0; lineIndex < lines.Length; lineIndex++)
         {
             var line = lines[lineIndex];
@@ -392,11 +425,13 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
                 if (insideCode)
                 {
                     result.Add(new SectionSpec(SectionKind.Code, code.ToString().TrimEnd('\n'), 0, language)); code.Clear();
+                    speechSections.Add(new(offsets, fenceStart, starts[lineIndex] + line.Length - fenceStart));
                 }
                 else
                 {
                     language = fence.Groups["info"].Value.Trim();
                     fenceCharacter = fence.Groups["fence"].Value[0]; fenceLength = fence.Groups["fence"].Length;
+                    fenceStart = starts[lineIndex];
                 }
                 insideCode = !insideCode;
                 continue;
@@ -414,18 +449,28 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
             {
                 result.Add(new SectionSpec(SectionKind.Table, table.Markdown, 0, string.Empty,
                     table.Markdown.Contains(tokenPrefix, StringComparison.Ordinal) ? tokenPrefix : string.Empty));
+                var rows = table.ContentLines.Select(index => (lines[index],
+                    new SpeechSection(offsets, starts[index], lines[index].Length))).ToArray();
+                speechSections.Add(new(offsets, starts[lineIndex], starts[nextLine - 1] + lines[nextLine - 1].Length - starts[lineIndex], Rows: rows));
                 lineIndex = nextLine - 1;
                 continue;
             }
-            var isHeading = TryParseHeading(line, out var headingLevel, out var headingText);
-            var source = isHeading ? headingText : BulletPattern().Replace(line, "•  ");
+            var isHeading = TryParseHeading(line, out var headingLevel, out var headingText, out var headingStart);
+            var bullet = isHeading ? Match.Empty : BulletPattern().Match(line);
+            var source = isHeading ? headingText : bullet.Success ? "•  " + line[bullet.Length..] : line;
             // Only the global parser may recognize formulas. Re-parsing the raw line here
             // would turn examples inside multiline code or unfinished display math into TeX.
             result.Add(new SectionSpec(SectionKind.Paragraph, source, headingLevel, string.Empty,
                 source.Contains(tokenPrefix, StringComparison.Ordinal) ? tokenPrefix : string.Empty));
+            var prefix = bullet.Success ? 3 : 0;
+            speechSections.Add(new(offsets, starts[lineIndex] + (isHeading ? headingStart : bullet.Length), source.Length - prefix, prefix));
         }
         // An opening fence is sufficient: live code must be visible before the closing fence arrives.
-        if (insideCode) result.Add(new SectionSpec(SectionKind.Code, code.ToString().TrimEnd('\n'), 0, language));
+        if (insideCode)
+        {
+            result.Add(new SectionSpec(SectionKind.Code, code.ToString().TrimEnd('\n'), 0, language));
+            speechSections.Add(new(offsets, fenceStart, text.Length - fenceStart));
+        }
         return result;
     }
 
@@ -445,6 +490,7 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
         var alignments = delimiter.Select(cell => cell.StartsWith(':') && cell.EndsWith(':') ? TextAlignment.Center
             : cell.EndsWith(':') ? TextAlignment.Right : TextAlignment.Left).ToArray();
         var rows = new List<IReadOnlyList<string>>();
+        var contentLines = new List<int> { start };
         var markdown = new StringBuilder(lines[start]).Append('\n').Append(lines[separator]);
         nextLine = separator + 1;
         while (nextLine < lines.Count)
@@ -460,19 +506,33 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
             if (cells.Count < headers.Count)
                 cells.AddRange(Enumerable.Repeat(string.Empty, headers.Count - cells.Count));
             rows.Add(cells);
+            contentLines.Add(rowLine);
             markdown.Append('\n').Append(lines[rowLine]);
             nextLine = rowLine + 1;
         }
-        table = new TableSpec(headers, alignments, rows, markdown.ToString());
+        table = new TableSpec(headers, alignments, rows, markdown.ToString(), contentLines);
         return true;
     }
 
-    internal static List<string> SplitTableCells(string line)
+    internal static List<string> SplitTableCells(string line, List<TableCellSource>? sources = null)
     {
         var cells = new List<string>();
         var cell = new StringBuilder();
         var codeFence = 0;
         var separators = 0;
+        var cellStart = 0;
+        List<int>? escapes = null;
+
+        void FinishCell()
+        {
+            var text = cell.ToString();
+            cells.Add(text.Trim());
+            if (sources is not null)
+                sources.Add(new(cellStart + text.Length - text.AsSpan().TrimStart().Length, escapes));
+            cell.Clear();
+            escapes = null;
+        }
+
         for (var index = 0; index < line.Length; index++)
         {
             var character = line[index];
@@ -493,16 +553,25 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
             {
                 cell.Length--;
                 cell.Append('|');
+                if (sources is not null) (escapes ??= []).Add(index - 1);
                 continue;
             }
-            cells.Add(cell.ToString().Trim());
-            cell.Clear();
+            FinishCell();
+            cellStart = index + 1;
             separators++;
         }
         if (separators == 0) return [];
-        cells.Add(cell.ToString().Trim());
-        if (cells.Count > 0 && cells[0].Length == 0) cells.RemoveAt(0);
-        if (cells.Count > 0 && cells[^1].Length == 0) cells.RemoveAt(cells.Count - 1);
+        FinishCell();
+        if (cells.Count > 0 && cells[0].Length == 0)
+        {
+            cells.RemoveAt(0);
+            sources?.RemoveAt(0);
+        }
+        if (cells.Count > 0 && cells[^1].Length == 0)
+        {
+            cells.RemoveAt(cells.Count - 1);
+            sources?.RemoveAt(cells.Count);
+        }
         return cells;
     }
 
@@ -541,14 +610,19 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
                 var end = start < 0 ? -1 : piece.Text.IndexOf('\uE001', start + tokenPrefix.Length);
                 if (end < 0)
                 {
-                    result.Add(new(piece.Text[offset..], false, false, piece.Kind, piece.Uri));
+                    result.Add(new(piece.Text[offset..], false, false, piece.Kind, piece.Uri,
+                        MarkupStart: piece.Start + offset, MarkupLength: piece.Text.Length - offset));
                     break;
                 }
-                if (start > offset) result.Add(new(piece.Text[offset..start], false, false, piece.Kind, piece.Uri));
+                if (start > offset) result.Add(new(piece.Text[offset..start], false, false, piece.Kind, piece.Uri,
+                    MarkupStart: piece.Start + offset, MarkupLength: start - offset));
+                var markupStart = piece.Start + start;
+                var markupLength = end - start + 1;
                 var payload = piece.Text[(start + tokenPrefix.Length)..end];
                 if (payload.Length < 2 || payload[0] is not ('I' or 'D' or 'L'))
                 {
-                    result.Add(new(piece.Text[start..(end + 1)], false, false, piece.Kind, piece.Uri));
+                    result.Add(new(piece.Text[start..(end + 1)], false, false, piece.Kind, piece.Uri,
+                        MarkupStart: markupStart, MarkupLength: markupLength));
                     offset = end + 1;
                     continue;
                 }
@@ -560,17 +634,19 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
                         if (separator < 2 || separator == payload.Length - 1) throw new FormatException("Incomplete legacy math token.");
                         var original = Encoding.UTF8.GetString(Convert.FromBase64String(payload[1..separator]));
                         var renderLatex = Encoding.UTF8.GetString(Convert.FromBase64String(payload[(separator + 1)..]));
-                        result.Add(new(original, true, false, piece.Kind, piece.Uri, renderLatex));
+                        result.Add(new(original, true, false, piece.Kind, piece.Uri, renderLatex, markupStart, markupLength));
                     }
                     else
                     {
                         var latex = Encoding.UTF8.GetString(Convert.FromBase64String(payload[1..]));
-                        result.Add(new(latex, true, payload[0] == 'D', piece.Kind, piece.Uri));
+                        result.Add(new(latex, true, payload[0] == 'D', piece.Kind, piece.Uri,
+                            MarkupStart: markupStart, MarkupLength: markupLength));
                     }
                 }
                 catch (FormatException)
                 {
-                    result.Add(new(piece.Text[start..(end + 1)], false, false, piece.Kind, piece.Uri));
+                    result.Add(new(piece.Text[start..(end + 1)], false, false, piece.Kind, piece.Uri,
+                        MarkupStart: markupStart, MarkupLength: markupLength));
                 }
                 offset = end + 1;
             }
@@ -584,15 +660,18 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
         var offset = 0;
         foreach (Match match in InlinePattern().Matches(source))
         {
-            if (match.Index > offset) result.Add(new InlineSpec(InlineKind.Plain, source[offset..match.Index]));
-            if (match.Groups["bold"].Success) result.Add(new InlineSpec(InlineKind.Bold, match.Groups["bold"].Value));
-            else if (match.Groups["code"].Success) result.Add(new InlineSpec(InlineKind.Code, match.Groups["code"].Value));
+            if (match.Index > offset) result.Add(new InlineSpec(InlineKind.Plain, source[offset..match.Index], offset));
+            var bold = match.Groups["bold"];
+            var code = match.Groups["code"];
+            var label = match.Groups["label"];
+            if (bold.Success) result.Add(new InlineSpec(InlineKind.Bold, bold.Value, bold.Index));
+            else if (code.Success) result.Add(new InlineSpec(InlineKind.Code, code.Value, code.Index));
             else if (Uri.TryCreate(match.Groups["uri"].Value, UriKind.Absolute, out var uri) && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps))
-                result.Add(new InlineSpec(InlineKind.Link, match.Groups["label"].Value, uri));
-            else result.Add(new InlineSpec(InlineKind.Plain, match.Value));
+                result.Add(new InlineSpec(InlineKind.Link, label.Value, label.Index, uri));
+            else result.Add(new InlineSpec(InlineKind.Plain, match.Value, match.Index));
             offset = match.Index + match.Length;
         }
-        if (offset < source.Length) result.Add(new InlineSpec(InlineKind.Plain, source[offset..]));
+        if (offset < source.Length) result.Add(new InlineSpec(InlineKind.Plain, source[offset..], offset));
         return result;
     }
 
@@ -602,11 +681,16 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
         4 => BodyFontSize + 2, 5 => BodyFontSize + 1, _ => BodyFontSize,
     };
 
-    internal static bool TryParseHeading(string line, out int level, out string content)
+    internal static bool TryParseHeading(string line, out int level, out string content) =>
+        TryParseHeading(line, out level, out content, out _);
+
+    private static bool TryParseHeading(string line, out int level, out string content, out int start)
     {
         var match = HeadingPattern().Match(line);
+        var group = match.Groups["content"];
         level = match.Success ? match.Groups["marker"].Length : 0;
-        content = match.Success ? HeadingClosingPattern().Replace(match.Groups["content"].Value, "").TrimEnd(' ', '\t') : line;
+        content = match.Success ? HeadingClosingPattern().Replace(group.Value, "").TrimEnd(' ', '\t') : line;
+        start = group.Index;
         return match.Success;
     }
 
@@ -631,11 +715,12 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
 
     internal enum SectionKind { Paragraph, Code, Math, Table }
     internal enum InlineKind { Plain, Bold, Code, Link }
-    internal readonly record struct MathInlineSpec(string Text, bool IsMath, bool Display, InlineKind Kind, Uri? Uri, string? RenderLatex = null);
+    internal readonly record struct MathInlineSpec(string Text, bool IsMath, bool Display, InlineKind Kind, Uri? Uri,
+        string? RenderLatex = null, int MarkupStart = 0, int MarkupLength = 0);
     internal readonly record struct SectionSpec(SectionKind Kind, string Text, int HeadingLevel, string Language, string MathTokenPrefix = "");
     internal readonly record struct TableSpec(IReadOnlyList<string> Headers, IReadOnlyList<TextAlignment> Alignments,
-        IReadOnlyList<IReadOnlyList<string>> Rows, string Markdown);
-    private readonly record struct InlineSpec(InlineKind Kind, string Text, Uri? Uri = null);
+        IReadOnlyList<IReadOnlyList<string>> Rows, string Markdown, IReadOnlyList<int> ContentLines);
+    private readonly record struct InlineSpec(InlineKind Kind, string Text, int Start, Uri? Uri = null);
     private sealed record InlineView(InlineKind Kind, Inline Element, Run Run);
 
     private sealed class SectionView(FrameworkElement element, TextBlock text)
@@ -659,6 +744,9 @@ public sealed partial class NativeStreamingMarkdown : StackPanel
         private readonly List<(Border Border, NativeMathParagraph Text)> _cells = [];
         private int _columns;
         public Grid Grid => _grid;
+
+        internal IEnumerable<NativeMathParagraph> CellsInRow(int row) =>
+            _cells.Skip(row * _columns).Take(_columns).Select(cell => cell.Text);
 
         public NativeTableView()
         {

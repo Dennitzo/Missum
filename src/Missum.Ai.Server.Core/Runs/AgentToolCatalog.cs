@@ -101,6 +101,9 @@ public sealed partial class AgentToolCatalog
             var planIndex = result.FindIndex(tool => tool.Name == CodingWorkingStateTools.PlanTool);
             if (planIndex >= 0) result[planIndex] = ScienceSkill.DescribePlanTool(result[planIndex]);
         }
+        if (request.ConversationProfile == ConversationProfile.PlanMode)
+            result.RemoveAll(tool => tool.RiskClass != ToolRiskClass.ReadOnly
+                || SubagentToolNames.All.Contains(tool.Name) || tool.Name == CodingWorkingStateTools.PlanTool);
         return result.OrderBy(static tool => tool.Name, StringComparer.Ordinal).ToArray();
     }
 

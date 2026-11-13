@@ -1,0 +1,2 @@
+MISSUM_GUI enabled=True port=8765 running=True instance=blender-12716-570040900 timer_registered=True python_allowed=True objects=3
+MISSUM_GUI ready

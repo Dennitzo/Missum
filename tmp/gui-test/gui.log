@@ -1,0 +1,4 @@
+MISSUM_GUI enabled=True port=8765 running=True instance=blender-41484-919861000 timer_registered=True python_allowed=True objects=3
+MISSUM_GUI ready
+MISSUM_GUI quit requested by flag
+MISSUM_GUI server stopped, requests served=11

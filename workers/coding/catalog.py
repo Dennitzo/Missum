@@ -1224,27 +1224,6 @@ class GpuLoadManager:
                 result.update(allowed=False, reason=cache["reason"])
             return result
 
-    def _preload_subagent(self, model_id):
-        """Finish an ordinary primary load with its eligible GPU1 replica.
-
-        Admission failures do not invalidate a usable primary. A native replica
-        allocation failure is sticky until the primary is actually reloaded;
-        ordinary free-memory rejection is rechecked on the next primary reuse.
-        """
-        replica = model_id + "@subagent"
-        try:
-            availability = self._secondary_agent_status(model_id)
-            if not availability["allowed"]:
-                return dict(availability, loaded=False, reused=False)
-            result = self.load(replica)
-            return dict(availability, loaded=True, reused=result.get("reused", False))
-        except (OSError, RuntimeError, ValueError) as error:
-            reason = self.agent_failures.get(model_id) or "subagent.runtime_load_failed"
-            self.agent_failures[model_id] = reason
-            self.record(replica, self.placements.get(replica), "preload-failed", str(error)[-4000:])
-            return dict(allowed=False, reason=reason, modelId=model_id, instanceId=replica,
-                        gpuIndex=1, loaded=False, reused=False)
-
     def load(self, model_id, context_length=None):
         with self.lock:
             self._check_model_load_stopped()
@@ -1295,10 +1274,7 @@ class GpuLoadManager:
                 status = existing.get("status", {})
                 if status.get("value") not in ("loaded", "sleeping") or status.get("failed"):
                     raise RuntimeError("Native model load failed; see gpu-placement.jsonl and llama.stderr.log")
-                result = {"success": True, "reused": True}
-                if not replica:
-                    result["subagent"] = self._preload_subagent(base)
-                return result
+                return {"success": True, "reused": True}
             devices = gpu_inventory()
             if replica:
                 availability = self._secondary_agent_status(base)
@@ -1347,10 +1323,7 @@ class GpuLoadManager:
                         if after and before and before["free"] > after["free"]:
                             self.allocations[model_id] = before["free"] - after["free"]
                         self.record(model_id, device, "loaded")
-                        result = {"success": True, "device": device, "fallback": attempt > 0}
-                        if not replica:
-                            result["subagent"] = self._preload_subagent(base)
-                        return result
+                        return {"success": True, "device": device, "fallback": attempt > 0}
                     if status.get("failed") or status.get("value") == "failed":
                         break
                     time.sleep(0.25)

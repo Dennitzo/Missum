@@ -78,4 +78,29 @@ public sealed class SpeechSourcePunctuationTests
             string.Join(' ', units.Select(unit => unit.Text)));
         Assert.All(units, unit => Assert.Equal(markdown, markdown.Substring(unit.Start, unit.Length)));
     }
+
+    [Fact]
+    public void SentenceRangesIdentifyTheOriginalMarkdownAndLineEndingsForRepeatedText()
+    {
+        const string first = "So steht es z. B. im **Handbuch**.";
+        const string second = "Der [zweite Link](https://example.com/a.b) erklärt&#33;";
+        const string third = "Die Zeile wird\r\nweitergeführt.";
+        const string source = "# Einleitung\r\n\r\n" + first + " " + second + " " + second + " " + third;
+        var units = SpeechSourceSegmentation.CreateUnits(source);
+        Assert.Equal([first, second, second, third], units.Skip(1).Select(unit => unit.SentenceSource));
+        Assert.Equal(source.IndexOf(first, StringComparison.Ordinal), units[1].SentenceStart);
+        Assert.Equal(source.IndexOf(second, StringComparison.Ordinal), units[2].SentenceStart);
+        Assert.Equal(source.LastIndexOf(second, StringComparison.Ordinal), units[3].SentenceStart);
+        Assert.All(units, unit => Assert.Equal(unit.SentenceSource,
+            source.Substring(unit.SentenceStart!.Value, unit.SentenceLength!.Value)));
+    }
+
+    [Fact]
+    public void AnExcerptWithNormalizedLineEndingsKeepsItsOriginalSourceOffset()
+    {
+        const string prefix = "Erster Satz.\r\n\r\n";
+        const string suffix = "Zweiter Satz.\r\nDritter Satz.";
+        Assert.Equal(prefix.Length, MissumAiAssistantService.SpeechExcerptOffset(prefix + suffix, suffix.ReplaceLineEndings("\n")));
+        Assert.Null(MissumAiAssistantService.SpeechExcerptOffset(prefix + suffix, "Anderer Satz."));
+    }
 }

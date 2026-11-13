@@ -7,6 +7,8 @@ public static class ExtensionManifestValidator
     public const int MaximumActions = 256;
     public const int MaximumTools = 256;
     public const int MaximumEntrypoints = 8;
+    public const int MaximumGroups = 32;
+    public const int MaximumToolsPerAction = 16;
 
     public static ExtensionValidationResult Validate(ExtensionManifest? manifest)
     {
@@ -49,9 +51,31 @@ public static class ExtensionManifestValidator
         foreach (var permission in permissions)
             if (!Enum.IsDefined(permission)) errors.Add($"Permission '{permission}' ist unbekannt.");
 
+        ValidateGroups(manifest, errors);
         ValidateActions(manifest, errors);
         ValidateTools(manifest, errors);
         return new(errors.AsReadOnly());
+    }
+
+    private static void ValidateGroups(ExtensionManifest manifest, List<string> errors)
+    {
+        var groups = manifest.Groups ?? [];
+        if (groups.Length > MaximumGroups)
+            errors.Add($"Groups darf höchstens {MaximumGroups} Einträge enthalten.");
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var group in groups)
+        {
+            if (group is null)
+            {
+                errors.Add("Groups enthält einen leeren Eintrag.");
+                continue;
+            }
+            if (!ExtensionIdentifiers.TryValidateToken(group.GroupId, "GroupId", out var groupError)) errors.Add(groupError);
+            else if (!ids.Add(group.GroupId)) errors.Add($"Gruppe '{group.GroupId}' ist mehrfach deklariert.");
+            ValidateText(group.Label, $"Label von Gruppe '{group.GroupId}'", 60, errors);
+            if (group.GroupOrder is < 0 or > 10_000)
+                errors.Add($"GroupOrder von Gruppe '{group.GroupId}' liegt außerhalb 0..10000.");
+        }
     }
 
     public static ExtensionValidationResult ValidateAction(ExtensionActionDescriptor? action, string expectedExtensionId)
@@ -114,7 +138,9 @@ public static class ExtensionManifestValidator
         if (tools.Length > MaximumTools) errors.Add($"Tools darf höchstens {MaximumTools} Einträge enthalten.");
         var actionIds = new HashSet<string>((manifest.Actions ?? []).Select(static action => action.ActionId), StringComparer.Ordinal);
         var toolNames = new HashSet<string>(StringComparer.Ordinal);
-        var toolActions = new HashSet<string>(StringComparer.Ordinal);
+        // One selected action may unlock several model tools for the same run, for example an
+        // editor integration with status, read, edit and capture tools. Only the names stay unique.
+        var toolsPerAction = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
         foreach (var tool in tools)
         {
             if (tool is null)
@@ -124,7 +150,6 @@ public static class ExtensionManifestValidator
             }
             if (!ExtensionIdentifiers.TryValidateActionId(tool.ActionId, manifest.Id, out var actionError)) errors.Add(actionError);
             else if (!actionIds.Contains(tool.ActionId)) errors.Add($"Tool '{tool.ModelToolName}' verweist auf eine unbekannte Action '{tool.ActionId}'.");
-            if (!toolActions.Add(tool.ActionId)) errors.Add($"Action '{tool.ActionId}' besitzt mehr als einen Modell-Toolnamen.");
             if (!ExtensionIdentifiers.TryValidateModelToolName(tool.ModelToolName, out var toolError)) errors.Add(toolError);
             else if (!toolNames.Add(tool.ModelToolName)) errors.Add($"Modell-Toolname '{tool.ModelToolName}' ist mehrfach vorhanden.");
             ValidateText(tool.Description, $"Description von '{tool.ModelToolName}'", 300, errors);
@@ -139,6 +164,15 @@ public static class ExtensionManifestValidator
                 errors.Add($"Mutierendes Tool '{tool.ModelToolName}' benötigt eine Schreib-Permission.");
             if (tool.TimeoutSeconds is < 1 or > 7_200) errors.Add($"TimeoutSeconds von '{tool.ModelToolName}' liegt außerhalb 1..7200.");
             if (tool.MaximumOutputBytes is < 1_024 or > 64 * 1024 * 1024) errors.Add($"MaximumOutputBytes von '{tool.ModelToolName}' liegt außerhalb 1024..67108864.");
+            if (!toolsPerAction.TryGetValue(tool.ActionId, out var actionToolNames))
+            {
+                actionToolNames = new HashSet<string>(StringComparer.Ordinal);
+                toolsPerAction[tool.ActionId] = actionToolNames;
+            }
+
+            // Only distinct names count; a repeated name was already reported above.
+            if (actionToolNames.Add(tool.ModelToolName) && actionToolNames.Count > MaximumToolsPerAction)
+                errors.Add($"Action '{tool.ActionId}' besitzt mehr als {MaximumToolsPerAction} Modell-Tools.");
         }
     }
 

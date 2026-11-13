@@ -216,7 +216,7 @@ public sealed partial class NativeAssistantPage
 
     private void UpdateCaptionChip()
     {
-        CaptionChip.SetTool("Live-Untertitel", "\uE7F4", Missum.App.Controls.NativeIconPalette.BrushFor("speech"));
+        CaptionChip.SetTool("Live-Untertitel", "\uE7F4", ComposerGroupIconBrush(Missum.Core.Extensions.BuiltInExtensionCatalog.GroupSpeech));
         CaptionChip.Visibility = _captionActive && _captionSessionId == _session ? Visibility.Visible : Visibility.Collapsed;
     }
 

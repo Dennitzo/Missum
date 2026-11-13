@@ -55,10 +55,14 @@ public sealed partial class NativeAssistantPage
         // Keep its visual parent and controls throughout streaming and virtualization.
         var messageActions = MessageActionsFor(messageId, message);
         if (!panel.Children.Contains(messageActions)) panel.Children.Add(messageActions);
-        if (UpdateVirtualMessageBlocks(messageId, message, panel, messageActions)) return;
+        if (UpdateVirtualMessageBlocks(messageId, message, panel, messageActions))
+        {
+            UpdatePlanInteraction(messageId, message, panel, messageActions);
+            return;
+        }
         if (!_messageBlocks.TryGetValue(messageId, out var blocks)) _messageBlocks[messageId] = blocks = new(StringComparer.Ordinal);
         var desired = new List<FrameworkElement>();
-        var content = MessageContent(message);
+        var content = PlanDisplayContent(message);
         var assistant = S(message, "role") == "assistant";
         if (assistant)
         {
@@ -77,19 +81,21 @@ public sealed partial class NativeAssistantPage
         {
             if (!blocks.TryGetValue("userText", out var userText)) blocks["userText"] = userText = new NativeStreamingMarkdown(content);
             else ((NativeStreamingMarkdown)userText).UpdateText(content);
+            UpdateMessageSpeechSource((NativeStreamingMarkdown)userText, messageId, 0, content);
             desired.Add(userText);
             content = "";
         }
         var offset = 0;
         var sequence = 0;
         var toolNumber = 0;
-        void Text(string key, string value, bool activitySlot = false, string? replacesKey = null)
+        void Text(string key, string value, int sourceStart = -1, bool activitySlot = false, string? replacesKey = null, string? speechStepId = null)
         {
             if (string.IsNullOrWhiteSpace(value)) return;
             if (!blocks.TryGetValue(key, out var element) || element is not NativeStreamingMarkdown)
                 blocks[key] = element = new NativeStreamingMarkdown(NativeStreamingMarkdown.PrepareSource(value));
             else if (((NativeStreamingMarkdown)element).Source != value)
                 ((NativeStreamingMarkdown)element).UpdatePreparedSource(NativeStreamingMarkdown.PrepareSource(value));
+            UpdateMessageSpeechSource((NativeStreamingMarkdown)element, messageId, sourceStart, value, speechStepId);
             desired.Add(activitySlot ? ActivityContainer(messageId, key, element, replacesKey) : element);
         }
         var messageSteps = MessageSteps(message);
@@ -140,13 +146,13 @@ public sealed partial class NativeAssistantPage
         {
             var step = activity.Step;
             var next = activity.Offset is { } n ? Math.Clamp(n, offset, content.Length) : offset;
-            Text("text:" + offset, content[offset..next]); offset = next;
+            Text("text:" + offset, content[offset..next], offset); offset = next;
             var id = S(step, "id", "step:" + sequence++);
             var tool = S(step, "tool");
             if (tool == "assistant.answer")
             {
                 var end = Math.Clamp(activity.EndOffset ?? offset, offset, content.Length);
-                Text(activity.Key, content[offset..end], activitySlot: true, activity.ReplacesKey);
+                Text(activity.Key, content[offset..end], offset, activitySlot: true, activity.ReplacesKey);
                 offset = end;
                 continue;
             }
@@ -186,7 +192,7 @@ public sealed partial class NativeAssistantPage
             }
             if (tool == "assistant.narration")
             {
-                Text(activity.Key, detail, activitySlot: true, activity.ReplacesKey);
+                Text(activity.Key, detail, 0, activitySlot: true, activity.ReplacesKey, speechStepId: id);
                 ArtifactsAfterStep(id);
                 continue;
             }
@@ -239,7 +245,7 @@ public sealed partial class NativeAssistantPage
             desired.Add(ActivityContainer(messageId, key, element, activity.ReplacesKey));
             ArtifactsAfterStep(id);
         }
-        Text("text:" + offset, content[offset..]);
+        Text("text:" + offset, content[offset..], offset);
         if (S(message, "error") is { Length: > 0 } error && error != content) Text("error", error);
         // Unassociated files keep their existing footer placement. In
         // particular, anchored images are never repeated in that collection.
@@ -261,7 +267,7 @@ public sealed partial class NativeAssistantPage
         var desiredSet = desired.ToHashSet();
         foreach (var slot in desired.OfType<ActivitySlotView>()) if (slot.Content is FrameworkElement inner) desiredSet.Add(inner);
         foreach (var old in panel.Children.OfType<FrameworkElement>()
-            .Where(child => !ReferenceEquals(child, messageActions) && !desiredSet.Contains(child)).ToArray()) panel.Children.Remove(old);
+            .Where(child => !ReferenceEquals(child, messageActions) && child.Name != PlanCardName && !desiredSet.Contains(child)).ToArray()) panel.Children.Remove(old);
         for (var i = 0; i < desired.Count; i++)
         {
             if (i < panel.Children.Count && ReferenceEquals(panel.Children[i], desired[i])) continue;
@@ -273,6 +279,7 @@ public sealed partial class NativeAssistantPage
             blocks.Remove(stale);
         }
         RefreshThinkingIndicators();
+        UpdatePlanInteraction(messageId, message, panel, messageActions);
     }
 
     private sealed class ActivitySlotView : ContentControl
@@ -521,6 +528,10 @@ public sealed partial class NativeAssistantPage
                 "coding.read" => "Datei lesen", "coding.write" or "coding.edit" or "coding.undo" => "Datei bearbeiten",
                 "coding.command" => "Befehl ausgeführt", "coding.list" => "Dateien aufgelistet", "coding.search" => "Dateien durchsucht",
                 "coding.gitDiff" => "Änderungen geprüft", "coding.updatePlan" => NativeWorkingPlanProjection.ReceiptTitle(step), "assistant.reasoning" => "Denkprozess",
+                // Document receipts carry their own readable titles inside the tab; the card and the
+                // tool tab still need a human name instead of the raw machine tool id.
+                "document.read" => "Dokument lesen", "documents.list" => "Dokumente aufgelistet",
+                "document.search" or "documents.search" => "Dokument durchsucht", "documents.readPages" => "Seiten gelesen",
                 "research.code.write" => "Python-Datei vorbereiten", "research.code.execute" => "Python-Analyse ausführen",
                 "research.code.test" => "Berechnung prüfen", "research.code.benchmark" => "Berechnung vergleichen",
                 "research.deliverables.verify" => "Forschungsergebnisse prüfen",

@@ -1,0 +1,47 @@
+﻿{
+    "finishedAt":  "2026-11-10T19:07:35",
+    "stage":  "report",
+    "verdict":  "verified",
+    "checks":  [
+                   {
+                       "name":  "vision.falsche-kennung-abgewiesen",
+                       "passed":  false,
+                       "detail":  "matchesCapture= code=blender.rebind_required"
+                   },
+                   {
+                       "name":  "vision.pruefung-bleibt-offen",
+                       "passed":  true,
+                       "detail":  "visionState=pending"
+                   },
+                   {
+                       "name":  "vision.urteil-zugeordnet",
+                       "passed":  false,
+                       "detail":  "matchesCapture= erwartet=True"
+                   },
+                   {
+                       "name":  "chip.urteil-sichtbar",
+                       "passed":  false,
+                       "detail":  "visionState=pending text=Visuelle Prüfung ausstehend: blender-viewport-20261110-190413-842-0b8040e2.png"
+                   },
+                   {
+                       "name":  "speichern.auf-dieselbe-blend",
+                       "passed":  false,
+                       "detail":  "savedTo= neueSicherungen= used= vor="
+                   },
+                   {
+                       "name":  "speichern.keine-blend1-auf-der-platte",
+                       "passed":  true,
+                       "detail":  "blend1-Dateien=0"
+                   },
+                   {
+                       "name":  "scene.read.nach-dem-speichern",
+                       "passed":  false,
+                       "detail":  "objekte="
+                   },
+                   {
+                       "name":  "fenster.gechlossen",
+                       "passed":  true,
+                       "detail":  "pid=12716"
+                   }
+               ]
+}

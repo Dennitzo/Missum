@@ -104,6 +104,16 @@ public sealed class ExtensionActionPersistenceTests
         Assert.Null(thirdPartyRun.Action);
         Assert.Equal("com.example.assistant/sample-action", (await runs.GetAsync(thirdPartyRun.Id))!.ExtensionActionId);
 
+        var integratedMessage = await chats.AddMessageAsync(session.Id, ChatRole.Assistant, string.Empty, MessageStatus.Streaming);
+        var integratedRun = await runs.BeginAttemptAsync(new MissumAiRunRecord(
+            Guid.NewGuid(), session.Id, integratedMessage.Id, PromptTriggerAction.Coding, "integrated-coding-action",
+            null, 0, "queued", null, null, now, now, ExtensionActionId: "com.example.assistant/sample-action"));
+        Assert.Equal(PromptTriggerAction.Coding, integratedRun.Action);
+        Assert.Equal("com.example.assistant/sample-action", integratedRun.ExtensionActionId);
+        var reopenedRun = await runs.GetAsync(integratedRun.Id);
+        Assert.Equal(PromptTriggerAction.Coding, reopenedRun?.Action);
+        Assert.Equal(integratedRun.ExtensionActionId, reopenedRun?.ExtensionActionId);
+
         await using var connection = await OpenAsync(Path.Combine(environment.Directory, "Missum.db"));
         await using var command = connection.CreateCommand();
         command.CommandText = """

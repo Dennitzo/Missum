@@ -118,4 +118,44 @@ public sealed class NativeMarkdownPreparationTests
         Assert.Contains(prepared.Sections, section => section.Kind == NativeStreamingMarkdown.SectionKind.Math);
         Assert.Contains(prepared.Sections, section => section.Kind == NativeStreamingMarkdown.SectionKind.Code);
     }
+
+    [Theory]
+    [InlineData("Erster [Link](https://example.org). **Zweiter Satz.** Letzter.", "**Zweiter Satz.**", 0, 13, 13)]
+    [InlineData("Gleich. Gleich. Gleich.", "Gleich. Gleich.", 0, 8, 15)]
+    [InlineData("- Erster. Zweiter.\r\n\r\n## Anfang. Ende. ##", "Ende.", 1, 8, 5)]
+    [InlineData("- Erster. Zweiter.", "Erster.", 0, 3, 7)]
+    [InlineData("Vor $x^2$ und weiter. Noch ein Satz.", "Noch ein Satz.", 0, 17, 14)]
+    [InlineData("Vor $$x^2$$ danach. Letzter.", "Letzter.", 2, 9, 8)]
+    public void MapsSpokenSourceToVisibleText(string source, string sentence, int section, int visibleStart, int visibleLength)
+    {
+        var prepared = NativeStreamingMarkdown.PrepareSource(source);
+        var start = source.LastIndexOf(sentence, StringComparison.Ordinal);
+        var range = NativeStreamingMarkdown.ProjectSpeechRange(prepared.Sections[section], prepared.SpeechSections[section]!,
+            start, start + sentence.Length);
+
+        Assert.NotNull(range);
+        Assert.Equal(visibleStart, range.Value.StartIndex);
+        Assert.Equal(visibleLength, range.Value.Length);
+    }
+
+    [Theory]
+    [InlineData("Eins \\| hier.", 0, 12)]
+    [InlineData("**Zweiter Satz.**", 13, 13)]
+    public void MapsOnlyTheSpokenPartOfATableCell(string sentence, int visibleStart, int visibleLength)
+    {
+        const string source = "| Titel | Zweite Spalte |\r\n| --- | --- |\r\n| Eins \\| hier. **Zweiter Satz.** | Kein Treffer. |";
+        var prepared = NativeStreamingMarkdown.PrepareSource(source);
+        var table = Assert.Single(prepared.Sections);
+        var location = Assert.Single(prepared.SpeechSections)!;
+        var (markup, row) = location.Rows![1];
+        var start = source.IndexOf(sentence, StringComparison.Ordinal);
+        var ranges = NativeStreamingMarkdown.ProjectTableRowSpeechRanges(markup, table.MathTokenPrefix, row,
+            start, start + sentence.Length).ToArray();
+
+        Assert.Equal(2, ranges.Length);
+        var range = Assert.IsType<Microsoft.UI.Xaml.Documents.TextRange>(ranges[0]);
+        Assert.Equal(visibleStart, range.StartIndex);
+        Assert.Equal(visibleLength, range.Length);
+        Assert.Null(ranges[1]);
+    }
 }

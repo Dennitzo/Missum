@@ -80,6 +80,60 @@ public sealed partial class MissumAiAssistantService
         return JsonSerializer.Serialize(merged, JsonOptions);
     }
 
+    internal static bool BlenderReviewHasVisionReceipt(JsonElement arguments,
+        IReadOnlyList<AssistantToolStep> steps, DateTimeOffset runStartedAt)
+    {
+        if (arguments.ValueKind != JsonValueKind.Object || !arguments.TryGetProperty("visionReview", out var review)
+            || review.ValueKind != JsonValueKind.Object)
+            return true;
+
+        var hash = StringProperty(review, "analyzedSha256");
+        var operationId = StringProperty(review, "operationId");
+        if (StringProperty(review, "verdict") == "unavailable")
+        {
+            for (var i = steps.Count - 1; i >= 0; i--)
+            {
+                var step = steps[i];
+                if (step.AgentId is not null || (step.StartedAt ?? step.CompletedAt ?? DateTimeOffset.MinValue) < runStartedAt)
+                    continue;
+                if (step.Tool is "blender.scene.edit" or "blender.custom.run") break;
+                if (step.Tool is ("media.analyze" or "blender.view.capture") && step.Status is ("failed" or "denied" or "interrupted"))
+                    return !string.IsNullOrWhiteSpace(operationId);
+            }
+            return false;
+        }
+        if (string.IsNullOrWhiteSpace(hash) || string.IsNullOrWhiteSpace(operationId)) return false;
+
+        var analysisSeen = false;
+        for (var i = steps.Count - 1; i >= 0; i--)
+        {
+            var step = steps[i];
+            if (step.AgentId is not null || step.Status != "completed"
+                || (step.StartedAt ?? step.CompletedAt ?? DateTimeOffset.MinValue) < runStartedAt)
+                continue;
+            if (step.Tool is "blender.scene.edit" or "blender.custom.run") return false;
+            if (step.Tool == "blender.view.capture")
+            {
+                var capture = ReadToolOutputObject(step.OutputJson);
+                return analysisSeen && capture.GetValueOrDefault("operationId").ValueKind == JsonValueKind.String
+                    && capture["operationId"].GetString() == operationId
+                    && capture.GetValueOrDefault("sha256").ValueKind == JsonValueKind.String
+                    && string.Equals(capture["sha256"].GetString(), hash, StringComparison.OrdinalIgnoreCase);
+            }
+            if (step.Tool != "media.analyze") continue;
+
+            var analysis = ReadToolOutputObject(step.OutputJson);
+            var upload = analysis.GetValueOrDefault("primaryUpload");
+            if (upload.ValueKind == JsonValueKind.Object
+                && upload.TryGetProperty("exactRequestedUpload", out var exact) && exact.ValueKind == JsonValueKind.True
+                && string.Equals(StringProperty(upload, "sha256"), hash, StringComparison.OrdinalIgnoreCase)
+                && analysis.GetValueOrDefault("analysis") is { ValueKind: JsonValueKind.String } findings
+                && !string.IsNullOrWhiteSpace(findings.GetString()))
+                analysisSeen = true;
+        }
+        return false;
+    }
+
     private static string? CompleteToolOutput(AssistantToolStep step, string status, CodingCommandProgress? progress)
     {
         if (step.Tool == ReasoningStepTool) return step.OutputJson;

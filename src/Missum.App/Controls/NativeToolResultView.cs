@@ -59,10 +59,14 @@ public sealed class NativeToolResultView : StackPanel
         else if (language == "diff") body = new NativeDiffView(source, wrapLines: embedded);
         else
         {
-            var text = new TextBlock { FontFamily = new("Cascadia Mono"), Foreground = NativeThemeBrushes.Text, FontSize = language == "text" ? 14 : 13, LineHeight = 23, IsTextSelectionEnabled = true, TextWrapping = embedded || language == "text" ? TextWrapping.Wrap : TextWrapping.NoWrap, Margin = new(12) };
+            // "plain" is document and receipt prose: flowing reading text in the interface font,
+            // never source code, so it must not inherit the monospaced code face.
+            var flowing = language is "text" or "plain";
+            var text = new TextBlock { Foreground = NativeThemeBrushes.Text, FontSize = flowing ? 14 : 13, LineHeight = 23, IsTextSelectionEnabled = true, TextWrapping = embedded || flowing ? TextWrapping.Wrap : TextWrapping.NoWrap, Margin = new(12) };
+            if (!flowing) text.FontFamily = new("Cascadia Mono");
             // Tool tabs own the single scrolling surface. Bounded source pages
             // keep the native text control small without creating a nested viewport.
-            ScrollViewer? scroll = embedded ? null : new ScrollViewer { Content = text, MaxHeight = 520, HorizontalScrollBarVisibility = language == "text" ? ScrollBarVisibility.Disabled : ScrollBarVisibility.Auto, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollMode = language == "text" ? ScrollMode.Disabled : ScrollMode.Enabled };
+            ScrollViewer? scroll = embedded ? null : new ScrollViewer { Content = text, MaxHeight = 520, HorizontalScrollBarVisibility = flowing ? ScrollBarVisibility.Disabled : ScrollBarVisibility.Auto, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollMode = flowing ? ScrollMode.Disabled : ScrollMode.Enabled };
             var pages = new List<int> { 0 };
             var current = 0;
             var nextOffset = 0;
@@ -82,7 +86,7 @@ public sealed class NativeToolResultView : StackPanel
                     else if (char.IsHighSurrogate(source[nextOffset - 1])) nextOffset--;
                 }
                 var visible = source[start..nextOffset];
-                if (language == "text") text.Text = visible;
+                if (flowing) text.Text = visible;
                 else new NativeCodeHighlighter(text).UpdateText(visible, language);
                 previous.IsEnabled = current > 0;
                 next.IsEnabled = nextOffset < source.Length;

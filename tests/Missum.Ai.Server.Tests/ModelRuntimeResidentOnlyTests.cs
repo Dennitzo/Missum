@@ -26,7 +26,7 @@ public sealed class ModelRuntimeResidentOnlyTests
         await runtime.CompleteChatWithCacheOwnershipAsync(ModelId,
             [new("user", "Bearbeite die ursprüngliche Forschungsaufgabe.")], tools,
             "session-owner", null, modelRole: "coding", sessionCacheKey: CacheKey);
-        Assert.Equal(1, handler.LoadCalls);
+        Assert.Equal(0, handler.LoadCalls);
         handler.AllowLoad = false;
 
         var review = await runtime.CompleteChatWithCacheOwnershipAsync(ModelId,
@@ -37,7 +37,7 @@ public sealed class ModelRuntimeResidentOnlyTests
             residentOnly: true, suppressToolCalls: true);
 
         Assert.Equal("Prüfung abgeschlossen.", review.Content);
-        Assert.Equal(1, handler.LoadCalls); // No idempotent primary/companion load-control call during the review.
+        Assert.Equal(0, handler.LoadCalls);
         Assert.Equal(2, handler.ChatBodies.Count);
         var main = handler.ChatBodies[0];
         var checkedBody = handler.ChatBodies[1];

@@ -72,6 +72,8 @@ public static class RunRequestValidator
         {
             throw new ArgumentException("Audiobook runs require general mode and an explicit empty server-tool allow-list.");
         }
+        if (request.ConversationProfile == ConversationProfile.PlanMode && request.Mode != RunMode.Coding)
+            throw new ArgumentException("Plan mode requires a Coding run.");
         if (request.CodingOptions is { } codingOptions)
         {
             if (codingOptions.WorkspacePath is { Length: > 4096 }

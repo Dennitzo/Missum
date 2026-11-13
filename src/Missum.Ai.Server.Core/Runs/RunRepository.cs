@@ -806,6 +806,7 @@ public sealed partial class RunRepository
             WHERE r.run_id != $run AND r.mode = 'Coding' AND r.state IN ('Completed','Failed','Cancelled','Interrupted')
                 AND json_extract(r.request_json, '$.sessionId') = $session
                 AND json_extract(r.request_json, '$.codingOptions.workspacePath') = $workspace COLLATE NOCASE
+                AND lower(coalesce(json_extract(r.request_json, '$.conversationProfile'), '')) <> 'planmode'
                 AND r.created_at < (SELECT created_at FROM runs WHERE run_id = $run)
             ORDER BY r.created_at DESC LIMIT 1;
             """;

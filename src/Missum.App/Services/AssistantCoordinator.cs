@@ -363,6 +363,22 @@ public sealed partial class AssistantCoordinator(
             submittedDocumentIds = await artifacts.ListSubmittedDocumentIdsAsync(session.Id, cancellationToken).ConfigureAwait(false),
             attachments = attachmentItems.Select(ToAttachmentDto),
             actionDescriptors = BuildActionDescriptors(selectedChatMode, page.TotalMessages, extensionWorkspaceRoot),
+            actionGroups = BuildActionGroupDescriptors(selectedChatMode),
+            // Live connection summary of program integrations (Blender and later editors), so the
+            // composer chip can show which scene is open or that the connection is still missing.
+            programIntegrations = ProgramIntegrationStatusReader.Read()
+                .Select(static status => (object)new
+                {
+                    status.ActionId,
+                    status.ExtensionId,
+                    status.Connected,
+                    status.SceneName,
+                    status.ProjectName,
+                    status.Detail,
+                    chipSuffix = status.ChipSuffix,
+                    menuNote = status.MenuNote,
+                    updatedAt = status.UpdatedAt?.ToString("O"),
+                }).ToArray(),
             documentGroupStatus,
             activeSessionId = session.Id,
             productName = runtimeProfile?.ProductName ?? "AI Assistent",
@@ -437,9 +453,8 @@ public sealed partial class AssistantCoordinator(
                 disabledReason ??= extensionRuntime is null
                     ? "Der ExtensionHost ist für diese Aktion nicht verfügbar."
                     : extensionRuntime.GetDisabledReason(action.ActionId, workspaceRoot);
-            var groupLabel = BuiltInExtensionCatalog.GroupLabels.TryGetValue(action.GroupId, out var label)
-                ? label
-                : "Erweiterungen";
+            // Groups come from the action catalog so a package can introduce its own group label.
+            var groupLabel = GroupLabel(action.GroupId);
             return (object)new
             {
                 action.ActionId,
@@ -472,6 +487,33 @@ public sealed partial class AssistantCoordinator(
                 disabledReason,
             };
         }).ToArray();
+    }
+
+    private string GroupLabel(string groupId) => _extensionActions.GetGroups().FirstOrDefault(
+        group => string.Equals(group.GroupId, groupId, StringComparison.Ordinal))?.Label
+        ?? BuiltInExtensionCatalog.GroupLabels.GetValueOrDefault(groupId)
+        ?? "Erweiterungen";
+
+    /// <summary>
+    /// Group headings for the composer tool menu. A group is offered only when the current chat mode
+    /// actually contains an entry for it, so empty headings never appear.
+    /// </summary>
+    private object[] BuildActionGroupDescriptors(ChatMode chatMode)
+    {
+        var extensionMode = chatMode switch
+        {
+            ChatMode.General => ExtensionChatMode.General,
+            ChatMode.Coding => ExtensionChatMode.Coding,
+            ChatMode.ClaudeScience => ExtensionChatMode.ClaudeScience,
+            _ => throw new InvalidOperationException("Der Chatmodus ist ungültig."),
+        };
+        var usedGroupIds = _extensionActions.GetActions(extensionMode)
+            .Select(static action => action.GroupId)
+            .ToHashSet(StringComparer.Ordinal);
+        return _extensionActions.GetGroups()
+            .Where(group => usedGroupIds.Contains(group.GroupId))
+            .Select(group => (object)new { group.GroupId, group.Label, group.GroupOrder })
+            .ToArray();
     }
 
     internal Task<object> BuildConversationForHostAsync(Guid sessionId, CancellationToken cancellationToken) => BuildConversationSnapshotAsync(sessionId, cancellationToken);
@@ -725,7 +767,8 @@ public sealed partial class AssistantCoordinator(
                 var steeringAccepted = await missumAi.SteerAsync(steeringSessionId,
                     steeringPrompt,
                     GetRequiredString(envelope.Payload, "inputId", 128),
-                    GetOptionalString(envelope.Payload, "expectedRunId", 128), cancellationToken).ConfigureAwait(false);
+                    GetOptionalString(envelope.Payload, "expectedRunId", 128),
+                    GetSubmittedAttachmentIds(envelope.Payload), cancellationToken).ConfigureAwait(false);
                 // A retry of an old acknowledgement must not replace the title
                 // from a newer submission. Rejected steering keeps the old name.
                 if (!steeringAccepted.Duplicate
@@ -748,12 +791,13 @@ public sealed partial class AssistantCoordinator(
                 }
                 break;
             case "document.remove":
-                EnsureContextCanChange();
+                // A run consumes the frozen selection it snapshotted at send time and its own artifact
+                // copies, so withdrawing an attachment never changes what the AI is already reading.
                 await documents.RemoveAsync(GetRequiredGuid(envelope.Payload, "documentId"), cancellationToken);
                 await emit("document.changed", await BuildSnapshotAsync(cancellationToken), envelope.RequestId);
                 break;
             case "attachment.remove":
-                EnsureContextCanChange();
+                // Blob deletion stays reference counted, therefore an in-flight prompt keeps its bytes.
                 await attachments.RemoveAsync(GetRequiredGuid(envelope.Payload, "attachmentId"), cancellationToken);
                 await emit("document.changed", await BuildSnapshotAsync(cancellationToken), envelope.RequestId);
                 break;
@@ -855,7 +899,7 @@ public sealed partial class AssistantCoordinator(
             || queue?.Pending.Any(item => item.SessionId == selectedSessionId.Value) == true);
         if (sessionIsBusy)
         {
-            throw new InvalidOperationException("Anhänge und Dokumente können während eines laufenden AI-Auftrags nicht geändert werden.");
+            throw new InvalidOperationException("Der Arbeitskontext kann während eines laufenden AI-Auftrags nicht geändert werden.");
         }
     }
 
@@ -1067,7 +1111,7 @@ public sealed partial class AssistantCoordinator(
                 ? argumentsElement
                 : JsonSerializer.SerializeToElement(new { });
             var result = await extensionRuntime.InvokeAsync(
-                actionId, arguments, workspaceRoot, cancellationToken).ConfigureAwait(false);
+                actionId, arguments, workspaceRoot, null, cancellationToken).ConfigureAwait(false);
             await emit("action.completed", new { actionId, result }, envelope.RequestId).ConfigureAwait(false);
             return;
         }
@@ -1607,7 +1651,8 @@ public sealed partial class AssistantCoordinator(
                 match,
                 update => EmitMissumAiUpdateAsync(update, emit, envelope.RequestId),
                 submittedSession: queuedInput?.Session,
-                cancellationToken: cancellationToken).ConfigureAwait(false);
+                cancellationToken: cancellationToken,
+                submittedAttachmentIds: GetSubmittedAttachmentIds(envelope.Payload)).ConfigureAwait(false);
         }
         catch (MissumAiStreamDetachedException)
         {
@@ -2432,6 +2477,21 @@ public sealed partial class AssistantCoordinator(
         attachment.Length,
         attachment.CreatedAt,
     };
+
+    private static HashSet<Guid>? GetSubmittedAttachmentIds(JsonElement payload)
+    {
+        if (!payload.TryGetProperty("attachmentIds", out var ids)) return null;
+        if (ids.ValueKind != JsonValueKind.Array)
+            throw new ArgumentException("Ungültige Auswahl für Dateianhänge.");
+        var result = new HashSet<Guid>();
+        foreach (var id in ids.EnumerateArray())
+        {
+            if (id.ValueKind != JsonValueKind.String || !id.TryGetGuid(out var parsed))
+                throw new ArgumentException("Ungültige Kennung für einen Dateianhang.");
+            result.Add(parsed);
+        }
+        return result;
+    }
 
     private static Guid GetRequiredGuid(JsonElement payload, string name)
     {

@@ -1,0 +1,62 @@
+﻿[
+    {
+        "name":  "setup.addon-aus-aktiviertem-paket",
+        "passed":  true,
+        "detail":  "dateien=4 quelle=C:\\Users\\AMD\\Documents\\GitHub\\Missum\\extensions\\blender\\missum_blender_bridge"
+    },
+    {
+        "name":  "bridge.port-erreichbar",
+        "passed":  true,
+        "detail":  "port=8765 blenderPid=12716 beendet=False"
+    },
+    {
+        "name":  "status.verbunden",
+        "passed":  true,
+        "detail":  "connected=True szene=Scene instanz=blender-12716-570040900"
+    },
+    {
+        "name":  "scene.read.werkszene-liest",
+        "passed":  true,
+        "detail":  "objekte=Camera,Cube,Light"
+    },
+    {
+        "name":  "scene.edit.schritte-angewendet",
+        "passed":  true,
+        "detail":  "appliedCount=7 code="
+    },
+    {
+        "name":  "ledger.doppeltes-angewendet",
+        "passed":  true,
+        "detail":  "outcome=already_applied dedupliert=True"
+    },
+    {
+        "name":  "ledger.keine-zusatzlichen-objekte",
+        "passed":  true,
+        "detail":  "objekte=5 (erwartet 5: Wuerfel, Kugel und Kamera dazu, Cube weg) liste=Camera,Light,LiveKamera,LiveKugel,LiveWuerfel"
+    },
+    {
+        "name":  "capture.png-aus-viewport",
+        "passed":  true,
+        "detail":  "pfad=C:\\Users\\AMD\\AppData\\Local\\Temp\\missum-program-integrations\\captures\\blender-viewport-20261110-190413-842-0b8040e2.png byte=453991 methode=viewport.opengl"
+    },
+    {
+        "name":  "capture.aus-echter-fensteransicht",
+        "passed":  true,
+        "detail":  "methode=viewport.opengl versuch=finished"
+    },
+    {
+        "name":  "capture.kennung-geliefert",
+        "passed":  true,
+        "detail":  "sha256=7403b782878deb04e8f32267e8761f3b98c78d71fb09c37aaba8207f441cd17e"
+    },
+    {
+        "name":  "capture.groesse-stimmt-mit-bild-ueberein",
+        "passed":  true,
+        "detail":  "gemeldet=900x600 bild=900x600 angefragt=900x600"
+    },
+    {
+        "name":  "chip.sichtpruefung-ausstehend",
+        "passed":  true,
+        "detail":  "visionState=pending text=Visuelle Prüfung ausstehend: blender-viewport-20261110-190413-842-0b8040e2.png"
+    }
+]

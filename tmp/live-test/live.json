@@ -1,0 +1,20 @@
+﻿{
+    "stage":  "setup",
+    "finishedAt":  "2026-11-10T19:04:15",
+    "computer":  "AMD",
+    "blenderPid":  12716,
+    "adapterPath":  "C:\\Users\\AMD\\AppData\\Local\\Missum\\Extensions\\active\\com.missum.blender\\1.0.1\\8a71faec908e3b29d5478a821c8404e6932bfad5a304c2348350bd876c1638ba\\content\\adapter\\Missum.BlenderAdapter.exe",
+    "contentPath":  "C:\\Users\\AMD\\AppData\\Local\\Missum\\Extensions\\active\\com.missum.blender\\1.0.1\\8a71faec908e3b29d5478a821c8404e6932bfad5a304c2348350bd876c1638ba\\content",
+    "port":  8765,
+    "instanceId":  "blender-12716-570040900",
+    "sceneName":  "Scene",
+    "operationId":  "live-pruefung-1",
+    "capturePath":  "C:\\Users\\AMD\\AppData\\Local\\Temp\\missum-program-integrations\\captures\\blender-viewport-20261110-190413-842-0b8040e2.png",
+    "captureSha256":  "7403b782878deb04e8f32267e8761f3b98c78d71fb09c37aaba8207f441cd17e",
+    "blendPath":  "C:\\Users\\AMD\\Documents\\GitHub\\Missum\\tmp\\live-test\\MissumLiveSzene.blend",
+    "objects":  [
+                    "Camera",
+                    "Cube",
+                    "Light"
+                ]
+}

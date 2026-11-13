@@ -69,21 +69,19 @@ class SubagentRuntimeTests(unittest.TestCase):
             return dict(success=True)
         raise AssertionError(path)
 
-    def test_ordinary_cold_load_completes_exact_main_and_replica_before_returning(self):
+    def test_cold_load_only_loads_primary_until_replica_is_requested(self):
         self.active.clear()
         with patch.object(catalog, "gpu_inventory", return_value=self.devices):
             result = self.manager.load(self.base)
-        self.assertTrue(result["success"])
+            self.assertTrue(result["success"])
+            self.assertEqual([self.base], self.loads)
+            self.assertNotIn(self.child, self.manager.placements)
+            self.assertTrue(self.manager.agent_status(self.base)["allowed"])
+            self.assertEqual([self.base], self.loads)
+            self.manager.load(self.child)
         self.assertEqual([self.base, self.child], self.loads)
-        self.assertEqual("CUDA0", self.manager.placements[self.base])
         self.assertEqual("CUDA1", self.manager.placements[self.child])
-        self.assertEqual(32768, self.manager.policies[self.base]["context"])
         self.assertEqual(32768, self.manager.policies[self.child]["context"])
-        self.assertTrue(result["subagent"]["allowed"])
-        self.assertTrue(result["subagent"]["loaded"])
-        self.assertFalse(result["subagent"]["reused"])
-        self.assertEqual(self.child, result["subagent"]["instanceId"])
-        self.assertEqual(["loaded", "loaded"], [item["status"]["value"] for item in self.active])
 
     def test_explicit_runtime_stop_interrupts_wait_for_existing_network_load(self):
         self.primary["status"]["value"] = "loading"
@@ -112,59 +110,47 @@ class SubagentRuntimeTests(unittest.TestCase):
                 self.manager.load(self.base)
         self.assertEqual([self.base], self.loads)
 
-    def test_reused_primary_eagerly_loads_missing_replica_then_preserves_both_slots(self):
+    def test_reused_primary_leaves_replica_unloaded(self):
         with patch.object(catalog, "gpu_inventory", return_value=self.devices):
-            first = self.manager.load(self.base)
-            self.assertTrue(first["reused"])
-            self.assertTrue(first["subagent"]["loaded"])
-            self.assertFalse(first["subagent"]["reused"])
             with patch.object(self.manager.sessions, "invalidate") as invalidate:
-                second = self.manager.load(self.base)
+                result = self.manager.load(self.base)
             invalidate.assert_not_called()
-        self.assertTrue(second["reused"])
-        self.assertTrue(second["subagent"]["loaded"])
-        self.assertTrue(second["subagent"]["reused"])
-        self.assertEqual([self.child], self.loads)
+        self.assertTrue(result["reused"])
+        self.assertEqual([], self.loads)
 
     def test_multigpu_primary_stays_successful_without_any_replica_load(self):
         self.primary["status"]["args"] = ["--device", "CUDA0,CUDA1", "--split-mode", "layer"]
         with patch.object(catalog, "gpu_inventory", return_value=self.devices):
             result = self.manager.load(self.base)
         self.assertTrue(result["success"])
-        self.assertFalse(result["subagent"]["loaded"])
-        self.assertEqual("subagent.primary_uses_multiple_gpus", result["subagent"]["reason"])
+        self.assertEqual("subagent.primary_uses_multiple_gpus", self.manager.agent_status(self.base)["reason"])
         self.assertEqual([], self.loads)
 
     def test_low_vram_admission_is_rechecked_after_memory_becomes_available(self):
         self.devices[1]["free"] = 1024**3
         with patch.object(catalog, "gpu_inventory", return_value=self.devices):
-            blocked = self.manager.load(self.base)
-            self.assertEqual("subagent.vram_insufficient", blocked["subagent"]["reason"])
+            blocked = self.manager.agent_status(self.base)
+            self.assertEqual("subagent.vram_insufficient", blocked["reason"])
             self.assertEqual([], self.loads)
             self.assertNotIn(self.base, self.manager.agent_failures)
             self.devices[1]["free"] = 40 * 1024**3
-            ready = self.manager.load(self.base)
-        self.assertTrue(ready["subagent"]["loaded"])
+            self.assertTrue(self.manager.agent_status(self.base)["allowed"])
+            self.manager.load(self.child)
         self.assertEqual([self.child], self.loads)
 
     def test_replica_native_failure_keeps_primary_and_is_sticky_until_actual_reload(self):
         self.active.clear()
         self.failed_models.add(self.child)
         with patch.object(catalog, "gpu_inventory", return_value=self.devices):
-            first = self.manager.load(self.base)
-            self.assertTrue(first["success"])
-            self.assertEqual("subagent.vram_allocation_failed", first["subagent"]["reason"])
-            self.assertFalse(first["subagent"]["loaded"])
+            self.assertTrue(self.manager.load(self.base)["success"])
+            with self.assertRaisesRegex(RuntimeError, "subagent.vram_allocation_failed"):
+                self.manager.load(self.child)
             self.assertEqual("loaded", self.active[0]["status"]["value"])
-            self.assertEqual("CUDA0", self.manager.placements[self.base])
-            self.assertEqual("CUDA1", self.manager.placements[self.child])
             self.failed_models.clear()
-            reused = self.manager.load(self.base)
-            self.assertEqual("subagent.vram_allocation_failed", reused["subagent"]["reason"])
-            self.assertEqual([self.base, self.child], self.loads)
-            self.active.clear()  # A real unload/reload is the retry boundary.
-            reloaded = self.manager.load(self.base)
-        self.assertTrue(reloaded["subagent"]["loaded"])
+            self.assertEqual("subagent.vram_allocation_failed", self.manager.agent_status(self.base)["reason"])
+            self.active.clear()
+            self.manager.load(self.base)
+            self.manager.load(self.child)
         self.assertEqual([self.base, self.child, self.base, self.child], self.loads)
         self.assertNotIn(self.base, self.manager.agent_failures)
 
@@ -173,34 +159,33 @@ class SubagentRuntimeTests(unittest.TestCase):
         self.failed_models.add(self.child)
         self.failure_detail = "invalid model tensor"
         with patch.object(catalog, "gpu_inventory", return_value=self.devices):
-            result = self.manager.load(self.base)
-            reused = self.manager.load(self.base)
-        self.assertTrue(result["success"])
-        self.assertTrue(reused["success"])
-        self.assertEqual("subagent.runtime_load_failed", result["subagent"]["reason"])
-        self.assertEqual("subagent.runtime_load_failed", reused["subagent"]["reason"])
+            self.assertTrue(self.manager.load(self.base)["success"])
+            with self.assertRaisesRegex(RuntimeError, "subagent.runtime_load_failed"):
+                self.manager.load(self.child)
+            self.assertTrue(self.manager.load(self.base)["reused"])
         self.assertEqual([self.base, self.child], self.loads)
         self.assertEqual("loaded", self.active[0]["status"]["value"])
 
-    def test_replica_preload_uses_measured_main_allocation_instead_of_small_fixture_estimate(self):
+    def test_replica_admission_uses_measured_main_allocation_instead_of_small_fixture_estimate(self):
         self.active.clear()
         before = [dict(index=0, device="CUDA0", free=40 * 1024**3),
                   dict(index=1, device="CUDA1", free=36 * 1024**3)]
         after = [dict(index=0, device="CUDA0", free=5 * 1024**3), before[1]]
         with patch.object(catalog, "gpu_inventory", side_effect=[before, after, after]):
-            result = self.manager.load(self.base)
-        self.assertTrue(result["success"])
+            self.assertTrue(self.manager.load(self.base)["success"])
+            result = self.manager.agent_status(self.base)
         self.assertEqual(35 * 1024**3, self.manager.allocations[self.base])
-        self.assertEqual("subagent.vram_insufficient", result["subagent"]["reason"])
-        self.assertEqual(37 * 1024**3, result["subagent"]["requiredBytes"])
+        self.assertEqual("subagent.vram_insufficient", result["reason"])
+        self.assertEqual(37 * 1024**3, result["requiredBytes"])
         self.assertEqual([self.base], self.loads)
 
     def test_one_gpu_primary_load_succeeds_without_replica_request(self):
         self.active.clear()
         with patch.object(catalog, "gpu_inventory", return_value=self.devices[:1]):
             result = self.manager.load(self.base)
+            availability = self.manager.agent_status(self.base)
         self.assertTrue(result["success"])
-        self.assertEqual("subagent.second_gpu_unavailable", result["subagent"]["reason"])
+        self.assertEqual("subagent.second_gpu_unavailable", availability["reason"])
         self.assertEqual([self.base], self.loads)
 
     def test_resident_replica_with_different_actual_context_is_not_reconfigured(self):
@@ -209,9 +194,10 @@ class SubagentRuntimeTests(unittest.TestCase):
         with patch.object(catalog, "gpu_inventory", return_value=self.devices), patch.object(
                 self.manager.sessions, "invalidate") as invalidate:
             result = self.manager.load(self.base)
+            availability = self.manager.agent_status(self.base)
         self.assertTrue(result["success"])
-        self.assertEqual("subagent.context_mismatch", result["subagent"]["reason"])
-        self.assertEqual(16384, result["subagent"]["replicaContextLength"])
+        self.assertEqual("subagent.context_mismatch", availability["reason"])
+        self.assertEqual(16384, availability["replicaContextLength"])
         self.assertEqual([], self.loads)
         invalidate.assert_not_called()
 
@@ -240,9 +226,8 @@ class SubagentRuntimeTests(unittest.TestCase):
         with patch.object(catalog, "gpu_inventory", return_value=self.devices), patch.object(catalog.time, "sleep", side_effect=finish):
             result = self.manager.load(self.base)
         self.assertTrue(result["reused"])
-        self.assertTrue(result["subagent"]["loaded"])
         self.assertNotIn(self.base, self.manager.policies)
-        self.assertEqual([self.child], self.loads)
+        self.assertEqual([], self.loads)
 
     def test_embedding_load_does_not_create_agent_replica(self):
         gguf(self.root / "embedding.gguf", architecture="bert", context=8192)
@@ -251,7 +236,7 @@ class SubagentRuntimeTests(unittest.TestCase):
         with patch.object(catalog, "gpu_inventory", return_value=self.devices):
             result = self.manager.load(embedding["id"])
         self.assertTrue(result["success"])
-        self.assertEqual("subagent.model_not_language", result["subagent"]["reason"])
+        self.assertNotIn("subagent", result)
         self.assertEqual([embedding["id"]], self.loads)
 
     def test_future_model_creates_two_exact_file_instances_with_independent_single_gpu_slots(self):
@@ -288,8 +273,7 @@ class SubagentRuntimeTests(unittest.TestCase):
                                                batchSize=256, ubatchSize=256)
         self.manager.placements[self.base] = "CUDA0"
         with patch.object(catalog, "gpu_inventory", return_value=self.devices):
-            result = self.manager.load(self.base)
-        self.assertTrue(result["subagent"]["loaded"])
+            self.manager.load(self.child)
         self.assertEqual([self.child], self.loads)
         for instance in (self.base, self.child):
             policy = self.manager.policies[instance]

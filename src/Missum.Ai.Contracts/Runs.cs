@@ -14,6 +14,7 @@ public enum ConversationProfile
     General,
     Audiobook,
     ContextPreparation,
+    PlanMode,
 }
 
 public enum RunState

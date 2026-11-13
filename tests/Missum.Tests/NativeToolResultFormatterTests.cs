@@ -6,6 +6,25 @@ namespace Missum.Tests;
 public sealed class NativeToolResultFormatterTests
 {
     [Theory]
+    [InlineData("document.search", "search")]
+    [InlineData("documents.search", "search")]
+    [InlineData("document.read", "search")]
+    [InlineData("document.read", "read")]
+    public void DocumentReceiptShowsReadableExcerpt(string tool, string mode)
+    {
+        const string excerpt = "Größe und Oberfläche";
+        var unit = new { fileName = "Prüfung.pdf", pageNumber = 2, text = excerpt };
+        var input = JsonSerializer.SerializeToElement(new { mode, query = "Größe" });
+        var output = mode == "search"
+            ? JsonSerializer.SerializeToElement(new { result = new { evidence = new[] { unit } } })
+            : JsonSerializer.SerializeToElement(new { units = new[] { unit } });
+        var blocks = NativeToolResultFormatter.Receipt(tool, input, output, "completed").ToArray();
+        var text = Assert.Single(blocks, block => block.Text == excerpt);
+        Assert.Equal("plain", text.Language);
+        Assert.Contains("Prüfung.pdf · Seite 2", text.Title, StringComparison.Ordinal);
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public void MediaAnalysisDecodesJsonOnceAndPreservesLiteralBackslashes(bool legacyDetail)

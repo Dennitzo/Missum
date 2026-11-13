@@ -51,7 +51,7 @@ public sealed class SpeechPauseTests
         var spoken = new ConcurrentQueue<string>();
         var enteredWait = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using var session = new SpeechStreamingSession(initial,
-            (text, _) => { spoken.Enqueue(text); return Task.CompletedTask; },
+            (text, _) => { spoken.Enqueue(text.Text); return Task.CompletedTask; },
             waitForResume: token =>
             {
                 var waiting = microphone.WaitForSpeechResumeAsync(token);
@@ -87,7 +87,7 @@ public sealed class SpeechPauseTests
         var nextWaiting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using var session = new SpeechStreamingSession(initial, (text, _) =>
         {
-            spoken.Enqueue(text);
+            spoken.Enqueue(text.Text);
             if (spoken.Count == 1)
             {
                 pause.Toggle(); // Exactly at the first completed segment, before the next dequeue.

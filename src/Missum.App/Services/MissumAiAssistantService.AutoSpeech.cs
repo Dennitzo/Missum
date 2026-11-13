@@ -25,10 +25,11 @@ public sealed partial class MissumAiAssistantService
             {
                 _automaticSpeechSession?.Cancel();
                 SpeechStreamingSession? session = null;
-                session = new(update.Message, async (text, token) =>
+                session = new(update.Message, async (chunk, token) =>
                 {
                     if (!IsCurrentAutomaticSpeech(session)) return;
-                    await SpeakCoreAsync(update.Message.SessionId, text, null,
+                    var messageId = update.Message.Id;
+                    await SpeakCoreAsync(update.Message.SessionId, chunk.Text, messageId,
                         speech =>
                         {
                             if (!IsCurrentAutomaticSpeech(session) || session!.WasCancelled && speech.IsActive) return Task.CompletedTask;
@@ -43,12 +44,15 @@ public sealed partial class MissumAiAssistantService
                             return status(AutomaticSpeechStatus(session!, speech));
                         },
                         playback => IsCurrentAutomaticSpeech(session) ? progress(playback with
-                        { ControlMessageId = session!.MessageId, ControlPlaybackId = session.PlaybackId, OwnerClientId = "desktop" }) : Task.CompletedTask,
+                        {
+                            ControlMessageId = session!.MessageId,
+                            ControlPlaybackId = session.PlaybackId,
+                            OwnerClientId = "desktop",
+                            SourceStepId = chunk.SourceStepId,
+                        }) : Task.CompletedTask,
                         null, null,
-                        // Never resolve an attachment or the full saved message for a delta.
-                        // Live source ranges are deliberately omitted; a chunk is not the
-                        // complete message used by the existing read-from-here highlighter.
-                        new(text, "AI-Antwort (live)", null, null, update.Message.ContentProfile), token).ConfigureAwait(false);
+                        new(chunk.Text, "AI-Antwort (live)", null, messageId, update.Message.ContentProfile,
+                            chunk.SourceOffset, chunk.SourceMarkdown), token).ConfigureAwait(false);
                 }, microphone.WaitForSpeechResumeAsync, microphone.BeginSpeechSession(resetPause: true),
                     CancellationToken.None);
                 _automaticSpeechSession = session;

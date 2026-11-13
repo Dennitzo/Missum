@@ -1,0 +1,9 @@
+MISSUM_GUI enabled=True port=8765 running=True instance=blender-41484-919861000 timer_registered=True python_allowed=True objects=3
+MISSUM_GUI ready
+00:08.375  render           | Saved: 'C:\Users\AMD\AppData\Local\Temp\missum-program-integrations\captures\blender-viewport-20261109-235056-248-5a49acec.png'
+Info: Saved "MissumGuiScene.blend"
+MISSUM_GUI quit requested by flag
+MISSUM_GUI server stopped, requests served=11
+00:13.000  blend            | Saved session recovery to "C:\Users\AMD\AppData\Local\Temp\quit.blend"
+
+Blender quit

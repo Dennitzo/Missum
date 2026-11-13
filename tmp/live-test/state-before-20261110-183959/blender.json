@@ -1,0 +1,53 @@
+{
+  "requiresRebind": false,
+  "rebindReason": null,
+  "binding": {
+    "instanceId": "blender-43692-044577000",
+    "sessionStamp": "1794270818044577000-0",
+    "port": 8765,
+    "projectPath": "C:\\Users\\AMD\\Documents\\GitHub\\Missum\\tmp\\test-vision\\MissumVisionScene.blend",
+    "sceneName": "Scene",
+    "boundAt": "2026-11-10T01:33:48.9675941\u002B01:00"
+  },
+  "updatedAt": "2026-11-10T01:33:48.9676742\u002B01:00",
+  "visionPending": null,
+  "visionReviews": [
+    {
+      "operationId": "",
+      "capturePath": "C:\\Users\\AMD\\AppData\\Local\\Temp\\missum-program-integrations\\captures\\blender-viewport-20261110-013339-766-73f338ce.png",
+      "sha256": "8251176368bdef27e075fafa1799e4226228ed67986a3788bdeb1b701b7e89a2",
+      "analyzedSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "matchesCapture": false,
+      "verdict": "verified",
+      "summary": "anderes Bild",
+      "at": "2026-11-10T01:33:43.5480464\u002B01:00"
+    },
+    {
+      "operationId": "",
+      "capturePath": "C:\\Users\\AMD\\AppData\\Local\\Temp\\missum-program-integrations\\captures\\blender-viewport-20261110-013339-766-73f338ce.png",
+      "sha256": "8251176368bdef27e075fafa1799e4226228ed67986a3788bdeb1b701b7e89a2",
+      "analyzedSha256": "8251176368bdef27e075fafa1799e4226228ed67986a3788bdeb1b701b7e89a2",
+      "matchesCapture": true,
+      "verdict": "verified",
+      "summary": "Wuerfel und Kugel sichtbar, Kamera passt",
+      "at": "2026-11-10T01:33:44.8788617\u002B01:00"
+    },
+    {
+      "operationId": "",
+      "capturePath": "C:\\Users\\AMD\\AppData\\Local\\Temp\\missum-program-integrations\\captures\\blender-viewport-20261110-013344-983-ef3c6e26.png",
+      "sha256": "270d22e14053dd2e9f72039ce08d3e1301487d6354e08cf63f955d1925c1aa46",
+      "analyzedSha256": "270d22e14053dd2e9f72039ce08d3e1301487d6354e08cf63f955d1925c1aa46",
+      "matchesCapture": true,
+      "verdict": "unavailable",
+      "summary": "Vision war in diesem Lauf nicht erreichbar",
+      "at": "2026-11-10T01:33:48.9660854\u002B01:00"
+    }
+  ],
+  "operations": {
+    "vision-test-aenderung": {
+      "outcome": "applied",
+      "summary": "1 Schritte auf Szene \u0027Scene\u0027 angewendet.",
+      "at": "2026-11-10T01:33:47.6267550\u002B01:00"
+    }
+  }
+}

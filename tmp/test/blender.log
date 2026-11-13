@@ -1,0 +1,15 @@
+00:02.234  blend            | Read blend: "C:\Users\AMD\Documents\GitHub\Missum\tmp\test\MissumTestScene.blend"
+Info: Saved "MissumTestScene.blend"
+Info: Saved "MissumOtherScene.blend"
+MISSUM_HARNESS port=8765 project=C:\Users\AMD\Documents\GitHub\Missum\tmp\test\MissumTestScene.blend save_version=1 instance=blender-5456-291017500 objects=3
+00:10.406  render           | Saved: 'C:\Users\AMD\AppData\Local\Temp\missum-program-integrations\captures\blender-viewport-20261109-235255-287-4517b5ea.png'
+00:10.578  blend            | Read blend: "C:\Users\AMD\Documents\GitHub\Missum\tmp\test\MissumOtherScene.blend"
+Info: Saved "MissumTestScene.blend"
+MISSUM_HARNESS switched to C:\Users\AMD\Documents\GitHub\Missum\tmp\test\MissumOtherScene.blend
+Info: Saved "MissumOtherScene.blend"
+MISSUM_HARNESS bridge stopped
+MISSUM_HARNESS quitting
+MISSUM_HARNESS done
+Blender 5.2.2 LTS (hash d13f752e3b9c built 2026-09-15 01:37:04)
+
+Blender quit

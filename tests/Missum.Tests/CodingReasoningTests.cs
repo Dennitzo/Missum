@@ -214,7 +214,7 @@ public sealed class CodingReasoningTests
         using var firstSpoken = new SemaphoreSlim(0);
         using var speech = new SpeechStreamingSession(initial, (text, _) =>
         {
-            spoken.Enqueue(text);
+            spoken.Enqueue(text.Text);
             firstSpoken.Release();
             return Task.CompletedTask;
         });
@@ -247,7 +247,7 @@ public sealed class CodingReasoningTests
         var spoken = new ConcurrentQueue<string>();
         using var speech = new SpeechStreamingSession(initial, (text, _) =>
         {
-            spoken.Enqueue(text);
+            spoken.Enqueue(text.Text);
             return Task.CompletedTask;
         });
         var message = initial with { Content = "Version 3." };

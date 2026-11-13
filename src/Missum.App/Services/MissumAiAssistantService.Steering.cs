@@ -33,8 +33,12 @@ public sealed partial class MissumAiAssistantService
             cancellationToken, resetPauseForDirectSource: true);
     }
 
-    public async Task<RunSteeringAccepted> SteerAsync(Guid sessionId, string prompt, string inputId,
-        string? expectedRunId = null, CancellationToken cancellationToken = default)
+    public Task<RunSteeringAccepted> SteerAsync(Guid sessionId, string prompt, string inputId,
+        string? expectedRunId = null, CancellationToken cancellationToken = default) =>
+        SteerAsync(sessionId, prompt, inputId, expectedRunId, null, cancellationToken);
+
+    internal async Task<RunSteeringAccepted> SteerAsync(Guid sessionId, string prompt, string inputId,
+        string? expectedRunId, IReadOnlySet<Guid>? submittedAttachmentIds, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(prompt);
         ArgumentException.ThrowIfNullOrWhiteSpace(inputId);
@@ -43,6 +47,11 @@ public sealed partial class MissumAiAssistantService
         var promptFiles = new PromptAttachmentService(attachments, artifacts, blobs);
         var documentSnapshot = await promptFiles.PendingDocumentsAsync(sessionId,
             await documents.ListAsync(sessionId, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
+        if (submittedAttachmentIds is not null)
+        {
+            attachmentSnapshot = attachmentSnapshot.Where(file => submittedAttachmentIds.Contains(file.Id)).ToArray();
+            documentSnapshot = documentSnapshot.Where(document => submittedAttachmentIds.Contains(document.Id)).ToArray();
+        }
         if (!IsRunning || ActiveSessionId != sessionId)
         {
             // A lost HTTP acknowledgement can be retried after completion. The

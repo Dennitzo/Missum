@@ -1,0 +1,20 @@
+{
+  "operations": {
+    "live-pruefung-1": {
+      "outcome": "applied",
+      "summary": "7 Schritte auf Szene \u0027Scene\u0027 angewendet.",
+      "at": "2026-11-10T19:04:10.9696751\u002B01:00"
+    }
+  },
+  "visionPending": {
+    "operationId": "live-pruefung-1",
+    "capturePath": "C:\\Users\\AMD\\AppData\\Local\\Temp\\missum-program-integrations\\captures\\blender-viewport-20261110-190413-842-0b8040e2.png",
+    "sha256": "7403b782878deb04e8f32267e8761f3b98c78d71fb09c37aaba8207f441cd17e",
+    "since": "2026-11-10T19:04:15.4311541\u002B01:00"
+  },
+  "visionReviews": null,
+  "requiresRebind": true,
+  "rebindReason": "Die Sichtpr\u00FCfung ben\u00F6tigt die verbundene Blender-Szene.",
+  "binding": null,
+  "updatedAt": "2026-11-10T19:07:32.8202507\u002B01:00"
+}

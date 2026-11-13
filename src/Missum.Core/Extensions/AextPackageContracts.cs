@@ -76,9 +76,11 @@ public interface IAextPackageStore
         CancellationToken cancellationToken = default);
 
     Task<IReadOnlyList<AextPackageInspection>> GetActivationCandidatesAsync(
+        Action<string>? reportFailure = null,
         CancellationToken cancellationToken = default);
 
     Task<IReadOnlyList<AextPackageInspection>> GetActivePackagesAsync(
+        Action<string>? reportFailure = null,
         CancellationToken cancellationToken = default);
 
     Task<ActivatedAextPackage> ActivateAsync(

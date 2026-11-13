@@ -87,37 +87,51 @@ public sealed partial class NativeAssistantPage
     {
         for (DependencyObject? source = target; source is not null; source = VisualTreeHelper.GetParent(source))
         {
-            if (source is not NativeStreamingMarkdown { Tag: NativeSourceAnchor anchor } || anchor.Start < 0) continue;
+            if (source is not FrameworkElement { Tag: NativeSourceAnchor { Start: >= 0 } anchor }) continue;
             if (!DisplayMessages.TryGetValue(anchor.MessageId, out var original)
-                || !_messageActionViews.TryGetValue(anchor.MessageId, out var action) || !action.CanRead || action.IsStreaming) return null;
-            var fullText = MessageContent(original);
-            var offset = Math.Clamp(anchor.Start, 0, fullText.Length);
-            var excerpt = fullText[offset..];
+                || !_messageActionViews.TryGetValue(anchor.MessageId, out var action) || !action.CanRead) return null;
+            var text = ContextSpeechSource(original, anchor.StepId);
+            if (anchor.Start > text.Length || !text.AsSpan(anchor.Start).StartsWith(anchor.Source, StringComparison.Ordinal))
+                return null;
+            var localStart = source is NativeStreamingMarkdown markdown && markdown.TryGetSpeechSectionStart(target, out var sectionStart)
+                ? sectionStart : 0;
+            if (localStart < 0 || localStart >= anchor.Source.Length) return null;
+            var offset = anchor.Start + localStart;
+            if (text.AsSpan(offset).IsWhiteSpace()) return null;
+
+            var start = new MessageSpeechStart(text, offset, anchor.StepId);
             var menu = new MenuFlyout();
             var read = new MenuFlyoutItem { Text = "Ab hier vorlesen" };
-            var owner = _session;
-            var updatedAt = DateTimeOffset.TryParse(MessageUpdatedAt(original), out var at) ? at : DateTimeOffset.MinValue;
-            read.Click += async (_, _) => { if (_session == owner) await StartMessageSpeechAsync(action, excerpt, updatedAt); };
+            var owner = ConversationViewKey;
+            read.Click += async (_, _) =>
+            {
+                if (ConversationViewKey != owner || !DisplayMessages.TryGetValue(anchor.MessageId, out var current)) return;
+                var currentText = ContextSpeechSource(current, start.StepId);
+                if (!currentText.StartsWith(start.Text, StringComparison.Ordinal))
+                {
+                    ShowMessageActionError("Die Nachricht wurde inzwischen geändert. Wähle die Vorlesestelle erneut aus.");
+                    return;
+                }
+                await StartMessageSpeechAsync(action, start with { Text = currentText });
+            };
             menu.Items.Add(read);
-            return menu;
-        }
-        foreach (var (id, entry) in _messageViews)
-        {
-            if (!_messageActionViews.TryGetValue(id, out var view) || !view.CanRead || view.IsStreaming || view.SessionId != _session) continue;
-            var blocks = MessageBody(entry.View).Children.OfType<Missum.App.Controls.NativeStreamingMarkdown>().Cast<FrameworkElement>().ToArray();
-            var excerpt = Missum.App.Controls.NativeConversationSelection.ReadableSuffix(blocks, target);
-            if (excerpt.Length == 0) continue;
-            if (!DisplayMessages.TryGetValue(id, out var message) || !DateTimeOffset.TryParse(MessageUpdatedAt(message), out var updatedAt)) return null;
-            var session = _session;
-            var menu = new MenuFlyout();
-            var read = new MenuFlyoutItem { Text = "Ab hier vorlesen", Icon = new FontIcon { Glyph = "\uE767", Foreground = NativeIconPalette.BrushFor("speech") } };
-            read.Click += async (_, _) => { if (_session == session) await StartMessageSpeechAsync(view, excerpt, updatedAt); };
-            menu.Items.Add(read);
-            var copy = new MenuFlyoutItem { Text = "Nachricht kopieren", Icon = new FontIcon { Glyph = "\uE8C8", Foreground = NativeIconPalette.BrushFor("link") } };
-            copy.Click += (_, _) => CopyMessageText(view); menu.Items.Add(copy);
+            if (!_virtualMessages.ContainsKey(anchor.MessageId))
+            {
+                read.Icon = new FontIcon { Glyph = "\uE767", Foreground = NativeIconPalette.BrushFor("speech") };
+                var copy = new MenuFlyoutItem { Text = "Nachricht kopieren", Icon = new FontIcon { Glyph = "\uE8C8", Foreground = NativeIconPalette.BrushFor("link") } };
+                copy.Click += (_, _) => CopyMessageText(action);
+                menu.Items.Add(copy);
+            }
             return menu;
         }
         return null;
+    }
+
+    private string ContextSpeechSource(JsonElement message, string? stepId)
+    {
+        if (stepId is null) return PlanDisplayContent(message);
+        var step = MessageSteps(message).FirstOrDefault(step => S(step, "id") == stepId && S(step, "tool") == "assistant.narration");
+        return S(step, "detail", S(step, "explanation"));
     }
 
     private async void CopyMessageText(MessageActionView view)
@@ -158,7 +172,7 @@ public sealed partial class NativeAssistantPage
         catch (Exception exception) when (exception is not OutOfMemoryException) { ShowMessageActionError(exception.Message); }
     }
 
-    private async Task StartMessageSpeechAsync(MessageActionView view, string? excerpt = null, DateTimeOffset? expectedUpdatedAt = null)
+    private async Task StartMessageSpeechAsync(MessageActionView view, MessageSpeechStart? start = null)
     {
         if (_disposed || _messageActionsDisposed || _messageSpeechActionBusy || !view.CanRead) return;
         if (!Guid.TryParse(view.MessageId, out var messageId)) { ShowMessageActionError("Die gespeicherte Nachricht hat keine gültige ID."); return; }
@@ -174,6 +188,7 @@ public sealed partial class NativeAssistantPage
         {
             // Read-aloud is independent of chat generation. Replace only the preceding audio operation.
             RememberStoppedMessageSpeechPlayback(_messageSpeechPlaybackId);
+            SetMessageSpeechHighlight(null);
             _messageSpeechCancellation?.Cancel();
             var service = App.Current.GetService<MissumAiAssistantService>();
             if (service.IsSpeaking || _microphone.Current.IsSpeaking) await service.CancelSpeechAsync(CancellationToken.None);
@@ -190,7 +205,7 @@ public sealed partial class NativeAssistantPage
             _speaking = true;
             var request = ++_messageSpeechRequest;
             RefreshAllMessageActions();
-            _messageSpeechTask = ReadPersistedMessageAsync(service, view.SessionId, messageId, request, cancellation, source, excerpt, expectedUpdatedAt);
+            _messageSpeechTask = PlayMessageSpeechAsync(service, view.SessionId, messageId, request, cancellation, source, start);
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested || _messageSpeechStopRequested) { }
         catch (Exception exception) when (exception is not OutOfMemoryException) { ShowMessageActionError(exception.Message); }
@@ -201,15 +216,13 @@ public sealed partial class NativeAssistantPage
         }
     }
 
-    private async Task ReadPersistedMessageAsync(MissumAiAssistantService service, Guid sessionId, Guid messageId,
-        long request, CancellationTokenSource cancellation, MessageSpeechSource source,
-        string? excerpt = null, DateTimeOffset? expectedUpdatedAt = null)
+    private async Task PlayMessageSpeechAsync(MissumAiAssistantService service, Guid sessionId, Guid messageId,
+        long request, CancellationTokenSource cancellation, MessageSpeechSource source, MessageSpeechStart? start)
     {
         try
         {
-            // Supplying the stored message ID makes the service validate and load its persisted text.
             var childMessage = _subagents.Values.Any(child => child.SessionId == sessionId && child.Messages.ContainsKey(messageId.ToString()));
-            await SpeakMessageActionSourceAsync(service, source, sessionId, messageId, childMessage, excerpt, expectedUpdatedAt,
+            await SpeakMessageActionSourceAsync(service, source, sessionId, messageId, childMessage, start,
                 update => DispatchMessageActionAsync(() =>
                 {
                     if (request != _messageSpeechRequest || IsStoppedMessageSpeechPlayback(update.PlaybackId)
@@ -230,6 +243,7 @@ public sealed partial class NativeAssistantPage
                     _messageSpeechMessageId = progress.ControlMessageId ?? (childMessage ? messageId : progress.SourceMessageId);
                     _messageSpeechPlaybackId = controlPlayback;
                     if (progress.State == SpeechPlaybackState.Paused) _messageSpeechStatus = "Vorlesen pausiert";
+                    UpdateMessageSpeechHighlight(progress);
                     RefreshAllMessageActions();
                 }),
                 cancellation.Token);
@@ -253,16 +267,19 @@ public sealed partial class NativeAssistantPage
     }
 
     private static Task SpeakMessageActionSourceAsync(MissumAiAssistantService service, MessageSpeechSource source,
-        Guid sessionId, Guid messageId, bool childMessage, string? excerpt, DateTimeOffset? expectedUpdatedAt,
+        Guid sessionId, Guid messageId, bool childMessage, MessageSpeechStart? start,
         Func<MissumAiSpeechUpdate, Task> update, Func<SpeechPlaybackProgress, Task> progress, CancellationToken cancellationToken)
     {
         if (source.SteeringStepId is { } stepId)
             return service.SpeakSteeringPromptAsync(sessionId, Guid.Parse(source.OwnerMessageId), stepId, source.Text,
                 update, progress, cancellationToken);
-        var explicitText = childMessage || source.IsStreaming ? excerpt ?? source.Text : null;
-        return service.SpeakAsync(sessionId, explicitText, childMessage ? null : messageId, update, progress,
-            cancellationToken: cancellationToken, messageExcerpt: childMessage ? null : excerpt,
-            expectedMessageUpdatedAt: childMessage ? null : expectedUpdatedAt);
+        if (start is not null)
+            return service.SpeakVisibleMessageAsync(sessionId, messageId, start.Text[start.Offset..], start.Offset, start.StepId,
+                update, progress, cancellationToken);
+        if (childMessage)
+            return service.SpeakVisibleMessageAsync(sessionId, messageId, source.Text, 0, null, update, progress, cancellationToken);
+        return service.SpeakAsync(sessionId, source.IsStreaming ? source.Text : null, messageId, update, progress,
+            cancellationToken: cancellationToken);
     }
 
     private async Task StopMessageSpeechAsync()
@@ -273,6 +290,7 @@ public sealed partial class NativeAssistantPage
         var stoppedTask = _messageSpeechTask;
         _messageSpeechStopRequested = true;
         RememberStoppedMessageSpeechPlayback(_messageSpeechPlaybackId);
+        SetMessageSpeechHighlight(null);
         if (_messageSpeechSmokeAdapter is { } smoke && IsMessageFooterSmoke)
         {
             await smoke("stop", _messageSpeechMessageId?.ToString());
@@ -327,6 +345,9 @@ public sealed partial class NativeAssistantPage
         if (S(data, "isPromptRequest") == "True" && Guid.TryParse(S(data, "sessionId"), out var sessionId) && sessionId == _session)
             _running = false;
         _speaking = S(data, "active") == "True";
+        if (_messageSpeechHighlight is { } highlight && playback is { } control
+            && (_speaking ? highlight.ControlPlaybackId != control : highlight.ControlPlaybackId == control))
+            SetMessageSpeechHighlight(null);
         _messageSpeechStatus = S(data, "status");
         var error = S(data, "error");
         if (error.Length > 0) ShowMessageActionError(error);
@@ -344,6 +365,7 @@ public sealed partial class NativeAssistantPage
         if (playback is not null) _messageSpeechPlaybackId = playback;
         if (MessageSpeechGuid(data, "controlPlaybackId") is not null) _messageSpeechAutomatic = true;
         if (S(data, "state") == "paused") _messageSpeechStatus = "Vorlesen pausiert";
+        UpdateMessageSpeechHighlight(data, playback);
         RefreshAllMessageActions();
     }
 
@@ -352,6 +374,7 @@ public sealed partial class NativeAssistantPage
         _ = DispatchMessageActionAsync(() =>
         {
             if (snapshot.IsSpeaking) _messageSpeechStatus = snapshot.Status;
+            if (MessageFooterMicrophone.IsSpeechPaused) SetMessageSpeechHighlight(null);
             RefreshAllMessageActions();
         });
     }
@@ -478,6 +501,7 @@ public sealed partial class NativeAssistantPage
         bool Active, bool Busy, bool CanPause, bool IsPaused, bool Automatic, string Status);
 
     private sealed record MessageSpeechSource(string OwnerMessageId, string? SteeringStepId, string Text, bool IsStreaming);
+    private sealed record MessageSpeechStart(string Text, int Offset, string? StepId);
 
     private sealed class MessageActionView(string messageId)
     {

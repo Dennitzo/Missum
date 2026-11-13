@@ -1212,9 +1212,9 @@ public sealed class SqliteMissumAiRunRepository(SqliteDatabase database) : IMiss
                     throw new ArgumentException("Promptaktion und Extension-ID widersprechen sich.", nameof(run));
                 action = mappedAction;
             }
-            else if (action is not null)
+            else if (action is not (null or PromptTriggerAction.Coding))
             {
-                throw new ArgumentException("Eine unbekannte Extension-ID darf keinen Legacy-Promptaktionsadapter angeben.", nameof(run));
+                throw new ArgumentException("Eine Erweiterungsaktion darf nur mit der Codex-Laufaktion kombiniert werden.", nameof(run));
             }
         }
         return run with { Action = action, ExtensionActionId = extensionActionId };
@@ -1235,7 +1235,11 @@ public sealed class SqliteMissumAiRunRepository(SqliteDatabase database) : IMiss
             throw new InvalidDataException("Die gespeicherte Lauf-Extension-Aktion ist ungültig.", exception);
         }
         if (!PromptActionExtensionIds.TryGetPromptAction(extensionActionId, out var mappedAction))
-            return (null, extensionActionId);
+        {
+            if (legacyAction is not (null or PromptTriggerAction.Coding))
+                throw new InvalidDataException($"Laufaktion und Extension-ID widersprechen sich ('{legacyAction}' / '{extensionActionId}').");
+            return (legacyAction, extensionActionId);
+        }
         if (legacyAction is not null && legacyAction.Value != mappedAction)
             throw new InvalidDataException($"Laufaktion und Extension-ID widersprechen sich ('{legacyAction}' / '{extensionActionId}').");
         return (mappedAction, extensionActionId);

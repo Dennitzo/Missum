@@ -12,7 +12,14 @@ public sealed class SpeechStreamingTests
         var initial = Message();
         var spoken = new ConcurrentQueue<string>();
         using var signal = new SemaphoreSlim(0);
-        using var session = new SpeechStreamingSession(initial, (text, _) => { spoken.Enqueue(text); signal.Release(); return Task.CompletedTask; });
+        var chunks = new ConcurrentQueue<SpeechStreamingChunk>();
+        using var session = new SpeechStreamingSession(initial, (chunk, _) =>
+        {
+            spoken.Enqueue(chunk.Text);
+            chunks.Enqueue(chunk);
+            signal.Release();
+            return Task.CompletedTask;
+        });
         var narration = new AssistantToolStep("science-introduction", "assistant.narration", "running", "Ich untersuche die Frage.");
         session.Observe(new(MissumAiAssistantUpdateKind.Delta, initial with { ToolSteps = [narration] }));
         Assert.Empty(spoken);
@@ -25,7 +32,11 @@ public sealed class SpeechStreamingTests
         session.Observe(new(MissumAiAssistantUpdateKind.Completed, current));
         await session.Completion.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal("Ich untersuche die Frage.", Assert.Single(spoken));
-        using var resumed = new SpeechStreamingSession(current, (text, _) => { spoken.Enqueue(text); return Task.CompletedTask; });
+        var narratedChunk = Assert.Single(chunks);
+        Assert.Equal(narration.Id, narratedChunk.SourceStepId);
+        Assert.Equal(0, narratedChunk.SourceOffset);
+        Assert.Equal(narration.Detail, narratedChunk.SourceMarkdown);
+        using var resumed = new SpeechStreamingSession(current, (text, _) => { spoken.Enqueue(text.Text); return Task.CompletedTask; });
         resumed.Observe(new(MissumAiAssistantUpdateKind.Completed, current));
         await resumed.Completion;
         Assert.Single(spoken);
@@ -40,7 +51,7 @@ public sealed class SpeechStreamingTests
         var spoken = new ConcurrentQueue<string>();
         using var session = new SpeechStreamingSession(initial, (text, _) =>
         {
-            spoken.Enqueue(text);
+            spoken.Enqueue(text.Text);
             return Task.CompletedTask;
         }) { WaitForActionBoundary = true };
         session.Observe(new(MissumAiAssistantUpdateKind.Delta, initial with { Content = first + " " }));
@@ -68,9 +79,9 @@ public sealed class SpeechStreamingTests
         using var session = new SpeechStreamingSession(initial, (text, _) =>
         {
             // Follow the same normalization and segmentation as SpeakCoreAsync.
-            var units = SpeechSourceSegmentation.CreateUnits(text);
+            var units = SpeechSourceSegmentation.CreateUnits(text.Text);
             var segments = SpeechSourceSegmentation.CreateDirectSegments(units,
-                MicrophoneTranscriptionService.PrepareSpeechText(text));
+                MicrophoneTranscriptionService.PrepareSpeechText(text.Text));
             foreach (var segment in segments) synthesisText.Enqueue(segment.Text);
             spoken.Release();
             return Task.CompletedTask;
@@ -103,7 +114,7 @@ public sealed class SpeechStreamingTests
         using var signal = new SemaphoreSlim(0);
         using var session = new SpeechStreamingSession(initial, (text, _) =>
         {
-            spoken.Enqueue(text);
+            spoken.Enqueue(text.Text);
             signal.Release();
             return Task.CompletedTask;
         });
@@ -157,7 +168,7 @@ public sealed class SpeechStreamingTests
     {
         var initial = Message();
         var spoken = new ConcurrentQueue<string>();
-        using var session = new SpeechStreamingSession(initial, (text, _) => { spoken.Enqueue(text); return Task.CompletedTask; });
+        using var session = new SpeechStreamingSession(initial, (text, _) => { spoken.Enqueue(text.Text); return Task.CompletedTask; });
         session.Observe(new(kind, initial with { Content = "Keine Antwort erzeugt", Error = "Keine Antwort erzeugt" }));
         await session.Completion.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Empty(spoken);
@@ -169,7 +180,7 @@ public sealed class SpeechStreamingTests
         var initial = Message();
         var spoken = new ConcurrentQueue<string>();
         using var signal = new SemaphoreSlim(0);
-        using var session = new SpeechStreamingSession(initial, (text, _) => { spoken.Enqueue(text); signal.Release(); return Task.CompletedTask; });
+        using var session = new SpeechStreamingSession(initial, (text, _) => { spoken.Enqueue(text.Text); signal.Release(); return Task.CompletedTask; });
         var current = initial with { Content = "Ich prüfe jetzt die Datei." };
         session.Observe(new(MissumAiAssistantUpdateKind.Delta, current));
         Assert.Empty(spoken);
@@ -189,7 +200,7 @@ public sealed class SpeechStreamingTests
         const string baseline = "Bereits gespeicherte Erklärung.\n````python\nprint('bereits";
         var initial = Message(baseline);
         var spoken = new ConcurrentQueue<string>();
-        using var session = new SpeechStreamingSession(initial, (text, _) => { spoken.Enqueue(text); return Task.CompletedTask; });
+        using var session = new SpeechStreamingSession(initial, (text, _) => { spoken.Enqueue(text.Text); return Task.CompletedTask; });
         var content = baseline + " gespeichert')\n```\nDO_NOT_READ_THIS_CODE. \n";
         session.Observe(new(MissumAiAssistantUpdateKind.Delta, initial with { Content = content }));
         Assert.Empty(spoken);
@@ -206,9 +217,9 @@ public sealed class SpeechStreamingTests
         var buffer = new SpeechStreamingTextBuffer();
         Assert.Empty(buffer.Take("Version 3."));
         var content = "Version 3.14 nutzt `a.b()` zuverlässig. Noch offen";
-        Assert.Equal("Version drei Komma eins vier nutzt a.b() zuverlässig.", Assert.Single(buffer.Take(content)));
+        Assert.Equal("Version drei Komma eins vier nutzt a.b() zuverlässig.", Assert.Single(buffer.Take(content)).Text);
         Assert.Empty(buffer.Take(content));
-        Assert.Equal("Noch offen", Assert.Single(buffer.Take(content, complete: true)));
+        Assert.Equal("Noch offen", Assert.Single(buffer.Take(content, complete: true)).Text);
         Assert.Empty(buffer.Take(content, complete: true));
     }
 
@@ -220,6 +231,23 @@ public sealed class SpeechStreamingTests
         Assert.Empty(buffer.Take("Eine völlig andere Antwort. "));
         Assert.True(buffer.HasConflictingRevision);
         Assert.Empty(buffer.Take("Eine völlig andere Antwort. Schluss", complete: true));
+    }
+
+    [Fact]
+    public void LiveChunkRangesStayAbsoluteAcrossSoftLineBreaksAndSkippedCode()
+    {
+        const string prefix = "Bereits gelesen.\r\n\r\n```cs\r\nvar a = 1;\r\n```\r\n";
+        const string wrapped = "Dieser Satz läuft\r\nüber zwei Zeilen.";
+        const string tail = "Dieser Satz ist erst nach Abschluss vollständig";
+        var buffer = new SpeechStreamingTextBuffer("Bereits gelesen.");
+        Assert.Empty(buffer.Take(prefix + "Dieser Satz läuft\r\n"));
+        var sentence = Assert.Single(buffer.Take(prefix + wrapped + " " + tail));
+        Assert.Equal(prefix.Length, sentence.SourceOffset);
+        Assert.Equal(wrapped + " ", sentence.SourceMarkdown);
+        Assert.Equal("Dieser Satz läuft über zwei Zeilen.", sentence.Text);
+        var remainder = Assert.Single(buffer.Take(prefix + wrapped + " " + tail, complete: true));
+        Assert.Equal(prefix.Length + wrapped.Length + 1, remainder.SourceOffset);
+        Assert.Equal(tail, remainder.SourceMarkdown);
     }
 
     private static ChatMessage Message(string content = "") => new(Guid.NewGuid(), Guid.NewGuid(), ChatRole.Assistant,

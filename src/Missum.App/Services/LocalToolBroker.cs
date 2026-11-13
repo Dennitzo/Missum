@@ -72,6 +72,7 @@ public sealed partial class LocalToolBroker(
                     extensionTool.ActionId,
                     proposal.Arguments,
                     workspaceRoot,
+                    extensionTool.ModelToolName,
                     cancellationToken).ConfigureAwait(false);
                 return Result(proposal, "completed", Bounded(extensionResult));
             }
