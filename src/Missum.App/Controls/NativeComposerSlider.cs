@@ -1,5 +1,6 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
 using Windows.UI;
@@ -16,6 +17,8 @@ internal sealed class NativeComposerSlider : Grid
     private readonly LinearGradientBrush _gradient = new() { StartPoint = new(0, .5), EndPoint = new(1, .5) };
     private readonly int _stops;
     private long? _accentCallback;
+    private long? _minimumCallback;
+    private long? _maximumCallback;
 
     internal NativeComposerSlider(Slider slider, int stops = 0)
     {
@@ -58,14 +61,30 @@ internal sealed class NativeComposerSlider : Grid
         Loaded += (_, _) =>
         {
             _accentCallback ??= _accent.RegisterPropertyChangedCallback(SolidColorBrush.ColorProperty, (_, _) => RefreshPalette());
+            // Range changes can leave Value unchanged, so ValueChanged alone
+            // does not keep the decorative fill in sync with the native slider.
+            _minimumCallback ??= slider.RegisterPropertyChangedCallback(RangeBase.MinimumProperty, (_, _) => RefreshTrack());
+            _maximumCallback ??= slider.RegisterPropertyChangedCallback(RangeBase.MaximumProperty, (_, _) => RefreshTrack());
             RefreshPalette();
             RefreshTrack();
         };
         Unloaded += (_, _) =>
         {
-            if (_accentCallback is not { } callback) return;
-            _accent.UnregisterPropertyChangedCallback(SolidColorBrush.ColorProperty, callback);
-            _accentCallback = null;
+            if (_accentCallback is { } accentCallback)
+            {
+                _accent.UnregisterPropertyChangedCallback(SolidColorBrush.ColorProperty, accentCallback);
+                _accentCallback = null;
+            }
+            if (_minimumCallback is { } minimumCallback)
+            {
+                slider.UnregisterPropertyChangedCallback(RangeBase.MinimumProperty, minimumCallback);
+                _minimumCallback = null;
+            }
+            if (_maximumCallback is { } maximumCallback)
+            {
+                slider.UnregisterPropertyChangedCallback(RangeBase.MaximumProperty, maximumCallback);
+                _maximumCallback = null;
+            }
         };
         RefreshPalette();
     }

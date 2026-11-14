@@ -80,6 +80,10 @@ public sealed class SubagentContextCompactionTests
 
         Assert.True(result.Succeeded, result.ErrorMessage);
         Assert.Equal(RunState.Completed, (await repository.GetAsync(child.RunId))!.State);
+        // Finishing a child flushes the resident slot without an explicit key,
+        // then unloads its independent instance. Await that cleanup before
+        // checking the ordered cache requests instead of racing the runner.
+        await handler.UnloadRequested.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal(1, handler.Summaries);
         Assert.Equal(1, handler.Answers);
         Assert.Equal(exactOverflow ? 3 : 2, handler.TokenCounts);
@@ -90,12 +94,14 @@ public sealed class SubagentContextCompactionTests
         var role = mode == RunMode.Coding ? "coding" : "general";
         var key = RunProcessor.BuildRunSessionCacheKey(childRequest, child.RunId, role);
         Assert.NotEqual(key, RunProcessor.BuildRunSessionCacheKey(request, parent.RunId, role));
-        Assert.NotEmpty(handler.CacheBodies);
+        Assert.True(handler.CacheBodies.Count >= 2); // Owned cache operations plus the final resident-slot flush.
+        Assert.Equal("/sessions/save", handler.CacheOperations[^1]);
+        Assert.Equal(JsonValueKind.Null, handler.CacheBodies[^1].GetProperty("sessionKey").ValueKind);
         Assert.All(handler.CacheBodies, body =>
         {
             Assert.Equal(Instance, body.GetProperty("model").GetString());
-            Assert.Equal(key, body.GetProperty("sessionKey").GetString());
         });
+        Assert.All(handler.CacheBodies.SkipLast(1), body => Assert.Equal(key, body.GetProperty("sessionKey").GetString()));
         Assert.All(handler.CacheBodies.Where(body => body.GetProperty("sessionId").ValueKind != JsonValueKind.Null), body =>
         {
             Assert.Equal(childRequest.SessionId, body.GetProperty("sessionId").GetString());
@@ -152,6 +158,9 @@ public sealed class SubagentContextCompactionTests
         private static readonly string[] ChildTags = [.. ParentTags, "missum-agent-instance:subagent", "missum-base-model:" + Model];
         public List<JsonElement> ChatBodies { get; } = [];
         public List<JsonElement> CacheBodies { get; } = [];
+        public List<string> CacheOperations { get; } = [];
+        public TaskCompletionSource UnloadRequested { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private volatile bool _childUnloaded;
         public int TokenCounts { get; private set; }
         public int Summaries { get; private set; }
         public int Answers { get; private set; }
@@ -162,8 +171,16 @@ public sealed class SubagentContextCompactionTests
             if (path == "/v1/models") return Json(new { data = new[]
             {
                 new { id = Model, tags = ParentTags, status = new { value = "loaded" } },
-                new { id = Instance, tags = ChildTags, status = new { value = "loaded" } },
+                new { id = Instance, tags = ChildTags, status = new { value = _childUnloaded ? "unloaded" : "loaded" } },
             } });
+            if (path == "/models/unload")
+            {
+                using var unload = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken));
+                Assert.Equal(Instance, unload.RootElement.GetProperty("model").GetString());
+                _childUnloaded = true;
+                UnloadRequested.TrySetResult();
+                return Json(new { success = true });
+            }
             if (path == "/props") return Json(new { default_generation_settings = new { n_ctx = Context } });
             if (path == "/agents/status") return Json(new { allowed = true, modelId = Model, instanceId = Instance, gpuIndex = 1,
                 contextLength = Context, executionMode = "parallel", requiredBytes = 3_000_000_000L, freeBytes = 8_000_000_000L });
@@ -171,12 +188,13 @@ public sealed class SubagentContextCompactionTests
             {
                 using var cache = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken));
                 CacheBodies.Add(cache.RootElement.Clone());
+                CacheOperations.Add(path);
                 return Json(new { status = path == "/sessions/save" ? "saved" : "resident" });
             }
             if (path == "/v1/chat/completions/input_tokens")
             {
                 TokenCounts++;
-                return Json(new { input_tokens = exactOverflow && TokenCounts == 1 ? 27_000 : 1_024 });
+                return Json(new { input_tokens = exactOverflow && TokenCounts == 1 ? 29_491 : 1_024 });
             }
             if (path != "/v1/chat/completions") throw new InvalidOperationException("Unexpected native request: " + path);
             using var document = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken));

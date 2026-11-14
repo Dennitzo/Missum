@@ -2220,6 +2220,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
                     && visionTags.EnumerateArray().Any(tag => tag.ValueKind == JsonValueKind.String && tag.GetString() is "missum-vision:projector" or "go-vision:projector")); // Legacy running supervisors remain readable.
             var fallback = embedding ? embeddingContextLength : vision ? visionContextLength : textContextLength;
             var context = ReadNominalContextLength(item, id, fallback);
+            var permittedContext = ReadExperimentalContextMaximum(item, id, context);
             var state = "unloaded";
             if (item.TryGetProperty("status", out var status) && status.ValueKind == JsonValueKind.Object)
             {
@@ -2237,10 +2238,11 @@ public sealed partial class ModelRuntimeClient : IDisposable
             var isSubagent = tags.Contains("missum-agent-instance:subagent", StringComparer.Ordinal);
             var baseModelId = tags.FirstOrDefault(static tag => tag.StartsWith("missum-base-model:", StringComparison.Ordinal))?["missum-base-model:".Length..];
             models.Add(new RuntimeModel(id, embedding ? "embedding" : "llm", state, state is "loaded" or "sleeping" ? id : null,
-                context, state is "loaded" or "sleeping" ? context : 0, name, null, null, !embedding, vision, reasoning.SupportedEfforts, reasoning.DefaultEffort, reasoning.Family,
+                permittedContext, state is ("loaded" or "sleeping") && permittedContext == context ? context : 0, name, null, null, !embedding, vision, reasoning.SupportedEfforts, reasoning.DefaultEffort, reasoning.Family,
                 item.TryGetProperty("tags", out var gpuTags) && gpuTags.ValueKind == JsonValueKind.Array
                     && gpuTags.EnumerateArray().Any(tag => tag.ValueKind == JsonValueKind.String && tag.GetString() is "missum-gpu-policy:single-preferred-v1" or "go-gpu-policy:single-preferred-v1"),
-                isSubagent, baseModelId, tags.Contains("missum-model-storage:network", StringComparer.Ordinal))); // Legacy catalog read alias.
+                isSubagent, baseModelId, tags.Contains("missum-model-storage:network", StringComparer.Ordinal),
+                permittedContext > context ? context : 0)); // Legacy catalog read alias.
         }
         return [.. models];
     }
@@ -2279,6 +2281,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
         {
             if (model.IsSubagent) continue; // Replicas are agent execution instances, not selectable models.
             var context = model.LoadedContextLength > 0 ? model.LoadedContextLength
+                : model.TrainingContextLength > 0 ? model.TrainingContextLength
                 : model.MaximumContextLength > 0 ? model.MaximumContextLength : 2_048;
             var displayName = string.IsNullOrWhiteSpace(model.Quantization)
                 ? model.DisplayName ?? model.Id
@@ -2322,7 +2325,9 @@ public sealed partial class ModelRuntimeClient : IDisposable
             reasoning.DefaultEffort,
             model.Architecture,
             model.Quantization,
-            model.MaximumContextLength);
+            model.MaximumContextLength,
+            model.TrainingContextLength > 0 ? model.TrainingContextLength : null,
+            loaded && model.LoadedContextLength > 0 ? model.LoadedContextLength : null);
     }
 
     private void RememberRuntimeModels(IEnumerable<RuntimeModel> models)
@@ -2437,5 +2442,6 @@ public sealed partial class ModelRuntimeClient : IDisposable
         bool ManagedGpuPlacement = false,
         bool IsSubagent = false,
         string? BaseModelId = null,
-        bool NetworkStorage = false);
+        bool NetworkStorage = false,
+        int TrainingContextLength = 0);
 }

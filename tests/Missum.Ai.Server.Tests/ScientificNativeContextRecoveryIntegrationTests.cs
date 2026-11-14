@@ -20,7 +20,7 @@ public sealed class ScientificNativeContextRecoveryIntegrationTests
     [InlineData(262_144, 239_683)] // Actual De-Broglie-Bohm continuation failure.
     [InlineData(1_000_000, 960_000)]
     [InlineData(1_000_000, 900_000)]
-    [InlineData(1_000_000, 800_000)]
+    [InlineData(1_000_000, 900_001)]
     [InlineData(258_000, 232_200)]
     public async Task NativeOverflowCompactsSavedScienceContextBeforeFirstGenerationWithoutReexecutingTools(int contextLength, int exactTokens)
     {

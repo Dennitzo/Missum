@@ -55,8 +55,8 @@ public sealed class DeepResearchCompactionTests
         Assert.Equal(1, harness.Handler.SummaryCalls);
         Assert.Equal(1, harness.Handler.PlanCalls);
         Assert.Equal(1, harness.Handler.SynthesisCalls);
-        Assert.Equal(27_000, harness.Handler.RejectedCounts.Single());
-        Assert.True(27_000 < ContextLength); // This is the shared80% boundary, not a full slot.
+        Assert.Equal(29_491, harness.Handler.RejectedCounts.Single());
+        Assert.True(29_491 < ContextLength); // This is the shared 90% boundary, not a full slot.
         var attempts = harness.Handler.CountBodies.Where(IsPlan).ToArray();
         Assert.Equal(2, attempts.Length);
         Assert.All(attempts, body => Assert.Equal(1, Occurrences(Text(body), "JSON-Objekt für research.plan")));
@@ -344,14 +344,14 @@ public sealed class DeepResearchCompactionTests
                 if (!IsSummary(body) && IsPlan(body) && ExactOverflowAtPlan && PlanThresholdHits == 0)
                 {
                     PlanThresholdHits++;
-                    RejectedCounts.Add(27_000);
-                    return Json(new { input_tokens = 27_000 });
+                    RejectedCounts.Add(29_491);
+                    return Json(new { input_tokens = 29_491 });
                 }
                 if (!IsSummary(body) && IsSynthesis(body) && ExactOverflowAtSynthesis && SynthesisThresholdHits == 0)
                 {
                     SynthesisThresholdHits++;
-                    RejectedCounts.Add(27_000);
-                    return Json(new { input_tokens = 27_000 });
+                    RejectedCounts.Add(29_491);
+                    return Json(new { input_tokens = 29_491 });
                 }
                 return Json(new { input_tokens = 1_000 });
             }

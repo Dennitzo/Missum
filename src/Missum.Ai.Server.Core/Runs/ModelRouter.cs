@@ -40,7 +40,7 @@ public sealed class ModelRouter
                 $"The selected {selected.Role} model '{selected.ModelId}' is not available.");
         var context = request.Limits?.MaximumContextTokens is >= 2048
             ? Math.Min(request.Limits.MaximumContextTokens.Value, model.MaximumContextTokens ?? model.ContextTokens)
-            : model.ContextTokens;
+            : model.TrainingContextTokens ?? model.ContextTokens;
         return selected with { ModelId = model.Id, ContextLength = Math.Max(2_048, context) };
     }
 

@@ -15,10 +15,10 @@ catalog = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(catalog)
 
 
-def gguf(path, architecture="qwen3", tensors=1, model_type="model", context=32768, pooling=None, template=None):
+def gguf(path, architecture="qwen3", tensors=1, model_type="model", context=32768, pooling=None, template=None, name=None):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("wb") as stream:
-        stream.write(struct.pack("<4sIQQ", b"GGUF", 3, tensors, 2 + int(context is not None) + int(pooling is not None) + int(template is not None)))
+        stream.write(struct.pack("<4sIQQ", b"GGUF", 3, tensors, 2 + int(context is not None) + int(pooling is not None) + int(template is not None) + int(name is not None)))
         for key, value in (("general.architecture", architecture), ("general.type", model_type)):
             key, value = key.encode(), value.encode()
             stream.write(struct.pack("<Q", len(key)) + key + struct.pack("<IQ", 8, len(value)) + value)
@@ -26,6 +26,9 @@ def gguf(path, architecture="qwen3", tensors=1, model_type="model", context=3276
             if value is not None:
                 key = key.encode()
                 stream.write(struct.pack("<Q", len(key)) + key + struct.pack("<II", 4, value))
+        if name is not None:
+            key, value = b"general.name", name.encode()
+            stream.write(struct.pack("<Q", len(key)) + key + struct.pack("<IQ", 8, len(value)) + value)
         if template is not None:
             key, value = b"tokenizer.chat_template", template.encode()
             stream.write(struct.pack("<Q", len(key)) + key + struct.pack("<IQ", 8, len(value)) + value)
@@ -315,6 +318,55 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(text.count("missum-context-train:262144,missum-context-policy:max-fit"), 2)
         self.assertEqual(text.count("ctx-size = 262144"), 2)  # Every model retains its own full metadata maximum.
         self.assertEqual(text.count("predict = -1"), 2)
+
+    def test_experimental_qwen_yarn_requires_exact_metadata_and_explicit_policy(self):
+        gguf(self.root / "target.gguf", architecture="qwen4exp", context=262144, name="Qwen3.8 Flash Next")
+        gguf(self.root / "other.gguf", architecture="qwen4exp", context=262144, name="Other model")
+        target = self.root / "models.ini"
+        models = catalog.write_presets(self.root, target)
+        model = next(m for m in models if m["path"].name == "target.gguf")
+        other = next(m for m in models if m["path"].name == "other.gguf")
+        self.assertEqual(model["experimentalContextMaximum"], 1048576)
+        self.assertNotIn("experimentalContextMaximum", other)
+        self.assertIn("missum-context-experimental-max:1048576", target.read_text())
+        self.assertNotIn("rope-scaling =", target.read_text())
+        for requested in (524288, 1000000, 1048576):
+            policy = dict(catalog.model_runtime_policy(model), context=requested, contextMaximum=1048576,
+                          experimentalRope="qwen38-yarn4")
+            catalog.write_presets(self.root, target, resolved_policies={model["id"]: policy})
+            block = target.read_text().split("[" + model["id"] + "]", 1)[1].split("\n[")[0]
+            self.assertIn(f"ctx-size = {requested}", block)
+            self.assertIn("rope-scaling = yarn\nrope-scale = 4\nyarn-orig-ctx = 262144", block)
+        self.assertEqual(catalog.limit_context_policy(other, dict(context=1048576, contextMaximum=1048576,
+                         experimentalRope="qwen38-yarn4"))["context"], 262144)
+
+    def test_qwen_q8_six_shards_offer_same_explicit_yarn_profile_as_q4(self):
+        snapshots = self.root / "models--unsloth--Qwen3.8-Flash-Next-GGUF" / "snapshots"
+        for revision, quant, count in (("q4-revision", "UD-Q4_K_XL", 4), ("q8-revision", "Q8_0", 6)):
+            for index in range(1, count + 1):
+                path = snapshots / revision / quant / f"Qwen3.8-Flash-Next-{quant}-{index:05d}-of-{count:05d}.gguf"
+                gguf(path, architecture="qwen4exp", tensors=0 if index == 1 else 1,
+                     context=262144, name="Qwen3.8 Flash Next")
+        target = self.root / "models.ini"
+        models = catalog.write_presets(self.root, target)
+        by_quant = {model["path"].parent.name: model for model in models}
+        self.assertEqual(set(by_quant), {"UD-Q4_K_XL", "Q8_0"})
+        self.assertNotEqual(by_quant["UD-Q4_K_XL"]["id"], by_quant["Q8_0"]["id"])
+        q8 = by_quant["Q8_0"]
+        self.assertTrue(q8["id"].startswith("coding/Qwen3.8-Flash-Next-Q8_0~"))
+        self.assertEqual((q8["context"], q8["experimentalContextMaximum"]), (262144, 1048576))
+        self.assertNotIn("rope-scaling =", target.read_text())
+        policy = dict(catalog.model_runtime_policy(q8), context=1048576, contextMaximum=1048576,
+                      experimentalRope="qwen38-yarn4")
+        catalog.write_presets(self.root, target, resolved_policies={q8["id"]: policy})
+        presets = target.read_text()
+        block = presets.split("[" + q8["id"] + "]", 1)[1].split("\n[")[0]
+        self.assertIn("missum-context-train:262144", block)
+        self.assertIn("missum-context-experimental-max:1048576", block)
+        self.assertIn("ctx-size = 1048576", block)
+        self.assertIn("rope-scaling = yarn\nrope-scale = 4\nyarn-orig-ctx = 262144", block)
+        q4_block = presets.split("[" + by_quant["UD-Q4_K_XL"]["id"] + "]", 1)[1].split("\n[")[0]
+        self.assertNotIn("rope-scaling =", q4_block)
 
     def test_missing_or_invalid_context_is_not_replaced_by_an_invented_maximum(self):
         gguf(self.root / "unknown.gguf", context=None)

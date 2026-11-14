@@ -73,7 +73,9 @@ public sealed record ModelRuntimeStatus(
     string? DefaultReasoningEffort = null,
     string? Architecture = null,
     string? Quantization = null,
-    int? MaximumContextTokens = null);
+    int? MaximumContextTokens = null,
+    int? TrainingContextTokens = null,
+    int? LoadedContextTokens = null);
 
 public sealed record GpuStatusSnapshot(
     bool Available,

@@ -11,13 +11,29 @@ namespace Missum.Ai.Server.Tests;
 public sealed class NativeContextBudgetRegressionTests
 {
     [Theory]
-    [InlineData(1_000_000, 799_999, false)]
-    [InlineData(1_000_000, 800_000, true)]
+    [InlineData(2_048, 1_024)]
+    [InlineData(4_096, 2_048)]
+    [InlineData(8_192, 6_144)]
+    [InlineData(16_384, 14_336)]
+    [InlineData(32_768, 29_491)]
+    [InlineData(262_144, 235_929)]
+    [InlineData(1_048_576, 943_718)]
+    public void CompactionBudgetUsesNinetyPercentUnlessTheSafetyReserveRequiresMoreSpace(int context, int expected)
+    {
+        Assert.Equal(expected, Missum.Ai.Contracts.ContextCompactionPolicy.InputTokenBudget(context));
+    }
+
+    [Theory]
+    [InlineData(1_000_000, 800_000, false)]
+    [InlineData(1_000_000, 899_999, false)]
+    [InlineData(1_000_000, 900_000, true)]
     [InlineData(1_000_000, 960_000, true)]
-    [InlineData(258_000, 206_399, false)]
-    [InlineData(258_000, 206_400, true)]
-    [InlineData(262_144, 209_714, false)]
-    [InlineData(262_144, 209_715, true)]
+    [InlineData(1_048_576, 943_717, false)]
+    [InlineData(1_048_576, 943_718, true)]
+    [InlineData(258_000, 232_199, false)]
+    [InlineData(258_000, 232_200, true)]
+    [InlineData(262_144, 235_928, false)]
+    [InlineData(262_144, 235_929, true)]
     public async Task ExactThresholdIsEnforcedBeforeInferenceEvenWhenTheCharacterEstimateIsSmall(int contextLength, int tokens, bool compact)
     {
         using var handler = new ExactBudgetHandler { InputTokens = tokens, LoadedContext = contextLength };

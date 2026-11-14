@@ -32,6 +32,8 @@ SHARD = re.compile(r"^(.*)-([0-9]{5})-of-([0-9]{5})\.gguf$", re.IGNORECASE)
 NON_TEXT = re.compile(r"(?:^|[-_./])(?:mmproj|ggml-vocab|embedding|embed|asr|whisper|clip|vae|diffusion|mtp)(?:[-_./]|$)", re.IGNORECASE)
 NON_TEXT_ARCHITECTURES = ("bert", "nomic-bert", "jina-bert", "embedding", "t5", "clip", "mclip", "wavtokenizer", "whisper", "dflash")
 EMBEDDING_ARCHITECTURES = ("bert", "nomic-bert", "jina-bert", "embedding")
+QWEN_FLASH_TRAIN_CONTEXT = 262144
+QWEN_FLASH_YARN_CONTEXT = 1048576
 _METADATA_CACHE = {}
 SCALAR_SIZES = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
 
@@ -321,6 +323,11 @@ def discover_models(root):
             reasoning = reasoning_profile(metadata)
             found.append({"id": f"coding/{safe_name}~{digest}", "path": path, "role": "general", "context": context,
                           "contextPolicy": "max-fit", "reasoning": reasoning})
+            # The experimental profile is deliberately specific to the model
+            # whose native metadata and YaRN configuration were examined.
+            if (architecture == "qwen4exp" and context == QWEN_FLASH_TRAIN_CONTEXT
+                    and metadata.get("general.name", "").strip().casefold() == "qwen3.8 flash next"):
+                found[-1]["experimentalContextMaximum"] = QWEN_FLASH_YARN_CONTEXT
             projector = matching_projector(path, root)
             if projector:
                 # A matching projector makes this exact text/tool model vision
@@ -330,6 +337,8 @@ def discover_models(root):
             if projector:
                 found.append({"id": f"vision/{safe_name}~{digest}", "path": path, "role": "vision",
                               "context": context, "contextPolicy": "max-fit", "reasoning": reasoning, "projector": projector})
+                if found[-2].get("experimentalContextMaximum"):
+                    found[-1]["experimentalContextMaximum"] = found[-2]["experimentalContextMaximum"]
         except (OSError, ValueError, struct.error):
             continue
     return found
@@ -409,7 +418,10 @@ def limit_context_policy(model, policy):
     # Each model advertises its own GGUF maximum. Keep a resolved smaller
     # policy (including a resident legacy load) unchanged; new loads may use
     # the full model window and llama's actual fitted n_ctx is authoritative.
-    maximum = min(model["context"], policy.get("contextMaximum") or model["context"])
+    ceiling = model["context"]
+    if policy.get("experimentalRope") == "qwen38-yarn4":
+        ceiling = model.get("experimentalContextMaximum", ceiling)
+    maximum = min(ceiling, policy.get("contextMaximum") or ceiling)
     context = min(policy.get("context") or maximum, maximum)
     return dict(policy, context=context, contextMaximum=maximum)
 
@@ -456,6 +468,8 @@ def write_presets(root, target, placements=None, managed_gpu=False, fit_target="
         if any(char in str(path) for char in "\r\n"):
             continue
         tags = f"missum-context-train:{model['context']},missum-context-policy:{model['contextPolicy']}"
+        if model.get("experimentalContextMaximum"):
+            tags += f",missum-context-experimental-max:{model['experimentalContextMaximum']}"
         if is_network_model_path(path):
             tags += ",missum-model-storage:network"
         if model.get("projector"):
@@ -501,6 +515,9 @@ def write_presets(root, target, placements=None, managed_gpu=False, fit_target="
             lines += [f"ctx-size = {policy['context']}"]
         if policy.get("fitContext"):
             lines += [f"fit-ctx = {policy['fitContext']}"]
+        if (model.get("experimentalContextMaximum") and policy.get("experimentalRope") == "qwen38-yarn4"
+                and policy["context"] > model["context"]):
+            lines += ["rope-scaling = yarn", "rope-scale = 4", f"yarn-orig-ctx = {model['context']}"]
         if policy.get("mmprojDevice") and model.get("projector") and not placement:
             lines += [f"mmproj-device = {policy['mmprojDevice']}"]
         for setting, argument in (("batchSize", "batch-size"), ("ubatchSize", "ubatch-size")):
@@ -510,9 +527,8 @@ def write_presets(root, target, placements=None, managed_gpu=False, fit_target="
             lines += ["embedding = true", f"pooling = {model['pooling']}", f"batch-size = {model['context']}",
                       f"ubatch-size = {model['context']}", "cache-type-k = f16", "cache-type-v = f16", "flash-attn = off"]
         else:
-            # An explicit product ceiling applies to every current/future model,
-            # including supplied measured policies and delegated model instances.
-            # Training metadata stays unchanged; it cannot expand the usable window.
+            # Training metadata stays unchanged. The narrowly scoped opt-in
+            # YaRN experiment above is the only supported extension.
             lines += ["cache-type-k = q8_0", "cache-type-v = q8_0", "flash-attn = on", "predict = -1",
                       "reasoning-budget = -1", "reasoning = on" if model["reasoning"]["enabled"] else "reasoning = auto"]
             if model["reasoning"]["effort"]:
@@ -879,6 +895,8 @@ class GpuLoadManager:
                            template=native_history_template(metadata.get("tokenizer.chat_template", "")),
                            placement=self.placements.get(model_id), fit=self.fit_target, gpuLayers=self.gpu_layers,
                            split="layer" if policy["split"] == "none" else policy["split"])
+        if policy.get("experimentalRope"):
+            fingerprint["experimentalRope"] = policy["experimentalRope"]
         if model.get("projector") and model["role"] != "embedding":
             # Default/fitted vision loads also changed their physical batching.
             # A snapshot must describe the effective decoder, not the unsafe
@@ -1231,8 +1249,9 @@ class GpuLoadManager:
             model = next((item for item in models if item["id"] == model_id), None)
             if model is None:
                 raise ValueError("Model is not in the local catalog")
-            if context_length is not None and (type(context_length) is not int or not 2048 <= context_length <= model["context"]):
-                raise ValueError("Context limit must be between 2048 and the GGUF model maximum")
+            maximum = model.get("experimentalContextMaximum", model["context"])
+            if context_length is not None and (type(context_length) is not int or not 2048 <= context_length <= maximum):
+                raise ValueError("Context limit must be between 2048 and the model's supported maximum")
             current = self.router("v1/models")["data"]
             active = [item for item in current if item.get("status", {}).get("value") in ("loaded", "loading", "sleeping")]
             replica = model.get("instance") == "subagent"
@@ -1290,6 +1309,8 @@ class GpuLoadManager:
                 policy = forced_policy or self.resolve_load_policy(model, device)
                 if context_length is not None and not replica:
                     policy = dict(policy, context=context_length, contextPolicy="user-limit")
+                    if context_length > model["context"]:
+                        policy.update(contextMaximum=maximum, experimentalRope="qwen38-yarn4")
                     # Fit GPU layers into available VRAM while retaining the
                     # explicitly requested KV window. CPU-backed weights stay mmap'ed.
                     if not device:
@@ -1299,6 +1320,10 @@ class GpuLoadManager:
                     # template. A child never spills onto its parent's device.
                     props = self.router("props?model=" + urllib.parse.quote(base, safe=""))
                     policy = dict(policy, context=props["default_generation_settings"]["n_ctx"])
+                    parent_policy = self.policies.get(base, {})
+                    if parent_policy.get("experimentalRope"):
+                        policy.update(contextMaximum=parent_policy["contextMaximum"],
+                                      experimentalRope=parent_policy["experimentalRope"])
                     for key in ("batchSize", "ubatchSize"):
                         if key in self.policies.get(base, {}):
                             policy[key] = self.policies[base][key]

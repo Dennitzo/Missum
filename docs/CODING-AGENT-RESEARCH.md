@@ -172,7 +172,7 @@ Wiederverwendet wird der tatsächlich identische Tokenpräfix, nicht ein unabhä
 veränderter Cache. Zwischenphasen erzwingen keine vollständigen KV-Snapshots.
 
 Recherchephasen verwenden dieselbe automatische Komprimierungsschwelle von
-80 Prozent wie der Hauptlauf. Vor einer zu großen Anfrage und nach einer exakten
+90 Prozent wie der Hauptlauf. Vor einer zu großen Anfrage und nach einer exakten
 nativen Budgetmeldung wird ältere abgeschlossene Arbeit zusammengefasst und
 dieselbe Phase fortgesetzt. Originalauftrag, aktuelle Quellenfenster, Antwortschema
 und Werkzeugrechte bleiben geschützt; Webaufrufe werden dabei nicht wiederholt.

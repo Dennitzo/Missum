@@ -928,6 +928,11 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         _sendPending = true;
         try
         {
+            // The model flyout can still be closing when the user immediately
+            // submits. Freeze the prompt only after its context change is saved.
+            _reasoningFlyout?.Hide();
+            if (!await CommitContextLimitBeforeSendAsync()) return;
+            if (_disposed || _session != session || !string.Equals(Composer.Text, draft, StringComparison.Ordinal)) return;
             if (!await EnsureRequiredMediaCaptureAsync(session, prompt, selectedAction)) return;
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { return; }

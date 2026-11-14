@@ -11,6 +11,26 @@ namespace Missum.Ai.Server.Tests;
 
 public sealed class ModelRuntimeClientTests
 {
+    [Fact]
+    public void ExperimentalContextCatalogIsRestrictedAndKeepsTrainingWindow()
+    {
+        using var catalog = JsonDocument.Parse("""
+            {"data":[
+              {"id":"coding/Qwen3.8-Flash-Next-Q4~a","tags":["missum-context-train:262144","missum-context-experimental-max:1048576"]},
+              {"id":"coding/Qwen3.8-Flash-Next-Q8_0~q8","tags":["missum-context-train:262144","missum-context-experimental-max:1048576"]},
+              {"id":"coding/Other~b","tags":["missum-context-train:262144","missum-context-experimental-max:1048576"]},
+              {"id":"coding/Qwen3.8-Flash-NextExtra~c","tags":["missum-context-train:262144","missum-context-experimental-max:1048576"]}
+            ]}
+            """);
+        var models = ModelRuntimeClient.ReadRuntimeModels(catalog.RootElement);
+        Assert.All(models.Take(2), model =>
+        {
+            Assert.Equal(1_048_576, model.MaximumContextLength);
+            Assert.Equal(262_144, model.TrainingContextLength);
+        });
+        Assert.All(models.Skip(2), model => Assert.Equal(262_144, model.MaximumContextLength));
+    }
+
     private const string NativeGeneralId = "coding/gpt-oss-120b~test";
     private const string NativeQwenId = "coding/qwen3.8-27b~test";
     private const string NativeCoderId = "coding/qwen3-coder-next~test";
@@ -39,6 +59,20 @@ public sealed class ModelRuntimeClientTests
         Assert.All(handler.LoadBodies.Skip(1), body => Assert.True(
             !body.TryGetProperty("contextLength", out var limit) || limit.ValueKind == JsonValueKind.Null));
         Assert.Single(handler.ChatBodies);
+    }
+
+    [Theory]
+    [InlineData("coding/Qwen3.8-Flash-Next~test", 262_144)]
+    [InlineData("coding/Qwen3.8-Flash-Next~test", 1_048_576)]
+    [InlineData("coding/Qwen3.8-Flash-Next-Q8_0~test", 262_144)]
+    [InlineData("coding/Qwen3.8-Flash-Next-Q8_0~test", 1_048_576)]
+    public async Task QwenContextRequestReachesManagedWorkerLoad(string model, int contextLength)
+    {
+        var handler = new NativeRuntimeHandler { ManagedGpuRuntime = true, QwenFlashRuntime = true };
+        using var client = CreateClient(new HttpClient(handler));
+        await client.EnsureModelLoadedAsync(model, contextLength);
+        var load = Assert.Single(handler.LoadBodies, body => body.GetProperty("model").GetString() == model);
+        Assert.Equal(contextLength, load.GetProperty("contextLength").GetInt32());
     }
 
     [Fact]
@@ -1397,6 +1431,7 @@ public sealed class ModelRuntimeClientTests
         public Func<CancellationToken, Task<HttpResponseMessage>>? OnSubagentPrepare { get; init; }
         public Action<string>? OnChatRequest { get; init; }
         public bool ManagedGpuRuntime { get; init; }
+        public bool QwenFlashRuntime { get; init; }
         public int DelayedUnloadPolls { get; init; }
         public int CatalogReadsWhileUnloading { get; private set; }
 
@@ -1436,7 +1471,9 @@ public sealed class ModelRuntimeClientTests
                         Model("qwen3-coder-next"),
                         Model("qwen3-vl-30b-a3b-instruct"),
                         Model("text-embedding-bge-m3"),
-                    },
+                    }.Concat(QwenFlashRuntime
+                        ? new[] { Model("Qwen3.8-Flash-Next"), Model("Qwen3.8-Flash-Next-Q8_0") }
+                        : Array.Empty<object>()).ToArray(),
                 }));
             }
 
@@ -1596,8 +1633,10 @@ public sealed class ModelRuntimeClientTests
                 "qwen3-vl-30b-a3b-instruct" => "vision/qwen3-vl-30b-a3b-instruct~test",
                 _ => "coding/" + key + "~test",
             };
-            return new { id, status = new { value = _loadedKey == id ? "loaded" : "unloaded" },
-                tags = ManagedGpuRuntime ? new[] { "missum-gpu-policy:single-preferred-v1" } : Array.Empty<string>() };
+            var tags = ManagedGpuRuntime ? new List<string> { "missum-gpu-policy:single-preferred-v1" } : new List<string>();
+            if (key is "Qwen3.8-Flash-Next" or "Qwen3.8-Flash-Next-Q8_0")
+                tags.AddRange(["missum-context-train:262144", "missum-context-experimental-max:1048576"]);
+            return new { id, status = new { value = _loadedKey == id ? "loaded" : "unloaded" }, tags };
         }
 
         private static HttpResponseMessage Json(string json) => new(HttpStatusCode.OK)

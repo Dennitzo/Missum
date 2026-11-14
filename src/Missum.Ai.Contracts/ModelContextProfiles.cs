@@ -9,11 +9,29 @@ namespace Missum.Ai.Contracts;
 public static class ModelContextProfiles
 {
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> CatalogMaximums = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> CatalogDefaults = new(StringComparer.OrdinalIgnoreCase);
 
-    public static void RegisterMaximum(string modelId, int contextTokens)
+    public static void RegisterMaximum(string modelId, int contextTokens, int? defaultContextTokens = null)
     {
         if (!string.IsNullOrWhiteSpace(modelId) && contextTokens >= 2048)
+        {
             CatalogMaximums[modelId] = contextTokens;
+            if (defaultContextTokens is >= 2048 && defaultContextTokens <= contextTokens)
+                CatalogDefaults[modelId] = defaultContextTokens.Value;
+            else
+                CatalogDefaults.TryRemove(modelId, out _);
+        }
+    }
+
+    public static int ResolveDefault(string modelId, int maximum)
+    {
+        if (CatalogDefaults.TryGetValue(modelId, out var value)) return Math.Min(value, maximum);
+        const string family = "coding/Qwen3.8-Flash-Next";
+        // Before the catalog has been registered, never implicitly opt this
+        // family into an experimental window just because it is available.
+        return modelId.StartsWith(family, StringComparison.OrdinalIgnoreCase)
+            && (modelId.Length == family.Length || modelId[family.Length] is '-' or '~')
+            ? Math.Min(Qwen38Maximum, maximum) : maximum;
     }
 
     public const int DeepSeekV4Maximum = 1_048_576;

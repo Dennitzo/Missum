@@ -43,9 +43,9 @@ public sealed class CodingContextCompactorTests
     }
 
     [Theory]
-    [InlineData(75_000, false)]
-    [InlineData(85_000, true)]
-    public void InheritedContextStartsCompactingAtEightyPercent(int characters, bool shouldCompact)
+    [InlineData(87_000, false)]
+    [InlineData(90_000, true)]
+    public void InheritedContextStartsCompactingAtNinetyPercent(int characters, bool shouldCompact)
     {
         LmChatMessage[] messages = [new("system", "Policy"), new("user", "Old task"),
             new("assistant", new string('x', characters)), new("user", "Continue")];

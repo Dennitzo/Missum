@@ -137,4 +137,26 @@ public sealed partial class ModelRuntimeClient
         var familyMaximum = ModelContextProfiles.ResolveMaximum(modelId, null);
         return familyMaximum == ModelContextProfiles.NativeRuntimeDefault ? fallback : familyMaximum;
     }
+
+    private static int ReadExperimentalContextMaximum(JsonElement item, string modelId, int trainingContext)
+    {
+        // Only the worker's explicit opt-in capability for this exact family may
+        // extend the native GGUF training window. All other catalogs stay native.
+        const string family = "coding/Qwen3.8-Flash-Next";
+        const string prefix = "missum-context-experimental-max:";
+        if (!modelId.StartsWith(family, StringComparison.OrdinalIgnoreCase)
+            || (modelId.Length > family.Length && modelId[family.Length] is not ('-' or '~'))
+            || trainingContext != ModelContextProfiles.Qwen38Maximum
+            || !item.TryGetProperty("tags", out var tags) || tags.ValueKind != JsonValueKind.Array)
+            return trainingContext;
+        foreach (var tag in tags.EnumerateArray())
+        {
+            var value = tag.ValueKind == JsonValueKind.String ? tag.GetString() : null;
+            if (value?.StartsWith(prefix, StringComparison.Ordinal) == true
+                && int.TryParse(value.AsSpan(prefix.Length), NumberStyles.None, CultureInfo.InvariantCulture, out var maximum)
+                && maximum == 1_048_576)
+                return maximum;
+        }
+        return trainingContext;
+    }
 }

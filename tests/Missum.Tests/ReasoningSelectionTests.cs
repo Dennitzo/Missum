@@ -13,6 +13,26 @@ namespace Missum.Tests;
 public sealed class ReasoningSelectionTests
 {
     [Fact]
+    public void ExperimentalContextRequiresExplicitSelectionAndRetainsNativeDefault()
+    {
+        const string id = "coding/Qwen3.8-Flash-Next~context-test";
+        ModelContextProfiles.RegisterMaximum(id, 1_048_576, 262_144);
+        try
+        {
+            var model = new ModelRuntimeStatus(id, "coding", true, true, "loaded", 524_288,
+                MaximumContextTokens: 1_048_576, TrainingContextTokens: 262_144, LoadedContextTokens: 524_288);
+            var options = MissumAiAssistantService.ResolveComposerReasoning(new(), id, "coding", Snapshot(model));
+            Assert.Equal(262_144, options.SelectedContextTokens);
+            Assert.Equal(262_144, options.TrainingContextTokens);
+            Assert.Equal(524_288, options.LoadedContextTokens);
+            var chosen = new AppSettings { ContextLimitsByModel = new() { [id] = 1_000_000 } };
+            Assert.Equal(1_000_000, ModelContextSelection.Resolve(chosen, id, 1_048_576));
+            Assert.Equal(900_000, ContextCompactionPolicy.InputTokenBudget(1_000_000));
+        }
+        finally { ModelContextProfiles.RegisterMaximum(id, 262_144); }
+    }
+
+    [Fact]
     public async Task ContextSelectionRetainsPerModelLimitAndReportsTrainingMaximumSeparatelyFromLoadedWindow()
     {
         await using var environment = await TestEnvironment.CreateAsync();

@@ -82,7 +82,7 @@ public sealed class DocumentContextPreparationService(IDocumentIngestor document
             throw new InvalidOperationException($"Das ausgewählte General-AI-Modell '{modelId}' ist nicht verfügbar.");
         }
         var maximumContext = selectedModel.MaximumContextTokens ?? selectedModel.ContextTokens;
-        var contextLength = Math.Max(2_048, contextLimit >= 2048 ? Math.Min(contextLimit, maximumContext) : maximumContext);
+        var contextLength = Math.Max(2_048, contextLimit >= 2048 ? Math.Min(contextLimit, maximumContext) : selectedModel.TrainingContextTokens ?? maximumContext);
 
         var pages = new List<DocumentPage>();
         foreach (var document in readyDocuments)

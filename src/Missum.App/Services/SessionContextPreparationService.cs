@@ -653,7 +653,7 @@ public sealed class SessionContextPreparationService(IChatRepository chats)
             throw new InvalidOperationException(
                 $"Das ausgewählte General-AI-Modell '{selectedModelId}' ist nicht verfügbar.");
         }
-        return (model.Id, Math.Max(2_048, knownContextLength ?? model.MaximumContextTokens ?? model.ContextTokens));
+        return (model.Id, Math.Max(2_048, knownContextLength ?? model.TrainingContextTokens ?? model.MaximumContextTokens ?? model.ContextTokens));
     }
 
     private static int CalculateHistoryBudget(int contextLength, string prompt)

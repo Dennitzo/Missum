@@ -13,6 +13,23 @@ spec.loader.exec_module(catalog)
 
 
 class GpuPlacementTests(unittest.TestCase):
+    def test_qwen_experimental_context_load_is_explicit_and_scoped(self):
+        path = self.root / "Qwen3.8-Flash-Next.gguf"
+        gguf(path, architecture="qwen4exp", context=262144, name="Qwen3.8 Flash Next")
+        self.model = next(m for m in catalog.discover_models(self.root) if m["path"] == path)
+        manager, _, _ = self.successful_manager()
+        with patch.object(catalog, "gpu_inventory", return_value=[]):
+            for invalid in (1048577, True):
+                with self.assertRaises(ValueError):
+                    manager.load(self.model["id"], invalid)
+            manager.load(self.model["id"], 1048576)
+        policy = manager.policies[self.model["id"]]
+        self.assertEqual(policy["context"], 1048576)
+        self.assertEqual(manager.session_fingerprint(self.model["id"])["experimentalRope"], "qwen38-yarn4")
+        block = manager.preset.read_text().split("[" + self.model["id"] + "]", 1)[1].split("\n[")[0]
+        self.assertIn("ctx-size = 1048576", block)
+        self.assertIn("rope-scaling = yarn\nrope-scale = 4\nyarn-orig-ctx = 262144", block)
+
     def test_explicit_context_keeps_both_gpu_fitting_and_reuses_padded_allocation(self):
         manager, state, calls = self.successful_manager()
         with patch.object(catalog, "gpu_inventory", return_value=[]):
