@@ -69,6 +69,20 @@ public sealed class MissumAiClient : IDisposable
     public Task<ModelStatusSnapshot> GetModelStatusAsync(CancellationToken cancellationToken = default) =>
         GetAsync<ModelStatusSnapshot>("v1/models/status", cancellationToken);
 
+    /// <summary>Transfers a desktop observation only into the gateway's short-lived memory.</summary>
+    public async Task<string> UploadComputerObservationAsync(string runId, string proposalId, byte[] png,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        using var content = new ByteArrayContent(png);
+        content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("image/png");
+        using var response = await _httpClient.PostAsync($"v1/runs/{Uri.EscapeDataString(runId)}/computer-observations/{Uri.EscapeDataString(proposalId)}", content, cancellationToken).ConfigureAwait(false);
+        await EnsureSuccessAsync(response, cancellationToken).ConfigureAwait(false);
+        using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false));
+        return json.RootElement.GetProperty("observationTransferId").GetString()
+            ?? throw new JsonException("Die Computer-Beobachtungskennung fehlt.");
+    }
+
     public Task<CodingModelCatalogResponse> GetCodingModelsAsync(CancellationToken cancellationToken = default) =>
         GetAsync<CodingModelCatalogResponse>("v1/models/coding", cancellationToken);
 
@@ -159,6 +173,11 @@ public sealed class MissumAiClient : IDisposable
         CancellationToken cancellationToken = default) =>
         PostAsync<UtteranceIntentRequest, UtteranceIntentResponse>(
             "v1/audio/utterance-intent", request, cancellationToken);
+
+    public Task<ComputerRoutingResponse> ClassifyComputerRouteAsync(
+        ComputerRoutingRequest request, CancellationToken cancellationToken = default) =>
+        PostAsync<ComputerRoutingRequest, ComputerRoutingResponse>(
+            "v1/computer/route", request, cancellationToken);
 
     public Task<LiveCaptionSessionSnapshot> CreateLiveCaptionSessionAsync(
         LiveCaptionSessionRequest request,

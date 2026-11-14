@@ -50,6 +50,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     private readonly NativeNavigationState _navigationState = new();
     private Task _navigationTail = Task.CompletedTask;
     private readonly MicrophoneTranscriptionService _microphone;
+    private readonly ComputerActionApprovalService _computerApprovals;
 
     private NativeConversationSelection? _conversationSelection;
     private bool _selectionInputSmokeActive;
@@ -102,6 +103,8 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         _assistantHost = App.Current.GetService<AssistantHost>();
         _hostSubscription = _assistantHost.Subscribe("desktop", (type, payload, id) => EmitAsync(type, payload, id));
         _settings = App.Current.GetService<SettingsCoordinator>();
+        _computerApprovals = App.Current.GetService<ComputerActionApprovalService>();
+        _computerApprovals.Changed += OnComputerApprovalsChanged;
         _inspectorRequested = _settings.Current.AssistantOutputsVisible;
         _microphone = App.Current.GetService<MicrophoneTranscriptionService>();
         _microphone.TurnChanged += OnTranscript;
@@ -852,6 +855,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     }
     private void SetRunning()
     {
+        RenderComputerApprovals();
         RefreshWorkingPlanTab();
         UpdateComposerAttachmentControls();
         var hasText = !string.IsNullOrWhiteSpace(Composer.Text);
@@ -1190,7 +1194,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         _hostSubscription.Dispose();
         _reasoningFlyout?.Hide(); _modelSelectionFlyout?.Hide();
         HideWorkingPlanView();
-        _disposed = true; _draftTimer.Stop(); _renderTimer.Stop(); _microphone.TurnChanged -= OnTranscript; _lifetime.Cancel(); _lifetime.Dispose();
+        _disposed = true; _computerApprovals.Changed -= OnComputerApprovalsChanged; _draftTimer.Stop(); _renderTimer.Stop(); _microphone.TurnChanged -= OnTranscript; _lifetime.Cancel(); _lifetime.Dispose();
     }
 }
 

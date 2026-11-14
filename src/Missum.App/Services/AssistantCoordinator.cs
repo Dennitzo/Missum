@@ -29,7 +29,8 @@ public sealed partial class AssistantCoordinator(
     IAssistantRunScheduler? runScheduler = null,
     NativeSessionCacheCleanupService? cacheCleanup = null,
     ScientificPublicationService? publicationService = null,
-    ScientificPresentationCoordinator? presentation = null)
+    ScientificPresentationCoordinator? presentation = null,
+    ModelCapabilityRegistry? modelCapabilities = null)
 {
     private AppSettings CurrentSettings => AssistantClientExecutionScope.Resolve(settings.Current);
     private Task UpdateViewSettingsAsync(Func<AppSettings, AppSettings> update, CancellationToken cancellationToken = default) =>
@@ -449,6 +450,9 @@ public sealed partial class AssistantCoordinator(
             if (string.Equals(action.ActionId, BuiltInActionIds.ExportChatPdf, StringComparison.Ordinal)
                 && messageCount == 0)
                 disabledReason = "Der Chat enthält noch keine Nachrichten.";
+            if (string.Equals(action.ActionId, BuiltInActionIds.ComputerUse, StringComparison.Ordinal)
+                && modelCapabilities?.SupportsComputerUse(CurrentSettings.SelectedModel) == false)
+                disabledReason = "Das ausgewählte lokale Codex-Modell benötigt Bildverarbeitung und Werkzeugaufrufe. Wähle ein geeignetes Vision-Modell.";
             if (!action.ActionId.StartsWith("builtin.", StringComparison.Ordinal))
                 disabledReason ??= extensionRuntime is null
                     ? "Der ExtensionHost ist für diese Aktion nicht verfügbar."
@@ -1113,6 +1117,12 @@ public sealed partial class AssistantCoordinator(
             var result = await extensionRuntime.InvokeAsync(
                 actionId, arguments, workspaceRoot, null, cancellationToken).ConfigureAwait(false);
             await emit("action.completed", new { actionId, result }, envelope.RequestId).ConfigureAwait(false);
+            return;
+        }
+
+        if (string.Equals(actionId, BuiltInActionIds.ComputerUse, StringComparison.Ordinal))
+        {
+            await emit("action.completed", new { actionId, enabled }, envelope.RequestId).ConfigureAwait(false);
             return;
         }
 

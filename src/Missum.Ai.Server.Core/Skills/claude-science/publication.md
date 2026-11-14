@@ -1,6 +1,10 @@
 # Publikation, Quellen und Daten
 
 Publikation.md direkt bearbeiten, keine Projektkopien oder Publikationsrevisionen anlegen.
+Nach jeder Phase Publikation-erzeugen.ps1 ohne -CheckOnly über coding.command ausführen, bevor die Phase
+abgeschlossen oder die nächste Phase begonnen wird. Exitcode 0 und Werkzeugausgabe prüfen; bei Fehlern die
+gemeldeten Originalstellen direkt korrigieren und den vollständigen PDF-Bau wiederholen. Eine alte PDF
+zählt nicht als Erfolg. Falls Bau oder Korrektur blockiert sind, die Phase offen halten und den Grund nennen.
 Die Publikation ist der fachliche Projektstand. Nach dem Strukturvorbild De-Broglie-Bohm einen Kurzüberblick,
 logisch abhängige Themen und Literatur und Daten führen. Beim jeweiligen Thema Fragestellung, Modellumfang,
 Konventionen, Voraussetzungen, Herleitung mit erläuterten LaTeX-Gleichungen, mathematischen Beweis,

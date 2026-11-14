@@ -184,6 +184,8 @@ public sealed partial class NativeAssistantPage
             var description = note is null
                 ? S(descriptor, "description")
                 : $"{S(descriptor, "description")} · {note}";
+            if (S(descriptor, "disabledReason") is { Length: > 0 } disabledReason)
+                description += " · " + disabledReason;
             AddEntry(S(descriptor, "groupId", BuiltInExtensionCatalog.GroupIntegrations),
                 IntField(descriptor, "groupOrder", 60), "Erweiterungen",
                 IntField(descriptor, "itemOrder", fallbackItemOrder),

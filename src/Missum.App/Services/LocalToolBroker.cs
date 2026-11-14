@@ -23,7 +23,9 @@ public sealed partial class LocalToolBroker(
     IChatRepository chats,
     IExtensionActionCatalog? extensionActions = null,
     IExtensionRuntimeService? extensionRuntime = null,
-    Missum.Core.Research.IResearchSandboxService? researchSandbox = null)
+    Missum.Core.Research.IResearchSandboxService? researchSandbox = null,
+    ComputerDesktopBroker? computerDesktop = null,
+    ComputerActionApprovalService? computerApproval = null)
 {
     private const int MaximumResultCharacters = 4 * 1024 * 1024;
     private static readonly JsonSerializerOptions JsonOptions = MissumAiProtocol.CreateJsonOptions();
@@ -39,7 +41,7 @@ public sealed partial class LocalToolBroker(
         PromptTriggerAction? runAction = null,
         Uri? gatewayOverride = null,
         CancellationToken cancellationToken = default) => ExecuteForAgentAsync(proposal, sessionId, assistantMessageId,
-            codingWorkspacePath, commandProgress, evidenceStore, runAction, null, gatewayOverride, cancellationToken);
+            codingWorkspacePath, commandProgress, evidenceStore, runAction, null, gatewayOverride, false, cancellationToken);
 
     internal async Task<ClientToolResult> ExecuteForAgentAsync(
         ToolProposal proposal,
@@ -51,11 +53,23 @@ public sealed partial class LocalToolBroker(
         PromptTriggerAction? runAction = null,
         string? researchActorAgentId = null,
         Uri? gatewayOverride = null,
+        bool computerUseEnabled = false,
         CancellationToken cancellationToken = default)
     {
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
+            // Enforce this at the actual execution boundary too: server-side tool
+            // filtering and model instructions are not an authorization boundary.
+            if (computerUseEnabled && proposal.Name is not ("computer.observe" or "computer.act"))
+                throw new UnauthorizedAccessException("Während der Computersteuerung sind andere lokale Werkzeuge gesperrt.");
+            if (proposal.Name is "computer.observe" or "computer.act")
+            {
+                if (!computerUseEnabled || runAction != PromptTriggerAction.Coding || researchActorAgentId is not null)
+                    throw new UnauthorizedAccessException("Die Computersteuerung ist für diesen Lauf nicht freigegeben.");
+                ValidateProposal(proposal);
+                return await ExecuteComputerToolAsync(proposal, sessionId, gatewayOverride, cancellationToken).ConfigureAwait(false);
+            }
             ExtensionToolDescriptor? extensionTool = null;
             if (extensionActions?.TryGetToolByModelName(proposal.Name, out var registeredTool) == true
                 && registeredTool is not null
@@ -374,6 +388,8 @@ public sealed partial class LocalToolBroker(
             ClientToolNames.MathSymbolic or ClientToolNames.MathNumeric or ClientToolNames.MathSmt
                 or ClientToolNames.MathFormalProof => ToolRiskClass.Process,
             WorkspaceTools.ImageInput => ToolRiskClass.ReadOnly,
+            "computer.observe" => ToolRiskClass.ReadOnly,
+            "computer.act" => ToolRiskClass.LocalMutation,
             ClientToolNames.DocumentRead or ClientToolNames.DocumentsList
                 or ClientToolNames.DocumentsSearch or ClientToolNames.DocumentsReadPages => ToolRiskClass.ReadOnly,
             ClientToolNames.DocumentCreate => ToolRiskClass.LocalMutation,
@@ -393,6 +409,11 @@ public sealed partial class LocalToolBroker(
         }
 
         var arguments = proposal.Arguments;
+        if (proposal.Name is "computer.observe" or "computer.act")
+        {
+            ValidateComputerArguments(proposal.Name, arguments);
+            return;
+        }
         if (extensionTool is not null)
         {
             ValidateExtensionArguments(extensionTool, arguments);

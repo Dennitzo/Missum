@@ -17,9 +17,10 @@ public sealed partial class MissumAiAssistantService
             session.Title, cancellationToken).ConfigureAwait(false);
         var relative = Path.GetRelativePath(session.CodingWorkspacePath, path).Replace('\\', '/');
         var localPdfTool = File.Exists(Path.Combine(session.CodingWorkspacePath, "Publikation-erzeugen.ps1"))
-            ? " Für die lokale PDF-Erzeugung steht Publikation-erzeugen.ps1 im Projekt bereit: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Publikation-erzeugen.ps1. "
-                + "Mit -CheckOnly wird nur geprüft. Fortschritt und konkrete Fehler mit Fundstellen stehen im Werkzeugergebnis sowie in publication-build.log und publication-build.json; bearbeite die betroffenen Originalstellen in Publikation.md. "
-            : "";
+            ? " Nach jeder Phase und vor ihrem Abschluss oder Beginn der nächsten Phase führe den vollständigen PDF-Bau im Projektordner über coding.command aus: Programm powershell.exe, getrennte Argumente -NoProfile, -ExecutionPolicy, Bypass, -File, .\\Publikation-erzeugen.ps1. "
+                + "Nutze dafür nicht -CheckOnly. Prüfe, dass der Exitcode 0 ist, und lies die Ausgabe; behebe Fehler zuerst an den genannten Originalstellen und wiederhole den Bau bis zum Erfolg. Eine erhaltene ältere PDF ist kein Erfolg des aktuellen Baus. "
+                + "Konkrete Fehler und Fundstellen stehen im Werkzeugergebnis sowie in publication-build.log und publication-build.json. Wenn Bau oder Korrektur nicht möglich sind, halte die Phase offen und nenne die Blockade. "
+            : " Publikation-erzeugen.ps1 fehlt im Projektordner; der für jede Phase erforderliche PDF-Bau ist blockiert. Melde die konkrete Einschränkung und markiere die Phase nicht als abgeschlossen. ";
         return prompt + "\n\nPublikation dieses Projekts: " + relative
             + ". Diese direkt bearbeitbare Markdown-Datei ist der aktuelle Projektstand; Missum setzt daraus automatisch die PDF im vorhandenen Layout mit Inhaltsverzeichnis. "
             + "Gliedere Hauptthemen mit ##, Unterthemen mit ### und weitere Ebenen entsprechend; Missum nummeriert Überschriften und Inhaltsverzeichnis gemeinsam als 1, 1.1, 1.2, 2 usw. "

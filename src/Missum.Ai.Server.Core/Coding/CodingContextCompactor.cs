@@ -38,7 +38,7 @@ internal static partial class CodingContextCompactor
         if (!force && ContextPlanner.EstimateTokens(prompt) < budget) return null;
         var currentRequestIndex = -1;
         for (var index = messages.Count - 1; index >= 0; index--)
-            if (messages[index].Role == "user" && messages[index].Content?.StartsWith(MemoryMarker, StringComparison.Ordinal) != true
+            if (messages[index].Role == "user" && messages[index].ComputerObservationId is null && messages[index].Content?.StartsWith(MemoryMarker, StringComparison.Ordinal) != true
                 && !ContextPlanner.IsRuntimeContext(messages[index])
                 && !ContextPlanner.IsNativeRuntimeInstruction(messages[index])
                 && !ModelRuntimeClient.IsLanguageReminder(messages[index])
@@ -61,6 +61,16 @@ internal static partial class CodingContextCompactor
         var firstOpen = messages.Select((message, index) => (message, index))
             .Where(item => item.message.ToolCalls?.Any(call => !receipts.TryGetValue(call.Id, out var receipt) || receipt <= item.index) == true)
             .Select(static item => item.index).DefaultIfEmpty(messages.Count).Min();
+        // The newest computer screenshot is transient and must reach the next
+        // model turn intact. Archiving its marker as text would allow a reply
+        // without the image even though the observation tool completed.
+        var latestComputerImage = messages.Select((message, index) => (message, index))
+            .Where(item => item.message.ComputerObservationId is not null)
+            .Select(item => item.index).DefaultIfEmpty(-1).Max();
+        if (latestComputerImage >= 2 && messages[latestComputerImage - 1] is { Role: "tool", ToolCallId: { } observationCallId }
+            && messages[latestComputerImage - 2].ToolCalls is { Count: 1 } observationCalls
+            && observationCalls[0].Name == "computer.observe" && observationCalls[0].Id == observationCallId)
+            firstOpen = Math.Min(firstOpen, latestComputerImage - 2);
         var freshReadIds = ContextPlanner.FreshReadCallIds(messages);
         if (freshReadIds.Count > 0)
         {
@@ -142,6 +152,7 @@ internal static partial class CodingContextCompactor
         if (ContextPlanner.IsNativeRuntimeInstruction(message)) content = content![nativePrefix.Length..];
         else if (message.Role != "system") return null;
         if (content?.StartsWith(ScienceSkill.Marker, StringComparison.Ordinal) == true) return ScienceSkill.Marker;
+        if (content?.StartsWith(ScienceSkill.PublicationPhaseMarker, StringComparison.Ordinal) == true) return ScienceSkill.PublicationPhaseMarker;
         if (content?.StartsWith("MISSUM_SCIENCE_FOCUS_V1\n", StringComparison.Ordinal) == true) return "MISSUM_SCIENCE_FOCUS_V1";
         if (content?.StartsWith("MISSUM_SCIENCE_SKILL_MODULE_V1:", StringComparison.Ordinal) == true) return content.Split('\n', 2)[0];
         if (content?.StartsWith(ScienceCompletionGuard.Marker, StringComparison.Ordinal) == true) return ScienceCompletionGuard.Marker;

@@ -104,6 +104,19 @@ public sealed partial class AgentToolCatalog
         if (request.ConversationProfile == ConversationProfile.PlanMode)
             result.RemoveAll(tool => tool.RiskClass != ToolRiskClass.ReadOnly
                 || SubagentToolNames.All.Contains(tool.Name) || tool.Name == CodingWorkingStateTools.PlanTool);
+        var hasComputerTool = request.ClientTools?.Any(tool => tool.Name is "computer.observe" or "computer.act") == true;
+        if (hasComputerTool || HasCapability(capabilities, "computer.use"))
+        {
+            if (request.Mode != RunMode.Coding || request.Subagent is not null
+                || !HasCapability(capabilities, "computer.use")
+                || request.ClientTools?.Count != 2
+                || request.ClientTools.Count(tool => tool.Name == "computer.observe") != 1
+                || request.ClientTools.Count(tool => tool.Name == "computer.act") != 1)
+                throw new ArgumentException("Computersteuerung benötigt einen freigegebenen Codex-Hauptlauf mit exakt beiden Computer-Werkzeugen.");
+            // Desktop control must not offer command, process, arbitrary code,
+            // subagents or other sidecars that could bypass its approval broker.
+            result.RemoveAll(tool => tool.Name is not ("computer.observe" or "computer.act"));
+        }
         return result.OrderBy(static tool => tool.Name, StringComparer.Ordinal).ToArray();
     }
 

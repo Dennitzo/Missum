@@ -232,6 +232,7 @@ public static class BuiltInExtensionCatalog
         Selectable(BuiltInActionIds.CreateDocument, "Dokumente erstellen", "Word, PDF, Tabellen und Präsentationen erstellen", "document", GroupFiles, 10, 20),
         Immediate(BuiltInActionIds.ExportChatPdf, "Chat als PDF exportieren", "Den vollständigen Chat über den Speicherdialog als PDF exportieren", "pdf", GroupFiles, 10, 30),
         SelectableCoding(BuiltInActionIds.PlanMode, "Planmodus", "Projekt schreibgeschützt analysieren und vor Änderungen einen umsetzbaren Plan abstimmen", "plan", GroupPlanning, 20, 10),
+        SelectableCoding(BuiltInActionIds.ComputerUse, "Computersteuerung", "Den lokalen Windows-Desktop sehen und bedienen", "computer", GroupIntegrations, 60, 30),
         Selectable(BuiltInActionIds.WebSearch, "Websuche", "Aktuelle Quellen im Web durchsuchen", "web", GroupResearch, 30, 10),
         Selectable(BuiltInActionIds.DeepResearch, "Deep Research", "Eine mehrstufige, quellenbasierte Recherche starten", "research", GroupResearch, 30, 20),
         Selectable(BuiltInActionIds.Lean, "Lean", "Mathematische Aussagen mit Lean 4 und Mathlib formalisieren und Beweise prüfen", "lean", GroupResearch, 30, 30),
@@ -257,6 +258,26 @@ public static class BuiltInExtensionCatalog
         Tool(BuiltInActionIds.CreateAudiobook, "audiobook.create", "Ein Hörbuch erzeugen", 1_800, 32 * 1024 * 1024),
         Tool(BuiltInActionIds.Translate, "speech.translate", "Text übersetzen", 300, 4 * 1024 * 1024),
         Tool(BuiltInActionIds.ReadAloud, "speech.synthesize", "Text lokal vorlesen", 300, 4 * 1024 * 1024),
+        Tool(BuiltInActionIds.ComputerUse, "computer.observe", "Beobachtet den Desktop oder das sichtbare Vordergrundfenster und liefert ein aktuelles Bild mit Beobachtungskennung. Für die Bedienung eines einzelnen Fensters scope window nutzen.", 300, 4 * 1024 * 1024,
+            schema: new { type = "object", properties = new { scope = new { type = "string", @enum = new[] { "desktop", "window" }, description = "desktop: gesamter Desktop (Standard); window: sichtbarer Ausschnitt des Vordergrundfensters." } }, required = Array.Empty<string>(), additionalProperties = false }),
+        Tool(BuiltInActionIds.ComputerUse, "computer.act", "Führt eine Desktopaktion für eine aktuelle Beobachtung aus; danach erneut beobachten. Für jede Aktion mit x/y oder endX/endY ist coordinateSpace explizit erforderlich. Für scroll sind x und y als Bildpunkt innerhalb des scrollbaren Bereichs sowie scrollY erforderlich.", 300, 1024 * 1024,
+            ExtensionToolRiskClass.LocalMutation, new
+            {
+                type = "object", properties = new
+                {
+                    observationId = new { type = "string" },
+                    kind = new { type = "string", @enum = new[] { "inspect", "move", "click", "double_click", "drag", "scroll", "type", "keypress", "focus", "wait" } },
+                    x = new { type = "number", description = "Horizontale Bildkoordinate; bei inspect, move, click, double_click, drag und scroll erforderlich." },
+                    y = new { type = "number", description = "Vertikale Bildkoordinate; bei inspect, move, click, double_click, drag und scroll erforderlich." },
+                    endX = new { type = "number" }, endY = new { type = "number" },
+                    imageWidth = new { type = "integer" }, imageHeight = new { type = "integer" },
+                    text = new { type = "string" }, key = new { type = "string" },
+                    scrollY = new { type = "integer", description = "Vertikaler Scrollwert: positiv nach unten, negativ nach oben; 120 entspricht einer Mausradrastung." }, windowId = new { type = "string" },
+                    coordinateSpace = new { type = "string", @enum = new[] { "pixels", "normalized1000" },
+                        description = "Pflicht bei jeder Aktion mit x/y oder endX/endY. pixels: Bildpixel; normalized1000: je Bildachse 0 bis 999. Bei Aktionen ohne Koordinaten optional." },
+                },
+                required = new[] { "observationId", "kind" }, additionalProperties = false,
+            }),
     ];
 
     private static ExtensionActionDescriptor Immediate(

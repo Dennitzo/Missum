@@ -29,7 +29,14 @@ public sealed record LmChatMessage(
     string? Content = null,
     IReadOnlyList<LmToolCall>? ToolCalls = null,
     string? ToolCallId = null,
-    string? ReasoningContent = null);
+    string? ReasoningContent = null,
+    string? ComputerObservationId = null,
+    string? ComputerObservationRunId = null)
+{
+    // Ephemeral bytes are attached only immediately before a native model call.
+    [System.Text.Json.Serialization.JsonIgnore]
+    public byte[]? ComputerImage { get; init; }
+}
 
 public sealed record LmToolCall(string Id, string Name, JsonElement Arguments);
 

@@ -18,6 +18,7 @@ public static class RunRequestValidator
         "coding",
         "coding.evidence",
         "coding.process",
+        "computer.use",
         "workspace.open",
         "research.sandbox",
         "math.lean",

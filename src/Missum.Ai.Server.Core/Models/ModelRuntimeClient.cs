@@ -392,7 +392,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
                 // Do not let llama.cpp choose another slot after a restart.
                 ["id_slot"] = 0,
                 ["stream_options"] = new { include_usage = true },
-                ["parallel_tool_calls"] = coding,
+                ["parallel_tool_calls"] = coding && !tools.Any(tool => tool.Name is "computer.observe" or "computer.act"),
             };
             ApplyModelSampling(body, modelId);
             if (responseSchema is { } schema)
@@ -1956,8 +1956,13 @@ public sealed partial class ModelRuntimeClient : IDisposable
             char.IsAsciiLetterOrDigit(character)
             || character is '_' or '-' or '.');
 
-    private static object ToOpenAiMessage(LmChatMessage message)
+    internal static object ToOpenAiMessage(LmChatMessage message)
     {
+        if (message.ComputerImage is { Length: > 0 } image && message.Role == "user")
+            return new { role = "user", content = new object[] {
+                new { type = "text", text = message.Content ?? "Aktuelle Computer-Beobachtung." },
+                new { type = "image_url", image_url = new { url = "data:image/png;base64," + Convert.ToBase64String(image) } }
+            } };
         if (string.Equals(message.Role, "assistant", StringComparison.OrdinalIgnoreCase)
             && message.ToolCalls is { Count: > 0 })
         {

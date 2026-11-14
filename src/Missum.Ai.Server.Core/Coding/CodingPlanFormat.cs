@@ -20,7 +20,7 @@ internal static class CodingPlanFormat
     internal static AgentRunCheckpoint UpgradeCheckpoint(AgentRunCheckpoint checkpoint,
         IReadOnlyCollection<string>? originalUserTexts = null)
     {
-        if (checkpoint.PlanFormatVersion >= CurrentVersion) return checkpoint;
+        if (checkpoint.PlanFormatVersion >= CurrentVersion) return EnsureSciencePublicationPhase(checkpoint);
         var messages = UpgradeMessages(checkpoint.Messages, originalUserTexts, out var messagesChanged);
         var contextTools = UpgradeTools(checkpoint.ContextTools);
         var lastModelTools = UpgradeTools(checkpoint.LastModelTools);
@@ -38,12 +38,29 @@ internal static class CodingPlanFormat
         }
         // Nothing retired means nothing was rewritten: keep the evaluated prompt
         // prefix and tool catalog signature exactly as the run stored them.
-        if (!messagesChanged && !stateChanged && !toolsChanged) return checkpoint with { PlanFormatVersion = CurrentVersion };
-        return checkpoint with
+        if (!messagesChanged && !stateChanged && !toolsChanged) return EnsureSciencePublicationPhase(checkpoint with { PlanFormatVersion = CurrentVersion });
+        return EnsureSciencePublicationPhase(checkpoint with
         {
             Messages = messages, WorkingState = state, ContextTools = contextTools, LastModelTools = lastModelTools,
             PlanFormatVersion = CurrentVersion, WorkingStatePromptIncluded = false,
             PreserveSessionPromptPrefix = false, ToolCatalogSignature = null,
+        });
+    }
+
+    private static AgentRunCheckpoint EnsureSciencePublicationPhase(AgentRunCheckpoint checkpoint)
+    {
+        // This policy is newer than plan format v2. Append it to Science checkpoints
+        // independently of the plan migration, without rewriting conversation or
+        // tool results. Only trusted system instructions can satisfy the marker.
+        var science = checkpoint.WorkingState?.Science is not null
+            || checkpoint.Messages.Any(message => message.Role == "system"
+                && message.Content?.StartsWith(ScienceSkill.Marker, StringComparison.Ordinal) == true);
+        if (!science || checkpoint.Messages.Any(message => message.Role == "system"
+            && message.Content?.Contains(ScienceSkill.PublicationPhaseMarker, StringComparison.Ordinal) == true)) return checkpoint;
+        return checkpoint with
+        {
+            Messages = [.. checkpoint.Messages, new LmChatMessage("system", ScienceSkill.PublicationPhaseInstructions)],
+            PreserveSessionPromptPrefix = false, WorkingStatePromptIncluded = false, ToolCatalogSignature = null,
         };
     }
 

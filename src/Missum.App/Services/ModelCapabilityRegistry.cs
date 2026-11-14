@@ -50,6 +50,17 @@ public sealed class ModelCapabilityRegistry
         }
     }
 
+    public bool? SupportsComputerUse(string? modelId)
+    {
+        var id = modelId?.Trim().ToLowerInvariant() ?? string.Empty;
+        lock (_sync)
+        {
+            if (_models.TryGetValue((id, "coding"), out var model))
+                return model.SupportsVision && model.SupportsTools;
+            return null;
+        }
+    }
+
     private void Update(IEnumerable<ModelCapability> models)
     {
         var updated = models

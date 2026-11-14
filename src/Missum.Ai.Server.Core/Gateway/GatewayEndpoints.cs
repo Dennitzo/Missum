@@ -43,6 +43,7 @@ internal static partial class GatewayEndpoints
         endpoints.MapGet("/v1/runs/{runId}", GetRunAsync);
         endpoints.MapGet("/v1/runs/{runId}/events", StreamRunEventsAsync);
         endpoints.MapPost("/v1/runs/{runId}/client-tool-results", SubmitClientToolResultAsync);
+        endpoints.MapPost("/v1/runs/{runId}/computer-observations/{proposalId}", StoreComputerObservationAsync);
         endpoints.MapPost("/v1/runs/{runId}/client-tool-progress", SubmitClientToolProgressAsync);
         endpoints.MapPost("/v1/runs/{runId}/cancel", CancelRunAsync);
         endpoints.MapPost("/v1/runs/{runId}/steer", SteerRunAsync);
@@ -66,6 +67,7 @@ internal static partial class GatewayEndpoints
         endpoints.MapPost("/v1/audio/speech/sessions/{sessionId}/end", EndSpeechSessionAsync);
         endpoints.MapPost("/v1/audio/speech/sessions/{sessionId}/cancel", CancelSpeechSessionAsync);
         endpoints.MapPost("/v1/audio/utterance-intent", ClassifyUtteranceIntentAsync);
+        endpoints.MapPost("/v1/computer/route", ClassifyComputerRouteAsync);
         endpoints.MapPost("/v1/audio/live-captions/sessions", CreateLiveCaptionSessionAsync);
         endpoints.MapGet("/v1/audio/live-captions/sessions/{sessionId}", GetLiveCaptionSessionAsync);
         endpoints.MapPost("/v1/audio/live-captions/sessions/{sessionId}/heartbeat", KeepLiveCaptionSessionAliveAsync);
@@ -77,6 +79,13 @@ internal static partial class GatewayEndpoints
 
     private static Task WriteLiveHealthAsync(HttpContext context) =>
         WriteJsonAsync(context, ServerRuntimeState.CreateLiveSnapshot());
+
+    private static async Task ClassifyComputerRouteAsync(HttpContext context)
+    {
+        var request = await ReadJsonAsync<ComputerRoutingRequest>(context).ConfigureAwait(false);
+        var service = context.RequestServices.GetRequiredService<ComputerRoutingService>();
+        await WriteJsonAsync(context, await service.ClassifyAsync(request, context.RequestAborted).ConfigureAwait(false)).ConfigureAwait(false);
+    }
 
     private static async Task WriteReadyHealthAsync(HttpContext context)
     {
@@ -391,6 +400,7 @@ internal static partial class GatewayEndpoints
     private static async Task CancelRunAsync(HttpContext context)
     {
         var runId = GetRouteString(context, "runId");
+        context.RequestServices.GetRequiredService<ComputerObservationStore>().RemoveRun(runId);
         var repository = context.RequestServices.GetRequiredService<RunRepository>();
         var snapshot = await repository.GetAsync(runId, context.RequestAborted).ConfigureAwait(false);
         if (snapshot is null)
@@ -419,7 +429,10 @@ internal static partial class GatewayEndpoints
         var repository = context.RequestServices.GetRequiredService<RunRepository>();
         var runId = await repository.CancelByIdempotencyKeyAsync(request, context.RequestAborted).ConfigureAwait(false);
         if (runId is not null)
+        {
+            context.RequestServices.GetRequiredService<ComputerObservationStore>().RemoveRun(runId);
             _ = context.RequestServices.GetRequiredService<RunProcessor>().Cancel(runId);
+        }
         context.Response.StatusCode = StatusCodes.Status204NoContent;
     }
 
@@ -896,6 +909,40 @@ internal static partial class GatewayEndpoints
         await WriteJsonAsync(
             context,
             new RunAccepted(snapshot.RunId, snapshot.State, snapshot.CreatedAt, $"/v1/runs/{Uri.EscapeDataString(snapshot.RunId)}/events")).ConfigureAwait(false);
+    }
+
+    private static async Task StoreComputerObservationAsync(HttpContext context, string runId, string proposalId)
+    {
+        var repository = context.RequestServices.GetRequiredService<RunRepository>();
+        var token = context.RequestAborted;
+        var request = await repository.GetRequestAsync(runId, token).ConfigureAwait(false);
+        var snapshot = await repository.GetAsync(runId, token).ConfigureAwait(false);
+        var checkpoint = await repository.GetCheckpointAsync(runId, token).ConfigureAwait(false);
+        var proposal = await repository.GetToolProposalAsync(proposalId, runId, token).ConfigureAwait(false);
+        if (request?.Mode != RunMode.Coding || request.ClientCapabilities?.Contains("computer.use", StringComparer.OrdinalIgnoreCase) != true
+            || request.ClientTools?.Count != 2 || request.ClientTools?.Any(t => t.Name == "computer.observe") != true
+            || request.ClientTools?.Any(t => t.Name == "computer.act") != true
+            || snapshot?.State is not (RunState.WaitingForClient or RunState.Running)
+            || checkpoint?.PendingProposalId != proposalId || proposal?.Name != "computer.observe"
+            || proposal.ExpiresAt <= DateTimeOffset.UtcNow
+            || await repository.GetClientToolResultAsync(proposalId, token).ConfigureAwait(false) is not null)
+            throw new InvalidOperationException("Computer-Beobachtung ist für diesen Lauf nicht freigegeben oder nicht mehr aktuell.");
+        if (context.Request.ContentType != "image/png" || context.Request.ContentLength is > ComputerObservationStore.MaximumBytes)
+            throw new ArgumentException("Computer-Beobachtung muss ein PNG bis maximal 7 MiB sein.");
+        using var stream = new MemoryStream();
+        var buffer = new byte[65536];
+        while (true)
+        {
+            var read = await context.Request.Body.ReadAsync(buffer, token).ConfigureAwait(false);
+            if (read == 0) break;
+            if (stream.Length + read > ComputerObservationStore.MaximumBytes) throw new ArgumentException("Computer-Beobachtung ist zu groß.");
+            await stream.WriteAsync(buffer.AsMemory(0, read), token).ConfigureAwait(false);
+        }
+        if (await repository.IsTerminalStateAsync(runId, token).ConfigureAwait(false)
+            || await repository.GetClientToolResultAsync(proposalId, token).ConfigureAwait(false) is not null)
+            throw new InvalidOperationException("Der Computer-Werkzeugauftrag ist nicht mehr aktiv.");
+        var id = context.RequestServices.GetRequiredService<ComputerObservationStore>().Put(runId, proposalId, stream.ToArray());
+        await WriteJsonAsync(context, new { observationTransferId = id }).ConfigureAwait(false);
     }
 
     private static Task<T> ReadJsonAsync<T>(HttpContext context) =>

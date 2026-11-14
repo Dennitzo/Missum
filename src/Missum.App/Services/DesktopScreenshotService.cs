@@ -277,7 +277,7 @@ public sealed class DesktopScreenshotService(ILogger<DesktopScreenshotService> l
         }
     }
 
-    private static async Task<byte[]> EncodePngAsync(
+    internal static async Task<byte[]> EncodePngAsync(
         byte[] pixels,
         int width,
         int height,

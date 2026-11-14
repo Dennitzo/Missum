@@ -14,7 +14,10 @@ internal static class ScienceInitialPlanGuard
     // same entrance protocol now applies to Codex; internal summaries and child
     // agents retain their own bounded workflows.
     internal static bool Applies(RunRequest request) => request.Mode == RunMode.Coding
-        && request.Subagent is null && request.ConversationProfile is not (ConversationProfile.ContextPreparation or ConversationProfile.PlanMode);
+        && request.Subagent is null && request.ConversationProfile is not (ConversationProfile.ContextPreparation or ConversationProfile.PlanMode)
+        // Computer control intentionally exposes only its two brokered tools;
+        // requiring coding.updatePlan here would make every such run fail.
+        && request.ClientTools?.Any(tool => tool.Name is "computer.observe" or "computer.act") != true;
 
     internal static bool IsPlanOnly(IReadOnlyList<LmToolCall> calls) => calls.Count == 1
         && calls[0].Name == CodingWorkingStateTools.PlanTool;

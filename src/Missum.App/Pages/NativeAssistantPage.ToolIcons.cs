@@ -12,7 +12,7 @@ public sealed partial class NativeAssistantPage
         "audio" or "speech" or "audiobook" or "translate" => "\uE767",
         "document" or "attachment" => "\uE8A5", "video" => "\uE714",
         "pdf" => "\uEA90", "captions" => "\uE8F2", "plan" => "\uEA80",
-        "project" or "folder" => "\uE8B7",
+        "project" or "folder" => "\uE8B7", "computer" => "\uE7F4",
         "lean" => "\uE73E",
         "code" => "\uE943", "success" => "\uE768", _ => "\uEA86",
     };

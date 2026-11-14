@@ -48,6 +48,7 @@ public sealed partial class RunProcessor
             && message.Content?.StartsWith(CompactAgentContextPolicy.RuntimeMarker, StringComparison.Ordinal) == true)?.Content == runtime)
             return;
         var index = beforeLatestUser ? messages.FindLastIndex(message => message.Role == "user"
+            && message.ComputerObservationId is null
             && !ModelRuntimeClient.IsLanguageReminder(message)
             && !ContextPlanner.IsNativeRuntimeInstruction(message)
             && message.Content?.StartsWith(CompactAgentContextPolicy.RuntimeMarker, StringComparison.Ordinal) != true) : -1;

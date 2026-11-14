@@ -10,6 +10,49 @@ namespace Missum.Tests;
 public sealed class SciencePublicationToolLiveTests
 {
     private static readonly string[] CheckArguments = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "Publikation-erzeugen.ps1", "-CheckOnly"];
+    private static readonly string[] BuildArguments = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "Publikation-erzeugen.ps1"];
+
+    [Fact]
+    [Trait("Category", "Live")]
+    public async Task CodingCommandReceivesPublicationTitleFailureAndKeepsPreviousPdf()
+    {
+        var package = Environment.GetEnvironmentVariable("MISSUM_PUBLICATION_TOOL_PACKAGE");
+        if (string.IsNullOrWhiteSpace(package)) return;
+        var project = Path.Combine(Path.GetTempPath(), "missum-publication-feedback-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(project);
+        try
+        {
+            await SciencePublicationScaffold.EnsureFromPackageAsync(ChatMode.ClaudeScience, project, package);
+            var source = Path.Combine(project, "Publikation.md");
+            await File.WriteAllTextAsync(source, "# Kurzer Titel\n\n## Einleitung\n\nEine Testpublikation.\n", new UTF8Encoding(false));
+            var executor = new LocalCodingToolExecutor(project);
+            var args = JsonSerializer.SerializeToElement(new
+            {
+                executable = "powershell.exe", workingDirectory = ".", timeoutSeconds = 120,
+                arguments = BuildArguments,
+            });
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+            var successful = await executor.ExecuteAsync("coding.command", args, timeout.Token);
+            Assert.True(successful.GetProperty("success").GetBoolean(), successful.GetRawText());
+            var pdf = Path.Combine(project, "Publikation.pdf");
+            var previous = await File.ReadAllBytesAsync(pdf, timeout.Token);
+            Assert.True(previous.Length > 1024);
+
+            const string title = "Quecksilber: Systematische Interdisziplinäre Untersuchung eines besonderen Elements";
+            await File.WriteAllTextAsync(source, $"# {title}\n\n## Einleitung\n\nEine Testpublikation.\n", new UTF8Encoding(false), timeout.Token);
+            var failed = await executor.ExecuteAsync("coding.command", args, timeout.Token);
+            Assert.False(failed.GetProperty("success").GetBoolean(), failed.GetRawText());
+            Assert.Equal(2, failed.GetProperty("exitCode").GetInt32());
+            var output = failed.GetProperty("stdout").GetString() ?? "";
+            Assert.Contains("Publikationstitel", output, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("Quecksilber", output, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(previous, await File.ReadAllBytesAsync(pdf, timeout.Token));
+            using var report = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(project, "publication-build.json"), timeout.Token));
+            Assert.Equal("error", report.RootElement.GetProperty("status").GetString());
+            Assert.NotEmpty(report.RootElement.GetProperty("errors").EnumerateArray());
+        }
+        finally { Directory.Delete(project, recursive: true); }
+    }
     [Fact]
     [Trait("Category", "Live")]
     public async Task ShippedToolInstallsAndRendersFromAnotherWorkingDirectoryWithoutSdk()

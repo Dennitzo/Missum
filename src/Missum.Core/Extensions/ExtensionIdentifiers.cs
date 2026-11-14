@@ -161,10 +161,11 @@ public static class BuiltInExtensionIds
     public const string Workspace = "builtin.workspace";
     public const string Audiobook = "builtin.audiobook";
     public const string Math = "builtin.math";
+    public const string Computer = "builtin.computer";
 
     public static IReadOnlyList<string> All { get; } =
     [
-        Coding, Web, Media, Image, Speech, Documents, Workspace, Audiobook, Math,
+        Coding, Web, Media, Image, Speech, Documents, Workspace, Audiobook, Math, Computer,
     ];
 }
 
@@ -185,6 +186,7 @@ public static class BuiltInActionIds
     public const string LiveCaptions = BuiltInExtensionIds.Speech + "/live-captions";
     public const string PlanMode = BuiltInExtensionIds.Coding + "/plan-mode";
     public const string Lean = BuiltInExtensionIds.Math + "/lean";
+    public const string ComputerUse = BuiltInExtensionIds.Computer + "/use";
 }
 
 public static class ToolSelectorNames

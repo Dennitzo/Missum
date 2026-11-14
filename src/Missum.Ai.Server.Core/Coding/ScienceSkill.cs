@@ -11,12 +11,14 @@ public static class ScienceSkill
     public const string Profile = "claude-science-v1";
     internal const string Marker = "MISSUM_SCIENCE_SKILL_V1\n";
     internal const string ResearchStandardMarker = "MISSUM_SCIENCE_SKILL_MODULE_V1:research-standard-v3\n";
-    private static readonly Dictionary<string, string> Modules = new[] { "SKILL", "stages", "verification", "publication", "research-standard" }
+    internal const string PublicationPhaseMarker = "MISSUM_SCIENCE_PUBLICATION_PHASE_V1\n";
+    private static readonly Dictionary<string, string> Modules = new[] { "SKILL", "stages", "verification", "publication", "publication-phase", "research-standard" }
         .ToDictionary(name => name, name => Read(name));
     public static bool Enabled(RunRequest request) => request.WorkflowProfile == Profile;
     internal static string Instructions => Marker + Modules["SKILL"] + "\n\n" + Modules["stages"]
-        + "\n\n" + ResearchStandardInstructions;
+        + "\n\n" + ResearchStandardInstructions + "\n\n" + PublicationPhaseInstructions;
     private static string ResearchStandardInstructions => ResearchStandardMarker + Modules["research-standard"];
+    internal static string PublicationPhaseInstructions => PublicationPhaseMarker + Modules["publication-phase"];
     private static string Read(string name)
     {
         var assembly = typeof(ScienceSkill).Assembly;

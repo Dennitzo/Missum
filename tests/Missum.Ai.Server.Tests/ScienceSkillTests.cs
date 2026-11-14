@@ -50,6 +50,59 @@ public sealed class ScienceSkillTests
     }
 
     [Fact]
+    public void PublicationBuildPolicyIsPresentInitiallyAndUpgradesStoredScienceInstructions()
+    {
+        var initial = RunProcessor.CreateInitialMessages(Request(), "coding", []);
+        var skill = Assert.Single(initial, message => message.Role == "system"
+            && message.Content?.StartsWith(ScienceSkill.Marker, StringComparison.Ordinal) == true);
+        Assert.Contains("Nach jeder Phase", skill.Content);
+        Assert.Contains("Publikation-erzeugen.ps1 ohne", skill.Content);
+        Assert.Contains("wiederhole den Bau", skill.Content);
+        Assert.Contains("halte die Phase offen", skill.Content);
+
+        // A continued run can start from a checkpoint created before this rule.
+        var restored = CodingPlanFormat.UpgradeMessages(
+            [new LmChatMessage("system", ScienceSkill.Marker + "Alter Science-Skill")], [], out var changed);
+        Assert.True(changed);
+        Assert.Equal(ScienceSkill.Instructions, Assert.Single(restored).Content);
+        Assert.Contains("Publikation-erzeugen.ps1 ohne", restored[0].Content);
+    }
+
+    [Fact]
+    public void ExistingVersionTwoScienceCheckpointGetsPolicyWithoutChangingUserOrToolContent()
+    {
+        var user = new LmChatMessage("user", "Bitte das laufende Projekt fortsetzen.");
+        var tool = new LmChatMessage("tool", "Originaler Fehlerbeleg", ToolCallId: "tool-1");
+        var oldSkill = new LmChatMessage("system", ScienceSkill.Marker + "Bisherige Science-Anweisungen");
+        var checkpoint = new AgentRunCheckpoint([oldSkill, user, tool], 3, 2, 100, 10,
+            WorkingState: Start(), PreserveSessionPromptPrefix: true, WorkingStatePromptIncluded: true,
+            ToolCatalogSignature: "old-cache", PlanFormatVersion: CodingPlanFormat.CurrentVersion);
+
+        var upgraded = CodingPlanFormat.UpgradeCheckpoint(checkpoint);
+
+        Assert.Equal(CodingPlanFormat.CurrentVersion, upgraded.PlanFormatVersion);
+        Assert.Same(oldSkill, upgraded.Messages[0]);
+        Assert.Same(user, upgraded.Messages[1]);
+        Assert.Same(tool, upgraded.Messages[2]);
+        Assert.StartsWith(ScienceSkill.PublicationPhaseMarker, upgraded.Messages[3].Content);
+        Assert.Contains("Publikation-erzeugen.ps1 ohne", upgraded.Messages[3].Content);
+        Assert.False(upgraded.PreserveSessionPromptPrefix);
+        Assert.False(upgraded.WorkingStatePromptIncluded);
+        Assert.Null(upgraded.ToolCatalogSignature);
+        Assert.Same(upgraded, CodingPlanFormat.UpgradeCheckpoint(upgraded));
+
+        var longContext = upgraded.Messages.Append(new LmChatMessage("assistant", new string('x', 100_000)))
+            .Append(new LmChatMessage("user", "Setze die laufende Phase fort.")).ToArray();
+        var plan = CodingContextCompactor.Plan(longContext, 32_768, upgraded.WorkingState);
+        Assert.NotNull(plan);
+        var compacted = CodingContextCompactor.Complete(plan, "Zusammengefasster Arbeitsstand.");
+        Assert.Contains(compacted, message => message.Content?.StartsWith(ScienceSkill.PublicationPhaseMarker, StringComparison.Ordinal) == true);
+
+        var normal = checkpoint with { Messages = [user, tool], WorkingState = CodingWorkingState.Create("Normaler Auftrag") };
+        Assert.Same(normal, CodingPlanFormat.UpgradeCheckpoint(normal));
+    }
+
+    [Fact]
     public void LegacyHashBindingsAreDiscardedWithoutLosingPlanOrEvidence()
     {
         const string legacy = """

@@ -35,6 +35,7 @@ public static class ContextPlanner
         var compacted = conversationCompacted || !messages.SequenceEqual(conversation);
         var latestUserIndex = Array.FindLastIndex(messages, static message =>
             string.Equals(message.Role, "user", StringComparison.OrdinalIgnoreCase)
+            && message.ComputerObservationId is null
             && !IsRuntimeContext(message)
             && !IsNativeRuntimeInstruction(message)
             && !ModelRuntimeClient.IsLanguageReminder(message)

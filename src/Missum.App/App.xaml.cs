@@ -118,6 +118,9 @@ public partial class App : Application
                 services.AddSingleton<MicrophoneTranscriptionService>();
                 services.AddSingleton<SystemAudioAnalysisCaptureService>();
                 services.AddSingleton<DesktopScreenshotService>();
+                services.AddSingleton<ComputerActionApprovalService>();
+                services.AddSingleton<IComputerActionApproval>(static provider => provider.GetRequiredService<ComputerActionApprovalService>());
+                services.AddSingleton<ComputerDesktopBroker>();
                 services.AddSingleton<ScreenClipCaptureService>();
                 services.AddSingleton<AssistantArtifactOriginalResolver>();
                 services.AddSingleton<AssistantArtifactPreviewService>();
