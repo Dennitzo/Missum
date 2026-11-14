@@ -215,9 +215,9 @@ and scanner in `Assets/NativeRuntime`, so this does not require a repository
 checkout. `windows/start-ai-stack.ps1` also starts the same runtime. Its optional
 `-NativeModelRoot` (also accepted as `-CodingModelRoot`) selects another existing model directory. The inspected
 installation uses `C:/Users/AMD/.cache/huggingface/hub`. The native supervisor
-uses Unsloth's existing executable at
-`%USERPROFILE%/.unsloth/llama.cpp/build/bin/Release/llama-server.exe`. No model
-files or runtime binaries are downloaded or copied.
+uses Missum's own managed CPython interpreter and an official llama.cpp server.
+The runtimes are installed when needed; model files remain in the selected
+Hugging Face cache and are neither converted nor moved.
 
 Reasoning uses each model's own template and selected effort, without a Missum
 language instruction or assistant-prefilled heading. Visible answers remain
@@ -239,8 +239,8 @@ cannot restore an incompatible KV snapshot.
 Start is idempotent and rejects a port occupied by an unrelated process. Stop
 checks the saved supervisor PID, process start time, and command line. A Windows
 Job Object binds only this supervisor's server and router children to its
-lifetime. Unsloth's own processes and the separate `manage-llama-server.ps1`
-installation are not stopped or reconfigured. Processes are launched hidden.
+lifetime. Other applications and their installations are not stopped or
+reconfigured. Processes are launched hidden.
 
 The scanner refreshes `%USERPROFILE%/.missum/native-runtime/models.ini` every ten seconds.
 This user-profile path remains the same when launching Missum from a normal Windows

@@ -4,6 +4,13 @@ namespace Missum.Tests;
 
 public sealed class NativeModelRuntimeServiceTests
 {
+    [Theory]
+    [InlineData("Start", false, 660)]
+    [InlineData("Stop", true, 35)]
+    [InlineData("Stop", false, 660)]
+    public void FirstInstallHasEnoughTimeWithoutChangingShutdownDeadline(string action, bool ownedShutdown, int seconds) =>
+        Assert.Equal(TimeSpan.FromSeconds(seconds), NativeModelRuntimeService.ResolveRuntimeManagerTimeout(action, ownedShutdown));
+
     [Fact]
     public void RuntimeManagerUsesTheResolvedBinaryStateAndPort()
     {

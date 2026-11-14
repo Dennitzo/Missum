@@ -31,6 +31,12 @@ function Assert-MissumCommand {
     return $command
 }
 
+function Get-MissumPythonPath {
+    $manager = Join-Path $PSScriptRoot 'manage-python-runtime.ps1'
+    if (-not (Test-Path -LiteralPath $manager -PathType Leaf)) { throw "Missum-Python-Verwaltung fehlt: $manager" }
+    return & $manager
+}
+
 function Resolve-MissumDockerCommand {
     $dockerBin = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)) 'Docker\Docker\resources\bin'
     if (Test-Path -LiteralPath $dockerBin -PathType Container) {
@@ -127,7 +133,7 @@ function Copy-MissumSqliteSnapshot {
         [Parameter(Mandatory = $true)][string] $Destination,
         [string] $PythonPath)
     if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) { throw "Source database does not exist: $Source" }
-    if ([string]::IsNullOrWhiteSpace($PythonPath)) { $PythonPath = (Assert-MissumCommand -Name 'python.exe').Source }
+    if ([string]::IsNullOrWhiteSpace($PythonPath)) { $PythonPath = Get-MissumPythonPath }
     # SQLite's backup API includes committed WAL pages without checkpointing or changing the source.
     $script = @'
 import hashlib, json, sqlite3, sys, uuid
@@ -188,9 +194,9 @@ function Resolve-MissumNativeModelFile {
 
 function Get-MissumNativeModelCatalog {
     param([Parameter(Mandatory = $true)][string] $NativeModelRoot)
-    $python = Join-Path $env:USERPROFILE '.unsloth\studio\unsloth_studio\Scripts\python.exe'
-    if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { $python = (Assert-MissumCommand -Name 'python.exe').Source }
-    $json = & $python (Resolve-MissumRepositoryPath -RelativePath 'workers\coding\catalog.py') --model-root $NativeModelRoot --list-models
+    $python = Get-MissumPythonPath
+    $bootstrap = "import os,runpy,sys; sys.path.insert(0,os.path.dirname(os.path.abspath(sys.argv[1]))); sys.argv.pop(0); runpy.run_path(sys.argv[0],run_name='__main__')"
+    $json = & $python -c $bootstrap (Resolve-MissumRepositoryPath -RelativePath 'workers\coding\catalog.py') --model-root $NativeModelRoot --list-models
     if ($LASTEXITCODE -ne 0) { throw 'The native model catalog could not be read.' }
     return @($json | ConvertFrom-Json)
 }

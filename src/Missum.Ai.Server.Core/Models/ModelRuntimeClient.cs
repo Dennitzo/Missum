@@ -13,7 +13,7 @@ namespace Missum.Ai.Server.Core.Models;
 
 /// <summary>
 /// Connects every model role to the native Windows llama.cpp router.
-/// Missum remains the only tool executor; the local Unsloth catalog owns model paths.
+/// Missum remains the only tool executor; the local native catalog owns model paths.
 /// </summary>
 public sealed partial class ModelRuntimeClient : IDisposable
 {
@@ -176,7 +176,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
             timeout.CancelAfter(ModelLoadTimeout);
             var runtimeModels = await GetRuntimeModelsAsync(timeout.Token).ConfigureAwait(false);
             var selected = ResolveInstalledModel(runtimeModels, runtimeInstanceId ?? modelId)
-                ?? throw new FileNotFoundException($"Das lokale Unsloth-Modell '{modelId}' ist nicht installiert.");
+                ?? throw new FileNotFoundException($"Das lokale Modell '{modelId}' ist nicht installiert.");
             var requestedBaseModel = ResolveInstalledModel(runtimeModels, modelId);
             var requestedBase = requestedBaseModel?.Id;
             if (runtimeInstanceId is not null && !(selected.IsSubagent

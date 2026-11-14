@@ -3,7 +3,7 @@
 param(
     [ValidateSet('Start', 'Stop', 'Status')][string] $Action = 'Start',
     [Alias('NativeModelRoot')][string] $ModelRoot = (Join-Path $env:USERPROFILE '.cache\huggingface\hub'),
-    [string] $BinaryPath = (Join-Path $env:USERPROFILE '.unsloth\llama.cpp\build\bin\Release\llama-server.exe'),
+    [string] $BinaryPath,
     [string] $PythonPath,
     # AppData is virtualized when launched from an MSIX host such as Codex.
     # Keep one identity/log directory for repository and portable app launches.
@@ -200,6 +200,17 @@ if ($Action -eq 'Stop') {
     return
 }
 
+if ([string]::IsNullOrWhiteSpace($BinaryPath)) {
+    $releaseFile = Join-Path $env:LOCALAPPDATA 'Missum\NativeRuntime\llama.cpp\current-release.json'
+    if (Test-Path -LiteralPath $releaseFile -PathType Leaf) {
+        try { $BinaryPath = [string](Get-Content -LiteralPath $releaseFile -Raw | ConvertFrom-Json).serverPath }
+        catch { throw "Die Missum-llama.cpp-Laufzeitinformation ist ungültig: $releaseFile" }
+    }
+    if ([string]::IsNullOrWhiteSpace($BinaryPath) -or
+        @([IO.Path]::GetFullPath($BinaryPath) -split '[\\/]' | Where-Object { $_ -in @('.unsloth', 'unsloth', 'unsloth_studio') }).Count -gt 0) {
+        throw 'Die eigenständige Missum-llama.cpp-Laufzeit wurde nicht gefunden. Bitte Missum öffnen oder manage-llama-server.ps1 -Action Update ausführen.'
+    }
+}
 if (Get-OwnedSupervisor) {
     $runningState = Get-Content -LiteralPath (Join-Path $StateDirectory 'runtime.json') -Raw | ConvertFrom-Json
     if ([IO.Path]::GetFullPath($runningState.modelRoot) -ne [IO.Path]::GetFullPath($ModelRoot) -or
@@ -217,8 +228,7 @@ if (-not (Test-Path -LiteralPath $catalogScript -PathType Leaf)) { throw "Native
 if (-not (Test-Path -LiteralPath $ModelRoot -PathType Container)) { throw "AI model directory unavailable: $ModelRoot. Check the folder, NAS connection and access permissions." }
 if (-not (Test-Path -LiteralPath $BinaryPath -PathType Leaf)) { throw "Native llama-server.exe not found: $BinaryPath. Specify an existing binary with -BinaryPath." }
 if ([string]::IsNullOrWhiteSpace($PythonPath)) {
-    $unslothPython = Join-Path $env:USERPROFILE '.unsloth\studio\unsloth_studio\Scripts\python.exe'
-    $PythonPath = if (Test-Path -LiteralPath $unslothPython -PathType Leaf) { $unslothPython } else { (Get-Command python.exe -ErrorAction Stop).Source }
+    $PythonPath = & (Join-Path $PSScriptRoot 'manage-python-runtime.ps1')
 }
 if (-not (Test-Path -LiteralPath $PythonPath -PathType Leaf)) { throw "Python interpreter not found: $PythonPath" }
 if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue) { throw "Port $Port is already occupied; its existing process will not be changed." }
@@ -244,7 +254,10 @@ New-Item -ItemType Directory -Path $StateDirectory -Force | Out-Null
 # must clear it before launching the new supervisor; otherwise catalog.py sees
 # the marker immediately and exits after the start command reported success.
 if (Test-Path -LiteralPath $stopFile -PathType Leaf) { Remove-Item -LiteralPath $stopFile -Force }
-$arguments = @($catalogScript, '--model-root', [IO.Path]::GetFullPath($ModelRoot), '--binary', [IO.Path]::GetFullPath($BinaryPath),
+# CPython's embeddable distribution isolates sys.path with a ._pth file. Add
+# the actual support-script directory explicitly before running its entrypoint.
+$pythonBootstrap = "import os,runpy,sys; sys.path.insert(0,os.path.dirname(os.path.abspath(sys.argv[1]))); sys.argv.pop(0); runpy.run_path(sys.argv[0],run_name='__main__')"
+$arguments = @('-c', $pythonBootstrap, $catalogScript, '--model-root', [IO.Path]::GetFullPath($ModelRoot), '--binary', [IO.Path]::GetFullPath($BinaryPath),
     '--state-directory', $StateDirectory, '--port', [string]$Port, '--fit-target', [string]$FitTargetMiB, '--gpu-layers', $GpuLayers)
 if ($ListenAddress) { $arguments += @('--host', $ListenAddress) }
 $quotedArguments = ($arguments | ForEach-Object {

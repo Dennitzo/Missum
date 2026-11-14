@@ -241,7 +241,7 @@ public sealed partial class SettingsViewModel(
             if (!modelStatus.ProviderReachable)
             {
                 throw new InvalidOperationException(
-                    missumAi.NativeRuntimeError ?? modelStatus.ErrorMessage ?? "Der lokale General-Modellkatalog ist nicht erreichbar. Prüfe die native Unsloth-Laufzeit und den Modellordner.");
+                    missumAi.NativeRuntimeError ?? modelStatus.ErrorMessage ?? "Der lokale General-Modellkatalog ist nicht erreichbar. Prüfe die native Laufzeit und den Modellordner.");
             }
             modelCapabilities.Update(modelStatus);
             items = modelStatus.Models

@@ -26,9 +26,25 @@ if ($UpdateNativeRuntime) {
         -ResolvedPathFile $resolvedBinaryFile -SkipFirewall
     $NativeBinaryPath = (Get-Content -LiteralPath $resolvedBinaryFile -Raw).Trim()
 }
-if ([string]::IsNullOrWhiteSpace($NativeBinaryPath)) { $NativeBinaryPath = $configured['MISSUM_AI_NATIVE_BINARY_PATH'] }
-if ([string]::IsNullOrWhiteSpace($NativeBinaryPath) -and (Test-Path -LiteralPath $resolvedBinaryFile -PathType Leaf)) {
-    $NativeBinaryPath = (Get-Content -LiteralPath $resolvedBinaryFile -Raw).Trim()
+if ([string]::IsNullOrWhiteSpace($NativeBinaryPath)) {
+    $candidate = $configured['MISSUM_AI_NATIVE_BINARY_PATH']
+    if ([string]::IsNullOrWhiteSpace($candidate) -and (Test-Path -LiteralPath $resolvedBinaryFile -PathType Leaf)) {
+        $candidate = (Get-Content -LiteralPath $resolvedBinaryFile -Raw).Trim()
+    }
+    # Older stack migrations wrote another application's installation here.
+    # Explicit -NativeBinaryPath remains an intentional user override.
+    if (-not [string]::IsNullOrWhiteSpace($candidate) -and
+        @($candidate -split '[\\/]' | Where-Object { $_ -in @('.unsloth', 'unsloth', 'unsloth_studio') }).Count -gt 0) {
+        $candidate = $null
+    }
+    if ([string]::IsNullOrWhiteSpace($candidate)) {
+        $releaseFile = Join-Path $llamaInstallRoot 'current-release.json'
+        if (Test-Path -LiteralPath $releaseFile -PathType Leaf) {
+            try { $candidate = [string](Get-Content -LiteralPath $releaseFile -Raw | ConvertFrom-Json).serverPath }
+            catch { throw "Missum llama.cpp runtime information is invalid: $releaseFile" }
+        }
+    }
+    $NativeBinaryPath = $candidate
 }
 if ([string]::IsNullOrWhiteSpace($NativeBinaryPath) -or -not (Test-Path -LiteralPath $NativeBinaryPath -PathType Leaf) -or
     [IO.Path]::GetFileName($NativeBinaryPath) -ne 'llama-server.exe') {

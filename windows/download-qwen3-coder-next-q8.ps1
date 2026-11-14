@@ -216,5 +216,5 @@ foreach ($file in $files) {
 $refsDirectory = Join-Path (Join-Path $resolvedModelRoot ('models--' + $repository.Replace('/', '--'))) 'refs'
 New-Item -ItemType Directory -Path $refsDirectory -Force | Out-Null
 [IO.File]::WriteAllText((Join-Path $refsDirectory 'main'), $revision, [Text.Encoding]::ASCII)
-Write-Host 'Qwen3-Coder-Next Q8_0 download completed and verified in the native Unsloth cache.' -ForegroundColor Green
+Write-Host 'Qwen3-Coder-Next Q8_0 download completed and verified in the native model cache.' -ForegroundColor Green
 Write-Host 'Refresh the Missum model catalog to select the model for General or Coding.' -ForegroundColor Yellow

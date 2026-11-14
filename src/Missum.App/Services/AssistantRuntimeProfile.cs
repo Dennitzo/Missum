@@ -74,7 +74,7 @@ public sealed record AssistantRuntimeProfile(
         var requestedNativeBinary = FirstNonEmpty(Environment.GetEnvironmentVariable("ASSISTANT_NATIVE_BINARY_PATH"));
         var pinnedNativeBinary = requestedNativeBinary is null ? ResolvePinnedNativeBinaryPath(stackDataRoot) : null;
         var nativeBinaryPath = requestedNativeBinary ?? pinnedNativeBinary
-            ?? ResolveNativeBinaryPath(stackDataRoot, userProfile);
+            ?? ResolveNativeBinaryPath(stackDataRoot);
         var productName = FirstNonEmpty(Environment.GetEnvironmentVariable("ASSISTANT_PRODUCT_NAME")) ?? "Missum Labs";
         var requestedInstanceKey = FirstNonEmpty(
             Environment.GetEnvironmentVariable("ASSISTANT_INSTANCE_KEY"),
@@ -103,16 +103,12 @@ public sealed record AssistantRuntimeProfile(
     internal static string ResolveProfileName(string? requestedProfile, string? publishedDirectory = null) =>
         ResolveProfileSelection(requestedProfile, publishedDirectory).ProfileName;
 
-    internal static string ResolveNativeBinaryPath(string stackDataRoot, string userProfile, Func<string, bool>? fileExists = null)
+    internal static string ResolveNativeBinaryPath(string stackDataRoot)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(stackDataRoot);
-        ArgumentException.ThrowIfNullOrWhiteSpace(userProfile);
-        fileExists ??= static path => File.Exists(path);
         var managed = Path.GetFullPath(Path.Combine(stackDataRoot, "bin", "llama-server.exe"));
-        var unsloth = Path.GetFullPath(Path.Combine(userProfile, ".unsloth", "llama.cpp", "build", "bin", "Release", "llama-server.exe"));
-        if (fileExists(managed)) return managed;
-        if (fileExists(unsloth)) return unsloth;
-        // Keep the managed path as the actionable error target when neither runtime exists.
+        // The automatic updater provides Missum's own runtime when this path is absent.
+        // Never discover an interpreter or executable from another application's installation.
         return managed;
     }
 
@@ -134,6 +130,11 @@ public sealed record AssistantRuntimeProfile(
                 || !string.Equals(Path.GetFileName(candidate), "llama-server.exe", StringComparison.OrdinalIgnoreCase))
                 return null;
             candidate = Path.GetFullPath(candidate);
+            if (candidate.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                .Any(static segment => segment.Equals(".unsloth", StringComparison.OrdinalIgnoreCase)
+                    || segment.Equals("unsloth", StringComparison.OrdinalIgnoreCase)
+                    || segment.Equals("unsloth_studio", StringComparison.OrdinalIgnoreCase)))
+                return null;
             return fileExists(candidate) ? candidate : null;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)

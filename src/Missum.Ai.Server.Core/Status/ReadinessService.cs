@@ -47,7 +47,7 @@ public sealed class ReadinessService
         }
 
         if (!modelStatus.Models.Any(static model => model.Role == "general" && model.Downloaded))
-            return NotReady("Kein lokales Sprachmodell verfügbar.", "Unsloth-Modellordner und nativen llama-Katalog prüfen.");
+            return NotReady("Kein lokales Sprachmodell verfügbar.", "Modellordner und nativen llama-Katalog prüfen.");
 
         var selectableModels = modelStatus.Models
             .Where(static model => model.Role == "general")

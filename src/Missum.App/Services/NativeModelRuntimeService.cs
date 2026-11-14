@@ -321,7 +321,7 @@ public sealed class NativeModelRuntimeService : IDisposable
         // Use stable paths instead of the single-file extraction directory. The supervisor remains
         // identifiable for shutdown and across application updates.
         var supportDirectory = Path.Combine(stateDirectory, "support");
-        foreach (var relative in new[] { Path.Combine("windows", "manage-coding-llama.ps1"), Path.Combine("windows", "manage-llama-server.ps1"), Path.Combine("workers", "coding", "session_cache.py"), Path.Combine("workers", "coding", "catalog.py") })
+        foreach (var relative in new[] { Path.Combine("windows", "manage-coding-llama.ps1"), Path.Combine("windows", "manage-llama-server.ps1"), Path.Combine("windows", "manage-python-runtime.ps1"), Path.Combine("workers", "coding", "session_cache.py"), Path.Combine("workers", "coding", "catalog.py") })
         {
             var source = ApplicationAssets.ResolvePath("Assets", "NativeRuntime", relative);
             if (!File.Exists(source))
@@ -365,8 +365,11 @@ public sealed class NativeModelRuntimeService : IDisposable
         using var process = new Process { StartInfo = info };
         if (!process.Start()) throw new InvalidOperationException("Der Starthelfer für Windows llama.cpp konnte nicht gestartet werden.");
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var networkRoot = action == "Start" && ResolveModelRoot(userProfile, profile, modelRoot).StartsWith("\\\\", StringComparison.Ordinal);
-        timeout.CancelAfter(TimeSpan.FromSeconds(action == "Stop" ? (ownedShutdown ? 35 : 660) : networkRoot ? 150 : 45));
+        // First startup can include a verified CPython download and extraction as
+        // well as the native router's own network-model discovery. Its separate
+        // internal deadlines still apply; never shorten caller cancellation or Stop.
+        var managerTimeout = ResolveRuntimeManagerTimeout(action, ownedShutdown);
+        timeout.CancelAfter(managerTimeout);
         try { await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false); }
         catch (OperationCanceledException)
         {
@@ -374,7 +377,7 @@ public sealed class NativeModelRuntimeService : IDisposable
             // supervisor remains profile-owned and is stopped by StopOwnedAsync.
             if (!process.HasExited) process.Kill(entireProcessTree: true);
             if (cancellationToken.IsCancellationRequested) throw;
-            throw new InvalidOperationException($"Windows llama.cpp: Aktion {action} hat das Zeitlimit überschritten. Diagnose: {Path.Combine(stateDirectory, "stderr.log")}");
+            throw new InvalidOperationException($"Windows llama.cpp: Aktion {action} hat das Zeitlimit von {managerTimeout.TotalSeconds:0} Sekunden überschritten. Diagnose: {Path.Combine(stateDirectory, "stderr.log")}");
         }
         if (process.ExitCode != 0)
         {
@@ -383,6 +386,11 @@ public sealed class NativeModelRuntimeService : IDisposable
             throw new InvalidOperationException($"Windows llama.cpp: Aktion {action} fehlgeschlagen: {error}");
         }
     }
+
+    internal static TimeSpan ResolveRuntimeManagerTimeout(string action, bool ownedShutdown) =>
+        TimeSpan.FromSeconds(string.Equals(action, "Stop", StringComparison.OrdinalIgnoreCase)
+            ? ownedShutdown ? 35 : 660
+            : 660);
 
     private static async Task<string> EnsureOfficialLlamaRuntimeAsync(
         AssistantRuntimeProfile profile,

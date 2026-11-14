@@ -72,15 +72,20 @@ in der EXE enthalten;
 der Start funktioniert auch außerhalb des Repository-Verzeichnisses und nach einem Windows-Neustart.
 Die Modellkataloge werden beim Öffnen der Einstellungen geladen. Ein bereits laufender Server wird wiederverwendet.
 
+Für den Modellkatalog richtet Missum beim ersten Bedarf zusätzlich eine eigene eingebettete CPython-Laufzeit
+von python.org ein und prüft deren SHA-256. Die erstmalige Einrichtung benötigt eine Internetverbindung;
+anschließend kann die installierte Laufzeit auch ohne Internet verwendet werden. Die GGUF-Modelle bleiben
+in ihrem vorhandenen Ordner, einschließlich Modellen aus Unsloth-Repositories.
+
 Alle folgenden Befehle werden im Repository-Verzeichnis ausgeführt. Benötigt werden Docker Desktop,
-die für Missum verwendete .NET-SDK-Version und Python für den lokalen Modellkatalog. Eine externe llama.cpp-
-Installation ist nicht erforderlich.
+und für Builds die für Missum verwendete .NET-SDK-Version. Den Python-Interpreter für den lokalen Modellkatalog
+stellt Missum selbst bereit; eine externe Python- oder llama.cpp-Installation ist dafür nicht erforderlich.
 
 | Einstellung | Standard |
 |---|---|
 | Native Modellablage | `%USERPROFILE%\.cache\huggingface\hub` |
 | Native Serverdatei | `<Assistent-Datenverzeichnis>\NativeRuntime\llama.cpp\versions\<GitHub-Tag>\llama-server.exe` |
-| Unsloth-Python | `%USERPROFILE%\.unsloth\studio\unsloth_studio\Scripts\python.exe` |
+| Python für den Modellkatalog | `%LOCALAPPDATA%\Missum\NativeRuntime\Python\versions\3.14.10\python.exe` |
 | Native Prozessdaten und Logs | `%USERPROFILE%\.missum\native-runtime` |
 | Stackdaten (`DataRoot`) | `%PROGRAMDATA%\Missum-AI-Stack` |
 | Sprach- und Bildmodelle (`ModelRoot`) | `<DataRoot>\Models` |
@@ -115,7 +120,7 @@ Die nativen Kontextfenster werden aus den GGUF-Metadaten ermittelt und an den ve
 ## Vorhandene Modelle übernehmen
 
 `migrate-local-models-to-unsloth.ps1` übernimmt vorhandene, im
-[Modellmanifest](../deploy/missum-ai/models.manifest.json) verzeichnete Dateien in die Unsloth-Ablage. Der Quellordner
+[Modellmanifest](../deploy/missum-ai/models.manifest.json) verzeichnete Dateien in den Hugging-Face-Modellcache. Der historische Skriptname bleibt aus Kompatibilitätsgründen erhalten. Der Quellordner
 muss die Manifeststruktur `<Herausgeber>\<Repository>\<Datei>` enthalten. Quelle und Ziel müssen auf demselben
 Windows-Laufwerk liegen; symbolische Verknüpfungen und andere Reparse Points werden abgewiesen.
 
@@ -145,7 +150,9 @@ Pfade zurückzusetzen, und hält den Status im Bericht fest.
 ## Modelle herunterladen
 
 Für einen neuen Modellbestand lädt das allgemeine Downloadskript gepinnte GGUFs sowie die separaten
-Worker-Modelle und prüft deren Integrität:
+Worker-Modelle und prüft deren Integrität. Der optionale Download der Worker-Modelle benötigt eine
+eigenständige Python-Installation mit `venv` und `pip` im `PATH`; für den Modellbetrieb selbst verwendet
+Missum seine eigene eingebettete Python-Laufzeit:
 
 ```powershell
 .\windows\download-ai-models.ps1

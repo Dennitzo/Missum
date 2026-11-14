@@ -22,11 +22,8 @@ $ErrorActionPreference = 'Stop'
 function Test-SqliteDatabase {
     param([Parameter(Mandatory = $true)] [string] $Path)
 
-    $python = Get-Command python -ErrorAction SilentlyContinue
-    if ($null -eq $python) {
-        throw 'Python is required once to validate the migrated SQLite database.'
-    }
-    & $python.Source -c "import pathlib,sqlite3,sys; c=sqlite3.connect(pathlib.Path(sys.argv[1]).resolve().as_uri()+'?mode=ro',uri=True); r=c.execute('PRAGMA integrity_check').fetchone()[0]; c.close(); print(r); raise SystemExit(0 if r=='ok' else 2)" $Path
+    $python = Get-MissumPythonPath
+    & $python -c "import pathlib,sqlite3,sys; c=sqlite3.connect(pathlib.Path(sys.argv[1]).resolve().as_uri()+'?mode=ro',uri=True); r=c.execute('PRAGMA integrity_check').fetchone()[0]; c.close(); print(r); raise SystemExit(0 if r=='ok' else 2)" $Path
     if ($LASTEXITCODE -ne 0) { throw "SQLite integrity check failed: $Path" }
 }
 
@@ -121,4 +118,4 @@ if (-not $SkipStart) {
     & (Join-Path $PSScriptRoot 'start-ai-stack.ps1') -DataRoot $paths.DataRoot -ModelRoot $paths.ModelRoot -NativeModelRoot $paths.NativeModelRoot -ServerIp $ServerIp -ImageVersion $ImageVersion `
         -NativeBinaryPath $NativeBinaryPath -NativeStateDirectory $NativeStateDirectory -UpdateNativeRuntime:$UpdateNativeRuntime
 }
-Write-Host 'Missum AI deployment completed: Docker gateway/workers plus native Unsloth / llama.cpp models.' -ForegroundColor Green
+Write-Host 'Missum AI deployment completed: Docker gateway/workers plus native llama.cpp models.' -ForegroundColor Green

@@ -169,7 +169,7 @@ $DataRoot = [IO.Path]::GetFullPath($DataRoot)
 $modelRoot = Join-Path $DataRoot 'Models'
 $nativeModelRoot = [IO.Path]::GetFullPath($NativeModelRoot)
 $downloadRoot = Join-Path $DataRoot 'Downloads'
-$toolRoot = Join-Path $DataRoot 'Tools\huggingface'
+$toolRoot = Join-Path $DataRoot 'Tools\huggingface-independent'
 New-Item -ItemType Directory -Path $modelRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $nativeModelRoot -Force | Out-Null
 
@@ -248,11 +248,18 @@ if (-not $SkipLlmModels) {
 }
 
 if (-not $SkipWorkerModels) {
-    $python = Assert-MissumCommand -Name 'python'
     $venvPython = Join-Path $toolRoot 'Scripts\python.exe'
     if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
+        # The optional Hugging Face downloader needs a full Python with venv
+        # and pip. Do not silently base it on another application's Python.
+        $python = @(Get-Command python.exe -All -ErrorAction SilentlyContinue | Where-Object {
+            $_.Source -and @($_.Source -split '[\\/]' | Where-Object { $_ -in @('.unsloth', 'unsloth', 'unsloth_studio') }).Count -eq 0
+        } | Select-Object -First 1)
+        if ($python.Count -eq 0) {
+            throw 'Der optionale Worker-Modell-Download benötigt ein eigenständig installiertes Python mit venv und pip im PATH; Unsloth-Python wird nicht verwendet.'
+        }
         New-Item -ItemType Directory -Path (Split-Path $toolRoot -Parent) -Force | Out-Null
-        Invoke-CheckedCommand -FilePath $python.Source -Arguments @('-m', 'venv', $toolRoot) -FailureMessage 'Unable to create the Hugging Face download environment.'
+        Invoke-CheckedCommand -FilePath $python[0].Source -Arguments @('-m', 'venv', $toolRoot) -FailureMessage 'Unable to create the Hugging Face download environment.'
         Invoke-CheckedCommand -FilePath $venvPython -Arguments @('-m', 'pip', 'install', '--disable-pip-version-check', 'huggingface_hub==0.36.0') -FailureMessage 'Unable to install the pinned Hugging Face client.'
     }
 
@@ -354,4 +361,4 @@ if (-not $SkipWorkerModels) {
     }
 }
 
-Write-Host "Missum AI model downloads are complete. Native Unsloth models: $nativeModelRoot; worker models: $modelRoot" -ForegroundColor Green
+Write-Host "Missum AI model downloads are complete. Native models: $nativeModelRoot; worker models: $modelRoot" -ForegroundColor Green

@@ -29,7 +29,7 @@ do {
 if ($null -eq $health -or $health.status -ne 'live') { throw "Gateway did not become live at $ServerUrl." }
 
 $nativeModels = Invoke-RestMethod -Uri ($ServerUrl.TrimEnd('/') + '/v1/models/status') -TimeoutSec 30
-if (-not $nativeModels.providerReachable) { throw 'The native Unsloth / llama.cpp runtime is not reachable through the gateway.' }
+if (-not $nativeModels.providerReachable) { throw 'The native llama.cpp runtime is not reachable through the gateway.' }
 foreach ($role in @('general', 'vision', 'embedding')) {
     if (@($nativeModels.models | Where-Object { $_.role -eq $role -and $_.downloaded }).Count -eq 0) {
         throw "No complete native $role model is available through the gateway."

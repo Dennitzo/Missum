@@ -147,26 +147,24 @@ public sealed class AssistantRuntimeProfileTests
     }
 
     [Fact]
-    public void NativeBinaryResolutionUsesInstalledStackThenUnslothFallback()
+    public void NativeBinaryResolutionUsesMissumStackWithoutUnslothFallback()
     {
         var root = Path.Combine(Path.GetTempPath(), "native-binary-resolution-" + Guid.NewGuid().ToString("N"));
         var managed = Path.Combine(root, "stack", "bin", "llama-server.exe");
-        var unsloth = Path.Combine(root, "user", ".unsloth", "llama.cpp", "build", "bin", "Release", "llama-server.exe");
-        try
-        {
-            Assert.Equal(Path.GetFullPath(managed), AssistantRuntimeProfile.ResolveNativeBinaryPath(
-                Path.Combine(root, "stack"), Path.Combine(root, "user"), path =>
-                    string.Equals(path, Path.GetFullPath(managed), StringComparison.OrdinalIgnoreCase)));
-            Assert.Equal(Path.GetFullPath(unsloth), AssistantRuntimeProfile.ResolveNativeBinaryPath(
-                Path.Combine(root, "stack"), Path.Combine(root, "user"), path =>
-                    string.Equals(path, Path.GetFullPath(unsloth), StringComparison.OrdinalIgnoreCase)));
-            Assert.Equal(Path.GetFullPath(managed), AssistantRuntimeProfile.ResolveNativeBinaryPath(
-                Path.Combine(root, "stack"), Path.Combine(root, "user"), static _ => false));
-        }
-        finally
-        {
-            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
-        }
+        Assert.Equal(Path.GetFullPath(managed), AssistantRuntimeProfile.ResolveNativeBinaryPath(Path.Combine(root, "stack")));
+    }
+
+    [Theory]
+    [InlineData(@"C:\Users\test\.unsloth\llama.cpp\build\bin\Release\llama-server.exe")]
+    [InlineData(@"C:\Users\test\.UNSLOTH\llama.cpp\build\bin\Release\llama-server.exe")]
+    [InlineData(@"C:\Unsloth\llama-server.exe")]
+    [InlineData(@"C:\Tools\unsloth_studio\llama-server.exe")]
+    public void UnslothMigrationHintDoesNotOverrideIndependentRuntime(string candidate)
+    {
+        const string root = @"C:\MissumStack";
+        var hint = Path.Combine(root, "native-llama-server.path");
+        Assert.Null(AssistantRuntimeProfile.ResolvePinnedNativeBinaryPath(root,
+            path => path == hint || string.Equals(path, candidate, StringComparison.OrdinalIgnoreCase), _ => candidate));
     }
 
     private sealed class EnvironmentScope : IDisposable

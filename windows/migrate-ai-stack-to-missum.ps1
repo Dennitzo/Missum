@@ -198,7 +198,7 @@ foreach ($process in Get-CimInstance Win32_Process) {
         $blocking.Add("Native supervisor process $($process.ProcessId) is still using a migration state directory.")
     }
 }
-if ([string]::IsNullOrWhiteSpace($PythonPath)) { $PythonPath = (Assert-MissumCommand -Name 'python.exe').Source }
+if ([string]::IsNullOrWhiteSpace($PythonPath)) { $PythonPath = Get-MissumPythonPath }
 $databaseProbe = @'
 import json, pathlib, sqlite3, sys
 with sqlite3.connect(pathlib.Path(sys.argv[1]).resolve().as_uri()+'?mode=ro',uri=True) as db:
