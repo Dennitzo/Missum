@@ -44,8 +44,7 @@ public sealed class SidebarSessionOrderingTests
         });
         var recent = new RecentActivityService(settings, new ShellViewModel(), NullLogger<RecentActivityService>.Instance);
         var coordinator = new AssistantCoordinator(chats, environment.Get<IDocumentIngestor>(),
-            environment.Get<IContextAssembler>(), environment.Get<IPromptTriggerRepository>(),
-            environment.Get<IAssistantAttachmentRepository>(), environment.Get<IChatArtifactRepository>(),
+            environment.Get<IContextAssembler>(), environment.Get<IAssistantAttachmentRepository>(), environment.Get<IChatArtifactRepository>(),
             environment.Get<IConversationSnapshotRepository>(), null, settings, recent);
 
         for (var index = 0; index < 6; index++)

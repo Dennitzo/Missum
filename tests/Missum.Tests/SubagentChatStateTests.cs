@@ -939,8 +939,7 @@ public sealed class SubagentChatStateTests
         await settings.InitializeAsync();
         var activity = new RecentActivityService(settings, new ShellViewModel(), NullLogger<RecentActivityService>.Instance); activity.Restore();
         var coordinator = new AssistantCoordinator(reopened.GetRequiredService<IChatRepository>(), reopened.GetRequiredService<IDocumentIngestor>(),
-            reopened.GetRequiredService<IContextAssembler>(), reopened.GetRequiredService<IPromptTriggerRepository>(),
-            reopened.GetRequiredService<IAssistantAttachmentRepository>(), reopened.GetRequiredService<IChatArtifactRepository>(),
+            reopened.GetRequiredService<IContextAssembler>(), reopened.GetRequiredService<IAssistantAttachmentRepository>(), reopened.GetRequiredService<IChatArtifactRepository>(),
             reopened.GetRequiredService<IConversationSnapshotRepository>(), null, settings, activity);
         var snapshot = JsonSerializer.SerializeToElement(await coordinator.BuildSnapshotAsync(), JsonSerializerOptions.Web);
         AssertChildSnapshot(snapshot, child);
@@ -1138,8 +1137,7 @@ public sealed class SubagentChatStateTests
         await settings.InitializeAsync();
         var activity = new RecentActivityService(settings, new ShellViewModel(), NullLogger<RecentActivityService>.Instance); activity.Restore();
         var coordinator = new AssistantCoordinator(reopened.GetRequiredService<IChatRepository>(), reopened.GetRequiredService<IDocumentIngestor>(),
-            reopened.GetRequiredService<IContextAssembler>(), reopened.GetRequiredService<IPromptTriggerRepository>(),
-            reopened.GetRequiredService<IAssistantAttachmentRepository>(), reopened.GetRequiredService<IChatArtifactRepository>(),
+            reopened.GetRequiredService<IContextAssembler>(), reopened.GetRequiredService<IAssistantAttachmentRepository>(), reopened.GetRequiredService<IChatArtifactRepository>(),
             reopened.GetRequiredService<IConversationSnapshotRepository>(), null, settings, activity);
         var snapshot = JsonSerializer.SerializeToElement(await coordinator.BuildSnapshotAsync(), JsonSerializerOptions.Web);
         AssertChildSnapshot(snapshot, child);
@@ -1206,8 +1204,7 @@ public sealed class SubagentChatStateTests
         await settings.InitializeAsync();
         var activity = new RecentActivityService(settings, new ShellViewModel(), NullLogger<RecentActivityService>.Instance); activity.Restore();
         var coordinator = new AssistantCoordinator(reopened.GetRequiredService<IChatRepository>(), reopened.GetRequiredService<IDocumentIngestor>(),
-            reopened.GetRequiredService<IContextAssembler>(), reopened.GetRequiredService<IPromptTriggerRepository>(),
-            reopened.GetRequiredService<IAssistantAttachmentRepository>(), reopened.GetRequiredService<IChatArtifactRepository>(),
+            reopened.GetRequiredService<IContextAssembler>(), reopened.GetRequiredService<IAssistantAttachmentRepository>(), reopened.GetRequiredService<IChatArtifactRepository>(),
             reopened.GetRequiredService<IConversationSnapshotRepository>(), null, settings, activity);
         var snapshot = JsonSerializer.SerializeToElement(await coordinator.BuildSnapshotAsync(), JsonSerializerOptions.Web);
         var child = Assert.Single(snapshot.GetProperty("subagents").EnumerateArray());

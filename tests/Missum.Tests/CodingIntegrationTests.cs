@@ -99,7 +99,7 @@ public sealed class CodingIntegrationTests
         using var connection = new MissumAiConnectionService(settings, NullLogger<MissumAiConnectionService>.Instance,
             () => new NativeCatalogHandler(models));
         var viewModel = new SettingsViewModel(settings, connection,
-            environment.Get<IPromptTriggerRepository>(), environment.Get<IBackupService>(),
+            environment.Get<IBackupService>(),
             new ShellViewModel(), new ModelCapabilityRegistry());
         viewModel.Initialize();
 
@@ -526,7 +526,6 @@ public sealed class CodingIntegrationTests
         return new AssistantCoordinator(
             environment.Get<IChatRepository>(), environment.Get<IDocumentIngestor>(),
             environment.Get<IContextAssembler>(),
-            environment.Get<IPromptTriggerRepository>(),
             environment.Get<IAssistantAttachmentRepository>(),
             environment.Get<IChatArtifactRepository>(),
             environment.Get<IConversationSnapshotRepository>(),

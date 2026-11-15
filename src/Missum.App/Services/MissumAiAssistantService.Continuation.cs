@@ -140,8 +140,9 @@ public sealed partial class MissumAiAssistantService
                 var workspace = persisted?.WorkspacePath ?? session.CodingWorkspacePath;
                 if (UsesCodingAgent(_activeRunAction) && (string.IsNullOrWhiteSpace(workspace) || !Directory.Exists(workspace)))
                     throw new InvalidOperationException("Der gespeicherte Projektordner ist nicht mehr vorhanden.");
-                if ((UsesCodingAgent(_activeRunAction) && _activeRunAction != PromptTriggerAction.PlanMode
-                    || session.ChatMode == ChatMode.ClaudeScience) && !string.IsNullOrWhiteSpace(workspace))
+                if (_activeRunAction != PromptTriggerAction.PlanMode
+                    && (UsesCodingAgent(_activeRunAction) || session.ChatMode == ChatMode.ClaudeScience)
+                    && !string.IsNullOrWhiteSpace(workspace))
                     await CodingWorkspaceGit.EnsureRepositoryAsync(workspace, token).ConfigureAwait(false);
 
                 // Recover an uncertain create by its durable idempotency key. Never
@@ -197,7 +198,7 @@ public sealed partial class MissumAiAssistantService
                     ToolStep: receipt, Model: submittedModel, LocalRunId: localRun.Id)).ConfigureAwait(false);
                 await FlushLiveModelSelectionAsync(token).ConfigureAwait(false);
                 var completed = await StreamRunWithReconnectAsync(localRun, assistant, update, token, client).ConfigureAwait(false);
-                if (session.ChatMode == ChatMode.ClaudeScience && sciencePresentation is not null)
+                if (_activeRunAction != PromptTriggerAction.PlanMode && session.ChatMode == ChatMode.ClaudeScience && sciencePresentation is not null)
                     await sciencePresentation.WaitForIdleAsync($"research-{sessionId:N}", token).ConfigureAwait(false);
                 return completed;
             }
@@ -335,6 +336,9 @@ public sealed partial class MissumAiAssistantService
 
     private static PromptTriggerMatch? ContinuationTrigger(ChatSession session, ChatMessage assistant, MissumAiRunRecord? run)
     {
+        // Earlier plan attempts may have persisted only the action enum.
+        if (run?.Action == PromptTriggerAction.PlanMode)
+            return AssistantCoordinator.CreateExtensionMatch(BuiltInActionIds.PlanMode, "Fortsetzen");
         var extension = run?.ExtensionActionId ?? session.PersistentExtensionActionId;
         if (!string.IsNullOrWhiteSpace(extension))
         {

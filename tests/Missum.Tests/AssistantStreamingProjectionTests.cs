@@ -536,7 +536,7 @@ public sealed class AssistantStreamingProjectionTests
     private static AssistantCoordinator CreateCoordinator(TestEnvironment environment, SettingsCoordinator settings,
         IConversationSnapshotRepository snapshots, IChatArtifactRepository artifacts) => new(
         environment.Get<IChatRepository>(), environment.Get<IDocumentIngestor>(), environment.Get<IContextAssembler>(),
-        environment.Get<IPromptTriggerRepository>(), environment.Get<IAssistantAttachmentRepository>(), artifacts, snapshots,
+        environment.Get<IAssistantAttachmentRepository>(), artifacts, snapshots,
         null, settings, new RecentActivityService(settings, new ShellViewModel(), NullLogger<RecentActivityService>.Instance));
 
     private sealed record Projection(string Type, JsonElement Payload, string? RequestId);

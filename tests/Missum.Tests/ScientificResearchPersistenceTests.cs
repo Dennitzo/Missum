@@ -1,4 +1,4 @@
-﻿using Missum.Core.Contracts;
+using Missum.Core.Contracts;
 using Missum.Core.Research;
 using Missum.Core.Models;
 using Missum.App.Services;
@@ -152,8 +152,7 @@ public sealed class ScientificResearchPersistenceTests
         await settings.InitializeAsync();
         var recent = new RecentActivityService(settings, new ShellViewModel(), NullLogger<RecentActivityService>.Instance);
         var coordinator = new AssistantCoordinator(chats, environment.Get<IDocumentIngestor>(),
-            environment.Get<IContextAssembler>(), environment.Get<IPromptTriggerRepository>(),
-            environment.Get<IAssistantAttachmentRepository>(), environment.Get<IChatArtifactRepository>(),
+            environment.Get<IContextAssembler>(), environment.Get<IAssistantAttachmentRepository>(), environment.Get<IChatArtifactRepository>(),
             environment.Get<IConversationSnapshotRepository>(), null, settings, recent, publicationService: publications);
         var events = new List<(string Type, JsonElement Payload)>();
         Task Emit(string type, object payload, string? _) { events.Add((type, JsonSerializer.SerializeToElement(payload, WebJson))); return Task.CompletedTask; }

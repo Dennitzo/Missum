@@ -107,7 +107,7 @@ public sealed class CodingToolStepSettingsTests
 
     private static AssistantSettingsService CreateService(TestEnvironment environment, SettingsCoordinator settings,
         MissumAiConnectionService connection) => new(settings, connection,
-            environment.Get<IPromptTriggerRepository>(), environment.Get<IBackupService>());
+            environment.Get<IBackupService>());
 
     private static AssistantCoordinator CreateCoordinator(TestEnvironment environment, SettingsCoordinator settings)
     {
@@ -115,7 +115,7 @@ public sealed class CodingToolStepSettingsTests
         recentActivity.Restore();
         return new AssistantCoordinator(
             environment.Get<IChatRepository>(), environment.Get<IDocumentIngestor>(), environment.Get<IContextAssembler>(),
-            environment.Get<IPromptTriggerRepository>(), environment.Get<IAssistantAttachmentRepository>(),
+            environment.Get<IAssistantAttachmentRepository>(),
             environment.Get<IChatArtifactRepository>(), environment.Get<IConversationSnapshotRepository>(),
             null, settings, recentActivity);
     }

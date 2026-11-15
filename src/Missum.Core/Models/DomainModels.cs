@@ -293,6 +293,8 @@ public sealed record AppSettings
     public const int CurrentVersion = 21;
     public const string DefaultSelectedModel = "gpt-oss-120b";
     public const string DefaultAccentColor = "#B0B0B0";
+    public const string CyberpunkAccentColor = "#FCEE0A";
+    public const string LegacyCyberpunkMintAccentColor = "#00FF9C";
     public const string DefaultBackgroundColor = "#181818";
     public const int MaximumRecentActivityTextLength = 180;
 
@@ -303,7 +305,6 @@ public sealed record AppSettings
     public AiProviderKind AiProvider { get; init; } = AiProviderKind.MissumAiServer;
     public string MissumAiServerUrl { get; init; } = "http://127.0.0.1:8080";
     public string MissumAiProtocolVersion { get; init; } = "1.0";
-    public string? NativeModelRoot { get; init; }
     public string LiveCaptionLanguage { get; init; } = "auto";
     public string? SelectedModel { get; init; } = DefaultSelectedModel;
     [System.Text.Json.Serialization.JsonIgnore]

@@ -131,6 +131,14 @@ if ([string]::IsNullOrWhiteSpace($NativeModelRoot)) { $NativeModelRoot = $source
 if ([string]::IsNullOrWhiteSpace($NativeModelRoot)) { $NativeModelRoot = $sourceEnvironment[$SourceEnvironmentPrefix + 'CODING_MODEL_ROOT'] }
 if ([string]::IsNullOrWhiteSpace($NativeModelRoot)) { throw 'Provide -NativeModelRoot; the source environment does not identify the native model cache.' }
 $NativeModelRoot = Resolve-MigrationDirectory $NativeModelRoot -MustExist
+# Preserve the legacy source path for inspection and overlap checks, but never
+# install it as the runtime cache. The migration does not copy model files.
+$destinationPaths = Get-MissumAiStackDefaults -DataRoot $DataRoot -ModelRoot $ModelRoot
+$destinationHub = $destinationPaths.NativeModelRoot.TrimEnd('\', '/')
+$destinationCache = [IO.Directory]::GetParent($destinationHub).FullName
+if ($NativeModelRoot -ine $destinationHub -and $NativeModelRoot -ine $destinationCache) {
+    Write-Warning "The legacy model cache $NativeModelRoot will not be used or copied. Install the required models under $destinationHub before starting Missum."
+}
 if ([string]::IsNullOrWhiteSpace($ServerIp)) { $ServerIp = $sourceEnvironment[$SourceEnvironmentPrefix + 'EXPECTED_LAN_IP'] }
 if ([string]::IsNullOrWhiteSpace($ServerIp)) { $ServerIp = '192.168.0.67' }
 if ([IO.Path]::GetFileName($SourceDatabaseName) -ne $SourceDatabaseName) { throw '-SourceDatabaseName must be a filename without directories.' }
@@ -240,11 +248,11 @@ foreach ($key in $sourceEnvironment.Keys) {
     $converted[$newKey] = $sourceEnvironment[$key]
 }
 $converted['MISSUM_AI_MODEL_ROOT'] = $ModelRoot -replace '\\','/'
-$converted['MISSUM_AI_NATIVE_MODEL_ROOT'] = $NativeModelRoot -replace '\\','/'
+$converted['MISSUM_AI_NATIVE_MODEL_ROOT'] = $destinationHub -replace '\\','/'
 $environmentPath = Join-Path $DataRoot 'stack.env'
 $environmentText = ($converted.Keys | Sort-Object | ForEach-Object { "$_=$($converted[$_])" }) -join "`n"
 [IO.File]::WriteAllText($environmentPath, $environmentText + "`n", [Text.UTF8Encoding]::new($false))
-$paths = Get-MissumAiStackDefaults -DataRoot $DataRoot -ModelRoot $ModelRoot -NativeModelRoot $NativeModelRoot
+$paths = $destinationPaths
 Write-MissumAiStackEnvironment -Paths $paths -ServerIp $ServerIp -ImageVersion $ImageVersion -NativeBinaryPath $NativeBinaryPath -NativeStateDirectory $NativeStateRoot
 [IO.File]::WriteAllText((Join-Path $DataRoot 'native-llama-server.path'), $NativeBinaryPath + "`n", [Text.UTF8Encoding]::new($false))
 [IO.File]::WriteAllText((Join-Path $NativeStateRoot 'official-llama-server.path'), $NativeBinaryPath + "`n", [Text.UTF8Encoding]::new($false))

@@ -45,9 +45,8 @@ public sealed class SpeechStreamingLiveTests(ITestOutputHelper output)
             new SessionContextPreparationService(chats), broker, null!, microphone, settings, recent,
             NullLogger<MissumAiAssistantService>.Instance);
         var coordinator = new AssistantCoordinator(chats, documents,
-            environment.Get<IContextAssembler>(), environment.Get<IPromptTriggerRepository>(),
-            environment.Get<IAssistantAttachmentRepository>(), environment.Get<IChatArtifactRepository>(),
-            environment.Get<IConversationSnapshotRepository>(), service, settings, recent, microphone);
+            environment.Get<IContextAssembler>(), environment.Get<IAssistantAttachmentRepository>(), environment.Get<IChatArtifactRepository>(),
+            environment.Get<IConversationSnapshotRepository>(), service, settings, recent);
         var session = await chats.CreateSessionAsync("Isolierte Prüfung der laufenden Sprachausgabe", mode);
         await settings.UpdateAsync(value => value with { ActiveSessionId = session.Id });
         var turn = await chats.AddTurnAsync(session.Id, "Erkläre die Aufgabe in kurzen Abschnitten.");

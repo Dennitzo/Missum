@@ -1,4 +1,4 @@
-﻿using Missum.Ai.Contracts;
+using Missum.Ai.Contracts;
 using Missum.App.Services;
 using Missum.App.ViewModels;
 using Missum.Core.Contracts;
@@ -52,9 +52,8 @@ public sealed class DeepResearchClientIntegrationTests
             new DocumentContextPreparationService(documents), new SessionContextPreparationService(chats),
             broker, null!, microphone, settings, recent, NullLogger<MissumAiAssistantService>.Instance);
         var coordinator = new AssistantCoordinator(chats, documents,
-            environment.Get<IContextAssembler>(), environment.Get<IPromptTriggerRepository>(),
-            environment.Get<IAssistantAttachmentRepository>(), environment.Get<IChatArtifactRepository>(),
-            environment.Get<IConversationSnapshotRepository>(), service, settings, recent, microphone);
+            environment.Get<IContextAssembler>(), environment.Get<IAssistantAttachmentRepository>(), environment.Get<IChatArtifactRepository>(),
+            environment.Get<IConversationSnapshotRepository>(), service, settings, recent);
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
 
         var introductions = new List<string>();
@@ -125,9 +124,8 @@ public sealed class DeepResearchClientIntegrationTests
             new DocumentContextPreparationService(documents), new SessionContextPreparationService(chats),
             broker, null!, microphone, settings, recent, NullLogger<MissumAiAssistantService>.Instance);
         var coordinator = new AssistantCoordinator(chats, documents,
-            environment.Get<IContextAssembler>(), environment.Get<IPromptTriggerRepository>(),
-            environment.Get<IAssistantAttachmentRepository>(), environment.Get<IChatArtifactRepository>(),
-            environment.Get<IConversationSnapshotRepository>(), service, settings, recent, microphone);
+            environment.Get<IContextAssembler>(), environment.Get<IAssistantAttachmentRepository>(), environment.Get<IChatArtifactRepository>(),
+            environment.Get<IConversationSnapshotRepository>(), service, settings, recent);
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
 
         // Exercise selection, deselection and an ordinary prompt without the field

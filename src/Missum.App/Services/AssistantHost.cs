@@ -358,7 +358,7 @@ public sealed class AssistantHost : IAsyncDisposable
     }
 
     private static bool IsMutation(string type) => type is "chat.send" or "chat.resume" or "chat.compact" or "action.invoke"
-        or "document.remove" or "attachment.remove" or "settings.update" or "promptTriggers.apply" or "backup.restoreCommit"
+        or "document.remove" or "attachment.remove" or "settings.update" or "backup.restoreCommit"
         or "session.create" or "session.rename" or "session.delete" or "session.clear" or "session.projectCreate" or "session.workspaceCreate" or "session.groupDeleteEmpty"
         or "microphone.speak" or "message.exportPdf" or "research.export";
     private static string Text(JsonElement value, string name, string fallback = "") => value.ValueKind == JsonValueKind.Object

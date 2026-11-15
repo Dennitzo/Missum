@@ -18,9 +18,11 @@ public sealed partial class NativeAssistantPage
             await VerifyComputerUseSmokeAsync();
             return 0;
         }
-        if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_RESPONSIVENESS") == "plan-mode")
+        if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_RESPONSIVENESS") is "plan-mode" or "science-plan-mode")
         {
-            await VerifyPlanModeInteractionSmokeAsync();
+            var mode = Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_RESPONSIVENESS") == "science-plan-mode"
+                ? Missum.Core.Models.ChatMode.ClaudeScience : Missum.Core.Models.ChatMode.Coding;
+            await VerifyPlanModeInteractionSmokeAsync(mode);
             return 0;
         }
         if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_RESPONSIVENESS") == "composer-attachments")
@@ -56,11 +58,6 @@ public sealed partial class NativeAssistantPage
             var snapshot = _snapshot.Clone();
             await VerifyWorkingPlanSmokeAsync(snapshot);
             await VerifyInspectorSidebarSmokeAsync(snapshot);
-            return 0;
-        }
-        if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_RESPONSIVENESS") == "model-root")
-        {
-            await SettingsPage.VerifyNativeModelRootSmokeAsync(LayoutRoot);
             return 0;
         }
         if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_RESPONSIVENESS") == "working-plan")

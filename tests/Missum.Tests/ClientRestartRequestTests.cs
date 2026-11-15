@@ -115,8 +115,7 @@ public sealed class ClientRestartRequestTests
         await service.StopPersistedRunsAtStartupAsync();
         Assert.Equal(0, await chats.DeleteEmptyTerminalMessagesAsync());
         var coordinator = new AssistantCoordinator(chats, documents,
-            provider.GetRequiredService<IContextAssembler>(), provider.GetRequiredService<IPromptTriggerRepository>(),
-            provider.GetRequiredService<IAssistantAttachmentRepository>(), provider.GetRequiredService<IChatArtifactRepository>(),
+            provider.GetRequiredService<IContextAssembler>(), provider.GetRequiredService<IAssistantAttachmentRepository>(), provider.GetRequiredService<IChatArtifactRepository>(),
             provider.GetRequiredService<IConversationSnapshotRepository>(), service, settings, recent);
         await coordinator.HandleAsync(new WebBridgeEnvelope(AssistantProtocol.ProtocolVersion, "session.open", "reopen",
             JsonSerializer.SerializeToElement(new { sessionId })), static (_, _, _) => Task.CompletedTask);

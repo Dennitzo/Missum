@@ -4,6 +4,13 @@ namespace Missum.App.Services;
 
 public sealed partial class MissumAiAssistantService
 {
+    private static string BuildSciencePlanningPrompt(string prompt) =>
+        prompt + "\n\nWissenschaftlicher Projektkontext für die Planung: Prüfe den vorhandenen Stand in Publikation.md und in inputs/, sofern diese Pfade existieren. "
+        + "Trenne Forschungsziel, Annahmen, Herleitung, Belege und Prüfkriterien. Für fachliche Forschungsfragen plane eine Untersuchung oder Prüfung ein. "
+        + "Entscheidungen zum Auftrag, die der Nutzer treffen muss, frage zuerst im strukturierten questions-Block ab. "
+        + "Plane pro Umsetzungsphase die fachlichen Prüfungen und den vollständigen PDF-Bau mit Publikation-erzeugen.ps1 ein. "
+        + "Der PDF-Bau und die Behebung seiner Fehler gehören zur Umsetzung nach der Freigabe.";
+
     private async Task<string> BuildPublicationWorkspacePromptAsync(ChatSession session, string prompt, CancellationToken cancellationToken)
     {
         if (sciencePublications is null || string.IsNullOrWhiteSpace(session.CodingWorkspacePath)) return prompt;

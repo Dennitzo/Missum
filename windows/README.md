@@ -107,10 +107,11 @@ Nach erfolgreicher Prüfung verwenden die Desktop-App und das Stack-Startskript 
 nächsten Runtime-Start. Eine laufende Runtime und frühere Installationen bleiben erhalten.
 `-ProbeModelRoot` wählt bei Bedarf den Modellordner für die Prüfung, `-ProbePort` ein anderes freies Portpaar.
 
-`-NativeModelRoot` wählt bei den Stackskripten einen anderen Cacheordner. Diesen Wert beim Bauen, Starten,
-Deployen und Aktualisieren konsistent übergeben. `-ModelRoot` bezeichnet bei diesen Skripten die separaten
-Worker-Modelle. Beim nativen Manager bezeichnet `-ModelRoot` hingegen die GGUF-Ablage; dort ist
-`-NativeModelRoot` als Alias verfügbar.
+Der produktive Stack verwendet ausschließlich `%USERPROFILE%\.cache\huggingface` beziehungsweise dessen
+Unterordner `hub`. Alte abweichende `-NativeModelRoot`-Angaben werden mit einer Fehlermeldung abgelehnt;
+alte Angaben in `stack.env` werden nicht für die Wahl des Modellordners verwendet. `-ModelRoot` bezeichnet
+bei den Stackskripten weiterhin die separaten Worker-Modelle. Der direkt gestartete native Manager erlaubt
+`-ModelRoot` für isolierte Prüfungen; reguläre Stack- und App-Starts setzen den festen Cachepfad.
 
 Der Manager heißt aus Kompatibilitätsgründen weiterhin `manage-coding-llama.ps1` und verwaltet alle vier
 Modellrollen. Textmodelle können unabhängig im Dropdown **General AI Modell** und **Coding AI Modell**

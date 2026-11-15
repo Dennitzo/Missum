@@ -27,7 +27,8 @@ public sealed partial class MissumAiAssistantService
     private async Task StartFileChangesAsync(MissumAiRunRecord run, ChatMessage message, bool resume,
         Func<MissumAiAssistantUpdate, Task> update, CancellationToken cancellationToken)
     {
-        if (run.WorkspacePath is not { } workspace) return;
+        // The tracker can initialize Git and write objects into the project.
+        if (run.Action == PromptTriggerAction.PlanMode || run.WorkspacePath is not { } workspace) return;
         if (!UsesCodingAgent(run.Action)
             && (await chats.GetSessionAsync(run.SessionId, cancellationToken).ConfigureAwait(false))?.ChatMode != ChatMode.ClaudeScience) return;
         if (!resume)
@@ -53,7 +54,8 @@ public sealed partial class MissumAiAssistantService
         var message = messages.LastOrDefault(static message => message.Role == ChatRole.Assistant);
         if (message is null) return null;
         var run = await runs.GetByAssistantMessageIdAsync(message.Id, cancellationToken).ConfigureAwait(false);
-        if (run is null || run.SessionId != sessionId || string.IsNullOrWhiteSpace(run.WorkspacePath)) return null;
+        if (run is null || run.Action == PromptTriggerAction.PlanMode || run.SessionId != sessionId
+            || string.IsNullOrWhiteSpace(run.WorkspacePath)) return null;
         var summary = await CodingChangesMonitor.ReadLatestAsync(
             CodingChangesMonitor.RunStorageDirectory(settings.DataDirectory, sessionId, message.Id, run.Id),
             cancellationToken).ConfigureAwait(false);

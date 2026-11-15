@@ -4,6 +4,25 @@ namespace Missum.Tests;
 
 public sealed class NativeAccentColorTests
 {
+    [Fact]
+    public void CyberpunkBackgroundUsesReferenceSurfacesInDarkModeAndKeepsLightModeLight()
+    {
+        var settings = new Missum.Core.Models.AppSettings
+        {
+            Theme = Missum.Core.Models.AppTheme.Dark,
+            AccentColor = Missum.Core.Models.AppSettings.CyberpunkAccentColor,
+            BackgroundColor = "#261D45",
+        };
+        var dark = Missum.App.App.CreateSavedAppearance(settings, false, null);
+        var light = Missum.App.App.CreateSavedAppearance(settings with { Theme = Missum.Core.Models.AppTheme.Light }, true, null);
+
+        Assert.Equal("#261D45", dark.Colors["window"]);
+        Assert.Equal("#100D23", dark.Colors["input"]);
+        Assert.StartsWith("#372963", dark.Colors["layerStrong"]);
+        Assert.NotEqual(dark.Colors["window"], light.Colors["window"]);
+        Assert.Equal("#261D45", settings.BackgroundColor);
+    }
+
     [Theory]
     [InlineData(176, 176, 176)]
     [InlineData(244, 184, 96)]

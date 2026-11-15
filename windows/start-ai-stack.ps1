@@ -56,6 +56,6 @@ Write-MissumAiStackEnvironment -Paths $paths -ServerIp $ServerIp -ImageVersion $
 [IO.File]::WriteAllText($resolvedBinaryFile, $NativeBinaryPath + "`n", [Text.UTF8Encoding]::new($false))
 Invoke-MissumAiCompose -Paths $paths -Arguments @('config', '--quiet')
 & (Join-Path $PSScriptRoot 'manage-coding-llama.ps1') -Action Start `
-    -ModelRoot $paths.NativeModelRoot -BinaryPath $NativeBinaryPath -StateDirectory $NativeStateDirectory
+    -ModelRoot (Join-Path $env:USERPROFILE '.cache\huggingface') -BinaryPath $NativeBinaryPath -StateDirectory $NativeStateDirectory
 Invoke-MissumAiCompose -Paths $paths -Arguments @('up', '-d', '--no-build', '--pull', 'never')
 Write-Host "Missum AI stack is starting at http://${ServerIp}:8080; all language, vision and embedding models use native Windows llama.cpp on port 8081." -ForegroundColor Green

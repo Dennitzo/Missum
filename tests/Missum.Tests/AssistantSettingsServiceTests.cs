@@ -181,7 +181,7 @@ public sealed class AssistantSettingsServiceTests
         await settings.InitializeAsync();
         using var connection = Connection(settings);
         using var service = Service(environment, settings, connection);
-        var viewModel = new SettingsViewModel(settings, connection, environment.Get<IPromptTriggerRepository>(),
+        var viewModel = new SettingsViewModel(settings, connection,
             environment.Get<IBackupService>(), new ShellViewModel(), new ModelCapabilityRegistry(), service);
         viewModel.Initialize();
         viewModel.AccentColor = "#A970FF";
@@ -287,7 +287,7 @@ public sealed class AssistantSettingsServiceTests
     }
 
     [Fact]
-    public async Task TriggerConflictPreflightDoesNotPartiallyDeleteOtherRowsOrSavePreferences()
+    public async Task RemovedTriggerSettingsCannotModifyStoredRowsOrPreferences()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
@@ -295,46 +295,22 @@ public sealed class AssistantSettingsServiceTests
         using var connection = Connection(settings);
         using var service = Service(environment, settings, connection);
         var repository = environment.Get<IPromptTriggerRepository>();
-        var first = await repository.CreateAsync(Trigger("first-test"));
-        var stale = await repository.CreateAsync(Trigger("stale-test"));
-        var updated = await repository.UpdateAsync(stale with { Phrase = "new-test" }, stale.Revision);
+        var existing = await repository.CreateAsync(Trigger("stored-test"));
         var events = new List<(string Type, JsonElement Payload)>();
 
-        await service.HandleAsync(Envelope("settings.update", new
-        {
+        Assert.False(AssistantSettingsService.CanHandle("promptTriggers.apply"));
+        Assert.False(AssistantSettingsService.CanHandle("promptTriggers.list"));
+        var snapshot = JsonSerializer.SerializeToElement(await service.GetSnapshotAsync(), JsonSerializerOptions.Web);
+        Assert.False(snapshot.TryGetProperty("triggers", out _));
+        Assert.False(snapshot.TryGetProperty("triggerActions", out _));
+        await service.HandleAsync(Envelope("settings.update", new {
             expectedRevision = 0, values = new { language = "en-US" },
-            deletedTriggers = new[] { new { id = first.Id, revision = first.Revision }, new { id = stale.Id, revision = stale.Revision } },
+            deletedTriggers = new[] { new { id = existing.Id, revision = existing.Revision } },
         }), Capture(events));
 
-        Assert.Equal("settings.conflict", Assert.Single(events).Type);
-        Assert.NotNull(await repository.GetAsync(first.Id));
-        Assert.Equal(updated.Revision, (await repository.GetAsync(stale.Id))?.Revision);
+        Assert.Equal("settings.error", Assert.Single(events).Type);
+        Assert.NotNull(await repository.GetAsync(existing.Id));
         Assert.Equal("de-DE", settings.Current.Language);
-    }
-
-    [Fact]
-    public async Task BrowserTriggerUpdatePreservesExistingMatchingPolicy()
-    {
-        await using var environment = await TestEnvironment.CreateAsync();
-        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
-        await settings.InitializeAsync();
-        using var connection = Connection(settings);
-        using var service = Service(environment, settings, connection);
-        var repository = environment.Get<IPromptTriggerRepository>();
-        var existing = await repository.CreateAsync(Trigger("exact-test") with { MatchMode = PromptTriggerMatchMode.Exact, Priority = 987 });
-        var events = new List<(string Type, JsonElement Payload)>();
-
-        await service.HandleAsync(Envelope("promptTriggers.apply", new { triggers = new[]
-        {
-            new { id = existing.Id, revision = existing.Revision, action = "webSearch", phrase = "changed-test", description = "browser edit", isEnabled = false },
-        } }), Capture(events));
-
-        Assert.Equal("settings.changed", Assert.Single(events).Type);
-        var saved = Assert.IsType<PromptTrigger>(await repository.GetAsync(existing.Id));
-        Assert.Equal(PromptTriggerMatchMode.Exact, saved.MatchMode);
-        Assert.Equal(987, saved.Priority);
-        Assert.False(saved.IsEnabled);
-        Assert.Equal(existing.Revision + 1, saved.Revision);
     }
 
     [Fact]
@@ -345,7 +321,7 @@ public sealed class AssistantSettingsServiceTests
         await settings.InitializeAsync();
         using var connection = Connection(settings);
         var backups = new RecordingBackupService();
-        using var service = new AssistantSettingsService(settings, connection, environment.Get<IPromptTriggerRepository>(), backups);
+        using var service = new AssistantSettingsService(settings, connection, backups);
         var events = new List<(string Type, JsonElement Payload)>();
         await service.HandleAsync(Envelope("backup.restore", new { fileName = "uploaded.missumbackup", base64 = Convert.ToBase64String([1, 2, 3]) }), Capture(events));
         var ready = Assert.Single(events);
@@ -375,7 +351,7 @@ public sealed class AssistantSettingsServiceTests
         await settings.InitializeAsync();
         using var connection = Connection(settings);
         var backups = new RecordingBackupService();
-        using var service = new AssistantSettingsService(settings, connection, environment.Get<IPromptTriggerRepository>(), backups);
+        using var service = new AssistantSettingsService(settings, connection, backups);
         var events = new List<(string Type, JsonElement Payload)>();
         await service.HandleAsync(Envelope("backup.create", new { }), Capture(events));
         var ready = Assert.Single(events);
@@ -391,7 +367,7 @@ public sealed class AssistantSettingsServiceTests
     private static MissumAiConnectionService Connection(SettingsCoordinator settings) =>
         new(settings, NullLogger<MissumAiConnectionService>.Instance);
     private static AssistantSettingsService Service(TestEnvironment environment, SettingsCoordinator settings, MissumAiConnectionService connection) =>
-        new(settings, connection, environment.Get<IPromptTriggerRepository>(), environment.Get<IBackupService>());
+        new(settings, connection, environment.Get<IBackupService>());
     private static WebBridgeEnvelope Envelope(string type, object payload) =>
         new(2, type, Guid.NewGuid().ToString("N"), JsonSerializer.SerializeToElement(payload));
     private static Func<string, object, string?, Task> Capture(List<(string Type, JsonElement Payload)> events) =>

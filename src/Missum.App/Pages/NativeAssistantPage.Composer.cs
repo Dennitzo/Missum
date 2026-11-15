@@ -196,7 +196,7 @@ public sealed partial class NativeAssistantPage
         var descriptors = Items(_snapshot, "actionDescriptors");
         var actions = descriptors.Where(a => S(a, "actionKind") == "selectableTool").ToArray();
         var document = actions.FirstOrDefault(a => S(a, "iconKey") == "document");
-        var plan = actions.FirstOrDefault(a => S(a, "iconKey") == "plan");
+        var plan = actions.FirstOrDefault(a => S(a, "actionId") == BuiltInActionIds.PlanMode);
         var attachGroup = S(descriptors.FirstOrDefault(a => S(a, "actionId") == BuiltInActionIds.AttachFilesAndFolders), "groupId", "files");
         var planningGroup = S(plan, "groupId", "planning");
 
@@ -209,9 +209,10 @@ public sealed partial class NativeAssistantPage
             () => _ = CompactCurrentSessionAsync(), "research", "context.compact",
             !_running && !_manualCompactionBusy && Items(_snapshot, "messages").Length > 0);
         if (plan.ValueKind == JsonValueKind.Object)
-            AddCatalogEntry(plan, id => () => SelectComposerTool(id, "Planmodus"), 10);
+            AddCatalogEntry(plan, id => () => SelectComposerTool(id, S(plan, "displayName")), 10);
         foreach (var action in actions.Where(a => !S(a, "actionId").StartsWith("builtin.", StringComparison.Ordinal)
-                     || (S(a, "actionId") != BuiltInActionIds.DeepResearch && S(a, "iconKey") is not ("plan" or "document"))))
+                     || (S(a, "actionId") is not (BuiltInActionIds.DeepResearch or BuiltInActionIds.PlanMode)
+                         && S(a, "iconKey") != "document")))
             AddCatalogEntry(action, id => () => SelectComposerTool(id, S(action, "displayName")));
         foreach (var action in descriptors.Where(a =>
                      S(a, "actionKind") == "immediate"

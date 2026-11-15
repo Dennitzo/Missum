@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param(
     [ValidateSet('Start', 'Stop', 'Status')][string] $Action = 'Start',
-    [Alias('NativeModelRoot')][string] $ModelRoot = (Join-Path $env:USERPROFILE '.cache\huggingface\hub'),
+    [Alias('NativeModelRoot')][string] $ModelRoot = (Join-Path $env:USERPROFILE '.cache\huggingface'),
     [string] $BinaryPath,
     [string] $PythonPath,
     # AppData is virtualized when launched from an MSIX host such as Codex.

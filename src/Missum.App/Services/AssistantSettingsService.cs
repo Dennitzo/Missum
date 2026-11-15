@@ -1,30 +1,25 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
-using Missum.App.ViewModels;
 using Missum.Core.Contracts;
-using Missum.Core.Extensions;
 using Missum.Core.Models;
 
 namespace Missum.App.Services;
 
-/// <summary>Shared preference/trigger/backup operations for the native desktop.</summary>
+/// <summary>Shared preference and backup operations for the native desktop.</summary>
 public sealed class AssistantSettingsService : IDisposable
 {
     private const int MaximumBackupBytes = 64 * 1024 * 1024;
     private readonly SettingsCoordinator _settings;
     private readonly MissumAiConnectionService _connection;
-    private readonly IPromptTriggerRepository _triggers;
     private readonly IBackupService _backups;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly ConcurrentDictionary<Guid, AssistantSettingsResource> _resources = new();
     private readonly ConcurrentDictionary<Guid, AssistantPreparedBackupRestore> _preparedRestores = new();
 
-    public AssistantSettingsService(SettingsCoordinator settings, MissumAiConnectionService connection,
-        IPromptTriggerRepository triggers, IBackupService backups)
+    public AssistantSettingsService(SettingsCoordinator settings, MissumAiConnectionService connection, IBackupService backups)
     {
         _settings = settings;
         _connection = connection;
-        _triggers = triggers;
         _backups = backups;
         settings.Changed += OnSettingsChanged;
     }
@@ -42,7 +37,6 @@ public sealed class AssistantSettingsService : IDisposable
 
     public static bool CanHandle(string type) => type is
         "settings.get" or "settings.update" or "settings.connectionTest"
-        or "promptTriggers.list" or "promptTriggers.apply"
         or "backup.create" or "backup.restore" or "backup.restoreCommit" or "backup.restoreCancel";
 
     public async Task<object> GetSnapshotAsync(CancellationToken cancellationToken = default)
@@ -52,18 +46,16 @@ public sealed class AssistantSettingsService : IDisposable
         finally { _gate.Release(); }
     }
 
-    private async Task<object> BuildSnapshotAsync(CancellationToken cancellationToken)
+    private Task<object> BuildSnapshotAsync(CancellationToken cancellationToken)
     {
         var current = _settings.Current;
-        var items = await _triggers.ListAsync(cancellationToken).ConfigureAwait(false);
         var appearance = ResolvedAppearanceProvider?.Invoke();
-        return new
+        return Task.FromResult<object>(new
         {
             revision = current.PreferencesRevision,
             values = new
             {
                 missumAiServerUrl = current.MissumAiServerUrl,
-                nativeModelRoot = current.NativeModelRoot,
                 isAutomaticSpeechEnabled = current.IsAutomaticSpeechEnabled,
                 liveCaptionLanguage = current.LiveCaptionLanguage,
                 theme = EnumText(current.Theme),
@@ -75,21 +67,7 @@ public sealed class AssistantSettingsService : IDisposable
             resolvedTheme = appearance?.Theme ?? (current.Theme == AppTheme.System
                 ? ResolvedThemeProvider?.Invoke() ?? "dark"
                 : EnumText(current.Theme)),
-            triggerActions = PromptTriggerEditorItem.AvailableActions.Select(option => new
-            {
-                value = EnumText(option.Value), label = option.Label, extensionActionId = option.ExtensionActionId,
-            }).ToArray(),
-            triggers = items.Select(trigger => new
-            {
-                id = trigger.Id,
-                revision = trigger.Revision,
-                action = EnumText(trigger.Action),
-                phrase = trigger.Phrase,
-                description = trigger.Description,
-                isEnabled = trigger.IsEnabled,
-                extensionActionId = trigger.ExtensionActionId,
-            }).ToArray(),
-        };
+        });
     }
 
     public async Task HandleAsync(WebBridgeEnvelope envelope, Func<string, object, string?, Task> emit,
@@ -102,25 +80,21 @@ public sealed class AssistantSettingsService : IDisposable
             switch (envelope.Type)
             {
                 case "settings.get":
-                case "promptTriggers.list":
                     await emit("settings.snapshot", await GetSnapshotAsync(cancellationToken).ConfigureAwait(false), envelope.RequestId).ConfigureAwait(false);
                     break;
                 case "settings.update":
                 {
                     RequireObject(envelope.Payload);
+                    if (envelope.Payload.TryGetProperty("triggers", out _)
+                        || envelope.Payload.TryGetProperty("deletedTriggers", out _))
+                        throw new ArgumentException("Prompt-Trigger werden nicht mehr unterstützt.");
                     var revision = RequiredRevision(envelope.Payload, "expectedRevision");
                     var patch = envelope.Payload.TryGetProperty("values", out var values)
                         ? ParsePatch(values) : new AssistantSettingsPatch();
-                    var edits = await ParseTriggersAsync(envelope.Payload, cancellationToken).ConfigureAwait(false);
-                    var deleted = ParseDeleted(envelope.Payload);
-                    await ApplyAsync(patch, revision, edits, deleted, cancellationToken).ConfigureAwait(false);
+                    await UpdatePreferencesAsync(patch, revision, cancellationToken).ConfigureAwait(false);
                     await emit("settings.changed", await GetSnapshotAsync(cancellationToken).ConfigureAwait(false), envelope.RequestId).ConfigureAwait(false);
                     break;
                 }
-                case "promptTriggers.apply":
-                    await ApplyTriggersAsync(await ParseTriggersAsync(envelope.Payload, cancellationToken).ConfigureAwait(false), ParseDeleted(envelope.Payload), cancellationToken).ConfigureAwait(false);
-                    await emit("settings.changed", await GetSnapshotAsync(cancellationToken).ConfigureAwait(false), envelope.RequestId).ConfigureAwait(false);
-                    break;
                 case "settings.connectionTest":
                 {
                     var address = RequiredString(envelope.Payload, "missumAiServerUrl");
@@ -185,82 +159,17 @@ public sealed class AssistantSettingsService : IDisposable
 
     public async Task UpdatePreferencesAsync(AssistantSettingsPatch patch, long expectedRevision,
         CancellationToken cancellationToken = default)
-        => await ApplyAsync(patch, expectedRevision, [], [], cancellationToken).ConfigureAwait(false);
-
-    public async Task<IReadOnlyList<PromptTrigger>> ApplyAsync(AssistantSettingsPatch patch, long expectedRevision,
-        IReadOnlyList<PromptTrigger> triggers, IReadOnlyList<AssistantDeletedTrigger> deleted,
-        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(patch);
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        IReadOnlyList<PromptTrigger> saved;
         try
         {
             if (_settings.Current.PreferencesRevision != expectedRevision)
                 throw new AssistantSettingsConflictException(_settings.Current.PreferencesRevision);
             var normalized = NormalizePatch(patch);
-            await ValidateTriggerBatchAsync(triggers, deleted, cancellationToken).ConfigureAwait(false);
-            // Preflight every edit before persistence; native settings writes use this shared gate.
             await _settings.UpdatePreferencesAsync(current => ApplyPatch(current, normalized), expectedRevision, cancellationToken).ConfigureAwait(false);
-            saved = await SaveTriggerBatchAsync(triggers, deleted, cancellationToken).ConfigureAwait(false);
         }
         finally { _gate.Release(); }
-        if (triggers.Count != 0 || deleted.Count != 0) Changed?.Invoke(this, EventArgs.Empty);
-        return saved;
-    }
-
-    public async Task<IReadOnlyList<PromptTrigger>> ApplyTriggersAsync(IReadOnlyList<PromptTrigger> triggers,
-        IReadOnlyList<AssistantDeletedTrigger> deleted, CancellationToken cancellationToken = default)
-    {
-        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        IReadOnlyList<PromptTrigger> saved;
-        try
-        {
-            await ValidateTriggerBatchAsync(triggers, deleted, cancellationToken).ConfigureAwait(false);
-            saved = await SaveTriggerBatchAsync(triggers, deleted, cancellationToken).ConfigureAwait(false);
-        }
-        finally { _gate.Release(); }
-        if (triggers.Count != 0 || deleted.Count != 0) Changed?.Invoke(this, EventArgs.Empty);
-        return saved;
-    }
-
-    private async Task ValidateTriggerBatchAsync(IReadOnlyList<PromptTrigger> triggers,
-        IReadOnlyList<AssistantDeletedTrigger> deleted, CancellationToken cancellationToken)
-    {
-        var ids = new HashSet<Guid>();
-        foreach (var trigger in triggers)
-        {
-            if (!ids.Add(trigger.Id)) throw new InvalidOperationException("Ein Prompt-Trigger wurde mehrfach übertragen.");
-            if (!Enum.IsDefined(trigger.Action) || !Enum.IsDefined(trigger.MatchMode)
-                || trigger.Priority is < -10_000 or > 10_000 || trigger.Revision < 0
-                || string.IsNullOrWhiteSpace(trigger.Phrase) || trigger.Phrase.Trim().Length > 160
-                || trigger.Description.Trim().Length > 500)
-                throw new InvalidOperationException("Ungültiger Prompt-Trigger: Phrase 1–160, Beschreibung höchstens 500 Zeichen.");
-            _ = PromptActionExtensionIds.ResolveForWrite(trigger.Action, trigger.ExtensionActionId);
-            var current = await _triggers.GetAsync(trigger.Id, cancellationToken).ConfigureAwait(false);
-            if (trigger.Revision == 0 ? current is not null : current is null || current.Revision != trigger.Revision)
-                throw new RevisionConflictException(nameof(PromptTrigger), trigger.Id);
-        }
-        foreach (var item in deleted)
-        {
-            if (!ids.Add(item.Id)) throw new InvalidOperationException("Ein Prompt-Trigger wurde mehrfach übertragen.");
-            var current = await _triggers.GetAsync(item.Id, cancellationToken).ConfigureAwait(false);
-            if (current is null || current.Revision != item.Revision)
-                throw new RevisionConflictException(nameof(PromptTrigger), item.Id);
-        }
-    }
-
-    private async Task<IReadOnlyList<PromptTrigger>> SaveTriggerBatchAsync(IReadOnlyList<PromptTrigger> triggers,
-        IReadOnlyList<AssistantDeletedTrigger> deleted, CancellationToken cancellationToken)
-    {
-        foreach (var item in deleted)
-            await _triggers.DeleteAsync(item.Id, item.Revision, cancellationToken).ConfigureAwait(false);
-        var saved = new List<PromptTrigger>();
-        foreach (var trigger in triggers)
-            saved.Add(trigger.Revision == 0
-                ? await _triggers.CreateAsync(trigger, cancellationToken).ConfigureAwait(false)
-                : await _triggers.UpdateAsync(trigger, trigger.Revision, cancellationToken).ConfigureAwait(false));
-        return saved;
     }
 
     public async Task<MissumAiConnectionStatus> TestConnectionAsync(string address, CancellationToken cancellationToken = default)
@@ -403,7 +312,6 @@ public sealed class AssistantSettingsService : IDisposable
         return patch with
         {
             MissumAiServerUrl = patch.MissumAiServerUrl is { } address ? NormalizeGatewayAddress(address) : null,
-            NativeModelRoot = patch.NativeModelRoot is { } modelRoot ? NativeModelRootPath.Normalize(modelRoot) ?? "" : null,
             LiveCaptionLanguage = patch.LiveCaptionLanguage?.Trim(),
             Language = patch.Language?.Trim(),
             AccentColor = patch.AccentColor is { } accent ? NormalizeColor(accent) : null,
@@ -414,7 +322,6 @@ public sealed class AssistantSettingsService : IDisposable
     private static AppSettings ApplyPatch(AppSettings current, AssistantSettingsPatch patch) => current with
     {
         MissumAiServerUrl = patch.MissumAiServerUrl ?? current.MissumAiServerUrl,
-        NativeModelRoot = patch.NativeModelRoot is { } modelRoot ? NativeModelRootPath.Normalize(modelRoot) : current.NativeModelRoot,
         IsAutomaticSpeechEnabled = patch.IsAutomaticSpeechEnabled ?? current.IsAutomaticSpeechEnabled,
         LiveCaptionLanguage = patch.LiveCaptionLanguage ?? current.LiveCaptionLanguage,
         Theme = patch.Theme ?? current.Theme,
@@ -447,7 +354,6 @@ public sealed class AssistantSettingsService : IDisposable
             patch = field.Name switch
             {
                 "missumAiServerUrl" => patch with { MissumAiServerUrl = StringValue(field.Value, field.Name) },
-                "nativeModelRoot" => patch with { NativeModelRoot = field.Value.ValueKind == JsonValueKind.Null ? "" : StringValue(field.Value, field.Name) },
                 "isAutomaticSpeechEnabled" => patch with { IsAutomaticSpeechEnabled = BooleanValue(field.Value, field.Name) },
                 "liveCaptionLanguage" => patch with { LiveCaptionLanguage = StringValue(field.Value, field.Name) },
                 "theme" => patch with { Theme = Enum.TryParse<AppTheme>(StringValue(field.Value, field.Name), true, out var theme) && Enum.IsDefined(theme)
@@ -458,41 +364,6 @@ public sealed class AssistantSettingsService : IDisposable
                 _ => throw new ArgumentException($"Nicht bearbeitbare Einstellung: {field.Name}"),
             };
         return patch;
-    }
-
-    private async Task<IReadOnlyList<PromptTrigger>> ParseTriggersAsync(JsonElement payload, CancellationToken cancellationToken)
-    {
-        RequireObject(payload);
-        if (!payload.TryGetProperty("triggers", out var array)) return [];
-        if (array.ValueKind != JsonValueKind.Array) throw new ArgumentException("triggers muss eine Liste sein.");
-        var result = new List<PromptTrigger>();
-        foreach (var item in array.EnumerateArray())
-        {
-            var revision = RequiredRevision(item, "revision");
-            var id = item.TryGetProperty("id", out var idValue)
-                ? idValue.ValueKind == JsonValueKind.String && Guid.TryParse(idValue.GetString(), out var parsedId) && parsedId != Guid.Empty
-                    ? parsedId : throw new ArgumentException("Ein Prompt-Trigger enthält eine ungültige ID.")
-                : revision == 0 ? Guid.NewGuid() : throw new ArgumentException("Die Prompt-Trigger-ID fehlt.");
-            if (!Enum.TryParse<PromptTriggerAction>(RequiredString(item, "action"), true, out var action)
-                || !Enum.IsDefined(action)) throw new ArgumentException("Ungültige Promptaktion.");
-            var now = DateTimeOffset.UtcNow;
-            var current = revision == 0 ? null : await _triggers.GetAsync(id, cancellationToken).ConfigureAwait(false);
-            var extensionActionId = item.TryGetProperty("extensionActionId", out var extension) && extension.ValueKind == JsonValueKind.String
-                ? extension.GetString() : current?.Action == action ? current.ExtensionActionId : null;
-            result.Add(new(id, action, RequiredString(item, "phrase"), RequiredString(item, "description"),
-                current?.MatchMode ?? PromptTriggerMatchMode.Prefix, RequiredBoolean(item, "isEnabled"),
-                current?.Priority ?? 100, revision, current?.CreatedAt ?? now, now, extensionActionId));
-        }
-        return result;
-    }
-
-    private static AssistantDeletedTrigger[] ParseDeleted(JsonElement payload)
-    {
-        RequireObject(payload);
-        if (!payload.TryGetProperty("deletedTriggers", out var array)) return [];
-        if (array.ValueKind != JsonValueKind.Array) throw new ArgumentException("deletedTriggers muss eine Liste sein.");
-        return array.EnumerateArray().Select(item => new AssistantDeletedTrigger(
-            RequiredGuid(item, "id"), RequiredRevision(item, "revision"))).ToArray();
     }
 
     private static string EnumText<T>(T value) where T : struct, Enum => JsonNamingPolicy.CamelCase.ConvertName(value.ToString());
@@ -510,12 +381,6 @@ public sealed class AssistantSettingsService : IDisposable
         return payload.TryGetProperty(field, out var value) ? StringValue(value, field)
             : throw new ArgumentException($"{field} fehlt.");
     }
-    private static bool RequiredBoolean(JsonElement payload, string field)
-    {
-        RequireObject(payload);
-        return payload.TryGetProperty(field, out var value) ? BooleanValue(value, field)
-            : throw new ArgumentException($"{field} fehlt.");
-    }
     private static long RequiredRevision(JsonElement payload, string field)
     {
         RequireObject(payload);
@@ -531,7 +396,6 @@ public sealed class AssistantSettingsService : IDisposable
 public sealed record AssistantSettingsPatch
 {
     public string? MissumAiServerUrl { get; init; }
-    public string? NativeModelRoot { get; init; }
     public bool? IsAutomaticSpeechEnabled { get; init; }
     public string? LiveCaptionLanguage { get; init; }
     public AppTheme? Theme { get; init; }
@@ -540,7 +404,6 @@ public sealed record AssistantSettingsPatch
     public string? BackgroundColor { get; init; }
 }
 
-public sealed record AssistantDeletedTrigger(Guid Id, long Revision);
 public sealed record AssistantSettingsResource(string Path, string ContentType, string FileName, DateTimeOffset ExpiresAt);
 public sealed record AssistantPreparedBackupRestore(Guid Id, string Path, string FileName, DateTimeOffset ExpiresAt);
 public sealed record AssistantResolvedAppearance(string Theme, bool HighContrast, IReadOnlyDictionary<string, string> Colors);

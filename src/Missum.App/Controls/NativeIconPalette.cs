@@ -1,5 +1,6 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Media;
+using Missum.Core.Models;
 using Windows.UI;
 
 namespace Missum.App.Controls;
@@ -7,8 +8,13 @@ namespace Missum.App.Controls;
 /// <summary>Accent-derived colors shared by XAML and retained native controls. Planet artwork is independent.</summary>
 public static class NativeIconPalette
 {
-    internal const string CyberpunkAccent = "#FCEE0A";
+    internal const string CyberpunkAccent = AppSettings.CyberpunkAccentColor;
     internal static readonly Color CyberpunkAccentColor = Color.FromArgb(255, 252, 238, 10);
+    internal const uint CyberpunkCyan = 0x00F0FF;
+    internal const uint CyberpunkYellow = 0xFCEE0A;
+    internal const uint CyberpunkPink = 0xFF4BA7;
+    internal const uint CyberpunkViolet = 0xB388FF;
+    internal const uint CyberpunkRed = 0xFF4A59;
     private static IReadOnlyDictionary<string, Color> _colors = ResolveColors(
         Color.FromArgb(255, 169, 112, 255), [Color.FromArgb(255, 48, 48, 48)]);
     // WinUI brushes belong to their dispatcher. Color resolution itself is pure
@@ -71,8 +77,7 @@ public static class NativeIconPalette
         var caution = Color.FromArgb(255, (byte)Math.Round(accent.R * .3 + 218 * .7),
             (byte)Math.Round(accent.G * .3 + 65 * .7), (byte)Math.Round(accent.B * .3 + 72 * .7));
         Color Readable(Color color) => highContrastForeground ?? App.ReadableAccentColor(color, surfaces);
-        // The named yellow preset has its own coordinated topic colors. All
-        // families still pass through the same light/dark contrast correction.
+        // Apply the Cyberpunk tool colors with the same contrast correction as other presets.
         var cyberpunk = accent == CyberpunkAccentColor;
         Color Topic(double offset, uint cyberpunkRgb) => Readable(cyberpunk
             ? Color.FromArgb(255, (byte)(cyberpunkRgb >> 16), (byte)(cyberpunkRgb >> 8), (byte)cyberpunkRgb)
@@ -80,13 +85,13 @@ public static class NativeIconPalette
         var colors = new Dictionary<string, Color>(StringComparer.Ordinal)
         {
             ["controls"] = Readable(accent),
-            ["web"] = Topic(300, 0x00F0FF),
-            ["research"] = Topic(30, 0xB388FF),
-            ["code"] = Topic(240, 0x5B9DFF),
+            ["web"] = Topic(300, CyberpunkCyan),
+            ["research"] = Topic(30, CyberpunkViolet),
+            ["code"] = Topic(240, CyberpunkYellow),
             ["speech"] = Topic(270, 0x51E9BD),
-            ["visual"] = Topic(60, 0xFF4BA7),
+            ["visual"] = Topic(60, CyberpunkPink),
             ["documents"] = Topic(150, 0xB9D5E8),
-            ["caution"] = Readable(cyberpunk ? Color.FromArgb(255, 255, 74, 89) : caution),
+            ["caution"] = cyberpunk ? Topic(0, CyberpunkRed) : Readable(caution),
         };
         foreach (var role in colors.Keys.ToArray())
             colors[role + "Foreground"] = App.ContrastForeground(colors[role]);

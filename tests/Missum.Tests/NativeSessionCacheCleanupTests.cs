@@ -298,7 +298,7 @@ public sealed class NativeSessionCacheCleanupTests
 
     private static AssistantCoordinator Coordinator(TestEnvironment environment, SettingsCoordinator settings,
         NativeSessionCacheCleanupService cleanup) => new(environment.Get<IChatRepository>(), environment.Get<IDocumentIngestor>(),
-            environment.Get<IContextAssembler>(), environment.Get<IPromptTriggerRepository>(), environment.Get<IAssistantAttachmentRepository>(),
+            environment.Get<IContextAssembler>(), environment.Get<IAssistantAttachmentRepository>(),
             environment.Get<IChatArtifactRepository>(), environment.Get<IConversationSnapshotRepository>(), null, settings,
             new RecentActivityService(settings, new ShellViewModel(), NullLogger<RecentActivityService>.Instance), cacheCleanup: cleanup);
 

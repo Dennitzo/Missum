@@ -8,6 +8,21 @@ public sealed class NativeModelRootRuntimeTests
     private static readonly Uri Gateway = new("http://localhost:8080");
 
     [Fact]
+    public async Task ExistingHubRuntimeIsRecognizedAsTheSameHuggingFaceCache()
+    {
+        var root = NativeModelRuntimeService.ResolveModelRoot(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+        var stops = 0;
+        using var service = new NativeModelRuntimeService(_ => true, _ => Task.FromResult(true), _ => Task.CompletedTask,
+            stop: _ => { stops++; return Task.CompletedTask; },
+            modelRoot: () => root, runningModelRoot: _ => Task.FromResult<string?>(Path.Combine(root, "hub")));
+
+        await service.EnsureStartedAsync(Gateway, CancellationToken.None);
+
+        Assert.Equal(0, stops);
+    }
+
+    [Fact]
     public async Task SavedRootChangeBypassesProbeCacheAndRestartsOnlyIdleOwnedRuntime()
     {
         var desired = @"C:\models";
@@ -121,13 +136,13 @@ public sealed class NativeModelRootRuntimeTests
     }
 
     [Fact]
-    public void ManagerReceivesUncFolderAsOneLiteralArgumentAndKeepsCacheLocal()
+    public void ManagerUsesFixedUserHuggingFaceFolderAndKeepsCacheLocal()
     {
         var profile = new AssistantRuntimeProfile("stable", "Missum", @"C:\app-data", Gateway, 8081, 8082,
             @"C:\native-state", @"C:\native\llama-server.exe", @"C:\stack", "test");
         var arguments = NativeModelRuntimeService.BuildRuntimeManagerArguments(profile, "Start", @"C:\support",
-            @"C:\native-state\error.txt", @"C:\user", nativeModelRoot: Nas);
-        Assert.Equal(Nas, arguments[Array.IndexOf(arguments, "-ModelRoot") + 1]);
+            @"C:\native-state\error.txt", @"C:\user");
+        Assert.Equal(@"C:\user\.cache\huggingface", arguments[Array.IndexOf(arguments, "-ModelRoot") + 1]);
         Assert.Equal(profile.NativeStateDirectory, arguments[Array.IndexOf(arguments, "-StateDirectory") + 1]);
     }
 }

@@ -43,9 +43,8 @@ public sealed class DeepResearchActivityTests
             environment.Get<IChatArtifactRepository>(), environment.Get<IMissumAiRunRepository>(), environment.Get<IClientToolExecutionRepository>(),
             environment.Get<IBinaryObjectStore>(), documents, new DocumentContextPreparationService(documents),
             new SessionContextPreparationService(chats), broker, null!, microphone, settings, recent, NullLogger<MissumAiAssistantService>.Instance);
-        var coordinator = new AssistantCoordinator(chats, documents, environment.Get<IContextAssembler>(), environment.Get<IPromptTriggerRepository>(),
-            environment.Get<IAssistantAttachmentRepository>(), environment.Get<IChatArtifactRepository>(), environment.Get<IConversationSnapshotRepository>(),
-            service, settings, recent, microphone);
+        var coordinator = new AssistantCoordinator(chats, documents, environment.Get<IContextAssembler>(), environment.Get<IAssistantAttachmentRepository>(), environment.Get<IChatArtifactRepository>(), environment.Get<IConversationSnapshotRepository>(),
+            service, settings, recent);
         var observations = new List<JsonElement>();
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         await coordinator.HandleAsync(new(AssistantProtocol.ProtocolVersion, "chat.send", "observed-research",
@@ -327,7 +326,7 @@ public sealed class DeepResearchActivityTests
         await settings.InitializeAsync();
         var recent = new RecentActivityService(settings, new ShellViewModel(), NullLogger<RecentActivityService>.Instance);
         var coordinator = new AssistantCoordinator(chats, environment.Get<IDocumentIngestor>(), environment.Get<IContextAssembler>(),
-            environment.Get<IPromptTriggerRepository>(), environment.Get<IAssistantAttachmentRepository>(), environment.Get<IChatArtifactRepository>(),
+            environment.Get<IAssistantAttachmentRepository>(), environment.Get<IChatArtifactRepository>(),
             environment.Get<IConversationSnapshotRepository>(), null, settings, recent);
         var agent = SubagentChatState.DeepResearchAgentId(parent.Id, original.Id);
         JsonElement loaded = default;

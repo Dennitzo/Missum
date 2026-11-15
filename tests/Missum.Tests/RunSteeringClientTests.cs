@@ -1,4 +1,4 @@
-﻿using Missum.Ai.Contracts;
+using Missum.Ai.Contracts;
 using Missum.App.Services;
 using Missum.App.ViewModels;
 using Missum.Core.Contracts;
@@ -107,8 +107,7 @@ public sealed class RunSteeringClientTests
         await Assert.ThrowsAsync<InvalidOperationException>(() => service.SteerAsync(Guid.NewGuid(), "Fremd", "wrong", "run-steer", deadline.Token));
         await Assert.ThrowsAsync<InvalidOperationException>(() => service.SteerAsync(session.Id, "Anderer Lauf", "wrong-run", "stale-run", deadline.Token));
         var coordinator = new AssistantCoordinator(chats, environment.Get<IDocumentIngestor>(),
-            environment.Get<IContextAssembler>(), environment.Get<IPromptTriggerRepository>(),
-            environment.Get<IAssistantAttachmentRepository>(), environment.Get<IChatArtifactRepository>(),
+            environment.Get<IContextAssembler>(), environment.Get<IAssistantAttachmentRepository>(), environment.Get<IChatArtifactRepository>(),
             environment.Get<IConversationSnapshotRepository>(), service, settings, recent);
         var steeringEnvelope = new WebBridgeEnvelope(AssistantProtocol.ProtocolVersion, "chat.steer", "steer-title",
             JsonSerializer.SerializeToElement(new { sessionId = session.Id, prompt = "Nur die Änderung erklären.",

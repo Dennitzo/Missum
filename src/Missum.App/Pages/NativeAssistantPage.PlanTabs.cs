@@ -13,11 +13,12 @@ public sealed partial class NativeAssistantPage
     private readonly ContentControl _planModeTabHost = new() { Visibility = Visibility.Collapsed,
         HorizontalContentAlignment = HorizontalAlignment.Stretch, VerticalContentAlignment = VerticalAlignment.Stretch };
 
-    private Button PlanSummaryCard(Guid session, string messageId, string title, string fullPlan)
+    private Button PlanSummaryCard(Guid session, string messageId, string title, string fullPlan, bool hasOpenQuestions)
     {
         title = string.IsNullOrWhiteSpace(title) ? "Plan" : title.Trim();
         var text = new StackPanel { Spacing = 8 };
-        text.Children.Add(new TextBlock { Text = "Plan", FontSize = 12, Foreground = ThemeBrush("MissumMutedTextBrush", 180) });
+        text.Children.Add(new TextBlock { Text = hasOpenQuestions ? "Planentwurf" : "Plan", FontSize = 12,
+            Foreground = ThemeBrush("MissumMutedTextBrush", 180) });
         var heading = PlanLabel(title, bold: true); heading.FontSize = 18;
         text.Children.Add(heading);
         var (section, preview) = PlanPreviewParts(fullPlan, title);

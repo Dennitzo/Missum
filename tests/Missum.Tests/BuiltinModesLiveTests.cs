@@ -58,8 +58,8 @@ public sealed class BuiltinModesLiveTests(ITestOutputHelper output)
             documents, new DocumentContextPreparationService(documents), new SessionContextPreparationService(chats), broker,
             null!, microphone, settings, recent, NullLogger<MissumAiAssistantService>.Instance, extensionActions: catalog);
         var coordinator = new AssistantCoordinator(chats, documents,
-            environment.Get<IContextAssembler>(), environment.Get<IPromptTriggerRepository>(), environment.Get<IAssistantAttachmentRepository>(),
-            artifacts, environment.Get<IConversationSnapshotRepository>(), service, settings, recent, microphone, profile, catalog);
+            environment.Get<IContextAssembler>(), environment.Get<IAssistantAttachmentRepository>(),
+            artifacts, environment.Get<IConversationSnapshotRepository>(), service, settings, recent, profile, catalog);
         var events = new ConcurrentQueue<(string Type, JsonElement Payload)>();
         var receipts = new List<object>();
         try

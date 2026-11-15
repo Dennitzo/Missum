@@ -23,6 +23,29 @@ public sealed class AssistantHostTests
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
     [Fact]
+    public async Task LegacyTriggerPhrasesAndCancelWordAreTreatedAsOrdinaryPrompts()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var session = await fixture.Environment.Get<IChatRepository>().CreateSessionAsync("Ordinary prompt");
+        var repository = fixture.Environment.Get<IPromptTriggerRepository>();
+        var now = DateTimeOffset.UtcNow;
+        await repository.CreateAsync(new PromptTrigger(Guid.NewGuid(), PromptTriggerAction.TextToSpeech,
+            "test-vorlesen", "", PromptTriggerMatchMode.Prefix, true, 1000, 0, now, now));
+        await repository.CreateAsync(new PromptTrigger(Guid.NewGuid(), PromptTriggerAction.ImageAnalysis,
+            "test-bild", "", PromptTriggerMatchMode.Prefix, true, 1000, 0, now, now));
+
+        var speech = JsonSerializer.SerializeToElement(new { sessionId = session.Id, prompt = "test-vorlesen diesen Satz" });
+        var image = JsonSerializer.SerializeToElement(new { sessionId = session.Id, prompt = "test-bild diese Szene" });
+        Assert.False(await fixture.Coordinator.IsSpeechRequestAsync(speech));
+        Assert.Null(await fixture.Coordinator.GetRequiredMediaCaptureAsync(image));
+
+        var events = new Events();
+        await fixture.Host.HandleAsync("desktop", Envelope("chat.send", new { sessionId = session.Id, prompt = "abbrechen" }), events.Emit);
+        Assert.Contains(events.Items, item => item.Type == "chat.queued");
+        Assert.DoesNotContain(events.Items, item => item.Type == "speech.status");
+    }
+
+    [Fact]
     public async Task ManualCompactionPassesHostProtocolAndDispatchesToTheAiService()
     {
         await using var fixture = await Fixture.CreateAsync();
@@ -376,13 +399,13 @@ public sealed class AssistantHostTests
         var backupPath = Path.Combine(fixture.Environment.Directory, "restore-admission.missumbackup");
         await fixture.Environment.Get<IBackupService>().CreateAsync(backupPath, timeout.Token);
         var later = await chats.CreateSessionAsync("Noch nicht eingeplanter Auftrag");
-        fixture.Triggers.BlockingPrompt = "Zugelassener Auftrag";
+        fixture.BlockingChats.BlockingSessionId = later.Id;
         var owner = new Events();
         var desktop = new Events();
         using var subscription = fixture.Host.Subscribe("desktop", desktop.Emit);
-        var request = Envelope("chat.send", new { sessionId = later.Id, prompt = fixture.Triggers.BlockingPrompt });
+        var request = Envelope("chat.send", new { sessionId = later.Id, prompt = "Zugelassener Auftrag" });
         var send = fixture.Host.HandleAsync("mac", request, owner.Emit, timeout.Token);
-        await fixture.Triggers.Entered.Task.WaitAsync(timeout.Token);
+        await fixture.BlockingChats.Entered.Task.WaitAsync(timeout.Token);
         Assert.True(fixture.Scheduler.Snapshot.IsIdle);
         var replay = new Events();
         await fixture.Host.HandleAsync("mac", request, replay.Emit, timeout.Token);
@@ -409,7 +432,7 @@ public sealed class AssistantHostTests
             var rejected = new Events();
             await fixture.Host.HandleAsync("other-mac", Envelope("chat.send", new { sessionId = saved.Id, prompt = "Zu spät" }), rejected.Emit, timeout.Token);
             Assert.Contains(rejected.Items, item => item.Type == "host.error");
-            fixture.Triggers.Release.TrySetResult();
+            fixture.BlockingChats.Release.TrySetResult();
             await send.WaitAsync(timeout.Token);
             Assert.Contains(owner.Items, item => item.Type == "chat.queued");
             await restoring.WaitAsync(timeout.Token);
@@ -417,7 +440,7 @@ public sealed class AssistantHostTests
         }
         finally
         {
-            fixture.Triggers.Release.TrySetResult();
+            fixture.BlockingChats.Release.TrySetResult();
             await send.WaitAsync(timeout.Token);
             await restoring.WaitAsync(timeout.Token);
         }
@@ -467,16 +490,18 @@ public sealed class AssistantHostTests
             Settings = settings;
             Gateway = new GatewayState();
             Scheduler = new(NullLogger<ProfileAssistantRunScheduler>.Instance);
-            Triggers = new(environment.Get<IPromptTriggerRepository>());
+            var chatProxy = System.Reflection.DispatchProxy.Create<IChatRepository, BlockingChatRepository>();
+            BlockingChats = (BlockingChatRepository)chatProxy;
+            BlockingChats.Inner = environment.Get<IChatRepository>();
             _connection = new(settings, NullLogger<MissumAiConnectionService>.Instance, () => new GatewayHandler(Gateway));
             if (reasoning) _ai = new(_connection, null!, null!, null!, null!, null!, null!, null!, null!,
                 null!, null!, null!, null!, settings, null!, NullLogger<MissumAiAssistantService>.Instance);
-            _preferences = new(settings, _connection, environment.Get<IPromptTriggerRepository>(), environment.Get<IBackupService>());
+            _preferences = new(settings, _connection, environment.Get<IBackupService>());
             _science = new(null!);
             _previews = new(environment.Get<IChatArtifactRepository>(), environment.Get<IBinaryObjectStore>(), Path.Combine(environment.Directory, "Previews"));
             var recent = new RecentActivityService(settings, new ShellViewModel(), NullLogger<RecentActivityService>.Instance);
-            Coordinator = new(environment.Get<IChatRepository>(), environment.Get<IDocumentIngestor>(), environment.Get<IContextAssembler>(),
-                Triggers, environment.Get<IAssistantAttachmentRepository>(), environment.Get<IChatArtifactRepository>(),
+            Coordinator = new(chatProxy, environment.Get<IDocumentIngestor>(), environment.Get<IContextAssembler>(),
+                environment.Get<IAssistantAttachmentRepository>(), environment.Get<IChatArtifactRepository>(),
                 environment.Get<IConversationSnapshotRepository>(), _ai, settings, recent, runScheduler: Scheduler);
             var services = new ServiceCollection().AddLogging()
                 .AddSingleton(_connection).AddSingleton(_preferences).AddSingleton(_science).AddSingleton(_previews)
@@ -491,7 +516,7 @@ public sealed class AssistantHostTests
         public SettingsCoordinator Settings { get; }
         public AssistantCoordinator Coordinator { get; }
         public ProfileAssistantRunScheduler Scheduler { get; }
-        public BlockingPromptTriggers Triggers { get; }
+        public BlockingChatRepository BlockingChats { get; }
         public ServiceProvider Services { get; }
         public AssistantHost Host { get; }
         public GatewayState Gateway { get; }
@@ -519,24 +544,25 @@ public sealed class AssistantHostTests
         }
     }
 
-    private sealed class BlockingPromptTriggers(IPromptTriggerRepository inner) : IPromptTriggerRepository
+    public class BlockingChatRepository : System.Reflection.DispatchProxy
     {
-        public string? BlockingPrompt { get; set; }
+        public IChatRepository Inner { get; set; } = null!;
+        public Guid? BlockingSessionId { get; set; }
         public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public Task<IReadOnlyList<PromptTrigger>> ListAsync(CancellationToken cancellationToken = default) => inner.ListAsync(cancellationToken);
-        public Task<PromptTrigger?> GetAsync(Guid id, CancellationToken cancellationToken = default) => inner.GetAsync(id, cancellationToken);
-        public Task<PromptTrigger> CreateAsync(PromptTrigger trigger, CancellationToken cancellationToken = default) => inner.CreateAsync(trigger, cancellationToken);
-        public Task<PromptTrigger> UpdateAsync(PromptTrigger trigger, long expectedRevision, CancellationToken cancellationToken = default) => inner.UpdateAsync(trigger, expectedRevision, cancellationToken);
-        public Task DeleteAsync(Guid id, long expectedRevision, CancellationToken cancellationToken = default) => inner.DeleteAsync(id, expectedRevision, cancellationToken);
-        public async Task<PromptTriggerMatch?> MatchAsync(string prompt, CancellationToken cancellationToken = default)
+        protected override object? Invoke(System.Reflection.MethodInfo? targetMethod, object?[]? args)
         {
-            if (prompt == BlockingPrompt)
-            {
-                Entered.TrySetResult();
-                await Release.Task.WaitAsync(cancellationToken);
-            }
-            return await inner.MatchAsync(prompt, cancellationToken);
+            if (targetMethod is null || args is null) throw new InvalidOperationException();
+            if (targetMethod.Name == nameof(IChatRepository.GetSessionAsync) && args[0] is Guid id && id == BlockingSessionId)
+                return GetBlockedSessionAsync(id, (CancellationToken)args[1]!);
+            return targetMethod.Invoke(Inner, args);
+        }
+        private async Task<ChatSession?> GetBlockedSessionAsync(Guid id, CancellationToken cancellationToken)
+        {
+            BlockingSessionId = null;
+            Entered.TrySetResult();
+            await Release.Task.WaitAsync(cancellationToken);
+            return await Inner.GetSessionAsync(id, cancellationToken);
         }
     }
 

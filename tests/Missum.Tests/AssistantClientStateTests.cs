@@ -351,7 +351,6 @@ public sealed class AssistantClientStateTests
         await settings.InitializeAsync();
         var chats = environment.Get<IChatRepository>();
         var session = await chats.CreateSessionAsync("Persistent tool");
-        await environment.Get<IPromptTriggerRepository>().CreateAsync(CreateTrigger(PromptTriggerAction.Audiobook, "queued-story"));
         using var views = new AssistantClientStateStore(environment.Directory);
         await using var scheduler = new ProfileAssistantRunScheduler(NullLogger<ProfileAssistantRunScheduler>.Instance);
         var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -362,7 +361,7 @@ public sealed class AssistantClientStateTests
         var coordinator = CreateCoordinator(environment, settings, scheduler);
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using (AssistantClientExecutionScope.Enter(views, "mac"))
-            await coordinator.HandleAsync(ChatEnvelope(session.Id, "queued-story create a new story"),
+            await coordinator.HandleAsync(ChatEnvelope(session.Id, "create a new story", BuiltInActionIds.CreateAudiobook),
                 (type, _, _) => { if (type == "host.error") completion.TrySetResult(); return Task.CompletedTask; }, timeout.Token);
         Assert.Equal(BuiltInActionIds.CreateAudiobook, (await chats.GetSessionAsync(session.Id))?.PersistentExtensionActionId);
         await chats.SetPersistentExtensionActionIdAsync(session.Id, BuiltInActionIds.PlanMode);
@@ -378,15 +377,12 @@ public sealed class AssistantClientStateTests
     {
         var recentActivity = new RecentActivityService(settings, new ShellViewModel(), NullLogger<RecentActivityService>.Instance);
         return new(environment.Get<IChatRepository>(), environment.Get<IDocumentIngestor>(), environment.Get<IContextAssembler>(),
-            environment.Get<IPromptTriggerRepository>(), environment.Get<IAssistantAttachmentRepository>(),
+            environment.Get<IAssistantAttachmentRepository>(),
             environment.Get<IChatArtifactRepository>(), environment.Get<IConversationSnapshotRepository>(), null,
             settings, recentActivity, runScheduler: scheduler);
     }
-    private static WebBridgeEnvelope ChatEnvelope(Guid sessionId, string prompt) =>
-        new(2, "chat.send", Guid.NewGuid().ToString("N"), JsonSerializer.SerializeToElement(new { sessionId, prompt }));
-    private static PromptTrigger CreateTrigger(PromptTriggerAction action, string phrase) =>
-        new(Guid.NewGuid(), action, phrase, "Queue regression", PromptTriggerMatchMode.Prefix, true, 100, 0,
-            DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
+    private static WebBridgeEnvelope ChatEnvelope(Guid sessionId, string prompt, string extensionActionId) =>
+        new(2, "chat.send", Guid.NewGuid().ToString("N"), JsonSerializer.SerializeToElement(new { sessionId, prompt, extensionActionId }));
 
     private sealed class RecordingGatewayProbe : HttpMessageHandler
     {

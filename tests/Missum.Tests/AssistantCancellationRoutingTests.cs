@@ -57,8 +57,7 @@ public sealed class AssistantCancellationRoutingTests
             settings, recent, NullLogger<MissumAiAssistantService>.Instance);
         await using var scheduler = new ProfileAssistantRunScheduler(NullLogger<ProfileAssistantRunScheduler>.Instance);
         var coordinator = new AssistantCoordinator(chats, environment.Get<IDocumentIngestor>(),
-            environment.Get<IContextAssembler>(), environment.Get<IPromptTriggerRepository>(),
-            environment.Get<IAssistantAttachmentRepository>(), environment.Get<IChatArtifactRepository>(),
+            environment.Get<IContextAssembler>(), environment.Get<IAssistantAttachmentRepository>(), environment.Get<IChatArtifactRepository>(),
             environment.Get<IConversationSnapshotRepository>(), service, settings, recent, runScheduler: scheduler);
         var updates = new ConcurrentQueue<MissumAiAssistantUpdate>();
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));

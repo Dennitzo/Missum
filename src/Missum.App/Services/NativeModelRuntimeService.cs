@@ -33,7 +33,7 @@ public sealed class NativeModelRuntimeService : IDisposable
     public NativeModelRuntimeService()
         : this(AssistantRuntimeProfile.Resolve()) { }
 
-    public NativeModelRuntimeService(AssistantRuntimeProfile profile, SettingsCoordinator? settings = null)
+    public NativeModelRuntimeService(AssistantRuntimeProfile profile)
         : this(
             IsLocalGateway,
             token => ProbeAsync(profile.NativePort, token),
@@ -42,10 +42,9 @@ public sealed class NativeModelRuntimeService : IDisposable
             token => RunInstalledRuntimeAsync(profile, "Stop", token),
             runtimeEndpoint: $"http://127.0.0.1:{profile.NativePort}",
             stopOwned: token => RunInstalledRuntimeAsync(profile, "Stop", token, ownedShutdown: true),
-            modelRoot: () => ResolveModelRoot(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), profile,
-                settings?.Current.NativeModelRoot),
+            modelRoot: () => ResolveModelRoot(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)),
             runningModelRoot: token => ReadRunningModelRootAsync(profile.NativeStateDirectory, token),
-            startAtModelRoot: (root, token) => RunInstalledRuntimeAsync(profile, "Start", token, modelRoot: root),
+            startAtModelRoot: (_, token) => RunInstalledRuntimeAsync(profile, "Start", token),
             validateModelRoot: ValidateModelRootAsync)
     {
         _cacheCleanup = new(profile);
@@ -151,9 +150,18 @@ public sealed class NativeModelRuntimeService : IDisposable
 
     public void BeginShutdown() => Interlocked.Exchange(ref _stopping, 1);
 
-    private static bool SameModelRoot(string? left, string? right) => string.Equals(
-        left is null ? null : Path.TrimEndingDirectorySeparator(Path.GetFullPath(left)),
-        right is null ? null : Path.TrimEndingDirectorySeparator(Path.GetFullPath(right)), StringComparison.OrdinalIgnoreCase);
+    private static bool SameModelRoot(string? left, string? right)
+    {
+        var first = left is null ? null : Path.TrimEndingDirectorySeparator(Path.GetFullPath(left));
+        var second = right is null ? null : Path.TrimEndingDirectorySeparator(Path.GetFullPath(right));
+        if (string.Equals(first, second, StringComparison.OrdinalIgnoreCase)) return true;
+        // Older sessions report the hub subfolder; the catalog resolves both
+        // forms to the same cache, so switching between them must not restart it.
+        var cache = ResolveModelRoot(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+        var hub = Path.Combine(cache, "hub");
+        return (string.Equals(first, cache, StringComparison.OrdinalIgnoreCase) && string.Equals(second, hub, StringComparison.OrdinalIgnoreCase))
+            || (string.Equals(second, cache, StringComparison.OrdinalIgnoreCase) && string.Equals(first, hub, StringComparison.OrdinalIgnoreCase));
+    }
 
     private static async Task<string?> ReadRunningModelRootAsync(string stateDirectory, CancellationToken token)
     {
@@ -313,8 +321,7 @@ public sealed class NativeModelRuntimeService : IDisposable
         AssistantRuntimeProfile profile,
         string action,
         CancellationToken cancellationToken,
-        bool ownedShutdown = false,
-        string? modelRoot = null)
+        bool ownedShutdown = false)
     {
         var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         var stateDirectory = profile.NativeStateDirectory;
@@ -360,7 +367,7 @@ public sealed class NativeModelRuntimeService : IDisposable
         // PowerShell launcher exits. Never wait for its process-lifetime stdout EOF.
         var errorFile = Path.Combine(stateDirectory, "startup-" + Guid.NewGuid().ToString("N") + ".error.txt");
         foreach (var argument in BuildRuntimeManagerArguments(profile, action, supportDirectory, errorFile, userProfile,
-                     shutdownTimeoutSeconds: ownedShutdown ? 20 : null, nativeModelRoot: modelRoot))
+                     shutdownTimeoutSeconds: ownedShutdown ? 20 : null))
             info.ArgumentList.Add(argument);
         using var process = new Process { StartInfo = info };
         if (!process.Start()) throw new InvalidOperationException("Der Starthelfer für Windows llama.cpp konnte nicht gestartet werden.");
@@ -448,8 +455,7 @@ public sealed class NativeModelRuntimeService : IDisposable
         string supportDirectory,
         string errorFile,
         string userProfile,
-        int? shutdownTimeoutSeconds = null,
-        string? nativeModelRoot = null)
+        int? shutdownTimeoutSeconds = null)
     {
         if (shutdownTimeoutSeconds is <= 0 or > 600)
             throw new ArgumentOutOfRangeException(nameof(shutdownTimeoutSeconds));
@@ -459,7 +465,7 @@ public sealed class NativeModelRuntimeService : IDisposable
             Path.Combine(supportDirectory, "windows", "manage-coding-llama.ps1"),
             "-Action", action,
             "-StateDirectory", profile.NativeStateDirectory,
-            "-ModelRoot", ResolveModelRoot(userProfile, profile, nativeModelRoot),
+            "-ModelRoot", ResolveModelRoot(userProfile),
             "-BinaryPath", profile.NativeBinaryPath,
             "-Port", profile.NativePort.ToString(System.Globalization.CultureInfo.InvariantCulture),
             "-ErrorFile", errorFile,
@@ -469,23 +475,8 @@ public sealed class NativeModelRuntimeService : IDisposable
         ];
     }
 
-    internal static string ResolveModelRoot(string userProfile)
-    {
-        return ResolveModelRoot(userProfile, AssistantRuntimeProfile.Resolve());
-    }
-
-    private static string ResolveModelRoot(string userProfile, AssistantRuntimeProfile profile, string? nativeModelRoot = null)
-    {
-        if (NativeModelRootPath.Normalize(nativeModelRoot) is { } selected) return selected;
-        var stackEnvironment = Path.Combine(profile.StackDataRoot, "stack.env");
-        if (!File.Exists(stackEnvironment))
-            stackEnvironment = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "Missum-AI-Stack", "stack.env");
-        IEnumerable<string> values = File.Exists(stackEnvironment) ? File.ReadLines(stackEnvironment) : [];
-        var configured = values.FirstOrDefault(line => line.StartsWith("MISSUM_AI_NATIVE_MODEL_ROOT=", StringComparison.Ordinal))
-            ?? values.FirstOrDefault(line => line.StartsWith("MISSUM_AI_CODING_MODEL_ROOT=", StringComparison.Ordinal));
-        var modelRoot = configured?[(configured.IndexOf('=') + 1)..].Trim();
-        return string.IsNullOrWhiteSpace(modelRoot) ? Path.Combine(userProfile, ".cache", "huggingface", "hub") : Path.GetFullPath(modelRoot);
-    }
+    internal static string ResolveModelRoot(string userProfile) =>
+        Path.GetFullPath(Path.Combine(userProfile, ".cache", "huggingface"));
 
     public void Dispose() => _gate.Dispose();
 }

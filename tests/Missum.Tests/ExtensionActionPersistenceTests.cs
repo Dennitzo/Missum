@@ -12,15 +12,17 @@ namespace Missum.Tests;
 public sealed class ExtensionActionPersistenceTests
 {
     [Fact]
-    public void ClaudeScienceReceivesSharedExtensionActionsWhilePlanModeRemainsCodingOnly()
+    public void ClaudeScienceCatalogOffersTheSelectablePlanMode()
     {
-        var actions = BuiltInExtensionCatalog.Actions;
+        var catalog = ExtensionActionCatalog.CreateWithBuiltIns();
+        var scienceActions = catalog.GetActions(ExtensionChatMode.ClaudeScience);
 
-        Assert.All(actions.Where(action => action.ActionId != BuiltInActionIds.PlanMode), action =>
-            Assert.Contains(ExtensionChatMode.ClaudeScience, action.SupportedChatModes));
-        Assert.DoesNotContain(
-            ExtensionChatMode.ClaudeScience,
-            actions.Single(action => action.ActionId == BuiltInActionIds.PlanMode).SupportedChatModes);
+        var plan = Assert.Single(scienceActions, action => action.ActionId == BuiltInActionIds.PlanMode);
+        Assert.Equal(BuiltInExtensionCatalog.GroupPlanning, plan.GroupId);
+        Assert.Equal(ExtensionActionKind.SelectableTool, plan.ActionKind);
+        Assert.Equal(ExtensionSelectionBehavior.Toggle, plan.SelectionBehavior);
+        Assert.DoesNotContain(scienceActions, action => action.ActionId == BuiltInActionIds.ComputerUse);
+        Assert.DoesNotContain(catalog.GetActions(ExtensionChatMode.General), action => action.ActionId == BuiltInActionIds.PlanMode);
     }
 
     [Fact]

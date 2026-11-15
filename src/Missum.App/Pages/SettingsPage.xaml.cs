@@ -7,7 +7,6 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.Windows.AppLifecycle;
 using Windows.Storage.Pickers;
-using WinUI.TableView;
 using WinRT.Interop;
 
 namespace Missum.App.Pages;
@@ -48,6 +47,7 @@ public sealed partial class SettingsPage : Page
         new("Grau", "#858A94", Windows.UI.Color.FromArgb(255, 133, 138, 148)),
         new("Dunkel", "#34313B", Windows.UI.Color.FromArgb(255, 52, 49, 59)),
         new("Schwarz", "#000000", Windows.UI.Color.FromArgb(255, 0, 0, 0)),
+        new("Cyberpunk 2077", "#261D45", Windows.UI.Color.FromArgb(255, 38, 29, 69)),
         new("Lila", "#A970FF", Windows.UI.Color.FromArgb(255, 169, 112, 255)),
         new("Violett", "#7C5CFC", Windows.UI.Color.FromArgb(255, 124, 92, 252)),
         new("Blau", "#4C8DFF", Windows.UI.Color.FromArgb(255, 76, 141, 255)),
@@ -71,7 +71,6 @@ public sealed partial class SettingsPage : Page
         {
             await ViewModel.InitializeAsync();
             SynchronizeControls();
-            UpdatePromptTriggerSortIndicators();
             if (!_sharedSettingsSubscribed)
             {
                 App.Current.GetService<AssistantSettingsService>().Changed += OnSharedSettingsChanged;
@@ -100,7 +99,6 @@ public sealed partial class SettingsPage : Page
         {
             await ViewModel.InitializeAsync();
             SynchronizeControls();
-            UpdatePromptTriggerSortIndicators();
         });
     });
 
@@ -116,10 +114,6 @@ public sealed partial class SettingsPage : Page
                 string.Equals(color.Value, ViewModel.AccentColor, StringComparison.OrdinalIgnoreCase));
             BackgroundColorList.SelectedItem = BackgroundColors.FirstOrDefault(color =>
                 string.Equals(color.Value, ViewModel.BackgroundColor, StringComparison.OrdinalIgnoreCase));
-            if (NewTriggerActionBox.SelectedItem is null && ViewModel.TriggerActions.Count > 0)
-            {
-                NewTriggerActionBox.SelectedIndex = 0;
-            }
         }
         finally
         {
@@ -150,138 +144,12 @@ public sealed partial class SettingsPage : Page
         });
     }
 
-    private async void OnSelectNativeModelRoot(object sender, RoutedEventArgs e)
-    {
-        await RunActionAsync(async () =>
-        {
-            var picker = new FolderPicker { SuggestedStartLocation = PickerLocationId.ComputerFolder };
-            picker.FileTypeFilter.Add("*");
-            InitializePicker(picker);
-            var folder = await picker.PickSingleFolderAsync();
-            if (folder is not null)
-                ViewModel.NativeModelRoot = NativeModelRootPath.Normalize(folder.Path)
-                    ?? throw new InvalidOperationException("Der ausgewählte Ordner besitzt keinen Dateisystempfad.");
-        });
-    }
-
     private void OnCaptionLanguageChanged(object sender, SelectionChangedEventArgs e)
     {
         if (!_synchronizing && (CaptionLanguageBox.SelectedItem as ComboBoxItem)?.Tag is string value)
         {
             ViewModel.LiveCaptionLanguage = value;
         }
-    }
-
-    private void OnAddTrigger(object sender, RoutedEventArgs e)
-    {
-        if (NewTriggerActionBox.SelectedItem is not PromptTriggerActionOption option)
-        {
-            ShowStatus("Bitte zuerst einen Dienst auswählen.", InfoBarSeverity.Warning);
-            return;
-        }
-
-        try
-        {
-            _ = ViewModel.AddTrigger(option.Value, NewTriggerPhraseBox.Text);
-            NewTriggerPhraseBox.Text = string.Empty;
-            PromptTriggerTable.SelectedItems.Clear();
-            ViewModel.SelectedPromptTrigger = null;
-            ShowStatus("Prompt-Trigger als neue Tabellenzeile hinzugefügt. Mit „Speichern“ in Missum.db übernehmen.", InfoBarSeverity.Success);
-        }
-        catch (Exception exception)
-        {
-            ShowStatus(exception.Message, InfoBarSeverity.Warning);
-        }
-    }
-
-    private void OnPromptTriggerTableSorting(object sender, TableViewSortingEventArgs e)
-    {
-        e.Handled = true;
-        if (e.Column.Tag is not string columnName)
-        {
-            return;
-        }
-
-        ViewModel.SortPromptTriggers(columnName);
-        UpdatePromptTriggerSortIndicators();
-    }
-
-    private void UpdatePromptTriggerSortIndicators()
-    {
-        foreach (var column in PromptTriggerTable.Columns)
-        {
-            column.SortDirection = column.Tag is string columnName
-                && string.Equals(columnName, ViewModel.TriggerSortColumn, StringComparison.Ordinal)
-                    ? ViewModel.TriggerSortDescending
-                        ? SortDirection.Descending
-                        : SortDirection.Ascending
-                    : null;
-        }
-    }
-
-    private void OnPromptTriggerSelectionChanged(object sender, SelectionChangedEventArgs e)
-    {
-        ViewModel.SelectedPromptTrigger = PromptTriggerTable.SelectedItems
-            .OfType<PromptTriggerEditorItem>()
-            .LastOrDefault();
-    }
-
-    private void OnTriggerSearchTextChanged(
-        AutoSuggestBox sender,
-        AutoSuggestBoxTextChangedEventArgs e)
-    {
-        if (e.Reason != AutoSuggestionBoxTextChangeReason.UserInput)
-        {
-            return;
-        }
-
-        PromptTriggerTable.SelectedItems.Clear();
-        ViewModel.SelectedPromptTrigger = null;
-    }
-
-    private void OnPromptTriggerCellEditEnded(
-        object sender,
-        TableViewCellEditEndedEventArgs e)
-    {
-        if (e.EditAction == TableViewEditAction.Commit
-            && e.DataItem is PromptTriggerEditorItem)
-        {
-            ViewModel.RefreshPromptTriggerView();
-        }
-    }
-
-    private async void OnDeleteSelectedTriggers(object sender, RoutedEventArgs e)
-    {
-        var items = PromptTriggerTable.SelectedItems
-            .OfType<PromptTriggerEditorItem>()
-            .Distinct()
-            .ToArray();
-        if (items.Length == 0)
-        {
-            return;
-        }
-
-        var dialog = new ContentDialog
-        {
-            XamlRoot = XamlRoot,
-            Title = $"{items.Length:N0} Prompt-Trigger löschen?",
-            Content = "Die ausgewählten Tabellenzeilen werden beim nächsten Speichern aus Missum.db gelöscht.",
-            PrimaryButtonText = "Zeile löschen",
-            CloseButtonText = "Abbrechen",
-            DefaultButton = ContentDialogButton.Close,
-        };
-        if (await dialog.ShowAsync() != ContentDialogResult.Primary)
-        {
-            return;
-        }
-
-        foreach (var item in items)
-        {
-            ViewModel.RemoveTrigger(item);
-        }
-        PromptTriggerTable.SelectedItems.Clear();
-        ViewModel.SelectedPromptTrigger = null;
-        ShowStatus("Ausgewählte Prompt-Trigger zum Löschen vorgemerkt. Mit „Speichern“ übernehmen.", InfoBarSeverity.Success);
     }
 
     private void OnThemeChanged(object sender, SelectionChangedEventArgs e)

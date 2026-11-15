@@ -6,7 +6,7 @@ public static class AssistantProtocol
     public const int ProtocolVersion = 2;
     private static readonly HashSet<string> AllowedIncomingTypes = new(StringComparer.Ordinal)
     {
-        "settings.get", "settings.update", "settings.connectionTest", "promptTriggers.list", "promptTriggers.apply",
+        "settings.get", "settings.update", "settings.connectionTest",
         "backup.create", "backup.restore", "backup.restoreCommit", "backup.restoreCancel", "models.list", "models.select",
         "chat.resume", "chat.compact", "session.groupDeleteEmpty", "coding.pickWorkspace",
         "app.ready", "conversation.refresh", "conversation.page", "conversation.prompts", "conversation.promptPage", "conversation.blocks.page", "subagent.blocks.page", "tool.details", "subagent.load", "chat.send", "chat.steer", "chat.cancel", "session.create", "session.open",
@@ -22,7 +22,7 @@ public static class AssistantProtocol
     };
     private static readonly HashSet<string> AllowedOutgoingTypes = new(StringComparer.Ordinal)
     {
-        "settings.snapshot", "settings.changed", "settings.conflict", "settings.connectionResult", "promptTriggers.snapshot", "promptTriggers.changed",
+        "settings.snapshot", "settings.changed", "settings.conflict", "settings.connectionResult",
         "backup.ready", "backup.restoreReady", "backup.restoreDeferred", "backup.restored", "backup.cancelled", "models.snapshot", "settings.error",
         "subagent.snapshot", "sources.snapshot", "workingPlan.changed",
         "state.snapshot", "chat.queued", "queue.changed", "chat.started", "chat.delta", "chat.completed",
@@ -37,7 +37,7 @@ public static class AssistantProtocol
     };
     private static readonly HashSet<string> ClientScopedOutgoingTypes = new(StringComparer.Ordinal)
     {
-        "settings.snapshot", "settings.conflict", "settings.connectionResult", "promptTriggers.snapshot", "backup.ready", "backup.restoreReady",
+        "settings.snapshot", "settings.conflict", "settings.connectionResult", "backup.ready", "backup.restoreReady",
         "backup.restored", "backup.restoreDeferred", "backup.cancelled", "models.snapshot", "settings.error",
         "state.snapshot", "conversation.snapshot", "conversation.page", "conversation.prompts", "conversation.promptPage", "conversation.blocks.page", "subagent.blocks.page", "tool.details", "sources.snapshot",
         "session.changed", "session.grouped",

@@ -231,8 +231,10 @@ public static class BuiltInExtensionCatalog
         Immediate(BuiltInActionIds.AttachFilesAndFolders, "Dateien und Ordner", "Dateien oder Ordner zum aktuellen Chat hinzufügen", "attachment", GroupFiles, 10, 10),
         Selectable(BuiltInActionIds.CreateDocument, "Dokumente erstellen", "Word, PDF, Tabellen und Präsentationen erstellen", "document", GroupFiles, 10, 20),
         Immediate(BuiltInActionIds.ExportChatPdf, "Chat als PDF exportieren", "Den vollständigen Chat über den Speicherdialog als PDF exportieren", "pdf", GroupFiles, 10, 30),
-        SelectableCoding(BuiltInActionIds.PlanMode, "Planmodus", "Projekt schreibgeschützt analysieren und vor Änderungen einen umsetzbaren Plan abstimmen", "plan", GroupPlanning, 20, 10),
-        SelectableCoding(BuiltInActionIds.ComputerUse, "Computersteuerung", "Den lokalen Windows-Desktop sehen und bedienen", "computer", GroupIntegrations, 60, 30),
+        Selectable(BuiltInActionIds.PlanMode, "Planmodus", "Projekt schreibgeschützt analysieren und vor Änderungen einen umsetzbaren Plan abstimmen", "plan", GroupPlanning, 20, 10,
+            [ExtensionChatMode.Coding, ExtensionChatMode.ClaudeScience]),
+        Selectable(BuiltInActionIds.ComputerUse, "Computersteuerung", "Den lokalen Windows-Desktop sehen und bedienen", "computer", GroupIntegrations, 60, 30,
+            [ExtensionChatMode.Coding]),
         Selectable(BuiltInActionIds.WebSearch, "Websuche", "Aktuelle Quellen im Web durchsuchen", "web", GroupResearch, 30, 10),
         Selectable(BuiltInActionIds.DeepResearch, "Deep Research", "Eine mehrstufige, quellenbasierte Recherche starten", "research", GroupResearch, 30, 20),
         Selectable(BuiltInActionIds.Lean, "Lean", "Mathematische Aussagen mit Lean 4 und Mathlib formalisieren und Beweise prüfen", "lean", GroupResearch, 30, 30),
@@ -298,19 +300,9 @@ public static class BuiltInExtensionCatalog
         string icon,
         string group,
         int groupOrder,
-        int itemOrder) =>
-        new(actionId, name, description, icon, group, groupOrder, itemOrder, [.. AllModes],
-            ExtensionActionKind.SelectableTool, ExtensionSelectionBehavior.Toggle);
-
-    private static ExtensionActionDescriptor SelectableCoding(
-        string actionId,
-        string name,
-        string description,
-        string icon,
-        string group,
-        int groupOrder,
-        int itemOrder) =>
-        new(actionId, name, description, icon, group, groupOrder, itemOrder, [ExtensionChatMode.Coding],
+        int itemOrder,
+        ExtensionChatMode[]? supportedModes = null) =>
+        new(actionId, name, description, icon, group, groupOrder, itemOrder, [.. (supportedModes ?? AllModes)],
             ExtensionActionKind.SelectableTool, ExtensionSelectionBehavior.Toggle);
 
     private static ExtensionToolDescriptor Tool(

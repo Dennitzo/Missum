@@ -14,14 +14,12 @@ public sealed partial class AssistantCoordinator(
     IChatRepository chats,
     IDocumentIngestor documents,
     IContextAssembler contextAssembler,
-    IPromptTriggerRepository promptTriggers,
     IAssistantAttachmentRepository attachments,
     IChatArtifactRepository artifacts,
     IConversationSnapshotRepository conversationSnapshots,
     MissumAiAssistantService? missumAi,
     SettingsCoordinator settings,
     RecentActivityService recentActivity,
-    MicrophoneTranscriptionService? microphone = null,
     AssistantRuntimeProfile? runtimeProfile = null,
     IExtensionActionCatalog? extensionActions = null,
     IExtensionRuntimeService? extensionRuntime = null,
@@ -1433,8 +1431,7 @@ public sealed partial class AssistantCoordinator(
 
         // Resolve tools when the user submits, not when a waiting run eventually
         // receives the model. A captured null is intentional and stays null.
-        var match = IsCancelCommand(prompt) ? null
-            : await ResolveRequestedMatchAsync(session, prompt, envelope.Payload, cancellationToken).ConfigureAwait(false);
+        var match = await ResolveRequestedMatchAsync(session, prompt, envelope.Payload, cancellationToken).ConfigureAwait(false);
         var persistentActionId = PersistentExtensionActionIdFor(match?.Trigger.Action);
         if (persistentActionId is not null && session.PersistentExtensionActionId != persistentActionId)
         {
@@ -1474,9 +1471,8 @@ public sealed partial class AssistantCoordinator(
         {
             // Commit at admission, before the model slot is available. Execution
             // of this older queued prompt must never rename the session again.
-            if (!IsCancelCommand(prompt))
-                await SaveSubmittedPromptTitleAsync(session, prompt, emit, envelope.RequestId,
-                    CancellationToken.None).ConfigureAwait(false);
+            await SaveSubmittedPromptTitleAsync(session, prompt, emit, envelope.RequestId,
+                CancellationToken.None).ConfigureAwait(false);
             await emit("chat.queued", new
             {
                 ticketId = ticket.TicketId,
@@ -1559,26 +1555,6 @@ public sealed partial class AssistantCoordinator(
         CancellationToken cancellationToken)
     {
         var prompt = GetRequiredString(envelope.Payload, "prompt", 100_000);
-        if (IsCancelCommand(prompt))
-        {
-            if (microphone is not null)
-            {
-                await microphone.StopSpeechAsync(cancellationToken).ConfigureAwait(false);
-            }
-            if (missumAi is not null)
-            {
-                await missumAi.CancelCurrentAsync(CancellationToken.None).ConfigureAwait(false);
-            }
-            await emit("speech.status", new
-            {
-                active = false,
-                status = "Abgebrochen",
-                detail = (string?)null,
-                model = (string?)null,
-                error = (string?)null,
-            }, envelope.RequestId).ConfigureAwait(false);
-            return;
-        }
         var sessionId = queuedInput?.Session.Id ?? GetOptionalGuid(envelope.Payload, "sessionId")
             ?? (await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false)).Id;
         var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
@@ -1789,15 +1765,8 @@ public sealed partial class AssistantCoordinator(
             return match;
         }
 
-        var databaseMatch = await promptTriggers.MatchAsync(prompt, cancellationToken).ConfigureAwait(false);
-        if (databaseMatch?.Trigger.Action == PromptTriggerAction.TextToSpeech)
-        {
-            return databaseMatch;
-        }
-        if (databaseMatch is not null)
-        {
-            return databaseMatch;
-        }
+        // Typed and dictated prompts both reach this path as ordinary text.
+        // Words alone never activate a previously configured trigger.
         if (string.Equals(
             session.PersistentExtensionActionId,
             BuiltInActionIds.CreateAudiobook,
@@ -2055,9 +2024,6 @@ public sealed partial class AssistantCoordinator(
                 break;
         }
     }
-
-    private static bool IsCancelCommand(string prompt) =>
-        prompt.Trim(' ', '.', ',', '!', '?').Equals("abbrechen", StringComparison.OrdinalIgnoreCase);
 
     private async Task EmitPublicationAsync(WebBridgeEnvelope envelope,
         Func<string, object, string?, Task> emit, string? selectedProjectId, CancellationToken cancellationToken)

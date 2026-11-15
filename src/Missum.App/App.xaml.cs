@@ -130,19 +130,16 @@ public partial class App : Application
                 services.AddSingleton<AssistantCoordinator>(static provider =>
                 {
                     var missumAi = provider.GetRequiredService<MissumAiAssistantService>();
-                    var microphone = provider.GetRequiredService<MicrophoneTranscriptionService>();
                     return new AssistantCoordinator(
                         provider.GetRequiredService<IChatRepository>(),
                         provider.GetRequiredService<IDocumentIngestor>(),
                         provider.GetRequiredService<IContextAssembler>(),
-                        provider.GetRequiredService<IPromptTriggerRepository>(),
                         provider.GetRequiredService<IAssistantAttachmentRepository>(),
                         provider.GetRequiredService<IChatArtifactRepository>(),
                         provider.GetRequiredService<IConversationSnapshotRepository>(),
                         missumAi,
                         provider.GetRequiredService<SettingsCoordinator>(),
                         provider.GetRequiredService<RecentActivityService>(),
-                        microphone,
                         provider.GetRequiredService<AssistantRuntimeProfile>(),
                         provider.GetRequiredService<IExtensionActionCatalog>(),
                         provider.GetRequiredService<IExtensionRuntimeService>(),
@@ -1223,6 +1220,22 @@ public partial class App : Application
         double backgroundWeight,
         byte alpha)
     {
+        // The Cyberpunk background preset has deliberate dark surfaces sampled
+        // from the reference; preserve the normal light theme and accessibility palette.
+        if (background.R == 0x26 && background.G == 0x1D && background.B == 0x45)
+        {
+            var cyberpunkRgb = baseRgb switch
+            {
+                0x202020 => 0x261D45u,
+                0x2B2B2B => 0x372963u,
+                0x333333 => 0x100D23u,
+                0x303030 => 0x372963u,
+                0x383838 => 0x48377Au,
+                _ => (uint?)null,
+            };
+            if (cyberpunkRgb is { } rgb)
+                return Windows.UI.Color.FromArgb(alpha, (byte)(rgb >> 16), (byte)(rgb >> 8), (byte)rgb);
+        }
         var baseColor = Windows.UI.Color.FromArgb(
             alpha,
             (byte)(baseRgb >> 16),

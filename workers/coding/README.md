@@ -212,11 +212,11 @@ indefinitely. The existing default layer/single-GPU cache identity is preserved.
 Missum starts the shared native runtime when connecting to its local gateway or
 refreshing the local model catalog. The portable package includes the launcher
 and scanner in `Assets/NativeRuntime`, so this does not require a repository
-checkout. `windows/start-ai-stack.ps1` also starts the same runtime. Its optional
-`-NativeModelRoot` (also accepted as `-CodingModelRoot`) selects another existing model directory. The inspected
-installation uses `C:/Users/AMD/.cache/huggingface/hub`. The native supervisor
+checkout. `windows/start-ai-stack.ps1` also starts the same runtime from the
+server user's fixed `%USERPROFILE%/.cache/huggingface` cache (models reside in
+`hub`). The native supervisor
 uses Missum's own managed CPython interpreter and an official llama.cpp server.
-The runtimes are installed when needed; model files remain in the selected
+The runtimes are installed when needed; model files remain in the
 Hugging Face cache and are neither converted nor moved.
 
 Reasoning uses each model's own template and selected effort, without a Missum

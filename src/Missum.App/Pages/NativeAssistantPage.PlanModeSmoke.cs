@@ -17,7 +17,7 @@ public sealed partial class NativeAssistantPage
 {
     // These fixtures exist only in a separate smoke profile, and remain there so
     // both real chat interactions can be inspected and operated in the window.
-    private async Task VerifyPlanModeInteractionSmokeAsync()
+    private async Task VerifyPlanModeInteractionSmokeAsync(ChatMode mode)
     {
         if (!IsMessageFooterSmoke || Environment.GetEnvironmentVariable("ASSISTANT_DISABLE_RUNTIME_AUTOSTART") != "1")
             throw new InvalidOperationException("Die Planmodus-Prüfung benötigt ein isoliertes Profil ohne Modellstart.");
@@ -59,9 +59,23 @@ public sealed partial class NativeAssistantPage
         {
             kind = "plan", title = planTitle, markdown = planMarkdown,
         }, JsonOptions);
-        var questions = await chats.CreateSessionAsync("Planmodus · Rückfrage", ChatMode.Coding, _lifetime.Token);
-        var plan = await chats.CreateSessionAsync("Planmodus · Abschluss", ChatMode.Coding, _lifetime.Token);
-        var multi = await chats.CreateSessionAsync("Planmodus · Mehrfachfragen", ChatMode.Coding, _lifetime.Token);
+        string[] unresolvedQuestions =
+        [
+            "Soll der Begriff Brennleuchten tatsächlich alle drei Lesarten umfassen, also Dauerlichter, kaltes Gasleuchten und die Frage nach der Brennbarkeit des Metalls, oder soll eine Lesart entfallen.",
+            "Sollen Aufgaben und Musterlösungen in einem gesammelten Anhang stehen oder jeweils direkt am Kapitelende.",
+            "Sind eigene Diagramme und Schemata als Bildmaterial ausreichend, oder stellen Sie Fotografien als Dateien zur Verfügung.",
+        ];
+        var unresolvedPayload = JsonSerializer.Serialize(new
+        {
+            kind = "plan",
+            title = "Plan mit offenen Entscheidungen",
+            markdown = "## Umsetzung\n\nDie Kapitel und Abbildungen vorbereiten.\n\n## Offene Fragen\n\n"
+                + string.Join("\n\n", unresolvedQuestions.Select((question, index) => $"{index + 1}. {question}")),
+        }, JsonOptions);
+        var questions = await chats.CreateSessionAsync("Planmodus · Rückfrage", mode, _lifetime.Token);
+        var plan = await chats.CreateSessionAsync("Planmodus · Abschluss", mode, _lifetime.Token);
+        var multi = await chats.CreateSessionAsync("Planmodus · Mehrfachfragen", mode, _lifetime.Token);
+        var unresolved = await chats.CreateSessionAsync("Planmodus · Offene Entscheidungen", mode, _lifetime.Token);
         // Real project grouping makes both sessions discoverable in the sidebar
         // and supplies the workspace permission boundary used by integrations.
         var project = Path.Combine(App.Current.DataDirectory, "Planmodus-Testprojekt");
@@ -69,23 +83,35 @@ public sealed partial class NativeAssistantPage
         await chats.SetCodingWorkspacePathAsync(questions.Id, project, activateCoding: false, _lifetime.Token);
         await chats.SetCodingWorkspacePathAsync(plan.Id, project, activateCoding: false, _lifetime.Token);
         await chats.SetCodingWorkspacePathAsync(multi.Id, project, activateCoding: false, _lifetime.Token);
+        await chats.SetCodingWorkspacePathAsync(unresolved.Id, project, activateCoding: false, _lifetime.Token);
         var grouped = await chats.GetSessionAsync(questions.Id, _lifetime.Token);
         if (grouped?.SessionGroupId is not { } groupId)
             throw new InvalidOperationException("Die Planmodus-Test-Sitzung besitzt keine Projektgruppe.");
         await chats.SetSessionGroupCollapsedAsync(groupId, false, _lifetime.Token);
         await chats.SetPersistentExtensionActionIdAsync(questions.Id, BuiltInActionIds.PlanMode, _lifetime.Token);
-        await chats.SetPersistentExtensionActionIdAsync(plan.Id, BuiltInActionIds.PlanMode, _lifetime.Token);
         await chats.SetPersistentExtensionActionIdAsync(multi.Id, BuiltInActionIds.PlanMode, _lifetime.Token);
+        await chats.SetPersistentExtensionActionIdAsync(unresolved.Id, BuiltInActionIds.PlanMode, _lifetime.Token);
         var questionMessage = await chats.AddMessageAsync(questions.Id, ChatRole.Assistant,
             "```assistant-plan\n" + questionPayload + "\n```", MessageStatus.Completed, cancellationToken: _lifetime.Token);
         var planMessage = await chats.AddMessageAsync(plan.Id, ChatRole.Assistant,
             "```assistant-plan\n" + planPayload + "\n```", MessageStatus.Completed, cancellationToken: _lifetime.Token);
         var multiMessage = await chats.AddMessageAsync(multi.Id, ChatRole.Assistant,
             "```assistant-plan\n" + multiPayload + "\n```", MessageStatus.Completed, cancellationToken: _lifetime.Token);
+        var unresolvedMessage = await chats.AddMessageAsync(unresolved.Id, ChatRole.Assistant,
+            "```assistant-plan\n" + unresolvedPayload + "\n```", MessageStatus.Completed, cancellationToken: _lifetime.Token);
         var intercepted = new List<(string? Prompt, bool Leave)>();
         _planInteractionSmokeAdapter = (prompt, leave) => { intercepted.Add((prompt, leave)); return Task.CompletedTask; };
 
         await OpenFixtureAsync(plan.Id);
+        await SelectPlanModeFromMenuAsync();
+        Invoke(SelectedToolChip);
+        await WaitForPagingSmokeAsync(() => !_composerToolSelectionBusy && SelectedToolChip.Visibility == Visibility.Collapsed,
+            "Der Planmodus-Chip konnte nicht abgewählt werden.");
+        if ((await chats.GetSessionAsync(plan.Id, _lifetime.Token))?.PersistentExtensionActionId is not null)
+            throw new InvalidOperationException("Das Abwählen des Chips muss den gespeicherten Planmodus zurücksetzen.");
+        await SelectPlanModeFromMenuAsync();
+        RenderMessagesNow();
+        UpdateLayout();
         var planCard = GetCard(planMessage.Id);
         AssertText(planCard, "Diesen Plan implementieren?");
         AssertButton(planCard, "Ja, diesen Plan implementieren");
@@ -122,11 +148,14 @@ public sealed partial class NativeAssistantPage
         if (_activePlanModeTab is not null || _planModeTabHost.Visibility != Visibility.Collapsed
             || Descendants(SessionTabsPanel).OfType<Button>().Any(button => AutomationProperties.GetName(button) == "Plan-Tab: " + planTitle))
             throw new InvalidOperationException("Der Plan-Tab darf in einer anderen Sitzung nicht sichtbar sein.");
-        foreach (var actionId in new[] { "com.missum.blender/edit", "com.missum.unreal/edit" })
+        if (mode == ChatMode.Coding)
         {
-            var descriptor = Items(_snapshot, "actionDescriptors").FirstOrDefault(item => S(item, "actionId") == actionId);
-            if (descriptor.ValueKind != JsonValueKind.Object || S(descriptor, "disabledReason").Length > 0)
-                throw new InvalidOperationException("Die Programmintegration ist im Testprojekt nicht auswählbar: " + actionId + " " + S(descriptor, "disabledReason"));
+            foreach (var actionId in new[] { "com.missum.blender/edit", "com.missum.unreal/edit" })
+            {
+                var descriptor = Items(_snapshot, "actionDescriptors").FirstOrDefault(item => S(item, "actionId") == actionId);
+                if (descriptor.ValueKind != JsonValueKind.Object || S(descriptor, "disabledReason").Length > 0)
+                    throw new InvalidOperationException("Die Programmintegration ist im Testprojekt nicht auswählbar: " + actionId + " " + S(descriptor, "disabledReason"));
+            }
         }
         var questionCard = GetCard(questionMessage.Id);
         AssertText(questionCard, "Welche Kameras soll die Vision-Analyse in der ersten Version auswerten?");
@@ -185,6 +214,36 @@ public sealed partial class NativeAssistantPage
         if (intercepted[0].Prompt?.Contains("Erstes Projekt", StringComparison.Ordinal) != true
             || intercepted[0].Prompt?.Contains("Kamera nach Wunsch", StringComparison.Ordinal) != true)
             throw new InvalidOperationException("Die gemeinsame Antwort aus Option und bestätigtem Freitext ist unvollständig.");
+        intercepted.Clear();
+        await OpenFixtureAsync(unresolved.Id);
+        var unresolvedCard = GetCard(unresolvedMessage.Id);
+        var unresolvedLabels = Descendants(unresolvedCard).OfType<TextBlock>()
+            .Select(block => block.Text.TrimEnd('.', '?')).ToHashSet(StringComparer.Ordinal);
+        foreach (var question in unresolvedQuestions)
+        {
+            if (!unresolvedLabels.Contains(question.TrimEnd('.', '?')))
+                throw new InvalidOperationException("Die native Rückfrage fehlt: " + question);
+        }
+        if (Descendants(unresolvedCard).OfType<Button>().Any(button => AutomationProperties.GetName(button) == "Ja, diesen Plan implementieren"))
+            throw new InvalidOperationException("Ein Plan mit offenen Entscheidungen darf keine Freigabe anbieten.");
+        var unresolvedInputs = Descendants(unresolvedCard).OfType<TextBox>().Where(input => AutomationProperties.GetName(input) == "Eigene Antwort").ToArray();
+        var unresolvedSends = Descendants(unresolvedCard).OfType<Button>().Where(button => AutomationProperties.GetName(button) == "Antworten senden").ToArray();
+        if (unresolvedInputs.Length != 3 || unresolvedSends.Length != 3)
+            throw new InvalidOperationException("Jede offene Entscheidung muss ein natives Freitextfeld mit Pfeil haben.");
+        await SaveMathPreviewAsync(_messageViews[unresolvedMessage.Id.ToString()].View, "native-plan-mode-unresolved-preview.png");
+        string[] unresolvedAnswers = ["Alle drei Lesarten", "Jeweils am Kapitelende", "Eigene Diagramme genügen"];
+        for (var index = 0; index < unresolvedAnswers.Length; index++)
+        {
+            unresolvedInputs[index].Text = unresolvedAnswers[index];
+            await WaitForNativePreviewFrameAsync();
+            Invoke(unresolvedSends[index]);
+            await WaitForNativePreviewFrameAsync();
+            if (index < unresolvedAnswers.Length - 1 && intercepted.Count != 0)
+                throw new InvalidOperationException("Unvollständige Antworten auf offene Entscheidungen dürfen nicht gesendet werden.");
+        }
+        await WaitForPagingSmokeAsync(() => intercepted.Count == 1, "Die Antworten auf offene Entscheidungen wurden nicht gemeinsam gesendet.");
+        if (intercepted[0].Leave || unresolvedAnswers.Any(answer => intercepted[0].Prompt?.Contains(answer, StringComparison.Ordinal) != true))
+            throw new InvalidOperationException("Die Antworten müssen vollständig im Planmodus gesendet werden.");
         // Keep interception enabled in this isolated test window for subsequent
         // manual UI inspection; it must never start a model or mutate a project.
         intercepted.Clear();
@@ -197,8 +256,29 @@ public sealed partial class NativeAssistantPage
             singleQuestionAutoSubmit = true, multiQuestionWaitsUntilComplete = true, freeTextArrow = true,
             approvalAvailable = true, fullPlanInOwnTab = true, fullPlanCloseReturnsToChat = true,
             fullPlanReopen = true, sessionIsolation = true, projectSessionsVisible = true,
-            programIntegrationsSelectable = true, modelRequests = 0,
+            planMenuSelectable = true, planChipRemovable = true, mode = mode.ToString(),
+            unresolvedPlanPromptsForAnswersBeforeApproval = true,
+            programIntegrationsSelectable = mode == ChatMode.Coding, modelRequests = 0,
         }, JsonOptions), _lifetime.Token);
+
+        async Task SelectPlanModeFromMenuAsync()
+        {
+            var menu = ShowComposerTools();
+            try
+            {
+                var rows = (StackPanel)((ScrollViewer)menu.Content).Content;
+                var button = rows.Children.OfType<Button>().Single(row => AutomationProperties.GetName(row) == "Planmodus");
+                if (!button.IsEnabled) throw new InvalidOperationException("Der Planmodus ist im Werkzeugmenü nicht auswählbar.");
+                Invoke(button);
+                await WaitForPagingSmokeAsync(() => !_composerToolSelectionBusy && _persistentAction == BuiltInActionIds.PlanMode
+                    && SelectedToolChip.Visibility == Visibility.Visible, "Die Auswahl des Planmodus wurde nicht als Chip angezeigt.");
+            }
+            finally { menu.Hide(); }
+            if ((await chats.GetSessionAsync(plan.Id, _lifetime.Token))?.PersistentExtensionActionId != BuiltInActionIds.PlanMode)
+                throw new InvalidOperationException("Die Menüauswahl muss den Planmodus speichern.");
+            if (AutomationProperties.GetName(SelectedToolChip) != "Planen entfernen")
+                throw new InvalidOperationException("Die Menüauswahl muss einen bedienbaren Planen-Chip anzeigen.");
+        }
 
         async Task OpenFixtureAsync(Guid id)
         {

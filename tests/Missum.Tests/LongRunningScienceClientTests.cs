@@ -2,6 +2,7 @@
 using Missum.App.Services;
 using Missum.App.ViewModels;
 using Missum.Core.Contracts;
+using Missum.Core.Extensions;
 using Missum.Core.Models;
 using Missum.Core.Research;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -25,7 +26,9 @@ public sealed class LongRunningScienceClientTests
     [InlineData(ChatMode.Coding, true)]
     [InlineData(ChatMode.ClaudeScience, false)]
     [InlineData(ChatMode.ClaudeScience, true)]
-    public async Task NewAndContinuedRequestsHaveNoOverallDeadlineInEveryMode(ChatMode mode, bool continuing)
+    [InlineData(ChatMode.ClaudeScience, false, true)]
+    [InlineData(ChatMode.ClaudeScience, true, true)]
+    public async Task NewAndContinuedRequestsHaveNoOverallDeadlineInEveryMode(ChatMode mode, bool continuing, bool planMode = false)
     {
         await using var environment = await TestEnvironment.CreateAsync();
         using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
@@ -37,7 +40,9 @@ public sealed class LongRunningScienceClientTests
         });
         var chats = environment.Get<IChatRepository>();
         var session = await chats.CreateSessionAsync("Lang laufende Aufgabe", mode);
-        await chats.SetCodingWorkspacePathAsync(session.Id, environment.Directory);
+        var workspace = Path.Combine(environment.Directory, "workspace");
+        Directory.CreateDirectory(workspace);
+        await chats.SetCodingWorkspacePathAsync(session.Id, workspace);
         const string original = "Leite eine dimensionskonsistente Niedrigenergiegrenze der Gravitation her und prüfe alle Annahmen.";
         var prompt = continuing ? "Weitermachen" : original;
         if (continuing)
@@ -63,7 +68,7 @@ public sealed class LongRunningScienceClientTests
             NullLogger<MissumAiAssistantService>.Instance, scientificResearch: environment.Get<IScientificResearchRepository>(),
             sciencePublications: publications);
         using var client = await connection.CreateClientAsync();
-        PromptTriggerMatch? trigger = mode switch
+        PromptTriggerMatch? trigger = planMode ? AssistantCoordinator.CreateExtensionMatch(BuiltInActionIds.PlanMode, prompt) : mode switch
         {
             ChatMode.Coding => AssistantCoordinator.CreateToolMatch("coding", prompt),
             ChatMode.ClaudeScience => AssistantCoordinator.CreateToolMatch("webSearch", prompt) with
@@ -88,8 +93,23 @@ public sealed class LongRunningScienceClientTests
         Assert.Null(request.Limits.MaximumOutputTokens);
         Assert.Equal(ContextTokens, request.Limits.MaximumContextTokens);
         Assert.Equal(session.Id.ToString("D"), request.SessionId);
-        Assert.Equal(environment.Directory, mode is ChatMode.Coding or ChatMode.ClaudeScience ? request.CodingOptions?.WorkspacePath : request.WorkspacePath);
-        if (mode == ChatMode.ClaudeScience)
+        Assert.Equal(workspace, mode is ChatMode.Coding or ChatMode.ClaudeScience ? request.CodingOptions?.WorkspacePath : request.WorkspacePath);
+        if (planMode)
+        {
+            Assert.Equal(RunMode.Coding, request.Mode);
+            Assert.Equal(ConversationProfile.PlanMode, request.ConversationProfile);
+            Assert.Null(request.WorkflowProfile);
+            Assert.Null(request.ResearchOptions);
+            Assert.False(request.CodingOptions!.ContinueSessionContext);
+            Assert.Equal(MissumAiAssistantService.GetAllowedServerTools(PromptTriggerAction.PlanMode), request.AllowedServerTools);
+            var planPrompt = Assert.Single(request.Messages[^1].Content).Text;
+            Assert.Contains("assistant-plan", planPrompt, StringComparison.Ordinal);
+            Assert.Contains("Publikation.md", planPrompt, StringComparison.Ordinal);
+            Assert.Contains("PDF-Bau und die Behebung seiner Fehler gehören zur Umsetzung nach der Freigabe", planPrompt, StringComparison.Ordinal);
+            Assert.DoesNotContain("coding.command", planPrompt, StringComparison.Ordinal);
+            Assert.Empty(Directory.EnumerateFileSystemEntries(workspace));
+        }
+        else if (mode == ChatMode.ClaudeScience)
         {
             Assert.Equal(RunMode.Coding, request.Mode);
             Assert.False(request.DeepResearch);

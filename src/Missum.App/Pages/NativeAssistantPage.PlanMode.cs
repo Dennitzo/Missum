@@ -1,4 +1,6 @@
+using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Missum.App.Controls;
 using Missum.Core.Extensions;
 using Microsoft.UI.Xaml;
@@ -61,10 +63,100 @@ public sealed partial class NativeAssistantPage
         var start = PlanPayloadStart(content);
         if (start < 0 || ReadPlanPayload(content[start..], out var length) is not { } payload || S(payload, "kind") != "plan")
             return "";
+        var plan = FullPlanText(content, start, length, payload);
+        return PlanQuestions(payload, plan).Length == 0 ? plan : "";
+    }
+
+    private static string FullPlanText(string content, int start, int length, JsonElement payload)
+    {
         var body = string.Join("\n\n", new[] { content[..start].Trim(), S(payload, "markdown").Trim(), content[(start + length)..].Trim() }
             .Where(part => part.Length > 0));
         var title = PlanTitlePrefix(payload, body);
         return string.Join("\n\n", new[] { title, body }.Where(part => part.Length > 0));
+    }
+
+    private sealed record PlanQuestion(string Text, JsonElement[] Options, bool AllowFreeText);
+
+    private static PlanQuestion[] PlanQuestions(JsonElement payload, string plan)
+    {
+        var structured = Items(payload, "questions")
+            .Where(question => !string.IsNullOrWhiteSpace(S(question, "text")))
+            .Select(question => new PlanQuestion(S(question, "text"), Items(question, "options").Take(12).ToArray(),
+                !question.TryGetProperty("allowFreeText", out var allow) || allow.ValueKind != JsonValueKind.False))
+            .ToArray();
+        return structured.Length > 0 ? structured
+            : [.. ReadOpenPlanQuestions(plan).Select(text => new PlanQuestion(text, [], true))];
+    }
+
+    [GeneratedRegex(@"^(?:[0-9]+[\\]?[.)]|[-+*])\s+")]
+    private static partial Regex PlanQuestionListMarker();
+
+    internal static IReadOnlyList<string> ReadOpenPlanQuestions(string plan)
+    {
+        var questions = new List<string>();
+        var question = new StringBuilder();
+        var inQuestionSection = false;
+        var fenceChar = '\0';
+        var fenceLength = 0;
+        using var lines = new StringReader(plan);
+        while (lines.ReadLine() is { } rawLine)
+        {
+            var line = rawLine.Trim();
+            if (line.Length == 0) continue;
+            if (line[0] is '`' or '~')
+            {
+                var length = line.Length - line.TrimStart(line[0]).Length;
+                if (fenceLength == 0 && length >= 3)
+                {
+                    fenceChar = line[0];
+                    fenceLength = length;
+                    continue;
+                }
+                if (line[0] == fenceChar && length >= fenceLength && length == line.Length)
+                {
+                    fenceLength = 0;
+                    continue;
+                }
+            }
+            if (fenceLength != 0) continue;
+
+            line = line.TrimEnd('\\').TrimEnd();
+            if (line.Length == 0) continue;
+            var label = line.Trim('#', ' ', ':', '*', '_');
+            if (label.Equals("Offene Fragen", StringComparison.OrdinalIgnoreCase)
+                || label.Equals("Offene Entscheidungen", StringComparison.OrdinalIgnoreCase)
+                || label.Equals("Open questions", StringComparison.OrdinalIgnoreCase)
+                || label.Equals("Open decisions", StringComparison.OrdinalIgnoreCase))
+            {
+                FinishQuestion();
+                inQuestionSection = true;
+                continue;
+            }
+            if (!inQuestionSection) continue;
+            if (line.StartsWith('#'))
+            {
+                FinishQuestion();
+                inQuestionSection = false;
+                continue;
+            }
+            var marker = PlanQuestionListMarker().Match(line);
+            if (marker.Success) FinishQuestion();
+            if (question.Length > 0) question.Append(' ');
+            question.Append(line.AsSpan(marker.Length));
+        }
+        FinishQuestion();
+        return questions;
+
+        void FinishQuestion()
+        {
+            var text = question.ToString().Trim();
+            question.Clear();
+            if (text.Length == 0) return;
+            if (text.TrimEnd('.', '!', ' ').ToUpperInvariant() is
+                "KEINE" or "KEINE OFFENEN FRAGEN" or "KEINE OFFENEN ENTSCHEIDUNGEN" or "ENTFÄLLT" or "NONE" or "NO OPEN QUESTIONS")
+                return;
+            questions.Add(text);
+        }
     }
 
     private static string PlanTitlePrefix(JsonElement payload, string markdown)
@@ -93,7 +185,8 @@ public sealed partial class NativeAssistantPage
         var old = panel.Children.OfType<Border>().FirstOrDefault(child => child.Name == PlanCardName);
         var content = MessageContent(message);
         var start = ActiveSubagent is null && S(message, "role") == "assistant" ? PlanPayloadStart(content) : -1;
-        var data = start < 0 ? null : ReadPlanPayload(content[start..], out _);
+        var length = 0;
+        var data = start < 0 ? null : ReadPlanPayload(content[start..], out length);
         if (data is not { } payload)
         {
             if (old is not null) panel.Children.Remove(old);
@@ -106,14 +199,18 @@ public sealed partial class NativeAssistantPage
                 && string.CompareOrdinal(S(other, "id"), messageId) > 0);
         var canSubmit = latest && !_discardedPlans.Contains(messageId) && S(message, "status") == "completed"
             && _persistentAction == BuiltInActionIds.PlanMode;
-        var questions = S(payload, "kind") == "questions";
-        var plan = canSubmit && !questions ? PlanApprovalText(content) : "";
-        var key = (payload.GetRawText(), canSubmit, plan);
+        var isPlan = S(payload, "kind") == "plan";
+        var fullPlan = isPlan ? FullPlanText(content, start, length, payload) : "";
+        var questions = PlanQuestions(payload, fullPlan);
+        var key = (payload.GetRawText(), canSubmit, fullPlan);
         if (old is not null && Equals(old.Tag, key)) return;
         if (old is not null) panel.Children.Remove(old);
 
         var contentPanel = new StackPanel { Spacing = 8 };
-        if (questions)
+        if (fullPlan.Length > 0)
+            contentPanel.Children.Add(PlanSummaryCard(session, messageId, S(payload, "title", "Plan"), fullPlan,
+                hasOpenQuestions: questions.Length > 0));
+        if (questions.Length > 0)
         {
             var answers = new List<Func<string?>>();
             var interaction = PlanCard();
@@ -126,21 +223,19 @@ public sealed partial class NativeAssistantPage
                 if (selected.Length == 0 || selected.Any(answer => answer is null)) return;
                 await SubmitPlanInteractionAsync(session, messageId, "Meine Antworten zum Plan\n\n" + string.Join("\n\n", selected));
             }
-            foreach (var question in Items(payload, "questions").Take(3))
+            foreach (var question in questions)
             {
-                var questionText = S(question, "text");
-                if (string.IsNullOrWhiteSpace(questionText)) continue;
+                var questionText = question.Text;
                 if (answers.Count > 0) layout.Children.Add(new Border { Height = 1, Margin = new Thickness(0, 4, 0, 4),
                     Background = ThemeBrush("MissumStrokeBrush", 50) });
                 layout.Children.Add(PlanLabel(questionText, bold: true));
-                var options = Items(question, "options").Take(12).ToArray();
+                var options = question.Options;
                 var selectedIndex = -1;
-                var ownConfirmed = false;
+                string? confirmedAnswer = null;
                 var confirmation = new TextBlock { Text = "Antwort bestätigt", FontSize = 11,
                     Foreground = ThemeBrush("MissumMutedTextBrush", 180), Visibility = Visibility.Collapsed };
                 var optionButtons = new List<Button>();
-                var allowFreeText = options.Length == 0 || !question.TryGetProperty("allowFreeText", out var allow)
-                    || allow.ValueKind != JsonValueKind.False;
+                var allowFreeText = options.Length == 0 || question.AllowFreeText;
                 TextBox? own = null;
                 void RefreshOptions()
                 {
@@ -167,7 +262,7 @@ public sealed partial class NativeAssistantPage
                     row.Click += async (_, _) =>
                     {
                         if (own is not null) own.Text = "";
-                        ownConfirmed = false;
+                        confirmedAnswer = null;
                         confirmation.Visibility = Visibility.Collapsed;
                         selectedIndex = index;
                         RefreshOptions();
@@ -180,46 +275,42 @@ public sealed partial class NativeAssistantPage
                 {
                     var input = PlanInput("Eigene Antwort", canSubmit, out own, canSubmit ? async value =>
                     {
-                        ownConfirmed = !string.IsNullOrWhiteSpace(value.Text);
-                        confirmation.Visibility = ownConfirmed ? Visibility.Visible : Visibility.Collapsed;
-                        if (ownConfirmed) await SendAnswersAsync();
+                        confirmedAnswer = value.Text.Trim();
+                        confirmation.Visibility = confirmedAnswer.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+                        if (confirmedAnswer.Length > 0) await SendAnswersAsync();
                     } : null);
                     own.TextChanged += (_, _) =>
                     {
-                        ownConfirmed = false;
-                        confirmation.Visibility = Visibility.Collapsed;
+                        if (!string.Equals(own.Text.Trim(), confirmedAnswer, StringComparison.Ordinal))
+                        {
+                            confirmedAnswer = null;
+                            confirmation.Visibility = Visibility.Collapsed;
+                        }
                         if (!string.IsNullOrWhiteSpace(own.Text)) { selectedIndex = -1; RefreshOptions(); }
                     };
                     layout.Children.Add(input);
                     layout.Children.Add(confirmation);
                 }
-                answers.Add(() => ownConfirmed && own is not null && own.Text.Trim() is { Length: > 0 } answer
+                answers.Add(() => confirmedAnswer is { Length: > 0 } answer && own?.Text.Trim() == answer
                     ? questionText + "\n" + answer
                     : selectedIndex >= 0 ? questionText + "\n" + S(options[selectedIndex], "label") : null);
             }
             contentPanel.Children.Add(interaction);
         }
-        else
+        else if (isPlan && canSubmit && fullPlan.Length > 0)
         {
-            var fullPlan = PlanApprovalText(content);
-            if (fullPlan.Length > 0)
-                contentPanel.Children.Add(PlanSummaryCard(session, messageId, S(payload, "title", "Plan"), fullPlan));
-            if (canSubmit)
+            var interaction = PlanCard();
+            var layout = (StackPanel)interaction.Child;
+            layout.Children.Add(PlanLabel("Diesen Plan implementieren?", bold: true));
+            layout.Children.Add(PlanOptionRow("✓", "Ja, diesen Plan implementieren", "", () =>
+                SubmitPlanInteractionAsync(session, messageId, null, leavePlanMode: true)));
+            var input = PlanInput("Änderungswünsche zum Plan", true, out _, async revision =>
             {
-                var interaction = PlanCard();
-                var layout = (StackPanel)interaction.Child;
-                layout.Children.Add(PlanLabel("Diesen Plan implementieren?", bold: true));
-                if (plan.Length > 0)
-                    layout.Children.Add(PlanOptionRow("✓", "Ja, diesen Plan implementieren", "", () =>
-                        SubmitPlanInteractionAsync(session, messageId, "Implementiere den von mir freigegebenen Plan.\n\n" + plan, leavePlanMode: true)));
-                var input = PlanInput("Änderungswünsche zum Plan", true, out _, async revision =>
-                {
-                    if (revision.Text.Trim() is { Length: > 0 } changes)
-                        await SubmitPlanInteractionAsync(session, messageId, "Überarbeite den Plan wie folgt.\n\n" + changes);
-                });
-                layout.Children.Add(input);
-                contentPanel.Children.Add(interaction);
-            }
+                if (revision.Text.Trim() is { Length: > 0 } changes)
+                    await SubmitPlanInteractionAsync(session, messageId, "Überarbeite den Plan wie folgt.\n\n" + changes);
+            });
+            layout.Children.Add(input);
+            contentPanel.Children.Add(interaction);
         }
         var card = new Border { Name = PlanCardName, Tag = key, Child = contentPanel };
         panel.Children.Insert(panel.Children.IndexOf(footer), card);
@@ -336,7 +427,14 @@ public sealed partial class NativeAssistantPage
     {
         if (_disposed || _submittingPlanInteraction || _session != session || _running || _sendPending
             || _persistentAction != BuiltInActionIds.PlanMode || !DisplayMessages.TryGetValue(messageId, out var message)
+            || S(message, "status") != "completed"
             || DisplayMessages.Values.Any(other => MessageCreatedAt(other) > MessageCreatedAt(message))) return;
+        if (leavePlanMode)
+        {
+            var plan = PlanApprovalText(MessageContent(message));
+            if (plan.Length == 0) return;
+            prompt = "Implementiere den von mir freigegebenen Plan.\n\n" + plan;
+        }
         _submittingPlanInteraction = true;
         try
         {

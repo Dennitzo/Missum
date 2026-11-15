@@ -6,8 +6,6 @@
   xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
   xmlns:local="using:Missum.App.Pages"
   xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-  xmlns:tv="using:WinUI.TableView"
-  xmlns:viewModels="using:Missum.App.ViewModels"
   Background="Transparent"
   Loaded="OnLoaded"
   Unloaded="OnUnloaded"
@@ -35,7 +33,7 @@
           <TextBlock
             Margin="0,4,0,0"
             Foreground="{ThemeResource MissumMutedTextBrush}"
-            Text="Docker-Gateway, Prompt-Trigger, lokale Werkzeuge, Darstellung und Datensicherung konfigurieren."
+            Text="Docker-Gateway, lokale Werkzeuge, Darstellung und Datensicherung konfigurieren."
             TextWrapping="Wrap" />
         </StackPanel>
         <Button Grid.Column="2" Click="OnSave" Content="Speichern" Style="{StaticResource MissumPrimaryButtonStyle}" />
@@ -109,28 +107,6 @@
         </StackPanel>
       </Border>
 
-      <Border x:Name="NativeModelRootCard" Style="{StaticResource MissumCardStyle}">
-        <StackPanel Spacing="14">
-          <StackPanel>
-            <TextBlock Style="{StaticResource MissumSectionTitleStyle}" Text="AI-Modellordner" />
-            <TextBlock Margin="0,3,0,0" Foreground="{ThemeResource MissumMutedTextBrush}"
-              Text="Ordner für die nativen GGUF-Modelle. Lokale Ordner und NAS-Freigaben werden unterstützt. Änderungen mit „Speichern“ übernehmen; bei aktiven AI-Läufen erfolgt die Umstellung nach deren Abschluss."
-              TextWrapping="Wrap" />
-          </StackPanel>
-          <Grid ColumnSpacing="10">
-            <Grid.ColumnDefinitions>
-              <ColumnDefinition Width="*" />
-              <ColumnDefinition Width="Auto" />
-            </Grid.ColumnDefinitions>
-            <TextBox x:Name="NativeModelRootBox" Header="Modellordner" MinWidth="160"
-              PlaceholderText="\\Server\Freigabe\Huggingface"
-              Text="{x:Bind ViewModel.NativeModelRoot, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-            <Button x:Name="SelectNativeModelRootButton" Grid.Column="1" Margin="0,24,0,0" Click="OnSelectNativeModelRoot" Content="Ordner auswählen"
-              Style="{StaticResource MissumPrimaryButtonStyle}" />
-          </Grid>
-        </StackPanel>
-      </Border>
-
       <Border Style="{StaticResource MissumCardStyle}">
         <StackPanel Spacing="14">
           <StackPanel>
@@ -171,7 +147,7 @@
       <Border Style="{StaticResource MissumCardStyle}">
         <StackPanel Spacing="12">
           <TextBlock Style="{StaticResource MissumSectionTitleStyle}" Text="Sicherung" />
-          <TextBlock Foreground="{ThemeResource MissumMutedTextBrush}" Text="Chats, Projekte, Dateien, Trigger und Einstellungen in einer .missumbackup-Datei sichern. Backups sind nicht verschlüsselt." TextWrapping="Wrap" />
+          <TextBlock Foreground="{ThemeResource MissumMutedTextBrush}" Text="Chats, Projekte, Dateien und Einstellungen in einer .missumbackup-Datei sichern. Backups sind nicht verschlüsselt." TextWrapping="Wrap" />
           <StackPanel Orientation="Horizontal" Spacing="8">
             <Button Click="OnCreateBackup" Content="Backup erstellen" Style="{StaticResource MissumPrimaryButtonStyle}" />
             <Button Click="OnRestoreBackup" Content="Backup wiederherstellen" />
@@ -179,208 +155,6 @@
         </StackPanel>
       </Border>
 
-      <StackPanel Spacing="18">
-        <StackPanel Spacing="4">
-          <TextBlock Style="{StaticResource MissumSectionTitleStyle}" Text="Prompt-Trigger" />
-          <TextBlock
-            Foreground="{ThemeResource MissumMutedTextBrush}"
-            Text="Aktive Phrasen werden als Präfix erkannt und routen die Anfrage deterministisch zum zugeordneten Dienst."
-            TextWrapping="Wrap" />
-        </StackPanel>
-
-        <InfoBar
-          IsClosable="False"
-          IsOpen="True"
-          Message="Triggerphrase, Beschreibung, Kategorie und Aktivstatus können direkt in der Tabelle bearbeitet werden. Änderungen werden mit „Speichern“ in Missum.db übernommen."
-          Severity="Informational"
-          Title="Dienst-Routing" />
-
-        <Border Style="{StaticResource MissumCardStyle}">
-          <StackPanel Spacing="12">
-            <StackPanel Spacing="3">
-              <TextBlock Style="{StaticResource MissumSectionTitleStyle}" Text="Prompt-Trigger hinzufügen" />
-              <TextBlock
-                Foreground="{ThemeResource MissumMutedTextBrush}"
-                Text="Dienst auswählen und eine neue Triggerphrase als Tabellenzeile anlegen."
-                TextWrapping="Wrap" />
-            </StackPanel>
-            <Grid ColumnSpacing="10" RowSpacing="10">
-              <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="260" />
-                <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="Auto" />
-              </Grid.ColumnDefinitions>
-              <ComboBox
-                x:Name="NewTriggerActionBox"
-                Header="Kategorie"
-                DisplayMemberPath="Label"
-                ItemsSource="{x:Bind ViewModel.TriggerActions, Mode=OneWay}"
-                PlaceholderText="Dienst auswählen" />
-              <TextBox
-                x:Name="NewTriggerPhraseBox"
-                Grid.Column="1"
-                Header="Neue Triggerphrase"
-                MaxLength="160"
-                PlaceholderText="Zum Beispiel: Erstelle ein Bild" />
-              <Button
-                x:Name="AddTriggerButton"
-                Grid.Column="2"
-                VerticalAlignment="Bottom"
-                Click="OnAddTrigger"
-                Content="Zeile hinzufügen"
-                Style="{StaticResource MissumPrimaryButtonStyle}" />
-            </Grid>
-          </StackPanel>
-        </Border>
-
-        <Border Padding="0" Style="{StaticResource MissumCardStyle}">
-          <Grid>
-            <Grid.RowDefinitions>
-              <RowDefinition Height="Auto" />
-              <RowDefinition Height="*" />
-            </Grid.RowDefinitions>
-            <Grid
-              Padding="12,10"
-              Background="{ThemeResource MissumLayerStrongBrush}"
-              ColumnSpacing="12"
-              RowSpacing="8">
-              <Grid.RowDefinitions>
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-              </Grid.RowDefinitions>
-              <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="Auto" />
-                <ColumnDefinition Width="Auto" />
-              </Grid.ColumnDefinitions>
-              <AutoSuggestBox
-                x:Name="TriggerSearchBox"
-                Grid.ColumnSpan="3"
-                AutomationProperties.Name="Prompt-Trigger durchsuchen"
-                PlaceholderText="Tabelle durchsuchen …"
-                Text="{x:Bind ViewModel.TriggerSearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                TextChanged="OnTriggerSearchTextChanged">
-                <AutoSuggestBox.QueryIcon><FontIcon Glyph="&#xE721;" Foreground="{ThemeResource MissumIconNavigationBrush}" /></AutoSuggestBox.QueryIcon>
-              </AutoSuggestBox>
-              <TextBlock
-                Grid.Row="1"
-                VerticalAlignment="Center"
-                Foreground="{ThemeResource MissumMutedTextBrush}"
-                Text="Eine oder mehrere Zeilen auswählen, um sie zu löschen."
-                TextWrapping="Wrap" />
-              <ComboBox
-                x:Name="TriggerCategoryFilterBox"
-                Grid.Row="1"
-                Grid.Column="1"
-                MinWidth="220"
-                AutomationProperties.Name="Prompt-Trigger nach Kategorie filtern"
-                DisplayMemberPath="Label"
-                ItemsSource="{x:Bind ViewModel.TriggerCategoryFilters, Mode=OneWay}"
-                SelectedItem="{x:Bind ViewModel.SelectedTriggerCategoryFilter, Mode=TwoWay}" />
-              <Button
-                x:Name="DeleteTriggerRowsButton"
-                Grid.Row="1"
-                Grid.Column="2"
-                AutomationProperties.Name="Ausgewählte Prompt-Trigger löschen"
-                Click="OnDeleteSelectedTriggers"
-                IsEnabled="{x:Bind ViewModel.CanDeleteSelectedPromptTrigger, Mode=OneWay}"
-                Style="{StaticResource MissumDangerButtonStyle}">
-                <StackPanel Orientation="Horizontal" Spacing="7">
-                  <SymbolIcon Symbol="Delete" Foreground="{ThemeResource MissumIconDangerBrush}" />
-                  <TextBlock Text="Zeile löschen" />
-                </StackPanel>
-              </Button>
-            </Grid>
-
-            <tv:TableView
-              x:Name="PromptTriggerTable"
-              Grid.Row="1"
-              Height="460"
-              AutomationProperties.Name="Sortierbare Prompt-Trigger"
-              AutoGenerateColumns="False"
-              CellEditEnded="OnPromptTriggerCellEditEnded"
-              CanFilterColumns="False"
-              CanReorderColumns="False"
-              CanResizeColumns="True"
-              CanSortColumns="True"
-              IsReadOnly="False"
-              ItemsSource="{x:Bind ViewModel.VisiblePromptTriggers, Mode=OneWay}"
-              MaxColumnWidth="900"
-              MinColumnWidth="72"
-              SelectionChanged="OnPromptTriggerSelectionChanged"
-              SelectionMode="Multiple"
-              ShowExportOptions="False"
-              Sorting="OnPromptTriggerTableSorting">
-              <tv:TableView.Columns>
-                <tv:TableViewTextColumn
-                  Binding="{Binding Phrase, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                  CanResize="True"
-                  CanSort="True"
-                  Header="Triggerphrase"
-                  IsReadOnly="False"
-                  SortMemberPath="Phrase"
-                  Tag="Phrase"
-                  Width="2*" />
-                <tv:TableViewTemplateColumn
-                  CanResize="True"
-                  CanSort="True"
-                  Header="Kategorie"
-                  IsReadOnly="False"
-                  SortMemberPath="Action"
-                  Tag="Action"
-                  Width="220">
-                  <tv:TableViewTemplateColumn.CellTemplate>
-                    <DataTemplate x:DataType="viewModels:PromptTriggerEditorItem">
-                      <TextBlock
-                        VerticalAlignment="Center"
-                        Text="{x:Bind ActionDisplayName}"
-                        TextTrimming="CharacterEllipsis"
-                        ToolTipService.ToolTip="{x:Bind ActionDisplayName}" />
-                    </DataTemplate>
-                  </tv:TableViewTemplateColumn.CellTemplate>
-                  <tv:TableViewTemplateColumn.EditingTemplate>
-                    <DataTemplate x:DataType="viewModels:PromptTriggerEditorItem">
-                      <ComboBox
-                        MinWidth="190"
-                        DisplayMemberPath="Label"
-                        ItemsSource="{x:Bind ActionOptions}"
-                        SelectedItem="{x:Bind SelectedActionOption, Mode=TwoWay}" />
-                    </DataTemplate>
-                  </tv:TableViewTemplateColumn.EditingTemplate>
-                </tv:TableViewTemplateColumn>
-                <tv:TableViewTextColumn
-                  Binding="{Binding Description, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                  CanResize="True"
-                  CanSort="True"
-                  Header="Beschreibung"
-                  IsReadOnly="False"
-                  SortMemberPath="Description"
-                  Tag="Description"
-                  Width="2*" />
-                <tv:TableViewTemplateColumn
-                  CanResize="True"
-                  CanSort="True"
-                  Header="Aktiv"
-                  IsReadOnly="True"
-                  SortMemberPath="IsEnabled"
-                  Tag="IsEnabled"
-                  Width="100">
-                  <tv:TableViewTemplateColumn.CellTemplate>
-                    <DataTemplate x:DataType="viewModels:PromptTriggerEditorItem">
-                      <ToggleSwitch
-                        AutomationProperties.Name="Prompt-Trigger aktivieren oder deaktivieren"
-                        IsOn="{x:Bind IsEnabled, Mode=TwoWay}"
-                        OffContent=""
-                        OnContent=""
-                        Tag="{x:Bind}" />
-                    </DataTemplate>
-                  </tv:TableViewTemplateColumn.CellTemplate>
-                </tv:TableViewTemplateColumn>
-              </tv:TableView.Columns>
-            </tv:TableView>
-          </Grid>
-        </Border>
-      </StackPanel>
     </StackPanel>
   </ScrollViewer>
 </Page>

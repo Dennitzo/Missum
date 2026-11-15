@@ -8,5 +8,5 @@ public sealed class SettingsAccentColorOption(string name, string value, Windows
 
     public string Value { get; } = value;
 
-    public SolidColorBrush PreviewBrush { get; } = new(color);
+    public Brush PreviewBrush { get; } = new SolidColorBrush(color);
 }

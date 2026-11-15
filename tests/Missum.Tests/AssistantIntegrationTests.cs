@@ -1,4 +1,4 @@
-﻿using Missum.App.Services;
+using Missum.App.Services;
 using Missum.App.Pages;
 using Missum.App.ViewModels;
 using Missum.Core.Contracts;
@@ -1601,7 +1601,6 @@ public sealed class AssistantIntegrationTests
         IProjectMemoryStore? projectMemory = null) => new(
             environment.Get<IChatRepository>(), environment.Get<IDocumentIngestor>(),
             environment.Get<IContextAssembler>(),
-            environment.Get<IPromptTriggerRepository>(),
             environment.Get<IAssistantAttachmentRepository>(),
             environment.Get<IChatArtifactRepository>(),
             environment.Get<IConversationSnapshotRepository>(),

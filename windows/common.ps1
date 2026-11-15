@@ -80,18 +80,21 @@ function Get-MissumAiStackDefaults {
     $resolvedDataRoot = [IO.Path]::GetFullPath($DataRoot)
     $configured = Read-MissumAiStackEnvironment -Path (Join-Path $resolvedDataRoot 'stack.env')
     if ([string]::IsNullOrWhiteSpace($ModelRoot)) { $ModelRoot = $configured['MISSUM_AI_MODEL_ROOT'] }
-    if ([string]::IsNullOrWhiteSpace($NativeModelRoot)) { $NativeModelRoot = $configured['MISSUM_AI_NATIVE_MODEL_ROOT'] }
     $resolvedModelRoot = if ([string]::IsNullOrWhiteSpace($ModelRoot)) {
         Join-Path $resolvedDataRoot 'Models'
     }
     else {
         [IO.Path]::GetFullPath($ModelRoot)
     }
-    $resolvedNativeModelRoot = if ([string]::IsNullOrWhiteSpace($NativeModelRoot)) {
-        Join-Path $env:USERPROFILE '.cache\huggingface\hub'
-    }
-    else {
-        [IO.Path]::GetFullPath($NativeModelRoot)
+    # The runtime always uses the current Windows user's Hugging Face cache.
+    # Reject explicit legacy overrides so callers never inspect or write the wrong folder.
+    $cacheRoot = [IO.Path]::GetFullPath((Join-Path $env:USERPROFILE '.cache\huggingface')).TrimEnd('\', '/')
+    $resolvedNativeModelRoot = Join-Path $cacheRoot 'hub'
+    if (-not [string]::IsNullOrWhiteSpace($NativeModelRoot)) {
+        $requested = [IO.Path]::GetFullPath($NativeModelRoot).TrimEnd('\', '/')
+        if ($requested -ine $cacheRoot -and $requested -ine $resolvedNativeModelRoot) {
+            throw "Native model folder overrides are no longer supported. Use $cacheRoot (hub: $resolvedNativeModelRoot); requested: $requested"
+        }
     }
     return [pscustomobject]@{
         DataRoot = $resolvedDataRoot
@@ -111,7 +114,14 @@ function Write-MissumAiStackEnvironment {
         [string] $NativeBinaryPath,
         [string] $NativeStateDirectory
     )
-    if ([string]::IsNullOrWhiteSpace($NativeModelRoot)) { $NativeModelRoot = $Paths.NativeModelRoot }
+    if (-not [string]::IsNullOrWhiteSpace($NativeModelRoot)) {
+        $requested = [IO.Path]::GetFullPath($NativeModelRoot).TrimEnd('\', '/')
+        $expected = [IO.Path]::GetFullPath($Paths.NativeModelRoot).TrimEnd('\', '/')
+        if ($requested -ine $expected -and $requested -ine [IO.Directory]::GetParent($expected).FullName) {
+            throw "Native model folder overrides are no longer supported. Use $expected; requested: $requested"
+        }
+    }
+    $NativeModelRoot = $Paths.NativeModelRoot
     New-Item -ItemType Directory -Path $Paths.DataRoot -Force | Out-Null
     $values = Read-MissumAiStackEnvironment -Path $Paths.EnvironmentFile
     $values['MISSUM_AI_DATA_ROOT'] = $Paths.DataRoot -replace '\\','/'

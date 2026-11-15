@@ -128,7 +128,7 @@ public sealed class SessionPromptTitleTests
     private static AssistantCoordinator Create(TestEnvironment environment, SettingsCoordinator settings,
         ProfileAssistantRunScheduler? scheduler = null) => new(environment.Get<IChatRepository>(),
             environment.Get<IDocumentIngestor>(), environment.Get<IContextAssembler>(),
-            environment.Get<IPromptTriggerRepository>(), environment.Get<IAssistantAttachmentRepository>(),
+            environment.Get<IAssistantAttachmentRepository>(),
             environment.Get<IChatArtifactRepository>(), environment.Get<IConversationSnapshotRepository>(), null,
             settings, new RecentActivityService(settings, new ShellViewModel(), NullLogger<RecentActivityService>.Instance),
             runScheduler: scheduler);

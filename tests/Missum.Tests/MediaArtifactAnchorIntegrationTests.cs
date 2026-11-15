@@ -85,7 +85,7 @@ public sealed class MediaArtifactAnchorIntegrationTests
         Assert.NotEqual(savedMessage.ToolSteps[^1].Id, savedArtifact.StepId);
 
         var coordinator = new AssistantCoordinator(chats, environment.Get<IDocumentIngestor>(),
-            environment.Get<IContextAssembler>(), environment.Get<IPromptTriggerRepository>(), environment.Get<IAssistantAttachmentRepository>(),
+            environment.Get<IContextAssembler>(), environment.Get<IAssistantAttachmentRepository>(),
             environment.Get<IChatArtifactRepository>(), environment.Get<IConversationSnapshotRepository>(), service, settings, recent);
         var snapshot = JsonSerializer.SerializeToElement(await coordinator.BuildSnapshotAsync(), JsonSerializerOptions.Web);
         var shown = Assert.Single(snapshot.GetProperty("messages").EnumerateArray(),

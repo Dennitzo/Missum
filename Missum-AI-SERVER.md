@@ -1,8 +1,8 @@
 # Missum AI Hybrid-Stack
 
 Missum betreibt Gateway, Orchestrierung, SQLite, SearXNG sowie Speech-, Media- und Image-Worker in Docker.
-General, Coding, Vision und Embeddings verwenden einen nativen Windows-`llama-server.exe`
-aus der vorhandenen Unsloth-Installation und lesen die lokalen GGUF-Dateien direkt.
+General, Coding, Vision und Embeddings verwenden Missums nativen Windows-`llama-server.exe`
+und lesen die lokalen GGUF-Dateien direkt.
 Datei- und Prozesswerkzeuge des Coding-Agenten führt der Missum-Client im ausgewählten Projekt aus.
 
 ## Architektur
@@ -97,7 +97,8 @@ Lifecycle:
 ```
 
 `start-ai-stack.ps1` startet beziehungsweise prüft den nativen Supervisor auf Port `8081`
-und anschließend Compose. `-NativeModelRoot` setzt die gemeinsame Windows-Modellwurzel.
+und anschließend Compose. Die Windows-Modellwurzel ist fest `%USERPROFILE%\.cache\huggingface`
+(Modelle im Unterordner `hub`); abweichende `-NativeModelRoot`-Angaben werden abgelehnt.
 `stop-ai-stack.ps1` beendet die Docker-Dienste und den eigenen nativen Supervisor samt Modellprozessen.
 
 Die native Modellruntime kann unabhängig verwaltet werden:
@@ -111,7 +112,7 @@ Die native Modellruntime kann unabhängig verwaltet werden:
 Der Launcher prüft Binary-Fähigkeiten und Portbelegung und startet den Supervisor ohne sichtbares Konsolenfenster.
 Zustand, generierte Presets und Logs liegen standardmäßig unter `%LOCALAPPDATA%\Missum-CodingLlama`.
 Die Gateway-Konfiguration verwendet `MISSUM_AI_MODEL_RUNTIME_URL=http://host.docker.internal:8081`;
-`MISSUM_AI_CODING_MODEL_ROOT` beschreibt die tatsächlich mit `-ModelRoot` gewählte Windows-Modellwurzel.
+die Stack-Metadaten weisen den festen Hugging-Face-Cache des Serverbenutzers aus.
 
 Vorhandene Modelle aus einer bisherigen Windows-Modellablage lassen sich mit dem geprüften Migrationsskript
 in den Hugging-Face-Cache verschieben:
@@ -129,7 +130,15 @@ und neuer Dateipfade.
 
 ## Client und Tools
 
-Der Client verbindet sich standardmäßig mit `http://192.168.0.67:8080`. **General AI Modell** und **Coding AI Modell**
+Auf einem anderen PC in Missum unter **Docker-Gatewayadresse** `http://192.168.0.67:8080` eintragen
+(bei anderer Server-IP die Adresse entsprechend anpassen). Die Dienste müssen auf dem Server laufen;
+das Schließen der serverseitigen Missum-App beendet die von ihr verwalteten Dienste. Für unabhängigen
+Betrieb den Stack auf dem Server gesondert über `windows/start-ai-stack.ps1` starten. Soll zusätzlich die
+serverseitige App geöffnet und geschlossen werden, muss sie mit gesetztem
+`ASSISTANT_DISABLE_RUNTIME_AUTOSTART=1` gestartet werden, damit sie den eigenständigen Stack nicht beendet.
+Das Gateway besitzt keine Authentifizierung und darf nur in einem vertrauenswürdigen privaten Netzwerk erreichbar sein.
+
+**General AI Modell** und **Coding AI Modell**
 besitzen unabhängige gespeicherte Auswahlen. Für Coding wird unter **Tools → Coding** der Modus gewählt und über den
 Projektchip ein vorhandener Ordner ausgewählt. Der Projektordner gehört zur jeweiligen Sitzung und wird beim
 Sitzungswechsel wiederhergestellt. Eine Sitzung ohne zugeordneten Ordner kann keine Coding-Dateiwerkzeuge ausführen.

@@ -151,8 +151,8 @@ public sealed class AdditionalToolsLiveTests(ITestOutputHelper output)
         var profile = AssistantRuntimeProfile.Resolve() with { DataDirectory = environment.Directory,
             NativeStateDirectory = Path.Combine(environment.Directory, "native-state") };
         var coordinator = new AssistantCoordinator(chats, documents,
-            environment.Get<IContextAssembler>(), environment.Get<IPromptTriggerRepository>(), environment.Get<IAssistantAttachmentRepository>(),
-            artifacts, environment.Get<IConversationSnapshotRepository>(), service, settings, recent, microphone, profile, catalog);
+            environment.Get<IContextAssembler>(), environment.Get<IAssistantAttachmentRepository>(),
+            artifacts, environment.Get<IConversationSnapshotRepository>(), service, settings, recent, profile, catalog);
         var events = new ConcurrentQueue<(string Type, JsonElement Payload)>();
         var done = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
         var files = new List<(string Name, byte[] Bytes)>();

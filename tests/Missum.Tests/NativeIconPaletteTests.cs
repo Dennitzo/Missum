@@ -29,8 +29,36 @@ public sealed class NativeIconPaletteTests
     {
         foreach (var theme in new[] { AppTheme.Light, AppTheme.Dark })
         foreach (var accent in new[] { "#000000", "#FFFFFF", "#808080", "#A970FF", "#FF0000", "#00FF00", "#0000FF", "#FFFF00", NativeIconPalette.CyberpunkAccent })
-        foreach (var background in new[] { "#000000", "#FFFFFF", "#181818", "#FF0000", "#0000FF" })
+        foreach (var background in new[] { "#000000", "#FFFFFF", "#181818", "#261D45", "#FF0000", "#0000FF" })
             yield return [theme, accent, background];
+    }
+
+    [Fact]
+    public void CyberpunkPresetUsesTheCoordinatedNeonRoles()
+    {
+        var accent = Parse(NativeIconPalette.CyberpunkAccent);
+        var dark = new[] { Parse("#000000") };
+        Assert.Equal("#FCEE0A", NativeIconPalette.CyberpunkAccent);
+        Assert.Equal(accent, NativeIconPalette.CyberpunkAccentColor);
+        Assert.Equal(accent, NativeIconPalette.ResolveColor("navigation", accent, dark));
+        Assert.Equal(Parse("#00F0FF"), NativeIconPalette.ResolveColor("web", accent, dark));
+        Assert.Equal(Parse("#FCEE0A"), NativeIconPalette.ResolveColor("code", accent, dark));
+        Assert.Equal(Parse("#FF4BA7"), NativeIconPalette.ResolveColor("image", accent, dark));
+        Assert.Equal(Parse("#B388FF"), NativeIconPalette.ResolveColor("research", accent, dark));
+        Assert.Equal(Parse("#FF4A59"), NativeIconPalette.ResolveColor("danger", accent, dark));
+        Assert.NotEqual(NativeIconPalette.ResolveColor("code", accent, dark),
+            NativeIconPalette.ResolveColor("code", Parse("#25B7A6"), dark));
+    }
+
+    [Fact]
+    public void CyberpunkPresetHonorsHighContrastSystemColors()
+    {
+        var highContrast = Missum.App.App.CreateHighContrastPalette(Parse("#000000"), Parse("#FFFFFF"), Parse("#FFFF00"));
+        var settings = new AppSettings { Theme = AppTheme.Dark, AccentColor = NativeIconPalette.CyberpunkAccent, BackgroundColor = "#261D45" };
+        var appearance = Missum.App.App.CreateSavedAppearance(settings, false, highContrast);
+        foreach (var role in IconRoles)
+            Assert.Equal("#FFFFFF", appearance.Colors["icon" + role]);
+        Assert.Equal("#FFFF00", appearance.Colors["accent"]);
     }
 
     [Theory]

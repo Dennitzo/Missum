@@ -89,8 +89,20 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
         Alias("goAiProtocolVersion", "missumAiProtocolVersion");
         Alias("protocolVersion", "missumAiProtocolVersion");
         RemoveDeprecated("isAiConnectionEnabled");
+        RemoveDeprecated("nativeModelRoot");
         RemoveDeprecated("codingToolStepsExpanded");
         RemoveDeprecated("showWorkingPlan");
+        // Keep the Cyberpunk preset selected when restoring its yellow accent.
+        foreach (var key in root.Select(pair => pair.Key)
+                     .Where(key => key.Equals("accentColor", StringComparison.OrdinalIgnoreCase)).ToArray())
+        {
+            if (root[key] is JsonValue value && value.TryGetValue<string>(out var accent)
+                && string.Equals(accent?.Trim(), AppSettings.LegacyCyberpunkMintAccentColor, StringComparison.OrdinalIgnoreCase))
+            {
+                root[key] = AppSettings.CyberpunkAccentColor;
+                migrated = true;
+            }
+        }
         // Preserve a legacy coding-only choice, but never keep two competing selections.
         var legacyModel = root.FirstOrDefault(pair => pair.Key.Equals("selectedCodingModel", StringComparison.OrdinalIgnoreCase)).Value;
         var globalModel = root.FirstOrDefault(pair => pair.Key.Equals("selectedModel", StringComparison.OrdinalIgnoreCase)).Value;
@@ -177,7 +189,6 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
             MissumAiProtocolVersion = string.IsNullOrWhiteSpace(settings.MissumAiProtocolVersion)
                 ? "1.0"
                 : settings.MissumAiProtocolVersion.Trim(),
-            NativeModelRoot = string.IsNullOrWhiteSpace(settings.NativeModelRoot) ? null : settings.NativeModelRoot.Trim(),
             LiveCaptionLanguage = settings.Version < 5
                 && string.Equals(settings.LiveCaptionLanguage, "de", StringComparison.OrdinalIgnoreCase)
                     ? "auto"
