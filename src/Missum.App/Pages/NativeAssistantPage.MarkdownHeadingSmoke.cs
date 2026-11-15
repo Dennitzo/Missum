@@ -13,13 +13,13 @@ public sealed partial class NativeAssistantPage
         const string source = "Einleitung.\n    ## Entropische Planck-Gravitation (EPT): Eine überprüfbare Theorie\n"
             + "    ### Ausgangspunkt\nDie Voraussetzungen werden erklärt.\n    #### Energie $E=mc^2$\n"
             + "```markdown\n## bleibt Quelltext\n```";
-        var owner = Guid.NewGuid(); var answerId = Guid.NewGuid().ToString(); var reasoningId = Guid.NewGuid().ToString();
+        var owner = Guid.NewGuid(); var answerId = Guid.NewGuid().ToString();
         var at = DateTimeOffset.UtcNow;
         var snapshot = original.Deserialize<Dictionary<string, JsonElement>>(JsonOptions)!;
         snapshot["activeSessionId"] = JsonSerializer.SerializeToElement(owner);
         snapshot["chatMode"] = JsonSerializer.SerializeToElement("general");
         snapshot["isRunning"] = JsonSerializer.SerializeToElement(true);
-        snapshot["runMessageId"] = JsonSerializer.SerializeToElement(reasoningId);
+        snapshot["runMessageId"] = JsonSerializer.SerializeToElement(answerId);
         snapshot["runStatus"] = JsonSerializer.SerializeToElement("Modell generiert");
         snapshot["generationState"] = JsonSerializer.SerializeToElement("tokenProgress");
         snapshot["generatedTokens"] = JsonSerializer.SerializeToElement(25);
@@ -27,9 +27,8 @@ public sealed partial class NativeAssistantPage
         snapshot["generationUpdatedAt"] = JsonSerializer.SerializeToElement(at);
         snapshot["messages"] = JsonSerializer.SerializeToElement(new object[]
         {
-            new { id = answerId, sessionId = owner, role = "assistant", content = source, status = "completed", createdAt = at, updatedAt = at },
-            new { id = reasoningId, sessionId = owner, role = "assistant", content = "", status = "streaming", createdAt = at, updatedAt = at,
-                toolSteps = new[] { new { id = "headings-reasoning", tool = "assistant.reasoning", status = "running", detail = "Einleitung.\n    ## Entropische", contentOffset = 0, updatedAt = at } } },
+            new { id = answerId, sessionId = owner, role = "assistant", content = source[..source.IndexOf("    ### Ausgangspunkt", StringComparison.Ordinal)],
+                status = "streaming", createdAt = at, updatedAt = at },
         });
         try
         {
@@ -38,25 +37,21 @@ public sealed partial class NativeAssistantPage
             RenderMessagesNow(); RefreshThinkingIndicators();
             var answer = _messageBlocks[answerId].Values.OfType<NativeStreamingMarkdown>().Single();
             await WaitForNativeMathPreparationAsync(answer);
-            VerifyHeadings(answer);
-            var row = _thinkingIndicators[reasoningId];
-            row.SetExpanded(true);
-            var reasoning = row.ReasoningView;
-            var headingBefore = reasoning.Children[1];
+            var headingBefore = answer.Children[1];
             ApplyEvent("chat.delta", JsonSerializer.SerializeToElement(new
             {
-                sessionId = owner, messageId = reasoningId, content = "", toolSteps = new[] { new
-                { id = "headings-reasoning", tool = "assistant.reasoning", status = "running", detail = source, contentOffset = 0, updatedAt = at.AddMilliseconds(100) } },
+                sessionId = owner, messageId = answerId, content = source,
             }));
             RenderMessagesNow(); RefreshThinkingIndicators();
-            if (!row.IsExpanded || !ReferenceEquals(reasoning, row.ReasoningView) || !ReferenceEquals(headingBefore, reasoning.Children[1]))
-                throw new InvalidOperationException("Streaming an indented heading rebuilt or collapsed the native reasoning disclosure.");
-            await WaitForNativeMathPreparationAsync(reasoning);
-            VerifyHeadings(reasoning);
+            if (!ReferenceEquals(answer, _messageBlocks[answerId].Values.OfType<NativeStreamingMarkdown>().Single())
+                || !ReferenceEquals(headingBefore, answer.Children[1]))
+                throw new InvalidOperationException("Streaming an indented heading rebuilt the unchanged answer heading.");
+            await WaitForNativeMathPreparationAsync(answer);
+            VerifyHeadings(answer);
             AssertChatCursorAbsent(LayoutRoot);
             await SaveMathPreviewAsync(LayoutRoot, "native-markdown-headings-preview.png");
             await File.WriteAllTextAsync(Path.Combine(App.Current.DataDirectory, "native-markdown-headings-validation.json"),
-                JsonSerializer.Serialize(new { passed = true, answerHeadings = true, reasoningHeadings = true,
+                JsonSerializer.Serialize(new { passed = true, answerHeadings = true,
                     headingStreamRetainsControl = true, indentedModelDraft = true, mathHeadingTypeset = true, fencedCodePreserved = true }));
         }
         finally { ApplyEvent("state.snapshot", original); RenderMessagesNow(); }

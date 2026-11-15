@@ -30,7 +30,7 @@ public sealed partial class NativeAssistantPage
 
     private async Task VerifyLooseMathSmokeAsync(JsonElement original)
     {
-        var owner = Guid.NewGuid(); var answerId = Guid.NewGuid().ToString(); var reasoningId = Guid.NewGuid().ToString();
+        var owner = Guid.NewGuid(); var answerId = Guid.NewGuid().ToString();
         var at = DateTimeOffset.UtcNow;
         var snapshot = original.Deserialize<Dictionary<string, JsonElement>>(JsonOptions)!;
         snapshot["activeSessionId"] = JsonSerializer.SerializeToElement(owner);
@@ -75,45 +75,10 @@ public sealed partial class NativeAssistantPage
                 throw new InvalidOperationException("Appending prose rebuilt an unchanged loose formula in the answer.");
             await SaveMathPreviewAsync(LayoutRoot, "native-loose-math-answer-preview.png");
 
-            snapshot["runMessageId"] = JsonSerializer.SerializeToElement(reasoningId);
-            snapshot["generationUpdatedAt"] = JsonSerializer.SerializeToElement(DateTimeOffset.UtcNow);
-            snapshot["messages"] = JsonSerializer.SerializeToElement(new object[]
-            {
-                new { id = answerId, sessionId = owner, role = "assistant", content = LooseMathSmokeSource, status = "completed", createdAt = at, updatedAt = at },
-                new { id = reasoningId, sessionId = owner, role = "assistant", content = "", status = "streaming", createdAt = at.AddSeconds(1), updatedAt = at,
-                    toolSteps = new[] { new { id = "loose-math-reasoning", tool = "assistant.reasoning", status = "running", detail = "Ich prüfe die Gleichungen.", contentOffset = 0, updatedAt = at } } },
-            });
-            ApplyEvent("state.snapshot", JsonSerializer.SerializeToElement(snapshot)); RenderMessagesNow(); RefreshThinkingIndicators();
-            var row = _thinkingIndicators[reasoningId]; row.SetExpanded(true);
-            var reasoning = row.ReasoningView;
-            foreach (var streamedSource in streamedSources)
-            {
-                ApplyEvent("chat.delta", JsonSerializer.SerializeToElement(new
-                {
-                    sessionId = owner, messageId = reasoningId, content = "", toolSteps = new[] { new
-                    { id = "loose-math-reasoning", tool = "assistant.reasoning", status = "running", detail = streamedSource, contentOffset = 0, updatedAt = DateTimeOffset.UtcNow } },
-                }));
-                await Task.Delay(180); await WaitForNativeMathPreparationAsync(LayoutRoot); RefreshThinkingIndicators();
-                if (!row.IsExpanded || !ReferenceEquals(reasoning, row.ReasoningView))
-                    throw new InvalidOperationException("Loose math streaming rebuilt or collapsed the reasoning disclosure.");
-                VerifyNoDanglingFormula(reasoning);
-            }
-            VerifyLooseMath(reasoning);
-            var reasoningFormula = Descendants(reasoning).OfType<NativeFormulaView>().Last();
-            ApplyEvent("chat.delta", JsonSerializer.SerializeToElement(new
-            {
-                sessionId = owner, messageId = reasoningId, content = "", toolSteps = new[] { new
-                { id = "loose-math-reasoning", tool = "assistant.reasoning", status = "running", detail = LooseMathSmokeSource + " Die Herleitung wird fortgesetzt.", contentOffset = 0, updatedAt = DateTimeOffset.UtcNow } },
-            }));
-            await Task.Delay(180); await WaitForNativeMathPreparationAsync(LayoutRoot); RefreshThinkingIndicators();
-            if (!Descendants(reasoning).OfType<NativeFormulaView>().Any(formula => ReferenceEquals(formula, reasoningFormula)))
-                throw new InvalidOperationException("Appending prose rebuilt an unchanged loose formula in the reasoning disclosure.");
             AssertChatCursorAbsent(LayoutRoot);
-            ConversationScroll.ChangeView(null, ConversationScroll.ScrollableHeight, null, true);
-            await SaveMathPreviewAsync(LayoutRoot, "native-loose-math-reasoning-preview.png");
             await File.WriteAllTextAsync(Path.Combine(App.Current.DataDirectory, "native-loose-math-validation.json"),
-                JsonSerializer.Serialize(new { renderer = "WinUI3", passed = true, answerMath = true, reasoningMath = true,
-                    visibleStreamingDeltas = streamedSources.Length, formulaControlRetained = true, reasoningDisclosureRetained = true, incompleteFormulaPreserved = true,
+                JsonSerializer.Serialize(new { renderer = "WinUI3", passed = true, answerMath = true,
+                    visibleStreamingDeltas = streamedSources.Length, formulaControlRetained = true, incompleteFormulaPreserved = true,
                     codePathsUrlsProtected = true, formulaFontMatchesText = true, chatCursorAbsent = true }));
             await VerifyStoredPhysicsDisplaySmokeAsync(original);
         }

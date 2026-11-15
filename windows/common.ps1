@@ -329,7 +329,7 @@ function Assert-MissumPublishDirectoryIdle {
     param([Parameter(Mandatory = $true)][string] $Path)
     $resolved = Assert-MissumArtifactPath -Path $Path
     $prefix = $resolved.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
-    foreach ($candidate in @(Get-Process -Name Missum, ExtensionHost -ErrorAction SilentlyContinue)) {
+    foreach ($candidate in @(Get-Process -Name 'Missum Labs', Missum, ExtensionHost -ErrorAction SilentlyContinue)) {
         try {
             if ($candidate.HasExited) { continue }
             $executablePath = $candidate.Path

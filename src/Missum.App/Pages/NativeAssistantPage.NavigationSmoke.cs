@@ -13,6 +13,11 @@ public sealed partial class NativeAssistantPage
     // Returning to A must not reuse a footer still parented to A's discarded bubble.
     private async Task<int> VerifyMessageNavigationSmokeAsync()
     {
+        if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_RESPONSIVENESS") == "continuation")
+        {
+            await VerifyContinuationSmokeAsync(_snapshot.Clone());
+            return 0;
+        }
         if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_RESPONSIVENESS") == "computer-use")
         {
             await VerifyComputerUseSmokeAsync();
@@ -274,8 +279,18 @@ public sealed partial class NativeAssistantPage
             var stepView = new ToolStepView(expandByDefault);
             var step = JsonSerializer.SerializeToElement(new { tool, status = "running", detail = "Erster Abschnitt" });
             stepView.Update(step);
+            if (tool is "assistant.reasoning" or "assistant.progress")
+            {
+                // Activity rows are deliberately non-disclosable, regardless of
+                // the expansion preference; normal tool receipts retain it.
+                stepView.SetExpanded(true);
+                stepView.Update(JsonSerializer.SerializeToElement(new { tool, status = "completed", detail = "Vollständiger Abschnitt" }));
+                if (stepView.IsExpanded || stepView.HasActivityDisclosure)
+                    throw new InvalidOperationException("Activity rows must stay collapsed without a disclosure button.");
+                continue;
+            }
             if (stepView.IsExpanded != expandByDefault)
-                throw new InvalidOperationException("The expansion preference must apply to every step, including reasoning.");
+                throw new InvalidOperationException("The expansion preference must apply to tool receipts.");
             stepView.SetExpanded(!expandByDefault);
             stepView.Update(JsonSerializer.SerializeToElement(new { tool, status = "completed", detail = "Vollständiger Abschnitt" }));
             if (stepView.IsExpanded == expandByDefault)
@@ -962,7 +977,7 @@ public sealed partial class NativeAssistantPage
                 ApplyEvent("chat.delta", JsonSerializer.SerializeToElement(new { sessionId = session, messageId = id, content, updatedAt = DateTimeOffset.UtcNow }));
                 // Do not force a render: verify the production render timer.
                 await Task.Delay(180);
-                if (!_messageBlocks.TryGetValue(id, out var blocks) || !blocks.TryGetValue("text:0", out var view)
+                if (!_messageBlocks.TryGetValue(id, out var blocks) || !blocks.TryGetValue("source:0", out var view)
                     || view is not Missum.App.Controls.NativeStreamingMarkdown markdown || !markdown.Children.OfType<TextBlock>()
                         .SelectMany(text => text.Inlines).OfType<Microsoft.UI.Xaml.Documents.Run>().Any(run => run.Text == content)
                     || S(_messages[id], "status") != "streaming")

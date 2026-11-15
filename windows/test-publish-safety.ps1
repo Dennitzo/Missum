@@ -28,7 +28,10 @@ function Move-Item {
 function Get-Process {
     [CmdletBinding()]
     param([string[]] $Name)
-    if ($null -ne $script:PublishSafetyFakeProcess) { return $script:PublishSafetyFakeProcess }
+    if ($null -ne $script:PublishSafetyFakeProcess) {
+        if ($Name -contains $script:PublishSafetyFakeProcess.ProcessName) { return $script:PublishSafetyFakeProcess }
+        return
+    }
     Microsoft.PowerShell.Management\Get-Process @PSBoundParameters
 }
 
@@ -51,7 +54,7 @@ try {
     $previousManifestHash = (Get-FileHash -LiteralPath ($output + '.manifest.json') -Algorithm SHA256).Hash
     $nextHash = (Get-FileHash -LiteralPath (Join-Path $stage 'Missum Labs.exe') -Algorithm SHA256).Hash
 
-    $script:PublishSafetyFakeProcess = [pscustomobject]@{ HasExited = $false; Id = 424242; Path = (Join-Path $output 'Missum Labs.exe') }
+    $script:PublishSafetyFakeProcess = [pscustomobject]@{ HasExited = $false; Id = 424242; ProcessName = 'Missum Labs'; Path = (Join-Path $output 'Missum Labs.exe') }
     $blocked = $false
     try { $null = Install-MissumPublishStage -StageDirectory $stage -OutputDirectory $output }
     catch { $blocked = $_.Exception.Message -like '*in use by process*' }

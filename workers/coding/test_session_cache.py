@@ -102,6 +102,19 @@ class SessionCacheTests(unittest.TestCase):
         reopened = self.create_cache()
         self.assertEqual(dict(status="restored", restoredTokens=100), reopened.prepare("model", "session"))
 
+    def test_non_forced_completed_small_turn_is_saved_and_restored(self):
+        self.cache.prepare("model", "session")
+        self.assertEqual("saved", self.cache.save("model", "session", force=False, new_tokens=1)["status"])
+        self.tokens = 0
+        self.assertEqual("restored", self.create_cache().prepare("model", "session")["status"])
+
+    def test_non_forced_save_does_not_snapshot_a_busy_prefill(self):
+        self.cache.prepare("model", "session")
+        self.busy = True
+        with patch("session_cache.time.monotonic", side_effect=[0, 3]):
+            self.assertEqual("unavailable", self.cache.save("model", "session", force=False, new_tokens=1)["status"])
+        self.assertFalse(self.actions("save"))
+
     def test_renamed_session_key_reuses_legacy_disk_and_resident_cache(self):
         suffix = "a" * 64
         legacy_key = "go-session-v2-" + suffix

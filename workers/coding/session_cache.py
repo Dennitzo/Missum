@@ -23,6 +23,9 @@ import uuid
 INTERRUPTED_SAVE_IDLE_SECONDS = 90.0
 PREPARATION_IDLE_SECONDS = 300.0
 PREPARATION_MAXIMUM_SECONDS = 2 * 60 * 60.0
+# Checkpoint only long uncached portions. Each checkpoint writes the entire KV
+# prefix, so short intervals can turn a long prefill into quadratic disk I/O.
+PREFILL_CHECKPOINT_TOKENS = 65536
 # Native versions 3 and 4 retain the same leading token payload layout. Their
 # KV tensors differ and remain bound to the native binary/model fingerprint;
 # accepting this header for bounded inspection does not make KV interchangeable.
@@ -225,7 +228,7 @@ class NativeSessionCache:
                 # subsequent save or prepare drains it before any cache reuse.
                 pending_models.append(model)
         for identity in identities:
-            for path in (self.directory / (identity + ".bin"), self.directory / (identity + ".json"),
+            for path in (self.directory / (identity + ".bin"), self.directory / (identity + ".prefill.bin"), self.directory / (identity + ".json"),
                          *self.directory.glob(identity + ".*.pending")):
                 if path.exists():
                     size = path.stat().st_size
@@ -300,6 +303,7 @@ class NativeSessionCache:
             if (current and current["identity"] == identity and tokens > 0
                     and not current.get("restore_preserved_snapshot")):
                 current["dirty"] = True
+                current.pop("restored_token_count", None)
                 return self._record(model, "prepare", dict(status="resident"))
             if current and tokens > 0 and not current.get("restore_preserved_snapshot"):
                 self._save(model)
@@ -321,6 +325,8 @@ class NativeSessionCache:
                     result = dict(status="unavailable", detail=str(error)[:500])
             if identity:
                 self.resident[model] = dict(identity=identity, key=key, dirty=True)
+                if result["status"] == "restored":
+                    self.resident[model]["restored_token_count"] = result["restoredTokens"]
                 if (result["status"] == "unavailable" and current and current["identity"] == identity
                         and current.get("restore_preserved_snapshot")):
                     # A transient failed restore must not let a following
@@ -336,9 +342,9 @@ class NativeSessionCache:
 
     def _prune(self, required=0, protected=None, replacing=None):
         protected = set(protected or ()) | {
-            value["identity"] + ".bin" for value in self.resident.values()}
+            value["identity"] + suffix for value in self.resident.values() for suffix in (".bin", ".prefill.bin")}
         files = sorted((path for path in self.directory.glob("*.bin")
-                        if re.fullmatch(r"[0-9a-f]{64}\.bin", path.name)),
+                        if re.fullmatch(r"[0-9a-f]{64}(?:\.prefill)?\.bin", path.name)),
                        key=lambda path: path.stat().st_mtime)
         pending_bytes = 0
         for pending in self.directory.glob("*.pending"):
@@ -440,6 +446,8 @@ class NativeSessionCache:
                 except Exception:
                     pass
             return dict(status="deleted" if not self.lifecycle_error else "unavailable")
+        if current.get("protect_prefill_snapshot"):
+            return self._record(model, "save", dict(status="unchanged", reason="incompletePrefill"))
         identity = current["identity"]
         target = self.directory / (identity + ".bin")
         temporary = self.directory / (identity + "." + uuid.uuid4().hex + ".pending")
@@ -515,6 +523,7 @@ class NativeSessionCache:
             temporary.replace(target)
             metadata.write_text(json.dumps(dict(self.owners.get(identity, {}), bytes=target.stat().st_size,
                                                tokens=response["n_saved"])), encoding="utf-8")
+            (self.directory / (identity + ".prefill.bin")).unlink(missing_ok=True)
             current["dirty"] = False
             self.save_progress[identity] = dict(time=time.monotonic(), new_tokens=0)
             self._prune(protected=[target.name])
@@ -558,17 +567,19 @@ class NativeSessionCache:
                 # such completion evidence and cannot remove the Stop guard.
                 current.pop("interrupted_prompt_tokens", None)
                 current.pop("restore_preserved_snapshot", None)
+                current.pop("protect_prefill_snapshot", None)
             progress = self.save_progress.get(current["identity"])
             if progress is None:
                 progress = dict(time=time.monotonic(), new_tokens=0)
                 self.save_progress[current["identity"]] = progress
             if type(new_tokens) is int and new_tokens > 0:
                 progress["new_tokens"] += new_tokens
-            if not force and prompt_tokens is None:
-                # AND, not OR: neither tiny frequent turns nor a large single
-                # turn should rewrite gigabytes of disposable KV on every call.
-                if time.monotonic() - progress["time"] < 120 or progress["new_tokens"] < 8192:
-                    return self._record(model, "save", dict(status="deferred", newTokens=progress["new_tokens"]))
+            # Persist at each requested completed inference boundary. The
+            # native slot-save API defers requests while a slot is processing,
+            # so it cannot create a durable checkpoint in the middle of a
+            # prefill. Keeping the old time/token thresholds here would also
+            # lose already completed work after a crash or model switch.
+            # `force` remains accepted for wire compatibility with older clients.
             return self._save(model, prompt_tokens)
         except Exception as error:
             return self._record(model, "save", dict(status="unavailable", detail=str(error)[:500]))
@@ -601,6 +612,155 @@ class NativeSessionCache:
     def _check_preparation_cancelled(cancelled):
         if cancelled and cancelled():
             raise PreparationCancelledError("Subagent preparation was cancelled by its caller")
+
+    @staticmethod
+    def _text_only_chat(body, model):
+        if not isinstance(body, dict) or body.get("model") != model or not isinstance(body.get("messages"), list):
+            return False
+        if body.get("add_generation_prompt", True) is not True:
+            return False
+        for message in body["messages"]:
+            if not isinstance(message, dict):
+                return False
+            content = message.get("content")
+            if content is None or isinstance(content, str):
+                continue
+            if not isinstance(content, list) or any(not isinstance(part, dict)
+                    or part.get("type") != "text" or not isinstance(part.get("text"), str) for part in content):
+                return False
+        return bool(body["messages"])
+
+    def prefill(self, model, key, body, cancelled=None):
+        """Persist validated text-only prefix checkpoints without replacing the full branch.
+
+        The caller must hold the model turn lease through the subsequent chat
+        request; the manager serializes this operation with other cache actions.
+        """
+        temporary = None
+        started = False
+        initially_cached = None
+        evaluated = 0
+        checkpoint_tokens = 0
+        active_completion = False
+        try:
+            if not key or not self._text_only_chat(body, model):
+                return dict(status="skipped", reason="unsupportedPrompt", started=False)
+            identity = self._identity(model, key)
+            current = self.resident.get(model)
+            if (self.lifecycle_error or self._canonical_key(key) in self.deleted_keys or not current
+                    or current.get("deleted") or current["identity"] != identity):
+                return dict(status="skipped", reason="unownedSession", started=False)
+            self._check_preparation_cancelled(cancelled)
+            rendered = self.router("apply-template", body, timeout=120).get("prompt")
+            if not isinstance(rendered, str) or not rendered or "<__media__>" in rendered:
+                return dict(status="skipped", reason="unsupportedTemplate", started=False)
+            tokens = self.router("tokenize", dict(model=model, content=rendered,
+                add_special=True, parse_special=True), timeout=120).get("tokens")
+            if (not isinstance(tokens, list) or not 1 <= len(tokens) <= 1_048_576
+                    or any(type(token) is not int or token < 0 for token in tokens)):
+                return dict(status="skipped", reason="unsupportedTokens", started=False)
+            if len(tokens) <= PREFILL_CHECKPOINT_TOKENS:
+                return dict(status="skipped", reason="shortPrefill", promptTokens=len(tokens), started=False)
+            self._check_preparation_cancelled(cancelled)
+            slot = self._idle_slot(model)
+            resident_tokens = slot.get("n_prompt_tokens", slot.get("n_past", slot.get("n_tokens", current.get("restored_token_count", 0))))
+            if type(resident_tokens) is not int or resident_tokens < 0:
+                return dict(status="skipped", reason="unsupportedSlot", started=False)
+            complete = self.directory / (identity + ".bin")
+            partial = self.directory / (identity + ".prefill.bin")
+            temporary = self.directory / (identity + "." + uuid.uuid4().hex + ".pending")
+            common = 0
+            if resident_tokens:
+                # Slot length alone says nothing about its actual common prefix:
+                # even an equally long resident prompt may have changed. Take
+                # a disposable snapshot to compare the real token vector.
+                estimate = self.estimate_bytes(model, resident_tokens) if self.estimate_bytes else None
+                if type(estimate) is not int or estimate <= 0:
+                    estimate = resident_tokens * 256 * 1024
+                self._prune(required=estimate, protected=[complete.name, partial.name])
+                saved = self.router("slots/0?action=save", dict(model=model, filename=temporary.name), timeout=120)
+                if not temporary.is_file() or saved.get("n_saved") != resident_tokens:
+                    raise RuntimeError("Unable to verify the resident prompt tokens")
+                resident = self._snapshot_tokens(temporary)
+                temporary.unlink()
+                for left, right in zip(resident, tokens):
+                    if left != right:
+                        break
+                    common += 1
+            if partial.is_file():
+                try:
+                    saved = self._snapshot_tokens(partial)
+                    if len(saved) > common and len(saved) < len(tokens) and tokens[:len(saved)] == saved:
+                        started = True
+                        current["protect_prefill_snapshot"] = True
+                        current["dirty"] = True
+                        restored = self.router("slots/0?action=restore", dict(model=model, filename=partial.name), timeout=120)
+                        if restored.get("n_restored") != len(saved):
+                            raise RuntimeError("Native server restored an incomplete prefill checkpoint")
+                        common = len(saved)
+                except (OSError, ValueError, struct.error):
+                    pass  # Corrupt or unsupported snapshots are disposable.
+            if len(tokens) - common <= PREFILL_CHECKPOINT_TOKENS:
+                return dict(status="skipped", reason="shortPrefill", promptTokens=len(tokens), started=started)
+            checkpoints = 0
+            for end in range(common + PREFILL_CHECKPOINT_TOKENS, len(tokens), PREFILL_CHECKPOINT_TOKENS):
+                self._check_preparation_cancelled(cancelled)
+                estimate = self.estimate_bytes(model, end) if self.estimate_bytes else None
+                if type(estimate) is not int or estimate <= 0:
+                    estimate = end * 256 * 1024
+                self._prune(required=estimate, protected=[complete.name, partial.name], replacing=partial)
+                prefix = tokens[:end]
+                completion = dict(model=model, prompt=prefix, n_predict=1, cache_prompt=True,
+                                  id_slot=0, temperature=0)
+                started = True
+                current["protect_prefill_snapshot"] = True
+                current["dirty"] = True
+                active_completion = True
+                response = (self.prepare_completion(completion, cancelled) if self.prepare_completion else
+                            self.router("completion", dict(completion, stream=False), timeout=PREPARATION_MAXIMUM_SECONDS))
+                timings = response.get("timings", {})
+                cached, processed = timings.get("cache_n"), timings.get("prompt_n")
+                if (type(cached) is not int or cached < 0 or type(processed) is not int or processed < 0
+                        or cached + processed != end or response.get("tokens_predicted") != 1):
+                    raise RuntimeError("Native prefill returned inconsistent token accounting")
+                if initially_cached is None:
+                    initially_cached = cached
+                evaluated += processed
+                active_completion = False
+                self._check_preparation_cancelled(cancelled)
+                self._idle_slot(model)
+                self._check_preparation_cancelled(cancelled)
+                saved = self.router("slots/0?action=save", dict(model=model, filename=temporary.name), timeout=120)
+                if (not temporary.is_file() or saved.get("n_saved") != end
+                        or self._snapshot_tokens(temporary) != prefix or temporary.stat().st_size > self.maximum_bytes):
+                    raise RuntimeError("Native prefill checkpoint did not match the requested token prefix")
+                self._check_preparation_cancelled(cancelled)
+                temporary.replace(partial)
+                checkpoints += 1
+                checkpoint_tokens = end
+            return dict(status="prepared", started=started, promptTokens=len(tokens), checkpoints=checkpoints,
+                        checkpointTokens=end if checkpoints else 0, cachedTokens=initially_cached or 0,
+                        evaluatedTokens=evaluated)
+        except Exception as error:
+            if started:
+                # No incomplete prefill may overwrite a previously completed
+                # snapshot during stop, shutdown, or a later owner switch.
+                current = self.resident.get(model)
+                if current and current.get("identity") == identity:
+                    current.update(protect_prefill_snapshot=True, restore_preserved_snapshot=True)
+                try:
+                    self._idle_slot(model, timeout=INTERRUPTED_SAVE_IDLE_SECONDS)
+                except Exception:
+                    pass
+            return dict(status="cancelled" if isinstance(error, PreparationCancelledError) else "unavailable",
+                        started=started, detail=str(error)[:500], cachedTokens=initially_cached if active_completion else (initially_cached or 0),
+                        evaluatedTokens=None if active_completion else evaluated, checkpointTokens=checkpoint_tokens)
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def _prefill_fork(self, source_model, target, temporary, prefill, cancelled=None, preparation=None):
         """Evaluate a canonical branch on the source's live rollback checkpoints.

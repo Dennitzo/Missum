@@ -207,7 +207,7 @@ try {
         throw 'Missing or stale native Markdown heading validation.'
     }
     $headingValidation = Get-Content -LiteralPath $headingValidationPath -Raw | ConvertFrom-Json
-    foreach ($headingCheck in @('passed', 'answerHeadings', 'reasoningHeadings', 'headingStreamRetainsControl', 'indentedModelDraft', 'mathHeadingTypeset', 'fencedCodePreserved')) {
+    foreach ($headingCheck in @('passed', 'answerHeadings', 'headingStreamRetainsControl', 'indentedModelDraft', 'mathHeadingTypeset', 'fencedCodePreserved')) {
         if ($headingValidation.PSObject.Properties.Name -notcontains $headingCheck -or $headingValidation.$headingCheck -ne $true) {
             throw "Native Markdown heading validation failed: $headingCheck"
         }
@@ -218,7 +218,7 @@ try {
         throw 'Missing native Markdown heading preview.'
     }
     Copy-Item -LiteralPath $headingPreview -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-markdown-headings-preview.png')) -Force
-    Write-Host 'Native headings in streamed answers and reasoning verified.'
+    Write-Host 'Native headings in streamed answers verified.'
     $imageValidationPath = Join-Path $smokeData 'native-artifact-image-validation.json'
     if (-not (Test-Path -LiteralPath $imageValidationPath) -or
         (Get-Item -LiteralPath $imageValidationPath).LastWriteTimeUtc -lt $startedAt.AddSeconds(-1)) {
@@ -289,13 +289,13 @@ try {
     if ($looseMathValidation.renderer -ne 'WinUI3' -or $looseMathValidation.visibleStreamingDeltas -lt 3) {
         throw 'Loose scientific formulas were not rendered by the native streaming path.'
     }
-    foreach ($looseMathCheck in @('passed', 'answerMath', 'reasoningMath', 'formulaControlRetained', 'reasoningDisclosureRetained', 'incompleteFormulaPreserved', 'codePathsUrlsProtected', 'formulaFontMatchesText', 'chatCursorAbsent')) {
+    foreach ($looseMathCheck in @('passed', 'answerMath', 'formulaControlRetained', 'incompleteFormulaPreserved', 'codePathsUrlsProtected', 'formulaFontMatchesText', 'chatCursorAbsent')) {
         if ($looseMathValidation.PSObject.Properties.Name -notcontains $looseMathCheck -or $looseMathValidation.$looseMathCheck -ne $true) {
             throw "Native loose-math validation failed: $looseMathCheck"
         }
     }
     Copy-Item -LiteralPath $looseMathValidationPath -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.native-loose-math-validation.json')) -Force
-    foreach ($looseMathPreviewName in @('native-loose-math-answer-preview', 'native-loose-math-reasoning-preview')) {
+    foreach ($looseMathPreviewName in @('native-loose-math-answer-preview')) {
         $looseMathPreview = Join-Path $smokeData ($looseMathPreviewName + '.png')
         if (-not (Test-Path -LiteralPath $looseMathPreview -PathType Leaf) -or (Get-Item -LiteralPath $looseMathPreview).Length -lt 100 -or
             (Get-Item -LiteralPath $looseMathPreview).LastWriteTimeUtc -lt $startedAt.AddSeconds(-1)) {
@@ -303,7 +303,7 @@ try {
         }
         Copy-Item -LiteralPath $looseMathPreview -Destination (Assert-MissumArtifactPath -Path ($PublishDirectory + '.' + $looseMathPreviewName + '.png')) -Force
     }
-    Write-Host 'Loose scientific formulas, protected literals, matching sizes and answer/reasoning streaming verified.'
+    Write-Host 'Loose scientific formulas, protected literals, matching sizes and answer streaming verified.'
     $physicsPath = Join-Path $smokeData 'native-physics-latex-validation.json'
     if (-not (Test-Path -LiteralPath $physicsPath -PathType Leaf) -or (Get-Item -LiteralPath $physicsPath).LastWriteTimeUtc -lt $startedAt.AddSeconds(-1)) {
         throw 'Missing or stale native physics formula evidence.'

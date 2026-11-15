@@ -57,6 +57,25 @@ public sealed class ClientContinuationTests
     }
 
     [Fact]
+    public async Task NewPromptKeepsStoppedAnswerAsHistoryAndCreatesANewTurn()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var seeded = await SeedAsync(environment, MessageStatus.Cancelled);
+        var handler = new ContinuationHandler(RunState.Cancelled);
+        using var host = await Host.CreateAsync(environment, handler);
+
+        var result = await host.Service.SendAsync(seeded.Session.Id, "Bitte mit dem nächsten Schritt fortfahren.",
+            null, _ => Task.CompletedTask);
+
+        Assert.NotEqual(seeded.Message.Id, result.Id);
+        Assert.Equal(MessageStatus.Completed, result.Status);
+        Assert.Equal(Partial, (await environment.Get<IChatRepository>().GetMessageAsync(seeded.Message.Id))!.Content);
+        var request = Assert.Single(handler.Requests);
+        Assert.Contains(request.Messages, message => message.Content.Any(part => part.Text != null && part.Text.Contains(Partial)));
+        Assert.Contains(request.Messages, message => message.Content.Any(part => part.Text != null && part.Text.Contains("Bitte mit dem nächsten Schritt fortfahren.")));
+    }
+
+    [Fact]
     public async Task CancelledTurnContinuesSameAnchorWithoutAnotherUserMessageAndPreservesReceiptsAndTitle()
     {
         await using var environment = await TestEnvironment.CreateAsync();

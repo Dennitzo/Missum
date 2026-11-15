@@ -924,6 +924,20 @@ class GpuLoadManager:
         with self.lock:
             return self.sessions.save(model, key, prompt_tokens, force, new_tokens)
 
+    def session_prefill(self, model, key, request_body, cancelled=None):
+        with self.lock:
+            return self.sessions.prefill(model, key, request_body, cancelled)
+
+    def session_barrier(self, model):
+        # A disconnected control client does not mean the native slot has
+        # drained. Acquire the same manager lock before checking that state.
+        with self.lock:
+            try:
+                self.sessions._idle_slot(model, timeout=90.0)
+                return dict(status="idle")
+            except Exception as error:
+                return dict(status="unavailable", detail=str(error)[:500])
+
     def session_reset_epoch(self, epoch):
         with self.lock:
             # Resident unowned/stateless native requests also make a reset busy.
@@ -1426,10 +1440,10 @@ def start_gpu_control(manager, host, port):
         def do_POST(self):
             try:
                 length = int(self.headers.get("Content-Length", "0"))
-                if self.path not in ("/models/load", "/sessions/prepare", "/sessions/save", "/sessions/fork", "/sessions/delete",
+                if self.path not in ("/models/load", "/sessions/prepare", "/sessions/save", "/sessions/fork", "/sessions/delete", "/sessions/prefill", "/sessions/barrier",
                                      "/sessions/reset-epoch",
                                      "/agents/status", "/agents/prepare") or not 0 < length <= (
-                                         16 * 1024**2 if self.path == "/agents/prepare" else 1024**2 if self.path == "/sessions/delete" else 8192):
+                                         32 * 1024**2 if self.path == "/sessions/prefill" else 16 * 1024**2 if self.path == "/agents/prepare" else 1024**2 if self.path == "/sessions/delete" else 8192):
                     raise ValueError("Invalid GPU control request")
                 body = json.loads(self.rfile.read(length))
                 if self.path.startswith("/sessions/"):
@@ -1439,6 +1453,10 @@ def start_gpu_control(manager, host, port):
                     elif self.path == "/sessions/save":
                         result = manager.session_save(body["model"], body.get("sessionKey"), body.get("promptTokens"),
                             body.get("force", True), body.get("newTokens"))
+                    elif self.path == "/sessions/prefill":
+                        result = manager.session_prefill(body["model"], body.get("sessionKey"), body.get("requestBody"), self.client_disconnected)
+                    elif self.path == "/sessions/barrier":
+                        result = manager.session_barrier(body["model"])
                     elif self.path == "/sessions/reset-epoch":
                         result = manager.session_reset_epoch(body["epoch"])
                     elif self.path == "/sessions/delete":

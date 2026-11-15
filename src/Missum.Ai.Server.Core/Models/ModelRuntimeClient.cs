@@ -362,6 +362,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
         string? preparedInstanceId = null;
         int? evaluatedPromptTokens = null;
         var inferenceIncomplete = false;
+        NativeCachePrefill? prefill = null;
         try
         {
             // The preset chooses the model's maximum that fits. A request limit is
@@ -429,6 +430,8 @@ public sealed partial class ModelRuntimeClient : IDisposable
             async ValueTask ReportProgressAsync(ModelRuntimeProgress progress, CancellationToken token)
             {
                 if (progress.PromptTokens is > 0) evaluatedPromptTokens = progress.PromptTokens;
+                if (prefill is not null && progress.CachedPromptTokens is { } cached)
+                    progress = progress with { CachedPromptTokens = prefill.CachedTokens is { } previous ? Math.Min(previous, cached) : null };
                 if (nativeProgress is not null) await nativeProgress(progress, token).ConfigureAwait(false);
             }
             var transportToolNames = tools.ToDictionary(
@@ -445,8 +448,24 @@ public sealed partial class ModelRuntimeClient : IDisposable
                 context,
                 maximumOutputTokens,
                 cancellationToken,
-                inferenceDispatched: () => inferenceIncomplete = true, compactAtThreshold: compactAtThreshold).ConfigureAwait(false);
+                inferenceDispatched: () => inferenceIncomplete = true, compactAtThreshold: compactAtThreshold,
+                cachePrefill: string.IsNullOrEmpty(sessionCacheKey) ? null
+                    : async (request, token) => prefill = await PrefillSessionCacheAsync(preparation.InstanceId, sessionCacheKey, request, token).ConfigureAwait(false)).ConfigureAwait(false);
             inferenceIncomplete = false;
+            if (prefill is not null)
+            {
+                var metrics = result.Metrics ?? new ModelTurnMetrics();
+                result = result with { Metrics = metrics with
+                {
+                    // Tokens evaluated in our preparation are not old cache hits,
+                    // even though the following chat sees them already resident.
+                    CachedPromptTokens = prefill.CachedTokens is { } previous && metrics.CachedPromptTokens is { } cached
+                        ? Math.Min(previous, cached) : null,
+                    PromptEvaluatedTokens = prefill.EvaluatedTokens is { } prepared && metrics.PromptEvaluatedTokens is { } evaluated
+                        ? prepared + evaluated : null,
+                    PromptMilliseconds = metrics.PromptMilliseconds is { } duration ? duration + prefill.Milliseconds : null,
+                } };
+            }
             // Ordinary controllers can retain the exact response for a recoverable
             // non-execution receipt. Private reviewers keep strict validation.
             if (suppressToolCalls && !deferSuppressedToolCallValidation && result.ToolCalls.Count > 0)
@@ -471,8 +490,9 @@ public sealed partial class ModelRuntimeClient : IDisposable
                         cancellationToken).ConfigureAwait(false);
                 }
             }
-            // Journal/checkpoint persistence owns correctness. Disposable KV writes
-            // are batched at idle turn boundaries; an answer ending a run is forced.
+            // The journal owns correctness; save the disposable native KV state at
+            // every completed model turn, including turns that request a tool.
+            // The native slot API cannot save while the model is processing.
             if (!string.IsNullOrEmpty(sessionCacheKey))
                 await UpdateSessionCacheAsync("save", preparation.InstanceId, sessionCacheKey,
                     forceSave: !deferSessionCacheCheckpoint && result.ToolCalls.Count == 0,
@@ -919,7 +939,8 @@ public sealed partial class ModelRuntimeClient : IDisposable
         string? completionEndpoint = null,
         Action? inferenceDispatched = null,
         bool compactAtThreshold = false,
-        bool allowMultimodalCountingFallback = false)
+        bool allowMultimodalCountingFallback = false,
+        Func<Dictionary<string, object?>, CancellationToken, Task>? cachePrefill = null)
     {
         Exception? last = null;
         string? protocolRepairTool = null;
@@ -937,6 +958,10 @@ public sealed partial class ModelRuntimeClient : IDisposable
                 Dictionary<string, object?> requestBody;
                 try { requestBody = await ApplyTokenBudgetAsync(unbudgetedBody, contextLength, maximumOutputTokens, nativeProgress, compactAtThreshold, allowMultimodalCountingFallback, cancellationToken).ConfigureAwait(false); }
                 finally { tokenCountingMilliseconds += countingClock.Elapsed.TotalMilliseconds; }
+                // Budgeting and a protocol-repair retry can change the actual
+                // prompt. Only prepare the exact body that will be sent next.
+                if (cachePrefill is not null)
+                    await cachePrefill(requestBody, cancellationToken).ConfigureAwait(false);
                 requestPhase = "generation";
                 var requestClock = Stopwatch.StartNew();
                 cancellationToken.ThrowIfCancellationRequested();
