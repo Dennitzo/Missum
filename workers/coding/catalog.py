@@ -32,8 +32,11 @@ SHARD = re.compile(r"^(.*)-([0-9]{5})-of-([0-9]{5})\.gguf$", re.IGNORECASE)
 NON_TEXT = re.compile(r"(?:^|[-_./])(?:mmproj|ggml-vocab|embedding|embed|asr|whisper|clip|vae|diffusion|mtp)(?:[-_./]|$)", re.IGNORECASE)
 NON_TEXT_ARCHITECTURES = ("bert", "nomic-bert", "jina-bert", "embedding", "t5", "clip", "mclip", "wavtokenizer", "whisper", "dflash")
 EMBEDDING_ARCHITECTURES = ("bert", "nomic-bert", "jina-bert", "embedding")
-QWEN_FLASH_TRAIN_CONTEXT = 262144
-QWEN_FLASH_YARN_CONTEXT = 1048576
+YARN4_TRAIN_CONTEXT = 262144
+YARN4_CONTEXT = YARN4_TRAIN_CONTEXT * 4
+# Keep the existing fingerprint for byte-compatible Flash Next cache snapshots.
+YARN4_CACHE_PROFILE = "qwen38-yarn4"
+QWEN_YARN_ARCHITECTURES = {"qwen35", "qwen35moe", "qwen4exp"}
 _METADATA_CACHE = {}
 SCALAR_SIZES = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
 
@@ -103,13 +106,20 @@ def model_metadata(path, allow_metadata_only=False):
         for _ in range(count):
             key = read_string(stream)
             kind = struct.unpack("<I", read_exact(stream, 4))[0]
-            if key in ("general.architecture", "general.type", "general.name", "tokenizer.chat_template") and kind == 8:
+            if (key in ("general.architecture", "general.type", "general.name", "tokenizer.chat_template")
+                    or key.endswith(".rope.scaling.type")) and kind == 8:
                 metadata[key] = read_string(stream)
+            elif key.endswith((".rope.freq_base", ".rope.scaling.factor", ".rope.scale_linear")) and kind == 6:
+                metadata[key] = struct.unpack("<f", read_exact(stream, 4))[0]
+            elif key.endswith(".rope.scaling.finetuned") and kind == 7:
+                metadata[key] = struct.unpack("<?", read_exact(stream, 1))[0]
+            elif key.endswith(".rope.dimension_count") and kind in (4, 10):
+                metadata[key] = (u64(stream) if kind == 10 else struct.unpack("<I", read_exact(stream, 4))[0])
             elif key.endswith((".context_length", ".pooling_type", ".block_count", ".embedding_length",
                                ".attention.head_count", ".attention.head_count_kv", ".attention.key_length",
                                ".attention.value_length", ".attention.indexer.key_length", ".ssm.state_size", ".ssm.inner_size",
                                ".ssm.group_count", ".ssm.conv_kernel", ".full_attention_interval",
-                               ".nextn_predict_layers")) and kind == 4:
+                               ".nextn_predict_layers", ".rope.scaling.original_context_length")) and kind == 4:
                 metadata[key] = struct.unpack("<I", read_exact(stream, 4))[0]
             else:
                 skip_value(stream, kind)
@@ -274,6 +284,29 @@ def resolve_model_catalog_root(root):
     return root
 
 
+def experimental_context_maximum(metadata, architecture, context):
+    # GGUF can declare an exact 4x YaRN profile. For Qwen hybrid exports that
+    # omit scaling, use the documented family profile only with matching RoPE
+    # metadata. Context length by itself does not imply scaling support.
+    if context != YARN4_TRAIN_CONTEXT:
+        return None
+    rope = architecture + ".rope."
+    scaling = metadata.get(rope + "scaling.type")
+    factor = metadata.get(rope + "scaling.factor")
+    original = metadata.get(rope + "scaling.original_context_length")
+    if metadata.get(rope + "scale_linear") not in (None, 1.0):
+        return None
+    if scaling == "yarn" and factor == 4.0 and original == context:
+        return YARN4_CONTEXT
+    if (architecture in QWEN_YARN_ARCHITECTURES and scaling in (None, "none")
+            and factor in (None, 1.0) and original in (None, context)
+            and not metadata.get(rope + "scaling.finetuned")
+            and metadata.get(rope + "freq_base") == 10_000_000.0
+            and metadata.get(rope + "dimension_count") == 64):
+        return YARN4_CONTEXT
+    return None
+
+
 def discover_models(root):
     root = resolve_model_catalog_root(root)
     found = []
@@ -323,11 +356,8 @@ def discover_models(root):
             reasoning = reasoning_profile(metadata)
             found.append({"id": f"coding/{safe_name}~{digest}", "path": path, "role": "general", "context": context,
                           "contextPolicy": "max-fit", "reasoning": reasoning})
-            # The experimental profile is deliberately specific to the model
-            # whose native metadata and YaRN configuration were examined.
-            if (architecture == "qwen4exp" and context == QWEN_FLASH_TRAIN_CONTEXT
-                    and metadata.get("general.name", "").strip().casefold() == "qwen3.8 flash next"):
-                found[-1]["experimentalContextMaximum"] = QWEN_FLASH_YARN_CONTEXT
+            if (maximum := experimental_context_maximum(metadata, architecture, context)) is not None:
+                found[-1]["experimentalContextMaximum"] = maximum
             projector = matching_projector(path, root)
             if projector:
                 # A matching projector makes this exact text/tool model vision
@@ -419,7 +449,7 @@ def limit_context_policy(model, policy):
     # policy (including a resident legacy load) unchanged; new loads may use
     # the full model window and llama's actual fitted n_ctx is authoritative.
     ceiling = model["context"]
-    if policy.get("experimentalRope") == "qwen38-yarn4":
+    if policy.get("experimentalRope") == YARN4_CACHE_PROFILE:
         ceiling = model.get("experimentalContextMaximum", ceiling)
     maximum = min(ceiling, policy.get("contextMaximum") or ceiling)
     context = min(policy.get("context") or maximum, maximum)
@@ -515,7 +545,7 @@ def write_presets(root, target, placements=None, managed_gpu=False, fit_target="
             lines += [f"ctx-size = {policy['context']}"]
         if policy.get("fitContext"):
             lines += [f"fit-ctx = {policy['fitContext']}"]
-        if (model.get("experimentalContextMaximum") and policy.get("experimentalRope") == "qwen38-yarn4"
+        if (model.get("experimentalContextMaximum") and policy.get("experimentalRope") == YARN4_CACHE_PROFILE
                 and policy["context"] > model["context"]):
             lines += ["rope-scaling = yarn", "rope-scale = 4", f"yarn-orig-ctx = {model['context']}"]
         if policy.get("mmprojDevice") and model.get("projector") and not placement:
@@ -1324,7 +1354,7 @@ class GpuLoadManager:
                 if context_length is not None and not replica:
                     policy = dict(policy, context=context_length, contextPolicy="user-limit")
                     if context_length > model["context"]:
-                        policy.update(contextMaximum=maximum, experimentalRope="qwen38-yarn4")
+                        policy.update(contextMaximum=maximum, experimentalRope=YARN4_CACHE_PROFILE)
                     # Fit GPU layers into available VRAM while retaining the
                     # explicitly requested KV window. CPU-backed weights stay mmap'ed.
                     if not device:

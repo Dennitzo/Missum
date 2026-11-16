@@ -38,10 +38,18 @@ public sealed partial class NativeAssistantPage
         panel.Children.Add(new NativeComposerSlider(slider));
         if (experimental)
         {
-            var toggle = new ToggleSwitch { Header = new TextBlock { Text = "Kontextvorgabe auf 1.048.576 Token erhöhen",
-                    TextWrapping = TextWrapping.Wrap }, OnContent = "", OffContent = "",
-                IsOn = extended, IsEnabled = !_running, Margin = new(0, 4, 0, 0) };
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(toggle, "Kontextvorgabe auf 1.048.576 Token erhöhen");
+            const string extensionLabel = "Kontextvorgabe auf 1.048.576 Token erhöhen";
+            static TextBlock CreateExtensionLabel() => new()
+            {
+                Text = extensionLabel, FontSize = 12, MaxWidth = 176, TextWrapping = TextWrapping.Wrap,
+            };
+            var toggle = new ToggleSwitch
+            {
+                OnContent = CreateExtensionLabel(), OffContent = CreateExtensionLabel(),
+                HorizontalAlignment = HorizontalAlignment.Center, VerticalContentAlignment = VerticalAlignment.Center,
+                MinWidth = 0, IsOn = extended, IsEnabled = !_running, Margin = new(0, 4, 0, 0),
+            };
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(toggle, extensionLabel);
             var syncing = false;
             slider.ValueChanged += (_, args) =>
             {

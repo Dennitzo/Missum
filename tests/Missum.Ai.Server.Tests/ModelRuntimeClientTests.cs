@@ -11,24 +11,25 @@ namespace Missum.Ai.Server.Tests;
 
 public sealed class ModelRuntimeClientTests
 {
-    [Fact]
-    public void ExperimentalContextCatalogIsRestrictedAndKeepsTrainingWindow()
+    [Theory]
+    [InlineData("coding/Qwen3.8-Flash-Next-Q4~a", true, 1_048_576, 262_144, 1_048_576)]
+    [InlineData("coding/Qwen3.8-Flash-Next-Q8_0~q8", true, 1_048_576, 262_144, 1_048_576)]
+    [InlineData("coding/Qwen3.8-27B~q8", true, 1_048_576, 262_144, 1_048_576)]
+    [InlineData("coding/FutureArchitecture~b", true, 1_048_576, 131_072, 1_048_576)]
+    [InlineData("coding/Qwen3.8-Flash-Next~f", true, 0, 262_144, 262_144)]
+    [InlineData("coding/Qwen3.8-27B~q8", false, 1_048_576, 262_144, 262_144)]
+    [InlineData("coding/Unknown~c", true, 524_288, 262_144, 262_144)]
+    [InlineData("coding/NativeMillion~d", true, 1_048_576, 1_048_576, 1_048_576)]
+    [InlineData("embedding/Unsupported~e", true, 1_048_576, 262_144, 262_144)]
+    public void ExperimentalContextUsesOnlyTheManagedWorkerCapability(string id, bool managed, int advertised, int training, int maximum)
     {
-        using var catalog = JsonDocument.Parse("""
-            {"data":[
-              {"id":"coding/Qwen3.8-Flash-Next-Q4~a","tags":["missum-context-train:262144","missum-context-experimental-max:1048576"]},
-              {"id":"coding/Qwen3.8-Flash-Next-Q8_0~q8","tags":["missum-context-train:262144","missum-context-experimental-max:1048576"]},
-              {"id":"coding/Other~b","tags":["missum-context-train:262144","missum-context-experimental-max:1048576"]},
-              {"id":"coding/Qwen3.8-Flash-NextExtra~c","tags":["missum-context-train:262144","missum-context-experimental-max:1048576"]}
-            ]}
-            """);
-        var models = ModelRuntimeClient.ReadRuntimeModels(catalog.RootElement);
-        Assert.All(models.Take(2), model =>
-        {
-            Assert.Equal(1_048_576, model.MaximumContextLength);
-            Assert.Equal(262_144, model.TrainingContextLength);
-        });
-        Assert.All(models.Skip(2), model => Assert.Equal(262_144, model.MaximumContextLength));
+        var tags = new List<string> { FormattableString.Invariant($"missum-context-train:{training}") };
+        if (managed) tags.Add("missum-gpu-policy:single-preferred-v1");
+        if (advertised > 0) tags.Add(FormattableString.Invariant($"missum-context-experimental-max:{advertised}"));
+        var catalog = JsonSerializer.SerializeToElement(new { data = new[] { new { id, tags } } });
+        var model = Assert.Single(ModelRuntimeClient.ReadRuntimeModels(catalog));
+        Assert.Equal(maximum, model.MaximumContextLength);
+        Assert.Equal(maximum > training ? training : 0, model.TrainingContextLength);
     }
 
     private const string NativeGeneralId = "coding/gpt-oss-120b~test";
@@ -66,9 +67,11 @@ public sealed class ModelRuntimeClientTests
     [InlineData("coding/Qwen3.8-Flash-Next~test", 1_048_576)]
     [InlineData("coding/Qwen3.8-Flash-Next-Q8_0~test", 262_144)]
     [InlineData("coding/Qwen3.8-Flash-Next-Q8_0~test", 1_048_576)]
+    [InlineData(NativeQwenId, 262_144)]
+    [InlineData(NativeQwenId, 1_048_576)]
     public async Task QwenContextRequestReachesManagedWorkerLoad(string model, int contextLength)
     {
-        var handler = new NativeRuntimeHandler { ManagedGpuRuntime = true, QwenFlashRuntime = true };
+        var handler = new NativeRuntimeHandler { ManagedGpuRuntime = true, ExtendedContextRuntime = true };
         using var client = CreateClient(new HttpClient(handler));
         await client.EnsureModelLoadedAsync(model, contextLength);
         var load = Assert.Single(handler.LoadBodies, body => body.GetProperty("model").GetString() == model);
@@ -1431,7 +1434,7 @@ public sealed class ModelRuntimeClientTests
         public Func<CancellationToken, Task<HttpResponseMessage>>? OnSubagentPrepare { get; init; }
         public Action<string>? OnChatRequest { get; init; }
         public bool ManagedGpuRuntime { get; init; }
-        public bool QwenFlashRuntime { get; init; }
+        public bool ExtendedContextRuntime { get; init; }
         public int DelayedUnloadPolls { get; init; }
         public int CatalogReadsWhileUnloading { get; private set; }
 
@@ -1441,6 +1444,9 @@ public sealed class ModelRuntimeClientTests
         {
             var path = request.RequestUri?.AbsolutePath ?? string.Empty;
             RequestPaths.Add(path);
+            // These fixtures use short prompts. The optional prefill probe
+            // does not prepare, save or change the resident session.
+            if (path == "/sessions/prefill") return Json("{\"status\":\"skipped\",\"reason\":\"shortPrefill\"}");
             if (path.StartsWith("/sessions/", StringComparison.Ordinal))
             {
                 CacheBodies.Add(JsonSerializer.Deserialize<JsonElement>(await request.Content!.ReadAsStringAsync(cancellationToken)));
@@ -1471,7 +1477,7 @@ public sealed class ModelRuntimeClientTests
                         Model("qwen3-coder-next"),
                         Model("qwen3-vl-30b-a3b-instruct"),
                         Model("text-embedding-bge-m3"),
-                    }.Concat(QwenFlashRuntime
+                    }.Concat(ExtendedContextRuntime
                         ? new[] { Model("Qwen3.8-Flash-Next"), Model("Qwen3.8-Flash-Next-Q8_0") }
                         : Array.Empty<object>()).ToArray(),
                 }));
@@ -1634,7 +1640,7 @@ public sealed class ModelRuntimeClientTests
                 _ => "coding/" + key + "~test",
             };
             var tags = ManagedGpuRuntime ? new List<string> { "missum-gpu-policy:single-preferred-v1" } : new List<string>();
-            if (key is "Qwen3.8-Flash-Next" or "Qwen3.8-Flash-Next-Q8_0")
+            if (ExtendedContextRuntime && key is ("qwen3.8-27b" or "Qwen3.8-Flash-Next" or "Qwen3.8-Flash-Next-Q8_0"))
                 tags.AddRange(["missum-context-train:262144", "missum-context-experimental-max:1048576"]);
             return new { id, status = new { value = _loadedKey == id ? "loaded" : "unloaded" }, tags };
         }

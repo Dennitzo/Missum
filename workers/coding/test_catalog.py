@@ -15,10 +15,11 @@ catalog = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(catalog)
 
 
-def gguf(path, architecture="qwen3", tensors=1, model_type="model", context=32768, pooling=None, template=None, name=None):
+def gguf(path, architecture="qwen3", tensors=1, model_type="model", context=32768, pooling=None, template=None, name=None, rope=None):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("wb") as stream:
-        stream.write(struct.pack("<4sIQQ", b"GGUF", 3, tensors, 2 + int(context is not None) + int(pooling is not None) + int(template is not None) + int(name is not None)))
+        count = 2 + sum(value is not None for value in (context, pooling, template, name)) + len(rope or {})
+        stream.write(struct.pack("<4sIQQ", b"GGUF", 3, tensors, count))
         for key, value in (("general.architecture", architecture), ("general.type", model_type)):
             key, value = key.encode(), value.encode()
             stream.write(struct.pack("<Q", len(key)) + key + struct.pack("<IQ", 8, len(value)) + value)
@@ -32,7 +33,19 @@ def gguf(path, architecture="qwen3", tensors=1, model_type="model", context=3276
         if template is not None:
             key, value = b"tokenizer.chat_template", template.encode()
             stream.write(struct.pack("<Q", len(key)) + key + struct.pack("<IQ", 8, len(value)) + value)
+        for name, value in (rope or {}).items():
+            key = f"{architecture}.rope.{name}".encode()
+            stream.write(struct.pack("<Q", len(key)) + key)
+            if isinstance(value, str):
+                value = value.encode()
+                stream.write(struct.pack("<IQ", 8, len(value)) + value)
+            else:
+                kind, fmt = {int: (4, "I"), float: (6, "f"), bool: (7, "?")}[type(value)]
+                stream.write(struct.pack("<I" + fmt, kind, value))
         stream.truncate(1024 * 1024 + 1)
+
+
+QWEN_ROPE = {"freq_base": 10_000_000.0, "dimension_count": 64}
 
 
 class CatalogTests(unittest.TestCase):
@@ -319,9 +332,10 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(text.count("ctx-size = 262144"), 2)  # Every model retains its own full metadata maximum.
         self.assertEqual(text.count("predict = -1"), 2)
 
-    def test_experimental_qwen_yarn_requires_exact_metadata_and_explicit_policy(self):
-        gguf(self.root / "target.gguf", architecture="qwen4exp", context=262144, name="Qwen3.8 Flash Next")
-        gguf(self.root / "other.gguf", architecture="qwen4exp", context=262144, name="Other model")
+    def test_experimental_qwen_yarn_uses_rope_metadata_without_a_model_name(self):
+        gguf(self.root / "target.gguf", architecture="qwen35", context=262144, rope=QWEN_ROPE)
+        gguf(self.root / "other.gguf", architecture="qwen35", context=262144,
+             name="Qwen3.8-27B", rope=dict(QWEN_ROPE, **{"scaling.type": "linear", "scaling.factor": 2.0}))
         target = self.root / "models.ini"
         models = catalog.write_presets(self.root, target)
         model = next(m for m in models if m["path"].name == "target.gguf")
@@ -340,13 +354,23 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(catalog.limit_context_policy(other, dict(context=1048576, contextMaximum=1048576,
                          experimentalRope="qwen38-yarn4"))["context"], 262144)
 
+    def test_future_export_can_declare_an_exact_yarn_profile_in_gguf(self):
+        for filename, factor, original in (("supported", 4.0, 262144), ("smaller", 2.0, 262144), ("wrong-base", 4.0, 131072)):
+            gguf(self.root / (filename + ".gguf"), architecture="llama", context=262144,
+                 rope={"scaling.type": "yarn", "scaling.factor": factor, "scaling.original_context_length": original})
+        gguf(self.root / "only-context.gguf", architecture="llama", context=262144)
+        gguf(self.root / "native-million.gguf", architecture="qwen35", context=1048576, rope=QWEN_ROPE)
+        models = catalog.discover_models(self.root)
+        self.assertEqual([("supported", 1048576)], [(m["path"].stem, m["experimentalContextMaximum"])
+                         for m in models if "experimentalContextMaximum" in m])
+
     def test_qwen_q8_six_shards_offer_same_explicit_yarn_profile_as_q4(self):
         snapshots = self.root / "models--unsloth--Qwen3.8-Flash-Next-GGUF" / "snapshots"
         for revision, quant, count in (("q4-revision", "UD-Q4_K_XL", 4), ("q8-revision", "Q8_0", 6)):
             for index in range(1, count + 1):
                 path = snapshots / revision / quant / f"Qwen3.8-Flash-Next-{quant}-{index:05d}-of-{count:05d}.gguf"
                 gguf(path, architecture="qwen4exp", tensors=0 if index == 1 else 1,
-                     context=262144, name="Qwen3.8 Flash Next")
+                     context=262144, rope=QWEN_ROPE)
         target = self.root / "models.ini"
         models = catalog.write_presets(self.root, target)
         by_quant = {model["path"].parent.name: model for model in models}

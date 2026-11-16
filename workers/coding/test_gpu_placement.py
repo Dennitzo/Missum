@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
-from test_catalog import gguf
+from test_catalog import QWEN_ROPE, gguf
 
 spec = importlib.util.spec_from_file_location("gpu_catalog", Path(__file__).with_name("catalog.py"))
 catalog = importlib.util.module_from_spec(spec)
@@ -14,8 +14,8 @@ spec.loader.exec_module(catalog)
 
 class GpuPlacementTests(unittest.TestCase):
     def test_qwen_experimental_context_load_is_explicit_and_scoped(self):
-        path = self.root / "Qwen3.8-Flash-Next.gguf"
-        gguf(path, architecture="qwen4exp", context=262144, name="Qwen3.8 Flash Next")
+        path = self.root / "Qwen3.8-27B-UD-Q8_K_XL.gguf"
+        gguf(path, architecture="qwen35", context=262144, rope=QWEN_ROPE)
         self.model = next(m for m in catalog.discover_models(self.root) if m["path"] == path)
         manager, _, _ = self.successful_manager()
         with patch.object(catalog, "gpu_inventory", return_value=[]):

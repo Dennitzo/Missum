@@ -2240,12 +2240,15 @@ public sealed partial class ModelRuntimeClient : IDisposable
             var id = item.TryGetProperty("id", out var idValue) ? idValue.GetString() : null;
             if (id is null || !(id.StartsWith("coding/", StringComparison.Ordinal) || id.StartsWith("vision/", StringComparison.Ordinal) || id.StartsWith("embedding/", StringComparison.Ordinal))) continue;
             var embedding = id.StartsWith("embedding/", StringComparison.Ordinal);
+            var tags = item.TryGetProperty("tags", out var instanceTags) && instanceTags.ValueKind == JsonValueKind.Array
+                ? instanceTags.EnumerateArray().Where(static tag => tag.ValueKind == JsonValueKind.String).Select(static tag => tag.GetString()!).ToArray()
+                : [];
+            var managed = tags.Any(static tag => tag is "missum-gpu-policy:single-preferred-v1" or "go-gpu-policy:single-preferred-v1");
             var vision = id.StartsWith("vision/", StringComparison.Ordinal)
-                || (item.TryGetProperty("tags", out var visionTags) && visionTags.ValueKind == JsonValueKind.Array
-                    && visionTags.EnumerateArray().Any(tag => tag.ValueKind == JsonValueKind.String && tag.GetString() is "missum-vision:projector" or "go-vision:projector")); // Legacy running supervisors remain readable.
+                || tags.Any(static tag => tag is "missum-vision:projector" or "go-vision:projector"); // Legacy running supervisors remain readable.
             var fallback = embedding ? embeddingContextLength : vision ? visionContextLength : textContextLength;
             var context = ReadNominalContextLength(item, id, fallback);
-            var permittedContext = ReadExperimentalContextMaximum(item, id, context);
+            var permittedContext = managed && !embedding ? ReadExperimentalContextMaximum(tags, context) : context;
             var state = "unloaded";
             if (item.TryGetProperty("status", out var status) && status.ValueKind == JsonValueKind.Object)
             {
@@ -2257,15 +2260,11 @@ public sealed partial class ModelRuntimeClient : IDisposable
             if (hash > 0) name = name[..hash];
             var reasoning = embedding ? new ModelReasoningProfile(ModelReasoningProfiles.UnknownFamily, ["none"], "none")
                 : ReadReasoningMetadata(item) ?? ModelReasoningProfiles.Resolve(id, vision ? "vision" : "general");
-            var tags = item.TryGetProperty("tags", out var instanceTags) && instanceTags.ValueKind == JsonValueKind.Array
-                ? instanceTags.EnumerateArray().Where(static tag => tag.ValueKind == JsonValueKind.String).Select(static tag => tag.GetString()!).ToArray()
-                : [];
             var isSubagent = tags.Contains("missum-agent-instance:subagent", StringComparer.Ordinal);
             var baseModelId = tags.FirstOrDefault(static tag => tag.StartsWith("missum-base-model:", StringComparison.Ordinal))?["missum-base-model:".Length..];
             models.Add(new RuntimeModel(id, embedding ? "embedding" : "llm", state, state is "loaded" or "sleeping" ? id : null,
                 permittedContext, state is ("loaded" or "sleeping") && permittedContext == context ? context : 0, name, null, null, !embedding, vision, reasoning.SupportedEfforts, reasoning.DefaultEffort, reasoning.Family,
-                item.TryGetProperty("tags", out var gpuTags) && gpuTags.ValueKind == JsonValueKind.Array
-                    && gpuTags.EnumerateArray().Any(tag => tag.ValueKind == JsonValueKind.String && tag.GetString() is "missum-gpu-policy:single-preferred-v1" or "go-gpu-policy:single-preferred-v1"),
+                managed,
                 isSubagent, baseModelId, tags.Contains("missum-model-storage:network", StringComparer.Ordinal),
                 permittedContext > context ? context : 0)); // Legacy catalog read alias.
         }
