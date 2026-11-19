@@ -573,6 +573,7 @@ public sealed partial class AssistantCoordinator(
         {
             sessionId = message.SessionId,
             conversationRevision = session.ConversationRevision,
+            session = ToSessionDto(session),
             message = ToMessageDto(message, messageArtifacts),
         }, requestId).ConfigureAwait(false);
     }

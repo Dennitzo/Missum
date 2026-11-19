@@ -33,7 +33,7 @@ public sealed class NativeModelRuntimeService : IDisposable
     public NativeModelRuntimeService()
         : this(AssistantRuntimeProfile.Resolve()) { }
 
-    public NativeModelRuntimeService(AssistantRuntimeProfile profile)
+    public NativeModelRuntimeService(AssistantRuntimeProfile profile, SettingsCoordinator? settings = null)
         : this(
             IsLocalGateway,
             token => ProbeAsync(profile.NativePort, token),
@@ -42,9 +42,9 @@ public sealed class NativeModelRuntimeService : IDisposable
             token => RunInstalledRuntimeAsync(profile, "Stop", token),
             runtimeEndpoint: $"http://127.0.0.1:{profile.NativePort}",
             stopOwned: token => RunInstalledRuntimeAsync(profile, "Stop", token, ownedShutdown: true),
-            modelRoot: () => ResolveModelRoot(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)),
+            modelRoot: () => settings?.Current.LocalAiModelDirectory ?? ResolveModelRoot(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)),
             runningModelRoot: token => ReadRunningModelRootAsync(profile.NativeStateDirectory, token),
-            startAtModelRoot: (_, token) => RunInstalledRuntimeAsync(profile, "Start", token),
+            startAtModelRoot: (root, token) => RunInstalledRuntimeAsync(profile, "Start", token, modelRoot: root),
             validateModelRoot: ValidateModelRootAsync)
     {
         _cacheCleanup = new(profile);
@@ -150,6 +150,13 @@ public sealed class NativeModelRuntimeService : IDisposable
 
     public void BeginShutdown() => Interlocked.Exchange(ref _stopping, 1);
 
+    internal async Task ConfirmConfiguredModelRootAsync(string root, CancellationToken token)
+    {
+        if (_runningModelRoot is not null
+            && !SameModelRoot(await _runningModelRoot(token).ConfigureAwait(false), root))
+            throw new InvalidOperationException("Modellordner gespeichert. Der lokale Modellserver verwendet ihn, sobald er im Leerlauf ist und die nächste Verbindung aufgebaut wird.");
+    }
+
     private static bool SameModelRoot(string? left, string? right)
     {
         var first = left is null ? null : Path.TrimEndingDirectorySeparator(Path.GetFullPath(left));
@@ -175,7 +182,7 @@ public sealed class NativeModelRuntimeService : IDisposable
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException) { return null; }
     }
 
-    private static async Task ValidateModelRootAsync(string root, CancellationToken token)
+    internal static async Task ValidateModelRootAsync(string root, CancellationToken token)
     {
         try
         {
@@ -321,7 +328,8 @@ public sealed class NativeModelRuntimeService : IDisposable
         AssistantRuntimeProfile profile,
         string action,
         CancellationToken cancellationToken,
-        bool ownedShutdown = false)
+        bool ownedShutdown = false,
+        string? modelRoot = null)
     {
         var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         var stateDirectory = profile.NativeStateDirectory;
@@ -367,7 +375,7 @@ public sealed class NativeModelRuntimeService : IDisposable
         // PowerShell launcher exits. Never wait for its process-lifetime stdout EOF.
         var errorFile = Path.Combine(stateDirectory, "startup-" + Guid.NewGuid().ToString("N") + ".error.txt");
         foreach (var argument in BuildRuntimeManagerArguments(profile, action, supportDirectory, errorFile, userProfile,
-                     shutdownTimeoutSeconds: ownedShutdown ? 20 : null))
+                     shutdownTimeoutSeconds: ownedShutdown ? 20 : null, modelRoot: modelRoot))
             info.ArgumentList.Add(argument);
         using var process = new Process { StartInfo = info };
         if (!process.Start()) throw new InvalidOperationException("Der Starthelfer für Windows llama.cpp konnte nicht gestartet werden.");
@@ -455,7 +463,8 @@ public sealed class NativeModelRuntimeService : IDisposable
         string supportDirectory,
         string errorFile,
         string userProfile,
-        int? shutdownTimeoutSeconds = null)
+        int? shutdownTimeoutSeconds = null,
+        string? modelRoot = null)
     {
         if (shutdownTimeoutSeconds is <= 0 or > 600)
             throw new ArgumentOutOfRangeException(nameof(shutdownTimeoutSeconds));
@@ -465,7 +474,7 @@ public sealed class NativeModelRuntimeService : IDisposable
             Path.Combine(supportDirectory, "windows", "manage-coding-llama.ps1"),
             "-Action", action,
             "-StateDirectory", profile.NativeStateDirectory,
-            "-ModelRoot", ResolveModelRoot(userProfile),
+            "-ModelRoot", modelRoot ?? ResolveModelRoot(userProfile),
             "-BinaryPath", profile.NativeBinaryPath,
             "-Port", profile.NativePort.ToString(System.Globalization.CultureInfo.InvariantCulture),
             "-ErrorFile", errorFile,

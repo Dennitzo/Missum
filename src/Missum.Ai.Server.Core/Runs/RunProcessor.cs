@@ -3059,6 +3059,10 @@ public sealed partial class RunProcessor : BackgroundService
                 Code: "context.native_budget_exceeded",
                 Message: overflow.Message + " Der Arbeitskontext konnte nicht ausreichend verdichtet werden; der gespeicherte Forschungsstand und das vollständige Journal bleiben erhalten.",
                 Retryable: false),
+            NativePrefillBarrierException barrier => (
+                Code: "cache.prefill_barrier_failed",
+                Message: barrier.Message,
+                Retryable: true),
             InvalidOperationException => (
                 Code: "run.invalid_operation",
                 Message: "Der AI-Lauf konnte eine erforderliche Operation nicht ausführen.",

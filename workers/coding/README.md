@@ -13,8 +13,9 @@ skipping unrelated `datasets`/`xet` caches. Models are read in place; presets,
 templates, logs and KV files remain in the local native runtime directory.
 Changing physical model files/locations still changes their cache fingerprint;
 existing conversations remain authoritative when a disposable KV file is no
-longer compatible. Incomplete split GGUF files and MTP-only prediction companions
-are not offered as chat models.
+longer compatible. Incomplete split GGUF files and multi-token prediction
+companions are not offered as chat models: a companion is recognised from its
+tensor layout and attached to its target model instead of being listed alone.
 
 The native control port exposes read-only `GET /runtime` with `modelRoot` (the
 selected folder) and `discoveryRoot` (the effective GGUF hub). These values are
@@ -27,6 +28,58 @@ GGUF files on a UNC share advertise `missum-model-storage:network`. Their actual
 model load has no fixed wall-clock deadline: a large transfer still responds to
 an explicit stop of the owning native runtime and reports native allocation/file errors. Local model
 loads retain their existing 280-second allocation ceiling.
+
+## Speculative decoding with a prediction companion
+
+A multi-token prediction companion (files such as `mtp-<model>-Q8_0.gguf`) is
+detected from its tensor layout, not from arithmetic on its header counters.
+A block that carries `blk.N.nextn.*` weights including `nextn.eh_proj.weight`
+is a prediction head; the block indices without any prediction weight are the
+base layers. This matters because real exports disagree: the companion of
+`Qwen3.8-Flash-Next` declares the full target depth plus one (`block_count` 49
+for a 48 layer model), other exports declare only their own single layer, and a
+target whose head was split out declares `nextn_predict_layers` not at all. A
+measured head is therefore never rejected by a declared number, and a file that
+only declares a prediction layer without carrying the projection tensor is
+never treated as a predictor.
+
+Pairing stays strict: same architecture, same Hugging Face scope, and equal
+embedding width and vocabulary size whenever both files declare them. The
+companion may carry no base layer, the full base stack, or the base stack minus
+its prediction layer. A companion is found in the snapshot itself, in an `MTP`
+subfolder, in a quantization folder such as `UD-Q4_K_XL`, and in a flat
+repository layout without a `snapshots` level. Among several matching variants
+the exact model family wins over a generic one, and inside the same specificity
+the smallest file wins so the draft costs as little GPU memory as possible;
+the remaining variants stay available as ordered alternatives.
+
+Before the first load the supervisor asks the installed `llama-server` once
+(`--help`) whether it advertises `--spec-type`, `--spec-draft-model` and
+`--spec-draft-n-max`. Only then does a preset request speculation; a router
+without those switches simply loads the model without a draft. The companion's
+file size is counted into the memory admission, and if that is exactly what
+does not fit, the draft is dropped instead of spilling the main model. On a load
+error the next candidate is tried, and only afterwards does the existing fallback
+without speculation apply, keeping the previous placement behaviour and the
+requested context limit untouched. Every decision is recorded in
+`gpu-placement.jsonl` as `mtp-applied`, `mtp-avoided`, `mtp-skipped-memory`,
+`mtp-fallback`, `mtp-unsupported` or `mtp-disabled`.
+
+Two tokens are speculated per turn by default. `MISSUM_MTP_DRAFT_TOKENS` raises
+that value (1 to 64) and `MISSUM_MTP_DISABLED=1` turns speculation off entirely;
+both are read per preset write. The session cache fingerprint includes the
+effective draft configuration. Switching drafts keeps the model's context limit.
+
+For CUDA MoE models, the managed load path selects larger prefill batches and
+can combine MTP with exact prompt matches for speculative decoding. With a
+vision projector, the logical batch stays within the physical microbatch.
+If host RAM can hold the weights and the model exceeds the available VRAM,
+Missum can budget llama.cpp's GPU expert cache alongside its normal layer
+fitting. Qwen's file-backed PLE table does not count against that VRAM estimate.
+`moe-performance-loaded` records the selected budget in `gpu-placement.jsonl`;
+llama.cpp reports the actual allocation and hit rate at log verbosity 4.
+A failed optimized load retries the original placement with the same context
+and MTP companion before considering a draft fallback.
 
 GPU placement is negotiated through the supervisor on port 8082 (router port
 plus one), advertised with the `missum-gpu-policy:single-preferred-v1` catalog tag.

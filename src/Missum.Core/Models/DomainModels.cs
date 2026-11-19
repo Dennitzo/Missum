@@ -290,6 +290,7 @@ public sealed record WindowPlacement(
 
 public sealed record AppSettings
 {
+    public string? LocalAiModelDirectory { get; init; }
     public const int CurrentVersion = 21;
     public const string DefaultSelectedModel = "gpt-oss-120b";
     public const string DefaultAccentColor = "#B0B0B0";

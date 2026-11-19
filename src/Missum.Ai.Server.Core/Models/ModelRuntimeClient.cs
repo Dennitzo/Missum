@@ -449,7 +449,7 @@ public sealed partial class ModelRuntimeClient : IDisposable
                 maximumOutputTokens,
                 cancellationToken,
                 inferenceDispatched: () => inferenceIncomplete = true, compactAtThreshold: compactAtThreshold,
-                cachePrefill: string.IsNullOrEmpty(sessionCacheKey) ? null
+                cachePrefill: string.IsNullOrEmpty(sessionCacheKey) || messages.Any(message => message.ComputerImage is { Length: > 0 }) ? null
                     : async (request, token) => prefill = await PrefillSessionCacheAsync(preparation.InstanceId, sessionCacheKey, request, token).ConfigureAwait(false)).ConfigureAwait(false);
             inferenceIncomplete = false;
             if (prefill is not null)
@@ -733,6 +733,11 @@ public sealed partial class ModelRuntimeClient : IDisposable
                 using var properties = await JsonDocument.ParseAsync(await props.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false), cancellationToken: cancellationToken).ConfigureAwait(false);
                 var loadedContext = ReadLoadedContextLength(properties.RootElement);
                 var reasoning = ReadReasoningMetadata(properties.RootElement);
+                // The catalog reads effort maps in GGUF templates. A boolean
+                // control inferred from /props does not supersede those levels.
+                if (models[index].ReasoningFamily == "llama-native"
+                    && reasoning?.Family is "llama-toggle" or "llama-thinking-toggle")
+                    reasoning = null;
                 models[index] = models[index] with { LoadedContextLength = Math.Min(loadedContext, models[index].MaximumContextLength),
                     ReasoningEfforts = reasoning?.SupportedEfforts ?? models[index].ReasoningEfforts,
                     DefaultReasoningEffort = reasoning is null ? models[index].DefaultReasoningEffort : reasoning.DefaultEffort,
@@ -956,11 +961,12 @@ public sealed partial class ModelRuntimeClient : IDisposable
                     : CreateToolProtocolRepairBody(body, protocolRepairTool);
                 var countingClock = Stopwatch.StartNew();
                 Dictionary<string, object?> requestBody;
-                try { requestBody = await ApplyTokenBudgetAsync(unbudgetedBody, contextLength, maximumOutputTokens, nativeProgress, compactAtThreshold, allowMultimodalCountingFallback, cancellationToken).ConfigureAwait(false); }
+                int inputTokens;
+                try { (requestBody, inputTokens) = await ApplyTokenBudgetAsync(unbudgetedBody, contextLength, maximumOutputTokens, nativeProgress, compactAtThreshold, allowMultimodalCountingFallback, cancellationToken).ConfigureAwait(false); }
                 finally { tokenCountingMilliseconds += countingClock.Elapsed.TotalMilliseconds; }
                 // Budgeting and a protocol-repair retry can change the actual
                 // prompt. Only prepare the exact body that will be sent next.
-                if (cachePrefill is not null)
+                if (cachePrefill is not null && inputTokens > NativePrefillCheckpointTokens)
                     await cachePrefill(requestBody, cancellationToken).ConfigureAwait(false);
                 requestPhase = "generation";
                 var requestClock = Stopwatch.StartNew();

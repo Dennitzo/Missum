@@ -107,6 +107,13 @@ Nach erfolgreicher Prüfung verwenden die Desktop-App und das Stack-Startskript 
 nächsten Runtime-Start. Eine laufende Runtime und frühere Installationen bleiben erhalten.
 `-ProbeModelRoot` wählt bei Bedarf den Modellordner für die Prüfung, `-ProbePort` ein anderes freies Portpaar.
 
+Der schnellere KV-Präfixvergleich verwendet die mitgelieferte llama.cpp-Änderung für `b12167`.
+`build-llama-slot-prefix.ps1` baut sie in einer Visual Studio x64 Developer PowerShell aus einem
+Checkout dieses Tags (`-SourceDirectory`) und dem offiziellen CUDA-12-Paket
+(`-OfficialCudaDirectory`) in ein neues `-OutputDirectory`. Die erzeugte `llama-server.exe`
+kann mit `ASSISTANT_NATIVE_BINARY_PATH` oder beim Stackstart mit `-NativeBinaryPath` gewählt werden.
+Offizielle Runtime-Versionen ohne Slot-Bestätigung verwenden weiterhin den vollständigen Vergleich.
+
 Der produktive Stack verwendet ausschließlich `%USERPROFILE%\.cache\huggingface` beziehungsweise dessen
 Unterordner `hub`. Alte abweichende `-NativeModelRoot`-Angaben werden mit einer Fehlermeldung abgelehnt;
 alte Angaben in `stack.env` werden nicht für die Wahl des Modellordners verwendet. `-ModelRoot` bezeichnet

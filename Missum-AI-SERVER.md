@@ -43,6 +43,34 @@ passenden Projektor; Embeddingmodelle eigene Embedding-Presets. Projektionsdatei
 eigenständige Textmodelle angeboten. Unvollständige Downloads werden ausgeschlossen. Die Dateien bleiben
 auf Windows; es gibt keinen LLM-Modellcontainer und keine Linux-Kopie.
 
+Vorhersagegewichte für spekulative Decodierung (Dateien wie `mtp-<Modell>-Q8_0.gguf`) werden ebenfalls
+eingelesen, aber nie als eigenes Chatmodell angeboten. Die Erkennung folgt der Tensorstruktur: Ein Block mit
+`blk.N.nextn.*`-Gewichten inklusive `nextn.eh_proj.weight` ist ein Vorhersagekopf, die Blockindizes ohne
+Vorhersagetensor sind die Basisschichten. Das ist nötig, weil die Exporte sich widersprechen — der Kopf zu
+`Qwen3.8-Flash-Next` deklariert die volle Zieltiefe plus eins (`block_count` 49 bei 48 Basisschichten), andere
+Exporte deklarieren nur die eigene eine Schicht, und ein Basismodell mit ausgelagertem Kopf deklariert
+`nextn_predict_layers` gar nicht. Ein gemessener Kopf wird daher durch keine deklarierte Zahl verworfen.
+Gekoppelt wird nur bei gleicher Architektur, gleichem Cache-Geltungsbereich und — sofern beide Seiten sie
+tragen — gleicher Einbettungsbreite und Wortanzahl; der Kopf darf keine, die volle oder die um seine
+Vorhersageschicht reduzierte Basis tragen. Gefunden wird er in einem Snapshot, in einem Unterordner `MTP`,
+in Quantisierungsordnern wie `UD-Q4_K_XL` und in flacher Repository-Struktur ohne `snapshots`-Ebene. Bei
+mehreren passenden Varianten gewinnt die exakte Modellfamilie vor einer generischen und innerhalb derselben
+Spezifität die kleinere Datei; die übrigen bleiben als geordnete Ausweichkandidaten erhalten.
+
+Vor dem ersten Load prüft der Supervisor die eingesetzte `llama-server`-Binary einmal per `--help` auf
+`--spec-type`, `--spec-draft-model` und `--spec-draft-n-max`; nur dann enthält ein Preset
+`spec-type = draft-mtp`, `spec-draft-model` und `spec-draft-n-max`. Eine Binary ohne diese Schalter lädt das
+Modell ohne Prädiktor. Die Dateigröße des Kopfes wird in die GPU-Zulassung eingerechnet; ist sie der Grund
+für eine Ablehnung, entfällt der Kopf, statt das Basismodell vom Grafikspeicher zu verdrängen. Bei einem
+Ladefehler wird zuerst der nächste Kandidat versucht und erst danach der bestehende Fallback ohne Spekulation
+aktiv, wobei die bisherige Platzierung und die angeforderte Kontextgrenze unverändert bleiben. Jeder Schritt
+steht als `mtp-applied`, `mtp-avoided`, `mtp-skipped-memory`, `mtp-fallback`, `mtp-unsupported` oder
+`mtp-disabled` in `gpu-placement.jsonl`. Standard sind zwei spekulierte Token pro Runde;
+`MISSUM_MTP_DRAFT_TOKENS` erhöht diesen Wert (1 bis 64) und `MISSUM_MTP_DISABLED=1` schaltet die Spekulation
+komplett ab. Der entfallene Kopf ändert weder den Fingerprint des Session-Caches noch die Kontextgrenze.
+`workers/coding/verify_mtp_pairing.py` liest dafür ausschließlich Header und Tensorverzeichnisse und zeigt die
+gemessenen Werte ohne Modelladern, Schreibzugriff oder Netz.
+
 Nur Speech- und Bildgenerierungsressourcen bleiben unter `C:\ProgramData\Missum-AI-Stack\Models`, weil diese von den
 spezialisierten Docker-Workern direkt gelesen werden. Revisionen, Größen und SHA-256-Werte der migrierten GGUF-Dateien
 stehen in `deploy/missum-ai/models.manifest.json`.

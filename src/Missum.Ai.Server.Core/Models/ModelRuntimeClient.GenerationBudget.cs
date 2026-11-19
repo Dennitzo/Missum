@@ -15,7 +15,7 @@ public sealed partial class ModelRuntimeClient
             new EventId(4104, "ModelRequestBudget"),
             "Native model request {ModelId}: input_tokens={InputTokens}, context_tokens={ContextTokens}, max_tokens={MaximumOutputTokens}, reasoning_effort={ReasoningEffort}.");
 
-    private async Task<Dictionary<string, object?>> ApplyTokenBudgetAsync(
+    private async Task<(Dictionary<string, object?> Request, int InputTokens)> ApplyTokenBudgetAsync(
         IReadOnlyDictionary<string, object?> body,
         int contextLength,
         int? maximumOutputTokens,
@@ -53,7 +53,7 @@ public sealed partial class ModelRuntimeClient
             request["reasoning_budget_tokens"] = outputTokens;
         LogModelRequestBudget(_logger, body["model"]?.ToString() ?? "", inputTokens,
             contextLength, outputTokens, effort ?? "none", null);
-        return request;
+        return (request, inputTokens);
     }
 
     private async Task<int> CountNativeInputAsync(IReadOnlyDictionary<string, object?> body,

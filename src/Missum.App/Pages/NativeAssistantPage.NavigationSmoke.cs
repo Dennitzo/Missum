@@ -798,7 +798,7 @@ public sealed partial class NativeAssistantPage
         {
             _running = false;
             ComposerSurface.Width = 600;
-            SelectedToolChip.SetTool("Planen", "\uEA80", Missum.App.Controls.NativeIconPalette.BrushFor("plan"));
+            SelectedToolChip.SetTool("Planmodus", "\uEA80", Missum.App.Controls.NativeIconPalette.BrushFor("plan"));
             SelectedToolChip.Visibility = Microsoft.UI.Xaml.Visibility.Visible;
             Composer.Focus(Microsoft.UI.Xaml.FocusState.Programmatic);
             SelectedToolChip.SetPointerState(false);

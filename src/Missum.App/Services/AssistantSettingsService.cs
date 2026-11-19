@@ -322,6 +322,7 @@ public sealed class AssistantSettingsService : IDisposable
     private static AppSettings ApplyPatch(AppSettings current, AssistantSettingsPatch patch) => current with
     {
         MissumAiServerUrl = patch.MissumAiServerUrl ?? current.MissumAiServerUrl,
+        LocalAiModelDirectory = patch.NativeModelRoot ?? current.LocalAiModelDirectory,
         IsAutomaticSpeechEnabled = patch.IsAutomaticSpeechEnabled ?? current.IsAutomaticSpeechEnabled,
         LiveCaptionLanguage = patch.LiveCaptionLanguage ?? current.LiveCaptionLanguage,
         Theme = patch.Theme ?? current.Theme,
@@ -395,6 +396,7 @@ public sealed class AssistantSettingsService : IDisposable
 
 public sealed record AssistantSettingsPatch
 {
+    internal string? NativeModelRoot { get; init; }
     public string? MissumAiServerUrl { get; init; }
     public bool? IsAutomaticSpeechEnabled { get; init; }
     public string? LiveCaptionLanguage { get; init; }

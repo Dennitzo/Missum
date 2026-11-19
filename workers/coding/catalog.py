@@ -6,6 +6,7 @@ No network access, downloads, model conversion, or Unsloth code is used here.
 from __future__ import annotations
 
 import argparse
+import ast
 import ctypes
 import csv
 import hashlib
@@ -29,6 +30,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from session_cache import NativeSessionCache, PreparationCancelledError, PreparationProgress, PreparationTimeoutError
 
 SHARD = re.compile(r"^(.*)-([0-9]{5})-of-([0-9]{5})\.gguf$", re.IGNORECASE)
+MTP_MARKER = re.compile(r"(?:^|[-_.])mtp(?=[-_.]|$)", re.IGNORECASE)
+QUANTIZATION = r"(?:ud[-_.])?(?:(?:iq|tq|q|bf|f|fp)\d+(?:_[a-z0-9]+)*|mxfp\d+(?:_[a-z0-9]+)*)"
+QUANTIZATION_SUFFIX = re.compile(r"(?:^|[-_.])" + QUANTIZATION + r"$", re.IGNORECASE)
+NEXTN_TENSOR = re.compile(r"^blk\.(\d+)\.(.*)$")
 NON_TEXT = re.compile(r"(?:^|[-_./])(?:mmproj|ggml-vocab|embedding|embed|asr|whisper|clip|vae|diffusion|mtp)(?:[-_./]|$)", re.IGNORECASE)
 NON_TEXT_ARCHITECTURES = ("bert", "nomic-bert", "jina-bert", "embedding", "t5", "clip", "mclip", "wavtokenizer", "whisper", "dflash")
 EMBEDDING_ARCHITECTURES = ("bert", "nomic-bert", "jina-bert", "embedding")
@@ -37,6 +42,14 @@ YARN4_CONTEXT = YARN4_TRAIN_CONTEXT * 4
 # Keep the existing fingerprint for byte-compatible Flash Next cache snapshots.
 YARN4_CACHE_PROFILE = "qwen38-yarn4"
 QWEN_YARN_ARCHITECTURES = {"qwen35", "qwen35moe", "qwen4exp"}
+MTP_DRAFT_TOKENS = 2
+MOE_PROMPT_LOOKUP_TOKENS = 5
+MTP_TOKENS_ENVIRONMENT = "MISSUM_MTP_DRAFT_TOKENS"
+MTP_SWITCH_ENVIRONMENT = "MISSUM_MTP_DISABLED"
+# The exact spellings the installed router has to advertise before a preset may
+# ask for speculation; verified against llama.cpp b12347-mix-241a0f3.
+MTP_REQUIRED_FLAGS = ("--spec-type", "--spec-draft-model", "--spec-draft-n-max")
+_MTP_CAPABILITY = {}
 _METADATA_CACHE = {}
 SCALAR_SIZES = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
 
@@ -91,11 +104,11 @@ def skip_value(stream, kind):
         raise ValueError("Unknown GGUF value kind")
 
 
-def model_metadata(path, allow_metadata_only=False):
+def model_metadata(path, allow_metadata_only=False, inspect_mtp=False):
     stat = path.stat()
     if stat.st_size < (24 if allow_metadata_only else 1024 * 1024):
         return None
-    cache_key = (str(path), stat.st_size, stat.st_mtime_ns, allow_metadata_only)
+    cache_key = (str(path), stat.st_size, stat.st_mtime_ns, allow_metadata_only, inspect_mtp)
     if cache_key in _METADATA_CACHE:
         return _METADATA_CACHE[cache_key]
     with path.open("rb", buffering=64 * 1024) as stream:
@@ -115,11 +128,12 @@ def model_metadata(path, allow_metadata_only=False):
                 metadata[key] = struct.unpack("<?", read_exact(stream, 1))[0]
             elif key.endswith(".rope.dimension_count") and kind in (4, 10):
                 metadata[key] = (u64(stream) if kind == 10 else struct.unpack("<I", read_exact(stream, 4))[0])
-            elif key.endswith((".context_length", ".pooling_type", ".block_count", ".embedding_length",
+            elif key.endswith((".context_length", ".pooling_type", ".block_count", ".embedding_length", ".vocab_size",
                                ".attention.head_count", ".attention.head_count_kv", ".attention.key_length",
                                ".attention.value_length", ".attention.indexer.key_length", ".ssm.state_size", ".ssm.inner_size",
                                ".ssm.group_count", ".ssm.conv_kernel", ".full_attention_interval",
-                               ".nextn_predict_layers", ".rope.scaling.original_context_length")) and kind == 4:
+                               ".nextn_predict_layers", ".expert_count", ".rope.scaling.original_context_length",
+                               "general.alignment")) and kind == 4:
                 metadata[key] = struct.unpack("<I", read_exact(stream, 4))[0]
             else:
                 skip_value(stream, kind)
@@ -128,6 +142,43 @@ def model_metadata(path, allow_metadata_only=False):
         end = stream.tell()
         if end > stat.st_size or (end == stat.st_size and not (allow_metadata_only and tensors == 0)):
             return None
+        if inspect_mtp:
+            if tensors > 1_000_000:
+                return None
+            block_indices = set()
+            prediction_blocks = set()
+            projection_blocks = set()
+            offsets = []
+            for _ in range(tensors):
+                name = read_string(stream)
+                dimensions = struct.unpack("<I", read_exact(stream, 4))[0]
+                if not 1 <= dimensions <= 4:
+                    return None
+                read_exact(stream, dimensions * 8 + 4)
+                offsets.append((u64(stream), name))
+                if match := NEXTN_TENSOR.fullmatch(name):
+                    index, tail = int(match[1]), match[2]
+                    block_indices.add(index)
+                    if tail.startswith("nextn."):
+                        prediction_blocks.add(index)
+                        if tail == "nextn.eh_proj.weight":
+                            projection_blocks.add(index)
+            # A prediction layer is a complete decoder layer that additionally
+            # carries blk.N.nextn.* tensors. Block indices holding prediction
+            # tensors are therefore head blocks and never base layers, even
+            # though they also hold ordinary attention and feed-forward weights.
+            metadata["mtp_projection_blocks"] = frozenset(projection_blocks)
+            metadata["mtp_base_blocks"] = frozenset(block_indices - prediction_blocks)
+            # llama.cpp keeps Qwen's lazy PLE lookup table file-backed.
+            alignment = metadata.get("general.alignment", 32)
+            if alignment > 0 and not alignment & (alignment - 1):
+                payload = stat.st_size - ((stream.tell() + alignment - 1) // alignment * alignment)
+                offsets.sort()
+                if offsets and offsets[-1][0] < payload:
+                    offsets.append((payload, ""))
+                    metadata["lazy_ple_bytes"] = sum(end - begin
+                        for (begin, name), (end, _) in zip(offsets, offsets[1:])
+                        if name == "per_layer_token_embd.weight")
         if len(_METADATA_CACHE) > 512:
             _METADATA_CACHE.clear()
         _METADATA_CACHE[cache_key] = metadata
@@ -180,17 +231,13 @@ def matching_projector(path, root):
     return None
 
 
-def _jinja_thinking_controls(template):
-    """Read boolean inputs from executable Jinja conditions, not prose.
+JINJA_STRING = re.compile(r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"", re.DOTALL)
 
-    Skip comments/raw sections and consume quoted values before their closing
-    delimiter. An example like ``{{ '{% if thinking %}' }}`` is not a toggle;
-    neither are attributes of message data.
-    """
-    controls = set()
+
+def _jinja_statements(template):
+    """Read statement blocks without interpreting comments, raw text or examples."""
     position = 0
     opening = re.compile(r"\{([%#{])")
-    quoted = re.compile(r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"", re.DOTALL)
     while match := opening.search(template, position):
         kind = match.group(1)
         end_token = {"%": "%}", "#": "#}", "{": "}}"}[kind]
@@ -202,7 +249,7 @@ def _jinja_thinking_controls(template):
             end = -1
             while cursor < len(template):
                 if template[cursor] in "'\"":
-                    literal = quoted.match(template, cursor)
+                    literal = JINJA_STRING.match(template, cursor)
                     if literal is None:
                         break  # Malformed template: do not infer capabilities.
                     cursor = literal.end()
@@ -223,10 +270,17 @@ def _jinja_thinking_controls(template):
                 break
             position += raw_end.end()
             continue
+        yield code
+
+
+def _jinja_thinking_controls(statements):
+    """Read boolean inputs from executable Jinja conditions, not message data."""
+    controls = set()
+    for code in statements:
         condition = re.match(r"(?:if|elif)\s+(.+)", code, re.DOTALL)
         if condition is None:
             continue
-        expression = quoted.sub(" ", condition.group(1))
+        expression = JINJA_STRING.sub(" ", condition.group(1))
         tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]*|[^\s]", expression)
         for index, token in enumerate(tokens):
             if token not in ("thinking", "enable_thinking"):
@@ -238,19 +292,52 @@ def _jinja_thinking_controls(template):
     return controls
 
 
+def _mapped_reasoning_levels(statements):
+    # Some templates validate the input against a named, literal dictionary of
+    # effort levels to numeric strengths. Resolve that declaration, not words
+    # in comments, system text, exception messages or tool schemas.
+    maps = set()
+    for statement in statements:
+        if not re.match(r"(?:if|elif)\s", statement):
+            continue
+        expression = JINJA_STRING.sub(" ", statement)
+        for use in re.finditer(r"\breasoning_effort\s+(?:not\s+)?in\s+([A-Za-z_]\w*)\b(?!\s*[.\[(])", expression):
+            if not expression[:use.start()].rstrip().endswith("."):
+                maps.add(use.group(1))
+    if len(maps) != 1:
+        return []
+    name = maps.pop()
+    declarations = [match.group(1) for code in statements
+                    if (match := re.fullmatch(rf"set\s+{name}\s*=\s*(.+)", code, re.DOTALL))]
+    if len(declarations) != 1 or len(declarations[0]) > 2048 or not declarations[0].startswith("{"):
+        return []
+    try:
+        mapping = ast.literal_eval(declarations[0])
+    except (ValueError, SyntaxError):
+        return []
+    if (not isinstance(mapping, dict) or not 1 <= len(mapping) <= 24
+            or any(not isinstance(level, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", level)
+                   or type(value) not in (int, float) for level, value in mapping.items())):
+        return []
+    return list(mapping)
+
+
 def reasoning_profile(metadata):
     """Only select effort values supported by this model's actual template."""
     template = metadata.get("tokenizer.chat_template", "")
     architecture = metadata.get("general.architecture", "")
-    thinking_controls = _jinja_thinking_controls(template)
-    levels = []
-    for match in re.finditer(r"(?:resolved_)?reasoning_(?:effort|strength)\s+(?:not\s+)?in\s*[\[(]([^\])]{1,512})[\])]", template):
-        levels.extend(re.findall(r"['\"]([a-z][a-z0-9_-]{0,31})['\"]", match.group(1)))
+    statements = list(_jinja_statements(template))
+    thinking_controls = _jinja_thinking_controls(statements)
+    mapped = _mapped_reasoning_levels(statements)
+    levels = list(mapped)
+    if not levels:
+        for match in re.finditer(r"(?:resolved_)?reasoning_(?:effort|strength)\s+(?:not\s+)?in\s*[\[(]([^\])]{1,512})[\])]", template):
+            levels.extend(re.findall(r"['\"]([a-z][a-z0-9_-]{0,31})['\"]", match.group(1)))
     levels = list(dict.fromkeys(levels))
     if not levels and (architecture == "gpt-oss" or "gpt-oss" in metadata.get("general.name", "").lower()) and "reasoning_effort" in template:
         levels = ["low", "medium", "high"]
     if levels:
-        if "enable_thinking" in thinking_controls and "none" not in levels:
+        if not mapped and "enable_thinking" in thinking_controls and "none" not in levels:
             levels.insert(0, "none")
         highest = next((level for level in ("max", "ultra", "xhigh", "high", "medium", "low", "minimal") if level in levels), None)
         return {"enabled": True, "effort": highest, "budget": -1, "levels": levels, "mode": "llama-native"}
@@ -307,15 +394,127 @@ def experimental_context_maximum(metadata, architecture, context):
     return None
 
 
+def mtp_tensor_layout(shards):
+    """Measure block roles from tensor names: (base indices, head indices).
+
+    Returns None when a shard cannot be inspected, so callers treat an unknown
+    layout as unusable instead of guessing.
+    """
+    base_blocks, head_blocks = set(), set()
+    for shard in shards:
+        layout = model_metadata(shard, allow_metadata_only=True, inspect_mtp=True)
+        if not layout:
+            return None
+        base_blocks |= layout["mtp_base_blocks"]
+        head_blocks |= layout["mtp_projection_blocks"]
+    return base_blocks, head_blocks
+
+
+def mtp_kind(metadata, shards, marked=False):
+    """Classify a GGUF by its tensor layout, not by arithmetic on its counters.
+
+    The declared numbers disagree between exports and must not veto a measured
+    head: the real unsloth prediction companion declares the full target depth
+    plus one (block_count 49 for a 48 layer model) with nextn_predict_layers 1,
+    other exports declare only their own single layer, and a target whose head
+    was split into a companion file declares nothing at all. The tensor
+    directory is what decides - exactly as in llama.cpp, which loads the draft
+    only when the NextN projection tensor is really present.
+
+    ``marked`` marks a name or path that announces a prediction companion; such
+    a file is never offered as a chat model even if it carries base layers.
+    """
+    if not metadata.get("general.architecture"):
+        return None
+    try:
+        layout = mtp_tensor_layout(shards)
+    except (OSError, ValueError, struct.error):
+        return None
+    if not layout:
+        return None
+    base_blocks, head_blocks = layout
+    if not head_blocks:
+        # No projection tensor: no predictor, whatever the metadata claims.
+        return None
+    if not base_blocks or marked:
+        return "sidecar"
+    return "embedded"
+
+
+def mtp_scope(path, root):
+    for parent in path.parents:
+        if parent == root:
+            break
+        if parent.parent.name.casefold() == "snapshots":
+            return parent
+    for parent in path.parents:
+        if parent == root:
+            break
+        if parent.name.casefold() == "mtp":
+            return parent.parent
+    return path.parent.parent if QUANTIZATION_SUFFIX.fullmatch(path.parent.name) and path.parent != root else path.parent
+
+
+def mtp_family(name):
+    name = MTP_MARKER.sub("-", name)
+    name = QUANTIZATION_SUFFIX.sub("", name)
+    name = re.sub(r"(?:^|[-_.])(?:shared|gguf)$", "", name, flags=re.IGNORECASE)
+    return re.sub(r"[^\w]+|_", "", name.casefold())
+
+
+def matching_mtp(model, candidates, scopes):
+    """Return every usable prediction companion for one model, best one first.
+
+    A companion may carry no base layer of its own (the usual split export), the
+    whole base stack, or the base stack minus its prediction layers, so all
+    three relations are valid. Identity stays strict: same architecture, same
+    cache scope and matching embedding width and vocabulary whenever both sides
+    declare them. The base depth is measured from the tensor layout because a
+    companion that shares embeddings with its target still declares the full
+    target depth in its header.
+    """
+    scope, family, metadata, _ = model
+    architecture = metadata["general.architecture"]
+    blocks = metadata.get(f"{architecture}.block_count", 0)
+    nextn = metadata.get(f"{architecture}.nextn_predict_layers", 0)
+    matches = []
+    for draft_scope, draft_family, draft, shards in candidates:
+        if draft_scope != scope or draft["general.architecture"] != architecture:
+            continue
+        if draft_family != family and (draft_family or scopes[scope] != {family}):
+            continue
+        layout = mtp_tensor_layout(shards)
+        if layout is None:
+            continue
+        draft_base_blocks = len(layout[0])
+        declared_base = draft.get(f"{architecture}.block_count", 0) - draft.get(f"{architecture}.nextn_predict_layers", 0)
+        if draft_base_blocks not in (0, blocks, blocks - nextn) and declared_base not in (0, blocks, blocks - nextn):
+            continue
+        dimensions = (f"{architecture}.embedding_length", f"{architecture}.vocab_size")
+        if any(metadata.get(key) and draft.get(key) and metadata[key] != draft[key] for key in dimensions):
+            continue
+        try:
+            size = sum(shard.stat().st_size for shard in shards)
+        except OSError:
+            continue
+        matches.append((not draft_family, size, str(shards[0]), shards))
+    if not matches:
+        return []
+    # The main model verifies candidate tokens at load time. Among equally
+    # specific companions the smallest one wins, to keep GPU memory for the main
+    # model; the path keeps the order stable when two files are equally large.
+    matches.sort(key=lambda item: (item[0], item[1], item[2]))
+    return [item[3] for item in matches]
+
+
 def discover_models(root):
     root = resolve_model_catalog_root(root)
     found = []
+    mtp_drafts = []
+    mtp_models = []
+    mtp_families = {}
     for path in sorted(root.rglob("*.gguf")):
         try:
-            if re.match(r"mtp(?:[-_.]|$)", path.name, re.IGNORECASE):
-                # Prediction-only companions may contain the main tokenizer
-                # metadata, but cannot act as independently selected chats.
-                continue
             # HF symlinks may target blobs within this mount, never other host paths.
             if not path.resolve().is_relative_to(root):
                 continue
@@ -332,6 +531,7 @@ def discover_models(root):
                     continue
                 name = stem
             else:
+                shards = [path]
                 metadata = model_metadata(path)
                 if not metadata:
                     continue
@@ -340,6 +540,19 @@ def discover_models(root):
             digest = hashlib.sha256(path.relative_to(root).as_posix().encode()).hexdigest()[:12]
             architecture = metadata.get("general.architecture", "").lower()
             if not architecture or metadata["general.type"] != "model":
+                continue
+            scope = mtp_scope(path, root)
+            marked = bool(MTP_MARKER.search(name)
+                          or any(parent.casefold() == "mtp" for parent in path.relative_to(scope).parts[:-1]))
+            kind = mtp_kind(metadata, shards, marked)
+            if kind == "sidecar":
+                allowed_target = scope.parent.parent if scope.parent.name.casefold() == "snapshots" else scope
+                if all(part.resolve().is_relative_to(allowed_target) and not any(char in str(part) for char in "\r\n")
+                       for part in shards):
+                    mtp_drafts.append((scope, mtp_family(name), metadata, tuple(shards)))
+                continue
+            if marked:
+                # Incomplete or incompatible prediction heads are not chat models.
                 continue
             context = metadata.get(architecture + ".context_length")
             # Do not invent a supported context for incomplete/unknown metadata.
@@ -356,6 +569,11 @@ def discover_models(root):
             reasoning = reasoning_profile(metadata)
             found.append({"id": f"coding/{safe_name}~{digest}", "path": path, "role": "general", "context": context,
                           "contextPolicy": "max-fit", "reasoning": reasoning})
+            family = mtp_family(name)
+            mtp_families.setdefault(scope, set()).add(family)
+            model_aliases = [found[-1]]
+            if kind == "embedded":
+                found[-1]["mtp_embedded"] = True
             if (maximum := experimental_context_maximum(metadata, architecture, context)) is not None:
                 found[-1]["experimentalContextMaximum"] = maximum
             projector = matching_projector(path, root)
@@ -367,9 +585,30 @@ def discover_models(root):
             if projector:
                 found.append({"id": f"vision/{safe_name}~{digest}", "path": path, "role": "vision",
                               "context": context, "contextPolicy": "max-fit", "reasoning": reasoning, "projector": projector})
+                model_aliases.append(found[-1])
                 if found[-2].get("experimentalContextMaximum"):
                     found[-1]["experimentalContextMaximum"] = found[-2]["experimentalContextMaximum"]
+                if kind == "embedded":
+                    found[-1]["mtp_embedded"] = True
+            if kind != "embedded":
+                mtp_models.append((scope, family, metadata, model_aliases))
         except (OSError, ValueError, struct.error):
+            continue
+    for model in mtp_models:
+        try:
+            choices = matching_mtp(model, mtp_drafts, mtp_families)
+            if choices:
+                for alias in model[3]:
+                    shards = choices[0]
+                    alias["mtp"] = shards[0]
+                    if len(shards) > 1:
+                        alias["mtp_shards"] = shards
+                    if len(choices) > 1:
+                        # Kept so a load can fall through to the next companion
+                        # before giving up on speculation entirely.
+                        alias["mtp_alternatives"] = choices[1:]
+        except OSError:
+            # A cache file may disappear between discovery and pairing.
             continue
     return found
 
@@ -479,8 +718,78 @@ def model_runtime_policy(model, placement=None, *, split_mode="layer", fit_targe
     return vision_batch_policy(model, limit_context_policy(model, policy))
 
 
+def mtp_draft_tokens():
+    """Speculated tokens per turn; the environment may raise the safe default."""
+    value = os.environ.get(MTP_TOKENS_ENVIRONMENT, "").strip()
+    if re.fullmatch(r"[1-9][0-9]?", value) and 1 <= int(value) <= 64:
+        return int(value)
+    return MTP_DRAFT_TOKENS
+
+
+def mtp_switch_disabled():
+    return os.environ.get(MTP_SWITCH_ENVIRONMENT, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def native_server_help(binary):
+    result = subprocess.run([str(binary), "--help"], capture_output=True, text=True, timeout=30,
+                            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+    return (result.stdout or "") + (result.stderr or "")
+
+
+def native_mtp_support(binary):
+    """Ask the installed router once per process whether it can speculate.
+
+    A build number is not a usable gate here: the deployed bundle reports a mix
+    version that matches no documented release, while its help text states
+    exactly which switches exist. The result is cached for the whole supervisor
+    lifetime. An unreadable probe never removes a working feature; the load path
+    still falls back when a draft cannot be loaded.
+    """
+    if not binary:
+        return True, "no native binary configured"
+    path = Path(binary)
+    cached = _MTP_CAPABILITY.get(str(path))
+    if cached is not None:
+        return cached
+    try:
+        help_text = native_server_help(path)
+    except (OSError, subprocess.SubprocessError) as error:
+        outcome = (True, f"probe unavailable ({type(error).__name__}); speculation left enabled")
+        _MTP_CAPABILITY[str(path)] = outcome
+        return outcome
+    missing = [flag for flag in MTP_REQUIRED_FLAGS if flag not in help_text]
+    outcome = (not missing, "missing " + ", ".join(missing) if missing else "speculation switches present")
+    _MTP_CAPABILITY[str(path)] = outcome
+    return outcome
+
+
+def mtp_linked_paths(model):
+    """Companion files the catalog linked to this entry, draft rules applied."""
+    if model.get("role") == "embedding" or mtp_switch_disabled() or not model.get("mtp"):
+        return []
+    return [Path(item) for item in model.get("mtp_shards") or (model["mtp"],)]
+
+
+def mtp_load_options(model, shards=None, binary=None):
+    if model.get("role") == "embedding" or mtp_switch_disabled():
+        return {}
+    if model.get("mtp_embedded"):
+        return {"mtpMode": "embedded"}
+    parts = [Path(item) for item in (shards or mtp_linked_paths(model))]
+    # Discovery only links readable companions, but a long living supervisor can
+    # see one disappear or stay incomplete while a download resumes. Such a draft
+    # must never become a preset path the router cannot open; dropping it keeps
+    # the plain load and leaves the cache fingerprint untouched.
+    if not parts or any(not item.is_file() for item in parts):
+        return {}
+    supported, _ = native_mtp_support(binary)
+    if not supported:
+        return {}
+    return {"mtpMode": "external", "mtpPath": parts[0].as_posix(), "mtpShards": [item.as_posix() for item in parts]}
+
+
 def write_presets(root, target, placements=None, managed_gpu=False, fit_target="2048", gpu_layers="auto",
-                  resolved_policies=None, agent_instances=False):
+                  resolved_policies=None, agent_instances=False, binary=None):
     models = discover_models(root)
     if agent_instances:
         models += [dict(model, id=model["id"] + "@subagent", baseModel=model["id"], instance="subagent")
@@ -531,6 +840,8 @@ def write_presets(root, target, placements=None, managed_gpu=False, fit_target="
             # override is validated/applied only at the next actual load.
             policy = model_runtime_policy(model, placement, split_mode="layer" if managed_gpu else multi_gpu_split_mode(),
                                           fit_target=fit_target, gpu_layers=gpu_layers)
+            if not managed_gpu:
+                policy.update(mtp_load_options(model, binary=binary))
         policy = vision_batch_policy(model, limit_context_policy(model, policy))
         if placement:
             lines += [f"device = {placement}", "main-gpu = 0"]
@@ -541,6 +852,8 @@ def write_presets(root, target, placements=None, managed_gpu=False, fit_target="
             # free-memory-dependent defaults change the validated split ratio.
             lines += [f"device = {policy['devices']}", f"tensor-split = {policy['tensorSplit']}"]
         lines += [f"split-mode = {policy['split']}", f"fit = {policy['fit']}", f"n-gpu-layers = {policy['gpuLayers']}"]
+        if policy.get("moeCacheMiB"):
+            lines += [f"moe-cache-mib = {policy['moeCacheMiB']}"]
         if policy["context"] is not None:
             lines += [f"ctx-size = {policy['context']}"]
         if policy.get("fitContext"):
@@ -565,6 +878,18 @@ def write_presets(root, target, placements=None, managed_gpu=False, fit_target="
                 lines += [f"reasoning-effort = {model['reasoning']['effort']}"]
             if model.get("projector"):
                 lines += [f"mmproj = {model['projector'].as_posix()}"]
+            if policy.get("mtpMode"):
+                speculators = "draft-mtp,ngram-simple" if policy.get("promptLookup") else "draft-mtp"
+                lines += [f"spec-type = {speculators}", f"spec-draft-n-max = {mtp_draft_tokens()}"]
+                if policy.get("promptLookup"):
+                    # ngram-simple requires the draft to cover at least the
+                    # lookup length, otherwise it rejects every proposal.
+                    lines += [f"spec-ngram-simple-size-n = {MOE_PROMPT_LOOKUP_TOKENS}",
+                              f"spec-ngram-simple-size-m = {MOE_PROMPT_LOOKUP_TOKENS}"]
+                if policy["mtpMode"] == "external":
+                    lines += [f"spec-draft-model = {policy['mtpPath']}"]
+                    if placement:
+                        lines += [f"spec-draft-device = {placement}", "spec-draft-ngl = 999"]
         lines.append("")
     text = "\n".join(lines)
     target = Path(target)
@@ -649,13 +974,20 @@ def available_host_memory():
     return None
 
 
-def model_file_bytes(model):
-    path = model["path"]
+def model_shards(path):
     match = SHARD.match(path.name)
-    paths = [path] if not match else [path.with_name(f"{match[1]}-{part:05d}-of-{int(match[3]):05d}.gguf")
+    return [path] if not match else [path.with_name(f"{match[1]}-{part:05d}-of-{int(match[3]):05d}.gguf")
                                     for part in range(1, int(match[3]) + 1)]
+
+
+def model_file_bytes(model):
+    paths = model_shards(model["path"])
     if model.get("projector"):
         paths.append(model["projector"])
+    # A companion draft is resident next to the target model, so admitting a
+    # device without counting it would plan up to several gigabytes too small.
+    # Only counted when speculation really applies to this load.
+    paths += [item for item in mtp_linked_paths(model) if item.is_file()]
     return sum(item.stat().st_size for item in paths)
 
 
@@ -665,10 +997,7 @@ def file_identity(paths):
 
 
 def model_file_identity(model):
-    path = model["path"]
-    match = SHARD.match(path.name)
-    paths = [path] if not match else [path.with_name(f"{match[1]}-{part:05d}-of-{int(match[3]):05d}.gguf")
-                                    for part in range(1, int(match[3]) + 1)]
+    paths = model_shards(model["path"])
     if model.get("projector"):
         paths.append(model["projector"])
     return file_identity(paths)
@@ -788,7 +1117,7 @@ def choose_single_gpu(model, devices, reserve_mib=2048):
     return candidates[0]["device"] if candidates else None
 
 
-def estimate_replica_bytes(model, context):
+def estimate_replica_bytes(model, context, weight_bytes=None):
     """Admission estimate from GGUF dimensions; native allocation is final authority.
 
     Hybrid attention intervals and prediction-only layers are explicit GGUF
@@ -812,8 +1141,47 @@ def estimate_replica_bytes(model, context):
     # Admission must not treat an unknown KV layout as a zero-byte cache.
     # Additional runtime buffers and the separate per-device reserve cover
     # CUDA graphs and batching before a native allocation is attempted.
-    return (int(model_file_bytes(model) * 1.05) + kv + int(recurrent_extra * 1.1) + 512 * 1024**2
+    weights = model_file_bytes(model) if weight_bytes is None else weight_bytes
+    return (int(weights * 1.05) + kv + int(recurrent_extra * 1.1) + 512 * 1024**2
             if kv is not None else None)
+
+
+def moe_performance_options(model, policy, devices, binary):
+    """Keep GPU-resident experts when they fit; cache host experts under VRAM pressure."""
+    if not binary or not devices or policy.get("profileId") or policy["split"] not in ("none", "layer"):
+        return {}
+    if model["role"] == "embedding":
+        return {}
+    metadata = model_metadata(model["path"], allow_metadata_only=True) or {}
+    architecture = metadata.get("general.architecture")
+    if not metadata.get(f"{architecture}.expert_count", 0) > 1:
+        return {}
+    try:
+        native_help = native_server_help(binary)
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    # Retain the mtmd requirement that a complete image batch fit in one ubatch.
+    options = dict(batchSize=2048, ubatchSize=1024)
+    if policy.get("mtpMode") and all(flag in native_help for flag in
+            ("ngram-simple", "--spec-ngram-simple-size-n", "--spec-ngram-simple-size-m")):
+        options["promptLookup"] = True
+    if policy["fit"] != "on" or policy["gpuLayers"] != "auto" or "--moe-cache-mib" not in native_help:
+        return options
+    mib = 1024**2
+    available = sum(max(0, gpu["free"] // mib - policy["fitTargetMiB"]) for gpu in devices)
+    weights = model_file_bytes(model)
+    if architecture == "qwen4exp":
+        weights -= sum((model_metadata(path, allow_metadata_only=True, inspect_mtp=True) or {}).get("lazy_ple_bytes", 0)
+                       for path in model_shards(model["path"]))
+    required = estimate_replica_bytes(model, policy["context"] or model["context"], weight_bytes=weights)
+    host_free = available_host_memory()
+    if required is not None and required > available * mib and host_free is not None and host_free > weights + 4096 * mib:
+        # llama.cpp's fitter accounts for this budget when placing host experts.
+        # Leave the rest of VRAM for weights, KV, MTP and compute buffers.
+        budget = min(16384, available // 4)
+        if budget >= 512:
+            options["moeCacheMiB"] = budget
+    return options
 
 
 def recurrent_state_bytes(metadata, layers):
@@ -932,6 +1300,12 @@ class GpuLoadManager:
             # A snapshot must describe the effective decoder, not the unsafe
             # logical batch recorded by an older measured profile.
             fingerprint["visionBatch"] = {key: policy[key] for key in ("batchSize", "ubatchSize")}
+        if policy.get("mtpMode"):
+            # llama.cpp persists draft state alongside the target slot.
+            fingerprint["mtp"] = dict(mode=policy["mtpMode"], draftTokens=mtp_draft_tokens(),
+                                      files=file_identity([Path(path) for path in policy.get("mtpShards", [])]))
+            if policy.get("promptLookup"):
+                fingerprint["mtp"]["promptLookup"] = MOE_PROMPT_LOOKUP_TOKENS
         if policy["split"] == "tensor" or policy.get("profileId") or policy.get("contextPolicy") == "profile-fallback-full-context":
             # Explicit tensor/profiled loads have distinct fitting, context,
             # projector and batch settings; include their effective config.
@@ -991,7 +1365,7 @@ class GpuLoadManager:
         with self.lock:
             return write_presets(self.root, self.preset, self.placements, managed_gpu=True,
                                  fit_target=self.fit_target, gpu_layers=self.gpu_layers,
-                                 resolved_policies=self.policies, agent_instances=True)
+                                 resolved_policies=self.policies, agent_instances=True, binary=self.binary)
 
     def router(self, path, body=None, timeout=15):
         request = urllib.request.Request(f"http://127.0.0.1:{self.port}/{path}",
@@ -1349,7 +1723,38 @@ class GpuLoadManager:
                 self.agent_failures.pop(base, None)
             deadline = model_load_deadline(model)
             forced_policy = None
-            for attempt in range(3):
+            mtp_options = mtp_load_options(model, binary=self.binary)
+            if not mtp_options and (model.get("mtp") or model.get("mtp_embedded")):
+                # The catalog found a draft but speculation is off for a reason an
+                # operator has to be able to see without reading the code.
+                supported, reason = native_mtp_support(self.binary)
+                if not supported:
+                    self.record(model_id, device, "mtp-unsupported", {"reason": reason})
+                elif mtp_switch_disabled():
+                    self.record(model_id, device, "mtp-disabled", {"reason": f"{MTP_SWITCH_ENVIRONMENT} is set"})
+            candidates = ([tuple(Path(item) for item in mtp_options["mtpShards"])]
+                          if mtp_options.get("mtpMode") == "external" else [])
+            candidates += [tuple(Path(part) for part in group) for group in model.get("mtp_alternatives", ())]
+            candidate_index = 0
+            if mtp_options and not device and not replica and mtp_options.get("mtpMode") == "external":
+                # The companion can be exactly what tips the weights past the
+                # device. Loading the target alone is better than spilling it.
+                lean = {key: value for key, value in model.items()
+                        if key not in ("mtp", "mtp_shards", "mtp_alternatives")}
+                fitting = choose_single_gpu(lean, devices, self.fit_target)
+                if fitting:
+                    self.record(model_id, device, "mtp-skipped-memory", {
+                        "draft": Path(mtp_options["mtpPath"]).name,
+                        "draftBytes": sum(Path(item).stat().st_size for item in mtp_options["mtpShards"])})
+                    mtp_options, candidates = {}, []
+                    model, device = lean, fitting
+            if replica:
+                # Cache forks require an identical effective draft configuration.
+                parent = self.policies.get(base, {})
+                mtp_options = {key: parent[key] for key in mtp_options if key in parent}
+                candidates = candidates[:1] if mtp_options else []
+            allow_performance = not replica
+            for attempt in range(5 + max(0, len(candidates) - 1)):
                 policy = forced_policy or self.resolve_load_policy(model, device)
                 if context_length is not None and not replica:
                     policy = dict(policy, context=context_length, contextPolicy="user-limit")
@@ -1368,10 +1773,13 @@ class GpuLoadManager:
                     if parent_policy.get("experimentalRope"):
                         policy.update(contextMaximum=parent_policy["contextMaximum"],
                                       experimentalRope=parent_policy["experimentalRope"])
-                    for key in ("batchSize", "ubatchSize"):
-                        if key in self.policies.get(base, {}):
-                            policy[key] = self.policies[base][key]
-                policy = vision_batch_policy(model, policy)
+                    for key in ("batchSize", "ubatchSize", "promptLookup"):
+                        if key in parent_policy:
+                            policy[key] = parent_policy[key]
+                policy = dict(policy, **mtp_options)
+                performance = (moe_performance_options(model, policy, devices, self.binary)
+                               if allow_performance else {})
+                policy = vision_batch_policy(model, dict(policy, **performance))
                 if attempt == 0:
                     self.sessions.invalidate(model_id)
                 self.placements[model_id] = device
@@ -1392,6 +1800,16 @@ class GpuLoadManager:
                         if after and before and before["free"] > after["free"]:
                             self.allocations[model_id] = before["free"] - after["free"]
                         self.record(model_id, device, "loaded")
+                        if performance:
+                            self.record(model_id, device, "moe-performance-loaded", {
+                                "expertCacheBudgetMiB": policy.get("moeCacheMiB", 0),
+                                "batchSize": policy["batchSize"], "ubatchSize": policy["ubatchSize"],
+                                "promptLookup": policy.get("promptLookup", False)})
+                        if policy.get("mtpMode"):
+                            self.record(model_id, device, "mtp-applied",
+                                        {"mode": policy["mtpMode"],
+                                         "draft": Path(policy["mtpPath"]).name if policy.get("mtpPath") else None,
+                                         "draftTokens": mtp_draft_tokens()})
                         return {"success": True, "device": device, "fallback": attempt > 0}
                     if status.get("failed") or status.get("value") == "failed":
                         break
@@ -1410,6 +1828,31 @@ class GpuLoadManager:
                             failure += stream.read(2 * 1024 * 1024).decode("utf-8", errors="replace")
                 memory_failure = re.search(r"out of memory|cudaMalloc.*failed|failed to allocate|unable to allocate|CUDA error.*memory", failure, re.I)
                 self.record(model_id, device, "failed", failure[-4000:])
+                if performance:
+                    # Retry the same model, context and draft with ordinary
+                    # placement settings before considering a draft fallback.
+                    allow_performance = False
+                    self.record(model_id, device, "moe-performance-fallback", {
+                        "reason": "allocation" if memory_failure else "load-failed"})
+                    continue
+                if mtp_options:
+                    # A second companion may load where this one could not, so
+                    # walk the ordered list before giving up on speculation and
+                    # before downgrading the placement or reading the model error.
+                    following = (mtp_load_options(model, candidates[candidate_index + 1], binary=self.binary)
+                                 if candidate_index + 1 < len(candidates) else {})
+                    if following:
+                        skipped = Path(mtp_options["mtpPath"]).name
+                        candidate_index += 1
+                        mtp_options = following
+                        forced_policy = None
+                        self.record(model_id, device, "mtp-avoided",
+                                    {"rejected": skipped, "next": Path(following["mtpPath"]).name})
+                        continue
+                    forced_policy = {key: value for key, value in policy.items() if key not in mtp_options}
+                    mtp_options = {}
+                    self.record(model_id, device, "mtp-fallback", {"reason": "draft-load-failed"})
+                    continue
                 if replica:
                     self.agent_failures[base] = "subagent.vram_allocation_failed" if memory_failure else "subagent.runtime_load_failed"
                     raise RuntimeError(self.agent_failures[base])
@@ -1425,11 +1868,12 @@ class GpuLoadManager:
                                                                       "context": forced_policy["context"]})
                     device = None
                     continue
-                if not device or attempt or not memory_failure:
+                if not device or not memory_failure:
                     raise RuntimeError("Native model load failed; see gpu-placement.jsonl and llama.stderr.log")
                 # A failed router child has already exited, releasing its CUDA
                 # allocations. Reloading the changed preset joins that child.
                 device = None
+                forced_policy = None
             raise RuntimeError("GPU load attempts exhausted")
 
     def _check_model_load_stopped(self):
@@ -1520,7 +1964,7 @@ def runtime_environment(source, state_directory):
                 "LLAMA_ARG_N_PREDICT", "LLAMA_ARG_THINK_BUDGET", "LLAMA_ARG_REASONING_EFFORT",
                 "LLAMA_ARG_REASONING", "LLAMA_ARG_CHAT_TEMPLATE_KWARGS", "LLAMA_ARG_DEVICE", "LLAMA_ARG_SPLIT_MODE",
                 "LLAMA_ARG_MAIN_GPU", "LLAMA_ARG_TENSOR_SPLIT", "LLAMA_ARG_N_GPU_LAYERS", "LLAMA_ARG_FIT",
-                "LLAMA_ARG_FIT_TARGET", "CUDA_VISIBLE_DEVICES"):
+                "LLAMA_ARG_FIT_TARGET", "LLAMA_ARG_MOE_CACHE_MIB", "CUDA_VISIBLE_DEVICES"):
         environment.pop(key, None)
     environment["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     return environment

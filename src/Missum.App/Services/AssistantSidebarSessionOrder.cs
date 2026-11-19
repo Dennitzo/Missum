@@ -12,7 +12,7 @@ internal static class AssistantSidebarSessionOrder
         .ThenByDescending(session => Text(session, "id"), StringComparer.Ordinal)
         .ToArray();
 
-    private static DateTimeOffset Date(JsonElement session, string name) =>
+    internal static DateTimeOffset Date(JsonElement session, string name) =>
         DateTimeOffset.TryParse(Text(session, name), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var value)
             ? value : DateTimeOffset.MinValue;
 

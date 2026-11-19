@@ -566,3 +566,55 @@ keine irrtümliche Runtime-Unerreichbarkeit. Nachweise:
 `native-model-switch-live.json/.log`, `native-model-switch-gateway.log` und
 `native-status-gateway-build.log`. Alle sechs Docker-Dienste sind gesund;
 die aktualisierte portable Missum-Anwendung läuft.
+
+## Vorhersagegewichte (Multi-Token-Vorhersage) an der echten Installation
+
+Geprüft am Router `C:\Users\AMD\.unsloth\llama.cpp\build\bin\Release\llama-server.exe`
+(Bundle `b12347-mix-241a0f3`). Der Hilfetext nennt `--spec-type` mit den Werten
+`none,draft-simple,draft-eagle3,draft-mtp,draft-dflash,draft-dspark,ngram-*`,
+`--spec-draft-model` (Standard: unbenutzt) sowie `--spec-draft-n-max`. Der
+Supervisor liest diese Zeilen vor dem ersten Laden einmal aus und schreibt
+Spekulationsschlüssel nur, wenn alle drei Schalter vorhanden sind.
+
+Die Discovery über beide Modellwurzeln (`C:\Users\AMD\.cache\huggingface\hub` und
+`E:\Huggingface\hub`) lieferte 14 Katalogeinträge, davon vier mit
+Vorhersagekopf. Die Kopfdatei `mtp-Qwen3.8-Flash-Next-Q8_0.gguf`
+(4.137.429.120 Bytes, Architektur `qwen4exp`, 34 Tensoren, ausschließlich
+Blockindex 48, davon sechs Vorhersagetensoren mit
+`blk.48.nextn.eh_proj.weight`) erscheint dabei nicht als eigenes Modell. Ihr
+Zielmodell deklariert `block_count` 48 ohne eigenen `nextn_predict_layers`-Wert;
+die Kopfdatei deklariert 49. Die Kopplung folgt deshalb der Tensorstruktur und
+nicht einer Rechenrelation der deklarierten Zahlen.
+
+Gemessene Presets (in ein Wegwerfverzeichnis geschrieben, nicht in den
+Laufzeitzustand): für `coding/Qwen3.8-Flash-Next-UD-Q4_K_XL~2e7aed309421`
+stehen dort `spec-type = draft-mtp`, `spec-draft-model` auf dem absoluten Pfad
+der Kopfdatei und `spec-draft-n-max = 2`. Die Zulassungsrechnung wächst von
+112.242.197.722 auf 116.379.626.842 Bytes, also um exakt die Kopfgröße.
+`Qwen3.8-27B-UD-Q8_K_XL` trägt seinen Kopf selbst (Architektur `qwen35`,
+`block_count` 65, Vorhersageblock 64 mit `blk.64.nextn.eh_proj.weight`,
+Basisschichten 0 bis 63); dessen Preset erhält `spec-type = draft-mtp` ohne
+`spec-draft-model`, weil keine separate Datei geladen werden darf.
+
+Echter Lastlauf mit dem eingebetteten Kopf, bewusst ohne Grafikspeicher
+(`--n-gpu-layers 0`, 1.024 Kontexttoken, eigene Ports), damit das zur selben
+Zeit residierende Produktionsmodell ungestört blieb. Das Protokoll des Routers
+zeigt `common_speculative_init_result: creating MTP draft context against the
+target model '…\Qwen3.8-27B-UD-Q8_K_XL.gguf'`, danach `model loaded` und
+`listening`. Zwei Generierungen über `/v1/chat/completions` ergaben
+`draft acceptance = 0.72222 (13 accepted / 18 generated), mean len = 2.44` bei
+24 Ausgabetoken und `draft acceptance = 0.85294 (29 accepted / 34 generated),
+mean len = 2.71` bei 48 Ausgabetoken. Der Prozess wurde danach beendet. Der
+sichtbare Antworttext blieb in beiden Anfragen leer, weil dieses Modell in den
+Reasoning-Kanal antwortet (`reasoning_content` 215 Zeichen); das ist
+Modellverhalten und hängt nicht an der Spekulation.
+
+Grenze: Das Paar aus `Qwen3.8-Flash-Next-UD-Q4_K_XL` (112 GB über vier Shards)
+und seiner separaten Kopfdatei wurde nicht geladen. Zum Prüfzeitpunkt hielt ein
+Produktionsprozess etwa 95 GB Arbeitsspeicher, pro GPU verblieben rund 5,3 GB
+und im System rund 106 GB frei; ein weiterer 116-GB-Lauf hätte den laufenden
+Betrieb verdrängt. Der externe Kopf ist damit auf Katalog-, Preset- und
+Zulassungsebene an der echten Installation nachgewiesen, der
+`draft-mtp`-Ladepfad desselben Router-Builds zusätzlich durch den obigen
+Lauf mit eingebettetem Kopf. Nachweisbefehl:
+`python workers/coding/verify_mtp_pairing.py --only Qwen3.8 --preset-check`.

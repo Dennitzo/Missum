@@ -108,6 +108,21 @@
       </Border>
 
       <Border Style="{StaticResource MissumCardStyle}">
+        <StackPanel Spacing="10">
+          <TextBlock Style="{StaticResource MissumSectionTitleStyle}" Text="AI-Modellordner" />
+          <Grid ColumnSpacing="10">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="*" />
+              <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBox AutomationProperties.Name="Lokaler AI-Modellordner"
+                     Text="{x:Bind ViewModel.NativeModelRoot, Mode=OneWay}" IsReadOnly="True" />
+            <Button Grid.Column="1" Click="OnSelectModelRoot" Content="Ordner auswählen" />
+          </Grid>
+        </StackPanel>
+      </Border>
+
+      <Border Style="{StaticResource MissumCardStyle}">
         <StackPanel Spacing="14">
           <StackPanel>
             <TextBlock Style="{StaticResource MissumSectionTitleStyle}" Text="Darstellung" />

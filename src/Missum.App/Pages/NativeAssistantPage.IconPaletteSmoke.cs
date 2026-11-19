@@ -105,7 +105,7 @@ public sealed partial class NativeAssistantPage
             _sourceTabs.Add(_session);
             RenderSessionTabs();
             Inspector.Visibility = Visibility.Visible;
-            SelectedToolChip.SetTool("Planen", "\uEA80", NativeIconPalette.BrushFor("plan"));
+            SelectedToolChip.SetTool("Planmodus", "\uEA80", NativeIconPalette.BrushFor("plan"));
             SelectedToolChip.Visibility = Visibility.Visible;
             var tool = (ToolStepView)_messageBlocks[answerId]["tool:palette-read"];
             tool.SetExpanded(false);

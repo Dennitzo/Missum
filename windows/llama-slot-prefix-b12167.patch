@@ -1,0 +1,96 @@
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+index 4596e78..8822fcc 100644
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -307,6 +307,17 @@ struct server_slot {
+     std::unique_ptr<const server_task> task;
+     std::unique_ptr<const server_task> task_prev; // used for debugging
+ 
++    // The exact packed vector from the last successful native slot save.
++    // Queried only on the server task thread, along with the current prompt.
++    std::vector<char> missum_saved_tokens;
++    std::string missum_saved_revision;
++    int missum_saved_task_id = -1;
++
++    void invalidate_missum_prefix() {
++        missum_saved_revision.clear();
++        missum_saved_tokens.clear();
++    }
++
+     // used to determine the slot that has been used the longest
+     int64_t t_last_used = -1;
+ 
+@@ -379,6 +390,7 @@ struct server_slot {
+     }
+ 
+     void prompt_clear() {
++        invalidate_missum_prefix();
+         SLT_TRC(*this, "clearing prompt with %zu tokens\n", prompt.tokens.size());
+ 
+         mem.seq_rm(id, -1, -1);
+@@ -819,6 +831,16 @@ struct server_slot {
+         };
+ 
+         const auto & ptask = task ? task : task_prev;
++        if (!is_processing() && !missum_saved_revision.empty()
++                && (ptask ? ptask->id : -1) == missum_saved_task_id) {
++            try {
++                if (prompt.tokens.serialize() == missum_saved_tokens) {
++                    res["missum_prefix_revision"] = missum_saved_revision;
++                }
++            } catch (const std::exception &) {
++                // Unsupported slot serialization leaves the proof absent.
++            }
++        }
+ 
+         if (ptask) {
+             res["id_task"] = ptask->id;
+@@ -3281,6 +3303,16 @@ private:
+                     res->is_save  = true;
+                     res->n_tokens = slot->prompt.tokens.size();
+                     res->n_bytes  = nwrite + nwrite_ckpt + nwrite_dft;
++                    // Distinguish equal task IDs after a child/router restart.
++                    static const std::string missum_process_epoch =
++                        std::to_string(std::random_device{}()) + "-" +
++                        std::to_string(std::random_device{}()) + "-" +
++                        std::to_string(std::random_device{}());
++                    const auto & last_task = slot->task ? slot->task : slot->task_prev;
++                    slot->missum_saved_task_id = last_task ? last_task->id : -1;
++                    slot->missum_saved_revision = missum_process_epoch + ":" + std::to_string(task.id);
++                    slot->missum_saved_tokens = std::move(packed);
++                    res->missum_prefix_revision = slot->missum_saved_revision;
+                     res->t_ms     = t_save_ms;
+                     queue_results.send(std::move(res));
+                 } break;
+@@ -3305,6 +3337,7 @@ private:
+                     std::string filepath = task.slot_action.filepath;
+ 
+                     size_t nread = 0;
++                    slot->invalidate_missum_prefix();
+                     try {
+                         size_t n_packed = 0;
+                         llama_tokens packed;
+diff --git a/tools/server/server-task.cpp b/tools/server/server-task.cpp
+index 1592330..2d46fa9 100644
+--- a/tools/server/server-task.cpp
++++ b/tools/server/server-task.cpp
+@@ -1670,6 +1670,7 @@ json server_task_result_slot_save_load::to_json() {
+             { "id_slot",   id_slot },
+             { "filename",  filename },
+             { "n_saved",   n_tokens },
++            { "missum_prefix_revision", missum_prefix_revision },
+             { "n_written", n_bytes },
+             { "timings", {
+                 { "save_ms", t_ms }
+diff --git a/tools/server/server-task.h b/tools/server/server-task.h
+index 8faae1f..fd5d8a6 100644
+--- a/tools/server/server-task.h
++++ b/tools/server/server-task.h
+@@ -641,6 +641,7 @@ struct server_task_result_slots : server_task_result {
+ struct server_task_result_slot_save_load : server_task_result {
+     std::string filename;
+     bool is_save; // true = save, false = load
++    std::string missum_prefix_revision;
+ 
+     size_t n_tokens;
+     size_t n_bytes;

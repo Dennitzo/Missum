@@ -370,6 +370,8 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                 if (!_changeReceiptState.ObserveStarted(_session, startedId, ReadConversationRevision(data), startedRun)) return;
                 ResetChangesSummary();
             }
+            if (data.TryGetProperty("session", out var changedSession) && changedSession.ValueKind == JsonValueKind.Object)
+                UpdateSidebarSession(changedSession);
             if (data.TryGetProperty("message", out var message))
             {
                 var id = S(message, "id");

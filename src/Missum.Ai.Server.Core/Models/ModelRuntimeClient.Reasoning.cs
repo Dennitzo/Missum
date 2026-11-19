@@ -41,8 +41,8 @@ public sealed partial class ModelRuntimeClient
     private static readonly string[] HighestReasoningLevels = ["max", "ultra", "xhigh", "high", "medium", "low", "minimal"];
     private static readonly string[] LowestReasoningLevels = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra", "on"];
     internal string? ResolveReasoningEffort(string modelId, string role, string? requested) =>
-        !string.IsNullOrWhiteSpace(requested) && !string.Equals(requested.Trim(), "auto", StringComparison.OrdinalIgnoreCase) ? requested.Trim().ToLowerInvariant()
-            : ResolveRuntimeReasoningProfile(modelId, role).DefaultEffort;
+        ResolveRuntimeReasoningProfile(modelId, role).Resolve(
+            string.Equals(requested?.Trim(), ModelReasoningProfiles.Automatic, StringComparison.OrdinalIgnoreCase) ? null : requested);
 
     internal string? ResolveMediaReasoningEffort(string modelId, string role, string? requested)
     {

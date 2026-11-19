@@ -130,6 +130,18 @@ public sealed partial class SettingsPage : Page
         });
     }
 
+    private async void OnSelectModelRoot(object sender, RoutedEventArgs e)
+    {
+        await RunActionAsync(async () =>
+        {
+            var picker = new FolderPicker { SuggestedStartLocation = PickerLocationId.ComputerFolder };
+            picker.FileTypeFilter.Add("*");
+            InitializePicker(picker);
+            if (await picker.PickSingleFolderAsync() is { } folder)
+                ViewModel.NativeModelRoot = folder.Path;
+        });
+    }
+
     private async void OnRefreshModels(object sender, RoutedEventArgs e)
     {
         await RunActionAsync(async () =>

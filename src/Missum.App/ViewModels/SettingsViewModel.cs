@@ -14,7 +14,8 @@ public sealed partial class SettingsViewModel(
     IBackupService backups,
     ShellViewModel shell,
     ModelCapabilityRegistry modelCapabilities,
-    AssistantSettingsService? sharedSettingsService = null) : ObservableObject
+    AssistantSettingsService? sharedSettingsService = null,
+    NativeModelRuntimeService? nativeRuntime = null) : ObservableObject
 {
     private readonly AssistantSettingsService _sharedSettings = sharedSettingsService
         ?? new(settings, missumAi, backups);
@@ -24,6 +25,7 @@ public sealed partial class SettingsViewModel(
     /// <summary>External settings refreshes may replace the editor only when it has no local draft.</summary>
     public bool HasUnsavedChanges =>
         MissumAiServerUrl != _preferencesBaseline.MissumAiServerUrl
+        || NativeModelRoot != ConfiguredModelRoot(_preferencesBaseline)
         || IsAutomaticSpeechEnabled != _preferencesBaseline.IsAutomaticSpeechEnabled
         || LiveCaptionLanguage != _preferencesBaseline.LiveCaptionLanguage
         || Theme != _preferencesBaseline.Theme
@@ -36,6 +38,12 @@ public sealed partial class SettingsViewModel(
 
     [ObservableProperty]
     public partial string MissumAiServerUrl { get; set; } = MissumAiConnectionService.DefaultServerUrl;
+
+    [ObservableProperty]
+    public partial string NativeModelRoot { get; set; } = "";
+
+    private static string ConfiguredModelRoot(AppSettings preferences) => preferences.LocalAiModelDirectory
+        ?? NativeModelRuntimeService.ResolveModelRoot(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
 
     [ObservableProperty]
     public partial bool IsAutomaticSpeechEnabled { get; set; } = true;
@@ -86,6 +94,7 @@ public sealed partial class SettingsViewModel(
         _preferencesBaseline = current;
         IsAutomaticSpeechEnabled = current.IsAutomaticSpeechEnabled;
         MissumAiServerUrl = current.MissumAiServerUrl;
+        NativeModelRoot = ConfiguredModelRoot(current);
         LiveCaptionLanguage = current.LiveCaptionLanguage;
         SelectedModel = current.SelectedModel ?? AppSettings.DefaultSelectedModel;
         SelectedGeneralModelItem = EnsureModelItem(Models, SelectedModel);
@@ -112,10 +121,21 @@ public sealed partial class SettingsViewModel(
         App.Current.ApplyTheme(Theme);
         App.Current.ApplyAccentColor(AccentColor);
         App.Current.ApplyBackgroundColor(BackgroundColor);
-        var status = await _sharedSettings.TestConnectionAsync(MissumAiServerUrl, cancellationToken);
+        var gateway = new Uri(MissumAiServerUrl);
+        var localModelRoot = nativeRuntime is not null && settings.Current.LocalAiModelDirectory is not null
+            && NativeModelRuntimeService.IsLocalGateway(gateway);
+        var status = localModelRoot ? await missumAi.TestAsync(cancellationToken)
+            : await _sharedSettings.TestConnectionAsync(MissumAiServerUrl, cancellationToken);
         ConnectionStatus = status.Message;
         IsServerReady = status.IsReady;
         shell.ApplyAiConnectionState(status.IsReachable, status.IsReady);
+        if (localModelRoot)
+        {
+            if (missumAi.NativeRuntimeError is { } error)
+                throw new InvalidOperationException($"Modellordner gespeichert. Initialisierung fehlgeschlagen: {error}");
+            await nativeRuntime!.ConfirmConfiguredModelRootAsync(NativeModelRoot, cancellationToken);
+            if (status.IsReachable) await RefreshModelsAsync(cancellationToken);
+        }
         return status;
     }
 
@@ -123,10 +143,16 @@ public sealed partial class SettingsViewModel(
     // probes so it can also be validated without launching the WinUI app.
     internal async Task SavePreferencesAsync(CancellationToken cancellationToken = default)
     {
+        if (NativeModelRoot != ConfiguredModelRoot(_preferencesBaseline))
+        {
+            NativeModelRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(NativeModelRoot));
+            await NativeModelRuntimeService.ValidateModelRootAsync(NativeModelRoot, cancellationToken);
+        }
         await _sharedSettings.UpdatePreferencesAsync(CreatePreferencesPatch(), _preferencesRevision, cancellationToken);
         _preferencesRevision = settings.Current.PreferencesRevision;
         _preferencesBaseline = settings.Current;
         MissumAiServerUrl = settings.Current.MissumAiServerUrl;
+        NativeModelRoot = ConfiguredModelRoot(settings.Current);
         SelectedModel = settings.Current.SelectedModel;
     }
 
@@ -134,6 +160,7 @@ public sealed partial class SettingsViewModel(
         {
             IsAutomaticSpeechEnabled = IsAutomaticSpeechEnabled,
             MissumAiServerUrl = MissumAiServerUrl,
+            NativeModelRoot = NativeModelRoot == ConfiguredModelRoot(_preferencesBaseline) ? null : NativeModelRoot,
             LiveCaptionLanguage = string.IsNullOrWhiteSpace(LiveCaptionLanguage) ? "auto" : LiveCaptionLanguage.Trim(),
             Theme = Theme,
             AccentColor = AccentColor,

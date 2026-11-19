@@ -13,6 +13,19 @@ public sealed partial class NativeAssistantPage
     private readonly Dictionary<Guid, List<ProgressRing>> _sidebarActivityRings = [];
     private readonly HashSet<Guid> _sidebarReportedBusy = [];
 
+    private void UpdateSidebarSession(JsonElement session)
+    {
+        var sessions = Items(_snapshot, "sessions");
+        var index = Array.FindIndex(sessions, item => S(item, "id") == S(session, "id"));
+        if (index < 0 || AssistantSidebarSessionOrder.Date(session, "updatedAt")
+            <= AssistantSidebarSessionOrder.Date(sessions[index], "updatedAt")) return;
+        sessions[index] = session.Clone();
+        var state = _snapshot.Deserialize<Dictionary<string, JsonElement>>(JsonOptions)!;
+        state["sessions"] = JsonSerializer.SerializeToElement(sessions);
+        _snapshot = JsonSerializer.SerializeToElement(state);
+        RenderSidebar();
+    }
+
     private void RenderSidebar()
     {
         ProjectsPanel.Children.Clear();
@@ -27,20 +40,18 @@ public sealed partial class NativeAssistantPage
         }
 
         var search = SearchBox.Text.Trim();
-        foreach (var group in Items(_snapshot, "sessionGroups"))
+        var projects = Items(_snapshot, "sessionGroups").Select(group =>
+        {
+            var members = Items(group, "sessionIds")
+                .Where(value => value.ValueKind == JsonValueKind.String && value.TryGetGuid(out var id) && byId.ContainsKey(id))
+                .Select(value => value.GetGuid()).Distinct().Select(id => byId[id]);
+            return (Group: group, Members: AssistantSidebarSessionOrder.Sort(members));
+        }).OrderByDescending(project => project.Members.Count == 0 ? DateTimeOffset.MinValue
+            : AssistantSidebarSessionOrder.Date(project.Members[0], "updatedAt"));
+        foreach (var (group, members) in projects)
         {
             var name = S(group, "name", "Projekt");
             var path = S(group, "workspacePath");
-            var members = new List<JsonElement>();
-            var seen = new HashSet<Guid>();
-            // Membership is separate from order: selecting a session never
-            // takes priority over the conversation's modification date.
-            foreach (var value in Items(group, "sessionIds"))
-            {
-                if (value.ValueKind == JsonValueKind.String && value.TryGetGuid(out var id)
-                    && seen.Add(id) && byId.TryGetValue(id, out var member)) members.Add(member);
-            }
-            members = AssistantSidebarSessionOrder.Sort(members).ToList();
             var nameMatches = name.Contains(search, StringComparison.CurrentCultureIgnoreCase);
             var visibleMembers = nameMatches ? members : members.Where(session =>
                 S(session, "title", "Neue Sitzung").Contains(search, StringComparison.CurrentCultureIgnoreCase)).ToList();

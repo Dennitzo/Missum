@@ -86,6 +86,37 @@ public sealed class ReasoningDiscoveryTests
         if (expectsReasoningEffort) Assert.Equal("none", effort.GetString());
     }
 
+    [Theory]
+    [InlineData("llama-native", "low|high|max", "max", "max")]
+    [InlineData("llama-toggle", "none|on", "on", "on")]
+    public async Task SavedReasoningRemainsUsableWhenLoadedPropertiesOnlyRecognizeAThinkingToggle(
+        string family, string levels, string defaultEffort, string expectedEffort)
+    {
+        using var handler = new DiscoveryHandler(family, levels, defaultEffort,
+            "{% set effort_map = {'low': 15, 'high': 45, 'max': 100} %}"
+            + "{% if enable_thinking %}{% if reasoning_effort in effort_map %}{% endif %}{% endif %}");
+        using var http = new HttpClient(handler);
+        using var runtime = new ModelRuntimeClient(http,
+            Options.Create(new MissumAiServerOptions { ModelRuntimeUri = new("http://native.test") }),
+            NullLogger<ModelRuntimeClient>.Instance);
+
+        var status = await runtime.GetCodingStatusAsync(default);
+        var model = Assert.Single(status.Models, model => model.Id == DiscoveryHandler.Model && model.Role == "coding");
+        Assert.Equal(levels.Split('|'), model.ReasoningEfforts);
+        Assert.Equal(32_768, model.LoadedContextTokens);
+        var supportedEffort = runtime.ResolveReasoningEffort(DiscoveryHandler.Model, "coding", "max");
+        Assert.Equal(expectedEffort, supportedEffort);
+
+        await runtime.CompleteChatAsync(DiscoveryHandler.Model, [new("user", "Fortsetzen")], [],
+            modelRole: "coding", reasoningEffort: supportedEffort);
+        var body = handler.Body!.Value;
+        Assert.True(body.GetProperty("chat_template_kwargs").GetProperty("enable_thinking").GetBoolean());
+        if (expectedEffort == "max")
+            Assert.Equal("max", body.GetProperty("reasoning_effort").GetString());
+        else
+            Assert.False(body.TryGetProperty("reasoning_effort", out _));
+    }
+
     [Fact]
     public void LanguageRuleIsFirstAndStableWithoutMutatingHistoryOrToolResults()
     {
@@ -157,7 +188,8 @@ public sealed class ReasoningDiscoveryTests
         Assert.Equal("Fortsetzen", result[^1].Content);
     }
 
-    private sealed class DiscoveryHandler : HttpMessageHandler
+    private sealed class DiscoveryHandler(string family = "llama-native",
+        string levels = "none|low|medium|xhigh|custom_level", string defaultEffort = "low", string? template = null) : HttpMessageHandler
     {
         internal const string Model = "coding/never-before-seen-model~metadata";
         internal JsonElement? Body;
@@ -169,8 +201,8 @@ public sealed class ReasoningDiscoveryTests
             var path = request.RequestUri!.AbsolutePath;
             var response = path switch
             {
-                "/v1/models" => """{"data":[{"id":"coding/never-before-seen-model~metadata","status":{"value":"loaded"},"tags":["missum-reasoning-mode:llama-native","missum-reasoning-levels:none|low|medium|xhigh|custom_level","missum-reasoning-default:low"]}]}""",
-                "/props" => """{"default_generation_settings":{"n_ctx":32768}}""",
+                "/v1/models" => $$"""{"data":[{"id":"{{Model}}","status":{"value":"loaded"},"tags":["missum-reasoning-mode:{{family}}","missum-reasoning-levels:{{levels}}","missum-reasoning-default:{{defaultEffort}}"]}]}""",
+                "/props" => JsonSerializer.Serialize(new { default_generation_settings = new { n_ctx = 32768 }, chat_template = template }),
                 "/v1/chat/completions/input_tokens" => """{"input_tokens":20}""",
                 "/v1/chat/completions" => """{"choices":[{"message":{"content":"Done"},"finish_reason":"stop"}]}""",
                 _ => throw new InvalidOperationException(path),

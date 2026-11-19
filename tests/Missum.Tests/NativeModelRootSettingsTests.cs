@@ -9,6 +9,21 @@ namespace Missum.Tests;
 
 public sealed class NativeModelRootSettingsTests
 {
+    [Fact]
+    public async Task NativeFolderSelectionSurvivesSettingsReload()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        using var connection = new MissumAiConnectionService(settings, NullLogger<MissumAiConnectionService>.Instance);
+        using var service = new AssistantSettingsService(settings, connection, environment.Get<IBackupService>());
+
+        await service.UpdatePreferencesAsync(new() { NativeModelRoot = environment.Directory }, 0);
+        await settings.InitializeAsync();
+
+        Assert.Equal(environment.Directory, settings.Current.LocalAiModelDirectory);
+        Assert.Equal(1, settings.Current.PreferencesRevision);
+    }
     [Theory]
     [InlineData("nativeModelRoot")]
     [InlineData("NativeModelRoot")]

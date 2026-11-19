@@ -304,6 +304,8 @@ public sealed partial class NativeAssistantPage
             layout.Children.Add(PlanLabel("Diesen Plan implementieren?", bold: true));
             layout.Children.Add(PlanOptionRow("✓", "Ja, diesen Plan implementieren", "", () =>
                 SubmitPlanInteractionAsync(session, messageId, null, leavePlanMode: true)));
+            layout.Children.Add(PlanOptionRow("×", "Verwerfen", "", () =>
+                SubmitPlanInteractionAsync(session, messageId, null, leavePlanMode: true, discard: true)));
             var input = PlanInput("Änderungswünsche zum Plan", true, out _, async revision =>
             {
                 if (revision.Text.Trim() is { Length: > 0 } changes)
@@ -423,13 +425,13 @@ public sealed partial class NativeAssistantPage
         return border;
     }
 
-    private async Task SubmitPlanInteractionAsync(Guid session, string messageId, string? prompt, bool leavePlanMode = false)
+    private async Task SubmitPlanInteractionAsync(Guid session, string messageId, string? prompt, bool leavePlanMode = false, bool discard = false)
     {
         if (_disposed || _submittingPlanInteraction || _session != session || _running || _sendPending
             || _persistentAction != BuiltInActionIds.PlanMode || !DisplayMessages.TryGetValue(messageId, out var message)
             || S(message, "status") != "completed"
             || DisplayMessages.Values.Any(other => MessageCreatedAt(other) > MessageCreatedAt(message))) return;
-        if (leavePlanMode)
+        if (leavePlanMode && !discard)
         {
             var plan = PlanApprovalText(MessageContent(message));
             if (plan.Length == 0) return;

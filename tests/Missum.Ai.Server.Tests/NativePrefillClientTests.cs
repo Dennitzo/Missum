@@ -40,6 +40,20 @@ public sealed class NativePrefillClientTests
     }
 
     [Theory]
+    [InlineData(16)]
+    [InlineData(65_536)]
+    public async Task ExactShortTextPromptSkipsTheSupervisorPrefill(int inputTokens)
+    {
+        using var handler = new PrefillHandler { InputTokens = inputTokens };
+        using var http = new HttpClient(handler);
+        using var client = CreateClient(http);
+        await client.CompleteChatAsync(Model, [new("user", "Hallo")], [], modelRole: "coding", sessionCacheKey: "session-a");
+        Assert.Contains("/v1/chat/completions/input_tokens", handler.Paths);
+        Assert.DoesNotContain("/sessions/prefill", handler.Paths);
+        Assert.Contains("/sessions/save", handler.Paths);
+    }
+
+    [Theory]
     [InlineData(false, "session-a")]
     [InlineData(true, null)]
     public async Task UnmanagedRuntimeOrMissingSessionDoesNotPrefill(bool managed, string? sessionKey)
@@ -113,9 +127,43 @@ public sealed class NativePrefillClientTests
     }
 
     [Fact]
-    public async Task CancelledPrefillKeepsTheTurnLeaseUntilTheSupervisorBarrierCompletes()
+    public async Task TransientBarrierDisconnectIsRetriedBeforeNormalChat()
     {
-        using var handler = new PrefillHandler { HoldPrefill = true };
+        using var handler = new PrefillHandler { PrefillStatus = "unavailable", BarrierTransportFailures = 1 };
+        using var http = new HttpClient(handler);
+        using var client = CreateClient(http);
+        await client.CompleteChatAsync(Model, [new("user", "Hallo")], [], modelRole: "coding",
+            sessionCacheKey: "session-a").WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(2, handler.BarrierAttempts);
+        Assert.Single(handler.Paths, path => path == "/sessions/prefill");
+        Assert.True(handler.Paths.LastIndexOf("/sessions/barrier") < handler.Paths.IndexOf("/v1/chat/completions"));
+    }
+
+    [Theory]
+    [InlineData("idle", 3, 3)]
+    [InlineData("unavailable", 0, 1)]
+    public async Task UnconfirmedSlotNeverStartsNormalChat(string barrierStatus, int transportFailures, int expectedAttempts)
+    {
+        using var handler = new PrefillHandler { PrefillStatus = "unavailable", BarrierStatus = barrierStatus,
+            BarrierTransportFailures = transportFailures };
+        using var http = new HttpClient(handler);
+        using var client = CreateClient(http);
+        await Assert.ThrowsAsync<NativePrefillBarrierException>(() => client.CompleteChatAsync(
+            Model, [new("user", "Hallo")], [], modelRole: "coding", sessionCacheKey: "session-a")
+            .WaitAsync(TimeSpan.FromSeconds(10)));
+
+        Assert.Equal(expectedAttempts, handler.BarrierAttempts);
+        Assert.Single(handler.Paths, path => path == "/sessions/prefill");
+        Assert.DoesNotContain("/v1/chat/completions", handler.Paths);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public async Task CancelledPrefillKeepsTheTurnLeaseUntilTheSupervisorBarrierCompletes(int transportFailures)
+    {
+        using var handler = new PrefillHandler { HoldPrefill = true, BarrierTransportFailures = transportFailures };
         using var http = new HttpClient(handler);
         using var client = CreateClient(http);
         using var stop = new CancellationTokenSource();
@@ -134,7 +182,8 @@ public sealed class NativePrefillClientTests
             handler.ReleaseBarrier.TrySetResult();
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => first.WaitAsync(TimeSpan.FromSeconds(10)));
             await second.WaitAsync(TimeSpan.FromSeconds(10));
-            Assert.Contains("/v1/chat/completions", handler.Paths);
+            Assert.Single(handler.Paths, path => path == "/v1/chat/completions");
+            Assert.Equal(transportFailures + 1, handler.BarrierAttempts);
         }
         finally
         {
@@ -154,9 +203,13 @@ public sealed class NativePrefillClientTests
         public bool HoldPrefill { get; init; }
         public bool PrefillWasStarted { get; init; }
         public string PrefillStatus { get; init; } = "prepared";
+        public string BarrierStatus { get; init; } = "idle";
+        public int BarrierTransportFailures { get; init; }
+        public int BarrierAttempts { get; private set; }
         public int PreviousCached { get; init; } = 1000;
         public int PrefillEvaluated { get; init; } = 4000;
         public int ChatCached { get; init; } = 5000;
+        public int InputTokens { get; init; } = 65_537;
         public TaskCompletionSource PrefillStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource BarrierStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource ReleaseBarrier { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -171,13 +224,13 @@ public sealed class NativePrefillClientTests
             lock (Paths) Paths.Add(path);
             if (path == "/v1/models")
             {
-                var tags = new List<string> { "missum-context-train:32768", "missum-reasoning-mode:llama-toggle",
+                var tags = new List<string> { "missum-context-train:131072", "missum-reasoning-mode:llama-toggle",
                     "missum-reasoning-levels:none|on", "missum-reasoning-default:on" };
                 if (Managed) tags.Add("missum-gpu-policy:single-preferred-v1");
                 return Json(new { data = new[] { new { id = Model, tags, status = new { value = "loaded" } } } });
             }
-            if (path == "/props") return Json(new { default_generation_settings = new { n_ctx = 32768 } });
-            if (path == "/v1/chat/completions/input_tokens") return Json(new { input_tokens = 16 });
+            if (path == "/props") return Json(new { default_generation_settings = new { n_ctx = 131072 } });
+            if (path == "/v1/chat/completions/input_tokens") return Json(new { input_tokens = InputTokens });
             if (path is "/sessions/prepare" or "/sessions/save") return Json(new { status = "saved" });
             if (path == "/sessions/prefill")
             {
@@ -195,9 +248,11 @@ public sealed class NativePrefillClientTests
             if (path == "/sessions/barrier")
             {
                 Assert.False(cancellationToken.IsCancellationRequested);
+                if (++BarrierAttempts <= BarrierTransportFailures)
+                    throw new HttpRequestException("The response ended prematurely.", new HttpIOException(HttpRequestError.ResponseEnded));
                 BarrierStarted.TrySetResult();
                 if (HoldPrefill) await ReleaseBarrier.Task.WaitAsync(TimeSpan.FromSeconds(15), cancellationToken);
-                return Json(new { status = "idle" });
+                return Json(new { status = BarrierStatus });
             }
             if (path == "/v1/chat/completions")
             {

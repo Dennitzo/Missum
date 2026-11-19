@@ -35,6 +35,8 @@ public sealed class ModelRuntimeClientTests
     private const string NativeGeneralId = "coding/gpt-oss-120b~test";
     private const string NativeQwenId = "coding/qwen3.8-27b~test";
     private const string NativeCoderId = "coding/qwen3-coder-next~test";
+    private const string NativeMuseName = "Muse-Spark-Open-816B-A42B-UD-IQ1_S";
+    private const string NativeMuseId = "coding/" + NativeMuseName + "~test";
     private static readonly string[] RequiredPath = ["path"];
     private static readonly string[] RequiredName = ["name"];
     private static readonly string[] RequiredOperation = ["operation"];
@@ -76,6 +78,35 @@ public sealed class ModelRuntimeClientTests
         await client.EnsureModelLoadedAsync(model, contextLength);
         var load = Assert.Single(handler.LoadBodies, body => body.GetProperty("model").GetString() == model);
         Assert.Equal(contextLength, load.GetProperty("contextLength").GetInt32());
+    }
+
+    [Fact]
+    public async Task MuseRuntimeAdvertisesNativeContextAndSendsOnlyItsSupportedReasoningLevels()
+    {
+        var handler = new NativeRuntimeHandler { ManagedGpuRuntime = true, MuseRuntime = true };
+        using var client = CreateClient(new HttpClient(handler));
+        async Task<(int? Maximum, int? Loaded)> ReadStatusAsync()
+        {
+            var catalog = await client.GetCodingModelsAsync();
+            var entry = Assert.Single(catalog.Models, model => model.Id == NativeMuseId);
+            Assert.Equal(["low", "medium", "high", "xhigh"], entry.ReasoningEfforts);
+            Assert.Equal("xhigh", entry.DefaultReasoningEffort);
+            return (entry.MaximumContextTokens, entry.LoadedContextTokens);
+        }
+
+        Assert.Equal((1_048_576, null), await ReadStatusAsync());
+        foreach (var effort in new[] { "auto", "low", "medium", "high", "xhigh" })
+        {
+            await client.CompleteChatAsync(NativeMuseId, [new("user", "Hallo")], [], reasoningEffort: effort);
+            using var sent = JsonDocument.Parse(handler.ChatBodies[^1]);
+            Assert.Equal(effort == "auto" ? "xhigh" : effort, sent.RootElement.GetProperty("reasoning_effort").GetString());
+        }
+        Assert.Equal((1_048_576, 262_144), await ReadStatusAsync());
+        Assert.Equal("xhigh", client.ResolveMediaReasoningEffort(NativeMuseId, "coding", "max"));
+        Assert.Equal("low", client.ResolveCompactionReasoningEffort(NativeMuseId, "coding"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            client.CompleteChatAsync(NativeMuseId, [new("user", "Hallo")], [], reasoningEffort: "none"));
+        Assert.Equal(5, handler.ChatBodies.Count);
     }
 
     [Fact]
@@ -1435,6 +1466,7 @@ public sealed class ModelRuntimeClientTests
         public Action<string>? OnChatRequest { get; init; }
         public bool ManagedGpuRuntime { get; init; }
         public bool ExtendedContextRuntime { get; init; }
+        public bool MuseRuntime { get; init; }
         public int DelayedUnloadPolls { get; init; }
         public int CatalogReadsWhileUnloading { get; private set; }
 
@@ -1453,7 +1485,9 @@ public sealed class ModelRuntimeClientTests
                 if (OnCacheRequest is not null) await OnCacheRequest(path, cancellationToken);
                 return Json("{\"status\":\"resident\"}");
             }
-            if (path == "/props") return Json("{\"default_generation_settings\":{\"n_ctx\":32768}}");
+            if (path == "/props") return Json(MuseRuntime && _loadedKey == NativeMuseId
+                ? "{\"default_generation_settings\":{\"n_ctx\":262144}}"
+                : "{\"default_generation_settings\":{\"n_ctx\":32768}}");
             if (path == "/v1/chat/completions/input_tokens")
             {
                 TokenCountingAttempts++;
@@ -1479,7 +1513,7 @@ public sealed class ModelRuntimeClientTests
                         Model("text-embedding-bge-m3"),
                     }.Concat(ExtendedContextRuntime
                         ? new[] { Model("Qwen3.8-Flash-Next"), Model("Qwen3.8-Flash-Next-Q8_0") }
-                        : Array.Empty<object>()).ToArray(),
+                        : Array.Empty<object>()).Concat(MuseRuntime ? [Model(NativeMuseName)] : []).ToArray(),
                 }));
             }
 
@@ -1642,6 +1676,9 @@ public sealed class ModelRuntimeClientTests
             var tags = ManagedGpuRuntime ? new List<string> { "missum-gpu-policy:single-preferred-v1" } : new List<string>();
             if (ExtendedContextRuntime && key is ("qwen3.8-27b" or "Qwen3.8-Flash-Next" or "Qwen3.8-Flash-Next-Q8_0"))
                 tags.AddRange(["missum-context-train:262144", "missum-context-experimental-max:1048576"]);
+            if (MuseRuntime && key == NativeMuseName)
+                tags.AddRange(["missum-context-train:1048576", "missum-reasoning-mode:llama-native",
+                    "missum-reasoning-levels:low|medium|high|xhigh", "missum-reasoning-default:xhigh"]);
             return new { id, status = new { value = _loadedKey == id ? "loaded" : "unloaded" }, tags };
         }
 

@@ -93,7 +93,7 @@ public sealed partial class NativeAssistantPage
         var glyph = ToolIconGlyph(S(action, "iconKey"));
         // Program integration chips must remain their static action name, including for future
         // integrations. Connection, project and review status belong outside the composer chip.
-        var text = _selectedAction == BuiltInActionIds.PlanMode ? "Planen" : label;
+        var text = _selectedAction == BuiltInActionIds.PlanMode ? "Planmodus" : label;
         SelectedToolChip.SetTool(text, glyph, ComposerGroupIconBrush(S(action, "groupId", BuiltInExtensionCatalog.GroupIntegrations)));
         SelectedToolChip.Visibility = Visibility.Visible;
     }

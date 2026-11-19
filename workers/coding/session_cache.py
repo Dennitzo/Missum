@@ -4,6 +4,7 @@ Only opaque, hashed keys become filenames. llama.cpp validates restored state an
 still compares prompt tokens before reusing it. No model is loaded by this module.
 """
 import hashlib
+from array import array
 import json
 import os
 from pathlib import Path
@@ -521,6 +522,16 @@ class NativeSessionCache:
             if temporary.stat().st_size > self.maximum_bytes:
                 raise OSError("Native session cache exceeds its disk allowance")
             temporary.replace(target)
+            current.pop("saved_prefix", None)
+            revision = response.get("missum_prefix_revision")
+            if isinstance(revision, str) and revision:
+                try:
+                    vector = self._snapshot_tokens(target)
+                    if len(vector) == response["n_saved"]:
+                        current["saved_prefix"] = (revision, array("i", vector))
+                except (OSError, ValueError, struct.error):
+                    # The durable checkpoint can still be restored by llama.cpp.
+                    pass
             metadata.write_text(json.dumps(dict(self.owners.get(identity, {}), bytes=target.stat().st_size,
                                                tokens=response["n_saved"])), encoding="utf-8")
             (self.directory / (identity + ".prefill.bin")).unlink(missing_ok=True)
@@ -671,18 +682,23 @@ class NativeSessionCache:
             temporary = self.directory / (identity + "." + uuid.uuid4().hex + ".pending")
             common = 0
             if resident_tokens:
-                # Slot length alone says nothing about its actual common prefix:
-                # even an equally long resident prompt may have changed. Take
-                # a disposable snapshot to compare the real token vector.
-                estimate = self.estimate_bytes(model, resident_tokens) if self.estimate_bytes else None
-                if type(estimate) is not int or estimate <= 0:
-                    estimate = resident_tokens * 256 * 1024
-                self._prune(required=estimate, protected=[complete.name, partial.name])
-                saved = self.router("slots/0?action=save", dict(model=model, filename=temporary.name), timeout=120)
-                if not temporary.is_file() or saved.get("n_saved") != resident_tokens:
-                    raise RuntimeError("Unable to verify the resident prompt tokens")
-                resident = self._snapshot_tokens(temporary)
-                temporary.unlink()
+                saved_prefix = current.get("saved_prefix")
+                if (saved_prefix and slot.get("missum_prefix_revision") == saved_prefix[0]
+                        and len(saved_prefix[1]) == resident_tokens):
+                    resident = saved_prefix[1]
+                    self._record(model, "prefill", dict(status="prefix-reused", residentTokens=resident_tokens))
+                else:
+                    # A length or generation task ID cannot certify the vector.
+                    # Older runtimes and changed slots require a native snapshot.
+                    estimate = self.estimate_bytes(model, resident_tokens) if self.estimate_bytes else None
+                    if type(estimate) is not int or estimate <= 0:
+                        estimate = resident_tokens * 256 * 1024
+                    self._prune(required=estimate, protected=[complete.name, partial.name])
+                    saved = self.router("slots/0?action=save", dict(model=model, filename=temporary.name), timeout=120)
+                    if not temporary.is_file() or saved.get("n_saved") != resident_tokens:
+                        raise RuntimeError("Unable to verify the resident prompt tokens")
+                    resident = self._snapshot_tokens(temporary)
+                    temporary.unlink()
                 for left, right in zip(resident, tokens):
                     if left != right:
                         break

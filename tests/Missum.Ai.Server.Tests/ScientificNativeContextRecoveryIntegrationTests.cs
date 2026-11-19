@@ -16,18 +16,20 @@ public sealed class ScientificNativeContextRecoveryIntegrationTests
     private const string TaskText = "Prüfe den Doppelspalt quantitativ weiter und bewahre die bisherigen Befunde.";
 
     [Theory]
-    [InlineData(262_144, 262_305)]
-    [InlineData(262_144, 239_683)] // Actual De-Broglie-Bohm continuation failure.
-    [InlineData(1_000_000, 960_000)]
-    [InlineData(1_000_000, 900_000)]
-    [InlineData(1_000_000, 900_001)]
-    [InlineData(258_000, 232_200)]
-    public async Task NativeOverflowCompactsSavedScienceContextBeforeFirstGenerationWithoutReexecutingTools(int contextLength, int exactTokens)
+    [InlineData(262_144, 262_305, null)]
+    [InlineData(262_144, 239_683, null)]
+    [InlineData(1_000_000, 960_000, null)]
+    [InlineData(1_000_000, 900_000, null)]
+    [InlineData(1_000_000, 900_001, null)]
+    [InlineData(258_000, 232_200, null)]
+    [InlineData(262_144, 239_683, "max")]
+    public async Task NativeOverflowCompactsSavedScienceContextBeforeFirstGenerationWithoutReexecutingTools(
+        int contextLength, int exactTokens, string? savedReasoningEffort)
     {
         using var context = new TestServerContext();
         context.Options.ModelRuntimeUri = new("http://native.test:19090");
         context.Options.GeneralModelId = ModelId;
-        using var native = new NativeHandler(contextLength, exactTokens);
+        using var native = new NativeHandler(contextLength, exactTokens, savedReasoningEffort is not null);
         using var http = new HttpClient(native);
         using var runtime = new ModelRuntimeClient(http, context.WrappedOptions, NullLogger<ModelRuntimeClient>.Instance);
         var services = new ServiceCollection();
@@ -48,6 +50,7 @@ public sealed class ScientificNativeContextRecoveryIntegrationTests
         var estimated = ContextPlanner.EstimateTokens(messages);
         Assert.InRange(estimated, 10_000, ContextPlanner.ComputeInputTokenBudget(contextLength, null) - 1);
         await repository.SaveCheckpointAsync(run, new AgentRunCheckpoint(messages, 20, 20, 200_000, 10_000,
+            SelectedModelId: ModelId, SelectedReasoningEffort: savedReasoningEffort,
             PreserveSessionPromptPrefix: true, ResearchManagedByAgent: true));
         var transcript = await repository.AppendEventAsync(run, "fixture.originalTranscript", new { messages });
         for (var index = 0; index < 20; index++)
@@ -72,6 +75,8 @@ public sealed class ScientificNativeContextRecoveryIntegrationTests
             Assert.True(compacted.Data.GetProperty("estimatedInputTokens").GetInt32() < estimated);
             Assert.Equal(3, native.TokenCounts);
             Assert.Equal(2, native.Generations); // Summary, then the resumed main turn.
+            if (savedReasoningEffort is not null)
+                Assert.Equal(["low", savedReasoningEffort], native.GenerationEfforts);
             Assert.True(native.PromptLengths[1] < native.PromptLengths[0]);
             var checkpoint = (await repository.GetCheckpointAsync(run))!;
             Assert.Equal(20, checkpoint.ToolCallCount);
@@ -143,12 +148,15 @@ public sealed class ScientificNativeContextRecoveryIntegrationTests
         Assert.Equal(calls.Order(), receipts.Order());
     }
 
-    private sealed class NativeHandler(int contextLength, int exactTokens) : HttpMessageHandler
+    private sealed class NativeHandler(int contextLength, int exactTokens, bool mappedReasoning) : HttpMessageHandler
     {
         private static readonly string[] ModelTags = ["missum-context-train:1048576"];
+        private static readonly string[] MappedReasoningTags = [.. ModelTags, "missum-reasoning-mode:llama-native",
+            "missum-reasoning-levels:low|high|max", "missum-reasoning-default:max"];
         internal int TokenCounts { get; private set; }
         internal int Generations { get; private set; }
         internal List<int> PromptLengths { get; } = [];
+        internal List<string?> GenerationEfforts { get; } = [];
         internal TaskCompletionSource InferenceStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -156,9 +164,14 @@ public sealed class ScientificNativeContextRecoveryIntegrationTests
             var path = request.RequestUri!.AbsolutePath;
             if (path == "/v1/models") return Json(new { data = new[]
             {
-                new { id = ModelId, tags = ModelTags, status = new { value = "loaded" } },
+                new { id = ModelId, tags = mappedReasoning ? MappedReasoningTags : ModelTags, status = new { value = "loaded" } },
             } });
-            if (path == "/props") return Json(new { default_generation_settings = new { n_ctx = contextLength } });
+            if (path == "/props") return Json(new
+            {
+                default_generation_settings = new { n_ctx = contextLength },
+                chat_template = mappedReasoning ? "{% set effort_map = {'low': 15, 'high': 45, 'max': 100} %}"
+                    + "{% if enable_thinking %}{% if reasoning_effort in effort_map %}{% endif %}{% endif %}" : null,
+            });
             if (path is "/sessions/prepare" or "/sessions/save") return Json(new { status = "resident" });
             if (path == "/v1/chat/completions/input_tokens")
             {
@@ -171,6 +184,8 @@ public sealed class ScientificNativeContextRecoveryIntegrationTests
             {
                 Generations++;
                 var body = await request.Content!.ReadAsStringAsync(cancellationToken);
+                using var generation = JsonDocument.Parse(body);
+                GenerationEfforts.Add(generation.RootElement.TryGetProperty("reasoning_effort", out var effort) ? effort.GetString() : null);
                 if (body.Contains("Erstelle eine kompakte Arbeitszusammenfassung", StringComparison.Ordinal))
                     return Json(new { choices = new[] { new { message = new { role = "assistant", content = "Belegte frühere Befunde und offene quantitative Prüfung bleiben erhalten." }, finish_reason = "stop" } },
                         usage = new { prompt_tokens = 100_000, completion_tokens = 64 } });

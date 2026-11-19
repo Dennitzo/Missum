@@ -15,15 +15,20 @@ catalog = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(catalog)
 
 
-def gguf(path, architecture="qwen3", tensors=1, model_type="model", context=32768, pooling=None, template=None, name=None, rope=None):
+def gguf(path, architecture="qwen3", tensors=1, model_type="model", context=32768, pooling=None, template=None, name=None, rope=None,
+         blocks=None, width=None, nextn=None, vocab=None, tensor_names=None):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("wb") as stream:
-        count = 2 + sum(value is not None for value in (context, pooling, template, name)) + len(rope or {})
+        if tensor_names is not None:
+            tensors = len(tensor_names)
+        count = 2 + sum(value is not None for value in (context, pooling, template, name, blocks, width, nextn, vocab)) + len(rope or {})
         stream.write(struct.pack("<4sIQQ", b"GGUF", 3, tensors, count))
         for key, value in (("general.architecture", architecture), ("general.type", model_type)):
             key, value = key.encode(), value.encode()
             stream.write(struct.pack("<Q", len(key)) + key + struct.pack("<IQ", 8, len(value)) + value)
-        for key, value in ((architecture + ".context_length", context), (architecture + ".pooling_type", pooling)):
+        for key, value in ((architecture + ".context_length", context), (architecture + ".pooling_type", pooling),
+                           (architecture + ".block_count", blocks), (architecture + ".embedding_length", width),
+                           (architecture + ".nextn_predict_layers", nextn), (architecture + ".vocab_size", vocab)):
             if value is not None:
                 key = key.encode()
                 stream.write(struct.pack("<Q", len(key)) + key + struct.pack("<II", 4, value))
@@ -42,10 +47,40 @@ def gguf(path, architecture="qwen3", tensors=1, model_type="model", context=3276
             else:
                 kind, fmt = {int: (4, "I"), float: (6, "f"), bool: (7, "?")}[type(value)]
                 stream.write(struct.pack("<I" + fmt, kind, value))
+        for name in tensor_names or ():
+            raw = name.encode()
+            stream.write(struct.pack("<Q", len(raw)) + raw + struct.pack("<IQIQ", 1, 32, 0, 0))
         stream.truncate(1024 * 1024 + 1)
 
 
 QWEN_ROPE = {"freq_base": 10_000_000.0, "dimension_count": 64}
+HEAD_LAYERS = ("eh_proj.weight", "enorm.weight", "hnorm.weight", "shared_head.norm.weight")
+
+
+def head_tensors(index):
+    # A prediction layer is a full decoder block that also carries nextn.*; the
+    # companion itself holds no base block besides that one.
+    return ([f"blk.{index}.nextn.{name}" for name in HEAD_LAYERS]
+            + [f"blk.{index}.{name}" for name in ("attn_q.weight", "attn_k.weight", "ffn_gate.weight")])
+
+
+def target_tensors(count):
+    return [f"blk.{index}.attn_q.weight" for index in range(count)]
+
+
+def prediction_head(path, architecture="qwen35moe", base_blocks=48, width=4096, vocab=None,
+                    declared_blocks=None, extra_bytes=0):
+    gguf(path, architecture=architecture, width=width, vocab=vocab, nextn=1,
+         blocks=base_blocks + 1 if declared_blocks is None else declared_blocks,
+         tensor_names=["token_embd.weight", "output.weight"] + head_tensors(base_blocks))
+    if extra_bytes:
+        with path.open("ab") as stream:
+            stream.write(b"\0" * extra_bytes)
+
+
+def target_model(path, architecture="qwen35moe", blocks=48, width=4096, vocab=None):
+    gguf(path, architecture=architecture, blocks=blocks, width=width, vocab=vocab,
+         tensor_names=target_tensors(blocks))
 
 
 class CatalogTests(unittest.TestCase):
@@ -424,6 +459,47 @@ class CatalogTests(unittest.TestCase):
         self.assertIn("missum-reasoning-levels:low|high|custom_level", text)
         self.assertIn("missum-reasoning-default:high", text)
 
+    def test_reasoning_dictionary_advertises_real_tiers_and_native_context_for_both_roles(self):
+        template = """
+            {%- set reasoning_effort = reasoning_effort | default('xhigh', true) -%}
+            {%- set strengths = {'low': 8, 'medium': 32, 'high': 256, 'xhigh': 512} -%}
+            {%- if not (reasoning_effort is string and reasoning_effort in strengths) -%}
+            {{ raise_exception('Invalid reasoning effort') }}
+            {%- endif -%}
+            {{ 'Reasoning strength: ' ~ strengths[reasoning_effort] }}
+        """
+        gguf(self.root / "renamed.gguf", architecture="muse-spark", context=1048576, template=template)
+        gguf(self.root / "mmproj-BF16.gguf", architecture="clip")
+        target = self.root / "models.ini"
+        models = catalog.write_presets(self.root, target, managed_gpu=True)
+
+        self.assertEqual({"general", "vision"}, {model["role"] for model in models})
+        for model in models:
+            self.assertEqual(1048576, model["context"])
+            self.assertNotIn("experimentalContextMaximum", model)
+            self.assertEqual(["low", "medium", "high", "xhigh"], model["reasoning"]["levels"])
+            self.assertEqual("xhigh", model["reasoning"]["effort"])
+        text = target.read_text()
+        self.assertEqual(2, text.count("missum-context-train:1048576"))
+        self.assertEqual(2, text.count("missum-reasoning-mode:llama-native,missum-reasoning-levels:low|medium|high|xhigh,missum-reasoning-default:xhigh"))
+        self.assertEqual(2, text.count("reasoning-effort = xhigh"))
+
+    def test_reasoning_dictionary_requires_a_static_map_used_by_the_template_input(self):
+        declaration = "{% set strengths = {'low': 8, 'high': 32} %}"
+        guard = "{% if reasoning_effort in strengths %}valid{% endif %}"
+        for template in (
+            declaration,
+            declaration + "{# " + guard + " #}",
+            "{% raw %}" + declaration + guard + "{% endraw %}",
+            declaration + "{{ '" + guard + "' }}",
+            declaration + "{% if message . reasoning_effort in strengths %}valid{% endif %}",
+            "{% set strengths = config.strengths %}" + guard,
+            declaration + "{% set strengths = config.strengths %}" + guard,
+        ):
+            with self.subTest(template=template):
+                profile = catalog.reasoning_profile({"tokenizer.chat_template": template})
+                self.assertEqual([], profile["levels"])
+
     def test_boolean_template_exposes_only_toggle_and_unknown_retains_auto(self):
         self.assertEqual(catalog.reasoning_profile({"tokenizer.chat_template": "{% if enable_thinking %}"})["levels"], ["none", "on"])
         self.assertEqual(catalog.reasoning_profile({"tokenizer.chat_template": "{{ messages }}"})["levels"], [])
@@ -506,6 +582,121 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(result["HF_HUB_OFFLINE"], "1")
         self.assertFalse(any(key.startswith("LLAMA_ARG_") for key in result))
         self.assertEqual(source["LLAMA_ARG_CTX_SIZE"], "4096")
+
+
+class MtpPairingTests(unittest.TestCase):
+    """Prediction companions pair by tensor layout, wherever they are stored."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.snapshot = self.root / "models--org--Demo-GGUF" / "snapshots" / "revision"
+
+    def listed(self):
+        return catalog.discover_models(self.root)
+
+    def test_companion_without_own_base_layers_pairs_with_its_target(self):
+        target_model(self.snapshot / "Demo-Q4_K_XL.gguf")
+        prediction_head(self.snapshot / "mtp-Demo-Q8_0.gguf")
+        models = self.listed()
+        self.assertEqual(["Demo-Q4_K_XL.gguf"], [model["path"].name for model in models])
+        self.assertEqual("mtp-Demo-Q8_0.gguf", Path(models[0]["mtp"]).name)
+
+    def test_companion_declaring_only_its_own_layer_is_still_recognised(self):
+        target_model(self.snapshot / "Demo-Q4_K_XL.gguf")
+        prediction_head(self.snapshot / "mtp-Demo-Q8_0.gguf", declared_blocks=1)
+        self.assertEqual("mtp-Demo-Q8_0.gguf", Path(self.listed()[0]["mtp"]).name)
+
+    def test_companion_declaring_no_prediction_layer_at_all_is_still_recognised(self):
+        target_model(self.snapshot / "Demo-Q4_K_XL.gguf")
+        gguf(self.snapshot / "mtp-Demo-Q8_0.gguf", architecture="qwen35moe", blocks=49, width=4096,
+             tensor_names=head_tensors(48))
+        self.assertEqual("mtp-Demo-Q8_0.gguf", Path(self.listed()[0]["mtp"]).name)
+
+    def test_companion_in_a_dedicated_mtp_folder_pairs_with_the_snapshot_target(self):
+        target_model(self.snapshot / "Demo-Q4_K_XL.gguf")
+        prediction_head(self.snapshot / "MTP" / "mtp-Demo-Q8_0.gguf")
+        models = self.listed()
+        self.assertEqual(["Demo-Q4_K_XL.gguf"], [model["path"].name for model in models])
+        self.assertEqual("mtp-Demo-Q8_0.gguf", Path(models[0]["mtp"]).name)
+
+    def test_companion_in_a_quantization_folder_pairs_with_the_snapshot_target(self):
+        target_model(self.snapshot / "Demo-Q4_K_XL.gguf")
+        prediction_head(self.snapshot / "UD-Q4_K_XL" / "mtp-Demo-Q8_0.gguf")
+        self.assertEqual("mtp-Demo-Q8_0.gguf", Path(self.listed()[0]["mtp"]).name)
+
+    def test_companion_pairs_in_a_flat_tree_without_a_snapshots_level(self):
+        repository = self.root / "models--org--Demo-GGUF"
+        target_model(repository / "Demo-Q4_K_XL.gguf")
+        prediction_head(repository / "MTP" / "mtp-Demo-Q8_0.gguf")
+        models = self.listed()
+        self.assertEqual(["Demo-Q4_K_XL.gguf"], [model["path"].name for model in models])
+        self.assertEqual("mtp-Demo-Q8_0.gguf", Path(models[0]["mtp"]).name)
+
+    def test_sharded_target_pairs_with_a_companion(self):
+        gguf(self.snapshot / "Demo-UD-Q4_K_XL-00001-of-00002.gguf", architecture="qwen35moe", tensors=0,
+             blocks=48, width=4096)
+        gguf(self.snapshot / "Demo-UD-Q4_K_XL-00002-of-00002.gguf", architecture="qwen35moe",
+             tensor_names=["blk.47.attn_q.weight"])
+        prediction_head(self.snapshot / "mtp-Demo-Q8_0.gguf")
+        models = self.listed()
+        self.assertEqual(["Demo-UD-Q4_K_XL-00001-of-00002.gguf"], [model["path"].name for model in models])
+        self.assertEqual("mtp-Demo-Q8_0.gguf", Path(models[0]["mtp"]).name)
+
+    def test_shared_companion_variant_pairs_and_the_smallest_variant_wins(self):
+        target_model(self.snapshot / "Demo-Q4_K_XL.gguf")
+        prediction_head(self.snapshot / "MTP" / "mtp-Demo-Q8_0.gguf", extra_bytes=8 * 1024 * 1024)
+        prediction_head(self.snapshot / "MTP" / "mtp-Demo-Q4_K_M.gguf", extra_bytes=1024 * 1024)
+        prediction_head(self.snapshot / "MTP" / "mtp-Demo-shared-Q4_K_M.gguf", extra_bytes=2 * 1024 * 1024)
+        models = self.listed()
+        self.assertEqual("mtp-Demo-Q4_K_M.gguf", Path(models[0]["mtp"]).name)
+        self.assertEqual(["mtp-Demo-shared-Q4_K_M.gguf", "mtp-Demo-Q8_0.gguf"],
+                         [Path(group[0]).name for group in models[0]["mtp_alternatives"]])
+
+    def test_model_carrying_its_own_head_is_embedded_and_seeks_no_companion(self):
+        gguf(self.snapshot / "Demo-Full-Q8_0.gguf", architecture="qwen35moe", blocks=49, nextn=1, width=4096,
+             tensor_names=target_tensors(48) + head_tensors(48))
+        models = self.listed()
+        self.assertTrue(models[0]["mtp_embedded"])
+        self.assertNotIn("mtp", models[0])
+
+    def test_marked_companion_carrying_a_base_stack_is_never_a_chat_model(self):
+        gguf(self.snapshot / "mtp-Demo-Shared-Q8_0.gguf", architecture="qwen35moe", blocks=49, nextn=1,
+             width=4096, tensor_names=target_tensors(48) + head_tensors(48))
+        target_model(self.snapshot / "Demo-Q4_K_XL.gguf")
+        models = self.listed()
+        self.assertEqual(["Demo-Q4_K_XL.gguf"], [model["path"].name for model in models])
+        self.assertEqual("mtp-Demo-Shared-Q8_0.gguf", Path(models[0]["mtp"]).name)
+
+    def test_companion_of_a_foreign_architecture_is_not_paired(self):
+        target_model(self.snapshot / "Demo-Q4_K_XL.gguf")
+        prediction_head(self.snapshot / "mtp-Demo-Q8_0.gguf", architecture="qwen3")
+        self.assertNotIn("mtp", self.listed()[0])
+
+    def test_companion_with_a_different_embedding_width_is_not_paired(self):
+        target_model(self.snapshot / "Demo-Q4_K_XL.gguf", width=4096)
+        prediction_head(self.snapshot / "mtp-Demo-Q8_0.gguf", width=2048)
+        self.assertNotIn("mtp", self.listed()[0])
+
+    def test_companion_with_a_different_vocabulary_is_not_paired(self):
+        target_model(self.snapshot / "Demo-Q4_K_XL.gguf", vocab=151_936)
+        prediction_head(self.snapshot / "mtp-Demo-Q8_0.gguf", vocab=100_000)
+        self.assertNotIn("mtp", self.listed()[0])
+
+    def test_declared_prediction_layer_without_a_projection_tensor_is_not_a_predictor(self):
+        target_model(self.snapshot / "Demo-Q4_K_XL.gguf")
+        gguf(self.snapshot / "mtp-Demo-Q8_0.gguf", architecture="qwen35moe", blocks=49, nextn=1, width=4096,
+             tensor_names=["blk.48.attn_q.weight", "token_embd.weight"])
+        models = self.listed()
+        self.assertEqual(["Demo-Q4_K_XL.gguf"], [model["path"].name for model in models])
+        self.assertNotIn("mtp", models[0])
+
+    def test_companion_is_not_paired_across_snapshots(self):
+        other = self.root / "models--org--Demo-GGUF" / "snapshots" / "other-revision"
+        target_model(self.snapshot / "Demo-Q4_K_XL.gguf")
+        prediction_head(other / "mtp-Demo-Q8_0.gguf")
+        self.assertNotIn("mtp", self.listed()[0])
 
 
 if __name__ == "__main__":

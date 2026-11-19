@@ -115,6 +115,7 @@ public sealed partial class NativeAssistantPage
         var planCard = GetCard(planMessage.Id);
         AssertText(planCard, "Diesen Plan implementieren?");
         AssertButton(planCard, "Ja, diesen Plan implementieren");
+        AssertButton(planCard, "Verwerfen");
         AssertText(planCard, "✓");
         AssertInput(planCard, "Änderungswünsche zum Plan");
         AssertNoExcludedActions(planCard);
@@ -276,8 +277,8 @@ public sealed partial class NativeAssistantPage
             finally { menu.Hide(); }
             if ((await chats.GetSessionAsync(plan.Id, _lifetime.Token))?.PersistentExtensionActionId != BuiltInActionIds.PlanMode)
                 throw new InvalidOperationException("Die Menüauswahl muss den Planmodus speichern.");
-            if (AutomationProperties.GetName(SelectedToolChip) != "Planen entfernen")
-                throw new InvalidOperationException("Die Menüauswahl muss einen bedienbaren Planen-Chip anzeigen.");
+            if (AutomationProperties.GetName(SelectedToolChip) != "Planmodus entfernen")
+                throw new InvalidOperationException("Die Menüauswahl muss einen bedienbaren Planmodus-Chip anzeigen.");
         }
 
         async Task OpenFixtureAsync(Guid id)
