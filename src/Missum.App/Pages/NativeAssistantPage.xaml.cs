@@ -925,8 +925,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         if (prompt.Length == 0) return;
         var draft = Composer.Text;
         var session = _session;
-        var selectedAction = _selectedAction == BuiltInActionIds.DeepResearch ? null : _selectedAction;
-        var mode = _mode;
+        var selectedAction = _selectedAction;
         _sendPending = true;
         try
         {
@@ -957,8 +956,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         // The prompt takes its attachments with it, exactly like its text.
         var submittedAttachmentIds = ClearComposerAttachmentsAfterSubmit();
         _finishedSessions.Remove(session); _running = true; SetRunning(); _chatErrors.Remove(session); RefreshChatNotices(); ChatStatus = "Anfrage wird vorbereitet …";
-        var deepResearch = mode == "claudescience" && string.IsNullOrEmpty(selectedAction);
-        if (!await CommandAsync("chat.send", new { sessionId = session, prompt, attachmentIds = submittedAttachmentIds, extensionActionId = deepResearch ? null : selectedAction, deepResearch, deepResearchProfile = deepResearch ? "auto" : null }))
+        if (!await CommandAsync("chat.send", new { sessionId = session, prompt, attachmentIds = submittedAttachmentIds, extensionActionId = selectedAction }))
         {
             _changeReceiptState.CancelPrompt(session, promptEpoch);
             if (_session == session)

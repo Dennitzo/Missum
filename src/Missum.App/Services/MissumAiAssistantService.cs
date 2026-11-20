@@ -3383,6 +3383,7 @@ public sealed partial class MissumAiAssistantService(
         var audiobook = action == PromptTriggerAction.Audiobook;
         var isScienceSession = codingSession.ChatMode == ChatMode.ClaudeScience;
         var isPlanMode = action == PromptTriggerAction.PlanMode;
+        var deepResearch = trigger?.DeepResearch == true;
         if (UsesCodingAgent(action) || isScienceSession)
         {
             _activeCodingWorkspace ??= codingSession.CodingWorkspacePath;
@@ -3407,14 +3408,14 @@ public sealed partial class MissumAiAssistantService(
             availableCodingModel = availableCodingModel with { ContextTokens = ModelContextSelection.Resolve(CurrentSettings, codingModel,
                 availableCodingModel.MaximumContextTokens ?? availableCodingModel.ContextTokens) };
             var codingPrompt = originalPrompt;
-            if (isScienceSession)
+            if (isScienceSession && !deepResearch)
                 codingPrompt = isPlanMode
                     ? BuildSciencePlanningPrompt(codingPrompt)
                     : await BuildPublicationWorkspacePromptAsync(codingSession, codingPrompt, cancellationToken).ConfigureAwait(false);
             if (isPlanMode)
                 codingPrompt = BuildPlanModePrompt(codingPrompt, _activeCodingWorkspace);
             var attachedDocuments = await documents.ListAsync(sessionId, cancellationToken).ConfigureAwait(false);
-            if (attachedDocuments.Count > 0)
+            if (attachedDocuments.Count > 0 && !deepResearch)
                 codingPrompt += "\n\n" + BuildCodingDocumentCatalog(attachedDocuments);
             var codingMessages = BuildCodingHistoryMessages(historyBeforePrompt,
                 CalculateCodingHistoryBudget(availableCodingModel.ContextTokens, codingPrompt)).ToList();
@@ -3424,7 +3425,7 @@ public sealed partial class MissumAiAssistantService(
                     MediaType: item.Attachment.ContentType, FileName: item.Attachment.FileName));
             codingMessages.Add(new RunMessage("user", codingParts));
             var codingConfiguration = NegotiateCodingOptions(serverCapabilities);
-            var researchOptions = isScienceSession ? null : CreateDeepResearchOptions(trigger, coding: true, sessionId);
+            var researchOptions = CreateDeepResearchOptions(trigger, coding: true, sessionId);
             await EnsureResearchProjectAsync(researchOptions, codingSession, originalPrompt, _activeCodingWorkspace,
                 cancellationToken).ConfigureAwait(false);
             return new RunRequest(
@@ -3446,7 +3447,7 @@ public sealed partial class MissumAiAssistantService(
                 } : codingConfiguration.Options,
                 ConversationProfile: isPlanMode ? ConversationProfile.PlanMode : null,
                 ReasoningEffort: await ResolveRequestedReasoningAsync(client, codingModel, "coding", cancellationToken).ConfigureAwait(false),
-                DeepResearch: !isScienceSession && trigger?.DeepResearch == true,
+                DeepResearch: deepResearch,
                 WorkflowProfile: isScienceSession && !isPlanMode ? "claude-science-v1" : null,
                 ClientTools: extensionClientTools,
                 ResearchOptions: researchOptions,

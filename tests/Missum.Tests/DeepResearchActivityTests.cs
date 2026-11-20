@@ -6,6 +6,7 @@ using Missum.Ai.Contracts;
 using Missum.App.Services;
 using Missum.App.ViewModels;
 using Missum.Core.Contracts;
+using Missum.Core.Extensions;
 using Missum.Core.Models;
 
 namespace Missum.Tests;
@@ -34,8 +35,9 @@ public sealed class DeepResearchActivityTests
         using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
         await settings.InitializeAsync();
         var requested = new List<string>();
+        var submitted = new List<RunRequest>();
         using var connection = new MissumAiConnectionService(settings, NullLogger<MissumAiConnectionService>.Instance,
-            () => new ActivityGatewayHandler(nested, session.Id, requested, explicitOwnership, compact));
+            () => new ActivityGatewayHandler(nested, session.Id, requested, submitted, explicitOwnership, compact));
         var broker = new LocalToolBroker(connection, documents, null!, chats);
         using var microphone = new MicrophoneTranscriptionService(connection, settings, NullLogger<MicrophoneTranscriptionService>.Instance);
         var recent = new RecentActivityService(settings, new ShellViewModel(), NullLogger<RecentActivityService>.Instance);
@@ -47,9 +49,16 @@ public sealed class DeepResearchActivityTests
             service, settings, recent);
         var observations = new List<JsonElement>();
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-        await coordinator.HandleAsync(new(AssistantProtocol.ProtocolVersion, "chat.send", "observed-research",
-            JsonSerializer.SerializeToElement(new { sessionId = session.Id, prompt = "Prüfe die Quellenlage.", deepResearch = true })),
+        const string prompt = "Prüfe die Quellenlage.";
+        var payload = nested
+            ? JsonSerializer.SerializeToElement(new { sessionId = session.Id, prompt, deepResearch = true })
+            : JsonSerializer.SerializeToElement(new { sessionId = session.Id, prompt, extensionActionId = BuiltInActionIds.DeepResearch });
+        await coordinator.HandleAsync(new(AssistantProtocol.ProtocolVersion, "chat.send", "observed-research", payload),
             (type, data, _) => { if (type == "subagent.snapshot") observations.Add(JsonSerializer.SerializeToElement(data, JsonSerializerOptions.Web)); return Task.CompletedTask; }, timeout.Token);
+        var request = Assert.Single(submitted);
+        Assert.True(request.DeepResearch);
+        Assert.Equal(DeepResearchProfile.Auto, request.ResearchOptions?.Profile);
+        Assert.Contains(request.Messages[^1].Content, part => part.Text?.Contains(prompt, StringComparison.Ordinal) == true);
         var parent = (await chats.ListMessagesAsync(session.Id))[^1];
         Assert.Equal(MessageStatus.Completed, parent.Status);
         Assert.Equal("Eigenständige Hauptantwort.", parent.Content);
@@ -397,10 +406,19 @@ public sealed class DeepResearchActivityTests
         sources = new[] { new { id = "source-1", title = "Originalquelle", url = "https://example.org/paper" } },
     }, Json);
 
-    private sealed class ActivityGatewayHandler(bool nested, Guid session, List<string> requests, bool explicitOwnership, bool compact = false) : HttpMessageHandler
+    private sealed class ActivityGatewayHandler(bool nested, Guid session, List<string> requests, List<RunRequest> submitted,
+        bool explicitOwnership, bool compact = false) : HttpMessageHandler
     {
         private const string ParentRun = "run-research-view-fixture";
         private const string ChildRun = "run-real-child-fixture";
+
+        private async Task<HttpResponseMessage> AcceptAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var json = await request.Content!.ReadAsStringAsync(cancellationToken);
+            submitted.Add(JsonSerializer.Deserialize<RunRequest>(json, Json)!);
+            return Response(new RunAccepted(ParentRun, RunState.Running, At, "/v1/runs/" + ParentRun + "/events"));
+        }
+
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             var path = request.RequestUri!.AbsolutePath;
@@ -410,7 +428,7 @@ public sealed class DeepResearchActivityTests
             if (path == "/v1/capabilities") return Task.FromResult(Response(new CapabilitySnapshot(MissumAiProtocol.Version, "fixture", [],
                 ["web.search", "web.fetch", "web.deepResearch"], [], new Dictionary<string, long>(), [], true, MissumAiProtocol.UploadChunkSize)));
             if (path == "/v1/runs" && request.Method == HttpMethod.Post)
-                return Task.FromResult(Response(new RunAccepted(ParentRun, RunState.Running, At, "/v1/runs/" + ParentRun + "/events")));
+                return AcceptAsync(request, cancellationToken);
             if (path == "/v1/runs/" + ParentRun + "/events")
             {
                 var events = new List<RunEvent>();

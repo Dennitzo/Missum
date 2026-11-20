@@ -3,6 +3,7 @@ using Missum.App.Services;
 using Missum.App.ViewModels;
 using Missum.Core.Contracts;
 using Missum.Core.Coding;
+using Missum.Core.Extensions;
 using Missum.Core.Models;
 using Missum.Core.Research;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -267,6 +268,39 @@ public sealed class ClientContinuationTests
         Assert.Equal(14, stored.Count);
         Assert.Equal(new string('x', 40000), stored[1].Content);
         Assert.Equal(6, stored.Count(message => message.Content.Length == 40000));
+    }
+
+    [Theory]
+    [InlineData(ChatMode.Coding, null)]
+    [InlineData(ChatMode.ClaudeScience, "claude-science-v1")]
+    public async Task DeepResearchSelectionSubmitsTheOriginalPromptWithTheExistingProjectWorkflow(ChatMode mode, string? workflow)
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var seeded = await SeedAsync(environment, MessageStatus.Cancelled, mode);
+        var handler = new ContinuationHandler(RunState.Cancelled);
+        using var host = await Host.CreateAsync(environment, handler, includeScientificRepository: true);
+        await host.Settings.UpdateAsync(settings => settings with { SelectedModel = "fixture/selected" });
+        var chats = environment.Get<IChatRepository>();
+        var coordinator = new AssistantCoordinator(chats, environment.Get<IDocumentIngestor>(), environment.Get<IContextAssembler>(),
+            environment.Get<IAssistantAttachmentRepository>(), environment.Get<IChatArtifactRepository>(),
+            environment.Get<IConversationSnapshotRepository>(), host.Service, host.Settings,
+            new RecentActivityService(host.Settings, new ShellViewModel(), NullLogger<RecentActivityService>.Instance));
+        const string prompt = "Vergleiche die Primärquellen zur Bohmschen Mechanik.\nPrüfe auch Gegenargumente.";
+        await coordinator.HandleAsync(new(AssistantProtocol.ProtocolVersion, "chat.send", "selected-deep-research",
+            JsonSerializer.SerializeToElement(new { sessionId = seeded.Session.Id, prompt, extensionActionId = BuiltInActionIds.DeepResearch })),
+            (_, _, _) => Task.CompletedTask, CancellationToken.None);
+
+        var request = Assert.Single(handler.Requests);
+        Assert.Equal(RunMode.Coding, request.Mode);
+        Assert.Equal(workflow, request.WorkflowProfile);
+        Assert.Equal(seeded.Session.CodingWorkspacePath, request.CodingOptions!.WorkspacePath);
+        Assert.True(request.DeepResearch);
+        Assert.Equal(DeepResearchProfile.Auto, request.ResearchOptions!.Profile);
+        Assert.Equal(prompt, Assert.Single(request.Messages.Last(message => message.Role == "user").Content).Text);
+        Assert.Contains("web.search", request.AllowedServerTools!);
+        Assert.Contains("web.fetch", request.AllowedServerTools!);
+        Assert.Contains("web.deepResearch", request.AllowedServerTools!);
+        Assert.Equal(MessageStatus.Completed, (await chats.ListMessagesAsync(seeded.Session.Id))[^1].Status);
     }
 
     [Theory]

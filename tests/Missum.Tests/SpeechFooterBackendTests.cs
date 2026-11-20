@@ -188,6 +188,84 @@ public sealed class SpeechFooterBackendTests
     }
 
     [Theory]
+    [InlineData(MissumAiAssistantUpdateKind.Delta, false)]
+    [InlineData(MissumAiAssistantUpdateKind.Completed, false)]
+    [InlineData(MissumAiAssistantUpdateKind.Delta, true)]
+    public async Task EnablingAutomaticSpeechDuringAStartedRunReadsOnlyNewText(MissumAiAssistantUpdateKind nextUpdate, bool continuation)
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
+        await settings.InitializeAsync();
+        await settings.UpdateAsync(value => value with
+        {
+            MissumAiServerUrl = "http://isolated.invalid:8080", IsAutomaticSpeechEnabled = false,
+        });
+        var requests = new ConcurrentQueue<string>();
+        using var connection = new MissumAiConnectionService(settings, NullLogger<MissumAiConnectionService>.Instance,
+            () => new ForbiddenHttpHandler(requests));
+        using var microphone = new MicrophoneTranscriptionService(connection, settings, NullLogger<MicrophoneTranscriptionService>.Instance);
+        var recent = new RecentActivityService(settings, new ShellViewModel(), NullLogger<RecentActivityService>.Instance);
+        using var service = new MissumAiAssistantService(connection, null!, null!, null!, null!, null!, null!,
+            null!, null!, null!, null!, null!, microphone, settings, recent, NullLogger<MissumAiAssistantService>.Instance);
+        using var frozen = AssistantClientExecutionScope.EnterFrozen(settings.Current);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var stopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var buffering = new TaskCompletionSource<SpeechPlaybackProgress>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var message = Message(ChatRole.Assistant, MessageStatus.Streaming, "");
+        const string prefix = "Dieser Text ist bereits sichtbar. ";
+        const string nextSentence = "Dieser Satz wird neu vorgelesen.";
+
+        try
+        {
+            if (continuation)
+            {
+                await settings.UpdateAsync(value => value with { IsAutomaticSpeechEnabled = true }, timeout.Token);
+                Observe(MissumAiAssistantUpdateKind.Started, message, Guid.NewGuid());
+                await service.CancelSpeechAsync(timeout.Token);
+                await stopped.Task.WaitAsync(timeout.Token);
+                stopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                await settings.UpdateAsync(value => value with { IsAutomaticSpeechEnabled = false }, timeout.Token);
+            }
+            Observe(MissumAiAssistantUpdateKind.Started, message, Guid.NewGuid());
+            Observe(MissumAiAssistantUpdateKind.Delta, message with { Content = prefix });
+            Assert.False(microphone.Current.CanPauseSpeech);
+
+            await settings.UpdateAsync(value => value with { IsAutomaticSpeechEnabled = true }, timeout.Token);
+            Assert.False(AssistantClientExecutionScope.Resolve(settings.Current).IsAutomaticSpeechEnabled);
+            Observe(nextUpdate, message with
+            {
+                Content = prefix + nextSentence + " ",
+                Status = nextUpdate == MissumAiAssistantUpdateKind.Completed ? MessageStatus.Completed : MessageStatus.Streaming,
+            });
+
+            var playback = await buffering.Task.WaitAsync(timeout.Token);
+            Assert.Equal(message.Id, playback.SourceMessageId);
+            var unit = Assert.Single(playback.SourceUnits!);
+            Assert.Equal(nextSentence, unit.Text);
+            Assert.Equal(prefix.Length, unit.SentenceStart);
+            await stopped.Task.WaitAsync(timeout.Token);
+            Assert.Empty(requests);
+        }
+        finally
+        {
+            await service.CancelSpeechAsync();
+        }
+
+        void Observe(MissumAiAssistantUpdateKind kind, ChatMessage snapshot, Guid? runId = null)
+            => service.ObserveAutomaticSpeech(new(kind, snapshot, LocalRunId: runId), update =>
+            {
+                if (!update.IsActive) stopped.TrySetResult();
+                return Task.CompletedTask;
+            }, async playback =>
+            {
+                if (playback.State != SpeechPlaybackState.Buffering) return;
+                // Check the actual chunk and source offset before starting any audio.
+                await service.CancelSpeechAsync(timeout.Token);
+                buffering.TrySetResult(playback);
+            });
+    }
+
+    [Theory]
     [InlineData(MessageStatus.Streaming)]
     [InlineData(MessageStatus.Pending)]
     public void VisibleStreamingPrefixMayBeAheadOfDatabaseWithoutChangingMessageIdentity(MessageStatus status)

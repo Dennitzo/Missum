@@ -1,5 +1,9 @@
 using System.Text.Json;
+using Missum.Core.Contracts;
+using Missum.Core.Extensions;
+using Missum.Core.Models;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Automation.Provider;
 using Microsoft.UI.Xaml.Controls;
@@ -8,6 +12,67 @@ namespace Missum.App.Pages;
 
 public sealed partial class NativeAssistantPage
 {
+    private async Task VerifyDeepResearchToolsSmokeAsync()
+    {
+        if (!IsMessageFooterSmoke || Environment.GetEnvironmentVariable("ASSISTANT_DISABLE_RUNTIME_AUTOSTART") != "1")
+            throw new InvalidOperationException("Die Deep-Research-Menüprüfung benötigt ein isoliertes Profil ohne Modellstart.");
+
+        var chats = App.Current.GetService<IChatRepository>();
+        var verifiedModes = new List<string>();
+        foreach (var (mode, modeKey) in new[]
+        {
+            (ChatMode.General, "general"), (ChatMode.Coding, "coding"), (ChatMode.ClaudeScience, "claudescience"),
+        })
+        {
+            var session = await chats.CreateSessionAsync($"Deep Research · {mode}", mode, _lifetime.Token);
+            if (!await CommandAsync("session.open", new { sessionId = session.Id }))
+                throw new InvalidOperationException("Die Deep-Research-Testsitzung konnte nicht geöffnet werden.");
+            await WaitForPagingSmokeAsync(() => _session == session.Id && _mode == modeKey,
+                "Die Deep-Research-Testsitzung wurde nicht angezeigt.");
+            ShowChatView();
+            UpdateLayout();
+
+            var menu = ShowComposerTools();
+            try
+            {
+                var rows = (StackPanel)((ScrollViewer)menu.Content).Content;
+                TextBlock? group = null;
+                Button? research = null;
+                foreach (var row in rows.Children)
+                {
+                    if (row is TextBlock heading) group = heading;
+                    if (row is not Button button || AutomationProperties.GetName(button) != "Deep Research") continue;
+                    if (research is not null || group?.Text != "Recherche" || !button.IsEnabled)
+                        throw new InvalidOperationException($"Deep Research ist in {mode} nicht eindeutig unter Recherche auswählbar.");
+                    research = button;
+                }
+                Invoke(research ?? throw new InvalidOperationException($"Deep Research fehlt in {mode} im Werkzeugmenü."));
+                await WaitForPagingSmokeAsync(() => !_composerToolSelectionBusy && _selectedAction == BuiltInActionIds.DeepResearch
+                    && SelectedToolChip.Visibility == Visibility.Visible, $"Deep Research erscheint in {mode} nicht als Chip.");
+            }
+            finally { menu.Hide(); }
+
+            if (AutomationProperties.GetName(SelectedToolChip) != "Deep Research entfernen"
+                || (await chats.GetSessionAsync(session.Id, _lifetime.Token))?.PersistentExtensionActionId is not null)
+                throw new InvalidOperationException($"Deep Research ist in {mode} kein entfernbares Werkzeug für den nächsten Prompt.");
+            Invoke(SelectedToolChip);
+            await WaitForPagingSmokeAsync(() => !_composerToolSelectionBusy && _selectedAction is null
+                && SelectedToolChip.Visibility == Visibility.Collapsed, $"Der Deep-Research-Chip lässt sich in {mode} nicht abwählen.");
+            verifiedModes.Add(mode.ToString());
+        }
+
+        await File.WriteAllTextAsync(Path.Combine(App.Current.DataDirectory, "native-deep-research-tools-validation.json"),
+            JsonSerializer.Serialize(new { passed = true, modes = verifiedModes, menuGroup = "Recherche",
+                chipLabel = "Deep Research", chipRemovable = true, modelRequests = 0 }, JsonOptions), _lifetime.Token);
+
+        static void Invoke(Button button)
+        {
+            if (new ButtonAutomationPeer(button).GetPattern(PatternInterface.Invoke) is not IInvokeProvider invoke)
+                throw new InvalidOperationException("Die Deep-Research-Aktion ist nicht barrierefrei bedienbar.");
+            invoke.Invoke();
+        }
+    }
+
     private async Task VerifyDeepResearchSmokeAsync(JsonElement original)
     {
         if (!IsMessageFooterSmoke) return;

@@ -1654,7 +1654,7 @@ public sealed partial class AssistantCoordinator(
         if (payload.TryGetProperty("deepResearch", out var research) && research.ValueKind == JsonValueKind.True)
         {
             if (match is not null && match.Trigger.Action is not (PromptTriggerAction.Coding or PromptTriggerAction.WebSearch))
-                throw new ArgumentException("Deep Research ist mit General oder Coding nutzbar. Wähle andere einmalige Tools zuerst ab.");
+                throw new ArgumentException("Wähle andere einmalige Werkzeuge ab, bevor du Deep Research startest.");
             var profile = GetOptionalString(payload, "deepResearchProfile", 64)?.Trim() ?? "auto";
             if (!DeepResearchProfiles.IsValid(profile)) throw new ArgumentException("Das ausgewählte Deep-Research-Profil ist unbekannt.");
             match = (match ?? CreateToolMatch("webSearch", prompt)) with { DeepResearch = true, DeepResearchProfile = profile };
@@ -1761,6 +1761,16 @@ public sealed partial class AssistantCoordinator(
                 if (disabledReason is not null) throw new InvalidOperationException(disabledReason);
             }
             var match = CreateExtensionMatch(explicitExtensionActionId, prompt);
+            if (explicitExtensionActionId == BuiltInActionIds.DeepResearch)
+                return match with
+                {
+                    Trigger = match.Trigger with
+                    {
+                        Action = session.ChatMode == ChatMode.General ? PromptTriggerAction.WebSearch : PromptTriggerAction.Coding,
+                    },
+                    DeepResearch = true,
+                    DeepResearchProfile = DeepResearchProfiles.Auto,
+                };
             if (session.ChatMode == ChatMode.Coding && match.Trigger.Action == PromptTriggerAction.Extension)
                 match = match with { Trigger = match.Trigger with { Action = PromptTriggerAction.Coding } };
             return match;
@@ -1878,25 +1888,22 @@ public sealed partial class AssistantCoordinator(
                 await emit("coding.changes", summary, requestId).ConfigureAwait(false);
             return;
         }
-        if (CurrentSettings.IsAutomaticSpeechEnabled)
-        {
-            missumAi?.ObserveAutomaticSpeech(update,
-                speech => emit("speech.status", new
-                {
-                    sessionId = speech.SessionId,
-                    sourceMessageId = speech.SourceMessageId,
-                    playbackId = speech.PlaybackId,
-                    automatic = speech.IsAutomatic,
-                    ownerClientId = "desktop",
-                    active = speech.IsActive,
-                    status = speech.Status,
-                    detail = speech.Detail,
-                    model = speech.Model,
-                    error = speech.Error,
-                    cacheHit = speech.CacheHit,
-                }, requestId),
-                playback => emit("speech.progress", SpeechPlaybackProgressBridge.ToPayload(playback), requestId));
-        }
+        missumAi?.ObserveAutomaticSpeech(update,
+            speech => emit("speech.status", new
+            {
+                sessionId = speech.SessionId,
+                sourceMessageId = speech.SourceMessageId,
+                playbackId = speech.PlaybackId,
+                automatic = speech.IsAutomatic,
+                ownerClientId = "desktop",
+                active = speech.IsActive,
+                status = speech.Status,
+                detail = speech.Detail,
+                model = speech.Model,
+                error = speech.Error,
+                cacheHit = speech.CacheHit,
+            }, requestId),
+            playback => emit("speech.progress", SpeechPlaybackProgressBridge.ToPayload(playback), requestId));
         _displayStates.TryGetValue(update.Message.SessionId, out var generationDisplay);
         IReadOnlyList<ChatArtifact>? terminalArtifacts = null;
         if (update.Kind is MissumAiAssistantUpdateKind.Completed or MissumAiAssistantUpdateKind.Cancelled or MissumAiAssistantUpdateKind.Failed)

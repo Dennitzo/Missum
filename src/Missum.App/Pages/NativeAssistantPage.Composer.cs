@@ -211,7 +211,7 @@ public sealed partial class NativeAssistantPage
         if (plan.ValueKind == JsonValueKind.Object)
             AddCatalogEntry(plan, id => () => SelectComposerTool(id, S(plan, "displayName")), 10);
         foreach (var action in actions.Where(a => !S(a, "actionId").StartsWith("builtin.", StringComparison.Ordinal)
-                     || (S(a, "actionId") is not (BuiltInActionIds.DeepResearch or BuiltInActionIds.PlanMode)
+                     || (S(a, "actionId") != BuiltInActionIds.PlanMode
                          && S(a, "iconKey") != "document")))
             AddCatalogEntry(action, id => () => SelectComposerTool(id, S(action, "displayName")));
         foreach (var action in descriptors.Where(a =>

@@ -99,11 +99,6 @@
             <ComboBoxItem Content="Automatisch" Tag="auto" />
           </ComboBox>
 
-<TextBlock Text="Modell und Reasoning werden global im Promptfenster ausgewählt." TextWrapping="Wrap" Foreground="{ThemeResource MissumMutedTextBrush}" />
-
-          <TextBlock FontWeight="SemiBold" Text="Coding · experimentelle Funktionen" />
-
-
         </StackPanel>
       </Border>
 
@@ -151,7 +146,7 @@
             <TextBlock FontWeight="SemiBold" Text="Hintergrundfarbe" />
             <TextBlock Foreground="{ThemeResource MissumMutedTextBrush}" Text="Standard, Grau, Dunkel und Schwarz erzeugen eine neutrale Hell-/Dunkelmodus-Optik; weitere Farben tönen die Flächen ein." TextWrapping="Wrap" />
             <ListView x:Name="BackgroundColorList" HorizontalAlignment="Stretch" ItemsSource="{x:Bind BackgroundColors}" SelectionChanged="OnBackgroundColorChanged" SelectionMode="Single">
-              <ListView.ItemsPanel><ItemsPanelTemplate><ItemsWrapGrid Orientation="Horizontal" /></ItemsPanelTemplate></ListView.ItemsPanel>
+              <ListView.ItemsPanel><ItemsPanelTemplate><ItemsWrapGrid Orientation="Horizontal" ItemWidth="190" /></ItemsPanelTemplate></ListView.ItemsPanel>
               <ListView.ItemContainerStyle><Style TargetType="ListViewItem"><Setter Property="MinWidth" Value="118" /><Setter Property="Margin" Value="0,0,8,8" /><Setter Property="Padding" Value="8" /><Setter Property="HorizontalContentAlignment" Value="Stretch" /></Style></ListView.ItemContainerStyle>
               <ListView.ItemTemplate><DataTemplate x:DataType="local:SettingsAccentColorOption"><StackPanel Orientation="Horizontal" Spacing="8"><Ellipse Width="24" Height="24" Fill="{x:Bind PreviewBrush}" Stroke="{ThemeResource MissumStrokeBrush}" StrokeThickness="1" /><TextBlock VerticalAlignment="Center" Text="{x:Bind Name}" /></StackPanel></DataTemplate></ListView.ItemTemplate>
             </ListView>

@@ -95,9 +95,36 @@ public sealed partial class SettingsPage
                         text = BrushValue(message.Foreground), fileName });
                 }
             }
+
+            var cyberpunk = page.BackgroundColors.Single(option => option.Value == "#261D45");
+            app.ApplyTheme(AppTheme.Dark);
+            page.BackgroundColorList.SelectedItem = cyberpunk;
+            page.BackgroundColorList.StartBringIntoView(new BringIntoViewOptions { AnimationDesired = false });
+            page.BackgroundColorList.ScrollIntoView(cyberpunk);
+            host.UpdateLayout();
+            await Task.Delay(80);
+            host.UpdateLayout();
+            var cyberpunkItem = page.BackgroundColorList.ContainerFromItem(cyberpunk) as ListViewItem
+                ?? throw new InvalidOperationException("Die Cyberpunk-Hintergrundfarbe wurde nicht dargestellt.");
+            var label = StatusSmokeDescendants(cyberpunkItem).OfType<TextBlock>()
+                .SingleOrDefault(text => text.Text == "Cyberpunk 2077")
+                ?? throw new InvalidOperationException("Der vollständige Name der Cyberpunk-Hintergrundfarbe fehlt.");
+            var unboundedLabel = new TextBlock
+            {
+                Text = label.Text, FontFamily = label.FontFamily, FontSize = label.FontSize,
+                FontStyle = label.FontStyle, FontStretch = label.FontStretch, FontWeight = label.FontWeight,
+            };
+            unboundedLabel.Measure(new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity));
+            var labelRight = label.TransformToVisual(cyberpunkItem).TransformPoint(new Windows.Foundation.Point()).X
+                + unboundedLabel.DesiredSize.Width;
+            if (label.ActualWidth + 1 < unboundedLabel.DesiredSize.Width || labelRight > cyberpunkItem.ActualWidth + 1)
+                throw new InvalidOperationException("Der Name der Cyberpunk-Hintergrundfarbe wird abgeschnitten.");
+            await SaveStatusSmokePreviewAsync(page.BackgroundColorList, Path.Combine(app.DataDirectory, "native-settings-background-palette.png"));
+
             await File.WriteAllTextAsync(Path.Combine(app.DataDirectory, "native-settings-save-validation.json"),
                 JsonSerializer.Serialize(new { passed = true, renderer = "WinUI3", actualSaveHandler = true,
-                    persistedInIsolatedProfile = true, liveThemeAndAccentChanges = true, variants, modelRequests = 0 }));
+                    persistedInIsolatedProfile = true, liveThemeAndAccentChanges = true, backgroundPresetLabel = label.Text,
+                    variants, modelRequests = 0 }));
         }
         finally
         {

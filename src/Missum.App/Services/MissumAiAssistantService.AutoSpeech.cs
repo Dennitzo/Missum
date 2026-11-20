@@ -7,6 +7,7 @@ public sealed partial class MissumAiAssistantService
     private readonly object _automaticSpeechGate = new();
     private SpeechStreamingSession? _automaticSpeechSession;
     private Guid? _automaticSpeechRunId;
+    private (ChatMessage Message, Guid? RunId)? _unspokenAutomaticSpeech;
 
     internal void ObserveAutomaticSpeech(MissumAiAssistantUpdate update,
         Func<MissumAiSpeechUpdate, Task> status,
@@ -15,52 +16,72 @@ public sealed partial class MissumAiAssistantService
         if (Volatile.Read(ref _disposed) != 0 || update.Message.Role != ChatRole.Assistant) return;
         lock (_automaticSpeechGate)
         {
-            // Replayed Started events cannot undo a footer Stop for this run.
-            // A new continuation of the same message has a different run ID.
-            if (update.Kind == MissumAiAssistantUpdateKind.Started
-                && _automaticSpeechSession?.MessageId == update.Message.Id
-                && _automaticSpeechSession.WasCancelled && _automaticSpeechRunId == update.LocalRunId) return;
-            if (update.Kind == MissumAiAssistantUpdateKind.Started
-                && (_automaticSpeechSession?.MessageId != update.Message.Id || _automaticSpeechSession.WasCancelled))
+            var started = update.Kind == MissumAiAssistantUpdateKind.Started;
+            var newRun = started && update.LocalRunId is not null && _automaticSpeechRunId != update.LocalRunId;
+            var baseline = _unspokenAutomaticSpeech is { } pending && pending.Message.Id == update.Message.Id
+                ? pending : ((ChatMessage Message, Guid? RunId)?)null;
+            if (_automaticSpeechSession is { } existing && existing.MessageId == update.Message.Id && !newRun && baseline is null)
             {
-                _automaticSpeechSession?.Cancel();
-                SpeechStreamingSession? session = null;
-                session = new(update.Message, async (chunk, token) =>
-                {
-                    if (!IsCurrentAutomaticSpeech(session)) return;
-                    var messageId = update.Message.Id;
-                    await SpeakCoreAsync(update.Message.SessionId, chunk.Text, messageId,
-                        speech =>
-                        {
-                            if (!IsCurrentAutomaticSpeech(session) || session!.WasCancelled && speech.IsActive) return Task.CompletedTask;
-                            if (!speech.IsActive)
-                            {
-                                if (speech.Status == "Abgebrochen") session!.Cancel();
-                                // The queue owns completion and stop state across all chunks.
-                                return speech.Error is null && !session!.WasCancelled
-                                    ? status(AutomaticSpeechStatus(session, new(true, "Antwort wird fortlaufend vorgelesen", "Warte auf weiteren Antworttext.")))
-                                    : Task.CompletedTask;
-                            }
-                            return status(AutomaticSpeechStatus(session!, speech));
-                        },
-                        playback => IsCurrentAutomaticSpeech(session) ? progress(playback with
-                        {
-                            ControlMessageId = session!.MessageId,
-                            ControlPlaybackId = session.PlaybackId,
-                            OwnerClientId = "desktop",
-                            SourceStepId = chunk.SourceStepId,
-                        }) : Task.CompletedTask,
-                        null, null,
-                        new(chunk.Text, "AI-Antwort (live)", null, messageId, update.Message.ContentProfile,
-                            chunk.SourceOffset, chunk.SourceMarkdown), token).ConfigureAwait(false);
-                }, microphone.WaitForSpeechResumeAsync, microphone.BeginSpeechSession(resetPause: true),
-                    CancellationToken.None);
-                _automaticSpeechSession = session;
-                _automaticSpeechRunId = update.LocalRunId;
-                _ = PublishAutomaticSpeechStartAsync(session, status);
-                _ = ObserveAutomaticSpeechCompletionAsync(session, status);
+                // The preference applies to new automatic queues. A footer Stop
+                // remains effective for this message, including replayed events.
+                existing.Observe(update);
+                return;
             }
-            _automaticSpeechSession?.Observe(update);
+
+            var finished = update.Kind is MissumAiAssistantUpdateKind.Completed
+                or MissumAiAssistantUpdateKind.Cancelled or MissumAiAssistantUpdateKind.Failed;
+            // Run execution uses submitted preferences. Read-aloud is a live
+            // desktop preference and may be enabled while this message streams.
+            if (!settings.Current.IsAutomaticSpeechEnabled)
+            {
+                _unspokenAutomaticSpeech = finished ? null
+                    : (update.Message, update.LocalRunId ?? (started ? null : baseline?.RunId));
+                return;
+            }
+            if (finished) _unspokenAutomaticSpeech = null;
+            var initialMessage = started ? update.Message : baseline?.Message;
+            if (initialMessage is null || (!started
+                && (update.Kind is not (MissumAiAssistantUpdateKind.Delta or MissumAiAssistantUpdateKind.Completed)
+                    || update.Message.Content == initialMessage.Content))) return;
+
+            _unspokenAutomaticSpeech = null;
+            _automaticSpeechSession?.Cancel();
+            SpeechStreamingSession? session = null;
+            session = new(initialMessage, async (chunk, token) =>
+            {
+                if (!IsCurrentAutomaticSpeech(session)) return;
+                var messageId = update.Message.Id;
+                await SpeakCoreAsync(update.Message.SessionId, chunk.Text, messageId,
+                    speech =>
+                    {
+                        if (!IsCurrentAutomaticSpeech(session) || session!.WasCancelled && speech.IsActive) return Task.CompletedTask;
+                        if (!speech.IsActive)
+                        {
+                            if (speech.Status == "Abgebrochen") session!.Cancel();
+                            // The queue owns completion and stop state across all chunks.
+                            return speech.Error is null && !session!.WasCancelled
+                                ? status(AutomaticSpeechStatus(session, new(true, "Antwort wird fortlaufend vorgelesen", "Warte auf weiteren Antworttext.")))
+                                : Task.CompletedTask;
+                        }
+                        return status(AutomaticSpeechStatus(session!, speech));
+                    },
+                    playback => IsCurrentAutomaticSpeech(session) ? progress(playback with
+                    {
+                        ControlMessageId = session!.MessageId,
+                        ControlPlaybackId = session.PlaybackId,
+                        OwnerClientId = "desktop",
+                        SourceStepId = chunk.SourceStepId,
+                    }) : Task.CompletedTask,
+                    null, null,
+                    new(chunk.Text, "AI-Antwort (live)", null, messageId, update.Message.ContentProfile,
+                        chunk.SourceOffset, chunk.SourceMarkdown), token).ConfigureAwait(false);
+            }, microphone.WaitForSpeechResumeAsync, microphone.BeginSpeechSession(resetPause: true),
+                CancellationToken.None);
+            _automaticSpeechSession = session;
+            _automaticSpeechRunId = update.LocalRunId ?? (started ? null : baseline?.RunId);
+            _ = PublishAutomaticSpeechStartAsync(session, status);
+            _ = ObserveAutomaticSpeechCompletionAsync(session, status);
+            session.Observe(update);
         }
     }
 
