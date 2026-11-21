@@ -21,6 +21,13 @@ class PreparationProgressTests(unittest.TestCase):
         self.progress.check()
         self.assertGreater(self.now, 300)
 
+    def test_only_advancing_native_counts_are_reported(self):
+        reported = []
+        progress = session_cache.PreparationProgress(65_536, report=reported.append)
+        for processed in (0, 1024, 1024, 512, 2048, 65_537):
+            progress.observe({"prompt_progress": {"processed": processed}})
+        self.assertEqual([0, 1024, 2048], reported)
+
     def test_heartbeat_or_repeated_count_does_not_extend_idle_deadline(self):
         self.progress.observe({"prompt_progress": {"processed": 512}})
         self.now = 250

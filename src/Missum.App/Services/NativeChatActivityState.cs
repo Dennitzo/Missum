@@ -11,7 +11,8 @@ internal sealed class NativeChatActivityState
     private NativeModelPhasePresentation? _promptProcessing;
     internal bool Waiting { get; private set; }
     internal int? ContextProcessingPercent => _promptProcessing?.MeasuredPromptFraction is { } progress
-        ? (int)Math.Round(progress * 100, MidpointRounding.AwayFromZero) : null;
+        ? progress > 0 ? Math.Max(1, (int)Math.Round(progress * 100, MidpointRounding.AwayFromZero)) : 0
+        : null;
     internal string ThinkingLabel => ContextProcessingPercent is { } percent
         ? $"{DefaultThinkingLabel} · {percent}% verarbeitet" : DefaultThinkingLabel;
 

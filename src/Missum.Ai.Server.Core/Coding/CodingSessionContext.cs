@@ -14,8 +14,11 @@ internal static class CodingSessionContext
         // equivalent policy sections in another order invalidates all native KV tokens.
         // Legacy, unevaluated history still adopts the current policy. Execution state
         // remains run-local and outstanding historical calls are never replayed.
-        var result = (previous.PreserveSessionPromptPrefix ? previous.Messages : initial)
-            .TakeWhile(message => message.Role == "system").ToList();
+        var initialPolicy = initial.TakeWhile(message => message.Role == "system").ToArray();
+        var result = (previous.PreserveSessionPromptPrefix
+            ? UserProfileContext.Refresh(previous.Messages.TakeWhile(message => message.Role == "system").ToArray(),
+                UserProfileContext.LeadingMessage(initialPolicy))
+            : initialPolicy).ToList();
         var pending = new HashSet<string>(StringComparer.Ordinal);
         foreach (var message in previous.Messages.SkipWhile(message => message.Role == "system"))
         {

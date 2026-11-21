@@ -43,8 +43,9 @@ class PreparationTimeoutError(TimeoutError):
 
 class PreparationProgress:
     """Only advancing native token counts extend the preparation idle budget."""
-    def __init__(self, total, cancelled=None, clock=None):
+    def __init__(self, total, cancelled=None, clock=None, report=None):
         self.total, self.cancelled = total, cancelled
+        self.report = report
         self.clock = clock or time.monotonic
         self.started = self.updated = self.clock()
         self.processed = -1
@@ -67,6 +68,8 @@ class PreparationProgress:
         if type(processed) is int and self.processed < processed <= self.total:
             self.processed = processed
             self.updated = self.clock()
+            if self.report:
+                self.report(processed)
 
 
 class NativeSessionCache:
@@ -641,7 +644,7 @@ class NativeSessionCache:
                 return False
         return bool(body["messages"])
 
-    def prefill(self, model, key, body, cancelled=None):
+    def prefill(self, model, key, body, cancelled=None, report=None):
         """Persist validated text-only prefix checkpoints without replacing the full branch.
 
         The caller must hold the model turn lease through the subsequent chat
@@ -719,6 +722,16 @@ class NativeSessionCache:
             if len(tokens) - common <= PREFILL_CHECKPOINT_TOKENS:
                 return dict(status="skipped", reason="shortPrefill", promptTokens=len(tokens), started=started)
             checkpoints = 0
+            reported = 0
+
+            def report_prefix(processed):
+                nonlocal reported
+                # Each completion evaluates a prefix of the same prompt. Its count
+                # already includes cached tokens, so the denominator stays fixed.
+                if processed > reported:
+                    report(dict(total=len(tokens), processed=processed))
+                    reported = processed
+
             for end in range(common + PREFILL_CHECKPOINT_TOKENS, len(tokens), PREFILL_CHECKPOINT_TOKENS):
                 self._check_preparation_cancelled(cancelled)
                 estimate = self.estimate_bytes(model, end) if self.estimate_bytes else None
@@ -732,8 +745,11 @@ class NativeSessionCache:
                 current["protect_prefill_snapshot"] = True
                 current["dirty"] = True
                 active_completion = True
-                response = (self.prepare_completion(completion, cancelled) if self.prepare_completion else
-                            self.router("completion", dict(completion, stream=False), timeout=PREPARATION_MAXIMUM_SECONDS))
+                if self.prepare_completion and report:
+                    response = self.prepare_completion(completion, cancelled, report_prefix)
+                else:
+                    response = (self.prepare_completion(completion, cancelled) if self.prepare_completion else
+                                self.router("completion", dict(completion, stream=False), timeout=PREPARATION_MAXIMUM_SECONDS))
                 timings = response.get("timings", {})
                 cached, processed = timings.get("cache_n"), timings.get("prompt_n")
                 if (type(cached) is not int or cached < 0 or type(processed) is not int or processed < 0

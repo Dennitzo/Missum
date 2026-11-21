@@ -53,7 +53,7 @@ class PrefillTests(unittest.TestCase):
             return dict(n_restored=len(self.tokens))
         raise AssertionError(path)
 
-    def completion(self, body, cancelled):
+    def completion(self, body, cancelled, report=None):
         self.completions += 1
         if self.cancel_after is not None and self.completions > self.cancel_after:
             raise PreparationCancelledError("cancelled")
@@ -63,8 +63,43 @@ class PrefillTests(unittest.TestCase):
             if a != b:
                 break
             reused += 1
+        if report:
+            report(reused)
+            report(len(prefix))
         self.tokens = prefix.copy()
         return dict(tokens_predicted=1, timings=dict(cache_n=reused, prompt_n=len(prefix) - reused))
+
+    def test_stream_reports_live_native_counts_against_the_full_prompt(self):
+        released = threading.Event()
+        original = self.completion
+
+        def completion(body, cancelled, report):
+            if not self.completions:
+                report(1)
+                if not released.wait(3):
+                    raise RuntimeError("Progress did not reach the client during native work")
+            return original(body, cancelled, report)
+
+        self.cache.prepare_completion = completion
+        manager = GpuLoadManager.__new__(GpuLoadManager)
+        manager.lock = threading.Lock()
+        manager.sessions = self.cache
+        server = start_gpu_control(manager, "127.0.0.1", 0)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.addCleanup(released.set)
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+        self.addCleanup(connection.close)
+        body = dict(model="model", sessionKey="key", requestBody=self.body, streamProgress=True)
+        connection.request("POST", "/sessions/prefill", json.dumps(body), {"Content-Type": "application/json"})
+        response = connection.getresponse()
+        self.assertEqual("application/x-ndjson", response.getheader("Content-Type"))
+        self.assertEqual({"prompt_progress": {"total": 14, "processed": 1}}, json.loads(response.readline()))
+        released.set()
+        frames = [json.loads(line) for line in response.read().splitlines()]
+        self.assertEqual([4, 8, 12], [frame["prompt_progress"]["processed"] for frame in frames[:-1]])
+        self.assertEqual([14, 14, 14], [frame["prompt_progress"]["total"] for frame in frames[:-1]])
+        self.assertEqual("prepared", frames[-1]["status"])
 
     def test_prefix_snapshots_preserve_completed_and_restore_matching_partial(self):
         self.tokens = [1, 2]

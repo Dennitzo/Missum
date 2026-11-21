@@ -15,6 +15,7 @@ public static class ProjectMemoryDependencyInjection
         services.AddSingleton(options);
         services.AddSingleton<SqliteProjectMemoryStore>();
         services.AddSingleton<IProjectMemoryStore>(static provider => provider.GetRequiredService<SqliteProjectMemoryStore>());
+        services.AddSingleton<IUserMemoryStore>(static provider => provider.GetRequiredService<SqliteProjectMemoryStore>());
         return services;
     }
 }

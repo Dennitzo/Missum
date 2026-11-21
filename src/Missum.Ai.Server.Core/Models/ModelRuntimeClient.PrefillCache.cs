@@ -13,7 +13,8 @@ public sealed partial class ModelRuntimeClient
     private sealed record NativeCachePrefill(int? CachedTokens, int? EvaluatedTokens, double Milliseconds);
 
     private async Task<NativeCachePrefill?> PrefillSessionCacheAsync(string model, string sessionKey,
-        Dictionary<string, object?> requestBody, CancellationToken cancellationToken)
+        Dictionary<string, object?> requestBody, Func<ModelRuntimeProgress, CancellationToken, ValueTask> progress,
+        CancellationToken cancellationToken)
     {
         lock (_cacheLock)
             if (!_runtimeCatalog.TryGetValue(model, out var entry) || !entry.ManagedGpuPlacement) return null;
@@ -25,10 +26,10 @@ public sealed partial class ModelRuntimeClient
         try
         {
             using var response = await SendJsonAsync(HttpMethod.Post, endpoint,
-                new { model, sessionKey, requestBody }, cancellationToken, bufferContent: true).ConfigureAwait(false);
-            using var result = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false),
-                cancellationToken: cancellationToken).ConfigureAwait(false);
-            if (!result.RootElement.TryGetProperty("status", out var status) || status.ValueKind != JsonValueKind.String)
+                new { model, sessionKey, requestBody, streamProgress = true }, cancellationToken, bufferContent: true).ConfigureAwait(false);
+            var result = await ReadNativePrefillResultAsync(response, progress, cancellationToken).ConfigureAwait(false);
+            if (result.ValueKind != JsonValueKind.Object
+                || !result.TryGetProperty("status", out var status) || status.ValueKind != JsonValueKind.String)
                 throw new JsonException("Native prefill response has no status.");
             var value = status.GetString();
             LogSessionCache(_logger, "prefill", value ?? "unknown", null);
@@ -42,12 +43,12 @@ public sealed partial class ModelRuntimeClient
             }
             cancellationToken.ThrowIfCancellationRequested();
             var prefillStarted = value == "prepared" || value == "unavailable"
-                && result.RootElement.TryGetProperty("started", out var started) && started.ValueKind == JsonValueKind.True;
+                && result.TryGetProperty("started", out var started) && started.ValueKind == JsonValueKind.True;
             if (prefillStarted)
             {
                 static int? Counter(JsonElement root, string name) => root.TryGetProperty(name, out var item)
                     && item.ValueKind == JsonValueKind.Number && item.TryGetInt32(out var number) && number >= 0 ? number : null;
-                return new(Counter(result.RootElement, "cachedTokens"), Counter(result.RootElement, "evaluatedTokens"),
+                return new(Counter(result, "cachedTokens"), Counter(result, "evaluatedTokens"),
                     stopwatch.Elapsed.TotalMilliseconds);
             }
         }
@@ -67,6 +68,43 @@ public sealed partial class ModelRuntimeClient
         }
         cancellationToken.ThrowIfCancellationRequested();
         return null;
+    }
+
+    private static async Task<JsonElement> ReadNativePrefillResultAsync(HttpResponseMessage response,
+        Func<ModelRuntimeProgress, CancellationToken, ValueTask> progress, CancellationToken cancellationToken)
+    {
+        var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+        if (response.Content.Headers.ContentType?.MediaType != "application/x-ndjson")
+        {
+            // Older supervisors ignore the progress flag and return the final JSON as before.
+            using var result = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken).ConfigureAwait(false);
+            return result.RootElement.Clone();
+        }
+
+        using var reader = new StreamReader(stream);
+        while (await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
+        {
+            using var frame = JsonDocument.Parse(line);
+            var root = frame.RootElement;
+            if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("status", out _)) return root.Clone();
+            if (ReadPromptProgress(root) is { } measurement)
+                await progress(measurement, cancellationToken).ConfigureAwait(false);
+        }
+        throw new JsonException("Native prefill progress ended without a final status.");
+    }
+
+    private static ModelRuntimeProgress? ReadPromptProgress(JsonElement frame)
+    {
+        if (frame.ValueKind != JsonValueKind.Object || !frame.TryGetProperty("prompt_progress", out var progress)
+            || progress.ValueKind != JsonValueKind.Object || Counter(progress, "processed") is not { } processed)
+            return null;
+
+        var total = Counter(progress, "total");
+        return new("promptProcessing", PromptProgress: total is > 0 ? Math.Clamp((double)processed / total.Value, 0, 1) : null,
+            PromptTokens: total is > 0 ? total : null, ProcessedPromptTokens: processed, CachedPromptTokens: Counter(progress, "cache"));
+
+        static int? Counter(JsonElement root, string name) => root.TryGetProperty(name, out var item)
+            && item.ValueKind == JsonValueKind.Number && item.TryGetInt32(out var number) && number >= 0 ? number : null;
     }
 
     private async Task WaitForPrefillBarrierAsync(string model)

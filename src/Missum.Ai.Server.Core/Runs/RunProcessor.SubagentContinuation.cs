@@ -96,7 +96,7 @@ public sealed partial class RunProcessor
         };
         sourceCheckpoint = OpenProjectWorkflow.UpgradeLegacyCheckpoint(sourceCheckpoint with { Messages = childMessages },
             childRequest, selection.Role, selection.ModelId, _toolCatalog.GetAvailableTools(childRequest, subagentAvailable: true));
-        childMessages = sourceCheckpoint.Messages.ToList();
+        childMessages = UserProfileContext.Refresh(sourceCheckpoint.Messages, UserProfileContext.CreateMessage(childRequest.UserProfile)).ToList();
         var childTools = sourceCheckpoint.ContextTools?.ToArray()
             ?? CreateModelToolDefinitions(_toolCatalog.GetAvailableTools(childRequest, subagentAvailable: true),
             selectedToolName: null, directTools: true, sourceCheckpoint.ContextProfileVersion);

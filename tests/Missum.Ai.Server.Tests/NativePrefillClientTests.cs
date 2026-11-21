@@ -33,10 +33,33 @@ public sealed class NativePrefillClientTests
         var chat = JsonNode.Parse(handler.ChatBody!)!;
         Assert.Equal(Model, (string?)prefill["model"]);
         Assert.Equal("session-a", (string?)prefill["sessionKey"]);
+        Assert.True((bool?)prefill["streamProgress"]);
         Assert.True(JsonNode.DeepEquals(prefill["requestBody"], chat));
         Assert.Equal(17, (int?)chat["max_tokens"]);
         Assert.NotNull(chat["tools"]);
         Assert.NotNull(chat["chat_template_kwargs"]);
+    }
+
+    [Fact]
+    public async Task EarlyCheckpointProgressUsesTheFullPromptAndPrecedesNormalChat()
+    {
+        using var handler = new PrefillHandler { StreamPrefill = true, InputTokens = 100_000 };
+        using var http = new HttpClient(handler);
+        using var client = CreateClient(http);
+        var percentages = new List<double>();
+        await client.CompleteChatAsync(Model, [new("user", "Hallo")], [], modelRole: "coding",
+            sessionCacheKey: "session-a", nativeProgress: (value, _) =>
+            {
+                if (value is { State: "promptProcessing", PromptTokens: 100_000, PromptProgress: { } fraction })
+                {
+                    Assert.DoesNotContain("/v1/chat/completions", handler.Paths);
+                    percentages.Add(fraction);
+                }
+                return ValueTask.CompletedTask;
+            });
+
+        Assert.Equal([0, .01, .05], percentages);
+        Assert.Contains("/v1/chat/completions", handler.Paths);
     }
 
     [Theory]
@@ -201,6 +224,7 @@ public sealed class NativePrefillClientTests
         public bool Managed { get; init; } = true;
         public bool PrefillNotFound { get; init; }
         public bool HoldPrefill { get; init; }
+        public bool StreamPrefill { get; init; }
         public bool PrefillWasStarted { get; init; }
         public string PrefillStatus { get; init; } = "prepared";
         public string BarrierStatus { get; init; } = "idle";
@@ -242,8 +266,16 @@ public sealed class NativePrefillClientTests
                     PrefillStarted.TrySetResult();
                     await Task.Delay(TimeSpan.FromSeconds(15), cancellationToken);
                 }
-                return Json(new { status = PrefillStatus, started = PrefillWasStarted,
-                    cachedTokens = PreviousCached, evaluatedTokens = PrefillEvaluated });
+                var result = new { status = PrefillStatus, started = PrefillWasStarted,
+                    cachedTokens = PreviousCached, evaluatedTokens = PrefillEvaluated };
+                if (!StreamPrefill) return Json(result);
+                return new(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(
+                        "{\"prompt_progress\":{\"total\":100000,\"processed\":1000}}\n"
+                        + "{\"prompt_progress\":{\"total\":100000,\"processed\":5000}}\n"
+                        + JsonSerializer.Serialize(result) + "\n", Encoding.UTF8, "application/x-ndjson"),
+                };
             }
             if (path == "/sessions/barrier")
             {

@@ -21,7 +21,11 @@ public sealed partial class ModelRuntimeClient
                 cancellationToken: CancellationToken.None);
     }
 
-    internal static string BuildSessionCacheKey(string sessionId, string role, string? workspacePath = null)
+    internal static string BuildSessionCacheKey(
+        string sessionId,
+        string role,
+        string? workspacePath = null,
+        string? profileFingerprint = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
         ArgumentException.ThrowIfNullOrWhiteSpace(role);
@@ -29,8 +33,13 @@ public sealed partial class ModelRuntimeClient
         // this identity. The supervisor separately binds snapshots to the exact
         // native model, binary, template and cache configuration.
         var workspace = (workspacePath ?? string.Empty).Trim().Replace('\\', '/').TrimEnd('/').ToUpperInvariant();
-        var scope = JsonSerializer.Serialize(new[] { sessionId, role.Trim().ToLowerInvariant(), workspace });
-        return "missum-session-v3-"
+        var modelRole = role.Trim().ToLowerInvariant();
+        // Keep existing snapshots addressable when no profile is delivered. A
+        // changed profile owns a separate snapshot of its evaluated prefix.
+        var scope = JsonSerializer.Serialize(profileFingerprint is null
+            ? new[] { sessionId, modelRole, workspace }
+            : new[] { sessionId, modelRole, workspace, profileFingerprint });
+        return (profileFingerprint is null ? "missum-session-v3-" : "missum-session-v4-")
             + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(scope))).ToLowerInvariant();
     }
 }

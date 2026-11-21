@@ -450,7 +450,8 @@ public sealed partial class ModelRuntimeClient : IDisposable
                 cancellationToken,
                 inferenceDispatched: () => inferenceIncomplete = true, compactAtThreshold: compactAtThreshold,
                 cachePrefill: string.IsNullOrEmpty(sessionCacheKey) || messages.Any(message => message.ComputerImage is { Length: > 0 }) ? null
-                    : async (request, token) => prefill = await PrefillSessionCacheAsync(preparation.InstanceId, sessionCacheKey, request, token).ConfigureAwait(false)).ConfigureAwait(false);
+                    : async (request, token) => prefill = await PrefillSessionCacheAsync(preparation.InstanceId, sessionCacheKey,
+                        request, ReportProgressAsync, token).ConfigureAwait(false)).ConfigureAwait(false);
             inferenceIncomplete = false;
             if (prefill is not null)
             {
@@ -964,6 +965,9 @@ public sealed partial class ModelRuntimeClient : IDisposable
                 int inputTokens;
                 try { (requestBody, inputTokens) = await ApplyTokenBudgetAsync(unbudgetedBody, contextLength, maximumOutputTokens, nativeProgress, compactAtThreshold, allowMultimodalCountingFallback, cancellationToken).ConfigureAwait(false); }
                 finally { tokenCountingMilliseconds += countingClock.Elapsed.TotalMilliseconds; }
+                if (nativeProgress is not null)
+                    await nativeProgress(new ModelRuntimeProgress("promptProcessing", PromptProgress: 0,
+                        PromptTokens: inputTokens, ProcessedPromptTokens: 0), cancellationToken).ConfigureAwait(false);
                 // Budgeting and a protocol-repair retry can change the actual
                 // prompt. Only prepare the exact body that will be sent next.
                 if (cachePrefill is not null && inputTokens > NativePrefillCheckpointTokens)
@@ -1228,18 +1232,8 @@ public sealed partial class ModelRuntimeClient : IDisposable
             if (chunk.RootElement.TryGetProperty("error", out var providerError)
                 && providerError.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined))
                 throw CreateStreamingProviderError(providerError);
-            if (nativeProgress is not null
-                && chunk.RootElement.TryGetProperty("prompt_progress", out var promptProgress)
-                && promptProgress.ValueKind == JsonValueKind.Object)
-            {
-                var total = promptProgress.TryGetProperty("total", out var totalValue) && totalValue.TryGetInt32(out var totalTokens) ? totalTokens : 0;
-                var processed = promptProgress.TryGetProperty("processed", out var processedValue) && processedValue.TryGetInt32(out var processedTokens) ? processedTokens : 0;
-                int? cached = promptProgress.TryGetProperty("cache", out var cacheValue) && cacheValue.TryGetInt32(out var cachedTokens) && cachedTokens >= 0 ? cachedTokens : null;
-                await nativeProgress(new ModelRuntimeProgress("promptProcessing",
-                    PromptProgress: total > 0 ? Math.Clamp((double)processed / total, 0, 1) : null,
-                    PromptTokens: total > 0 ? total : null,
-                    ProcessedPromptTokens: processed, CachedPromptTokens: cached), cancellationToken).ConfigureAwait(false);
-            }
+            if (nativeProgress is not null && ReadPromptProgress(chunk.RootElement) is { } measurement)
+                await nativeProgress(measurement, cancellationToken).ConfigureAwait(false);
             var contentDelta = accumulator.Add(chunk.RootElement);
             // The private channel stays internal for context/recovery and guards.
             // Its consumer projects only phase changes to the client journal;

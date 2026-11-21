@@ -4,8 +4,10 @@ using Missum.App.ViewModels;
 using Missum.Core.Contracts;
 using Missum.Core.Coding;
 using Missum.Core.Extensions;
+using Missum.Core.Memory;
 using Missum.Core.Models;
 using Missum.Core.Research;
+using Missum.Infrastructure.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
 using System.Net;
 using System.Text;
@@ -17,6 +19,72 @@ public sealed class ClientContinuationTests
 {
     private const string Partial = "Bereits erarbeitete Herleitung.";
     private static readonly JsonSerializerOptions Json = MissumAiProtocol.CreateJsonOptions();
+
+    [Theory]
+    [InlineData(ChatMode.General)]
+    [InlineData(ChatMode.Coding)]
+    [InlineData(ChatMode.ClaudeScience)]
+    public async Task GlobalMemoryReachesTheFirstRequestOfAnEmptyChat(ChatMode mode)
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var options = new ProjectMemoryOptions { SharedDataDirectory = environment.Directory };
+        environment.TrackDatabase(Path.Combine(environment.Directory, options.DatabaseFileName));
+        await using var memory = new SqliteProjectMemoryStore(options);
+        const string rule = "Vergleiche als Tabelle darstellen.";
+        await memory.SaveAsync(new UserMemoryDraft(UserMemoryKind.Preference, UserMemoryScopeKind.Global, rule,
+            "chat", UserMemoryStatus.Active, SessionId: Guid.NewGuid().ToString("D")));
+        var chats = environment.Get<IChatRepository>();
+        var session = await chats.CreateSessionAsync("Neue Sitzung", mode);
+        if (mode != ChatMode.General)
+            await chats.SetCodingWorkspacePathAsync(session.Id, environment.Directory, activateCoding: false);
+        Assert.Empty(await chats.ListMessagesAsync(session.Id));
+        var handler = new ContinuationHandler(RunState.Cancelled);
+        using var host = await Host.CreateAsync(environment, handler, includeScientificRepository: mode == ChatMode.ClaudeScience,
+            userMemory: new UserMemoryService(memory, chats));
+        await host.Settings.UpdateAsync(current => current with { SelectedModel = "fixture/selected" });
+        const string prompt = "Vergleiche zwei Wärmepumpen.";
+        var trigger = mode == ChatMode.Coding ? AssistantCoordinator.CreateToolMatch("coding", prompt) : null;
+
+        var response = await host.Service.SendAsync(session.Id, prompt, trigger, _ => Task.CompletedTask);
+
+        Assert.Equal(MessageStatus.Completed, response.Status);
+        var request = Assert.Single(handler.Requests);
+        Assert.Contains(rule, Assert.IsType<UserProfileSection>(request.UserProfile).Text, StringComparison.Ordinal);
+        Assert.Contains(request.Messages, message => message.Role == "user" && message.Content.Any(part => part.Text?.Contains(prompt, StringComparison.Ordinal) == true));
+        Assert.DoesNotContain(request.Messages, message => message.Content.Any(part => part.Text?.Contains(rule, StringComparison.Ordinal) == true));
+    }
+
+    [Theory]
+    [InlineData("Vergiss meine gespeicherte Vorgabe zur Grußformel.", true)]
+    [InlineData("Ich bevorzuge kurze Sätze.", false)]
+    public async Task RecognitionMayForgetAnExistingRuleOnlyOnUserRequest(string prompt, bool forget)
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var options = new ProjectMemoryOptions { SharedDataDirectory = environment.Directory };
+        environment.TrackDatabase(Path.Combine(environment.Directory, options.DatabaseFileName));
+        await using var store = new SqliteProjectMemoryStore(options);
+        var rule = await store.SaveAsync(new UserMemoryDraft(UserMemoryKind.Preference, UserMemoryScopeKind.Global,
+            "Nutze am Ende jeder Antwort eine Grußformel.", "chat", UserMemoryStatus.Active));
+        var chats = environment.Get<IChatRepository>();
+        var memory = new UserMemoryService(store, chats);
+        var session = await chats.CreateSessionAsync("Neue Sitzung", ChatMode.General);
+        var handler = new ContinuationHandler(RunState.Cancelled)
+        {
+            ReviewOutput = JsonSerializer.Serialize(new { memories = Array.Empty<object>(), forget = new[] { rule.Entry.Id } }, Json),
+        };
+        using var host = await Host.CreateAsync(environment, handler, userMemory: memory,
+            recognition: new UserMemoryRecognitionService(memory, store));
+
+        var response = await host.Service.SendAsync(session.Id, prompt, null, _ => Task.CompletedTask);
+
+        Assert.Equal(MessageStatus.Completed, response.Status);
+        Assert.Equal(forget ? UserMemoryStatus.Forgotten : UserMemoryStatus.Active,
+            (await ((IUserMemoryStore)store).GetAsync(rule.Entry.Id))?.Status);
+        Assert.Equal(2, handler.Requests.Count);
+        Assert.Null(handler.Requests[0].SessionId);
+        var profile = Assert.IsType<UserProfileSection>(handler.Requests[1].UserProfile);
+        Assert.Equal(forget, profile.Text.Length == 0);
+    }
 
     [Theory]
     [InlineData(false)]
@@ -811,7 +879,8 @@ public sealed class ClientContinuationTests
         internal MissumAiAssistantService Service => service;
         internal SettingsCoordinator Settings => settings;
         internal static async Task<Host> CreateAsync(TestEnvironment environment, ContinuationHandler handler,
-            bool includeScientificRepository = false)
+            bool includeScientificRepository = false, UserMemoryService? userMemory = null,
+            UserMemoryRecognitionService? recognition = null)
         {
             await environment.Get<ISettingsStore>().SaveAsync(new AppSettings { MissumAiServerUrl = "http://127.0.0.1:65000", SelectedModel = "fixture/model", IsAutomaticSpeechEnabled = false });
             var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
@@ -825,7 +894,8 @@ public sealed class ClientContinuationTests
                 new DocumentContextPreparationService(documents), new SessionContextPreparationService(chats), new LocalToolBroker(connection, documents, null!, chats),
                 null!, microphone, settings, new RecentActivityService(settings, new ShellViewModel(), NullLogger<RecentActivityService>.Instance),
                 NullLogger<MissumAiAssistantService>.Instance,
-                scientificResearch: includeScientificRepository ? environment.Get<IScientificResearchRepository>() : null);
+                scientificResearch: includeScientificRepository ? environment.Get<IScientificResearchRepository>() : null,
+                userMemory: userMemory, userMemoryRecognition: recognition);
             return new(settings, connection, microphone, service);
         }
         public void Dispose() { service.Dispose(); microphone.Dispose(); connection.Dispose(); settings.Dispose(); }
@@ -840,6 +910,7 @@ public sealed class ClientContinuationTests
         internal List<RunRequest> Requests { get; } = [];
         internal List<string> RawRequests { get; } = [];
         internal List<string> IdempotencyKeys { get; } = [];
+        internal string? ReviewOutput { get; init; }
         internal List<RunModelSelectionRequest> ModelSelections { get; } = [];
         internal RunMode OriginalRunMode { get; init; } = RunMode.General;
         internal bool OriginalModelSupportsReasoning { get; init; } = true;
@@ -926,6 +997,8 @@ public sealed class ClientContinuationTests
                 var runId = path.Split('/')[3];
                 LastEventCursor = request.Headers.TryGetValues(MissumAiHeaders.LastEventId, out var values) ? values.Single() : null;
                 var delta = runId == "run-old" ? Partial + "\n\nNeue Fortsetzung." : "Neue Fortsetzung.";
+                if (runId != "run-old" && Requests.Last().ConversationProfile == ConversationProfile.ContextPreparation
+                    && ReviewOutput is not null) delta = ReviewOutput;
                 var completedModel = runId == "run-old" ? ModelSelections.LastOrDefault()?.ModelId ?? "fixture/model"
                     : Requests.Last().PreferredGeneralModelId ?? Requests.Last().PreferredCodingModelId ?? "fixture/model";
                 var items = new[]

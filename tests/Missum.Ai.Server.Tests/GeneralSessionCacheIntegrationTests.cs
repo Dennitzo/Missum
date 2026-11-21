@@ -330,6 +330,48 @@ public sealed class GeneralSessionCacheIntegrationTests
         Assert.Equal(native.Requests[0].SessionKey, native.Requests[1].SessionKey);
     }
 
+    [Fact]
+    public async Task NativeTurnsCarryUserProfileAndRemoveForgottenRulesAfterGatewayRestart()
+    {
+        using var context = new TestServerContext();
+        context.Options.ModelRuntimeUri = new("http://native.test:19090");
+        context.Options.GeneralModelId = NativeHandler.ModelA;
+        using var native = new NativeHandler();
+        const string memory = "Arbeitsweise-EICHE: Tabellen als CSV bereitstellen.";
+        const string initialPrompt = "Erkläre das Ergebnis.";
+        var request = Request("profile-session", [Message("user", initialPrompt)], NativeHandler.ModelA) with
+        {
+            UserProfile = new(memory, "client-fingerprint", 1),
+        };
+
+        using (var firstGateway = new Services(context, native))
+        {
+            await firstGateway.CompleteAsync(request);
+            var firstMessages = native.Requests[0].Body.GetProperty("messages");
+            Assert.Contains(memory, firstMessages[0].GetProperty("content").GetString(), StringComparison.Ordinal);
+            Assert.Equal(initialPrompt, firstMessages[1].GetProperty("content").GetString());
+            request = request with { Messages = [.. request.Messages, Message("assistant", native.Answers[0]),
+                Message("user", "Begründe es noch kurz.")] };
+            await firstGateway.CompleteAsync(request);
+            AssertNativePrefix(native.Requests[0].Body, native.Requests[1].Body);
+            Assert.Equal(native.Requests[0].SessionKey, native.Requests[1].SessionKey);
+        }
+
+        using var restartedGateway = new Services(context, native);
+        await restartedGateway.CompleteAsync(request with
+        {
+            UserProfile = null,
+            Messages = [.. request.Messages, Message("assistant", native.Answers[1]), Message("user", "Zeige das Endergebnis.")],
+        });
+        var finalMessages = native.Requests[2].Body.GetProperty("messages");
+        Assert.DoesNotContain(memory, finalMessages[0].GetProperty("content").GetString(), StringComparison.Ordinal);
+        Assert.Contains(finalMessages.EnumerateArray(),
+            message => message.GetProperty("content").GetString() == initialPrompt);
+        Assert.Contains(finalMessages.EnumerateArray(), message => message.TryGetProperty("reasoning_content", out var reasoning)
+            && reasoning.GetString() == NativeHandler.Reasoning(2));
+        Assert.NotEqual(native.Requests[1].SessionKey, native.Requests[2].SessionKey);
+    }
+
     private static RunMessage Message(string role, string text) => new(role, [new("text", text)]);
 
     private static RunRequest Request(string session, IEnumerable<RunMessage> history, string model) => new(

@@ -4,6 +4,9 @@ namespace Missum.App.Services;
 
 internal static partial class AppLog
 {
+    [LoggerMessage(EventId = 1210, Level = LogLevel.Warning, Message = "Background review of stored user memories stopped")]
+    public static partial void UserMemoryBackfillStopped(ILogger logger, Exception exception);
+
     [LoggerMessage(EventId = 1000, Level = LogLevel.Warning, Message = "Local AI API availability check failed")]
     public static partial void LocalAiAvailabilityCheckFailed(ILogger logger, Exception exception);
 

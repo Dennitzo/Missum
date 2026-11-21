@@ -65,7 +65,18 @@ public sealed record RunRequest(
     [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] DeepResearchOptions? ResearchOptions = null,
     [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] SubagentRunContext? Subagent = null,
     [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] string? ContextProfileVersion = null,
-    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] string? WorkflowProfile = null);
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] string? WorkflowProfile = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] UserProfileSection? UserProfile = null);
+
+/// <summary>
+/// Personal context and the current memory action, separate from the user prompt.
+/// The gateway derives its cache identity from the bounded model text.
+/// </summary>
+public sealed record UserProfileSection(
+    string Text,
+    string Fingerprint,
+    long Revision,
+    string? OperationNote = null);
 
 /// <summary>Gateway-created branch of an existing run. Permissions and model selection are inherited.</summary>
 public sealed record SubagentRunContext(

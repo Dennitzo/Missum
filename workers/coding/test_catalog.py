@@ -84,6 +84,19 @@ def target_model(path, architecture="qwen35moe", blocks=48, width=4096, vocab=No
 
 
 class CatalogTests(unittest.TestCase):
+    def test_deepseek41_external_engram_is_a_shard_not_a_model(self):
+        folder = self.root / "IQ1_S"
+        model = folder / "DeepSeek-V4.1-Flash-1017-Coding-IQ1_S-200E.gguf"
+        engram = folder / "DeepSeek-V4.1-Flash-1017-engram-IQ4_NL.gguf_file"
+        gguf(model, architecture="deepseek41", tensor_names=["token_embd.weight"])
+        gguf(engram, architecture="deepseek41", tensor_names=["per_layer_token_embd.weight"])
+        preset = self.root / "models.ini"
+        catalog.write_presets(self.root, preset)
+        self.assertIn("shard = " + engram.as_posix(), preset.read_text())
+        gguf(model, architecture="deepseek41", tensor_names=["token_embd.weight", "per_layer_token_embd.weight"])
+        catalog.write_presets(self.root, preset)
+        self.assertNotIn("shard = " + engram.as_posix(), preset.read_text())
+
     def test_network_model_loading_has_no_local_wall_clock_deadline(self):
         for value in (r"\\umbrel.local\Melow's Umbrel\Huggingface\hub\model.gguf",
                       "//umbrel.local/Melow's Umbrel/Huggingface/hub/model.gguf",

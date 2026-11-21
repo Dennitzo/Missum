@@ -4,6 +4,7 @@ using Missum.Core.Contracts;
 using Missum.Core.Chat;
 using Missum.Core.Coding;
 using Missum.Core.Extensions;
+using Missum.Core.Memory;
 using Missum.Core.Models;
 using Missum.Core.Research;
 using Microsoft.Extensions.Logging;
@@ -110,7 +111,9 @@ public sealed partial class MissumAiAssistantService(
     IScientificResearchRepository? scientificResearch = null,
     IResearchSandboxService? researchSandbox = null,
     ScientificPresentationCoordinator? sciencePresentation = null,
-    ScientificPublicationService? sciencePublications = null) : IDisposable
+    ScientificPublicationService? sciencePublications = null,
+    UserMemoryService? userMemory = null,
+    UserMemoryRecognitionService? userMemoryRecognition = null) : IDisposable
 {
     private const int MaximumPromptRetries = 3;
     private static readonly JsonSerializerOptions JsonOptions = MissumAiProtocol.CreateJsonOptions();
@@ -119,6 +122,14 @@ public sealed partial class MissumAiAssistantService(
         LogLevel.Information,
         new EventId(5300, nameof(RunDiagnostic)),
         "Missum AI Client run {RunId}: {State}.");
+    private static readonly Action<ILogger, Exception?> UserMemoryReviewSkipped = LoggerMessage.Define(
+        LogLevel.Warning,
+        new EventId(5312, nameof(UserMemoryReviewSkipped)),
+        "Missum AI: die Prüfung des Nutzerprofils wurde für diesen Auftrag übersprungen.");
+    private static readonly Action<ILogger, Exception?> UserProfileUnavailable = LoggerMessage.Define(
+        LogLevel.Warning,
+        new EventId(5313, nameof(UserProfileUnavailable)),
+        "Missum AI: das Nutzerprofil konnte nicht gelesen werden.");
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly SemaphoreSlim _speechGate = new(1, 1);
     private readonly SemaphoreSlim _startupCleanupGate = new(1, 1);
@@ -230,6 +241,8 @@ public sealed partial class MissumAiAssistantService(
 
             try
             {
+                var memoryNote = await ReviewForUserMemoryAsync(
+                    sessionId, turn.UserMessage, action, assistant, update, _activeCancellation.Token).ConfigureAwait(false);
                 var completed = action switch
                 {
                     PromptTriggerAction.Transcription => await CompleteTranscriptionAsync(assistant, trigger!, sessionAttachments, update, _activeCancellation.Token).ConfigureAwait(false),
@@ -242,6 +255,7 @@ public sealed partial class MissumAiAssistantService(
                         trigger,
                         sessionAttachments,
                         historyBeforePrompt,
+                        memoryNote,
                         update,
                         _activeCancellation.Token).ConfigureAwait(false),
                 };
@@ -1196,6 +1210,7 @@ public sealed partial class MissumAiAssistantService(
         PromptTriggerMatch? trigger,
         IReadOnlyList<AssistantAttachment> sessionAttachments,
         IReadOnlyList<ChatMessage> historyBeforePrompt,
+        string? memoryNote,
         Func<MissumAiAssistantUpdate, Task> update,
         CancellationToken cancellationToken)
     {
@@ -1211,6 +1226,7 @@ public sealed partial class MissumAiAssistantService(
                     trigger,
                     sessionAttachments,
                     historyBeforePrompt,
+                    memoryNote,
                     update,
                     cancellationToken).ConfigureAwait(false);
             }
@@ -1264,6 +1280,7 @@ public sealed partial class MissumAiAssistantService(
         PromptTriggerMatch? trigger,
         IReadOnlyList<AssistantAttachment> sessionAttachments,
         IReadOnlyList<ChatMessage> historyBeforePrompt,
+        string? memoryNote,
         Func<MissumAiAssistantUpdate, Task> update,
         CancellationToken cancellationToken)
     {
@@ -1400,7 +1417,8 @@ public sealed partial class MissumAiAssistantService(
                     uploaded,
                     assistant,
                     async progress => { assistant = progress.Message; await update(progress).ConfigureAwait(false); },
-                    cancellationToken).ConfigureAwait(false);
+                    cancellationToken,
+                    memoryNote).ConfigureAwait(false);
                 accepted = await client.CreateRunAsync(request, idempotencyKey, cancellationToken).ConfigureAwait(false);
                 if (localRun.WorkspacePath is { } workspace)
                 {
@@ -3330,6 +3348,156 @@ public sealed partial class MissumAiAssistantService(
         return final;
     }
 
+    private async Task<string?> ReviewForUserMemoryAsync(
+        Guid sessionId,
+        ChatMessage userMessage,
+        PromptTriggerAction? action,
+        ChatMessage assistant,
+        Func<MissumAiAssistantUpdate, Task> update,
+        CancellationToken cancellationToken)
+    {
+        if (userMemory is null || userMemoryRecognition is null || UserMemoryService.Disabled) return null;
+        if (action is PromptTriggerAction.Transcription or PromptTriggerAction.VoiceInput
+            or PromptTriggerAction.LiveCaptions or PromptTriggerAction.LiveTranslation
+            or PromptTriggerAction.ImageGeneration)
+        {
+            return null;
+        }
+
+        var intent = UserMemoryIntentScanner.Scan(userMessage.Content);
+        if (!intent.WorthReviewing) return null;
+        try
+        {
+            var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false);
+            if (session is null) return null;
+            var outcome = new UserMemoryRecognitionService.Outcome("profile-query", [], [], null);
+            if (intent.ExplicitPermanence || intent.ForgetRequest || !intent.AsksForStoredProfile)
+            {
+                using var client = await connection.CreateClientAsync(cancellationToken).ConfigureAwait(false);
+                var modelId = CurrentSettings.SelectedModel;
+                var contextLimit = ModelContextSelection.Resolve(CurrentSettings, modelId ?? string.Empty,
+                    ModelContextProfiles.ResolveMaximum(modelId, UsesCodingAgent(action) ? "coding" : "general"));
+                outcome = await userMemoryRecognition.ObserveAsync(
+                    client, session, userMessage, intent, "chat", modelId, cancellationToken, contextLimit)
+                    .ConfigureAwait(false);
+            }
+            await userMemoryRecognition.RecordProcessedAsync(userMessage, outcome, cancellationToken).ConfigureAwait(false);
+            var note = await BuildMemoryNoteAsync(session, outcome, intent, cancellationToken).ConfigureAwait(false);
+            if (note is not null)
+            {
+                await update(new(
+                    MissumAiAssistantUpdateKind.Status,
+                    assistant,
+                    Status: "Gedächtnis",
+                    Detail: outcome.Changed ? "Vorgaben aktualisiert" : "Vorgaben geprüft")).ConfigureAwait(false);
+            }
+            return note;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            // A failing memory review must never break the conversation the user asked for.
+            UserMemoryReviewSkipped(logger, exception);
+            return null;
+        }
+    }
+
+    private async Task<string?> BuildMemoryNoteAsync(
+        ChatSession session,
+        UserMemoryRecognitionService.Outcome outcome,
+        UserMemoryIntentScanner.UserMemoryIntent intent,
+        CancellationToken cancellationToken)
+    {
+        var builder = new StringBuilder();
+        if (outcome.Error is not null && intent.RequiresImmediateReview)
+        {
+            builder.AppendLine("Missum konnte die Gedächtnisänderung nicht ausführen. Bestätige keine Änderung.");
+        }
+        else if (outcome.Decision == "no-project")
+        {
+            builder.AppendLine("Dieser Chat ist keinem Projekt zugeordnet. Die Projektvorgabe wurde nicht gespeichert.");
+        }
+        else if (!outcome.Changed && (intent.ExplicitPermanence || intent.ForgetRequest))
+        {
+            builder.AppendLine("Missum hat keine Gedächtnisvorgabe geändert. Bestätige keine Änderung.");
+        }
+
+        foreach (var entry in outcome.Stored)
+        {
+            builder.Append("- gespeichert: ").Append(entry.Content)
+                .Append(entry.Scope == UserMemoryScopeKind.Project ? " [nur dieses Projekt]" : " [global]")
+                .Append(entry.Status == UserMemoryStatus.Suggested ? " [noch nicht bestätigt]" : " [dauerhaft]")
+                .Append('\n');
+        }
+
+        foreach (var entry in outcome.ScopeUpdated)
+        {
+            builder.Append(entry.Scope == UserMemoryScopeKind.Project
+                ? "- gilt künftig nur noch in diesem Projekt: "
+                : "- gilt künftig global: ")
+                .Append(entry.Content).Append('\n');
+        }
+
+        foreach (var entry in outcome.Forgotten)
+        {
+            builder.Append("- vergessen: ").Append(entry.Content).Append('\n');
+        }
+
+        if (intent.AsksForStoredProfile)
+        {
+            builder.Append("Der Nutzer fragt nach seinem Gedächtnis. Antworte mit den tatsächlich gespeicherten Vorgaben und ihrem Geltungsbereich.\n");
+            var visible = await userMemory!.ListVisibleAsync(session, cancellationToken).ConfigureAwait(false);
+            if (visible.Count == 0)
+            {
+                builder.Append("(noch keine gespeicherte Vorgabe)\n");
+            }
+
+            foreach (var entry in visible.Take(12))
+            {
+                builder.Append("- ").Append(entry.Content)
+                    .Append(entry.Scope == UserMemoryScopeKind.Project ? " [nur dieses Projekt]" : " [global]")
+                    .Append(entry.Status == UserMemoryStatus.Suggested ? " [noch nicht bestätigt]" : string.Empty)
+                    .Append('\n');
+            }
+        }
+
+        if (builder.Length == 0) return null;
+        builder.Append("Melde dem Nutzer nur, was hier tatsächlich steht.");
+        return builder.ToString();
+    }
+
+    private async Task<Missum.Ai.Contracts.UserProfileSection?> ResolveUserProfileSectionAsync(
+        ChatSession session,
+        string? note,
+        CancellationToken cancellationToken)
+    {
+        if (userMemory is null || UserMemoryService.Disabled) return null;
+        try
+        {
+            var profile = await userMemory.ProfileForSessionAsync(session, cancellationToken).ConfigureAwait(false);
+            if (!profile.HasContent && string.IsNullOrWhiteSpace(note)) return null;
+            var text = profile.Text;
+            // The fingerprint describes exactly what is delivered, so an extra action note cannot
+            // silently reuse a prefix that was built without it.
+            var fingerprint = string.IsNullOrWhiteSpace(note)
+                ? profile.Fingerprint
+                : UserMemoryKey.Fingerprint(text + "\n" + note);
+            return new Missum.Ai.Contracts.UserProfileSection(text, fingerprint, profile.Revision, note);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            UserProfileUnavailable(logger, exception);
+            return null;
+        }
+    }
+
     private async Task<RunRequest> BuildRunRequestAsync(
         MissumAiClient client,
         Guid sessionId,
@@ -3340,7 +3508,8 @@ public sealed partial class MissumAiAssistantService(
         IReadOnlyList<UploadedAttachment> uploaded,
         ChatMessage assistant,
         Func<MissumAiAssistantUpdate, Task> update,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? memoryNote = null)
     {
         _ = sessionAttachments;
         var codingSession = await GetExecutionSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
@@ -3353,6 +3522,7 @@ public sealed partial class MissumAiAssistantService(
         }
         var serverCapabilities = await client.GetCapabilitiesAsync(cancellationToken).ConfigureAwait(false);
         var compactContext = serverCapabilities.ContextProfiles?.Contains("compact-v1", StringComparer.Ordinal) == true;
+        var userProfileSection = await ResolveUserProfileSectionAsync(codingSession, memoryNote, cancellationToken).ConfigureAwait(false);
         var action = trigger?.Trigger.Action;
         var extensionClientTools = ResolveExtensionClientTools(trigger);
         if (extensionClientTools is { Count: > 0 })
@@ -3451,7 +3621,8 @@ public sealed partial class MissumAiAssistantService(
                 WorkflowProfile: isScienceSession && !isPlanMode ? "claude-science-v1" : null,
                 ClientTools: extensionClientTools,
                 ResearchOptions: researchOptions,
-                ContextProfileVersion: compactContext ? "compact-v1" : null);
+                ContextProfileVersion: compactContext ? "compact-v1" : null,
+                UserProfile: userProfileSection);
         }
         var contextProfile = audiobook
             ? SessionContextProfile.Audiobook
@@ -3575,7 +3746,8 @@ public sealed partial class MissumAiAssistantService(
             DeepResearch: trigger?.DeepResearch == true,
             ClientTools: extensionClientTools,
             ResearchOptions: generalResearchOptions,
-            ContextProfileVersion: compactContext ? "compact-v1" : null);
+            ContextProfileVersion: compactContext ? "compact-v1" : null,
+            UserProfile: userProfileSection);
     }
 
     internal static string? ResolvePreferredModel(AppSettings current) =>

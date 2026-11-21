@@ -432,10 +432,10 @@ public sealed partial class NativeAssistantPage
             throw new InvalidOperationException("The output overlay must not duplicate the source heading, previews or all-sources link.");
         if (SourcesPanel.Parent is not StackPanel sections || !ReferenceEquals(ChangesSummaryButton.Parent, sections)
             || !ReferenceEquals(SubagentsSection.Parent, sections)
-            || sections.Children.IndexOf(SourcesPanel) != sections.Children.IndexOf(ContextSummaryRow) + 1
+            || sections.Children.IndexOf(SourcesPanel) != sections.Children.IndexOf(ChangesSummaryButton) + 1
             || sections.Children.IndexOf(SubagentsSection) != sections.Children.IndexOf(SourcesPanel) + 1
             || sections.Children.IndexOf(InspectorWorkingPlanHost) != sections.Children.IndexOf(SubagentsSection) + 1)
-            throw new InvalidOperationException("The source summary must follow Kontext directly and precede Subagenten.");
+            throw new InvalidOperationException("The source summary must follow Änderungen directly and precede Subagenten.");
     }
 
     private async Task VerifySourcesSmokeAsync(JsonElement original)

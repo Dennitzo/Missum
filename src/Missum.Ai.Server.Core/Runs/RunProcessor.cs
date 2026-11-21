@@ -283,7 +283,12 @@ public sealed partial class RunProcessor : BackgroundService
 
         var checkpoint = await _repository.GetCheckpointAsync(runId, cancellationToken).ConfigureAwait(false);
         if (checkpoint is not null)
+        {
             checkpoint = OpenProjectWorkflow.UpgradeLegacyCheckpoint(checkpoint, request, selection.Role, selection.ModelId, availableTools);
+            var restored = UserProfileContext.Refresh(checkpoint.Messages, UserProfileContext.CreateMessage(request.UserProfile));
+            if (!ReferenceEquals(restored, checkpoint.Messages))
+                checkpoint = checkpoint with { Messages = restored };
+        }
         if (checkpoint is null)
         {
             checkpoint = new AgentRunCheckpoint(
@@ -2728,6 +2733,10 @@ public sealed partial class RunProcessor : BackgroundService
                 + (effectiveTools.Contains(SubagentToolNames.Spawn, StringComparer.Ordinal)
                     ? "\n\n" + SubagentAgentPolicy.Manager : "")),
         };
+        // Personal long term context is placed as its own bounded section right after the base
+        // policy. The user prompt keeps standing alone, so tools such as deep research still read
+        // the real order instead of a merged instruction.
+        if (UserProfileContext.CreateMessage(request.UserProfile) is { } profileMessage) messages.Add(profileMessage);
         if (ScienceSkill.Enabled(request)) messages.Add(new("system", ScienceSkill.Instructions));
         if (effectiveTools.Contains(ClientToolNames.MathFormalProof, StringComparer.Ordinal))
             messages[0] = messages[0] with { Content = messages[0].Content + "\n\n" + LeanAgentPolicy.Instructions };

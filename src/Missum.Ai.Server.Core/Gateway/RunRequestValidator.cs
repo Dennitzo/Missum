@@ -43,6 +43,11 @@ public static class RunRequestValidator
             throw new ArgumentException("Unsupported context profile.");
         if (request.Subagent is not null)
             throw new ArgumentException("Subagent runs are created by the gateway from an existing authorized parent run.");
+        if (request.UserProfile is { } profile
+            && (profile.Text is null || profile.Text.Length > UserProfileContext.MaximumTextCharacters
+                || profile.OperationNote is { Length: > UserProfileContext.MaximumOperationNoteCharacters }
+                || profile.Revision < 0 || string.IsNullOrWhiteSpace(profile.Fingerprint) || profile.Fingerprint.Length > 128))
+            throw new ArgumentException("Das Nutzerprofil wurde ungültig oder zu groß übermittelt.");
         if (request.DeepResearch && (request.AllowedServerTools is not { } researchTools
             || !researchTools.Contains("web.search", StringComparer.Ordinal)
             || !researchTools.Contains("web.fetch", StringComparer.Ordinal)

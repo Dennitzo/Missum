@@ -78,7 +78,8 @@ public sealed partial class RunProcessor
 
     internal static string BuildRunSessionCacheKey(RunRequest request, string runId, string role) =>
         ModelRuntimeClient.BuildSessionCacheKey(request.SessionId ?? runId, role,
-            request.Mode == RunMode.Coding ? request.CodingOptions?.WorkspacePath : request.WorkspacePath);
+            request.Mode == RunMode.Coding ? request.CodingOptions?.WorkspacePath : request.WorkspacePath,
+            UserProfileContext.Fingerprint(request.UserProfile));
 
     internal static GpuLeaseMode SubagentLeaseMode(SubagentRunContext? relation) => relation is null
         ? GpuLeaseMode.Shared

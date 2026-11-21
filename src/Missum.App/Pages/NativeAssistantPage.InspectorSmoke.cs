@@ -3,6 +3,7 @@ using Missum.App.Controls;
 using Missum.App.Services;
 using Missum.Core.Models;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Automation.Provider;
 using Microsoft.UI.Xaml.Controls;
@@ -80,23 +81,24 @@ public sealed partial class NativeAssistantPage
                 || Grid.GetColumn(Inspector) != 1 || Grid.GetColumn(BodyGrid) != 0)
                 throw new InvalidOperationException("Ausgaben liegt nicht in einer separaten nativen Layoutspalte.");
             if (ChangesSummaryButton.Parent is not Panel summaries
-                || summaries.Children.IndexOf(ContextSummaryRow) != summaries.Children.IndexOf(ChangesSummaryButton) + 1)
-                throw new InvalidOperationException("Der Kontextzähler steht nicht direkt unter Änderungen.");
+                || summaries.Children.IndexOf(SourcesPanel) != summaries.Children.IndexOf(ChangesSummaryButton) + 1
+                || Descendants(Inspector).OfType<TextBlock>().Any(label => label.Text == "Kontext"))
+                throw new InvalidOperationException("Die Ausgaben-Seitenleiste muss Quellen direkt nach Änderungen anzeigen.");
             if (InspectorWorkingPlanHost.Visibility != Visibility.Visible
                 || _inspectorWorkingPlanView.StepCount != 3 || _workingPlanTabOpen)
                 throw new InvalidOperationException("Der Arbeitsplan erscheint nicht ohne automatischen Tab in der Seitenleiste.");
 
             UpdateContext(JsonSerializer.SerializeToElement(new { contextUsed = 154900, contextLimit = 258000 }));
-            AssertCounter("154.9k / 258k", 154900d / 258000 * 100);
+            AssertContextIndicator(154900, 258000);
             ApplyEvent("chat.started", JsonSerializer.SerializeToElement(new { sessionId = owner }, JsonOptions));
             UpdateContext(JsonSerializer.SerializeToElement(new { contextUsed = 194700, contextLimit = 258000 }));
             _lastHeaderSecond = -1;
             UpdateRunDurations();
-            AssertCounter("194.7k / 258k", 194700d / 258000 * 100);
+            AssertContextIndicator(194700, 258000);
             UpdateContext(JsonSerializer.SerializeToElement(new { contextUsed = 29300, contextLimit = 131072 }));
             _lastHeaderSecond = -1;
             UpdateRunDurations();
-            AssertCounter("29.3k / 131.1k", 29300d / 131072 * 100);
+            AssertContextIndicator(29300, 131072);
             ApplyEvent("status.changed", JsonSerializer.SerializeToElement(new { sessionId = owner, runStatus = "Fertig" }, JsonOptions));
 
             var chatWidthWithSidebar = BodyGrid.ActualWidth;
@@ -213,10 +215,10 @@ public sealed partial class NativeAssistantPage
                     passed = true, renderer = "WinUI3", fixedWidth = NativeInspectorLayout.SidebarWidth, nativeLayoutColumn = true,
                     fullContentHeight = true, noOverlayOverlap = true, manualToggleReflowsContent = true, sameWidthAsProjects = true,
                     narrowWindowHides = true, wideWindowRestoresRequestedSidebar = true,
-                    manualClosedPreferencePreserved = true, contextDirectlyBelowChanges = true,
-                    contextMatchesComposerRing = true, streamingCounterUpdates = true, compactionCounterUpdates = true,
+                    manualClosedPreferencePreserved = true, sidebarContextRemoved = true,
+                    composerContextPreserved = true, streamingCounterUpdates = true, compactionCounterUpdates = true,
                     planVisibleWithoutPermanentTab = true, sidebarPersistsInPlanTab = true, sidebarPersistsInToolTab = true,
-                    uniformTextSize = 13, uniformIconSize = 16, contextIconUsesTextColor = true,
+                    uniformTextSize = 13, uniformIconSize = 16,
                     changesIconUsesTextColor = true, planHeadingUsesTextColor = true, planHeadingHasNoIcons = true,
                     sidebarUsesTextColorExceptPlanetsAndDiffCounts = true, diffCountsUseGreenAndRed = true,
                     sourcesThenSubagentsThenWorkingPlan = true, uniformGroupHeadings = true,
@@ -259,10 +261,13 @@ public sealed partial class NativeAssistantPage
             }
         }
 
-        void AssertCounter(string expected, double ringValue)
+        void AssertContextIndicator(int used, int limit)
         {
-            if (InspectorContextCount.Text != expected || Math.Abs(ContextRing.Value - ringValue) > .001)
-                throw new InvalidOperationException("Der native Kontextzähler und die Kontextanzeige im Prompt sind nicht synchron: " + InspectorContextCount.Text);
+            var ringValue = (double)used / limit * 100;
+            var description = $"Kontext: {used:N0} / {limit:N0} Token ({ringValue:0.0} %)";
+            if (Math.Abs(ContextRing.Value - ringValue) > .001
+                || !Equals(ContextToolTip.Content, description) || AutomationProperties.GetName(ContextIndicator) != description)
+                throw new InvalidOperationException("Die Kontextanzeige im Prompt zeigt einen abweichenden Kontextwert.");
         }
 
         void AssertSidebarTypography()
@@ -300,12 +305,10 @@ public sealed partial class NativeAssistantPage
                 .Where(outline => VisualTreeHelper.GetParent(outline) is Grid parent && parent.Children.OfType<ProgressRing>().Any()))
                 VerifySidebarTextBrush(outline.Stroke);
             FrameworkElement[] icons = [Descendants(InspectorProjectRow).OfType<FontIcon>().Single(),
-                Descendants(ChangesSummaryButton).OfType<Microsoft.UI.Xaml.Shapes.Path>().Single(), InspectorContextIcon];
+                Descendants(ChangesSummaryButton).OfType<Microsoft.UI.Xaml.Shapes.Path>().Single()];
             if (icons.Any(icon => Math.Abs(icon.ActualWidth - 16) > .01 || Math.Abs(icon.ActualHeight - 16) > .01)
                 || SourcesSummaryIcon.Width != 16 || SourcesSummaryIcon.Height != 16)
                 throw new InvalidOperationException("Die Seitenleisten-Icons teilen nicht dieselbe Größe von 16 × 16.");
-            if (InspectorContextIcon.Foreground is not SolidColorBrush contextBrush || contextBrush.Color != NativeThemeBrushes.Text.Color)
-                throw new InvalidOperationException("Das Kontext-Icon verwendet nicht die normale Schriftfarbe.");
             var changesIcon = Descendants(ChangesSummaryButton).OfType<Microsoft.UI.Xaml.Shapes.Path>().Single();
             var changesTitle = Descendants(ChangesSummaryButton).OfType<TextBlock>().Single(label => label.Text == "Änderungen");
             if (changesIcon.Stroke is not SolidColorBrush changesBrush || changesTitle.Foreground is not SolidColorBrush titleBrush

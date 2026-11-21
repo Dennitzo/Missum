@@ -36,7 +36,8 @@ internal static class GeneralSessionContext
         // This is an already evaluated branch. Its exact policy ordering is part
         // of the native token prefix, including when the current policy builder
         // would produce equivalent sections in a different order.
-        var continued = saved.TakeWhile(message => message.Role == "system").ToList();
+        var continued = UserProfileContext.Refresh(saved.TakeWhile(message => message.Role == "system").ToArray(),
+            UserProfileContext.LeadingMessage(initial)).ToList();
         var pending = new HashSet<string>(StringComparer.Ordinal);
         foreach (var message in saved.SkipWhile(message => message.Role == "system"))
         {

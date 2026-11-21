@@ -853,7 +853,6 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         ToolTipService.SetToolTip(InspectorToggle, label);
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(InspectorToggle, label);
         RefreshInspectorWorkingPlan();
-        RefreshInspectorContext();
     }
     private void SetRunning()
     {
@@ -1104,7 +1103,6 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         if (!Equals(ContextToolTip.Content, description)) ContextToolTip.Content = description;
         if (Microsoft.UI.Xaml.Automation.AutomationProperties.GetName(ContextIndicator) != description)
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(ContextIndicator, description);
-        RefreshInspectorContext();
     }
     private void OnContextPointerEntered(object sender, PointerRoutedEventArgs e) => ContextToolTip.IsOpen = true;
     private void OnContextPointerExited(object sender, PointerRoutedEventArgs e) => ContextToolTip.IsOpen = false;

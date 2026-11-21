@@ -74,15 +74,21 @@ public sealed partial class NativeAssistantPage
                         generationUpdatedAt = at.AddSeconds(seconds), promptProgress = progress,
                     }));
                 }
-                Phase("promptProcessing", .97, 1);
+                Phase("promptProcessing", 0, 1);
+                if (view.ActivityLabel != "Denke nach · 0% verarbeitet")
+                    throw new InvalidOperationException("Die Denkzeile zeigt den Beginn der Kontextverarbeitung nicht an.");
+                Phase("promptProcessing", .03, 2);
+                if (view.ActivityLabel != "Denke nach · 3% verarbeitet")
+                    throw new InvalidOperationException("Die Denkzeile zeigt niedrige Fortschrittswerte nicht an.");
+                Phase("promptProcessing", .97, 3);
                 UpdateLayout();
                 if (!ReferenceEquals(view, slot.Content) || view.ActivityLabel != "Denke nach · 97% verarbeitet"
                     || Math.Abs(slot.ActualHeight - height) > 1)
                     throw new InvalidOperationException("Gemessener Kontextfortschritt muss die bestehende Denkzeile aktualisieren.");
-                Phase("promptProcessing", .98, 2);
+                Phase("promptProcessing", .98, 4);
                 if (view.ActivityLabel != "Denke nach · 98% verarbeitet")
                     throw new InvalidOperationException("Die Denkzeile zeigt nicht den aktuellen Kontextfortschritt.");
-                Phase("reasoningStarted", null, 3);
+                Phase("reasoningStarted", null, 5);
                 if (view.ActivityLabel != "Denke nach")
                     throw new InvalidOperationException("Die Denkzeile zeigt nach der Kontextverarbeitung weiterhin Prozent an.");
                 foreach (var tool in new[] { "assistant.reasoning", "assistant.progress" })

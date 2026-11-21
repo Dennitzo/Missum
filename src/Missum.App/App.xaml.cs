@@ -151,6 +151,9 @@ public partial class App : Application
                 services.AddSingleton<LogsViewModel>();
                 services.AddSingleton<SettingsViewModel>();
                 services.AddSingleton<MainWindow>();
+                services.AddSingleton<UserMemoryService>();
+                services.AddSingleton<UserMemoryRecognitionService>();
+                services.AddSingleton<UserMemoryBackfillService>();
                 services.AddSingleton<DocumentContextPreparationService>();
                 services.AddSingleton<SessionContextPreparationService>();
                 services.AddSingleton<DocumentPdfExporter>();
@@ -298,6 +301,7 @@ public partial class App : Application
                 await ApplySessionActivationAsync(targetSessionId, navigateToAssistant: true);
             }
             StartAiAvailabilityMonitoring();
+            StartUserMemoryBackfill();
         }
         catch (Exception exception)
         {
@@ -667,6 +671,39 @@ public partial class App : Application
         else if (dispatcher is not null) CacheResolvedAppearance(systemAppearanceChanged: true);
     }
 
+    private CancellationTokenSource? _userMemoryBackfillCancellation;
+    private Task? _userMemoryBackfill;
+
+    /// <summary>
+    /// Reviews the existing chats in the background, in small resumable batches. It starts only
+    /// after the window is up, waits before the first model call and stops cleanly on shutdown.
+    /// </summary>
+    private void StartUserMemoryBackfill()
+    {
+        if (UserMemoryService.Disabled || Environment.GetEnvironmentVariable("ASSISTANT_DISABLE_RUNTIME_AUTOSTART") == "1") return;
+        var cancellation = new CancellationTokenSource();
+        _userMemoryBackfillCancellation = cancellation;
+        _userMemoryBackfill = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(20), cancellation.Token).ConfigureAwait(false);
+                var settings = GetService<SettingsCoordinator>();
+                var backfill = GetService<UserMemoryBackfillService>();
+                await backfill.RunUntilDoneAsync(() => settings.Current, GetService<IAssistantRunScheduler>(), cancellation.Token)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // Shutdown or a disabled feature ends the archive review without further work.
+            }
+            catch (Exception exception) when (exception is not OutOfMemoryException)
+            {
+                AppLog.UserMemoryBackfillStopped(GetService<ILogger<App>>(), exception);
+            }
+        }, cancellation.Token);
+    }
+
     private async Task PrepareShutdownAsync()
     {
         if (Interlocked.Exchange(ref _shutdownStarted, 1) != 0)
@@ -701,6 +738,14 @@ public partial class App : Application
             }
 
             availabilityCancellation?.Dispose();
+            var memoryCancellation = Interlocked.Exchange(ref _userMemoryBackfillCancellation, null);
+            var memoryBackfill = Interlocked.Exchange(ref _userMemoryBackfill, null);
+            memoryCancellation?.Cancel();
+            if (memoryBackfill is not null)
+            {
+                await RunShutdownStepAsync("user-memory", token => memoryBackfill.WaitAsync(token), TimeSpan.FromSeconds(5));
+            }
+            memoryCancellation?.Dispose();
             var assistant = GetService<MissumAiAssistantService>();
             // Capture the active server run before cancellation drains the queue
             // and detaches its stream. No queued prompt may start during shutdown.

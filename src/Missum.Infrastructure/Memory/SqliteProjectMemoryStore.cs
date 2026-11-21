@@ -4,9 +4,9 @@ using Microsoft.Data.Sqlite;
 
 namespace Missum.Infrastructure.Memory;
 
-public sealed class SqliteProjectMemoryStore : IProjectMemoryStore, IAsyncDisposable
+public sealed partial class SqliteProjectMemoryStore : IProjectMemoryStore, IUserMemoryStore, IAsyncDisposable
 {
-    private const int SchemaVersion = 1;
+    private const int SchemaVersion = 3;
     private readonly SemaphoreSlim _initializationGate = new(1, 1);
     private readonly SemaphoreSlim _writeGate = new(1, 1);
     private int _initialized;
@@ -86,10 +86,35 @@ public sealed class SqliteProjectMemoryStore : IProjectMemoryStore, IAsyncDispos
             var storedVersion = Convert.ToInt32(
                 await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
                 CultureInfo.InvariantCulture);
-            if (storedVersion != SchemaVersion)
+            if (storedVersion is < 1 or > SchemaVersion)
             {
                 throw new InvalidOperationException(
                     $"Nicht unterstützte Version des Projektgedächtnisses: {storedVersion}. Erwartet: {SchemaVersion}.");
+            }
+
+            command.CommandText = CreateUserMemorySchemaSql();
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            if (storedVersion == 2)
+            {
+                // The initial source and the processed-message index predate per-entry evidence.
+                command.CommandText = """
+                    INSERT OR IGNORE INTO user_memory_evidence(entry_id,message_id,session_id)
+                    SELECT id,source_message_id,session_id FROM user_memory_entries WHERE source_message_id IS NOT NULL;
+                    INSERT OR IGNORE INTO user_memory_evidence(entry_id,message_id,session_id)
+                    SELECT e.id,p.message_id,p.session_id FROM user_memory_processed_messages p
+                    JOIN user_memory_entries e ON e.id=p.entry_id;
+                    DELETE FROM user_memory_search
+                    WHERE rowid IN (SELECT rowid FROM user_memory_entries WHERE status<>'active');
+                    """;
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            if (storedVersion != SchemaVersion)
+            {
+                command.Parameters.Clear();
+                command.CommandText = "UPDATE project_memory_metadata SET schema_version=$version;";
+                command.Parameters.AddWithValue("$version", SchemaVersion);
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             }
 
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);

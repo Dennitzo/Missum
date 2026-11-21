@@ -156,6 +156,8 @@ def model_metadata(path, allow_metadata_only=False, inspect_mtp=False):
                     return None
                 read_exact(stream, dimensions * 8 + 4)
                 offsets.append((u64(stream), name))
+                if name == "per_layer_token_embd.weight":
+                    metadata["has_engram_table"] = True
                 if match := NEXTN_TENSOR.fullmatch(name):
                     index, tail = int(match[1]), match[2]
                     block_indices.add(index)
@@ -507,6 +509,28 @@ def matching_mtp(model, candidates, scopes):
     return [item[3] for item in matches]
 
 
+def matching_engram(path, root, metadata, shards):
+    if metadata["general.architecture"] != "deepseek41" or len(shards) != 1:
+        return None
+    inspected = model_metadata(path, inspect_mtp=True)
+    if not inspected or inspected.get("has_engram_table"):
+        return None
+    family = re.match(r"(DeepSeek-V4\.1-Flash-\d+)-", path.name, re.IGNORECASE)
+    if not family:
+        return None
+    scope = mtp_scope(path, root)
+    for directory in (path.parent, path.parent / "engram", scope / "engram"):
+        matches = []
+        for candidate in directory.glob(f"{family[1]}-engram-*.gguf_file"):
+            if candidate.is_file() and candidate.resolve().is_relative_to(root):
+                sidecar = model_metadata(candidate, inspect_mtp=True)
+                if sidecar and sidecar.get("has_engram_table"):
+                    matches.append(candidate)
+        if matches:
+            return matches[0] if len(matches) == 1 else None
+    return None
+
+
 def discover_models(root):
     root = resolve_model_catalog_root(root)
     found = []
@@ -569,6 +593,8 @@ def discover_models(root):
             reasoning = reasoning_profile(metadata)
             found.append({"id": f"coding/{safe_name}~{digest}", "path": path, "role": "general", "context": context,
                           "contextPolicy": "max-fit", "reasoning": reasoning})
+            if engram := matching_engram(path, root, metadata, shards):
+                found[-1]["engram"] = engram
             family = mtp_family(name)
             mtp_families.setdefault(scope, set()).add(family)
             model_aliases = [found[-1]]
@@ -878,6 +904,9 @@ def write_presets(root, target, placements=None, managed_gpu=False, fit_target="
                 lines += [f"reasoning-effort = {model['reasoning']['effort']}"]
             if model.get("projector"):
                 lines += [f"mmproj = {model['projector'].as_posix()}"]
+            if model.get("engram"):
+                # Skip the extra decode at startup for disk-backed Engram tables.
+                lines += [f"shard = {model['engram'].as_posix()}", "warmup = false"]
             if policy.get("mtpMode"):
                 speculators = "draft-mtp,ngram-simple" if policy.get("promptLookup") else "draft-mtp"
                 lines += [f"spec-type = {speculators}", f"spec-draft-n-max = {mtp_draft_tokens()}"]
@@ -1000,6 +1029,8 @@ def model_file_identity(model):
     paths = model_shards(model["path"])
     if model.get("projector"):
         paths.append(model["projector"])
+    if model.get("engram"):
+        paths.append(model["engram"])
     return file_identity(paths)
 
 
@@ -1280,6 +1311,8 @@ class GpuLoadManager:
         paths = sorted(path.parent.glob(shard.group(1) + "-*.gguf")) if shard else [path]
         if model.get("projector"):
             paths += [Path(model["projector"])]
+        if model.get("engram"):
+            paths += [Path(model["engram"])]
         if self.binary:
             paths += [self.binary] + sorted(self.binary.parent.glob("*.dll"))
         identity = [(str(item.resolve()), item.stat().st_size, item.stat().st_mtime_ns) for item in paths]
@@ -1328,9 +1361,9 @@ class GpuLoadManager:
         with self.lock:
             return self.sessions.save(model, key, prompt_tokens, force, new_tokens)
 
-    def session_prefill(self, model, key, request_body, cancelled=None):
+    def session_prefill(self, model, key, request_body, cancelled=None, report=None):
         with self.lock:
-            return self.sessions.prefill(model, key, request_body, cancelled)
+            return self.sessions.prefill(model, key, request_body, cancelled, report)
 
     def session_barrier(self, model):
         # A disconnected control client does not mean the native slot has
@@ -1374,14 +1407,14 @@ class GpuLoadManager:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.load(response)
 
-    def prepare_completion(self, body, cancelled=None):
+    def prepare_completion(self, body, cancelled=None, report=None):
         """Keep long prefills alive only while their native token count advances.
 
         A watchdog also closes the actual inference socket on caller disconnect;
         abandoning the outer control request alone does not cancel llama's task.
         The session cache drains the slot before releasing the preparation lease.
         """
-        progress = PreparationProgress(len(body["prompt"]), cancelled)
+        progress = PreparationProgress(len(body["prompt"]), cancelled, report=report)
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=300)
         finished, failures = threading.Event(), []
         response = None
@@ -1911,6 +1944,27 @@ def start_gpu_control(manager, host, port):
             except (OSError, ValueError):
                 return True
 
+        def stream_prefill(self, body):
+            # HTTP/1.0 closes after the final line. Flush each measurement so it
+            # reaches the gateway while the native completion is still active.
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.end_headers()
+
+            def write(result):
+                try:
+                    self.wfile.write(json.dumps(result).encode() + b"\n")
+                    self.wfile.flush()
+                except OSError as error:
+                    raise PreparationCancelledError("Native prefill client disconnected") from error
+
+            try:
+                result = manager.session_prefill(body["model"], body.get("sessionKey"), body.get("requestBody"),
+                    self.client_disconnected, lambda progress: write(dict(prompt_progress=progress)))
+                write(result)
+            except PreparationCancelledError:
+                pass
+
         def do_POST(self):
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -1920,6 +1974,11 @@ def start_gpu_control(manager, host, port):
                                          32 * 1024**2 if self.path == "/sessions/prefill" else 16 * 1024**2 if self.path == "/agents/prepare" else 1024**2 if self.path == "/sessions/delete" else 8192):
                     raise ValueError("Invalid GPU control request")
                 body = json.loads(self.rfile.read(length))
+                if self.path == "/sessions/prefill" and body.get("streamProgress") is True:
+                    if not isinstance(body.get("model"), str):
+                        raise ValueError("Invalid prefill model")
+                    self.stream_prefill(body)
+                    return
                 if self.path.startswith("/sessions/"):
                     if self.path == "/sessions/prepare":
                         result = manager.session_prepare(body["model"], body.get("sessionKey"),

@@ -45,6 +45,10 @@ public sealed class NativeChatActivityStateTests
         var start = DateTimeOffset.UtcNow;
         state.ObservePhase("promptProcessing", start);
         Assert.Equal("Denke nach", state.ThinkingLabel);
+        state.ObservePhase("promptProcessing", start, processed: 0, total: 1000);
+        Assert.Equal("Denke nach · 0% verarbeitet", state.ThinkingLabel);
+        state.ObservePhase("promptProcessing", start, processed: 1, total: 1000);
+        Assert.Equal("Denke nach · 1% verarbeitet", state.ThinkingLabel);
         state.ObservePhase("promptProcessing", start.AddSeconds(1), processed: 10, total: 100, progress: .97);
         Assert.Equal("Denke nach · 97% verarbeitet", state.ThinkingLabel);
         state.ObservePhase("codingWaiting", start.AddSeconds(2));
