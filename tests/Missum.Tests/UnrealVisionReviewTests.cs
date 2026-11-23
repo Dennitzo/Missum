@@ -38,8 +38,8 @@ public sealed class UnrealVisionReviewTests
     }
 
     [Theory]
-    [InlineData("unreal.blueprint.edit")]
-    [InlineData("unreal.camera.create")]
+    [InlineData("unreal.blueprint")]
+    [InlineData("unreal.camera")]
     public void LaterChangeInvalidatesAnEarlierCapture(string mutation)
     {
         const string hash = "7871b8af2781b51837e046f95b05a2a14fdd1341f481d6389c28c9d1849482a5";

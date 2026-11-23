@@ -88,7 +88,8 @@ public sealed partial class MissumAiAssistantService
     internal static bool UnrealReviewHasVisionReceipt(JsonElement arguments,
         IReadOnlyList<AssistantToolStep> steps, DateTimeOffset runStartedAt) =>
         IntegrationReviewHasVisionReceipt(arguments, steps, runStartedAt, "unreal.view.capture",
-            ["unreal.blueprint.create", "unreal.blueprint.edit", "unreal.blueprint.save", "unreal.camera.create"]);
+            ["unreal.actor", "unreal.material", "unreal.level", "unreal.blueprint", "unreal.camera",
+             "unreal.light", "unreal.sky", "unreal.asset", "unreal.python"]);
 
     private static bool IntegrationReviewHasVisionReceipt(JsonElement arguments,
         IReadOnlyList<AssistantToolStep> steps, DateTimeOffset runStartedAt, string captureTool,

@@ -25,7 +25,7 @@ public sealed class UnrealVisionReviewTests
             Assert.True(await repository.SaveClientToolResultAsync(runId,
                 new ClientToolResult(id, "completed", JsonSerializer.SerializeToElement(receipt))));
         }
-        Task EditAsync(string id, bool requiresReview) => RecordAsync("unreal.blueprint.edit",
+        Task EditAsync(string id, bool requiresReview) => RecordAsync("unreal.blueprint",
             new { operationId = id, visualCheck = new { required = requiresReview } });
         Task ReviewAsync(string id, string verdict) => RecordAsync("unreal.status",
             new { visionReview = new { operationId = id, verdict, matchesCapture = true } });
@@ -42,7 +42,7 @@ public sealed class UnrealVisionReviewTests
         Assert.Contains("fehlt", await RepairAsync());
         await ReviewAsync("second", "verified");
         Assert.Null(await RepairAsync());
-        await RecordAsync("unreal.camera.create", new { operationId = "camera", visualCheck = new { required = true } });
+        await RecordAsync("unreal.camera", new { operationId = "camera", visualCheck = new { required = true } });
         Assert.Contains("fehlt", await RepairAsync());
         await ReviewAsync("camera", "verified");
         Assert.Null(await RepairAsync());

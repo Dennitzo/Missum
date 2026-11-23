@@ -8,7 +8,7 @@ namespace Missum.Infrastructure.Storage;
 
 public sealed class SqliteDatabase : IMissumDatabase, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 58;
+    public const int CurrentSchemaVersion = 59;
     private static readonly Action<ILogger, string, Exception?> DatabaseInitialized = LoggerMessage.Define<string>(
         LogLevel.Information, new EventId(1000, nameof(DatabaseInitialized)), "SQLite-Datenbank {DatabasePath} wurde initialisiert.");
     private static readonly Action<ILogger, string?, Exception?> IntegrityCheckFailed = LoggerMessage.Define<string?>(
@@ -112,6 +112,8 @@ public sealed class SqliteDatabase : IMissumDatabase, IAsyncDisposable
             await ApplyMigrationFiftySixAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplySessionOnlyContextMigrationAsync(connection, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationFiftyEightAsync(connection, cancellationToken).ConfigureAwait(false);
+            await BackupBeforeMigrationAsync(connection, 59, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationFiftyNineAsync(connection, cancellationToken).ConfigureAwait(false);
             // A full scan belongs to migrations/recovery and explicit diagnostics, not every ordinary launch.
             if (previousVersion != CurrentSchemaVersion
                 || previousSchema != await ReadSchemaCookieAsync(connection, cancellationToken).ConfigureAwait(false))
@@ -125,11 +127,19 @@ public sealed class SqliteDatabase : IMissumDatabase, IAsyncDisposable
         }
     }
 
-    private async Task BackupBeforeClaudeScienceMigrationAsync(SqliteConnection source, CancellationToken cancellationToken)
+    private Task BackupBeforeClaudeScienceMigrationAsync(SqliteConnection source, CancellationToken cancellationToken) =>
+        BackupBeforeMigrationAsync(source, 49, cancellationToken);
+
+    /// <summary>
+    /// Copies the database before a table-rebuilding migration runs. Already applied
+    /// migrations and brand-new databases (no user data yet) need no backup.
+    /// </summary>
+    private async Task BackupBeforeMigrationAsync(SqliteConnection source, int version, CancellationToken cancellationToken)
     {
         await using (var check = source.CreateCommand())
         {
-            check.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=49;";
+            check.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=$version;";
+            check.Parameters.AddWithValue("$version", version);
             if (Convert.ToInt32(await check.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0)
                 return;
         }
@@ -137,7 +147,7 @@ public sealed class SqliteDatabase : IMissumDatabase, IAsyncDisposable
         var backupDirectory = Path.Combine(_options.DataDirectory, "DatabaseBackups");
         Directory.CreateDirectory(backupDirectory);
         var timestamp = DateTimeOffset.UtcNow.ToString("yyyyMMdd'T'HHmmssfff'Z'", CultureInfo.InvariantCulture);
-        var backupPath = Path.Combine(backupDirectory, Path.GetFileName(DatabasePath) + ".pre-v49-" + timestamp + ".bak");
+        var backupPath = Path.Combine(backupDirectory, Path.GetFileName(DatabasePath) + ".pre-v" + version.ToString(CultureInfo.InvariantCulture) + "-" + timestamp + ".bak");
         var builder = new SqliteConnectionStringBuilder { DataSource = backupPath, Mode = SqliteOpenMode.ReadWriteCreate };
         await using var destination = new SqliteConnection(builder.ToString());
         await destination.OpenAsync(cancellationToken).ConfigureAwait(false);
@@ -2336,7 +2346,8 @@ public sealed class SqliteDatabase : IMissumDatabase, IAsyncDisposable
         string tableName,
         string oldCheck,
         string newCheck,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string temporarySuffix = "_claudescience_v49")
     {
         if (tableName is not ("chat_session_groups" or "chat_sessions" or "research_projects"))
             throw new ArgumentOutOfRangeException(nameof(tableName));
@@ -2361,11 +2372,20 @@ public sealed class SqliteDatabase : IMissumDatabase, IAsyncDisposable
         if (tableSql is null) throw new InvalidDataException($"Required table {tableName} is missing.");
         if (!tableSql.Contains(oldCheck, StringComparison.Ordinal))
             throw new InvalidDataException($"The expected mode/autonomy constraint was not found on {tableName}.");
-        var temporaryName = tableName + "_claudescience_v49";
-        var createSql = tableSql
-            .Replace("CREATE TABLE " + tableName, "CREATE TABLE " + temporaryName, StringComparison.Ordinal)
-            .Replace("CREATE TABLE IF NOT EXISTS " + tableName, "CREATE TABLE IF NOT EXISTS " + temporaryName, StringComparison.Ordinal)
+        var temporaryName = tableName + temporarySuffix;
+        // A table renamed by an earlier rebuild is stored with a quoted name.
+        var quoted = "\"" + tableName + "\"";
+        var createSql = (tableSql.Contains("CREATE TABLE " + quoted, StringComparison.Ordinal)
+                || tableSql.Contains("CREATE TABLE IF NOT EXISTS " + quoted, StringComparison.Ordinal)
+            ? tableSql
+                .Replace("CREATE TABLE " + quoted, "CREATE TABLE " + temporaryName, StringComparison.Ordinal)
+                .Replace("CREATE TABLE IF NOT EXISTS " + quoted, "CREATE TABLE IF NOT EXISTS " + temporaryName, StringComparison.Ordinal)
+            : tableSql
+                .Replace("CREATE TABLE IF NOT EXISTS " + tableName, "CREATE TABLE IF NOT EXISTS " + temporaryName, StringComparison.Ordinal)
+                .Replace("CREATE TABLE " + tableName, "CREATE TABLE " + temporaryName, StringComparison.Ordinal))
             .Replace(oldCheck, newCheck, StringComparison.Ordinal);
+        if (!createSql.Contains(temporaryName, StringComparison.Ordinal))
+            throw new InvalidDataException($"The definition of {tableName} could not be prepared for the rebuild.");
 
         var columns = new List<string>();
         await using (var readColumns = connection.CreateCommand())
@@ -2724,6 +2744,42 @@ public sealed class SqliteDatabase : IMissumDatabase, IAsyncDisposable
             """;
         command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToDb());
         await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+    }
+
+    private static async Task ApplyMigrationFiftyNineAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        // Claude Meetings is a fourth session mode. Like migration 49, the CHECK
+        // constraint can only be widened by rebuilding the two mode-owned tables.
+        const string oldCheck = "CHECK(chat_mode IN ('general','coding','claudescience'))";
+        const string newCheck = "CHECK(chat_mode IN ('general','coding','claudescience','claudemeetings'))";
+        await using (var pragma = connection.CreateCommand())
+        {
+            pragma.CommandText = "PRAGMA foreign_keys=OFF; PRAGMA legacy_alter_table=ON;";
+            await pragma.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        try
+        {
+            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=59;";
+            if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+            {
+                await RebuildModeTableAsync(connection, transaction, "chat_session_groups", oldCheck, newCheck, cancellationToken, "_claudemeetings_v59").ConfigureAwait(false);
+                await RebuildModeTableAsync(connection, transaction, "chat_sessions", oldCheck, newCheck, cancellationToken, "_claudemeetings_v59").ConfigureAwait(false);
+                command.CommandText = "INSERT INTO schema_migrations(version,applied_at) VALUES(59,$now);";
+                command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            await using var pragma = connection.CreateCommand();
+            pragma.CommandText = "PRAGMA legacy_alter_table=OFF; PRAGMA foreign_keys=ON;";
+            await pragma.ExecuteNonQueryAsync(CancellationToken.None).ConfigureAwait(false);
+        }
     }
 
     private static async Task ApplyMarkerMigrationAsync(SqliteConnection connection, int version, CancellationToken cancellationToken)

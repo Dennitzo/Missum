@@ -199,7 +199,7 @@ public sealed class ComputerDesktopBrokerTests
     [Fact]
     public async Task RejectsStaleFramesAndMismatchedImageCoordinates()
     {
-        var platform = new FakePlatform { Age = TimeSpan.FromMinutes(2) };
+        var platform = new FakePlatform { Age = ComputerDesktopBroker.ObservationLifetime + TimeSpan.FromMinutes(1) };
         using var broker = new ComputerDesktopBroker(new FakeApproval(), platform);
         broker.Begin(Session, Run);
         var stale = await broker.ObserveAsync(Session, Run);

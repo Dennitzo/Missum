@@ -1150,6 +1150,76 @@ def op_project_save_as(args, context):
     return _save_project(target, workspace_root)
 
 
+EXPORT_FORMATS = {"fbx": ".fbx", "glb": ".glb", "gltf": ".gltf", "obj": ".obj", "usd": ".usdc"}
+
+
+def op_project_export(args, context):
+    """Exportiert Geometrie für Unreal (Standard: FBX nach Import/Blender im Projektordner).
+
+    Die FBX-Einstellungen passen zu Unreals Import: Einheiten skaliert, keine Leaf-Bones,
+    Flächen-Glättung mitgegeben. Nur der Projektordner ist als Ziel erlaubt.
+    """
+    import os
+
+    fmt = (_as_str(args, "format") or "fbx").lower()
+    if fmt not in EXPORT_FORMATS:
+        raise ToolError("blender.export_format", "format muss fbx, glb, gltf, obj oder usd sein.")
+    workspace_root = context.get("workspaceRoot", "")
+    if not workspace_root:
+        raise ToolError("blender.export_workspace", "Für den Export ist ein Projektordner nötig.")
+    name = _as_str(args, "name") or os.path.splitext(os.path.basename(bpy.data.filepath or "Szene"))[0] or "Szene"
+    relative = _as_str(args, "exportPath") or os.path.join("Import", "Blender", name + EXPORT_FORMATS[fmt])
+    target = relative if os.path.isabs(relative) else os.path.join(workspace_root, relative)
+    if not target.lower().endswith(EXPORT_FORMATS[fmt]) and not (fmt == "usd" and target.lower().endswith((".usd", ".usda"))):
+        target += EXPORT_FORMATS[fmt]
+    target = _workspace_project_file(target, workspace_root)
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+
+    wanted = args.get("objects")
+    view_layer = bpy.context.view_layer
+    previous_selection = [obj for obj in view_layer.objects if obj.select_get()]
+    previous_active = view_layer.objects.active
+    selected_only = False
+    if isinstance(wanted, list) and wanted:
+        missing = [n for n in wanted if n not in bpy.data.objects]
+        if missing:
+            raise ToolError("blender.export_objects", "Diese Objekte gibt es nicht: " + ", ".join(map(str, missing)))
+        for obj in view_layer.objects:
+            obj.select_set(obj.name in wanted)
+        selected_only = True
+    try:
+        if fmt == "fbx":
+            bpy.ops.export_scene.fbx(filepath=target, use_selection=selected_only, apply_unit_scale=True,
+                                     apply_scale_options="FBX_SCALE_UNITS", mesh_smooth_type="FACE",
+                                     add_leaf_bones=False, bake_anim=_as_bool(args.get("animation"), False),
+                                     path_mode="COPY", embed_textures=True)
+        elif fmt in ("glb", "gltf"):
+            bpy.ops.export_scene.gltf(filepath=target, export_format="GLB" if fmt == "glb" else "GLTF_SEPARATE",
+                                      use_selection=selected_only)
+        elif fmt == "obj":
+            bpy.ops.wm.obj_export(filepath=target, export_selected_objects=selected_only)
+        else:
+            bpy.ops.wm.usd_export(filepath=target, selected_objects_only=selected_only)
+    except Exception as error:
+        raise ToolError("blender.export_failed", f"Der Export ist fehlgeschlagen: {error}")
+    finally:
+        for obj in view_layer.objects:
+            obj.select_set(obj in previous_selection)
+        view_layer.objects.active = previous_active
+    if not os.path.exists(target) or os.path.getsize(target) == 0:
+        raise ToolError("blender.export_missing", "Die Exportdatei wurde nicht geschrieben.")
+    exported = [n for n in (wanted or [o.name for o in bpy.data.objects if o.type == "MESH"])]
+    relative_path = os.path.relpath(target, workspace_root)
+    return {
+        "exportPath": target,
+        "relativePath": relative_path,
+        "format": fmt,
+        "bytes": os.path.getsize(target),
+        "objects": exported[:200],
+        "nextStep": "In Unreal mit unreal.asset operation import und filePath auf diese Datei importieren.",
+    }
+
+
 def op_project_open(args, context):
     target = _as_str(args, "projectFile")
     if not target:
@@ -1516,6 +1586,7 @@ OPERATIONS = {
     "collection.create": op_collection_create,
     "modifier.add": op_modifier_add,
     "project.saveAs": op_project_save_as,
+    "project.export": op_project_export,
     "project.open": op_project_open,
 }
 

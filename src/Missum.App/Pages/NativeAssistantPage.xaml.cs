@@ -301,7 +301,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                 _mode = newMode;
                 _running = _changeReceiptState.IsPromptPending(_session)
                     || (S(data, "isRunning") == "True" && !_finishedSessions.Contains(_session));
-                ModeLabel.Text = _mode switch { "coding" => "Codex", "claudescience" => "Claude Science", _ => "ChatGPT" };
+                ModeLabel.Text = _mode switch { "coding" => "Codex", "claudescience" => "Claude Science", "claudemeetings" => "Claude Meetings", _ => "ChatGPT" };
                 ChatStatus = _running && !S(data, "runStatus").StartsWith("Modell generiert", StringComparison.Ordinal) ? S(data, "runStatus") + "  " + S(data, "runDetail") : "";
                 _persistentAction = S(data, "selectedExtensionActionId");
                 if (_persistentAction == BuiltInActionIds.DeepResearch) _persistentAction = null;
@@ -312,7 +312,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                 }
                 else if (_selectedAction is not null)
                     UpdateSelectedToolChip(_lastToolChipLabel);
-                if (ActiveSubagent is null) Composer.PlaceholderText = _mode switch { "coding" => "Leg einfach los", "claudescience" => "Stelle eine Forschungsfrage", _ => "Frag etwas" };
+                if (ActiveSubagent is null) Composer.PlaceholderText = _mode switch { "coding" => "Leg einfach los", "claudescience" => "Stelle eine Forschungsfrage", "claudemeetings" => "Nachricht an alle oder @Missum", _ => "Frag etwas" };
                 _rendering = true;
                 if (changed) Composer.Text = S(data, "draft");
                 _rendering = false;
@@ -336,6 +336,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                 if (data.TryGetProperty("changesSummary", out var changes)) RenderChanges(changes);
                 SetRunning();
                 SyncResearchSession();
+                SyncMeetingsSession();
                 // Closed tool details and older pages intentionally omit URLs.
                 // Load only the compact source index, independently of the tab.
                 if (!_selectionInputSmokeActive && (changed || type == "state.snapshot"))
@@ -732,6 +733,14 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     }
     public async void OnToggleInspector(object sender, RoutedEventArgs e)
     {
+        if (IsMeetingsMode)
+        {
+            // In Claude Meetings the right sidebar is the meeting chat.
+            _meetingChatRequested = Inspector.Visibility != Visibility.Visible;
+            UpdateResponsiveLayout();
+            MarkMeetingsDirty(chat: true, stage: true);
+            return;
+        }
         try { await SetInspectorVisibleAsync(Inspector.Visibility != Visibility.Visible); }
         catch (Exception exception) when (exception is not OutOfMemoryException) { ShowError(exception.Message); }
     }
@@ -843,13 +852,25 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     {
         if (Inspector is null || InspectorColumn is null || AssistantFrame is null || InspectorToggle is null) return;
         var available = NativeInspectorLayout.HasRoom(AssistantFrame.ActualWidth);
-        var visible = available && _inspectorRequested;
-        var width = visible ? NativeInspectorLayout.SidebarWidth : 0;
+        var meetings = IsMeetingsMode;
+        var visible = available && (meetings ? _meetingChatRequested : _inspectorRequested);
+        var width = visible ? meetings ? MeetingChatWidth : NativeInspectorLayout.SidebarWidth : 0;
+        if (Inspector.Width != (meetings ? MeetingChatWidth : NativeInspectorLayout.SidebarWidth))
+            Inspector.Width = meetings ? MeetingChatWidth : NativeInspectorLayout.SidebarWidth;
+        var chatVisibility = meetings ? Visibility.Visible : Visibility.Collapsed;
+        if (MeetingChatHost.Visibility != chatVisibility)
+        {
+            MeetingChatHost.Visibility = chatVisibility;
+            InspectorScroll.Visibility = meetings ? Visibility.Collapsed : Visibility.Visible;
+            if (meetings) { _meetingChatSignature = null; MarkMeetingsDirty(chat: true); }
+        }
         if (InspectorColumn.Width.Value != width) InspectorColumn.Width = new(width);
         var visibility = visible ? Visibility.Visible : Visibility.Collapsed;
         if (Inspector.Visibility != visibility) Inspector.Visibility = visibility;
         InspectorToggle.IsEnabled = available;
-        var label = !available ? "Ausgaben bei größerem Fenster verfügbar" : visible ? "Ausgaben schließen" : "Ausgaben öffnen";
+        var label = meetings
+            ? !available ? "Chat bei größerem Fenster verfügbar" : visible ? "Meeting-Chat schließen" : "Meeting-Chat öffnen"
+            : !available ? "Ausgaben bei größerem Fenster verfügbar" : visible ? "Ausgaben schließen" : "Ausgaben öffnen";
         ToolTipService.SetToolTip(InspectorToggle, label);
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(InspectorToggle, label);
         RefreshInspectorWorkingPlan();
@@ -975,6 +996,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         Composer.IsReadOnly = !_navigationState.CanEditComposer || ActiveSubagent is not null;
         UpdateComposerAttachmentControls();
     }
+
     private async Task<string?> FinishDictationForNavigationAsync(Guid sessionId, string? draft)
     {
         if (_dictationSession != sessionId) return draft;
@@ -1146,8 +1168,8 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         var owner = _dictationSession;
         DispatcherQueue.TryEnqueue(() =>
         {
-            if (!_disposed && owner.HasValue && owner == _dictationSession && owner == _session && _navigationState.CanEditComposer)
-                Composer.Text = (_dictationPrefix + " " + turn.Text).Trim();
+            if (!_disposed && owner.HasValue && owner == _dictationSession && owner == _session && (_meetingDictation || _navigationState.CanEditComposer))
+                DictationTarget.Text = (_dictationPrefix + " " + turn.Text).Trim();
         });
     }
     private void ShowError(string message)
@@ -1191,6 +1213,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         ClearToolTabs(returnToChat: false);
         ClearPlanModeTabs(returnToChat: false);
         DisposeScienceViews();
+        DisposeMeetings();
         _researchRefreshTimer?.Stop();
         _ = CancelNativeMediaCaptureAsync();
         _conversationSelection?.Clear();

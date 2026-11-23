@@ -6,30 +6,32 @@ public sealed partial class RunRepository
     // turn an outstanding screenshot into an apparent verification.
     internal Task<string?> GetBlenderCompletionRepairAsync(string runId, CancellationToken cancellationToken) =>
         GetIntegrationCompletionRepairAsync(runId, "blender.status",
-            "blender.scene.edit", "blender.custom.run", "blender.custom.run", "blender.custom.run",
+            ["blender.scene.edit", "blender.custom.run", "blender.custom.run", "blender.custom.run"],
             "blender.custom.run", "blender.view.capture (view=window)", cancellationToken);
 
     internal Task<string?> GetUnrealCompletionRepairAsync(string runId, CancellationToken cancellationToken) =>
         GetIntegrationCompletionRepairAsync(runId, "unreal.status",
-            "unreal.blueprint.create", "unreal.blueprint.edit", "unreal.blueprint.save", "unreal.camera.create",
-            "unreal.blueprint.edit", "unreal.view.capture", cancellationToken);
+            ["unreal.actor", "unreal.material", "unreal.level", "unreal.blueprint", "unreal.camera",
+             "unreal.light", "unreal.sky", "unreal.asset", "unreal.python"],
+            "unreal.blueprint", "unreal.view.capture", cancellationToken);
 
     private async Task<string?> GetIntegrationCompletionRepairAsync(string runId, string statusTool,
-        string mutation1, string mutation2, string mutation3, string mutation4, string editTool, string captureTool,
+        string[] mutationTools, string editTool, string captureTool,
         CancellationToken cancellationToken)
     {
         await using var connection = await _database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
-        command.CommandText = """
+        var mutationFilter = string.Join(", ", mutationTools.Select(static (_, index) => $"$mutation{index}"));
+        command.CommandText = $$"""
             WITH receipts AS (
                 SELECT r.rowid AS sequence, p.name, r.result_json AS payload
                 FROM client_tool_results r JOIN client_tool_proposals p ON p.proposal_id=r.proposal_id
                 WHERE r.run_id=$run AND p.run_id=$run
-                  AND p.name IN ($mutation1,$mutation2,$mutation3,$mutation4,$status)
+                  AND p.name IN ($status, {{mutationFilter}})
                   AND json_extract(r.result_json,'$.status')='completed'
             ), latest_change AS (
                 SELECT sequence, json_extract(payload,'$.result.operationId') AS operation_id FROM receipts
-                WHERE name IN ($mutation1,$mutation2,$mutation3,$mutation4)
+                WHERE name IN ({{mutationFilter}})
                   AND json_extract(payload,'$.result.visualCheck.required')=1
                   AND coalesce(json_extract(payload,'$.result.deduplicated'),0)=0
                   AND length(json_extract(payload,'$.result.operationId'))>0
@@ -49,10 +51,8 @@ public sealed partial class RunRepository
             """;
         command.Parameters.AddWithValue("$run", runId);
         command.Parameters.AddWithValue("$status", statusTool);
-        command.Parameters.AddWithValue("$mutation1", mutation1);
-        command.Parameters.AddWithValue("$mutation2", mutation2);
-        command.Parameters.AddWithValue("$mutation3", mutation3);
-        command.Parameters.AddWithValue("$mutation4", mutation4);
+        for (var index = 0; index < mutationTools.Length; index++)
+            command.Parameters.AddWithValue($"$mutation{index}", mutationTools[index]);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false)) return null;
         var verdict = reader.IsDBNull(0) ? null : reader.GetString(0);

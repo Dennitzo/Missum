@@ -1,0 +1,19 @@
+[
+  {
+    "tool": "unreal.level",
+    "arguments": { "operation": "open", "assetPath": "/Game/Maps/MissumCityGrid", "operationId": "phaseY2-open-0001" }
+  },
+  {
+    "tool": "unreal.blueprint",
+    "arguments": { "operation": "template", "template": "questComponent", "replace": true, "operationId": "phaseY2-bp-1" },
+    "timeout": 600
+  },
+  {
+    "tool": "unreal.blueprint",
+    "arguments": { "operation": "read", "assetPath": "/Game/Blueprints/Mission/BPC_QuestTracker" }
+  },
+  {
+    "tool": "unreal.blueprint",
+    "arguments": { "operation": "read", "assetPath": "/Game/Blueprints/Mission/DT_QuestObjective" }
+  }
+]

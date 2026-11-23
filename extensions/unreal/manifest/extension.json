@@ -1,24 +1,42 @@
 {
   "schemaVersion": 1,
   "id": "com.missum.unreal",
-  "version": "0.1.0",
+  "version": "0.3.5",
   "displayName": "Unreal Engine",
   "publisher": "Missum",
-  "groups": [{ "groupId": "integrations", "label": "Programmintegrationen", "groupOrder": 60 }],
-  "entrypoints": [{ "kind": "desktop", "path": "adapter/Missum.UnrealAdapter.exe" }],
-  "permissions": ["fileWrite", "network"],
-  "actions": [{
-    "actionId": "com.missum.unreal/edit",
-    "displayName": "Unreal Engine",
-    "description": "Öffnet ein Unreal-Projekt im Workspace und bearbeitet Blueprint-Graphen im Editor.",
-    "iconKey": "unreal",
-    "groupId": "integrations",
-    "groupOrder": 60,
-    "itemOrder": 20,
-    "supportedChatModes": ["coding"],
-    "actionKind": "selectableTool",
-    "selectionBehavior": "toggle"
-  }],
+  "groups": [
+    {
+      "groupId": "integrations",
+      "label": "Programmintegrationen",
+      "groupOrder": 60
+    }
+  ],
+  "entrypoints": [
+    {
+      "kind": "desktop",
+      "path": "adapter/Missum.UnrealAdapter.exe"
+    }
+  ],
+  "permissions": [
+    "fileWrite",
+    "network"
+  ],
+  "actions": [
+    {
+      "actionId": "com.missum.unreal/edit",
+      "displayName": "Unreal Engine",
+      "description": "Öffnet ein Unreal-Projekt im Workspace und bearbeitet Blueprint-Graphen im Editor.",
+      "iconKey": "unreal",
+      "groupId": "integrations",
+      "groupOrder": 60,
+      "itemOrder": 20,
+      "supportedChatModes": [
+        "coding"
+      ],
+      "actionKind": "selectableTool",
+      "selectionBehavior": "toggle"
+    }
+  ],
   "tools": [
     {
       "actionId": "com.missum.unreal/edit",
@@ -30,12 +48,29 @@
           "visionReview": {
             "type": "object",
             "properties": {
-              "operationId": { "type": "string" },
-              "analyzedSha256": { "type": "string" },
-              "verdict": { "type": "string", "enum": ["verified", "deviation", "unavailable"] },
-              "summary": { "type": "string" }
+              "operationId": {
+                "type": "string"
+              },
+              "analyzedSha256": {
+                "type": "string"
+              },
+              "verdict": {
+                "type": "string",
+                "enum": [
+                  "verified",
+                  "deviation",
+                  "unavailable"
+                ]
+              },
+              "summary": {
+                "type": "string"
+              }
             },
-            "required": ["operationId", "verdict", "summary"],
+            "required": [
+              "operationId",
+              "verdict",
+              "summary"
+            ],
             "additionalProperties": false
           }
         },
@@ -53,8 +88,14 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "projectPath": { "type": "string", "description": "Gewünschte .uproject-Datei innerhalb des Workspace." },
-          "engineVersion": { "type": "string", "description": "Installierte UE-5-Version oder zugehörige Build-Kennung." }
+          "projectPath": {
+            "type": "string",
+            "description": "Gewünschte .uproject-Datei innerhalb des Workspace."
+          },
+          "engineVersion": {
+            "type": "string",
+            "description": "Installierte UE-5-Version oder zugehörige Build-Kennung."
+          }
         },
         "required": [],
         "additionalProperties": false
@@ -65,86 +106,1065 @@
     },
     {
       "actionId": "com.missum.unreal/edit",
-      "modelToolName": "unreal.blueprint.read",
-      "description": "Liest Blueprint-Graphen, Knoten, Pins und Verbindungen. assetPath liegt unter /Game/.",
-      "inputSchema": { "type": "object", "properties": { "assetPath": { "type": "string" } }, "required": ["assetPath"], "additionalProperties": false },
-      "timeoutSeconds": 60, "maximumOutputBytes": 524288, "riskClass": "readOnly"
+      "modelToolName": "unreal.launcher.start",
+      "description": "Findet den Epic Games Launcher ohne festen Pfad und öffnet ihn, falls er nicht läuft. Gemeldet werden Ausführungspfad, Erkennungsquelle und ob ein Fenster läuft.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "timeoutSeconds": 60,
+      "maximumOutputBytes": 65536,
+      "riskClass": "localMutation"
     },
     {
       "actionId": "com.missum.unreal/edit",
-      "modelToolName": "unreal.blueprint.create",
-      "description": "Erstellt einen Actor-Blueprint unter /Game/.",
-      "inputSchema": { "type": "object", "properties": { "assetPath": { "type": "string" }, "operationId": { "type": "string" }, "requireVisualReview": { "type": "boolean" } }, "required": ["assetPath"], "additionalProperties": false },
-      "timeoutSeconds": 120, "maximumOutputBytes": 262144, "riskClass": "localMutation"
-    },
-    {
-      "actionId": "com.missum.unreal/edit",
-      "modelToolName": "unreal.blueprint.edit",
-      "description": "Bearbeitet einen Blueprint mit graph.create/remove, variable.add/remove, component.add/remove/set, node.add/remove oder pin.connect/disconnect. Ein Auftrag enthält eine Operation. Graph und Pin-IDs zuvor mit unreal.blueprint.read ermitteln.",
+      "modelToolName": "unreal.level",
+      "description": "Karten bearbeiten: list, create, open, save, read. Meldet Assetpfade, Dateinachweis auf der Platte und Schauspieler je Klasse mit Ort und Ausdehnung.",
       "inputSchema": {
         "type": "object",
         "properties": {
-          "assetPath": { "type": "string" },
-          "operation": { "type": "string", "enum": ["graph.create", "graph.remove", "variable.add", "variable.remove", "component.add", "component.remove", "component.set", "node.add", "node.remove", "pin.connect", "pin.disconnect"] },
-          "graph": { "type": "string" },
-          "name": { "type": "string" },
-          "type": { "type": "string", "enum": ["bool", "int", "float", "string", "name", "vector"] },
-          "defaultValue": { "type": "string" },
-          "property": { "type": "string" },
-          "value": { "type": "string" },
-          "kind": { "type": "string", "enum": ["event", "call", "get", "set"] },
-          "classPath": { "type": "string", "description": "Für component.add eine native ActorComponent-Klasse wie /Script/Engine.StaticMeshComponent." },
-          "x": { "type": "integer" },
-          "y": { "type": "integer" },
-          "fromNode": { "type": "string" },
-          "nodeId": { "type": "string" },
-          "fromPin": { "type": "string" },
-          "toNode": { "type": "string" },
-          "toPin": { "type": "string" },
-          "operationId": { "type": "string" },
-          "requireVisualReview": { "type": "boolean" }
+          "operation": {
+            "type": "string",
+            "enum": [
+              "list",
+              "create",
+              "open",
+              "save",
+              "read"
+            ]
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 400
+          },
+          "levelName": {
+            "type": "string"
+          },
+          "folder": {
+            "type": "string",
+            "description": "Zielordner unter /Game/, Standard /Game/Maps."
+          },
+          "template": {
+            "type": "string",
+            "description": "Vorlagenpaket, zum Beispiel /Engine/Maps/Templates/Template_Default."
+          },
+          "save": {
+            "type": "boolean"
+          },
+          "operationId": {
+            "type": "string"
+          },
+          "requireVisualReview": {
+            "type": "boolean"
+          },
+          "assetPath": {
+            "type": "string"
+          },
+          "classFilter": {
+            "type": "string"
+          },
+          "labelledOnly": {
+            "type": "boolean"
+          }
         },
-        "required": ["assetPath", "operation"],
+        "required": [
+          "operation"
+        ],
         "additionalProperties": false
       },
-      "timeoutSeconds": 120, "maximumOutputBytes": 262144, "riskClass": "localMutation"
+      "timeoutSeconds": 300,
+      "maximumOutputBytes": 524288,
+      "riskClass": "localMutation"
     },
     {
       "actionId": "com.missum.unreal/edit",
-      "modelToolName": "unreal.blueprint.compile",
-      "description": "Kompiliert den Blueprint und gibt Compilerdiagnosen zurück.",
-      "inputSchema": { "type": "object", "properties": { "assetPath": { "type": "string" } }, "required": ["assetPath"], "additionalProperties": false },
-      "timeoutSeconds": 120, "maximumOutputBytes": 262144, "riskClass": "localMutation"
+      "modelToolName": "unreal.asset",
+      "description": "Assetkatalog und Import: list, read, import. Holt FBX, obj oder glTF aus dem Projektordner nach /Game/ und nennt Materialfelder, Stufenzahl und Texturgroesse.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "type": "string",
+            "enum": [
+              "list",
+              "read",
+              "import"
+            ]
+          },
+          "folder": {
+            "type": "string"
+          },
+          "recursive": {
+            "type": "boolean"
+          },
+          "classFilter": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 400
+          },
+          "assetPath": {
+            "type": "string"
+          },
+          "actorName": {
+            "type": "string"
+          },
+          "operationId": {
+            "type": "string"
+          },
+          "filePath": {
+            "type": "string",
+            "description": "Importdatei innerhalb des Projektordners, zum Beispiel Import/Blender/pillar.fbx."
+          },
+          "assetName": {
+            "type": "string"
+          },
+          "replace": {
+            "type": "boolean"
+          },
+          "save": {
+            "type": "boolean"
+          },
+          "importMaterials": {
+            "type": "boolean"
+          },
+          "importTextures": {
+            "type": "boolean"
+          },
+          "nanite": {
+            "type": "boolean"
+          },
+          "mergeVertices": {
+            "type": "boolean"
+          },
+          "requireVisualReview": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "additionalProperties": false
+      },
+      "timeoutSeconds": 600,
+      "maximumOutputBytes": 524288,
+      "riskClass": "localMutation"
     },
     {
       "actionId": "com.missum.unreal/edit",
-      "modelToolName": "unreal.blueprint.save",
-      "description": "Speichert das Blueprint-Asset im verbundenen Projekt.",
-      "inputSchema": { "type": "object", "properties": { "assetPath": { "type": "string" }, "operationId": { "type": "string" }, "requireVisualReview": { "type": "boolean" } }, "required": ["assetPath"], "additionalProperties": false },
-      "timeoutSeconds": 120, "maximumOutputBytes": 262144, "riskClass": "localMutation"
+      "modelToolName": "unreal.material",
+      "description": "Materialien: create, read, edit, assign. edit=values (oder nur Werte wie baseColor/metallic) setzt Startwerte; replace=true überschreibt sie bei create. Liest Parameter, Knoten und Nutzer.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "type": "string",
+            "enum": [
+              "create",
+              "read",
+              "edit",
+              "assign"
+            ]
+          },
+          "assetName": {
+            "type": "string"
+          },
+          "folder": {
+            "type": "string"
+          },
+          "parentMaterial": {
+            "type": "string"
+          },
+          "baseColor": {
+            "type": "object",
+            "properties": {
+              "r": {
+                "type": "number"
+              },
+              "g": {
+                "type": "number"
+              },
+              "b": {
+                "type": "number"
+              },
+              "a": {
+                "type": "number"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "r",
+              "g",
+              "b"
+            ],
+            "description": "Farbe mit r, g, b (0–1) und optional a."
+          },
+          "emissiveColor": {
+            "type": "object",
+            "properties": {
+              "r": {
+                "type": "number"
+              },
+              "g": {
+                "type": "number"
+              },
+              "b": {
+                "type": "number"
+              },
+              "a": {
+                "type": "number"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "r",
+              "g",
+              "b"
+            ],
+            "description": "Farbe mit r, g, b (0–1) und optional a."
+          },
+          "metallic": {
+            "type": "number"
+          },
+          "roughness": {
+            "type": "number"
+          },
+          "specular": {
+            "type": "number"
+          },
+          "opacity": {
+            "type": "number"
+          },
+          "emissiveIntensity": {
+            "type": "number"
+          },
+          "texture": {
+            "type": "string"
+          },
+          "scalars": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "number"
+            }
+          },
+          "vectors": {
+            "type": "object"
+          },
+          "staticSwitches": {
+            "type": "object"
+          },
+          "replace": {
+            "type": "boolean"
+          },
+          "save": {
+            "type": "boolean"
+          },
+          "operationId": {
+            "type": "string"
+          },
+          "requireVisualReview": {
+            "type": "boolean"
+          },
+          "assetPath": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "scalar",
+              "vector",
+              "texture",
+              "staticSwitch"
+            ]
+          },
+          "value": {},
+          "property": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "expressionPath": {
+            "type": "string"
+          },
+          "fromExpression": {
+            "type": "string"
+          },
+          "toExpression": {
+            "type": "string"
+          },
+          "fromOutput": {
+            "type": "string"
+          },
+          "toInput": {
+            "type": "string"
+          },
+          "output": {
+            "type": "string"
+          },
+          "texturePath": {
+            "type": "string"
+          },
+          "x": {
+            "type": "integer"
+          },
+          "y": {
+            "type": "integer"
+          },
+          "materialPath": {
+            "type": "string"
+          },
+          "actorName": {
+            "type": "string"
+          },
+          "componentPath": {
+            "type": "string"
+          },
+          "meshAssetPath": {
+            "type": "string"
+          },
+          "blueprintPath": {
+            "type": "string"
+          },
+          "slot": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "slotName": {
+            "type": "string"
+          },
+          "allSlots": {
+            "type": "boolean"
+          },
+          "edit": {
+            "type": "string",
+            "enum": [
+              "values",
+              "parameter",
+              "expression.add",
+              "expression.remove",
+              "expression.connect",
+              "property.connect",
+              "blendMode",
+              "shadingModel",
+              "usage",
+              "recompile"
+            ]
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "additionalProperties": false
+      },
+      "timeoutSeconds": 300,
+      "maximumOutputBytes": 524288,
+      "riskClass": "localMutation"
     },
     {
       "actionId": "com.missum.unreal/edit",
-      "modelToolName": "unreal.camera.create",
-      "description": "Erstellt eine Kamera in der aktuellen Editor-Welt. Die Karte wird geändert, jedoch nicht gespeichert. Position in Unreal-Einheiten, Winkel in Grad.",
-      "inputSchema": { "type": "object", "properties": {
-        "cameraName": { "type": "string" },
-        "position": { "type": "object", "properties": { "x": { "type": "number" }, "y": { "type": "number" }, "z": { "type": "number" } }, "required": ["x", "y", "z"], "additionalProperties": false },
-        "rotation": { "type": "object", "properties": { "pitch": { "type": "number" }, "yaw": { "type": "number" }, "roll": { "type": "number" } }, "required": ["pitch", "yaw", "roll"], "additionalProperties": false },
-        "operationId": { "type": "string" }, "requireVisualReview": { "type": "boolean" }
-      }, "required": ["cameraName", "position", "rotation"], "additionalProperties": false },
-      "timeoutSeconds": 120, "maximumOutputBytes": 131072, "riskClass": "localMutation"
+      "modelToolName": "unreal.actor",
+      "description": "Schauspieler: place, read, set, remove, verify. verify meldet Lage, Ausdehnung, Materialfelder, Abstand und ob der Rahmen im Blickfeld liegt.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "type": "string",
+            "enum": [
+              "place",
+              "read",
+              "set",
+              "remove",
+              "verify"
+            ]
+          },
+          "assetPath": {
+            "type": "string"
+          },
+          "primitive": {
+            "type": "string",
+            "enum": [
+              "cube",
+              "sphere",
+              "plane",
+              "cylinder",
+              "cone"
+            ]
+          },
+          "actorClass": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "position": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "number"
+              },
+              "y": {
+                "type": "number"
+              },
+              "z": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "x",
+              "y",
+              "z"
+            ],
+            "additionalProperties": false
+          },
+          "rotation": {
+            "type": "object",
+            "properties": {
+              "pitch": {
+                "type": "number"
+              },
+              "yaw": {
+                "type": "number"
+              },
+              "roll": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "pitch",
+              "yaw",
+              "roll"
+            ],
+            "additionalProperties": false
+          },
+          "scale": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "number"
+              },
+              "y": {
+                "type": "number"
+              },
+              "z": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "x",
+              "y",
+              "z"
+            ],
+            "additionalProperties": false
+          },
+          "visible": {
+            "type": "boolean"
+          },
+          "operationId": {
+            "type": "string"
+          },
+          "requireVisualReview": {
+            "type": "boolean"
+          },
+          "actorName": {
+            "type": "string"
+          },
+          "property": {
+            "type": "string"
+          },
+          "value": {},
+          "componentPath": {
+            "type": "string"
+          },
+          "cameraName": {
+            "type": "string"
+          },
+          "referenceActor": {
+            "type": "string"
+          },
+          "referencePosition": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "number"
+              },
+              "y": {
+                "type": "number"
+              },
+              "z": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "x",
+              "y",
+              "z"
+            ],
+            "additionalProperties": false
+          },
+          "expectLocation": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "number"
+              },
+              "y": {
+                "type": "number"
+              },
+              "z": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "x",
+              "y",
+              "z"
+            ],
+            "additionalProperties": false
+          },
+          "expectExtent": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "number"
+              },
+              "y": {
+                "type": "number"
+              },
+              "z": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "x",
+              "y",
+              "z"
+            ],
+            "additionalProperties": false
+          },
+          "tolerance": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "additionalProperties": false
+      },
+      "timeoutSeconds": 300,
+      "maximumOutputBytes": 524288,
+      "riskClass": "localMutation"
+    },
+    {
+      "actionId": "com.missum.unreal/edit",
+      "modelToolName": "unreal.camera",
+      "description": "Kameras: create, set, frame. frame richtet eine Kamera (cameraName) oder ohne cameraName den Editor-Viewport auf Auswahl, Bereich oder ganze Karte aus. Drehungen als pitch/yaw/roll in Grad.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "type": "string",
+            "enum": [
+              "create",
+              "set",
+              "frame"
+            ]
+          },
+          "cameraName": {
+            "type": "string"
+          },
+          "position": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "number"
+              },
+              "y": {
+                "type": "number"
+              },
+              "z": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "x",
+              "y",
+              "z"
+            ],
+            "additionalProperties": false
+          },
+          "rotation": {
+            "type": "object",
+            "properties": {
+              "pitch": {
+                "type": "number"
+              },
+              "yaw": {
+                "type": "number"
+              },
+              "roll": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "pitch",
+              "yaw",
+              "roll"
+            ],
+            "additionalProperties": false
+          },
+          "operationId": {
+            "type": "string"
+          },
+          "requireVisualReview": {
+            "type": "boolean"
+          },
+          "fieldOfView": {
+            "type": "number"
+          },
+          "aperture": {
+            "type": "number"
+          },
+          "focusDistance": {
+            "type": "number"
+          },
+          "nearClip": {
+            "type": "number"
+          },
+          "farClip": {
+            "type": "number"
+          },
+          "actorName": {
+            "type": "string"
+          },
+          "selected": {
+            "type": "boolean"
+          },
+          "pitch": {
+            "type": "number"
+          },
+          "yaw": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "additionalProperties": false
+      },
+      "timeoutSeconds": 300,
+      "maximumOutputBytes": 262144,
+      "riskClass": "localMutation"
+    },
+    {
+      "actionId": "com.missum.unreal/edit",
+      "modelToolName": "unreal.light",
+      "description": "Lichtquellen: create, set, read. Gerichtetes, Punkt-, Spot-, Rechteck-, Himmels-, Nebel- und Postprozesslicht mit Intensitaet, Farbe, Temperatur und Schatten.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "type": "string",
+            "enum": [
+              "create",
+              "set",
+              "read"
+            ]
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "directional",
+              "point",
+              "spot",
+              "rect",
+              "sky",
+              "fog",
+              "postProcess"
+            ]
+          },
+          "lightName": {
+            "type": "string"
+          },
+          "position": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "number"
+              },
+              "y": {
+                "type": "number"
+              },
+              "z": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "x",
+              "y",
+              "z"
+            ],
+            "additionalProperties": false
+          },
+          "rotation": {
+            "type": "object",
+            "properties": {
+              "pitch": {
+                "type": "number"
+              },
+              "yaw": {
+                "type": "number"
+              },
+              "roll": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "pitch",
+              "yaw",
+              "roll"
+            ],
+            "additionalProperties": false
+          },
+          "intensity": {
+            "type": "number"
+          },
+          "temperature": {
+            "type": "number"
+          },
+          "attenuationRadius": {
+            "type": "number"
+          },
+          "innerCone": {
+            "type": "number"
+          },
+          "outerCone": {
+            "type": "number"
+          },
+          "sourceAngle": {
+            "type": "number"
+          },
+          "castShadows": {
+            "type": "boolean"
+          },
+          "visible": {
+            "type": "boolean"
+          },
+          "operationId": {
+            "type": "string"
+          },
+          "requireVisualReview": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "additionalProperties": false
+      },
+      "timeoutSeconds": 300,
+      "maximumOutputBytes": 262144,
+      "riskClass": "localMutation"
+    },
+    {
+      "actionId": "com.missum.unreal/edit",
+      "modelToolName": "unreal.sky",
+      "description": "Himmel: create, read. Setzt Sonne, Himmelslicht, Atmosphaere, Nebel und Wolken aus Tageszeit oder Sonnenstand und meldet die berechneten Werte.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "type": "string",
+            "enum": [
+              "create",
+              "read"
+            ]
+          },
+          "timeOfDay": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 24
+          },
+          "sunAltitude": {
+            "type": "number"
+          },
+          "sunAzimuth": {
+            "type": "number"
+          },
+          "sunIntensity": {
+            "type": "number"
+          },
+          "nightSunIntensity": {
+            "type": "number"
+          },
+          "skyIntensity": {
+            "type": "number"
+          },
+          "cloudiness": {
+            "type": "number"
+          },
+          "fogDensity": {
+            "type": "number"
+          },
+          "operationId": {
+            "type": "string"
+          },
+          "requireVisualReview": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "additionalProperties": false
+      },
+      "timeoutSeconds": 300,
+      "maximumOutputBytes": 262144,
+      "riskClass": "localMutation"
+    },
+    {
+      "actionId": "com.missum.unreal/edit",
+      "modelToolName": "unreal.class",
+      "description": "Klassen: search. Findet verfuegbare Elternklassen nach Suchwort samt Pfad und Mitgliedern.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "type": "string",
+            "enum": [
+              "search"
+            ]
+          },
+          "query": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 300
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "additionalProperties": false
+      },
+      "timeoutSeconds": 90,
+      "maximumOutputBytes": 262144,
+      "riskClass": "readOnly"
+    },
+    {
+      "actionId": "com.missum.unreal/edit",
+      "modelToolName": "unreal.blueprint",
+      "description": "Blueprints: create, read, edit, compile, save, template. Die Teiloperation von edit steht im Feld edit, der Bauplan von template im Feld template.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "type": "string",
+            "enum": [
+              "create",
+              "read",
+              "edit",
+              "compile",
+              "save",
+              "template"
+            ]
+          },
+          "assetPath": {
+            "type": "string"
+          },
+          "operationId": {
+            "type": "string"
+          },
+          "requireVisualReview": {
+            "type": "boolean"
+          },
+          "graph": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "bool",
+              "int",
+              "float",
+              "string",
+              "name",
+              "vector"
+            ]
+          },
+          "defaultValue": {
+            "type": "string"
+          },
+          "property": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "event",
+              "call",
+              "get",
+              "set"
+            ]
+          },
+          "classPath": {
+            "type": "string",
+            "description": "Für component.add eine native ActorComponent-Klasse wie /Script/Engine.StaticMeshComponent."
+          },
+          "x": {
+            "type": "integer"
+          },
+          "y": {
+            "type": "integer"
+          },
+          "fromNode": {
+            "type": "string"
+          },
+          "nodeId": {
+            "type": "string"
+          },
+          "fromPin": {
+            "type": "string"
+          },
+          "toNode": {
+            "type": "string"
+          },
+          "toPin": {
+            "type": "string"
+          },
+          "edit": {
+            "type": "string",
+            "enum": [
+              "variable.add",
+              "variable.remove",
+              "graph.create",
+              "graph.remove",
+              "node.add",
+              "node.remove",
+              "pin.connect",
+              "pin.disconnect",
+              "component.add",
+              "component.remove",
+              "component.set"
+            ]
+          },
+          "template": {
+            "type": "string",
+            "enum": [
+              "gameMode",
+              "playerCharacter",
+              "npc",
+              "questObjective",
+              "questComponent"
+            ]
+          },
+          "parentClass": {
+            "type": "string"
+          },
+          "assetType": {
+            "type": "string",
+            "enum": [
+              "blueprint",
+              "actorBlueprint",
+              "componentBlueprint",
+              "gameModeBlueprint",
+              "characterBlueprint",
+              "dataAssetBlueprint",
+              "widgetBlueprint",
+              "animBlueprint"
+            ]
+          },
+          "folder": {
+            "type": "string"
+          },
+          "assetName": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "additionalProperties": false
+      },
+      "timeoutSeconds": 600,
+      "maximumOutputBytes": 524288,
+      "riskClass": "localMutation"
+    },
+    {
+      "actionId": "com.missum.unreal/edit",
+      "modelToolName": "unreal.python",
+      "description": "Führt Editor-Python mit dem Modul unreal aus (Assets, Actors, Materialien, Subsysteme, Imports, Einstellungen). Für alles, was andere unreal-Werkzeuge nicht abdecken. print und result kommen zurück; per Strg+Z rücknehmbar.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "maxLength": 65536
+          },
+          "description": {
+            "type": "string"
+          },
+          "operationId": {
+            "type": "string"
+          },
+          "requireVisualReview": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "additionalProperties": false
+      },
+      "timeoutSeconds": 600,
+      "maximumOutputBytes": 262144,
+      "riskClass": "localMutation"
     },
     {
       "actionId": "com.missum.unreal/edit",
       "modelToolName": "unreal.view.capture",
       "description": "Nimmt den Editor-Viewport oder eine benannte Projektkamera auf. Das PNG mit image.input und media.analyze auswerten.",
-      "inputSchema": { "type": "object", "properties": {
-        "source": { "type": "string", "enum": ["viewport", "camera"] },
-        "cameraName": { "type": "string" },
-        "operationId": { "type": "string" }
-      }, "required": ["source"], "additionalProperties": false },
-      "timeoutSeconds": 240, "maximumOutputBytes": 131072, "riskClass": "localMutation"
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string",
+            "enum": [
+              "viewport",
+              "camera"
+            ]
+          },
+          "cameraName": {
+            "type": "string"
+          },
+          "operationId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source"
+        ],
+        "additionalProperties": false
+      },
+      "timeoutSeconds": 240,
+      "maximumOutputBytes": 131072,
+      "riskClass": "localMutation"
     }
   ]
 }

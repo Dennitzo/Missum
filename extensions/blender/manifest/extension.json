@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "com.missum.blender",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "displayName": "Blender",
   "publisher": "Missum",
   "groups": [
@@ -70,7 +70,11 @@
               },
               "verdict": {
                 "type": "string",
-                "enum": ["verified", "deviation", "unavailable"],
+                "enum": [
+                  "verified",
+                  "deviation",
+                  "unavailable"
+                ],
                 "description": "verified wenn das Bild der Anforderung entspricht, deviation bei Abweichung, unavailable wenn Vision nicht prüfen konnte."
               },
               "summary": {
@@ -78,7 +82,10 @@
                 "description": "Kurzer, konkreter Sichtbefund aus media.analyze."
               }
             },
-            "required": ["verdict", "summary"],
+            "required": [
+              "verdict",
+              "summary"
+            ],
             "additionalProperties": false
           }
         },
@@ -98,7 +105,11 @@
         "properties": {
           "detail": {
             "type": "string",
-            "enum": ["summary", "selection", "full"]
+            "enum": [
+              "summary",
+              "selection",
+              "full"
+            ]
           },
           "limit": {
             "type": "integer",
@@ -107,12 +118,16 @@
           },
           "include": {
             "type": "array",
-            "items": { "type": "string" },
+            "items": {
+              "type": "string"
+            },
             "description": "Gewünschte Bereiche, z. B. objects, materials, cameras, lights, collections, render. bounds liefert achsparallele Weltgrenzen und Szeneneinheiten für Geometrie- und Anschlussprüfungen."
           },
           "objectNames": {
             "type": "array",
-            "items": { "type": "string" },
+            "items": {
+              "type": "string"
+            },
             "description": "Nur diese Objekte genauer lesen."
           }
         },
@@ -126,7 +141,7 @@
     {
       "actionId": "com.missum.blender/edit",
       "modelToolName": "blender.scene.edit",
-      "description": "Änderungen in der geöffneten Szene ausführen: Objekte anlegen, transformieren, Materialien zuweisen, Kamera und Licht einstellen. Zusammenhängende Schritte als eine Gruppe in operations, immer mit gleicher operationId. save=true schreibt auf dieselbe .blend-Datei.",
+      "description": "Änderungen in der Szene: Objekte anlegen und transformieren, Materialien, Kamera, Licht. Schritte als Gruppe in operations mit gleicher operationId. save=true speichert die .blend. project.export schreibt FBX/GLB nach Import/Blender für Unreal.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -140,16 +155,39 @@
                 "op": {
                   "type": "string",
                   "enum": [
-                    "object.create", "object.duplicate", "object.delete", "object.rename",
-                    "object.transform", "object.parent", "object.visible", "object.shade",
-                    "keyframe.insert", "material.create", "material.assign", "material.update",
-                    "camera.create", "camera.set", "light.create", "world.set", "render.set",
-                    "scene.frame.set", "collection.create", "modifier.add",
-                    "project.saveAs", "project.open"
+                    "object.create",
+                    "object.duplicate",
+                    "object.delete",
+                    "object.rename",
+                    "object.transform",
+                    "object.parent",
+                    "object.visible",
+                    "object.shade",
+                    "keyframe.insert",
+                    "material.create",
+                    "material.assign",
+                    "material.update",
+                    "camera.create",
+                    "camera.set",
+                    "light.create",
+                    "world.set",
+                    "render.set",
+                    "scene.frame.set",
+                    "collection.create",
+                    "modifier.add",
+                    "project.saveAs",
+                    "project.open",
+                    "project.export"
                   ]
                 },
-                "name": { "type": "string", "description": "Name des neuen oder bearbeiteten Elements. Bei material.create ist dies der Materialname." },
-                "target": { "type": "string", "description": "Exakter Objektname für material.assign oder material.create mit direkter Zuweisung. Ungültige Ziele werden abgelehnt." },
+                "name": {
+                  "type": "string",
+                  "description": "Name des neuen oder bearbeiteten Elements. Bei material.create ist dies der Materialname."
+                },
+                "target": {
+                  "type": "string",
+                  "description": "Exakter Objektname für material.assign oder material.create mit direkter Zuweisung. Ungültige Ziele werden abgelehnt."
+                },
                 "projectFile": {
                   "type": "string",
                   "description": "Absoluter .blend-Pfad innerhalb des Workspace für project.open oder zum ersten Speichern mit project.saveAs."
@@ -158,19 +196,95 @@
                   "type": "string",
                   "description": "Grundkörper für object.create: cube, plane, grid, sphere (auch uv_sphere), icosphere, cylinder, cone, torus, circle, monkey."
                 },
-                "location": { "type": "array", "items": { "type": "number" }, "description": "Position des Objektursprungs. Bei cube ist dies die Mitte des Quaders." },
-                "rotation": { "type": "array", "items": { "type": "number" } },
-                "scale": { "type": "array", "items": { "type": "number" }, "description": "Skalierungsfaktoren. Der cube-Grundkörper hat vor der Skalierung Kantenlänge 1." },
-                "dimensions": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3, "description": "Für object.create mit primitive=cube: volle lokale Kantenlängen X, Y, Z. Ohne scale angeben." },
-                "radius": { "type": "number", "description": "Radius eines geeigneten Grundkörpers." },
-                "material": { "type": "string" },
-                "baseColor": { "type": "array", "items": { "type": "number" }, "description": "RGBA-Grundfarbe für material.create und material.update." },
-                "color": { "type": "array", "items": { "type": "number" } },
-                "visible": { "type": "boolean" },
-                "engine": { "type": "string", "description": "Für render.set: workbench, eevee oder cycles. Missum löst die Kennung passend zur laufenden Blender-Version auf." },
-                "frame": { "type": "integer" }
+                "location": {
+                  "type": "array",
+                  "items": {
+                    "type": "number"
+                  },
+                  "description": "Position des Objektursprungs. Bei cube ist dies die Mitte des Quaders."
+                },
+                "rotation": {
+                  "type": "array",
+                  "items": {
+                    "type": "number"
+                  }
+                },
+                "scale": {
+                  "type": "array",
+                  "items": {
+                    "type": "number"
+                  },
+                  "description": "Skalierungsfaktoren. Der cube-Grundkörper hat vor der Skalierung Kantenlänge 1."
+                },
+                "dimensions": {
+                  "type": "array",
+                  "items": {
+                    "type": "number"
+                  },
+                  "minItems": 3,
+                  "maxItems": 3,
+                  "description": "Für object.create mit primitive=cube: volle lokale Kantenlängen X, Y, Z. Ohne scale angeben."
+                },
+                "radius": {
+                  "type": "number",
+                  "description": "Radius eines geeigneten Grundkörpers."
+                },
+                "material": {
+                  "type": "string"
+                },
+                "baseColor": {
+                  "type": "array",
+                  "items": {
+                    "type": "number"
+                  },
+                  "description": "RGBA-Grundfarbe für material.create und material.update."
+                },
+                "color": {
+                  "type": "array",
+                  "items": {
+                    "type": "number"
+                  }
+                },
+                "visible": {
+                  "type": "boolean"
+                },
+                "engine": {
+                  "type": "string",
+                  "description": "Für render.set: workbench, eevee oder cycles. Missum löst die Kennung passend zur laufenden Blender-Version auf."
+                },
+                "frame": {
+                  "type": "integer"
+                },
+                "format": {
+                  "type": "string",
+                  "enum": [
+                    "fbx",
+                    "glb",
+                    "gltf",
+                    "obj",
+                    "usd"
+                  ],
+                  "description": "Nur project.export: Dateiformat, Standard fbx (passend für Unreal)."
+                },
+                "exportPath": {
+                  "type": "string",
+                  "description": "Nur project.export: Ziel im Projektordner, Standard Import/Blender/<Name>.fbx."
+                },
+                "objects": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Nur project.export: exakte Objektnamen; ohne Angabe wird die ganze Szene exportiert."
+                },
+                "animation": {
+                  "type": "boolean",
+                  "description": "Nur project.export (fbx): Animation mitbacken."
+                }
               },
-              "required": ["op"],
+              "required": [
+                "op"
+              ],
               "additionalProperties": true
             }
           },
@@ -187,7 +301,9 @@
             "description": "Beim ersten Versuch frei wählen und bei Wiederholungen gleich lassen; dieselbe Gruppe wird dann nicht zweimal angewendet."
           }
         },
-        "required": ["operations"],
+        "required": [
+          "operations"
+        ],
         "additionalProperties": false
       },
       "timeoutSeconds": 300,
@@ -203,7 +319,11 @@
         "properties": {
           "view": {
             "type": "string",
-            "enum": ["window", "viewport", "render"],
+            "enum": [
+              "window",
+              "viewport",
+              "render"
+            ],
             "description": "Standard window für den sichtbaren Fensterinhalt; viewport und render für eine steuerbare Szene."
           },
           "instanceId": {
@@ -212,10 +332,22 @@
           },
           "engine": {
             "type": "string",
-            "enum": ["workbench", "eevee", "cycles"]
+            "enum": [
+              "workbench",
+              "eevee",
+              "cycles"
+            ]
           },
-          "width": { "type": "integer", "minimum": 160, "maximum": 4096 },
-          "height": { "type": "integer", "minimum": 160, "maximum": 4096 },
+          "width": {
+            "type": "integer",
+            "minimum": 160,
+            "maximum": 4096
+          },
+          "height": {
+            "type": "integer",
+            "minimum": 160,
+            "maximum": 4096
+          },
           "cameraView": {
             "type": "boolean",
             "description": "true durch die aktive Kamera aufnehmen."
@@ -248,7 +380,9 @@
             "description": "true speichert die Szene danach auf denselben Projektpfad."
           }
         },
-        "required": ["code"],
+        "required": [
+          "code"
+        ],
         "additionalProperties": false
       },
       "timeoutSeconds": 240,

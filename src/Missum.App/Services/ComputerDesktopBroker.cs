@@ -47,6 +47,13 @@ internal interface IComputerDesktopPlatform
 /// <summary>Serializes input and owns an explicitly activated, run-bound desktop session.</summary>
 public sealed class ComputerDesktopBroker : IDisposable
 {
+    /// <summary>
+    /// How long one observation authorizes an action. Local vision models need minutes to read a
+    /// 4K desktop and decide; 60 s failed every action. Staleness is still caught where it matters:
+    /// the foreground revision must match and the platform re-checks the pixels at the target point.
+    /// </summary>
+    internal static readonly TimeSpan ObservationLifetime = TimeSpan.FromMinutes(15);
+
     private sealed class Session(Guid sessionId, string runId, IComputerForegroundMonitor monitor)
     {
         public Guid SessionId { get; } = sessionId;
@@ -140,7 +147,7 @@ public sealed class ComputerDesktopBroker : IDisposable
             session.Frame = null;
             if (!session.Activated || frame is null || frame.Public.ObservationId != action.ObservationId)
                 throw new InvalidOperationException("Die Beobachtung ist nicht mehr gültig. Beobachte den Desktop erneut.");
-            if (DateTimeOffset.UtcNow - frame.CapturedAt > TimeSpan.FromSeconds(60))
+            if (DateTimeOffset.UtcNow - frame.CapturedAt > ObservationLifetime)
                 throw new InvalidOperationException("Die Beobachtung ist abgelaufen. Beobachte den Desktop erneut.");
             var waited = await session.Monitor.WaitForExpectedAsync(linked.Token).ConfigureAwait(false);
             if (waited || session.Monitor.Revision != session.FrameRevision)
@@ -212,7 +219,7 @@ public sealed class ComputerDesktopBroker : IDisposable
                 waited = await session.Monitor.WaitForExpectedAsync(linked.Token).ConfigureAwait(false);
                 if (waited || session.Monitor.Revision != session.FrameRevision)
                     throw new InvalidOperationException("Das Vordergrundfenster hat sich während der Freigabe geändert. Bitte erneut beobachten.");
-                if (DateTimeOffset.UtcNow - frame.CapturedAt > TimeSpan.FromSeconds(60))
+                if (DateTimeOffset.UtcNow - frame.CapturedAt > ObservationLifetime)
                     throw new InvalidOperationException("Die Beobachtung ist während der Freigabe abgelaufen. Bitte erneut beobachten.");
                 approved = true;
             }

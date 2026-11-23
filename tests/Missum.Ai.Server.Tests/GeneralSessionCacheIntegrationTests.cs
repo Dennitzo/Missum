@@ -450,6 +450,7 @@ public sealed class GeneralSessionCacheIntegrationTests
         private string? _loaded = ModelA;
         private readonly Dictionary<string, string?> _sessions = new(StringComparer.Ordinal);
         internal List<NativeRequest> Requests { get; } = [];
+        internal List<JsonElement> PlanRequests { get; } = [];
         internal List<Operation> Operations { get; } = [];
         internal List<string> Answers { get; } = [];
         internal bool HoldFirstCompletion { get; init; }
@@ -482,6 +483,23 @@ public sealed class GeneralSessionCacheIntegrationTests
             if (path == "/sessions/save") return Json(new { status = "saved" });
             if (path != "/v1/chat/completions") throw new InvalidOperationException("Unexpected native endpoint: " + path);
             Assert.Equal(_loaded, model);
+            // Codex-Hauptläufe verlangen den initialen Arbeitsplan als ersten Werkzeugschritt.
+            // Each new run (a new user turn) needs its own plan; a resumed run already has one.
+            var planTool = ModelRuntimeClient.ToTransportToolName(Missum.Ai.Server.Core.Coding.CodingWorkingStateTools.PlanTool);
+            if (!PlannedSinceLastUserMessage(body, planTool) && body.TryGetProperty("tools", out var offeredTools)
+                && offeredTools.EnumerateArray().Any(tool => tool.GetProperty("function").GetProperty("name").GetString() == planTool))
+            {
+                PlanRequests.Add(body.Clone());
+                return Json(new
+                {
+                    choices = new[] { new { message = new { role = "assistant", content = (string?)null,
+                        tool_calls = new[] { new { id = "plan-1", type = "function",
+                            function = new { name = ModelRuntimeClient.ToTransportToolName(Missum.Ai.Server.Core.Coding.CodingWorkingStateTools.PlanTool),
+                                arguments = JsonSerializer.Serialize(new { steps = new[] { new { id = "p1", title = "Phase 1: Sitzungskontext prüfen" } }, phase = "planning" }) } } } }, finish_reason = "tool_calls" } },
+                    usage = new { prompt_tokens = 256, completion_tokens = 32 },
+                });
+            }
+            // The mandatory plan step is bookkeeping, not a content turn: tests count content requests only.
             Requests.Add(new(body.Clone(), _sessions.GetValueOrDefault(model), Operations.Count - 1));
             if (HoldFirstCompletion && Requests.Count == 1)
             {
@@ -503,6 +521,15 @@ public sealed class GeneralSessionCacheIntegrationTests
                 choices = new[] { new { message = new { role = "assistant", content = answer, reasoning_content = Reasoning(Requests.Count) }, finish_reason = "stop" } },
                 usage = new { prompt_tokens = 256, completion_tokens = 32 },
             });
+        }
+
+        private static bool PlannedSinceLastUserMessage(JsonElement body, string planTool)
+        {
+            var messages = body.GetProperty("messages").EnumerateArray().ToArray();
+            var lastUser = Array.FindLastIndex(messages, message => message.GetProperty("role").GetString() == "user");
+            return messages.Skip(lastUser + 1).Any(message => message.TryGetProperty("tool_calls", out var calls)
+                && calls.ValueKind == JsonValueKind.Array
+                && calls.EnumerateArray().Any(call => call.GetProperty("function").GetProperty("name").GetString() == planTool));
         }
 
         private static HttpResponseMessage Json(object value) => new(HttpStatusCode.OK)

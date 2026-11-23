@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using Missum.Core.Contracts;
 using Missum.Core.Extensions;
 using Missum.Core.Models;
@@ -149,7 +149,8 @@ public sealed partial class NativeAssistantPage
         if (_activePlanModeTab is not null || _planModeTabHost.Visibility != Visibility.Collapsed
             || Descendants(SessionTabsPanel).OfType<Button>().Any(button => AutomationProperties.GetName(button) == "Plan-Tab: " + planTitle))
             throw new InvalidOperationException("Der Plan-Tab darf in einer anderen Sitzung nicht sichtbar sein.");
-        if (mode == ChatMode.Coding)
+        // Isolated profiles without installed extensions can skip only this check.
+        if (mode == ChatMode.Coding && Environment.GetEnvironmentVariable("MISSUM_SMOKE_SKIP_EXTENSION_CHECK") != "1")
         {
             foreach (var actionId in new[] { "com.missum.blender/edit", "com.missum.unreal/edit" })
             {
@@ -170,7 +171,7 @@ public sealed partial class NativeAssistantPage
             throw new InvalidOperationException("Ein separater Antworten-senden-Button darf nicht angezeigt werden.");
         var firstOption = Descendants(questionCard).OfType<Button>().Single(button => AutomationProperties.GetName(button) == "Unreal-Kameras");
         var ownAnswer = Descendants(questionCard).OfType<TextBox>().Single(input => AutomationProperties.GetName(input) == "Eigene Antwort");
-        var initialColor = (firstOption.Background as SolidColorBrush)?.Color;
+        await SaveMathPreviewAsync(_messageViews[questionMessage.Id.ToString()].View, "native-plan-mode-questions-preview.png");
         ownAnswer.Text = "Eigene Antwort";
         await WaitForNativePreviewFrameAsync();
         if (new ButtonAutomationPeer(firstOption).GetPattern(PatternInterface.Invoke) is not IInvokeProvider invoke)
@@ -179,18 +180,20 @@ public sealed partial class NativeAssistantPage
         await WaitForPagingSmokeAsync(() => intercepted.Count == 1, "Eine einzelne Antwortoption muss unmittelbar gesendet werden.");
         if (intercepted[0].Prompt?.Contains("Unreal-Kameras", StringComparison.Ordinal) != true || intercepted[0].Leave)
             throw new InvalidOperationException("Die unmittelbar gesendete Auswahl stimmt nicht mit der gewählten Option überein.");
-        if (ownAnswer.Text.Length != 0 || (firstOption.Background as SolidColorBrush)?.Color == initialColor)
-            throw new InvalidOperationException("Die Auswahl einer Antwort muss den Freitext löschen und sichtbar markiert sein.");
+        await WaitForNativePreviewFrameAsync();
+        // The card collapses to question + chosen answer with an accent check mark.
+        AssertAnswered(GetCard(questionMessage.Id), "Welche Kameras soll die Vision-Analyse in der ersten Version auswerten?", "Unreal-Kameras");
+        await SaveMathPreviewAsync(_messageViews[questionMessage.Id.ToString()].View, "native-plan-mode-answered-preview.png");
+        questionCard = ReopenQuestions(questionMessage.Id);
+        ownAnswer = Descendants(questionCard).OfType<TextBox>().Single(input => AutomationProperties.GetName(input) == "Eigene Antwort");
         ownAnswer.Text = "Andere Kamera";
         await WaitForNativePreviewFrameAsync();
-        if ((firstOption.Background as SolidColorBrush)?.Color != initialColor)
-            throw new InvalidOperationException("Eine eigene Antwort muss die gewählte Option wieder abwählen.");
         Invoke(Descendants(questionCard).OfType<Button>().Single(button => AutomationProperties.GetName(button) == "Antworten senden"));
         await WaitForPagingSmokeAsync(() => intercepted.Count == 2, "Die eigene Antwort wurde über den Pfeil nicht gesendet.");
         if (intercepted[1].Prompt?.Contains("Andere Kamera", StringComparison.Ordinal) != true)
             throw new InvalidOperationException("Der Freitext wurde nicht korrekt über den Pfeil übergeben.");
-        ownAnswer.Text = "";
-        await SaveMathPreviewAsync(_messageViews[questionMessage.Id.ToString()].View, "native-plan-mode-questions-preview.png");
+        await WaitForNativePreviewFrameAsync();
+        AssertAnswered(GetCard(questionMessage.Id), "Welche Kameras soll die Vision-Analyse in der ersten Version auswerten?", "Andere Kamera");
         intercepted.Clear();
         await OpenFixtureAsync(multi.Id);
         var multiCard = GetCard(multiMessage.Id);
@@ -202,7 +205,14 @@ public sealed partial class NativeAssistantPage
         if (intercepted[0].Prompt?.Contains("Erstes Projekt", StringComparison.Ordinal) != true
             || intercepted[0].Prompt?.Contains("Zweite Kamera", StringComparison.Ordinal) != true)
             throw new InvalidOperationException("Der gemeinsame Antworttext der Mehrfachfragen ist unvollständig.");
+        await WaitForNativePreviewFrameAsync();
+        if (Descendants(GetCard(multiMessage.Id)).OfType<FontIcon>().Count(icon => icon.Glyph == "\uE73E") != 2)
+            throw new InvalidOperationException("Beide beantworteten Rückfragen müssen eingeklappt mit Häkchen erscheinen.");
         intercepted.Clear();
+        multiCard = ReopenQuestions(multiMessage.Id);
+        // The reopened card starts empty again: choose the first answer once more.
+        Invoke(Descendants(multiCard).OfType<Button>().Single(button => AutomationProperties.GetName(button) == "Erstes Projekt"));
+        await WaitForNativePreviewFrameAsync();
         var multiInputs = Descendants(multiCard).OfType<TextBox>().Where(input => AutomationProperties.GetName(input) == "Eigene Antwort").ToArray();
         var multiSends = Descendants(multiCard).OfType<Button>().Where(button => AutomationProperties.GetName(button) == "Antworten senden").ToArray();
         if (multiInputs.Length != 2 || multiSends.Length != 2)
@@ -287,6 +297,28 @@ public sealed partial class NativeAssistantPage
                 throw new InvalidOperationException("Die Planmodus-Test-Sitzung konnte nicht geöffnet werden.");
             ShowChatView(); RenderSessionTabs(); RenderMessagesNow(); UpdateLayout();
             await WaitForNativePreviewFrameAsync();
+        }
+
+        // Smoke only: forget a given answer so the same fixture can be answered again.
+        Border ReopenQuestions(Guid id)
+        {
+            var card = GetCard(id);
+            var key = id.ToString();
+            _planAnswers.Remove(key);
+            card.Tag = null;
+            if (card.Parent is StackPanel panel && DisplayMessages.TryGetValue(key, out var fixture))
+                UpdatePlanInteraction(key, fixture, panel, MessageActionsFor(key, fixture));
+            return GetCard(id);
+        }
+
+        static void AssertAnswered(Border card, string question, string answer)
+        {
+            var texts = Descendants(card).OfType<TextBlock>().Select(block => block.Text).ToList();
+            var questionIndex = texts.IndexOf(question);
+            if (questionIndex < 0 || questionIndex + 1 >= texts.Count || texts[questionIndex + 1] != answer
+                || !Descendants(card).OfType<FontIcon>().Any(icon => icon.Glyph == "\uE73E")
+                || Descendants(card).OfType<TextBox>().Any())
+                throw new InvalidOperationException("Die beantwortete Rückfrage muss eingeklappt Frage, Antwort und Häkchen zeigen: " + answer);
         }
 
         Border GetCard(Guid id) => Descendants(_messageViews[id.ToString()].View).OfType<Border>()

@@ -13,6 +13,74 @@ internal static class Program
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private const string Action = "com.missum.unreal/edit";
+    // Das Gateway erlaubt höchstens 16 Modellwerkzeuge pro Aktion. Deshalb bündelt das
+    // Manifest die Editorbefehle in Gruppenwerkzeuge; hier steht die Übersetzung zurück.
+    private static readonly Dictionary<string, string[]> GroupedCommands =
+        new Dictionary<string, string[]>
+        {
+            ["unreal.level"] = ["list", "create", "open", "save", "read"],
+            ["unreal.asset"] = ["list", "read", "import"],
+            ["unreal.material"] = ["create", "read", "edit", "assign"],
+            ["unreal.actor"] = ["place", "read", "set", "remove", "verify"],
+            ["unreal.camera"] = ["create", "set", "frame"],
+            ["unreal.light"] = ["create", "set", "read"],
+            ["unreal.sky"] = ["create", "read"],
+            ["unreal.class"] = ["search"],
+            ["unreal.blueprint"] = ["create", "read", "edit", "compile", "save", "template"],
+        };
+
+    // Gebündelte Werkzeuge tragen die Teiloperation im Feld operation; für edit steht die
+    // eigentliche Teiloperation im Feld edit. Der Adapter übersetzt das in den granularen
+    // Editorbefehl und entfernt die Steuerfelder, damit die Laufzeit sie nicht als Argument sieht.
+    private static readonly string[] MaterialValueFields =
+        ["baseColor", "emissiveColor", "metallic", "roughness", "specular", "opacity", "emissiveIntensity"];
+
+    private static string GroupedCommand(string tool, JsonObject args, string[] verbs)
+    {
+        var verb = String(args, "operation");
+        if (Array.IndexOf(verbs, verb) < 0)
+            throw new ToolException("unreal.operation_unknown", $"Die Operation '{verb}' gehört nicht zu {tool}.");
+        var prefix = tool[(tool.IndexOf('.') + 1)..];
+        if (verb != "edit")
+        {
+            args.Remove("operation");
+            return prefix + "." + verb;
+        }
+        var sub = String(args, "edit");
+        // Models send material values directly (operation=edit, baseColor, roughness ...) without
+        // the edit field; that is the "values" sub-operation, not an unknown request.
+        if (sub.Length == 0 && prefix == "material"
+            && MaterialValueFields.Any(field => args[field] is not null))
+            sub = "values";
+        if (sub.Length == 0)
+            throw new ToolException("unreal.operation_unknown", prefix == "material"
+                ? "Für unreal.material mit operation=edit fehlt edit (parameter, expression.add, …) oder ein Wert wie baseColor, metallic, roughness."
+                : $"Für {tool} mit operation=edit ist das Feld edit erforderlich.");
+        if (prefix == "blueprint")
+        {
+            var command = sub switch
+            {
+                "variable.add" => "blueprint.variable.add",
+                "variable.remove" => "blueprint.variable.remove",
+                "graph.create" => "blueprint.graph.create",
+                "graph.remove" => "blueprint.graph.remove",
+                "component.add" => "blueprint.component.add",
+                "component.remove" => "blueprint.component.remove",
+                "component.set" => "blueprint.component.set",
+                "node.add" => "blueprint.node.add",
+                "node.remove" => "blueprint.node.remove",
+                "pin.connect" => "blueprint.pin.connect",
+                "pin.disconnect" => "blueprint.pin.disconnect",
+                _ => throw new ToolException("unreal.operation_unknown", "Die Blueprint-Operation wird nicht unterstützt."),
+            };
+            args.Remove("operation");
+            args.Remove("edit");
+            return command;
+        }
+        // Material: die Teiloperation wird zum Argument operation des Editorbefehls.
+        args["operation"] = JsonValue.Create(sub);
+        return "material.edit";
+    }
     private static string Workspace => Path.TrimEndingDirectorySeparator(Path.GetFullPath(
         Environment.GetEnvironmentVariable("ASSISTANT_EXTENSION_WORKSPACE_ROOT")
         ?? throw new ToolException("unreal.workspace_missing", "Wähle zuerst einen vorhandenen Projektordner.")));
@@ -36,9 +104,15 @@ internal static class Program
             var args = payload["arguments"] as JsonObject ?? new();
             var endpoint = args["_missumUnreal"] as JsonObject;
             var engines = args["_missumUnrealEngines"]?.DeepClone();
+            var channel = args["_missumUnrealChannel"]?.DeepClone();
+            var launcher = args["_missumUnrealLauncher"]?.DeepClone();
             args.Remove("_missumUnreal");
             args.Remove("_missumUnrealEngines");
-            var result = await DispatchAsync(String(payload, "modelToolName"), args, endpoint, engines).ConfigureAwait(false);
+            // The launch receipt must not travel into the editor arguments: it would change
+            // the operation fingerprint and leak a local path into the command payload.
+            args.Remove("_missumUnrealChannel");
+            args.Remove("_missumUnrealLauncher");
+            var result = await DispatchAsync(String(payload, "modelToolName"), args, endpoint, engines, channel, launcher).ConfigureAwait(false);
             await ReplyAsync("action.result", id, new JsonObject { ["result"] = result }).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
@@ -48,9 +122,13 @@ internal static class Program
         }
     }
 
-    private static async Task<JsonObject> DispatchAsync(string tool, JsonObject args, JsonObject? endpoint, JsonNode? engines)
+    private static async Task<JsonObject> DispatchAsync(string tool, JsonObject args, JsonObject? endpoint,
+        JsonNode? engines, JsonNode? launchChannel, JsonNode? launcher)
     {
-        using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(4));
+        // The outer host already enforces the per-tool budget from the manifest. A shorter
+        // internal limit would cancel heavy operations such as compiling a Blueprint of a
+        // Character before the caller could report a result.
+        using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(10));
         var token = deadline.Token;
         await using var stateLock = await LockWorkspaceAsync(token).ConfigureAwait(false);
         var state = LoadState();
@@ -73,53 +151,57 @@ internal static class Program
                 ["tool"] = tool, ["connected"] = editor is not null,
                 ["instances"] = windows, ["selected"] = editor?.DeepClone(),
                 ["availableEngines"] = engines,
+                // Kanal getrennt vom Rest: der Start ist lokal belegt, die Fähigkeiten melden aus dem Editor.
+                ["launchChannel"] = launchChannel?.DeepClone(),
+                ["editorChannel"] = editor?["channel"]?.DeepClone(),
+                ["editorCapabilities"] = editor?["capabilities"]?.DeepClone(),
+                ["capabilityLimits"] = editor?["capabilityLimits"]?.DeepClone(),
+                ["launcher"] = launcher?.DeepClone(),
                 ["visionPending"] = state["visionPending"]?.DeepClone(),
                 ["nextStep"] = editor is null
                     ? "Mit unreal.connect ein Arbeitsfenster öffnen. Bereits geöffnete Fenster werden nur beobachtet."
-                    : "Blueprints mit unreal.blueprint.read untersuchen und mit unreal.blueprint.edit bearbeiten.",
+                    : "Fähigkeiten des Editors stehen in editorCapabilities; Aufnahmen mit unreal.view.capture.",
+                ["channel"] = editor is not null
+                    ? $"{String(editor["channel"], "type", "unknown")} über {String(editor["channel"], "pump", "unbekannt")}"
+                    : launchChannel is null ? "kein laufender Editor" : $"{String(launchChannel, "channel", "unknown")} über {String(launchChannel, "pump", "unbekannt")}",
             };
             WriteStatus(editor, windows.Count, state);
             return result;
         }
+        if (tool == "unreal.launcher.start")
+        {
+            // Works without a running editor: it prepares the machine for the Fab download run.
+            if (launcher is not JsonObject found)
+                throw new ToolException("unreal.launcher_not_found",
+                    "Der Epic Games Launcher wurde auf diesem Rechner nicht gefunden. Installiere ihn oder gib ihn manuell an.");
+            found["tool"] = tool;
+            found["nextStep"] = Boolean(found, "running")
+                ? "Der Launcher ist offen. Im Steuerlauf kann die Fab-Bibliothek jetzt bedient werden."
+                : "Der Launcherpfad ist bekannt, das Fenster wurde aber nicht beobachtet.";
+            WriteStatus(editor, 0, state);
+            return found;
+        }
         if (editor is null) throw new ToolException("unreal.not_connected", "Unreal ist nicht verbunden. Zuerst unreal.connect aufrufen.");
         ValidateAssetPath(args);
+        if (tool == "unreal.asset" && String(args, "operation") == "import") ValidateImportFile(args);
         var operationId = String(args, "operationId");
         if (operationId.Length == 0) operationId = Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture);
         string? captureOperationId = null;
         var command = tool switch
         {
-            "unreal.blueprint.read" => "blueprint.read",
-            "unreal.blueprint.create" => "blueprint.create",
-            "unreal.blueprint.edit" => String(args, "operation") switch
-            {
-                "variable.add" => "blueprint.variable.add",
-                "variable.remove" => "blueprint.variable.remove",
-                "graph.create" => "blueprint.graph.create",
-                "graph.remove" => "blueprint.graph.remove",
-                "component.add" => "blueprint.component.add",
-                "component.remove" => "blueprint.component.remove",
-                "component.set" => "blueprint.component.set",
-                "node.add" => "blueprint.node.add",
-                "node.remove" => "blueprint.node.remove",
-                "pin.connect" => "blueprint.pin.connect",
-                "pin.disconnect" => "blueprint.pin.disconnect",
-                _ => throw new ToolException("unreal.operation_unknown", "Die Blueprint-Operation wird nicht unterstützt."),
-            },
-            "unreal.blueprint.compile" => "blueprint.compile",
-            "unreal.blueprint.save" => "blueprint.save",
-            "unreal.camera.create" => "camera.create",
+            _ when GroupedCommands.TryGetValue(tool, out var verbs) => GroupedCommand(tool, args, verbs),
             "unreal.view.capture" => "view.capture",
+            "unreal.python" => "python.run",
             _ => throw new ToolException("unreal.tool_unknown", "Unbekanntes Unreal-Werkzeug."),
         };
-        args.Remove("operation");
         var visual = Boolean(args, "requireVisualReview");
         args.Remove("requireVisualReview");
         if (command == "view.capture")
         {
-            var pendingId = String(state["visionPending"], "operationId");
-            if (pendingId.Length > 0 && String(args, "operationId") is { Length: > 0 } requested && requested != pendingId)
-                throw new ToolException("unreal.vision_operation_mismatch", "Die Aufnahme muss zur aktuellen Änderung gehören.");
-            if (pendingId.Length > 0) operationId = pendingId;
+            // A change that still waits for its picture claims the capture, whatever the caller named
+            // it: the capture shows the current state either way. A capture that already exists does
+            // not block the next one; the new picture simply replaces the pending review.
+            if (PendingCaptureOperation(state["visionPending"]) is { } pendingId) operationId = pendingId;
             var directory = Path.Combine(Root, "captures");
             Directory.CreateDirectory(directory);
             args["outputPath"] = Path.Combine(directory, "unreal-" + Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture) + ".png");
@@ -134,6 +216,10 @@ internal static class Program
                 await Task.Delay(100, token).ConfigureAwait(false);
                 output = await SendAsync(endpoint!, "operation.status", new JsonObject { ["operationId"] = captureOperationId }, token).ConfigureAwait(false);
             }
+            if (String(output, "state") == "failed")
+                throw new ToolException(String(output, "errorCode", "unreal.capture_failed"),
+                    String(output, "errorMessage", "Die Editoraufnahme schlug fehl. "
+                        + "Als Rückfall steht die Fensteraufnahme über image.input offen."));
             var path = String(args, "outputPath");
             if (!File.Exists(path) || new FileInfo(path).Length is <= 8 or > 25 * 1024 * 1024)
                 throw new ToolException("unreal.capture_missing", "Die Unreal-Aufnahme wurde nicht als gültige PNG-Datei gespeichert.");
@@ -157,8 +243,7 @@ internal static class Program
                 ["instruction"] = "Dieses Bild laden, mit media.analyze prüfen und den Befund an unreal.status als visionReview melden." };
             SaveState(state);
         }
-        else if (command == "camera.create" || command.StartsWith("blueprint.", StringComparison.Ordinal)
-            && command is not ("blueprint.read" or "blueprint.compile"))
+        else if (IsVisualMutation(command))
         {
             output["operationId"] = operationId;
             output["visualCheck"] = new JsonObject { ["required"] = visual };
@@ -170,10 +255,46 @@ internal static class Program
                 SaveState(state);
             }
         }
+        if (command == "python.run" && String(args, "code").Contains("HighResShot", StringComparison.OrdinalIgnoreCase))
+            output["captureNotice"] = HighResShotNotice;
         output["tool"] = tool;
         WriteStatus(editor, 0, state);
         return output;
     }
+
+    // In the live run the agent fired HighResShot itself and then guessed the newest file in
+    // Saved/Screenshots: the file arrives seconds later, during PIE it shows the game window, and
+    // it picked an older picture of a different view. The result says so right away.
+    internal const string HighResShotNotice =
+        "HighResShot schreibt asynchron, oft erst Sekunden später, und nimmt während einer Spielvorschau "
+        + "das Spielfenster statt des Editor-Viewports auf. Die neueste Datei in Saved/Screenshots ist deshalb "
+        + "nicht sicher diese Aufnahme. Für eine belegte Aufnahme unreal.view.capture verwenden; sie meldet "
+        + "imagePath und sha256 des tatsächlichen Bildes.";
+
+    /// <summary>The operation of a visible change that has no picture yet, or null.</summary>
+    internal static string? PendingCaptureOperation(JsonNode? pending) =>
+        String(pending, "operationId") is { Length: > 0 } id && String(pending, "sha256").Length == 0 ? id : null;
+
+    /// <summary>
+    /// Changes that can be seen in the viewport get an operation identity and, when the caller
+    /// asks for it, a pending visual review. Pure reads never do.
+    /// </summary>
+    private static bool IsVisualMutation(string command) => command switch
+    {
+        "camera.create" or "camera.set" or "camera.frame" or "view.capture" or "python.run" => true,
+        _ when command.StartsWith("blueprint.", StringComparison.Ordinal)
+            => command is not ("blueprint.read" or "blueprint.compile"),
+        _ when command.StartsWith("level.", StringComparison.Ordinal)
+            => command is not ("level.read" or "level.list"),
+        _ when command.StartsWith("asset.", StringComparison.Ordinal)
+            => command is not ("asset.read" or "asset.list"),
+        _ when command.StartsWith("actor.", StringComparison.Ordinal)
+            => command is not ("actor.read" or "actor.verify"),
+        _ when command.StartsWith("material.", StringComparison.Ordinal) => command != "material.read",
+        _ when command.StartsWith("light.", StringComparison.Ordinal) => command != "light.read",
+        _ when command.StartsWith("sky.", StringComparison.Ordinal) => command != "sky.read",
+        _ => false,
+    };
 
     private static JsonObject Review(JsonObject state, JsonObject review, JsonObject? editor)
     {
@@ -213,6 +334,77 @@ internal static class Program
         if (!asset.StartsWith("/Game/", StringComparison.Ordinal) || asset.Contains("..", StringComparison.Ordinal)
             || asset.Contains('\\') || asset.Contains("//", StringComparison.Ordinal))
             throw new ToolException("unreal.invalid_asset_path", "Assetpfade müssen unter /Game/ liegen.");
+    }
+
+    private static readonly string[] ImportExtensions = [".fbx", ".obj", ".gltf", ".glb", ".usda", ".abc"];
+
+    /// <summary>
+    /// Import sources must stay inside the opened workspace. Reparse points are resolved first,
+    /// so a link out of the workspace cannot smuggle a foreign file into the project.
+    /// </summary>
+    private static void ValidateImportFile(JsonObject args)
+    {
+        var raw = String(args, "filePath");
+        if (raw.Length == 0) throw new ToolException("unreal.import_file_required", "Eine Importdatei fehlt.");
+        var full = Path.GetFullPath(Path.IsPathFullyQualified(raw) ? raw : Path.Combine(Workspace, raw));
+        var resolved = ResolveReparsePoint(full);
+        var extension = Path.GetExtension(resolved).ToLowerInvariant();
+        if (!ImportExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase))
+            throw new ToolException("unreal.import_extension_unsupported",
+                "Unterstützte Formate: " + string.Join(", ", ImportExtensions) + ".");
+        if (!File.Exists(resolved))
+            throw new ToolException("unreal.import_file_missing", "Die Importdatei existiert nicht: " + resolved);
+        if (!resolved.StartsWith(Workspace + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            throw new ToolException("unreal.import_outside_workspace",
+                "Importdateien müssen innerhalb des Projektordners liegen.");
+        args["filePath"] = resolved;
+    }
+
+    private static string ResolveReparsePoint(string path)
+    {
+        var full = Path.GetFullPath(path);
+        try
+        {
+            var file = new FileInfo(full);
+            if (file.Exists && (file.Attributes & FileAttributes.ReparsePoint) != 0)
+            {
+                var fileTarget = file.ResolveLinkTarget(true);
+                if (fileTarget is not null) full = Path.GetFullPath(fileTarget.FullName);
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            // A link that cannot be read stays as it is; the workspace check below still applies.
+        }
+        var name = Path.GetFileName(full);
+        var directory = Path.GetDirectoryName(full);
+        if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(directory)) return ResolveDirectory(full);
+        return Path.GetFullPath(Path.Combine(ResolveDirectory(directory), name));
+    }
+
+    /// <summary>Follows directory links a bounded number of times so a link cannot leave the workspace.</summary>
+    private static string ResolveDirectory(string directory)
+    {
+        var current = Path.GetFullPath(directory);
+        for (var hop = 0; hop < 8; hop++)
+        {
+            DirectoryInfo info;
+            try
+            {
+                info = new DirectoryInfo(current);
+                if (!info.Exists || (info.Attributes & FileAttributes.ReparsePoint) == 0) return current;
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException)
+            {
+                return current;
+            }
+            var target = info.ResolveLinkTarget(true);
+            if (target is null) return current;
+            var next = Path.GetFullPath(target.FullName);
+            if (string.Equals(next, current, StringComparison.OrdinalIgnoreCase)) return current;
+            current = next;
+        }
+        return current;
     }
 
     private static async Task<JsonObject> SendAsync(JsonObject endpoint, string command, JsonObject args, CancellationToken token)

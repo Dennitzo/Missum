@@ -1,0 +1,39 @@
+[
+  {
+    "tool": "unreal.level.open",
+    "arguments": { "assetPath": "/Game/Maps/MissumCityGrid", "operationId": "phaseV-open-0001" }
+  },
+  {
+    "tool": "unreal.actor.verify",
+    "arguments": {
+      "actorName": "NeonFinal",
+      "cameraName": "CamFinal",
+      "expectLocation": { "x": -600, "y": -600, "z": 200 },
+      "tolerance": 5
+    }
+  },
+  {
+    "tool": "unreal.actor.place",
+    "arguments": {
+      "primitive": "plane",
+      "label": "ReviewPlane",
+      "position": { "x": 0, "y": 0, "z": 50 },
+      "requireVisualReview": true,
+      "operationId": "phaseV-place-0001"
+    }
+  },
+  {
+    "tool": "unreal.status",
+    "arguments": {
+      "visionReview": {
+        "operationId": "phaseV-place-0001",
+        "verdict": "unavailable",
+        "summary": "Bildprüfung nicht möglich: der Editorweg HighResShot blieb ohne Datei und das Editorfenster stand der Fensteraufnahme nicht zur Verfügung. Die Änderung ist datenbasiert bestätigt."
+      }
+    }
+  },
+  {
+    "tool": "unreal.level.save",
+    "arguments": { "operationId": "phaseV-save-0001" }
+  }
+]

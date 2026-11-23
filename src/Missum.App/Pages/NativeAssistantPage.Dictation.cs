@@ -103,10 +103,15 @@ public sealed partial class NativeAssistantPage
         {
             if (pump is not null) await pump;
             if (!_disposed && _dictationSession == _session && _dictationFinalText is { } text)
-                Composer.Text = (_dictationPrefix + " " + text).Trim();
+                DictationTarget.Text = (_dictationPrefix + " " + text).Trim();
         }
         catch (Exception exception) when (exception is not OutOfMemoryException) { ShowError(exception.Message); }
-        finally { await _microphone.StopAsync(); }
+        finally
+        {
+            await _microphone.StopAsync();
+            _meetingDictation = false;
+            UpdateMeetingDictationButton();
+        }
     }
 
     private void UpdateVoiceVisual()

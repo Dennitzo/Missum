@@ -439,12 +439,15 @@ public sealed partial class AssistantCoordinator(
             ChatMode.General => ExtensionChatMode.General,
             ChatMode.Coding => ExtensionChatMode.Coding,
             ChatMode.ClaudeScience => ExtensionChatMode.ClaudeScience,
+            ChatMode.ClaudeMeetings => ExtensionChatMode.ClaudeMeetings,
             _ => throw new InvalidOperationException("Der Chatmodus ist ungültig."),
         };
         return _extensionActions.GetActions(extensionMode)
             .Select(action =>
         {
             var disabledReason = action.DisabledReason;
+            if (action.ActionId == BuiltInActionIds.SelfImprovement && !SelfImprovementTool.Allows(workspaceRoot))
+                disabledReason = "Nur im zugeordneten Missum-Projekt verfügbar.";
             if (string.Equals(action.ActionId, BuiltInActionIds.ExportChatPdf, StringComparison.Ordinal)
                 && messageCount == 0)
                 disabledReason = "Der Chat enthält noch keine Nachrichten.";
@@ -472,6 +475,7 @@ public sealed partial class AssistantCoordinator(
                     ExtensionChatMode.General => "general",
                     ExtensionChatMode.Coding => "coding",
                     ExtensionChatMode.ClaudeScience => "claudescience",
+                    ExtensionChatMode.ClaudeMeetings => "claudemeetings",
                     _ => throw new InvalidOperationException("Der Extension-Chatmodus ist ungültig."),
                 }),
                 actionKind = action.ActionKind switch
@@ -507,6 +511,7 @@ public sealed partial class AssistantCoordinator(
             ChatMode.General => ExtensionChatMode.General,
             ChatMode.Coding => ExtensionChatMode.Coding,
             ChatMode.ClaudeScience => ExtensionChatMode.ClaudeScience,
+            ChatMode.ClaudeMeetings => ExtensionChatMode.ClaudeMeetings,
             _ => throw new InvalidOperationException("Der Chatmodus ist ungültig."),
         };
         var usedGroupIds = _extensionActions.GetActions(extensionMode)
@@ -960,6 +965,12 @@ public sealed partial class AssistantCoordinator(
                 ActiveClaudeScienceSessionId = session.Id,
                 ActiveSessionId = session.Id,
             },
+            ChatMode.ClaudeMeetings => current with
+            {
+                SelectedChatMode = ChatMode.ClaudeMeetings,
+                ActiveClaudeMeetingsSessionId = session.Id,
+                ActiveSessionId = session.Id,
+            },
             _ => throw new InvalidOperationException("Die Sitzung enthält einen unbekannten Chatmodus."),
         }, cancellationToken);
 
@@ -968,6 +979,7 @@ public sealed partial class AssistantCoordinator(
         ChatMode.General => settingsValue.ActiveGeneralSessionId,
         ChatMode.Coding => settingsValue.ActiveCodingSessionId,
         ChatMode.ClaudeScience => settingsValue.ActiveClaudeScienceSessionId,
+        ChatMode.ClaudeMeetings => settingsValue.ActiveClaudeMeetingsSessionId,
         _ => throw new InvalidOperationException("Der Chatmodus ist ungültig."),
     };
 
@@ -1116,6 +1128,18 @@ public sealed partial class AssistantCoordinator(
             var result = await extensionRuntime.InvokeAsync(
                 actionId, arguments, workspaceRoot, null, cancellationToken).ConfigureAwait(false);
             await emit("action.completed", new { actionId, result }, envelope.RequestId).ConfigureAwait(false);
+            return;
+        }
+
+        if (string.Equals(actionId, BuiltInActionIds.SelfImprovement, StringComparison.Ordinal))
+        {
+            if (enabled)
+            {
+                var groups = await chats.ListSessionGroupsAsync(session.ChatMode, cancellationToken).ConfigureAwait(false);
+                if (!SelfImprovementTool.Allows(ResolveSessionWorkspaceRoot(session, groups)))
+                    throw new InvalidOperationException("Selbstverbesserung ist nur im zugeordneten Missum-Projekt verfügbar.");
+            }
+            await emit("action.completed", new { actionId, enabled }, envelope.RequestId).ConfigureAwait(false);
             return;
         }
 
@@ -1276,6 +1300,11 @@ public sealed partial class AssistantCoordinator(
                     ActiveClaudeScienceSessionId = null,
                     ActiveSessionId = current.SelectedChatMode == ChatMode.ClaudeScience ? null : current.ActiveSessionId,
                 },
+                ChatMode.ClaudeMeetings => current with
+                {
+                    ActiveClaudeMeetingsSessionId = null,
+                    ActiveSessionId = current.SelectedChatMode == ChatMode.ClaudeMeetings ? null : current.ActiveSessionId,
+                },
                 _ => throw new InvalidOperationException("Die Sitzung enthält einen unbekannten Chatmodus."),
             }, cancellationToken).ConfigureAwait(false);
         }
@@ -1357,6 +1386,11 @@ public sealed partial class AssistantCoordinator(
             {
                 ActiveClaudeScienceSessionId = null,
                 ActiveSessionId = current.SelectedChatMode == ChatMode.ClaudeScience ? null : current.ActiveSessionId,
+            },
+            ChatMode.ClaudeMeetings => current with
+            {
+                ActiveClaudeMeetingsSessionId = null,
+                ActiveSessionId = current.SelectedChatMode == ChatMode.ClaudeMeetings ? null : current.ActiveSessionId,
             },
             _ => throw new InvalidOperationException("Der Chatmodus ist ungültig."),
         }, cancellationToken).ConfigureAwait(false);
@@ -1845,6 +1879,7 @@ public sealed partial class AssistantCoordinator(
         ChatMode.General => ExtensionChatMode.General,
         ChatMode.Coding => ExtensionChatMode.Coding,
         ChatMode.ClaudeScience => ExtensionChatMode.ClaudeScience,
+        ChatMode.ClaudeMeetings => ExtensionChatMode.ClaudeMeetings,
         _ => throw new InvalidOperationException("Der Chatmodus ist ungültig."),
     };
 
@@ -1853,6 +1888,7 @@ public sealed partial class AssistantCoordinator(
         ChatMode.General => "general",
         ChatMode.Coding => "coding",
         ChatMode.ClaudeScience => "claudescience",
+        ChatMode.ClaudeMeetings => "claudemeetings",
         _ => throw new InvalidOperationException("Der Chatmodus ist ungültig."),
     };
 
@@ -1861,6 +1897,7 @@ public sealed partial class AssistantCoordinator(
         "general" => ChatMode.General,
         "coding" => ChatMode.Coding,
         "claudescience" or "claude-science" or "science" => ChatMode.ClaudeScience,
+        "claudemeetings" or "claude-meetings" or "meetings" => ChatMode.ClaudeMeetings,
         _ => throw new ArgumentException("Die angeforderte Chatansicht ist unbekannt."),
     };
 
@@ -2392,7 +2429,8 @@ public sealed partial class AssistantCoordinator(
             toolStepWindow = toolWindow ?? new ConversationToolStepWindow(message.ToolSteps?.Count ?? 0,
                 message.ToolSteps?.Count > 64, message.ToolSteps?.Count > 64 ? message.ToolSteps.Count - 64 : null),
             artifacts = AssistantArtifactOriginalResolver.DisplayArtifacts(messageArtifacts ?? [], message.ToolSteps)
-                .Select(artifact => ToArtifactDtoWithPosition(artifact,
+                .Select(artifact => ToArtifactDtoWithPosition(
+                    artifact with { FileName = AssistantArtifactOriginalResolver.DisplayFileName(artifact, message.ToolSteps) },
                     message.ToolSteps?.FirstOrDefault(step => step.Id == artifact.StepId)?.ContentOffset)),
         };
     }

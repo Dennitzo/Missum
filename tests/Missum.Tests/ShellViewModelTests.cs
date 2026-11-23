@@ -100,7 +100,7 @@ public sealed class ShellViewModelTests
             [],
             DateTimeOffset.UtcNow));
 
-        Assert.Equal(6, viewModel.AiServices.Count);
+        Assert.Equal(7, viewModel.AiServices.Count);
         Assert.True(viewModel.AiServices.Single(static item => item.Key == "general").IsActive);
     }
 
@@ -115,7 +115,7 @@ public sealed class ShellViewModelTests
             "Sprache wird live transkribiert",
             "Docker · Whisper STT");
 
-        Assert.Equal(6, viewModel.AiServices.Count);
+        Assert.Equal(7, viewModel.AiServices.Count);
         Assert.True(viewModel.AiServices.Single(static item => item.Key == "speech-to-text").IsActive);
 
         viewModel.SetClientAiRun("microphone-stt", false, string.Empty, string.Empty);

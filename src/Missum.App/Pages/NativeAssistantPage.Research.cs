@@ -15,7 +15,8 @@ public sealed partial class NativeAssistantPage
     private DispatcherTimer? _researchRefreshTimer;
     private long _researchTabSelectionVersion;
 
-    private string ModelRole => _mode is "coding" or "claudescience" ? "coding" : "general";
+    // Claude Meetings picks its model like Codex does.
+    private string ModelRole => _mode is "coding" or "claudescience" or "claudemeetings" ? "coding" : "general";
 
     private NativeResearchSession ResearchState(Guid sessionId)
     {

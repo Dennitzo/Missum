@@ -272,12 +272,24 @@ public sealed class MissumAiClient : IDisposable
         CancellationToken cancellationToken = default) =>
         PostRunWorkloadAsync("v1/media/analyze", request, idempotencyKey, cancellationToken);
 
+    /// <summary>
+    /// Returns a reason while new runs must not start (for example during a self-improvement apply);
+    /// null allows them. Existing runs, their streams and tool results are never affected.
+    /// </summary>
+    public static Func<string?>? RunCreationHold { get; set; }
+
+    private static void ThrowIfRunCreationHeld()
+    {
+        if (RunCreationHold?.Invoke() is { } reason) throw new InvalidOperationException(reason);
+    }
+
     public async Task<RunAccepted> CreateRunAsync(
         RunRequest request,
         string? idempotencyKey = null,
         CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        ThrowIfRunCreationHeld();
         using var message = new HttpRequestMessage(HttpMethod.Post, "v1/runs")
         {
             Content = JsonContent.Create(request, options: _jsonOptions),
@@ -745,6 +757,7 @@ public sealed class MissumAiClient : IDisposable
         CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        ThrowIfRunCreationHeld();
         using var message = new HttpRequestMessage(HttpMethod.Post, path)
         {
             Content = JsonContent.Create(value, options: _jsonOptions),

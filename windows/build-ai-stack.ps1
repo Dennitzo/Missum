@@ -6,6 +6,8 @@ param(
     [string] $NativeModelRoot,
     [string] $ServerIp = '192.168.0.67',
     [string] $ImageVersion = '2.0.0',
+    [ValidatePattern('^missum-ai/research-runner:[a-zA-Z0-9_.-]+$')]
+    [string] $ResearchRunnerImage = 'missum-ai/research-runner:3',
     [switch] $SkipTests,
     [switch] $Pull
 )
@@ -28,9 +30,9 @@ $arguments = @('build')
 if ($Pull) { $arguments += '--pull' }
 Invoke-MissumAiCompose -Paths $paths -Arguments $arguments
 $docker = Resolve-MissumDockerCommand
-$runnerArguments = @('build', '--tag', 'missum-ai/research-runner:3')
+$runnerArguments = @('build', '--tag', $ResearchRunnerImage)
 if ($Pull) { $runnerArguments += '--pull' }
 $runnerArguments += Resolve-MissumRepositoryPath -RelativePath 'deploy\missum-ai\research-runner'
 & $docker @runnerArguments
 if ($LASTEXITCODE -ne 0) { throw "Research runner build failed with exit code $LASTEXITCODE." }
-Write-Host "Missum AI $ImageVersion gateway/workers and research-runner:3 were built successfully. Language, vision and embedding models use the native Windows runtime." -ForegroundColor Green
+Write-Host "Missum AI $ImageVersion gateway/workers and $ResearchRunnerImage were built successfully." -ForegroundColor Green

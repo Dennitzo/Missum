@@ -1,0 +1,21 @@
+[
+  {
+    "tool": "unreal.level.open",
+    "arguments": { "assetPath": "/Game/Maps/MissumCityGrid", "operationId": "phaseA-open-0001" }
+  },
+  {
+    "tool": "unreal.camera.create",
+    "arguments": {
+      "cameraName": "CamA11",
+      "position": { "x": 1600, "y": -2000, "z": 800 },
+      "rotation": { "pitch": -20, "yaw": 127, "roll": 0 },
+      "fieldOfView": 60,
+      "operationId": "phaseA-cam-0001"
+    }
+  },
+  {
+    "tool": "unreal.view.capture",
+    "timeout": 200,
+    "arguments": { "source": "camera", "cameraName": "CamA11", "operationId": "phaseA-capture-0001" }
+  }
+]

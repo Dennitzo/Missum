@@ -22,7 +22,8 @@ public sealed record CapabilitySnapshot(
     bool SupportsRunSteering = false,
     IReadOnlyList<ExtensionCapability>? Extensions = null,
     IReadOnlyList<string>? ContextProfiles = null,
-    bool SupportsSteeringAttachments = false);
+    bool SupportsSteeringAttachments = false,
+    bool SupportsSelfImprovementToolNames = false);
 
 public sealed record ExtensionCapability(
     string Id,

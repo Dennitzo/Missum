@@ -90,7 +90,7 @@ public static class ExtensionInvocationPolicy
         HashSet<ExtensionPermissionKind> permissions,
         string? workspaceRoot)
     {
-        if (PathPropertyNames.Contains(propertyName))
+        if (PathPropertyNames.Contains(propertyName) && !IsEnginePackagePath(value))
         {
             if (!permissions.Overlaps(
                 [ExtensionPermissionKind.FileRead, ExtensionPermissionKind.FileWrite,
@@ -111,6 +111,18 @@ public static class ExtensionInvocationPolicy
             && !permissions.Contains(ExtensionPermissionKind.Process))
             throw new InvalidDataException($"Argument '{propertyName}' benötigt die deklarierte Prozessberechtigung.");
     }
+
+    /// <summary>
+    /// Unreal content paths such as /Game/Maps name packages inside the engine's virtual file system,
+    /// not files: on Windows, Path.GetFullPath would turn them into C:\Game\Maps and reject every
+    /// folder argument. Only the fixed engine mount points count; anything else stays a file path.
+    /// </summary>
+    internal static bool IsEnginePackagePath(string value) =>
+        value.Length > 1 && value[0] == '/' && value[1] != '/'
+        && !value.Contains('\\', StringComparison.Ordinal) && !value.Contains("..", StringComparison.Ordinal)
+        && (value.Equals("/Game", StringComparison.Ordinal) || value.StartsWith("/Game/", StringComparison.Ordinal)
+            || value.Equals("/Engine", StringComparison.Ordinal) || value.StartsWith("/Engine/", StringComparison.Ordinal)
+            || value.Equals("/Script", StringComparison.Ordinal) || value.StartsWith("/Script/", StringComparison.Ordinal));
 
     private static bool RequiresWorkspaceBoundary(HashSet<ExtensionPermissionKind> permissions) =>
         permissions.Overlaps(

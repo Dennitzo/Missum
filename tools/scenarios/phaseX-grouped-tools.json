@@ -1,0 +1,24 @@
+[
+  {
+    "tool": "unreal.level",
+    "arguments": { "operation": "open", "assetPath": "/Game/Maps/MissumCityGrid", "operationId": "phaseX-open-0001" }
+  },
+  {
+    "tool": "unreal.actor",
+    "arguments": {
+      "operation": "verify",
+      "actorName": "NeonFinal",
+      "cameraName": "CamFinal",
+      "expectLocation": { "x": -600, "y": -600, "z": 200 },
+      "tolerance": 5
+    }
+  },
+  {
+    "tool": "unreal.class",
+    "arguments": { "operation": "search", "query": "GameMode", "limit": 5 }
+  },
+  {
+    "tool": "unreal.light",
+    "arguments": { "operation": "read" }
+  }
+]

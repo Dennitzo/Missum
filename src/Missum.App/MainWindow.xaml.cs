@@ -348,7 +348,13 @@ public sealed partial class MainWindow : Window
         }
 
         args.Cancel = true;
-        if (_closePreparationStarted)
+        await CloseGracefullyAsync();
+    }
+
+    /// <summary>Saves the draft and window state, runs the shutdown preparation and closes the window once.</summary>
+    internal async Task CloseGracefullyAsync()
+    {
+        if (_allowClose || _closePreparationStarted)
         {
             return;
         }

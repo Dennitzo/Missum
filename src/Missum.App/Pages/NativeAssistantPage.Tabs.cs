@@ -22,6 +22,7 @@ public sealed partial class NativeAssistantPage
             ["general"] = [SessionViewKind.Chat],
             ["coding"] = [SessionViewKind.Chat],
             ["claudescience"] = [SessionViewKind.Chat, SessionViewKind.Research],
+            ["claudemeetings"] = [SessionViewKind.Meeting, SessionViewKind.Notes, SessionViewKind.Whiteboard],
         };
 
     /// <summary>Call after assigning the active session and its complete coordinator snapshot.</summary>
@@ -99,9 +100,19 @@ public sealed partial class NativeAssistantPage
         if (!layout.Contains(SessionViewKind.Research) && _researchTabButton is not null)
             SessionTabsPanel.Children.Remove(_researchTabButton);
 
+        if (!layout.Contains(SessionViewKind.Meeting))
+            foreach (var button in _meetingTabButtons.Values) SessionTabsPanel.Children.Remove(button);
+        else
+            foreach (var tab in _sessionTabs) SessionTabsPanel.Children.Remove(tab.Container);
+
         var position = 0;
         foreach (var view in layout)
         {
+            if (view is SessionViewKind.Meeting or SessionViewKind.Notes or SessionViewKind.Whiteboard)
+            {
+                position = RenderMeetingTab(view, position);
+                continue;
+            }
             if (view == SessionViewKind.Research)
             {
                 if (_session != Guid.Empty)
@@ -245,6 +256,9 @@ public sealed partial class NativeAssistantPage
     {
         Chat,
         Research,
+        Meeting,
+        Notes,
+        Whiteboard,
     }
 
     private sealed class SessionTabState(Guid id, string title, string mode, Border container, TextBlock label, Button select)

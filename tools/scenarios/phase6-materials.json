@@ -1,0 +1,91 @@
+[
+  {
+    "tool": "unreal.level.open",
+    "arguments": { "assetPath": "/Game/Maps/MissumCityGrid", "operationId": "phase6-open-0001" }
+  },
+  {
+    "tool": "unreal.material.create",
+    "arguments": {
+      "assetName": "M_NeonCyan",
+      "folder": "/Game/Materials",
+      "baseColor": { "r": 0.05, "g": 0.85, "b": 0.9, "a": 1 },
+      "emissiveColor": { "r": 0.0, "g": 0.6, "b": 0.7, "a": 1 },
+      "emissiveIntensity": 3.0,
+      "metallic": 0.2,
+      "roughness": 0.25,
+      "replace": true,
+      "operationId": "phase6-mat-0001"
+    }
+  },
+  {
+    "tool": "unreal.material.create",
+    "arguments": {
+      "assetName": "M_ConcreteGrey",
+      "folder": "/Game/Materials",
+      "baseColor": { "r": 0.42, "g": 0.42, "b": 0.44, "a": 1 },
+      "metallic": 0.0,
+      "roughness": 0.9,
+      "replace": true,
+      "operationId": "phase6-mat-0002"
+    }
+  },
+  {
+    "tool": "unreal.actor.place",
+    "arguments": {
+      "primitive": "sphere",
+      "label": "NeonSphere",
+      "position": { "x": -400, "y": 0, "z": 120 },
+      "operationId": "phase6-place-0001"
+    }
+  },
+  {
+    "tool": "unreal.material.assign",
+    "arguments": {
+      "materialPath": "/Game/Materials/M_NeonCyan",
+      "actorName": "MissumMarker",
+      "allSlots": true,
+      "operationId": "phase6-assign-0001"
+    }
+  },
+  {
+    "tool": "unreal.material.assign",
+    "arguments": {
+      "materialPath": "/Game/Materials/M_ConcreteGrey",
+      "actorName": "PillarImported",
+      "allSlots": true,
+      "operationId": "phase6-assign-0002"
+    }
+  },
+  {
+    "tool": "unreal.material.assign",
+    "arguments": {
+      "materialPath": "/Game/Materials/M_NeonCyan",
+      "actorName": "NeonSphere",
+      "allSlots": true,
+      "operationId": "phase6-assign-0003"
+    }
+  },
+  {
+    "tool": "unreal.material.read",
+    "arguments": { "assetPath": "/Game/Materials/M_NeonCyan" }
+  },
+  {
+    "tool": "unreal.asset.read",
+    "arguments": { "assetPath": "/Game/SourceAssets/Blender/SM_MissumPillar", "actorName": "PillarImported" }
+  },
+  {
+    "tool": "unreal.material.edit",
+    "arguments": {
+      "assetPath": "/Game/Materials/M_ConcreteGrey",
+      "operation": "parameter",
+      "type": "scalar",
+      "name": "Roughness",
+      "value": 0.65,
+      "operationId": "phase6-edit-0001"
+    }
+  },
+  {
+    "tool": "unreal.level.save",
+    "arguments": { "operationId": "phase6-save-0001" }
+  }
+]

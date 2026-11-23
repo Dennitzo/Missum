@@ -202,7 +202,7 @@ public sealed class ExtensionActionCatalog : IExtensionActionCatalog
 public static class BuiltInExtensionCatalog
 {
     private static readonly ExtensionChatMode[] AllModes =
-        [ExtensionChatMode.General, ExtensionChatMode.Coding, ExtensionChatMode.ClaudeScience];
+        [ExtensionChatMode.General, ExtensionChatMode.Coding, ExtensionChatMode.ClaudeScience, ExtensionChatMode.ClaudeMeetings];
 
     // Purpose groups for the composer tool menu. Every tool sits in the group that matches what it
     // does, so an empty group simply disappears from the menu in the current chat mode.
@@ -235,6 +235,7 @@ public static class BuiltInExtensionCatalog
             [ExtensionChatMode.Coding, ExtensionChatMode.ClaudeScience]),
         Selectable(BuiltInActionIds.ComputerUse, "Computersteuerung", "Den lokalen Windows-Desktop sehen und bedienen", "computer", GroupIntegrations, 60, 30,
             [ExtensionChatMode.Coding]),
+        Selectable(BuiltInActionIds.SelfImprovement, "Selbstverbesserung", "Den zugeordneten Anwendungsquellcode bauen und prüfen", "computer", GroupIntegrations, 60, 40),
         Selectable(BuiltInActionIds.WebSearch, "Websuche", "Aktuelle Quellen im Web durchsuchen", "web", GroupResearch, 30, 10),
         Selectable(BuiltInActionIds.DeepResearch, "Deep Research", "Eine mehrstufige, quellenbasierte Recherche starten", "research", GroupResearch, 30, 20),
         Selectable(BuiltInActionIds.Lean, "Lean", "Mathematische Aussagen mit Lean 4 und Mathlib formalisieren und Beweise prüfen", "lean", GroupResearch, 30, 30),
@@ -260,6 +261,18 @@ public static class BuiltInExtensionCatalog
         Tool(BuiltInActionIds.CreateAudiobook, "audiobook.create", "Ein Hörbuch erzeugen", 1_800, 32 * 1024 * 1024),
         Tool(BuiltInActionIds.Translate, "speech.translate", "Text übersetzen", 300, 4 * 1024 * 1024),
         Tool(BuiltInActionIds.ReadAloud, "speech.synthesize", "Text lokal vorlesen", 300, 4 * 1024 * 1024),
+        Tool(BuiltInActionIds.SelfImprovement, "selfimprovement.build", "Startet einen isolierten Missum-Build mit Pflichtprüfungen. Liefert die Kandidatenkennung für die Statusabfrage.", 60, 64 * 1024,
+            ExtensionToolRiskClass.Process, new { type = "object", properties = new { }, required = Array.Empty<string>(), additionalProperties = false }),
+        Tool(BuiltInActionIds.SelfImprovement, "selfimprovement.status", "Ruft den Build-Bericht ab. Warte bei Bedarf auf Fortschritt oder lies mit logStep und lineOffset das Protokoll eines Prüfschritts.", 30, 64 * 1024,
+            schema: new { type = "object", properties = new
+            {
+                candidateId = new { type = "string" },
+                waitSeconds = new { type = "integer", minimum = 0, maximum = 20 },
+                logStep = new { type = "string", @enum = new[] { "portable", "app-tests", "ai-stack", "portable-smoke", "gateway-smoke" } },
+                lineOffset = new { type = "integer", minimum = 0, maximum = 100000 },
+            }, required = new[] { "candidateId" }, additionalProperties = false }),
+        Tool(BuiltInActionIds.SelfImprovement, "selfimprovement.apply", "Prüft einen vollständig geprüften Kandidaten erneut und übernimmt ihn. Liefert bei Abweichungen einen konkreten Fehlerbericht.", 3600, 64 * 1024,
+            ExtensionToolRiskClass.Process, new { type = "object", properties = new { candidateId = new { type = "string" } }, required = new[] { "candidateId" }, additionalProperties = false }),
         Tool(BuiltInActionIds.ComputerUse, "computer.observe", "Beobachtet den Desktop oder das sichtbare Vordergrundfenster und liefert ein aktuelles Bild mit Beobachtungskennung. Für die Bedienung eines einzelnen Fensters scope window nutzen.", 300, 4 * 1024 * 1024,
             schema: new { type = "object", properties = new { scope = new { type = "string", @enum = new[] { "desktop", "window" }, description = "desktop: gesamter Desktop (Standard); window: sichtbarer Ausschnitt des Vordergrundfensters." } }, required = Array.Empty<string>(), additionalProperties = false }),
         Tool(BuiltInActionIds.ComputerUse, "computer.act", "Führt eine Desktopaktion für eine aktuelle Beobachtung aus; danach erneut beobachten. Für jede Aktion mit x/y oder endX/endY ist coordinateSpace explizit erforderlich. Für scroll sind x und y als Bildpunkt innerhalb des scrollbaren Bereichs sowie scrollY erforderlich.", 300, 1024 * 1024,

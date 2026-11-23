@@ -1,0 +1,6 @@
+[
+  {
+    "tool": "unreal.class",
+    "arguments": { "operation": "search", "query": "EdGraphPin", "limit": 10 }
+  }
+]

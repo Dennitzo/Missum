@@ -88,8 +88,8 @@ public sealed class ExtensionRuntimeService(
             return "Die Erweiterung benötigt einen geöffneten Workspace als Zugriffsgrenze.";
         if (actionId == BlenderAction && !File.Exists(Path.Combine(extension.ContentDirectory, "runtime", "bootstrap.py")))
             return "Für die automatische Blender-Verbindung wird die Missum-Erweiterung Blender ab Version 1.1 benötigt.";
-        if (actionId == UnrealAction && !File.Exists(Path.Combine(extension.ContentDirectory, "runtime", "MissumBridge", "MissumBridge.uplugin")))
-            return "Das Unreal-Editor-Plugin fehlt im Erweiterungspaket.";
+        if (actionId == UnrealAction && !File.Exists(Path.Combine(extension.ContentDirectory, "runtime", "unreal_bootstrap.py")))
+            return "Die Unreal-Python-Laufzeit fehlt im Erweiterungspaket.";
         return null;
     }
 
@@ -192,6 +192,23 @@ public sealed class ExtensionRuntimeService(
             ["processId"] = endpoint.ProcessId,
             ["token"] = endpoint.Token,
         };
+        var launch = UnrealApplicationLauncher.TryGetLaunchInfo(workspace);
+        if (launch is not null)
+            enriched["_missumUnrealChannel"] = new JsonObject
+            {
+                ["channel"] = launch.Channel,
+                ["pump"] = launch.Pump,
+                ["runtimeVersion"] = launch.RuntimeVersion,
+                ["bridgeNotice"] = launch.BridgeNotice,
+                ["capabilities"] = new JsonArray([.. launch.Capabilities.Select(capability => (JsonNode?)capability)]),
+            };
+        // The launcher is resolved without any fixed path. Starting it belongs to the Missum run,
+        // because a computer-control run may only carry the two control tools and cannot start it.
+        var launcher = modelToolName == "unreal.launcher.start"
+            ? await UnrealLauncherLocator.StartOrReportAsync(cancellationToken).ConfigureAwait(false)
+            : UnrealLauncherLocator.Locate();
+        if (launcher is not null)
+            enriched["_missumUnrealLauncher"] = UnrealLauncherNode(launcher.Executable, launcher.Running, launcher.Source, launcher.ProcessId);
         enriched["_missumUnrealEngines"] = new JsonArray(UnrealApplicationLauncher.DiscoverInstallations()
             .Select(engine => (JsonNode?)new JsonObject
             {
@@ -201,6 +218,19 @@ public sealed class ExtensionRuntimeService(
             }).ToArray());
         return JsonSerializer.SerializeToElement(enriched);
     }
+
+    /// <summary>
+    /// Launcher facts for the adapter. The path is "launcherPath", never "executable": the invocation
+    /// policy treats "executable" as a process request, and the Unreal package declares no process
+    /// permission, so that name failed every Unreal call once the Epic Games Launcher was installed.
+    /// </summary>
+    internal static JsonObject UnrealLauncherNode(string executable, bool running, string source, int? processId) => new()
+    {
+        ["launcherPath"] = executable,
+        ["running"] = running,
+        ["source"] = source,
+        ["processId"] = processId ?? 0,
+    };
 
     private static async Task<JsonElement> PrepareBlenderArgumentsAsync(string contentDirectory, string workspace,
         string? modelToolName, JsonElement arguments, CancellationToken cancellationToken)

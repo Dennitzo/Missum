@@ -91,6 +91,44 @@ public sealed partial class AssistantArtifactOriginalResolver : IDisposable
                     || RecordedUpload(item, steps) is { } upload && original.Metadata?.GetValueOrDefault("sourceUploadId") == upload)))).ToArray();
     }
 
+    /// <summary>
+    /// The media worker names every exported original "original.png". The chat shows the name the
+    /// image had when image.input loaded it: media.analyze reports it as primaryUpload.fileName,
+    /// and the loading step itself still knows the file path.
+    /// </summary>
+    internal static string DisplayFileName(ChatArtifact artifact, IReadOnlyList<AssistantToolStep>? steps)
+    {
+        var role = artifact.Metadata?.GetValueOrDefault("role");
+        if (steps is null || role is not ("original" or "thumbnail")
+            || !Path.GetFileNameWithoutExtension(artifact.FileName).StartsWith(role, StringComparison.OrdinalIgnoreCase))
+            return artifact.FileName;
+        var step = steps.FirstOrDefault(item => item.Id == artifact.StepId && item.Tool is "media.analyze" or "media.inspect");
+        var name = PrimaryUploadFileName(step?.OutputJson);
+        if (string.IsNullOrWhiteSpace(name) && RecordedUpload(artifact, steps) is { } uploadId)
+        {
+            var input = steps.LastOrDefault(item => item.Tool == "image.input"
+                && JsonString(item.OutputJson, "uploadId", true) == uploadId);
+            name = JsonString(input?.OutputJson, "sourcePath", true) ?? JsonString(input?.InputJson, "path", false);
+        }
+        name = string.IsNullOrWhiteSpace(name) ? null : Path.GetFileName(name.Replace('\\', '/').TrimEnd('/'));
+        return string.IsNullOrWhiteSpace(name) || name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 ? artifact.FileName : name;
+    }
+
+    private static string? PrimaryUploadFileName(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
+            if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("result", out var result)) root = result;
+            return root.ValueKind == JsonValueKind.Object && root.TryGetProperty("primaryUpload", out var upload)
+                && upload.ValueKind == JsonValueKind.Object && upload.TryGetProperty("fileName", out var name)
+                && name.ValueKind == JsonValueKind.String ? name.GetString() : null;
+        }
+        catch (JsonException) { return null; }
+    }
+
     private static string? RecordedUpload(ChatArtifact artifact, IReadOnlyList<AssistantToolStep>? steps)
     {
         var step = steps?.FirstOrDefault(item => item.Id == artifact.StepId && item.Tool is "media.analyze" or "media.inspect");

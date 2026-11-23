@@ -13,6 +13,10 @@ namespace Missum.App.Services.Extensions;
 internal sealed record UnrealApplicationEndpoint(int Port, int ProcessId, string Token);
 internal sealed record UnrealEngineInstallation(string Association, string Root, Version Version);
 
+/// <summary>What the running editor announced in its ready receipt: channel and capabilities.</summary>
+internal sealed record UnrealLaunchInfo(string Channel, string Pump, string RuntimeVersion,
+    IReadOnlyList<string> Capabilities, int Port, int ProcessId, string? BridgeNotice = null);
+
 /// <summary>Owns the visible editor process independently of the short-lived extension host.</summary>
 internal static class UnrealApplicationLauncher
 {
@@ -41,17 +45,14 @@ internal static class UnrealApplicationLauncher
             var installations = DiscoverInstallations();
             var association = project is null ? null : ReadAssociation(project);
             var engine = SelectEngine(installations, association, requestedEngine);
-            var pluginSource = Path.Combine(contentDirectory, "runtime", "MissumBridge");
-            var descriptor = Path.Combine(pluginSource, "MissumBridge.uplugin");
-            if (!File.Exists(descriptor))
-                throw new InvalidOperationException("Die Unreal-Erweiterung enthält das Editor-Plugin nicht.");
-
-            // Compile outside the project first. A failed build leaves the user's project untouched.
-            // UBT creates deeply nested intermediate paths and rejects long package roots.
-            var package = Path.Combine(Path.GetTempPath(), "mu", Guid.NewGuid().ToString("N")[..12]);
-            await BuildPluginAsync(engine, descriptor, package, deadline.Token).ConfigureAwait(false);
+            // The editor is driven exclusively through Epics Python: no plugin is compiled,
+            // no C++ toolchain is required, and no build step can block a connection.
+            var script = Path.Combine(contentDirectory, "runtime", "unreal_bootstrap.py");
+            if (!File.Exists(script))
+                throw new InvalidOperationException("Die Unreal-Erweiterung enthält ihre Python-Laufzeit nicht.");
             project ??= CreateProject(workspace, engine);
-            InstallPlugin(workspace, project, package);
+            var bridgeNotice = RemoveOwnedBridgePlugin(workspace, project);
+            EnsurePythonPluginEnabled(project);
 
             var launchId = Guid.NewGuid();
             var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
@@ -63,8 +64,12 @@ internal static class UnrealApplicationLauncher
                 WindowStyle = ProcessWindowStyle.Normal,
             };
             start.ArgumentList.Add(project);
+            // Quoted inside the switch: the engine parses an unquoted value up to the first
+            // space, which would break install roots such as "Program Files".
+            start.ArgumentList.Add($"-ExecutePythonScript=\"{script.Replace('\\', '/')}\"");
             start.Environment["MISSUM_UNREAL_READY_PATH"] = ReadyPath(directory, launchId);
             start.Environment["MISSUM_UNREAL_TOKEN"] = token;
+            start.Environment["MISSUM_UNREAL_PROJECT_PATH"] = project;
             start.Environment["MISSUM_UNREAL_WORKSPACE"] = workspace;
             var blankPending = File.Exists(BlankProjectMarker(project));
             if (blankPending) start.Environment["MISSUM_UNREAL_INITIALIZE_BLANK_PROJECT"] = "1";
@@ -73,13 +78,13 @@ internal static class UnrealApplicationLauncher
             Directory.CreateDirectory(captureRoot);
             start.Environment["MISSUM_UNREAL_CAPTURE_ROOT"] = captureRoot;
             using var process = Process.Start(start) ?? throw new InvalidOperationException("Unreal Editor konnte nicht gestartet werden.");
-            var current = new LaunchLease(launchId, process.Id, process.StartTime.ToUniversalTime().Ticks, token, project, blankPending);
+            var current = new LaunchLease(launchId, process.Id, process.StartTime.ToUniversalTime().Ticks, token, project, blankPending, bridgeNotice);
             WriteLease(directory, current);
             return await WaitForEndpointAsync(directory, current, deadline.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
         {
-            throw new TimeoutException("Unreal Editor oder der Plugin-Build wurde nicht rechtzeitig bereit. Prüfe die Build-Ausgabe und das Editorfenster.", exception);
+            throw new TimeoutException("Der Unreal Editor wurde nicht rechtzeitig bereit. Prüfe das Editorfenster und das Log unter Saved/Logs.", exception);
         }
     }
 
@@ -88,6 +93,29 @@ internal static class UnrealApplicationLauncher
         var directory = LeaseDirectory(NormalizeWorkspace(workspaceRoot));
         endpoint = ReadLease(directory) is { } lease && IsAlive(lease) ? ReadEndpoint(directory, lease) : null;
         return endpoint is not null;
+    }
+
+    /// <summary>Reports which channel the running editor announced, without contacting it.</summary>
+    internal static UnrealLaunchInfo? TryGetLaunchInfo(string workspaceRoot)
+    {
+        try
+        {
+            var directory = LeaseDirectory(NormalizeWorkspace(workspaceRoot));
+            if (ReadLease(directory) is not { } lease || !IsAlive(lease)) return null;
+            if (ReadJson<ReadyReceipt>(ReadyPath(directory, lease.LaunchId)) is not { } ready) return null;
+            return new UnrealLaunchInfo(
+                ready.Channel?.Type is { Length: > 0 } type ? type : "unknown",
+                ready.Channel?.Pump ?? "",
+                ready.Channel?.RuntimeVersion ?? "",
+                ready.Capabilities ?? [],
+                ready.Port,
+                lease.ProcessId,
+                lease.BridgeNotice);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException)
+        {
+            return null;
+        }
     }
 
     internal static string? FindProject(string workspace, string? requested)
@@ -177,12 +205,31 @@ internal static class UnrealApplicationLauncher
                 foreach (var child in Directory.EnumerateDirectories(configured, "UE_*", new EnumerationOptions { IgnoreInaccessible = true }))
                     AddEngineRoot(child);
         }
-        // Launcher manifests do not necessarily list manually copied installations.
-        // Include the known local installation root, then validate the engine below.
-        const string localRoot = @"E:\UnrealEngine";
-        if (Directory.Exists(localRoot))
-            foreach (var child in Directory.EnumerateDirectories(localRoot, "UE_*", new EnumerationOptions { IgnoreInaccessible = true }))
-                AddEngineRoot(child);
+        // Machine registry of installed engines. A branch may exist without a usable path.
+        try
+        {
+            using var machine = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\EpicGames\Unreal Engine");
+            if (machine is not null)
+                foreach (var name in machine.GetSubKeyNames())
+                {
+                    using var branch = machine.OpenSubKey(name);
+                    if (branch?.GetValue("InstallDirectory") is string directory && !string.IsNullOrWhiteSpace(directory))
+                        AddEngineRoot(directory, name);
+                }
+        }
+        catch (Exception exception) when (exception is IOException or SecurityException or UnauthorizedAccessException) { }
+
+        // Manifests and the registry do not list manually copied installations. Search the fixed
+        // drives and the usual folders for UE_* directories, at most two levels deep, never
+        // following reparse points. Every candidate is still verified below.
+        foreach (var root in EngineSearchRoots())
+        {
+            foreach (var directory in ChildrenNamedUE(root))
+                AddEngineRoot(directory);
+            foreach (var parent in ImmediateSubDirectories(root))
+                foreach (var directory in ChildrenNamedUE(parent))
+                    AddEngineRoot(directory);
+        }
 
         var result = new List<UnrealEngineInstallation>();
         foreach (var (id, root) in candidates)
@@ -205,41 +252,127 @@ internal static class UnrealApplicationLauncher
         }
         return result;
 
-        void AddEngineRoot(string root)
+        void AddEngineRoot(string root, string? association = null)
         {
             var explicitAssociation = Environment.GetEnvironmentVariable("MISSUM_UNREAL_ENGINE_ASSOCIATION");
             var name = Path.GetFileName(Path.TrimEndingDirectorySeparator(root));
-            var id = !string.IsNullOrWhiteSpace(explicitAssociation) && root == configured ? explicitAssociation
+            var id = !string.IsNullOrWhiteSpace(association) ? association
+                : !string.IsNullOrWhiteSpace(explicitAssociation) && root == configured ? explicitAssociation
                 : name.StartsWith("UE_", StringComparison.OrdinalIgnoreCase) ? name[3..] : "configured";
             candidates.Add((id, root));
         }
     }
 
-    private static async Task BuildPluginAsync(UnrealEngineInstallation engine, string descriptor, string destination, CancellationToken cancellationToken)
+    /// <summary>Fixed drives plus the folders an engine installation commonly lives in.</summary>
+    private static IEnumerable<string> EngineSearchRoots()
     {
-        var uat = Path.Combine(engine.Root, "Engine", "Build", "BatchFiles", "RunUAT.bat");
-        if (!File.Exists(uat)) throw new FileNotFoundException("Das Unreal-Buildwerkzeug RunUAT.bat fehlt.", uat);
-        if (new[] { uat, descriptor, destination }.Any(path => path.IndexOfAny(['%', '!', '"']) >= 0))
-            throw new InvalidOperationException("Für den Plugin-Build dürfen die Engine- und Paketpfade keine Prozentzeichen, Ausrufezeichen oder Anführungszeichen enthalten.");
-        var start = new ProcessStartInfo("cmd.exe")
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var candidate in DriveRoots().Concat(CommonEngineFolders()))
         {
-            UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true,
-            Arguments = $"/d /s /c \"\"{uat}\" -WaitForUATMutex BuildPlugin \"-Plugin={descriptor}\" \"-Package={destination}\" -TargetPlatforms=Win64\"",
-        };
-        using var process = Process.Start(start) ?? throw new InvalidOperationException("Der Unreal-Plugin-Build konnte nicht gestartet werden.");
-        var stdout = process.StandardOutput.ReadToEndAsync(cancellationToken);
-        var stderr = process.StandardError.ReadToEndAsync(cancellationToken);
-        try { await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false); }
-        catch (OperationCanceledException) { process.Kill(entireProcessTree: true); throw; }
-        var output = await stdout.ConfigureAwait(false);
-        var errors = await stderr.ConfigureAwait(false);
-        if (process.ExitCode != 0)
-        {
-            var detail = (output + Environment.NewLine + errors).Trim();
-            if (detail.Length > 6000) detail = detail[^6000..];
-            throw new InvalidOperationException("Das Unreal-Editor-Plugin konnte nicht gebaut werden. Prüfe die für diese Engine erforderlichen C++-Buildwerkzeuge. " + detail);
+            var trimmed = Path.TrimEndingDirectorySeparator(candidate);
+            if (seen.Add(trimmed) && Directory.Exists(trimmed)) yield return trimmed;
         }
     }
+
+    private static string[] DriveRoots()
+    {
+        try
+        {
+            return DriveInfo.GetDrives()
+                .Where(drive => drive.DriveType == DriveType.Fixed)
+                .Where(drive => { try { return drive.IsReady; } catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return false; } })
+                .Select(drive => drive.RootDirectory.FullName)
+                .ToArray();
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or SecurityException)
+        {
+            return [];
+        }
+    }
+
+    private static IEnumerable<string> CommonEngineFolders()
+    {
+        foreach (var folder in new[]
+        {
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+        })
+        {
+            if (string.IsNullOrWhiteSpace(folder)) continue;
+            yield return Path.Combine(folder, "Epic Games");
+            yield return Path.Combine(folder, "Epic", "UnrealEngine");
+            yield return folder;
+        }
+        var user = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (!string.IsNullOrWhiteSpace(user))
+        {
+            yield return Path.Combine(user, "Documents");
+            yield return Path.Combine(user, "UnrealEngine");
+        }
+    }
+
+    private static string[] ChildrenNamedUE(string root)
+    {
+        try
+        {
+            return Directory.EnumerateDirectories(root, "UE_*", ReparseSafe).ToArray();
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or SecurityException)
+        {
+            return [];
+        }
+    }
+
+    private static string[] ImmediateSubDirectories(string root)
+    {
+        try
+        {
+            return Directory.EnumerateDirectories(root, "*", ReparseSafe).ToArray();
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or SecurityException)
+        {
+            return [];
+        }
+    }
+
+    private static readonly EnumerationOptions ReparseSafe = new()
+    {
+        AttributesToSkip = FileAttributes.ReparsePoint,
+        IgnoreInaccessible = true,
+        RecurseSubdirectories = false,
+    };
+
+    /// <summary>
+    /// Takes the bridge plugin of an earlier Missum version out of the project. The folder is
+    /// deleted only when the ownership marker proves Missum created it; a foreign plugin of the
+    /// same name is reported and left untouched, together with its project entry.
+    /// </summary>
+    private static string? RemoveOwnedBridgePlugin(string workspace, string project)
+    {
+        var projectDirectory = Path.GetDirectoryName(project)!;
+        var relative = Path.GetRelativePath(workspace, Path.Combine(projectDirectory, "Plugins", "MissumBridge"));
+        var directory = WorkspaceFilePath.Resolve(workspace, relative);
+        if (Directory.Exists(directory))
+        {
+            if (!File.Exists(Path.Combine(directory, ".missum-owned")))
+                return "Plugins/MissumBridge gehört nicht zu Missum. Ordner und Projekteintrag bleiben unberührt.";
+            try
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                return "Plugins/MissumBridge konnte nicht entfernt werden: " + exception.Message;
+            }
+        }
+        RewriteProjectPlugins(project, add: null, remove: "MissumBridge");
+        return null;
+    }
+
+    /// <summary>The Python channel needs Epic's scripting plugin, so Missum enables it on first connect.</summary>
+    private static void EnsurePythonPluginEnabled(string project) => RewriteProjectPlugins(project, add: "PythonScriptPlugin", remove: null);
 
     private static string CreateProject(string workspace, UnrealEngineInstallation engine)
     {
@@ -302,29 +435,24 @@ internal static class UnrealApplicationLauncher
 
     private static string BlankProjectMarker(string project) => project + ".missum-blank-pending";
 
-    private static void InstallPlugin(string workspace, string project, string package)
+    /// <summary>Adds or removes one plugin entry in the .uproject file, atomically and without a byte-order mark.</summary>
+    private static void RewriteProjectPlugins(string project, string? add, string? remove)
     {
-        var projectDirectory = Path.GetDirectoryName(project)!;
-        var relative = Path.GetRelativePath(workspace, Path.Combine(projectDirectory, "Plugins", "MissumBridge"));
-        var destination = WorkspaceFilePath.Resolve(workspace, relative);
-        var marker = Path.Combine(destination, ".missum-owned");
-        if (Directory.Exists(destination) && !File.Exists(marker))
-            throw new InvalidOperationException("Plugins/MissumBridge existiert bereits und gehört nicht zu Missum.");
-        Directory.CreateDirectory(destination);
-        foreach (var file in Directory.EnumerateFiles(package, "*", SearchOption.AllDirectories))
-        {
-            var target = Path.Combine(destination, Path.GetRelativePath(package, file));
-            var safe = WorkspaceFilePath.Resolve(workspace, Path.GetRelativePath(workspace, target));
-            Directory.CreateDirectory(Path.GetDirectoryName(safe)!);
-            File.Copy(file, safe, overwrite: true);
-        }
-        File.WriteAllText(marker, "Missum Unreal Editor integration");
         var root = JsonNode.Parse(File.ReadAllText(project))?.AsObject() ?? throw new InvalidDataException("Ungültige .uproject-Datei.");
-        var plugins = root["Plugins"] as JsonArray;
-        if (plugins is null) root["Plugins"] = plugins = new JsonArray();
-        var entry = plugins.OfType<JsonObject>().FirstOrDefault(item => (string?)item["Name"] == "MissumBridge");
-        if (entry is null) plugins.Add(new JsonObject { ["Name"] = "MissumBridge", ["Enabled"] = true });
-        else entry["Enabled"] = true;
+        var plugins = root["Plugins"] as JsonArray ?? new JsonArray();
+        var changed = false;
+        if (remove is not null)
+            for (var index = plugins.Count - 1; index >= 0; index--)
+                if (plugins[index] is JsonObject item && (string?)item["Name"] == remove)
+                { plugins.RemoveAt(index); changed = true; }
+        if (add is not null)
+        {
+            var entry = plugins.OfType<JsonObject>().FirstOrDefault(item => (string?)item["Name"] == add);
+            if (entry is null) { plugins.Add(new JsonObject { ["Name"] = add, ["Enabled"] = true }); changed = true; }
+            else if ((bool?)entry["Enabled"] != true) { entry["Enabled"] = true; changed = true; }
+        }
+        if (!changed) return;
+        root["Plugins"] = plugins;
         var temp = project + "." + Guid.NewGuid().ToString("N") + ".tmp";
         File.WriteAllText(temp, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
         File.Move(temp, project, overwrite: true);
@@ -401,7 +529,10 @@ internal static class UnrealApplicationLauncher
             await Task.Delay(PollInterval, cancellationToken).ConfigureAwait(false);
         }
     }
-    private sealed record LaunchLease(Guid LaunchId, int ProcessId, long StartTime, string Token, string ProjectPath, bool BlankPending = false);
+    private sealed record LaunchLease(Guid LaunchId, int ProcessId, long StartTime, string Token, string ProjectPath,
+        bool BlankPending = false, string? BridgeNotice = null);
     private sealed record ReadyReceipt(int Port, int ProcessId, string? Token, string? ProjectPath,
-        bool Initialized = false, string? InitializationError = null);
+        bool Initialized = false, string? InitializationError = null,
+        ReadyChannel? Channel = null, string[]? Capabilities = null);
+    private sealed record ReadyChannel(string? Type, int Protocol, string? RuntimeVersion, string? Pump, string? Transport);
 }

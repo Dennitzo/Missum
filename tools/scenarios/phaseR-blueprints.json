@@ -1,0 +1,54 @@
+[
+  {
+    "tool": "unreal.level.open",
+    "arguments": { "assetPath": "/Game/Maps/MissumCityGrid", "operationId": "phaseR-open-0001" }
+  },
+  {
+    "tool": "unreal.actor.place",
+    "arguments": {
+      "primitive": "cone",
+      "label": "ReviewTarget11",
+      "position": { "x": 700, "y": 700, "z": 0 },
+      "scale": { "x": 3, "y": 3, "z": 4 },
+      "requireVisualReview": true,
+      "operationId": "phaseR-place-0001"
+    }
+  },
+  {
+    "tool": "unreal.class.search",
+    "arguments": { "query": "GameModeBase", "limit": 3 }
+  },
+  {
+    "tool": "unreal.blueprint.template",
+    "arguments": { "template": "gameMode", "replace": true, "operationId": "phaseR-bp-1" },
+    "timeout": 600
+  },
+  {
+    "tool": "unreal.blueprint.template",
+    "arguments": { "template": "playerCharacter", "replace": true, "operationId": "phaseR-bp-2" },
+    "timeout": 600
+  },
+  {
+    "tool": "unreal.blueprint.template",
+    "arguments": { "template": "npc", "replace": true, "operationId": "phaseR-bp-3" },
+    "timeout": 600
+  },
+  {
+    "tool": "unreal.blueprint.template",
+    "arguments": { "template": "questObjective", "replace": true, "operationId": "phaseR-bp-4" },
+    "timeout": 600
+  },
+  {
+    "tool": "unreal.blueprint.template",
+    "arguments": { "template": "questComponent", "replace": true, "operationId": "phaseR-bp-5" },
+    "timeout": 600
+  },
+  {
+    "tool": "unreal.blueprint.read",
+    "arguments": { "assetPath": "/Game/Blueprints/Mission/BP_MissionGameMode" }
+  },
+  {
+    "tool": "unreal.level.save",
+    "arguments": { "operationId": "phaseR-save-0001" }
+  }
+]

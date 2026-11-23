@@ -13,6 +13,7 @@ public sealed partial class ShellViewModel : ObservableObject
     private const string VisionMediaService = "vision-media";
     private const string ImageService = "image-generation";
     private const string ResearchService = "research";
+    private const string MeetingsService = "meetings-host";
     private readonly Dictionary<string, string> _activeClientServices = new(StringComparer.Ordinal);
     private GpuStatusSnapshot? _gpuStatus;
     private ModelStatusSnapshot? _modelStatus;
@@ -27,6 +28,25 @@ public sealed partial class ShellViewModel : ObservableObject
         AiServices.Add(new(VisionMediaService, "Vision / Medien", "Qwen3-VL + Media Worker", "\uE722", "Vision / Medien - Qwen3-VL", false, false, "Wird geprüft"));
         AiServices.Add(new(ImageService, "Bildgenerierung", "Z-Image-Turbo · Docker", "\uE8B9", "Bildgenerierung - Z-Image-Turbo", false, false, "Wird geprüft"));
         AiServices.Add(new(ResearchService, "Web", "SearXNG", "\uE721", "Web - SearXNG", false, false, "Wird geprüft"));
+        AiServices.Add(new(MeetingsService, "Meetings-Host", "Claude Meetings · LAN", "\uE8AA", "Meetings-Host - Claude Meetings im lokalen Netzwerk", false, false, "Wird gestartet"));
+    }
+
+    /// <summary>The meetings host runs inside Missum, so its chip follows the local service, not the gateway.</summary>
+    public void ApplyMeetingHostStatus(Missum.App.Services.Meetings.MeetingHostStatus status)
+    {
+        var index = AiServices.ToList().FindIndex(static item => item.Key == MeetingsService);
+        if (index < 0) return;
+        var guests = Math.Max(0, status.Connections - 1);
+        var next = AiServices[index] with
+        {
+            Runtime = status.Running ? $"Claude Meetings · Port {status.Port}" : "Claude Meetings · LAN",
+            IsReachable = status.Running,
+            StateLabel = !status.Running ? (status.Error is null ? "Gestoppt" : "Fehler") : guests > 0 ? $"{guests} verbunden" : "Bereit",
+            ToolTipText = status.Running
+                ? $"Meetings-Host - lauscht auf Port {status.Port}"
+                : "Meetings-Host - " + (status.Error ?? "gestoppt"),
+        };
+        if (next != AiServices[index]) AiServices[index] = next;
     }
 
     [ObservableProperty]
@@ -169,6 +189,7 @@ public sealed partial class ShellViewModel : ObservableObject
         for (var index = 0; index < AiServices.Count; index++)
         {
             var current = AiServices[index];
+            if (current.Key == MeetingsService) continue;
             var reachable = IsServiceReachable(current.Key);
             var isActive = active.Contains(current.Key);
             var isWaiting = waiting && string.Equals(current.Key, GeneralService, StringComparison.Ordinal) && !isActive;

@@ -1,0 +1,12 @@
+[
+  {
+    "tool": "unreal.status",
+    "arguments": {
+      "visionReview": {
+        "operationId": "phaseF-place-0001",
+        "verdict": "unavailable",
+        "summary": "Bildprüfung nicht möglich: Der Editorweg HighResShot lieferte in dieser Sitzung keine Datei, und das Editorfenster stand der Fensteraufnahme nicht zur Verfügung. Die Platzierung selbst ist datenbasiert bestätigt: Kugel an (-600, -600, 200) mit Maßstab 3, Feld 0 auf /Game/Materials/M_NeonCyan."
+      }
+    }
+  }
+]

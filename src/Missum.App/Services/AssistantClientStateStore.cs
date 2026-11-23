@@ -119,6 +119,7 @@ internal sealed record AssistantClientView
     public Guid? GeneralSession { get; init; }
     public Guid? CodingSession { get; init; }
     public Guid? ScienceSession { get; init; }
+    public Guid? MeetingsSession { get; init; }
     public Guid? ActiveSession { get; init; }
     public Guid? ActiveProject { get; init; }
     public string? Model { get; init; }
@@ -129,7 +130,7 @@ internal sealed record AssistantClientView
     internal static AssistantClientView From(AppSettings value) => new()
     {
         Mode = value.SelectedChatMode, GeneralSession = value.ActiveGeneralSessionId,
-        CodingSession = value.ActiveCodingSessionId, ScienceSession = value.ActiveClaudeScienceSessionId,
+        CodingSession = value.ActiveCodingSessionId, ScienceSession = value.ActiveClaudeScienceSessionId, MeetingsSession = value.ActiveClaudeMeetingsSessionId,
         ActiveSession = value.ActiveSessionId, ActiveProject = value.ActiveProjectId,
         Model = value.SelectedModel, SessionPaneOpen = value.IsAssistantSessionPaneOpen,
         Reasoning = new(value.ReasoningEffortsByModel, StringComparer.OrdinalIgnoreCase),
@@ -138,7 +139,7 @@ internal sealed record AssistantClientView
     internal AppSettings Apply(AppSettings global) => global with
     {
         SelectedChatMode = Mode, ActiveGeneralSessionId = GeneralSession, ActiveCodingSessionId = CodingSession,
-        ActiveClaudeScienceSessionId = ScienceSession, ActiveSessionId = ActiveSession, ActiveProjectId = ActiveProject,
+        ActiveClaudeScienceSessionId = ScienceSession, ActiveClaudeMeetingsSessionId = MeetingsSession, ActiveSessionId = ActiveSession, ActiveProjectId = ActiveProject,
         SelectedModel = Model ?? global.SelectedModel, SelectedCodingModel = Model ?? global.SelectedModel, IsAssistantSessionPaneOpen = SessionPaneOpen,
         // Reasoning is a shared PC preference. Legacy per-tab values remain
         // readable in the cache but may not shadow newer saved server choices.
@@ -157,7 +158,7 @@ internal sealed record AssistantClientView
         {
             Mode = Enum.IsDefined(Mode) ? Mode : ChatMode.General,
             GeneralSession = NormalizeId(GeneralSession), CodingSession = NormalizeId(CodingSession),
-            ScienceSession = NormalizeId(ScienceSession), ActiveSession = NormalizeId(ActiveSession), ActiveProject = NormalizeId(ActiveProject),
+            ScienceSession = NormalizeId(ScienceSession), MeetingsSession = NormalizeId(MeetingsSession), ActiveSession = NormalizeId(ActiveSession), ActiveProject = NormalizeId(ActiveProject),
             Model = IsValidText(Model, 512) ? Model : null,
             Reasoning = reasoning, Drafts = drafts,
         };

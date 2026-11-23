@@ -103,6 +103,15 @@ public sealed class CodingTextReconcilerTests
         Assert.Equal("reasoningCompleted", ReasoningPhases(events)[^1]);
     }
 
+    // Coding runs execute the mandatory initial plan as their own model turn first.
+    // Assertions about the content turn only consider events after that plan step.
+    private static RunEvent[] AfterInitialPlan(IReadOnlyList<RunEvent> events)
+    {
+        var plan = events.LastOrDefault(item => item.Type.StartsWith("server_tool.", StringComparison.Ordinal)
+            && item.Data.TryGetProperty("tool", out var tool) && tool.GetString() == CodingWorkingStateTools.PlanTool);
+        return plan is null ? [.. events] : events.Where(item => item.Id > plan.Id).ToArray();
+    }
+
     private static string[] ReasoningPhases(IEnumerable<RunEvent> events) => events
         .Where(item => item.Type == RunEventTypes.ModelGeneration
             && item.Data.GetProperty("state").GetString() is "reasoningStarted" or "reasoningCompleted")
@@ -126,7 +135,9 @@ public sealed class CodingTextReconcilerTests
         Assert.Equal(Harness.Previous.Length, checkpoint.VisibleTextLength);
         Assert.Equal(Harness.Previous + NativeHandler.FirstText,
             CodingTextReconciler.Project(await harness.Repository.GetEventsAfterAsync(runId, 0)));
-        Assert.Equal("read-completed", Assert.Single(checkpoint.Messages, item => item.Role == "tool").ToolCallId);
+        // Der Beleg des initialen Planaufrufs liegt vor dem Lesen im Journal.
+        Assert.Equal<string?>(["read-completed", "plan-1"], checkpoint.Messages
+            .Where(item => item.Role == "tool").Select(item => item.ToolCallId));
 
         harness.Handler.HoldRetry = false;
         await harness.Processor.ProcessAsync(runId, CancellationToken.None);
@@ -155,8 +166,9 @@ public sealed class CodingTextReconcilerTests
             var live = await harness.Repository.GetEventsAfterAsync(runId, 0);
             Assert.Equal(Harness.Previous + NativeHandler.FirstText, CodingTextReconciler.Project(live));
             Assert.DoesNotContain(live, item => item.Type == RunEventTypes.ReasoningDelta);
-            Assert.DoesNotContain(live, item => item.Type is RunEventTypes.RunCompleted or "model.turn.metrics");
-            Assert.Equal(SingleReasoningPhases, ReasoningPhases(live));
+            Assert.DoesNotContain(live, item => item.Type == RunEventTypes.RunCompleted);
+            Assert.DoesNotContain(AfterInitialPlan(live), item => item.Type == "model.turn.metrics");
+            Assert.Equal(SingleReasoningPhases, ReasoningPhases(AfterInitialPlan(live)));
         }
         finally { harness.Handler.ReleaseFirstTail.TrySetResult(); }
         await processing.WaitAsync(stop.Token);
@@ -183,7 +195,7 @@ public sealed class CodingTextReconcilerTests
             var live = await harness.Repository.GetEventsAfterAsync(runId, 0);
             Assert.Equal(Harness.Previous + NativeHandler.FirstText + NativeHandler.ShortTextTail,
                 CodingTextReconciler.Project(live));
-            var phase = Assert.Single(live, item => item.Type == RunEventTypes.ModelGeneration
+            var phase = Assert.Single(AfterInitialPlan(live), item => item.Type == RunEventTypes.ModelGeneration
                 && item.Data.GetProperty("state").GetString() == "toolCallGeneration");
             Assert.True(live.Last(item => item.Type == RunEventTypes.TextDelta).Id < phase.Id);
             Assert.DoesNotContain(live, item => item.Type == RunEventTypes.ClientToolProposed);
@@ -256,6 +268,8 @@ public sealed class CodingTextReconcilerTests
         internal string FinalText { get; } = diverge ? "Die neue Prüfung zeigt einen anderen Zusammenhang. Die Antwort wurde anhand der Datei korrigiert." : FirstText + " Die Prüfung ist jetzt abgeschlossen.";
         internal string FinalReasoning { get; } = diverge ? "## Korrigierter Plan\n\nDie Ursache ist nun bestätigt." : FirstReasoning + "\nJetzt testen.";
         internal int ChatCalls { get; private set; }
+        private int _contentTurns;
+        private bool _planIssued;
         internal bool HoldRetry { get; set; }
         internal bool HoldFirstTail { get; set; }
         internal bool HoldToolArguments { get; set; }
@@ -272,8 +286,28 @@ public sealed class CodingTextReconcilerTests
             if (path == "/props") return Json(new { default_generation_settings = new { n_ctx = 32768 } });
             if (path == "/v1/chat/completions/input_tokens") return Json(new { input_tokens = 32 });
             if (path != "/v1/chat/completions") throw new InvalidOperationException("Unexpected endpoint " + path);
+            using var requestBody = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken));
+            // Codex-Hauptläufe verlangen den initialen Arbeitsplan als ersten Werkzeugschritt.
+            if (!_planIssued && requestBody.RootElement.TryGetProperty("tools", out var offeredTools)
+                && offeredTools.EnumerateArray().Any(tool => tool.GetProperty("function").GetProperty("name").GetString()
+                    == ModelRuntimeClient.ToTransportToolName(Missum.Ai.Server.Core.Coding.CodingWorkingStateTools.PlanTool)))
+            {
+                _planIssued = true;
+                var planFrame = JsonSerializer.Serialize(new
+                {
+                    choices = new[] { new { delta = new { tool_calls = new[] { new { index = 0, id = "plan-1", type = "function",
+                        function = new { name = ModelRuntimeClient.ToTransportToolName(Missum.Ai.Server.Core.Coding.CodingWorkingStateTools.PlanTool),
+                            arguments = JsonSerializer.Serialize(new { steps = new[] { new { id = "p1", title = "Phase 1: Datei prüfen" } }, phase = "planning" }) } } } }, finish_reason = "tool_calls" } },
+                    usage = new { prompt_tokens = 32, completion_tokens = 32 },
+                });
+                return new(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("data: " + planFrame + "\n\ndata: [DONE]\n\n", Encoding.UTF8, "text/event-stream"),
+                };
+            }
             ChatCalls++;
-            if (ChatCalls > 1 && HoldRetry)
+            _contentTurns++;
+            if (_contentTurns > 1 && HoldRetry)
             {
                 RetryEntered.TrySetResult();
                 await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
@@ -289,7 +323,7 @@ public sealed class CodingTextReconcilerTests
                 paused.Headers.ContentType = new("text/event-stream");
                 return new(HttpStatusCode.OK) { Content = paused };
             }
-            var incomplete = ChatCalls == 1;
+            var incomplete = _contentTurns == 1;
             var reasoningFrames = "";
             if (streamReasoning)
             {

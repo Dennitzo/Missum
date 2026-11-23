@@ -168,7 +168,7 @@ public sealed class LocalCodingToolExecutor
                 + "nicht den vollständigen Datensatz in den Modellkontext übertragen.");
         // Direct reads are complete; only an explicit line range limits the returned content.
         // Search and mutation retain their independent safety limits.
-        var bytes = await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
+        var bytes = await ReadSharedAsync(path, cancellationToken).ConfigureAwait(false);
         if (bytes.Length > MaximumReadFileBytes)
             throw new InvalidDataException("Die Datei ist während des Lesens über das direkte Leselimit von 8 MiB gewachsen.");
         if (IsBinary(bytes)) throw new InvalidDataException("Die Datei ist binär und kann nicht als Text gelesen werden.");
@@ -704,12 +704,25 @@ public sealed class LocalCodingToolExecutor
         }
     }
 
+    /// <summary>
+    /// Reads a file other programs may still hold open for writing, such as the log of a running
+    /// Unreal editor. File.ReadAllBytes refuses those with a sharing violation.
+    /// </summary>
+    internal static async Task<byte[]> ReadSharedAsync(string path, CancellationToken cancellationToken)
+    {
+        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete, 81920, useAsync: true);
+        using var buffer = new MemoryStream();
+        await stream.CopyToAsync(buffer, cancellationToken).ConfigureAwait(false);
+        return buffer.ToArray();
+    }
+
     private static async Task<byte[]?> TryReadTextFileAsync(string path, CancellationToken cancellationToken)
     {
         try
         {
             if (new FileInfo(path).Length > MaximumFileBytes) return null;
-            var bytes = await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
+            var bytes = await ReadSharedAsync(path, cancellationToken).ConfigureAwait(false);
             if (bytes.Length > MaximumFileBytes || IsBinary(bytes)) return null;
             return bytes;
         }

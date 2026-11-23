@@ -122,8 +122,9 @@ public sealed class CodingRunBudgetTests
         Assert.Null(await harness.DriveAsync(runId));
 
         var completed = Assert.Single(await harness.Repository.GetEventsAfterAsync(runId, 0), item => item.Type == RunEventTypes.RunCompleted);
-        Assert.Equal(5_000_000_016, completed.Data.GetProperty("inputTokens").GetInt64());
-        Assert.Equal(6_000_000_004, completed.Data.GetProperty("outputTokens").GetInt64());
+        // Der initiale Arbeitsplan kostet eine zusätzliche Modellrunde (Nutzung 16/4).
+        Assert.Equal(5_000_000_032, completed.Data.GetProperty("inputTokens").GetInt64());
+        Assert.Equal(6_000_000_008, completed.Data.GetProperty("outputTokens").GetInt64());
     }
 
     [Theory]
@@ -143,7 +144,8 @@ public sealed class CodingRunBudgetTests
 
         Assert.Null(await harness.DriveAsync(runId));
         Assert.Equal(RunState.Completed, (await harness.Repository.GetAsync(runId))!.State);
-        Assert.Equal(2, harness.Handler.ChatCalls);
+        // Plan-Aufruf, Lesevorschlag und Abschlussantwort sind drei Modellrunden.
+        Assert.Equal(3, harness.Handler.ChatCalls);
     }
 
     [Theory]
@@ -197,7 +199,8 @@ public sealed class CodingRunBudgetTests
         Assert.Null(await harness.DriveAsync(runId));
 
         Assert.Equal(70, harness.ExecutedReads);
-        Assert.Equal(71, harness.Handler.ChatCalls);
+        // Plan-Aufruf plus 70 Lesevorschläge plus Abschlussantwort.
+        Assert.Equal(72, harness.Handler.ChatCalls);
         Assert.Equal(RunState.Completed, (await harness.Repository.GetAsync(runId))!.State);
         var events = await harness.Repository.GetEventsAfterAsync(runId, 0);
         Assert.Equal(70, events.Count(item => item.Type == RunEventTypes.ClientToolProposed));
@@ -238,9 +241,10 @@ public sealed class CodingRunBudgetTests
         Assert.Null(await harness.DriveAsync(runId));
 
         Assert.Equal(30, harness.ExecutedReads);
-        Assert.Equal(31, harness.Handler.ChatCalls);
+        Assert.Equal(32, harness.Handler.ChatCalls);
         Assert.Equal(RunState.Completed, (await harness.Repository.GetAsync(runId))!.State);
-        Assert.Equal(30, harness.Handler.LastMessages.Count(message => message.GetProperty("role").GetString() == "tool"));
+        // 30 Lesebelege plus der Beleg des initialen Planaufrufs.
+        Assert.Equal(31, harness.Handler.LastMessages.Count(message => message.GetProperty("role").GetString() == "tool"));
         Assert.Contains(harness.Handler.LastMessages, message =>
             message.GetProperty("role").GetString() == "assistant"
             && message.TryGetProperty("content", out var content) && content.GetString() == "Ich prüfe die nächste Datei.");
@@ -251,7 +255,9 @@ public sealed class CodingRunBudgetTests
     [Fact]
     public async Task LastRoundProducesToolFreeInterimAnswerAndKeepsCheckpointWithoutFalseCompletion()
     {
-        using var harness = new Harness(readCalls: 30, maximumRounds: 4);
+        // Mit Planprotokoll belegt der initiale Planaufruf die erste Runde; fünf Runden
+        // lassen drei Lesevorschläge und die werkzeugfreie Zwischenantwort zu.
+        using var harness = new Harness(readCalls: 30, maximumRounds: 5);
         var runId = await harness.CreateRunAsync();
 
         var error = Assert.IsType<AgentRunLimitException>(await harness.DriveAsync(runId));
@@ -259,11 +265,11 @@ public sealed class CodingRunBudgetTests
         Assert.Contains("Arbeitsbudget erreicht", error.Message);
         Assert.Contains("Fortsetzung", error.Message);
         Assert.Equal(3, harness.ExecutedReads);
-        Assert.Equal(4, harness.Handler.ChatCalls);
+        Assert.Equal(5, harness.Handler.ChatCalls);
         Assert.True(harness.Handler.LastTurnHadNoTools);
         var checkpoint = (await harness.Repository.GetCheckpointAsync(runId))!;
-        Assert.Equal(4, checkpoint.RoundCount);
-        Assert.Equal(3, checkpoint.Messages.Count(message => message.Role == "tool"));
+        Assert.Equal(5, checkpoint.RoundCount);
+        Assert.Equal(4, checkpoint.Messages.Count(message => message.Role == "tool"));
         Assert.True(checkpoint.BudgetWarningIssued);
         Assert.Contains(checkpoint.Messages, message => message.Role == "assistant" && message.Content == Harness.InterimAnswer);
         var events = await harness.Repository.GetEventsAfterAsync(runId, 0);
@@ -323,9 +329,14 @@ public sealed class CodingRunBudgetTests
         using var harness = new Harness(readCalls: 0, maximumRounds: 4);
         var runId = await harness.CreateRunAsync();
         var call = new LmToolCall("pending-read", ClientToolNames.CodingRead, JsonSerializer.SerializeToElement(new { path = "src/final.cs" }));
+        // Der Arbeitsplan-Schutz verlangt einen initialisierten Plan, sonst wird der
+        // fortgeführte Leseaufruf abgelehnt, bevor das Rundlimit greift.
+        var planState = CodingWorkingState.Create("Prüfe das Projekt.");
+        planState = CodingWorkingStateReducer.ApplyPlanUpdate(planState, JsonSerializer.SerializeToElement(
+            new { steps = new[] { new { id = "p1", title = "Phase 1: Projekt prüfen" } }, phase = "planning" }));
         await harness.Repository.SaveCheckpointAsync(runId, new AgentRunCheckpoint(
             [new LmChatMessage("user", "Prüfe das Projekt."), new LmChatMessage("assistant", null, ToolCalls: [call])],
-            4, 1, 16, 4, ActiveToolCalls: [call]));
+            4, 1, 16, 4, ActiveToolCalls: [call], WorkingState: planState, SciencePlanInitialized: true));
 
         Assert.IsType<AgentRunLimitException>(await harness.DriveAsync(runId));
 
@@ -348,24 +359,27 @@ public sealed class CodingRunBudgetTests
         Assert.Null(await harness.DriveAsync(runId));
 
         Assert.Equal(3, harness.ExecutedReads);
-        Assert.Equal(2, harness.Handler.ChatCalls);
-        Assert.Equal(3, harness.Handler.LastMessages.Count(message => message.GetProperty("role").GetString() == "tool"));
+        Assert.Equal(3, harness.Handler.ChatCalls);
+        // 3 Lesebelege plus der Beleg des initialen Planaufrufs.
+        Assert.Equal(4, harness.Handler.LastMessages.Count(message => message.GetProperty("role").GetString() == "tool"));
     }
 
     [Fact]
     public async Task OversizedFinalBatchExecutesOnlyRemainingBudgetThenSummarizesDeniedCalls()
     {
-        using var harness = new Harness(readCalls: 3, batchSize: 3, maximumTools: 2);
+        // Der Planaufruf zählt als Werkzeugaufruf; mit Limit 3 laufen Plan plus zwei
+        // Lesevorschläge, der dritte wird als überzählig zusammengefasst.
+        using var harness = new Harness(readCalls: 3, batchSize: 3, maximumTools: 3);
         var runId = await harness.CreateRunAsync();
 
         Assert.IsType<AgentRunLimitException>(await harness.DriveAsync(runId));
 
         Assert.Equal(2, harness.ExecutedReads);
-        Assert.Equal(2, harness.Handler.ChatCalls);
+        Assert.Equal(3, harness.Handler.ChatCalls);
         Assert.True(harness.Handler.LastTurnHadNoTools);
         var checkpoint = (await harness.Repository.GetCheckpointAsync(runId))!;
-        Assert.Equal(2, checkpoint.ToolCallCount);
-        Assert.Equal(3, checkpoint.Messages.Count(message => message.Role == "tool"));
+        Assert.Equal(3, checkpoint.ToolCallCount);
+        Assert.Equal(4, checkpoint.Messages.Count(message => message.Role == "tool"));
         Assert.Contains(checkpoint.Messages, message => message.Role == "tool" && message.Content!.Contains("agent.tool_budget", StringComparison.Ordinal));
     }
 
@@ -873,6 +887,7 @@ public sealed class CodingRunBudgetTests
         public int Compactions { get; private set; }
         public JsonElement[] LastMessages { get; private set; } = [];
         private int _issuedReads;
+        private bool _planIssued;
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
@@ -926,10 +941,28 @@ public sealed class CodingRunBudgetTests
             if (LastMessages.Any(message => message.GetProperty("role").GetString() == "system"
                 && message.GetProperty("content").GetString()?.Contains(SummaryTask, StringComparison.Ordinal) == true))
             {
-                Assert.True(LastTurnHadNoTools);
+                // Die Zusammenfassung antwortet werkzeugfrei; der Auftrag darf
+                // bei Planprotokoll trotzdem Werkzeugschemata enthalten.
                 Compactions++;
                 delta = new { content = "Bisherige Dateien wurden geprüft. Auftrag: langsamen Programmstart korrigieren. Noch offen: weitere Dateien prüfen, Änderung und Tests." };
                 finish = "stop";
+            }
+            else if (!LastTurnHadNoTools && !_planIssued && tools.EnumerateArray().Any(tool =>
+                tool.GetProperty("function").GetProperty("name").GetString()
+                == ModelRuntimeClient.ToTransportToolName(CodingWorkingStateTools.PlanTool)))
+            {
+                // Codex-Hauptläufe verlangen den initialen Arbeitsplan als ersten Werkzeugschritt.
+                _planIssued = true;
+                delta = new { tool_calls = new[] { new { index = 0, id = "plan-1", type = "function", function = new
+                {
+                    name = ModelRuntimeClient.ToTransportToolName(CodingWorkingStateTools.PlanTool),
+                    arguments = JsonSerializer.Serialize(new
+                    {
+                        steps = new[] { new { id = "p1", title = "Phase 1: Projektanalyse und Korrektur des langsamen Programmstarts" } },
+                        phase = "planning",
+                    }),
+                } } } };
+                finish = "tool_calls";
             }
             else if (!LastTurnHadNoTools && _issuedReads < readCalls
                 && tools.EnumerateArray().Any(tool => tool.GetProperty("function").GetProperty("name").GetString()

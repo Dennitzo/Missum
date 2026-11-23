@@ -1,0 +1,39 @@
+[
+  { "command": "level.list", "arguments": { "limit": 5 } },
+  {
+    "command": "level.create",
+    "arguments": {
+      "levelName": "MissumCityGrid",
+      "folder": "/Game/Maps",
+      "save": true,
+      "operationId": "phase4-create-0001"
+    }
+  },
+  {
+    "command": "level.open",
+    "arguments": { "assetPath": "/Game/Maps/MissumCityGrid", "operationId": "phase4-open-0001" }
+  },
+  {
+    "command": "actor.place",
+    "arguments": {
+      "primitive": "cube",
+      "label": "MissumMarker",
+      "position": { "x": 1000, "y": 0, "z": 200 },
+      "rotation": { "pitch": 0, "yaw": 0, "roll": 0 },
+      "scale": { "x": 2, "y": 2, "z": 2 },
+      "operationId": "phase4-place-0001"
+    }
+  },
+  {
+    "command": "level.save",
+    "arguments": { "operationId": "phase4-save-0001" }
+  },
+  {
+    "command": "level.read",
+    "arguments": { "limit": 12 }
+  },
+  {
+    "command": "actor.read",
+    "arguments": { "actorName": "MissumMarker" }
+  }
+]

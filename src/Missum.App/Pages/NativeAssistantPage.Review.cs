@@ -175,7 +175,10 @@ public sealed partial class NativeAssistantPage
         SaveReviewScrollOffset();
         _activeReviewRunId = null;
         ReviewScroll.Visibility = Visibility.Collapsed;
-        BodyGrid.Visibility = Visibility.Visible;
+        // In Claude Meetings the tabs replace the chat body entirely.
+        var meetings = _mode == MeetingsMode;
+        BodyGrid.Visibility = meetings ? Visibility.Collapsed : Visibility.Visible;
+        MeetingsHost.Visibility = meetings ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void SaveReviewScrollOffset()

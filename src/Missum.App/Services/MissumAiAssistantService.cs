@@ -190,6 +190,10 @@ public sealed partial class MissumAiAssistantService(
         {
             throw new InvalidOperationException("Vorlesen muss als nachrichtenlose Sprachausgabe gestartet werden.");
         }
+        if (SelfImprovementApply.HoldReason() is { } held)
+        {
+            throw new InvalidOperationException(held);
+        }
         if (!await _gate.WaitAsync(0, cancellationToken).ConfigureAwait(false))
         {
             throw new InvalidOperationException("Es läuft bereits ein Missum-AI-Auftrag.");
@@ -1315,6 +1319,16 @@ public sealed partial class MissumAiAssistantService(
             RunAccepted accepted;
             var idempotencyKey = $"missum-client-{Guid.NewGuid():N}";
             var ownerSession = await GetExecutionSessionAsync(assistant.SessionId, cancellationToken).ConfigureAwait(false);
+            // A prompt that names an installed program integration (Unreal, Blender) uses its
+            // dedicated tools. Otherwise the classifier would pick desktop control for "open Unreal".
+            if (ShouldAutoRouteComputer(action, trigger, ownerSession?.ChatMode)
+                && MatchIntegrationAction(originalPrompt, extensionActions) is { } integrationActionId)
+            {
+                var integration = AssistantCoordinator.CreateExtensionMatch(integrationActionId, originalPrompt);
+                trigger = integration with { Trigger = integration.Trigger with { Action = PromptTriggerAction.Coding } };
+                await update(new(MissumAiAssistantUpdateKind.Status, assistant,
+                    Status: "Werkzeug wird ausgewählt", Model: CurrentSettings.SelectedModel)).ConfigureAwait(false);
+            }
             if (ShouldAutoRouteComputer(action, trigger, ownerSession?.ChatMode)
                 && ComputerLocalEndpoint.IsLocal(client.BaseAddress)
                 && !string.IsNullOrWhiteSpace(CurrentSettings.SelectedModel))
@@ -1509,6 +1523,28 @@ public sealed partial class MissumAiAssistantService(
                 }
             }
         }
+    }
+
+    /// <summary>Program integrations chosen automatically when the prompt names their program.</summary>
+    private static readonly (string ActionId, System.Text.RegularExpressions.Regex Pattern)[] IntegrationRoutes =
+    [
+        ("com.missum.unreal/edit", new(@"\b(unreal(\s*engine)?|ue\s?5(\.\d+)?|uproject|epic\s+games(\s+launcher)?)\b",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant)),
+        ("com.missum.blender/edit", new(@"\bblender\b",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant)),
+    ];
+
+    /// <summary>
+    /// The first installed integration whose program the prompt names, or null. Desktop
+    /// control stays reserved for programs without a dedicated tool set.
+    /// </summary>
+    internal static string? MatchIntegrationAction(string? prompt, IExtensionActionCatalog? catalog)
+    {
+        if (string.IsNullOrWhiteSpace(prompt) || catalog is null) return null;
+        foreach (var (actionId, pattern) in IntegrationRoutes)
+            if (pattern.IsMatch(prompt) && catalog.TryGetTools(actionId, out var tools) && tools is { Count: > 0 })
+                return actionId;
+        return null;
     }
 
     internal static bool ShouldAutoRouteComputer(PromptTriggerAction? action, PromptTriggerMatch? trigger, ChatMode? mode) =>
@@ -2075,7 +2111,8 @@ public sealed partial class MissumAiAssistantService(
                 cancellationToken).ConfigureAwait(false);
             foreach (var incomplete in incompleteExecutions)
             {
-                var unknown = UnknownClientToolOutcome(incomplete.ProposalId);
+                var unknown = await RecoverIncompleteOutcomeAsync(client, incomplete.ProposalId, incomplete.ToolName, localRun.SessionId,
+                    localRun.ServerRunId!, cancellationToken).ConfigureAwait(false);
                 await toolExecutions.CompleteAsync(incomplete.ProposalId, JsonSerializer.Serialize(unknown, JsonOptions),
                     CancellationToken.None).ConfigureAwait(false);
             }
@@ -2773,7 +2810,7 @@ public sealed partial class MissumAiAssistantService(
         }
         finally
         {
-            if (localRun.ExtensionActionId == "builtin.computer/use" && localRun.ServerRunId is { Length: > 0 } computerRunId)
+            if (AllowsComputerTools(localRun.ExtensionActionId) && localRun.ServerRunId is { Length: > 0 } computerRunId)
                 toolBroker.EndComputerRun(localRun.SessionId, computerRunId);
             lock (_activeRunLock)
                 if (ReferenceEquals(_activeSteeringSink, steeringSink)) _activeSteeringSink = null;
@@ -3006,7 +3043,7 @@ public sealed partial class MissumAiAssistantService(
                     "computer.tool_blocked", "Während der Computersteuerung sind andere lokale Werkzeuge für diesen Lauf gesperrt.");
             }
             else if (proposal.Name is "computer.observe" or "computer.act"
-                && (localRun.Action != PromptTriggerAction.Coding || localRun.ExtensionActionId != "builtin.computer/use"
+                && (localRun.Action != PromptTriggerAction.Coding || !AllowsComputerTools(localRun.ExtensionActionId)
                     || researchActorAgentId is not null || !string.Equals(proposal.RunId, item.RunId, StringComparison.Ordinal)))
             {
                 result = new ClientToolResult(proposal.ProposalId, "rejected",
@@ -3066,7 +3103,8 @@ public sealed partial class MissumAiAssistantService(
                     gatewayOverride: client.BaseAddress,
                     cancellationToken: cancellationToken,
                     researchActorAgentId: researchActorAgentId,
-                    computerUseEnabled: localRun.ExtensionActionId == "builtin.computer/use").ConfigureAwait(false);
+                    computerUseEnabled: localRun.ExtensionActionId == "builtin.computer/use",
+                    computerToolsAllowed: AllowsComputerTools(localRun.ExtensionActionId)).ConfigureAwait(false);
             }
             if (evidenceStore is not null && proposal.Name is not (ClientToolNames.CodingReadOutput or ClientToolNames.CodingSearchRunEvidence))
             {
@@ -3113,12 +3151,25 @@ public sealed partial class MissumAiAssistantService(
 
         // Canonical updates store the receipt in the same transaction as their objects.
         // Recover that receipt without executing anything again; other unknown mutations remain non-replayable.
-        var unknown = UnknownClientToolOutcome(proposal.ProposalId);
+        var unknown = await RecoverIncompleteOutcomeAsync(client, proposal.ProposalId, proposal.Name, localRun.SessionId,
+            item.RunId, cancellationToken).ConfigureAwait(false);
         _ = await toolExecutions.CompleteAsync(
             proposal.ProposalId,
             JsonSerializer.Serialize(unknown, JsonOptions),
             CancellationToken.None).ConfigureAwait(false);
         return unknown;
+    }
+
+    // A self-improvement apply is driven by its external broker, so its outcome is not unknown after a
+    // restart: wait for the broker's durable terminal state instead of reporting an unknown result.
+    private static async Task<ClientToolResult> RecoverIncompleteOutcomeAsync(MissumAiClient client, string proposalId, string toolName,
+        Guid sessionId, string serverRunId, CancellationToken cancellationToken)
+    {
+        if (SelfImprovementApply.IsApplyTool(toolName)
+            && await SelfImprovementApply.ResolveRecoveredAsync(proposalId, sessionId, serverRunId,
+                token => client.GetRunAsync(serverRunId, token), cancellationToken).ConfigureAwait(false) is { } resolved)
+            return resolved;
+        return UnknownClientToolOutcome(proposalId);
     }
 
     private static ClientToolResult UnknownClientToolOutcome(string proposalId) => new(proposalId, "failed",
@@ -3554,6 +3605,17 @@ public sealed partial class MissumAiAssistantService(
         var isScienceSession = codingSession.ChatMode == ChatMode.ClaudeScience;
         var isPlanMode = action == PromptTriggerAction.PlanMode;
         var deepResearch = trigger?.DeepResearch == true;
+        if (!isPlanMode && !deepResearch && (extensionClientTools?.Count ?? 0) <= 13
+            && trigger?.Trigger.ExtensionActionId == BuiltInActionIds.SelfImprovement
+            && SelfImprovementTool.Allows(codingSession.CodingWorkspacePath)
+            && extensionActions?.TryGetTools(BuiltInActionIds.SelfImprovement, out var selfImprovementTools) == true
+            && selfImprovementTools is not null)
+        {
+            extensionClientTools = [.. extensionClientTools ?? [], .. selfImprovementTools.Select(tool =>
+                ToClientToolDescriptor(serverCapabilities.SupportsSelfImprovementToolNames
+                    ? tool with { ModelToolName = "selfImprovement" + tool.ModelToolName["selfimprovement".Length..] }
+                    : tool))];
+        }
         if (UsesCodingAgent(action) || isScienceSession)
         {
             _activeCodingWorkspace ??= codingSession.CodingWorkspacePath;
@@ -3859,7 +3921,7 @@ public sealed partial class MissumAiAssistantService(
     internal static readonly string[] WorkspaceClientCapabilities =
         ["documentIo", "documents", "visual-tools", "workspace", "coding.process", "workspace.open"];
 
-    private IReadOnlyList<ToolDescriptor>? ResolveExtensionClientTools(PromptTriggerMatch? trigger)
+    private List<ToolDescriptor>? ResolveExtensionClientTools(PromptTriggerMatch? trigger)
     {
         var actionId = trigger?.Trigger.ExtensionActionId;
         if (string.IsNullOrWhiteSpace(actionId)
@@ -3869,7 +3931,11 @@ public sealed partial class MissumAiAssistantService(
         // One selected action can unlock several model tools. Integrations that only declare a
         // single tool keep working unchanged, because TryGetTools returns exactly that one entry.
         if (extensionActions.TryGetTools(actionId, out var registered) && registered is { Count: > 0 } tools)
-            return [.. tools.Select(ToClientToolDescriptor)];
+        {
+            // Never mix in computer.observe/computer.act: the gateway allows desktop control only in an
+            // isolated Computer-Use run with exactly those two tools (no code-running sidecars such as unreal.python).
+            return tools.Select(ToClientToolDescriptor).ToList();
+        }
         if (extensionActions.TryGetTool(actionId, out var single) && single is not null)
             return [ToClientToolDescriptor(single)];
         return null;
@@ -4395,21 +4461,49 @@ public sealed partial class MissumAiAssistantService(
         technisch nicht möglich, protokolliere unavailable mit dem konkreten Fehler und melde sie als ausstehend.
         """;
 
+    internal const string UnrealActionId = "com.missum.unreal/edit";
+
+    /// <summary>
+    /// Runs whose action allows computer.observe/computer.act. Only the isolated Computer-Use run:
+    /// the gateway rejects desktop control next to any other tool (it failed Unreal runs with run.failed).
+    /// </summary>
+    internal static bool AllowsComputerTools(string? extensionActionId) =>
+        extensionActionId is "builtin.computer/use";
+
     private const string UnrealWorkflowPrompt = """
         UNREAL-ENGINE-WORKFLOW
         Prüfe mit unreal.status die verfügbaren Editorfenster und Projektdateien. Verwende unreal.connect,
         um das gewünschte Projekt im aktuellen Projektordner mit dem Missum-Editor zu öffnen. Nutze bei
         mehreren Projektdateien oder Engine-Versionen die Auswahlparameter. Ein bereits separat geöffnetes
         Fenster ist sichtbar; die Bearbeitung erfolgt in der von Missum gestarteten Sitzung.
-        Untersuche Blueprint-Assets und Graphen mit unreal.blueprint.read. Erstelle und bearbeite
-        Blueprint-Assets, Variablen, Komponenten, Knoten und Pin-Verbindungen mit den angebotenen
-        unreal.blueprint-Werkzeugen. Kompiliere die betroffenen Blueprints, behebe Fehler und speichere.
+        Enthält der Projektordner noch keine .uproject-Datei, legt unreal.connect selbst ein neues
+        Blueprint-Projekt (benannt nach dem Projektordner) an und öffnet es. Ein neues Projekt erstellst du
+        also immer mit unreal.connect – nie über Startmenü, Launcher oder Bildschirmsteuerung.
+        Für alles, was die einzelnen unreal-Werkzeuge nicht abdecken, schreibe Editor-Python mit
+        unreal.python (Modul unreal: EditorAssetLibrary, EditorActorSubsystem, AssetTools, Materialien,
+        Projekteinstellungen, Imports). Gib Ergebnisse mit print oder der Variable result zurück und
+        prüfe sie. Python-Namen weichen von C++ ab: set_actor_scale3d, set_actor_location(v, False, False),
+        root_component ist eine Eigenschaft, Komponenten über get_component_by_class; Eigenschaften mit
+        get_editor_property/set_editor_property. Bei AttributeError nennt das Ergebnis passende Namen.
+        unreal.Rotator hat in Python die Reihenfolge (roll, pitch, yaw); schreibe immer
+        unreal.Rotator(pitch=..., yaw=..., roll=...). Blickrichtung: yaw 0 = +X, yaw 90 = +Y; eine Kamera
+        südlich der Mitte (negatives Y) braucht yaw 90, um zur Mitte zu blicken. Die Karte ins Bild rücken:
+        unreal.camera operation=frame (ohne cameraName richtet es den Editor-Viewport aus). Blueprints untersuchst und erstellst du mit unreal.blueprint (operation read, create,
+        compile, save); Knoten- und Pinverbindungen sind über Python nicht zuverlässig möglich – baue
+        Logik dann über Komponenten und Eigenschaften. unreal.launcher.start öffnet den Epic Games Launcher;
+        Klicks im Launcher oder im Blueprint-Editor erledigt der separate Modus Computersteuerung – nenne
+        dem Nutzer dann den konkreten Schritt.
+        3D-Geometrie aus Blender liegt als FBX/GLB unter Import/Blender im Projektordner; importiere sie
+        mit unreal.asset (operation import) und prüfe das Ergebnis im Viewport.
         Prüfe nach unbekanntem Werkzeugausgang den aktuellen Zustand, bevor du eine Änderung wiederholst.
         Wenn der Auftrag eine Sichtprüfung verlangt, erfasse den passenden Viewport oder eine benannte
-        Kamera mit unreal.view.capture. Lade das PNG mit image.input und prüfe den exakten Upload mit
+        Kamera mit unreal.view.capture, nicht mit eigenem HighResShot und Dateisuche in Saved/Screenshots
+        (asynchron; während einer Spielvorschau zeigt es das Spielfenster). Beende eine laufende
+        Spielvorschau vor der Aufnahme. Lade das gemeldete imagePath mit image.input und prüfe den exakten Upload mit
         media.analyze. Vergleiche vorhandene Bildvorlagen mit referenceUploadIds. Melde operationId,
         Bild-SHA-256 und den tatsächlichen Befund mit unreal.status visionReview. Bei Abweichungen
-        korrigiere und prüfe erneut; bei technischen Fehlern melde die Sichtprüfung als ausstehend.
+        korrigiere und prüfe erneut. Liefert unreal.view.capture kein Bild, melde die Sichtprüfung als
+        ausstehend.
         """;
 
     internal static string RemoveDocumentEvidenceFooter(string content)

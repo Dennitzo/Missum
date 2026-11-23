@@ -1,6 +1,8 @@
 using Missum.App.Services;
 using Missum.App.Services.Extensions;
+using Missum.App.Services.Meetings;
 using Missum.App.ViewModels;
+using Missum.Ai.Client;
 using Missum.Ai.Contracts;
 using Missum.Core.Chat;
 using Missum.Core.Contracts;
@@ -74,6 +76,7 @@ public partial class App : Application
     private string? _lastLoggedAiConnectionState;
     private int _activationReady;
     private int _shutdownStarted;
+    private int _plannedRestart;
     private Uri? _lifecycleGateway;
     private AssistantResolvedAppearance? _resolvedAppearance;
     private UISettings? _appearanceSystemSettings;
@@ -163,6 +166,12 @@ public partial class App : Application
                 services.AddSingleton<LocalDocumentToolService>();
                 services.AddSingleton<LocalToolBroker>();
                 services.AddSingleton<MissumAiAssistantService>();
+                services.AddSingleton<MeetingHostService>();
+                services.AddSingleton<MeetingCameraService>();
+                services.AddSingleton<MeetingAudioService>();
+                services.AddSingleton<MeetingSessionService>();
+                services.AddSingleton<MeetingAgentService>();
+                services.AddSingleton<MeetingTranscriptionHub>();
             })
             .Build();
     }
@@ -269,6 +278,20 @@ public partial class App : Application
             // visible window can accept a new prompt. Remote cancellation can
             // wait for the local services to become reachable.
             await GetService<MissumAiAssistantService>().PreparePersistedRunsAtStartupAsync();
+            MissumAiClient.RunCreationHold = SelfImprovementApply.HoldReason;
+            SelfImprovementApply.PlannedRestartHandler = BeginPlannedRestartAsync;
+            SelfImprovementApply.ResumeSnapshotProvider = GetService<MissumAiAssistantService>().CaptureSelfImprovementResumeAsync;
+            // An unfinished self-improvement apply resumes its broker and reopens its chat for reattach.
+            var activeApply = SelfImprovementApply.ActiveOperation();
+            if (activeApply is not null)
+            {
+                try { SelfImprovementApply.EnsureActiveBrokerRunning(); }
+                catch (Exception exception) when (exception is not OutOfMemoryException)
+                {
+                    AppLog.ShutdownCleanupFailed(GetService<ILogger<App>>(), exception);
+                }
+                _pendingActivationTargets.Enqueue(activeApply.Value.SessionId);
+            }
             _ = await GetService<IChatRepository>().DeleteEmptyTerminalMessagesAsync();
             await ApplySessionActivationAsync(
                 GetTargetSessionId(activationArguments),
@@ -295,7 +318,10 @@ public partial class App : Application
             sharedSettings.ResolvedThemeProvider = () => Volatile.Read(ref _resolvedAppearance)?.Theme ?? "dark";
             settings.Changed += OnSharedSettingsChanged;
             await GetService<AssistantHost>().StartAsync();
+            await StartMeetingHostAsync();
             Volatile.Write(ref _activationReady, 1);
+            if (GetMeetingLink(activationArguments) is { } launchMeeting)
+                GetService<MeetingSessionService>().RequestJoin(launchMeeting);
             while (_pendingActivationTargets.TryDequeue(out var targetSessionId))
             {
                 await ApplySessionActivationAsync(targetSessionId, navigateToAssistant: true);
@@ -337,6 +363,19 @@ public partial class App : Application
 
     private void OnAppInstanceActivated(object? sender, AppActivationArguments args)
     {
+        if (GetMeetingLink(args) is { } meetingLink)
+        {
+            // A join link from a browser, chat or mail focuses this window and opens Claude Meetings.
+            _window?.DispatcherQueue.TryEnqueue(async () =>
+            {
+                if (_window is not { } target) return;
+                await target.OpenAssistantSessionAsync(refreshSession: false);
+                target.BringToForeground();
+                GetService<MeetingSessionService>().RequestJoin(meetingLink);
+            });
+            return;
+        }
+
         var targetSessionId = GetTargetSessionId(args);
         var window = _window;
         if (Volatile.Read(ref _activationReady) == 0 || window is null)
@@ -394,6 +433,38 @@ public partial class App : Application
         return AssistantSessionUri.TryParse(protocolArgs.Uri, RuntimeProfile.Name, out var sessionId)
             ? sessionId
             : null;
+    }
+
+    private static MeetingLink? GetMeetingLink(AppActivationArguments? args)
+    {
+        if (args?.Kind != ExtendedActivationKind.Protocol
+            || args.Data is not Windows.ApplicationModel.Activation.IProtocolActivatedEventArgs protocolArgs)
+        {
+            return null;
+        }
+        return MeetingLink.TryParse(protocolArgs.Uri, out var link) ? link : null;
+    }
+
+    /// <summary>
+    /// Starts the resident Claude Meetings host together with its agent and
+    /// transcription observers. Smoke instances skip it unless a meetings smoke asks for it.
+    /// </summary>
+    private async Task StartMeetingHostAsync()
+    {
+        var smoke = !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("MISSUM_SMOKE_INSTANCE_KEY"));
+        if (smoke && string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_MEETINGS"))) return;
+        _ = GetService<MeetingAgentService>();
+        _ = GetService<MeetingTranscriptionHub>();
+        var host = GetService<MeetingHostService>();
+        host.StatusChanged += (_, _) => _window?.DispatcherQueue.TryEnqueue(() => GetService<ShellViewModel>().ApplyMeetingHostStatus(host.Status));
+        var port = int.TryParse(Environment.GetEnvironmentVariable("MISSUM_MEETING_PORT"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var configured)
+            && configured is > 0 and < 65536 ? configured : MeetingHostService.DefaultPort;
+        try { await host.StartAsync(port); }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            AppLog.ShutdownCleanupFailed(GetService<ILogger<App>>(), new InvalidOperationException("Meeting-Host konnte nicht starten", exception));
+        }
+        GetService<ShellViewModel>().ApplyMeetingHostStatus(host.Status);
     }
 
     private void TryRegisterSessionProtocol()
@@ -704,6 +775,19 @@ public partial class App : Application
         }, cancellation.Token);
     }
 
+    // The apply broker waits for this process to exit. Close like a normal exit, but keep the run,
+    // its tool proposal and the stack alive so the new version can reattach to the same chat.
+    private Task BeginPlannedRestartAsync(string operationId)
+    {
+        Interlocked.Exchange(ref _plannedRestart, 1);
+        var window = _window;
+        if (window is null || !window.DispatcherQueue.TryEnqueue(() => _ = window.CloseGracefullyAsync()))
+            Environment.Exit(0);
+        // Never let a stuck shutdown block the swap: the broker only proceeds once this process is gone.
+        _ = Task.Delay(TimeSpan.FromSeconds(90)).ContinueWith(static _ => Environment.Exit(0), TaskScheduler.Default);
+        return Task.CompletedTask;
+    }
+
     private async Task PrepareShutdownAsync()
     {
         if (Interlocked.Exchange(ref _shutdownStarted, 1) != 0)
@@ -750,18 +834,31 @@ public partial class App : Application
             // Capture the active server run before cancellation drains the queue
             // and detaches its stream. No queued prompt may start during shutdown.
             using var runDrain = new CancellationTokenSource(TimeSpan.FromSeconds(25));
-            var activeRun = assistant.CancelCurrentAndWaitAsync(runDrain.Token);
+            var plannedRestart = Volatile.Read(ref _plannedRestart) != 0;
+            // A planned self-improvement restart keeps the waiting run, its journaled tool call and the
+            // stack: the broker swaps them and the new version reattaches to the same gateway run.
+            var activeRun = plannedRestart ? Task.CompletedTask : assistant.CancelCurrentAndWaitAsync(runDrain.Token);
             var queue = GetService<IAssistantRunScheduler>().DisposeAsync().AsTask();
-            await RunShutdownStepAsync("runs", assistant.StopPersistedRunsForShutdownAsync, TimeSpan.FromSeconds(20));
+            if (!plannedRestart)
+                await RunShutdownStepAsync("runs", assistant.StopPersistedRunsForShutdownAsync, TimeSpan.FromSeconds(20));
             await RunShutdownStepAsync("run-drain", token => Task.WhenAll(activeRun, queue).WaitAsync(token), TimeSpan.FromSeconds(25));
             // A server acceptance can arrive while the first scan still sees a
             // queued local attempt. Drain first, then retire its saved identity.
-            await RunShutdownStepAsync("final-runs", assistant.StopPersistedRunsForShutdownAsync, TimeSpan.FromSeconds(20));
+            if (!plannedRestart)
+                await RunShutdownStepAsync("final-runs", assistant.StopPersistedRunsForShutdownAsync, TimeSpan.FromSeconds(20));
             // Each cleanup stage is independent. An unavailable Docker daemon
             // must never prevent both native GPU runtimes from being released.
-            await RunShutdownStepAsync("docker", token => stack.StopAsync(gateway, token), TimeSpan.FromSeconds(45));
+            if (!plannedRestart)
+                await RunShutdownStepAsync("docker", token => stack.StopAsync(gateway, token), TimeSpan.FromSeconds(45));
             await RunShutdownStepAsync("models", token => nativeRuntime.StopOwnedAsync(gateway, token), TimeSpan.FromSeconds(45));
             await RunShutdownStepAsync("final-run-drain", token => queue.WaitAsync(token), TimeSpan.FromSeconds(10));
+            await RunShutdownStepAsync("meetings", async token =>
+            {
+                await GetService<MeetingSessionService>().DisposeAsync();
+                await GetService<MeetingHostService>().StopAsync(token);
+                await GetService<MeetingTranscriptionHub>().DisposeAsync();
+                GetService<MeetingAgentService>().Dispose();
+            }, TimeSpan.FromSeconds(10));
             await RunShutdownStepAsync("host", _ => _host.StopAsync(TimeSpan.FromSeconds(4)), TimeSpan.FromSeconds(6));
         }
         finally

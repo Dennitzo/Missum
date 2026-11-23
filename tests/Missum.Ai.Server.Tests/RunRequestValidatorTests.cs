@@ -208,6 +208,15 @@ public sealed class RunRequestValidatorTests
         RunRequestValidator.Validate(request);
     }
 
+    [Theory]
+    [InlineData("selfImprovement.build")]
+    [InlineData("selfImprovement.status")]
+    [InlineData("selfImprovement.apply")]
+    public void SelfImprovementNamesAreAccepted(string name)
+    {
+        RunRequestValidator.Validate(CreateRequestWithClientTools([CreateDynamicTool(name)]));
+    }
+
     [Fact]
     public void ExplicitCodingProcessAndWorkspaceOpenCapabilitiesAreAccepted()
     {

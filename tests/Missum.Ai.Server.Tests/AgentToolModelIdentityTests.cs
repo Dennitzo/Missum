@@ -180,7 +180,7 @@ public sealed class AgentToolModelIdentityTests
         {
             var path = request.RequestUri!.AbsolutePath;
             if (path is "/sessions/prepare" or "/sessions/save") return new(HttpStatusCode.NotFound);
-            if (path == "/release") return Json(new { released = true });
+            if (path is "/release" or "/recognition/release" or "/load") return Json(new { success = true });
             if (path == "/v1/models") return Json(new { data = InstalledIds.Select(id => new
             {
                 id, status = new { value = id == _loadedModel ? "loaded" : "unloaded" }, tags = ReasoningTags,

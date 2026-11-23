@@ -23,8 +23,8 @@ public sealed class UnrealDesktopLiveTests(ITestOutputHelper output)
         var root = Path.Combine(Path.GetTempPath(), "missum-unreal-live", Guid.NewGuid().ToString("N"));
         var workspace = Path.Combine(root, "Project");
         var content = Path.Combine(root, "Extension");
-        var source = Path.Combine(repository, "extensions", "unreal", "editor", "MissumBridge");
-        var destination = Path.Combine(content, "runtime", "MissumBridge");
+        var source = Path.Combine(repository, "extensions", "unreal", "runtime");
+        var destination = Path.Combine(content, "runtime");
         Directory.CreateDirectory(workspace);
         CopyDirectory(source, destination);
         output.WriteLine($"Engine association: {engine}");
@@ -35,12 +35,17 @@ public sealed class UnrealDesktopLiveTests(ITestOutputHelper output)
         using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(25));
         try
         {
-            output.WriteLine("Building the project plugin and starting the Unreal Editor.");
+            output.WriteLine("Starting the Unreal Editor with the Missum Python channel.");
             endpoint = await UnrealApplicationLauncher.EnsureStartedAsync(content, workspace, null, engine, timeout.Token);
             var project = Assert.Single(Directory.GetFiles(workspace, "*.uproject"));
             Assert.True(File.Exists(project), $"The blank Blueprint project was not created in {workspace}.");
             Assert.Equal(engine, UnrealApplicationLauncher.ReadAssociation(project));
-            Assert.True(File.Exists(Path.Combine(workspace, "Plugins", "MissumBridge", "MissumBridge.uplugin")));
+            // The bridge plugin of an older Missum version must be gone, folder and project entry.
+            Assert.False(Directory.Exists(Path.Combine(workspace, "Plugins", "MissumBridge")),
+                "Plugins/MissumBridge exists after connecting through the Python channel.");
+            var projectText = await File.ReadAllTextAsync(project, timeout.Token);
+            Assert.DoesNotContain("MissumBridge", projectText, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("PythonScriptPlugin", projectText, StringComparison.OrdinalIgnoreCase);
             var engineSettings = await File.ReadAllTextAsync(Path.Combine(workspace, "Config", "DefaultEngine.ini"), timeout.Token);
             Assert.Contains("EditorStartupMap=/Game/Maps/Main", engineSettings, StringComparison.OrdinalIgnoreCase);
             Assert.Contains("GameDefaultMap=/Game/Maps/Main", engineSettings, StringComparison.OrdinalIgnoreCase);

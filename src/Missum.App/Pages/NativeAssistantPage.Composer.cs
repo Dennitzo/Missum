@@ -25,7 +25,7 @@ public sealed partial class NativeAssistantPage
         style.Setters.Add(new Setter(Control.BorderBrushProperty, ThemeBrush("MissumStrokeBrush", 49)));
         flyout.FlyoutPresenterStyle = style;
         var panel = new StackPanel { Width = 232, Spacing = 2 };
-        foreach (var (mode, title, description) in new[] { ("general", "ChatGPT", "Erstellen, lernen und erkunden"), ("coding", "Codex", "Erstellen, debuggen und ausliefern"), ("claudescience", "Claude Science", "Deep Research, Analysen und Nachweise") })
+        foreach (var (mode, title, description) in new[] { ("general", "ChatGPT", "Erstellen, lernen und erkunden"), ("coding", "Codex", "Erstellen, debuggen und ausliefern"), ("claudescience", "Claude Science", "Deep Research, Analysen und Nachweise"), ("claudemeetings", "Claude Meetings", "Live-Meetings mit Notizen und Whiteboard") })
         {
             var row = new Grid();
             var text = new StackPanel { Spacing = 2 };

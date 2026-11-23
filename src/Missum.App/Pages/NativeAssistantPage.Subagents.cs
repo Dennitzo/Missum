@@ -75,6 +75,7 @@ public sealed partial class NativeAssistantPage
         ToolTipService.SetToolTip(ModelButton, child is null ? "Aufwand auswählen"
             : (child.IsDeepResearch ? "Modell der Recherche: " : "Modell des Subagenten: ") + ModelLabel.Text);
         RefreshModelPickerTrigger();
+        UpdateMeetingModelFooter();
     }
 
     private bool IsKnownConversationMessage(string id) => _messages.ContainsKey(id)

@@ -1,0 +1,44 @@
+[
+  {
+    "tool": "unreal.level.open",
+    "arguments": { "assetPath": "/Game/Maps/MissumCityGrid", "operationId": "phaseF-open-0001" }
+  },
+  {
+    "tool": "unreal.actor.place",
+    "arguments": {
+      "primitive": "sphere",
+      "label": "NeonFinal",
+      "position": { "x": -600, "y": -600, "z": 200 },
+      "scale": { "x": 3, "y": 3, "z": 3 },
+      "requireVisualReview": true,
+      "operationId": "phaseF-place-0001"
+    }
+  },
+  {
+    "tool": "unreal.material.assign",
+    "arguments": {
+      "materialPath": "/Game/Materials/M_NeonCyan",
+      "actorName": "NeonFinal",
+      "allSlots": true,
+      "operationId": "phaseF-assign-0001"
+    }
+  },
+  {
+    "tool": "unreal.camera.create",
+    "arguments": {
+      "cameraName": "CamFinal",
+      "position": { "x": 1900, "y": -2200, "z": 900 },
+      "rotation": { "pitch": -16, "yaw": 130, "roll": 0 },
+      "fieldOfView": 62,
+      "operationId": "phaseF-cam-0001"
+    }
+  },
+  {
+    "tool": "unreal.actor.verify",
+    "arguments": { "actorName": "NeonFinal", "cameraName": "CamFinal" }
+  },
+  {
+    "tool": "unreal.level.save",
+    "arguments": { "operationId": "phaseF-save-0001" }
+  }
+]

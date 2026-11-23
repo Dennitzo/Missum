@@ -321,7 +321,8 @@ public static class RunRequestValidator
             if (tool is null
                 || string.IsNullOrWhiteSpace(tool.Name)
                 || tool.Name.Length > 160
-                || !Regex.IsMatch(tool.Name, "^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+$", RegexOptions.CultureInvariant)
+                || (tool.Name is not ("selfImprovement.build" or "selfImprovement.status" or "selfImprovement.apply")
+                    && !Regex.IsMatch(tool.Name, "^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+$", RegexOptions.CultureInvariant))
                 || tool.Name.StartsWith("missum.", StringComparison.OrdinalIgnoreCase)
                 // Keep the former product namespace reserved for old packages, too.
                 || tool.Name.StartsWith("go.", StringComparison.OrdinalIgnoreCase)

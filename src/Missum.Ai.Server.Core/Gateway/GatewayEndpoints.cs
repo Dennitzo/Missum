@@ -40,6 +40,7 @@ internal static partial class GatewayEndpoints
 
         endpoints.MapPost("/v1/runs", CreateRunAsync);
         endpoints.MapPost("/v1/runs/cancel-by-key", CancelRunByKeyAsync);
+        endpoints.MapGet("/v1/runs/activity", GetRunActivityAsync);
         endpoints.MapGet("/v1/runs/{runId}", GetRunAsync);
         endpoints.MapGet("/v1/runs/{runId}/events", StreamRunEventsAsync);
         endpoints.MapPost("/v1/runs/{runId}/client-tool-results", SubmitClientToolResultAsync);
@@ -223,6 +224,19 @@ internal static partial class GatewayEndpoints
                 snapshot.State,
                 snapshot.CreatedAt,
                 $"/v1/runs/{Uri.EscapeDataString(snapshot.RunId)}/events")).ConfigureAwait(false);
+    }
+
+    private static async Task GetRunActivityAsync(HttpContext context)
+    {
+        var except = context.Request.Query["except"].ToString();
+        var repository = context.RequestServices.GetRequiredService<RunRepository>();
+        var active = await repository.ListActiveRunsAsync(string.IsNullOrWhiteSpace(except) ? null : except,
+            context.RequestAborted).ConfigureAwait(false);
+        await WriteJsonAsync(context, new
+        {
+            protocolVersion = MissumAiProtocol.Version,
+            activeRuns = active.Select(static run => new { runId = run.RunId, state = run.State, mode = run.Mode }).ToArray(),
+        }).ConfigureAwait(false);
     }
 
     private static async Task GetRunAsync(HttpContext context)

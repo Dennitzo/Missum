@@ -187,6 +187,7 @@ public static class BuiltInActionIds
     public const string PlanMode = BuiltInExtensionIds.Coding + "/plan-mode";
     public const string Lean = BuiltInExtensionIds.Math + "/lean";
     public const string ComputerUse = BuiltInExtensionIds.Computer + "/use";
+    public const string SelfImprovement = "builtin.self-improvement/build";
 }
 
 public static class ToolSelectorNames

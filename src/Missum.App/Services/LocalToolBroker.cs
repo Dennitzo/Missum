@@ -41,7 +41,7 @@ public sealed partial class LocalToolBroker(
         PromptTriggerAction? runAction = null,
         Uri? gatewayOverride = null,
         CancellationToken cancellationToken = default) => ExecuteForAgentAsync(proposal, sessionId, assistantMessageId,
-            codingWorkspacePath, commandProgress, evidenceStore, runAction, null, gatewayOverride, false, cancellationToken);
+            codingWorkspacePath, commandProgress, evidenceStore, runAction, null, gatewayOverride, false, false, cancellationToken);
 
     internal async Task<ClientToolResult> ExecuteForAgentAsync(
         ToolProposal proposal,
@@ -54,6 +54,7 @@ public sealed partial class LocalToolBroker(
         string? researchActorAgentId = null,
         Uri? gatewayOverride = null,
         bool computerUseEnabled = false,
+        bool computerToolsAllowed = false,
         CancellationToken cancellationToken = default)
     {
         try
@@ -63,9 +64,27 @@ public sealed partial class LocalToolBroker(
             // filtering and model instructions are not an authorization boundary.
             if (computerUseEnabled && proposal.Name is not ("computer.observe" or "computer.act"))
                 throw new UnauthorizedAccessException("Während der Computersteuerung sind andere lokale Werkzeuge gesperrt.");
+            var selfImprovementName = proposal.Name switch
+            {
+                "selfImprovement.build" => "selfimprovement.build",
+                "selfImprovement.status" => "selfimprovement.status",
+                "selfImprovement.apply" => "selfimprovement.apply",
+                _ => proposal.Name,
+            };
+            if (selfImprovementName is "selfimprovement.build" or "selfimprovement.status" or "selfimprovement.apply")
+            {
+                proposal = proposal with { Name = selfImprovementName };
+                ValidateProposal(proposal, extensionTool: BuiltInExtensionCatalog.Tools.Single(tool => tool.ModelToolName == proposal.Name));
+                var workspace = await ResolveWorkspaceRootAsync(sessionId, codingWorkspacePath, cancellationToken).ConfigureAwait(false);
+                if (researchActorAgentId is not null || runAction == PromptTriggerAction.PlanMode || !SelfImprovementTool.Allows(workspace))
+                    throw new UnauthorizedAccessException("Selbstverbesserung ist nur im zugeordneten Missum-Projekt verfügbar.");
+                return await SelfImprovementTool.ExecuteAsync(proposal, workspace!, sessionId, cancellationToken,
+                    new SelfImprovementApply.ApplyContext(proposal.RunId, assistantMessageId,
+                        gatewayOverride ?? AssistantRuntimeProfile.Resolve().GatewayUri)).ConfigureAwait(false);
+            }
             if (proposal.Name is "computer.observe" or "computer.act")
             {
-                if (!computerUseEnabled || runAction != PromptTriggerAction.Coding || researchActorAgentId is not null)
+                if (!(computerUseEnabled || computerToolsAllowed) || runAction != PromptTriggerAction.Coding || researchActorAgentId is not null)
                     throw new UnauthorizedAccessException("Die Computersteuerung ist für diesen Lauf nicht freigegeben.");
                 ValidateProposal(proposal);
                 return await ExecuteComputerToolAsync(proposal, sessionId, gatewayOverride, cancellationToken).ConfigureAwait(false);

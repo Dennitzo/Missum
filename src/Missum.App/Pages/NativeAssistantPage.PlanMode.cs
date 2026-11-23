@@ -17,6 +17,9 @@ public sealed partial class NativeAssistantPage
     private bool _submittingPlanInteraction;
     private Func<string?, bool, Task>? _planInteractionSmokeAdapter;
     private readonly HashSet<string> _discardedPlans = new(StringComparer.Ordinal);
+    // Answers chosen for a plan's questions, kept per message so the card stays collapsed.
+    private readonly Dictionary<string, IReadOnlyList<(string Question, string Answer)>> _planAnswers = new(StringComparer.Ordinal);
+    internal const string PlanAnswersHeader = "Meine Antworten zum Plan";
 
     private static int PlanPayloadStart(string content)
     {
@@ -202,7 +205,8 @@ public sealed partial class NativeAssistantPage
         var isPlan = S(payload, "kind") == "plan";
         var fullPlan = isPlan ? FullPlanText(content, start, length, payload) : "";
         var questions = PlanQuestions(payload, fullPlan);
-        var key = (payload.GetRawText(), canSubmit, fullPlan);
+        var answered = questions.Length > 0 ? AnsweredPlanQuestions(messageId, message) : null;
+        var key = (payload.GetRawText(), canSubmit, fullPlan, answered is null ? "" : string.Join("|", answered.Select(a => a.Answer)));
         if (old is not null && Equals(old.Tag, key)) return;
         if (old is not null) panel.Children.Remove(old);
 
@@ -210,7 +214,11 @@ public sealed partial class NativeAssistantPage
         if (fullPlan.Length > 0)
             contentPanel.Children.Add(PlanSummaryCard(session, messageId, S(payload, "title", "Plan"), fullPlan,
                 hasOpenQuestions: questions.Length > 0));
-        if (questions.Length > 0)
+        if (answered is not null)
+        {
+            contentPanel.Children.Add(AnsweredPlanCard(answered));
+        }
+        else if (questions.Length > 0)
         {
             var answers = new List<Func<string?>>();
             var interaction = PlanCard();
@@ -221,7 +229,19 @@ public sealed partial class NativeAssistantPage
                 // Several questions share one submission. A typed free-text
                 // answer is complete only after its own send arrow is pressed.
                 if (selected.Length == 0 || selected.Any(answer => answer is null)) return;
-                await SubmitPlanInteractionAsync(session, messageId, "Meine Antworten zum Plan\n\n" + string.Join("\n\n", selected));
+                // Collapse right away: the card now shows question and chosen answer.
+                _planAnswers[messageId] = ParsePlanAnswers(string.Join("\n\n", selected));
+                var collapsedCard = AnsweredPlanCard(_planAnswers[messageId]);
+                var index = contentPanel.Children.IndexOf(interaction);
+                if (index >= 0) contentPanel.Children[index] = collapsedCard;
+                var sent = await SubmitPlanInteractionAsync(session, messageId, PlanAnswersHeader + "\n\n" + string.Join("\n\n", selected));
+                if (!sent)
+                {
+                    // Nothing was sent (e.g. a run is still busy): offer the choices again.
+                    _planAnswers.Remove(messageId);
+                    if (panel.Children.OfType<Border>().FirstOrDefault(child => child.Name == PlanCardName) is { } stale) stale.Tag = null;
+                    UpdatePlanInteraction(messageId, message, panel, footer);
+                }
             }
             foreach (var question in questions)
             {
@@ -316,6 +336,69 @@ public sealed partial class NativeAssistantPage
         }
         var card = new Border { Name = PlanCardName, Tag = key, Child = contentPanel };
         panel.Children.Insert(panel.Children.IndexOf(footer), card);
+    }
+
+    /// <summary>
+    /// The answers given to a plan's questions: from this window's own choice, or read back from
+    /// the answer message that followed the plan (so the collapsed card survives reloads).
+    /// </summary>
+    private IReadOnlyList<(string Question, string Answer)>? AnsweredPlanQuestions(string messageId, JsonElement message)
+    {
+        if (_planAnswers.TryGetValue(messageId, out var known)) return known;
+        var created = MessageCreatedAt(message);
+        var reply = DisplayMessages.Values
+            .Where(other => S(other, "role") == "user" && MessageCreatedAt(other) >= created)
+            .OrderBy(MessageCreatedAt)
+            .FirstOrDefault();
+        if (reply.ValueKind != JsonValueKind.Object) return null;
+        var text = MessageContent(reply);
+        if (!text.StartsWith(PlanAnswersHeader, StringComparison.Ordinal)) return null;
+        var parsed = ParsePlanAnswers(text[PlanAnswersHeader.Length..]);
+        if (parsed.Count == 0) return null;
+        _planAnswers[messageId] = parsed;
+        return parsed;
+    }
+
+    /// <summary>"Frage\nAntwort" blocks separated by blank lines.</summary>
+    internal static IReadOnlyList<(string Question, string Answer)> ParsePlanAnswers(string text) =>
+        text.Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Split("\n\n", StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(block => block.Split('\n', 2))
+            .Where(parts => parts.Length == 2 && parts[0].Trim().Length > 0 && parts[1].Trim().Length > 0)
+            .Select(parts => (parts[0].Trim(), parts[1].Trim()))
+            .ToList();
+
+    /// <summary>Collapsed card: each question with its chosen answer below and an accent check mark.</summary>
+    private static Border AnsweredPlanCard(IReadOnlyList<(string Question, string Answer)> answers)
+    {
+        var card = PlanCard();
+        card.Padding = new Thickness(14, 10, 14, 10);
+        var layout = (StackPanel)card.Child;
+        layout.Spacing = 10;
+        foreach (var (question, answer) in answers)
+        {
+            var row = new Grid { ColumnSpacing = 10 };
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            row.Children.Add(new FontIcon
+            {
+                Glyph = "\uE73E",
+                FontSize = 15,
+                Margin = new Thickness(0, 2, 0, 0),
+                VerticalAlignment = VerticalAlignment.Top,
+                Foreground = ThemeBrush("MissumAccentBrush", 180),
+            });
+            var text = new StackPanel { Spacing = 2 };
+            text.Children.Add(new TextBlock { Text = question, TextWrapping = TextWrapping.Wrap, FontSize = 13,
+                Foreground = ThemeBrush("MissumMutedTextBrush", 180) });
+            text.Children.Add(new TextBlock { Text = answer, TextWrapping = TextWrapping.Wrap,
+                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Foreground = ThemeBrush("MissumTextBrush", 230) });
+            Grid.SetColumn(text, 1);
+            row.Children.Add(text);
+            layout.Children.Add(row);
+        }
+        AutomationProperties.SetName(card, "Beantwortete Rückfragen");
+        return card;
     }
 
     private static Border PlanCard() => new()
@@ -425,16 +508,17 @@ public sealed partial class NativeAssistantPage
         return border;
     }
 
-    private async Task SubmitPlanInteractionAsync(Guid session, string messageId, string? prompt, bool leavePlanMode = false, bool discard = false)
+    /// <summary>Returns true once the answer or decision was actually handed to the conversation.</summary>
+    private async Task<bool> SubmitPlanInteractionAsync(Guid session, string messageId, string? prompt, bool leavePlanMode = false, bool discard = false)
     {
         if (_disposed || _submittingPlanInteraction || _session != session || _running || _sendPending
             || _persistentAction != BuiltInActionIds.PlanMode || !DisplayMessages.TryGetValue(messageId, out var message)
             || S(message, "status") != "completed"
-            || DisplayMessages.Values.Any(other => MessageCreatedAt(other) > MessageCreatedAt(message))) return;
+            || DisplayMessages.Values.Any(other => MessageCreatedAt(other) > MessageCreatedAt(message))) return false;
         if (leavePlanMode && !discard)
         {
             var plan = PlanApprovalText(MessageContent(message));
-            if (plan.Length == 0) return;
+            if (plan.Length == 0) return false;
             prompt = "Implementiere den von mir freigegebenen Plan.\n\n" + plan;
         }
         _submittingPlanInteraction = true;
@@ -443,12 +527,12 @@ public sealed partial class NativeAssistantPage
             if (IsMessageFooterSmoke && _planInteractionSmokeAdapter is { } smokeAdapter)
             {
                 await smokeAdapter(prompt, leavePlanMode);
-                return;
+                return true;
             }
             if (leavePlanMode)
             {
                 if (!await CommandAsync("action.invoke", new { sessionId = session, actionId = BuiltInActionIds.PlanMode, enabled = false })
-                    || _session != session) return;
+                    || _session != session) return false;
                 ClearToolSelection();
             }
             if (prompt is not null)
@@ -458,9 +542,10 @@ public sealed partial class NativeAssistantPage
                 _discardedPlans.Add(messageId);
                 await RefreshForExternalActivationAsync();
             }
+            return true;
         }
-        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
-        catch (Exception exception) when (exception is not OutOfMemoryException) { ShowError(exception.Message); }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { return false; }
+        catch (Exception exception) when (exception is not OutOfMemoryException) { ShowError(exception.Message); return false; }
         finally { _submittingPlanInteraction = false; }
     }
 }

@@ -1,0 +1,45 @@
+[
+  {
+    "tool": "unreal.asset.list",
+    "arguments": { "folder": "/Game", "recursive": true, "limit": 8 }
+  },
+  {
+    "tool": "unreal.asset.import",
+    "timeout": 900,
+    "arguments": {
+      "filePath": "Import/Blender/SM_MissumPillar.fbx",
+      "folder": "/Game/SourceAssets/Blender",
+      "assetName": "SM_MissumPillar",
+      "replace": true,
+      "importMaterials": true,
+      "importTextures": true,
+      "nanite": false,
+      "operationId": "phase5-import-0001"
+    }
+  },
+  {
+    "tool": "unreal.asset.read",
+    "arguments": { "assetPath": "/Game/SourceAssets/Blender/SM_MissumPillar" }
+  },
+  {
+    "tool": "unreal.level.open",
+    "arguments": { "assetPath": "/Game/Maps/MissumCityGrid", "operationId": "phase5-open-0001" }
+  },
+  {
+    "tool": "unreal.actor.place",
+    "arguments": {
+      "assetPath": "/Game/SourceAssets/Blender/SM_MissumPillar",
+      "label": "PillarImported",
+      "position": { "x": 500, "y": 500, "z": 0 },
+      "operationId": "phase5-place-0001"
+    }
+  },
+  {
+    "tool": "unreal.level.save",
+    "arguments": { "operationId": "phase5-save-0001" }
+  },
+  {
+    "tool": "unreal.level.read",
+    "arguments": { "limit": 14 }
+  }
+]

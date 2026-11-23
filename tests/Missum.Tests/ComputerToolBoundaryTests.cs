@@ -22,6 +22,16 @@ public sealed class ComputerToolBoundaryTests
     }
 
     [Fact]
+    public void OnlyTheIsolatedComputerRunMayCarryComputerTools()
+    {
+        // The gateway rejects computer.observe/act next to other tools; an Unreal run with both failed with run.failed.
+        Assert.True(MissumAiAssistantService.AllowsComputerTools("builtin.computer/use"));
+        Assert.False(MissumAiAssistantService.AllowsComputerTools(MissumAiAssistantService.UnrealActionId));
+        Assert.False(MissumAiAssistantService.AllowsComputerTools("builtin.coding/run"));
+        Assert.False(MissumAiAssistantService.AllowsComputerTools(null));
+    }
+
+    [Fact]
     public async Task ComputerRunRejectsOtherLocalToolsAtExecutionBoundary()
     {
         var broker = new LocalToolBroker(null!, null!, null!, null!);

@@ -2,7 +2,7 @@ namespace Missum.Core.Models;
 
 public enum ChatRole { System, User, Assistant }
 public enum MessageStatus { Pending, Streaming, Completed, Cancelled, Failed, Interrupted }
-public enum ChatMode { General, Coding, ClaudeScience }
+public enum ChatMode { General, Coding, ClaudeScience, ClaudeMeetings }
 public enum MessageContentProfile { General, Audiobook }
 public enum SessionContextProfile { General, Audiobook }
 public enum ProjectStatus { Active, Archived }
@@ -330,6 +330,10 @@ public sealed record AppSettings
     public Guid? ActiveGeneralSessionId { get; init; }
     public Guid? ActiveCodingSessionId { get; init; }
     public Guid? ActiveClaudeScienceSessionId { get; init; }
+    public Guid? ActiveClaudeMeetingsSessionId { get; init; }
+    public string? MeetingDisplayName { get; init; }
+    public string? MeetingCameraDeviceId { get; init; }
+    public string? MeetingMicrophoneDevice { get; init; }
     // Compatibility alias for call sites that have not yet moved to the two
     // mode-specific pointers. The coordinator keeps it synchronized.
     public Guid? ActiveSessionId { get; init; }

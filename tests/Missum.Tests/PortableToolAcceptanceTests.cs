@@ -61,6 +61,8 @@ internal static class PortableToolAcceptance
             [BuiltInActionIds.Translate] = "translation-and-plan-mode",
             [BuiltInActionIds.ReadAloud] = "documents-and-audiobook+gateway-server-media-speech",
             [BuiltInActionIds.LiveCaptions] = "gateway-server-media-speech",
+            [BuiltInActionIds.ComputerUse] = "native-computer-use-contracts",
+            [BuiltInActionIds.SelfImprovement] = "self-improvement-tool-contract",
         };
 }
 

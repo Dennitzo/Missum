@@ -15,12 +15,16 @@ public sealed partial class NativeAssistantPage
     private Flyout? _modelSelectionFlyout;
     private long _modelPickerGeneration;
     private string? _composerPickerOwner;
+    // The composer and the meeting chat share one picker; it opens at whichever button was clicked.
+    private FrameworkElement? _modelPickerAnchor;
+    private FrameworkElement PickerAnchor => _modelPickerAnchor is { XamlRoot: not null } anchor ? anchor : ModelButton;
 
     private async void OnReasoningClick(object sender, RoutedEventArgs e)
     {
         if (_disposed || ActiveSubagent is not null) return;
         if (_reasoningFlyout is { } open) { open.Hide(); return; }
         if (_modelSelectionFlyout is { } modelMenu) { modelMenu.Hide(); return; }
+        _modelPickerAnchor = ReferenceEquals(sender, ModelButton) ? null : sender as FrameworkElement;
         var generation = ++_modelPickerGeneration;
         var model = _settings.Current.SelectedModel;
         var role = ModelRole;
@@ -49,7 +53,7 @@ public sealed partial class NativeAssistantPage
             if (ReferenceEquals(_reasoningFlyout, flyout)) _reasoningFlyout = null;
             RefreshModelPickerTrigger();
         };
-        flyout.ShowAt(ModelButton);
+        flyout.ShowAt(PickerAnchor);
     }
 
     private void RefreshModelPickerTrigger()
@@ -165,7 +169,7 @@ public sealed partial class NativeAssistantPage
             if (ReferenceEquals(_modelSelectionFlyout, flyout)) _modelSelectionFlyout = null;
             RefreshModelPickerTrigger();
         };
-        flyout.ShowAt(ModelButton);
+        flyout.ShowAt(PickerAnchor);
         try
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);

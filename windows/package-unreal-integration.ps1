@@ -22,7 +22,7 @@ $runtime = Join-Path $stage 'runtime'
 $keys = Join-Path $ArtifactDirectory 'keys'
 $packages = Join-Path $ArtifactDirectory 'package'
 $manifest = Join-Path $repository 'extensions\unreal\manifest\extension.json'
-$plugin = Join-Path $repository 'extensions\unreal\editor\MissumBridge'
+$runtimeSource = Join-Path $repository 'extensions\unreal\runtime'
 $adapterProject = Join-Path $repository 'src\Missum.UnrealAdapter\Missum.UnrealAdapter.csproj'
 $packager = Join-Path $repository 'tools\Missum.ExtensionPackager\Missum.ExtensionPackager.csproj'
 $keyId = 'missum-unreal-2026'
@@ -32,7 +32,10 @@ New-Item -ItemType Directory -Force -Path $adapter, $runtime, $keys, $packages |
 
 dotnet publish $adapterProject --configuration Release --runtime win-x64 --self-contained true --output $adapter --nologo
 if ($LASTEXITCODE -ne 0) { throw 'Unreal-Adapter konnte nicht veröffentlicht werden.' }
-Copy-Item -LiteralPath $plugin -Destination $runtime -Recurse
+# The editor is driven by Epics Python: the package carries the runtime scripts, no plugin binary.
+Copy-Item -Path (Join-Path $runtimeSource '*.py') -Destination $runtime -Force
+if (-not (Test-Path -LiteralPath (Join-Path $runtime 'unreal_bootstrap.py'))) { throw 'Python-Laufzeit fehlt im Paket.' }
+if (-not (Test-Path -LiteralPath (Join-Path $runtime 'unreal_ops.py'))) { throw 'Operationsregister fehlt im Paket.' }
 dotnet build $packager --configuration Release --nologo
 if ($LASTEXITCODE -ne 0) { throw 'Extension-Packager konnte nicht gebaut werden.' }
 dotnet run --project $packager --configuration Release --no-build -- key --keys $keys --key-id $keyId
