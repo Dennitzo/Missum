@@ -233,6 +233,7 @@ public sealed partial class NativeAssistantPage
             await ApplyLobbyNameAsync();
             await StartMeetingFromUiAsync();
         }));
+        stack.Children.Add(MeetingPrepareLine());
         stack.Children.Add(new Border { Height = 1, Background = ThemeBrush("MissumStrokeBrush", 48), Margin = new Thickness(0, 4, 0, 4) });
         stack.Children.Add(JoinByLinkRow());
         card.Child = stack;
@@ -432,7 +433,8 @@ public sealed partial class NativeAssistantPage
             avatar.VerticalAlignment = VerticalAlignment.Center;
             grid.Children.Add(avatar);
         }
-        grid.Children.Add(NameChip(self ? person.Name + " (Du)" : person.Name, person.MicOn));
+        var speaking = IsSpeaking(person.Id) && person.MicOn;
+        grid.Children.Add(NameChip(self ? person.Name + " (Du)" : person.Name, person.MicOn, speaking: speaking));
         if (!self)
         {
             var mute = new Button
@@ -451,13 +453,12 @@ public sealed partial class NativeAssistantPage
             };
             grid.Children.Add(mute);
         }
-        var speaking = IsSpeaking(person.Id) && person.MicOn;
         return new Border
         {
             Height = height,
             CornerRadius = new CornerRadius(14),
             Background = new SolidColorBrush(Blend(ParticipantColors[person.ColorIndex % ParticipantColors.Length], Color.FromArgb(255, 0x22, 0x22, 0x24), .82)),
-            BorderBrush = speaking ? ThemeBrush("MissumAccentBrush", 170) : new SolidColorBrush(Colors.Transparent),
+            BorderBrush = speaking ? new SolidColorBrush(SpeakingGreen) : new SolidColorBrush(Colors.Transparent),
             BorderThickness = new Thickness(3),
             Child = grid,
         };

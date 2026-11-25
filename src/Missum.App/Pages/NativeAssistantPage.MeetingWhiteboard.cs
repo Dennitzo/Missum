@@ -25,6 +25,7 @@ public sealed partial class NativeAssistantPage
     private static readonly Vector3 StickyLift = new(0, 0, 10);
     private Grid? _boardRoot;
     private TextBlock? _boardTitle;
+    private FloatingToolbar? _boardToolbar;
     private TextBlock? _boardHint;
     private ScrollViewer? _boardScroll;
     private BoardPanSurface? _boardContent;
@@ -43,19 +44,20 @@ public sealed partial class NativeAssistantPage
         _boardRoot.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         _boardRoot.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
-        var header = new StackPanel { Spacing = 10, Padding = new Thickness(28, 20, 280, 12) };
+        var header = new StackPanel { Spacing = 6, Padding = new Thickness(28, 20, 280, 12) };
         _boardTitle = new TextBlock { FontSize = 30, FontWeight = Microsoft.UI.Text.FontWeights.Bold, TextTrimming = TextTrimming.CharacterEllipsis };
         header.Children.Add(_boardTitle);
-        var tools = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
-        tools.Children.Add(BoardToolButton("", "Notiz", "Neue Haftnotiz in der ersten Spalte", () => AddStickyNote(null)));
-        tools.Children.Add(BoardToolButton("", "Spalte", "Neue Spalte hinzufügen", AddBoardColumn));
-        var organize = BoardToolButton("", "Mit Missum ordnen", "Missum sortiert, gruppiert und fasst das Whiteboard zusammen", () => Meetings.RequestAgent("organize"), accent: true);
-        tools.Children.Add(organize);
-        tools.Children.Add(new Border { Width = 1, Height = 22, Background = ThemeBrush("MissumStrokeBrush", 60), Margin = new Thickness(4, 0, 4, 0) });
-        tools.Children.Add(BoardToolButton("\uE8D2", "Text", "Textfeld auf die Fläche setzen", () => AddCanvasElement("text")));
-        tools.Children.Add(BoardToolButton("\uE80A", "Tabelle", "Tabelle einfügen (Rechtsklick für Zeilen und Spalten)", () => AddCanvasElement("table")));
-        tools.Children.Add(BoardToolButton("\uEB9F", "Bild", "Bild aus Datei einfügen – oder Strg+V auf dem Whiteboard", () => _ = PickImageAsync()));
-        var shapes = BoardToolButton("\uE71A", "Form", "Rechteck, Ellipse oder Raute einfügen", () => { });
+        // Tools float over the board in the shared translucent pill; the header keeps title and hint.
+        var tools = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+        tools.Children.Add(FloatingToolbar.Tool("", "Notiz", "Neue Haftnotiz in der ersten Spalte", () => RunUiCallback("Board.Tool", () => AddStickyNote(null))));
+        tools.Children.Add(FloatingToolbar.Tool("", "Spalte", "Neue Spalte hinzufügen", () => RunUiCallback("Board.Tool", AddBoardColumn)));
+        tools.Children.Add(FloatingToolbar.Tool("", "Ordnen", "Missum sortiert, gruppiert und fasst das Whiteboard zusammen",
+            () => RunUiCallback("Board.Tool", () => Meetings.RequestAgent("organize")), new MeetingAgentVisual { Height = 16, Width = 16 }));
+        tools.Children.Add(FloatingToolbar.Separator());
+        tools.Children.Add(FloatingToolbar.Tool("", "Text", "Textfeld auf die Fläche setzen", () => RunUiCallback("Board.Tool", () => AddCanvasElement("text"))));
+        tools.Children.Add(FloatingToolbar.Tool("", "Tabelle", "Tabelle einfügen (Rechtsklick für Zeilen und Spalten)", () => RunUiCallback("Board.Tool", () => AddCanvasElement("table"))));
+        tools.Children.Add(FloatingToolbar.Tool("", "Bild", "Bild aus Datei einfügen – oder Strg+V auf dem Whiteboard", () => RunUiCallback("Board.Tool", () => _ = PickImageAsync())));
+        var shapes = FloatingToolbar.Tool("", "Form", "Rechteck, Ellipse oder Raute einfügen", () => { });
         var shapeMenu = new MenuFlyout();
         foreach (var (label, shape) in new[] { ("Rechteck", "rect"), ("Ellipse", "ellipse"), ("Raute", "diamond") })
         {
@@ -65,17 +67,9 @@ public sealed partial class NativeAssistantPage
         }
         shapes.Flyout = shapeMenu;
         tools.Children.Add(shapes);
-        tools.Children.Add(BoardToolButton("\uE8AB", "Pfeil", "Zwei Elemente oder Notizen nacheinander anklicken, um sie zu verbinden", StartArrowTool));
+        tools.Children.Add(FloatingToolbar.Tool("", "Pfeil", "Zwei Elemente oder Notizen nacheinander anklicken, um sie zu verbinden", () => RunUiCallback("Board.Tool", StartArrowTool)));
+        _boardToolbar = new FloatingToolbar("Werkzeuge des Whiteboards", tools, "", "Whiteboard");
         _boardHint = new TextBlock { FontSize = 12, Margin = new Thickness(2, 0, 0, 0), TextTrimming = TextTrimming.CharacterEllipsis, Foreground = ThemeBrush("MissumMutedTextBrush", 150) };
-        // Narrow windows scroll the toolbar sideways instead of hiding tools under the camera panel.
-        header.Children.Add(new ScrollViewer
-        {
-            Content = tools,
-            HorizontalScrollBarVisibility = ScrollBarVisibility.Hidden,
-            HorizontalScrollMode = ScrollMode.Enabled,
-            VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
-            VerticalScrollMode = ScrollMode.Disabled,
-        });
         header.Children.Add(_boardHint);
         _boardRoot.Children.Add(header);
 
@@ -99,29 +93,21 @@ public sealed partial class NativeAssistantPage
         AutomationProperties.SetName(_boardScroll, "Whiteboard");
         Grid.SetRow(_boardScroll, 1);
         _boardRoot.Children.Add(_boardScroll);
+        Grid.SetRowSpan(_boardToolbar!, 2);
+        _boardRoot.Children.Add(_boardToolbar!);
         return _boardRoot;
     }
 
-    private Button BoardToolButton(string glyph, string text, string help, Action onClick, bool accent = false)
+    /// <summary>Removes an element from whatever holds it, logical or visual parent.</summary>
+    private static void DetachBoardElement(FrameworkElement element)
     {
-        var content = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 7 };
-        content.Children.Add(accent
-            ? new MeetingAgentVisual { Height = 16, Width = 16 }
-            : new FontIcon { Glyph = glyph, FontSize = 13, Foreground = NativeIconPalette.BrushFor("add") });
-        content.Children.Add(new TextBlock { Text = text, FontSize = 13 });
-        var button = new Button
+        switch (element.Parent ?? VisualTreeHelper.GetParent(element))
         {
-            Content = content,
-            Padding = new Thickness(12, 6, 13, 7),
-            CornerRadius = new CornerRadius(10),
-            Background = accent ? ThemeBrush("MissumSelectionBrush", 50) : ThemeBrush("MissumLayerStrongBrush", 40),
-            BorderThickness = new Thickness(0),
-        };
-        button.Resources["ButtonBackgroundPointerOver"] = ThemeBrush("MissumHoverBrush", 60);
-        ToolTipService.SetToolTip(button, help);
-        AutomationProperties.SetName(button, text);
-        button.Click += (_, _) => RunUiCallback("Board.Tool", onClick);
-        return button;
+            case Panel panel: panel.Children.Remove(element); break;
+            case Border border when ReferenceEquals(border.Child, element): border.Child = null; break;
+            case ContentControl control when ReferenceEquals(control.Content, element): control.Content = null; break;
+            case ContentPresenter presenter when ReferenceEquals(presenter.Content, element): presenter.Content = null; break;
+        }
     }
 
     private void SizeBoardContent()
@@ -208,8 +194,18 @@ public sealed partial class NativeAssistantPage
                 UpdateStickyView(sticky!, note, canEdit, snapshot.Whiteboard.Columns);
                 if (!ReferenceEquals(sticky!.Root.Parent, columnView.Notes))
                 {
-                    (sticky.Root.Parent as Panel)?.Children.Remove(sticky.Root);
-                    columnView.Notes.Children.Add(sticky.Root);
+                    DetachBoardElement(sticky.Root);
+                    try { columnView.Notes.Children.Add(sticky.Root); }
+                    catch (System.Runtime.InteropServices.COMException exception) when (exception.HResult == unchecked((int)0x800F1000))
+                    {
+                        // Still attached somewhere XAML does not report as its parent: start the note fresh.
+                        ReportUiProjectionFailure("Board.StickyReparent", new InvalidOperationException(
+                            $"parent={sticky.Root.Parent?.GetType().Name ?? "null"}, visual={VisualTreeHelper.GetParent(sticky.Root)?.GetType().Name ?? "null"}", exception));
+                        sticky = CreateStickyView(note.Id);
+                        _stickyViews[note.Id] = sticky;
+                        UpdateStickyView(sticky, note, canEdit, snapshot.Whiteboard.Columns);
+                        columnView.Notes.Children.Add(sticky.Root);
+                    }
                 }
                 Grid.SetRow(sticky.Root, index / 2);
                 Grid.SetColumn(sticky.Root, index % 2);
@@ -220,7 +216,7 @@ public sealed partial class NativeAssistantPage
                 view.Notes.RowDefinitions.Clear();
         foreach (var stale in _stickyViews.Keys.Where(id => !seenNotes.Contains(id)).ToArray())
         {
-            (_stickyViews[stale].Root.Parent as Panel)?.Children.Remove(_stickyViews[stale].Root);
+            DetachBoardElement(_stickyViews[stale].Root);
             _stickyViews.Remove(stale);
         }
         foreach (var view in _boardColumnViews.Values)

@@ -38,6 +38,22 @@ public sealed partial class NativeAssistantPage
         }
     }
 
+    /// <summary>
+    /// Meeting callbacks run on the dispatcher with live media and remote operations; any
+    /// non-fatal failure there is logged with its stack and skipped instead of ending the app.
+    /// </summary>
+    private void RunMeetingCallback(string phase, Action action)
+    {
+        if (_disposed) return;
+        try { action(); }
+        catch (Exception exception) when (exception is not (OutOfMemoryException or AccessViolationException or StackOverflowException)
+            && exception.HResult != unchecked((int)0x8007000E))
+        {
+            _uiCallbackFaultCount++;
+            ReportUiProjectionFailure(phase, exception);
+        }
+    }
+
     private void OnNativeRenderTimerTick()
     {
         if (_disposed || _uiRenderTickActive) return;

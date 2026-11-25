@@ -28,6 +28,7 @@ public sealed partial class NativeAssistantPage
         "media.analyze" or "media.inspect" => "image",
         "context.embed" or "context.retrieve" => "research",
         "workspace.open" => "project",
+        "webdesign.serve" or "webdesign.preview" => "web",
         "speech.translate" => "translate",
         _ when tool.StartsWith("research.code.", StringComparison.OrdinalIgnoreCase) => "code",
         _ when tool.StartsWith("coding.", StringComparison.OrdinalIgnoreCase) => "code",

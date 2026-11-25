@@ -167,6 +167,7 @@ public partial class App : Application
                 services.AddSingleton<LocalToolBroker>();
                 services.AddSingleton<MissumAiAssistantService>();
                 services.AddSingleton<MeetingHostService>();
+                services.AddSingleton<Missum.App.Services.Webdesign.WebdesignServeService>();
                 services.AddSingleton<MeetingCameraService>();
                 services.AddSingleton<MeetingAudioService>();
                 services.AddSingleton<MeetingSessionService>();
@@ -859,6 +860,9 @@ public partial class App : Application
                 await GetService<MeetingTranscriptionHub>().DisposeAsync();
                 GetService<MeetingAgentService>().Dispose();
             }, TimeSpan.FromSeconds(10));
+            // Project dev servers run in job objects; stopping them here ends their process trees.
+            await RunShutdownStepAsync("webdesign", async _ =>
+                await GetService<Missum.App.Services.Webdesign.WebdesignServeService>().DisposeAsync(), TimeSpan.FromSeconds(10));
             await RunShutdownStepAsync("host", _ => _host.StopAsync(TimeSpan.FromSeconds(4)), TimeSpan.FromSeconds(6));
         }
         finally

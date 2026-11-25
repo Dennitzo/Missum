@@ -440,6 +440,7 @@ public sealed partial class AssistantCoordinator(
             ChatMode.Coding => ExtensionChatMode.Coding,
             ChatMode.ClaudeScience => ExtensionChatMode.ClaudeScience,
             ChatMode.ClaudeMeetings => ExtensionChatMode.ClaudeMeetings,
+            ChatMode.Webdesign => ExtensionChatMode.Webdesign,
             _ => throw new InvalidOperationException("Der Chatmodus ist ungültig."),
         };
         return _extensionActions.GetActions(extensionMode)
@@ -476,6 +477,7 @@ public sealed partial class AssistantCoordinator(
                     ExtensionChatMode.Coding => "coding",
                     ExtensionChatMode.ClaudeScience => "claudescience",
                     ExtensionChatMode.ClaudeMeetings => "claudemeetings",
+                    ExtensionChatMode.Webdesign => "webdesign",
                     _ => throw new InvalidOperationException("Der Extension-Chatmodus ist ungültig."),
                 }),
                 actionKind = action.ActionKind switch
@@ -512,6 +514,7 @@ public sealed partial class AssistantCoordinator(
             ChatMode.Coding => ExtensionChatMode.Coding,
             ChatMode.ClaudeScience => ExtensionChatMode.ClaudeScience,
             ChatMode.ClaudeMeetings => ExtensionChatMode.ClaudeMeetings,
+            ChatMode.Webdesign => ExtensionChatMode.Webdesign,
             _ => throw new InvalidOperationException("Der Chatmodus ist ungültig."),
         };
         var usedGroupIds = _extensionActions.GetActions(extensionMode)
@@ -971,6 +974,12 @@ public sealed partial class AssistantCoordinator(
                 ActiveClaudeMeetingsSessionId = session.Id,
                 ActiveSessionId = session.Id,
             },
+            ChatMode.Webdesign => current with
+            {
+                SelectedChatMode = ChatMode.Webdesign,
+                ActiveWebdesignSessionId = session.Id,
+                ActiveSessionId = session.Id,
+            },
             _ => throw new InvalidOperationException("Die Sitzung enthält einen unbekannten Chatmodus."),
         }, cancellationToken);
 
@@ -980,6 +989,7 @@ public sealed partial class AssistantCoordinator(
         ChatMode.Coding => settingsValue.ActiveCodingSessionId,
         ChatMode.ClaudeScience => settingsValue.ActiveClaudeScienceSessionId,
         ChatMode.ClaudeMeetings => settingsValue.ActiveClaudeMeetingsSessionId,
+        ChatMode.Webdesign => settingsValue.ActiveWebdesignSessionId,
         _ => throw new InvalidOperationException("Der Chatmodus ist ungültig."),
     };
 
@@ -1305,6 +1315,11 @@ public sealed partial class AssistantCoordinator(
                     ActiveClaudeMeetingsSessionId = null,
                     ActiveSessionId = current.SelectedChatMode == ChatMode.ClaudeMeetings ? null : current.ActiveSessionId,
                 },
+                ChatMode.Webdesign => current with
+                {
+                    ActiveWebdesignSessionId = null,
+                    ActiveSessionId = current.SelectedChatMode == ChatMode.Webdesign ? null : current.ActiveSessionId,
+                },
                 _ => throw new InvalidOperationException("Die Sitzung enthält einen unbekannten Chatmodus."),
             }, cancellationToken).ConfigureAwait(false);
         }
@@ -1392,6 +1407,11 @@ public sealed partial class AssistantCoordinator(
                 ActiveClaudeMeetingsSessionId = null,
                 ActiveSessionId = current.SelectedChatMode == ChatMode.ClaudeMeetings ? null : current.ActiveSessionId,
             },
+            ChatMode.Webdesign => current with
+            {
+                ActiveWebdesignSessionId = null,
+                ActiveSessionId = current.SelectedChatMode == ChatMode.Webdesign ? null : current.ActiveSessionId,
+            },
             _ => throw new InvalidOperationException("Der Chatmodus ist ungültig."),
         }, cancellationToken).ConfigureAwait(false);
         if (deletedCount > 0)
@@ -1457,7 +1477,7 @@ public sealed partial class AssistantCoordinator(
         var prompt = GetRequiredString(envelope.Payload, "prompt", 100_000);
         var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Die AI-Sitzung wurde nicht gefunden.");
-        if (session.ChatMode is ChatMode.Coding or ChatMode.ClaudeScience
+        if (IsCodingAgentSession(session.ChatMode)
             && (string.IsNullOrWhiteSpace(session.CodingWorkspacePath)
                 || !Directory.Exists(session.CodingWorkspacePath)))
         {
@@ -1601,7 +1621,7 @@ public sealed partial class AssistantCoordinator(
                 CodingWorkspacePath = queuedInput.Session.CodingWorkspacePath,
                 PersistentExtensionActionId = queuedInput.Session.PersistentExtensionActionId,
             };
-        if (session.ChatMode is ChatMode.Coding or ChatMode.ClaudeScience
+        if (IsCodingAgentSession(session.ChatMode)
             && (string.IsNullOrWhiteSpace(session.CodingWorkspacePath)
                 || !Directory.Exists(session.CodingWorkspacePath)))
         {
@@ -1805,7 +1825,7 @@ public sealed partial class AssistantCoordinator(
                     DeepResearch = true,
                     DeepResearchProfile = DeepResearchProfiles.Auto,
                 };
-            if (session.ChatMode == ChatMode.Coding && match.Trigger.Action == PromptTriggerAction.Extension)
+            if (session.ChatMode is ChatMode.Coding or ChatMode.Webdesign && match.Trigger.Action == PromptTriggerAction.Extension)
                 match = match with { Trigger = match.Trigger with { Action = PromptTriggerAction.Coding } };
             return match;
         }
@@ -1826,7 +1846,7 @@ public sealed partial class AssistantCoordinator(
         {
             return CreateExtensionMatch(BuiltInActionIds.PlanMode, prompt);
         }
-        return session.ChatMode is ChatMode.Coding or ChatMode.ClaudeScience
+        return IsCodingAgentSession(session.ChatMode)
             ? CreateToolMatch("coding", prompt)
             : null;
     }
@@ -1872,7 +1892,8 @@ public sealed partial class AssistantCoordinator(
         _ => null,
     };
 
-    internal static bool IsCodingAgentSession(ChatMode? mode) => mode is ChatMode.Coding or ChatMode.ClaudeScience;
+    // Webdesign is Codex with a live website tab: same coding agent, workspace duty and work plan.
+    internal static bool IsCodingAgentSession(ChatMode? mode) => mode is ChatMode.Coding or ChatMode.ClaudeScience or ChatMode.Webdesign;
 
     private static ExtensionChatMode ToExtensionChatMode(ChatMode mode) => mode switch
     {
@@ -1880,6 +1901,7 @@ public sealed partial class AssistantCoordinator(
         ChatMode.Coding => ExtensionChatMode.Coding,
         ChatMode.ClaudeScience => ExtensionChatMode.ClaudeScience,
         ChatMode.ClaudeMeetings => ExtensionChatMode.ClaudeMeetings,
+        ChatMode.Webdesign => ExtensionChatMode.Webdesign,
         _ => throw new InvalidOperationException("Der Chatmodus ist ungültig."),
     };
 
@@ -1889,6 +1911,7 @@ public sealed partial class AssistantCoordinator(
         ChatMode.Coding => "coding",
         ChatMode.ClaudeScience => "claudescience",
         ChatMode.ClaudeMeetings => "claudemeetings",
+        ChatMode.Webdesign => "webdesign",
         _ => throw new InvalidOperationException("Der Chatmodus ist ungültig."),
     };
 
@@ -1898,6 +1921,7 @@ public sealed partial class AssistantCoordinator(
         "coding" => ChatMode.Coding,
         "claudescience" or "claude-science" or "science" => ChatMode.ClaudeScience,
         "claudemeetings" or "claude-meetings" or "meetings" => ChatMode.ClaudeMeetings,
+        "webdesign" or "web-design" or "web" => ChatMode.Webdesign,
         _ => throw new ArgumentException("Die angeforderte Chatansicht ist unbekannt."),
     };
 

@@ -16,7 +16,7 @@ public sealed partial class NativeAssistantPage
     private long _researchTabSelectionVersion;
 
     // Claude Meetings picks its model like Codex does.
-    private string ModelRole => _mode is "coding" or "claudescience" or "claudemeetings" ? "coding" : "general";
+    private string ModelRole => _mode is "coding" or "claudescience" or "claudemeetings" or "webdesign" ? "coding" : "general";
 
     private NativeResearchSession ResearchState(Guid sessionId)
     {
@@ -120,12 +120,16 @@ public sealed partial class NativeAssistantPage
         HidePlanModeTab();
         HideToolView();
         HideSubagentOverview();
+        HideWebsiteView();
         _activeSourcesSession = null; _sourcesHost.Visibility = Visibility.Collapsed;
         SaveReviewScrollOffset();
         _activeReviewRunId = null;
         ReviewScroll.Visibility = Visibility.Collapsed;
         BodyGrid.Visibility = Visibility.Collapsed;
         _activeResearchSessionId = _session;
+        // Like the website tab, the publication hides the right sidebar until the chat is shown again.
+        _websiteHidesInspector = true;
+        UpdateResponsiveLayout();
         // A retained PDF may have been replaced at its stable path while the
         // tab was hidden. Revalidate it on every explicit tab selection.
         _scienceViewSignature = null;
@@ -139,7 +143,9 @@ public sealed partial class NativeAssistantPage
     private void HideResearchView()
     {
         _researchTabSelectionVersion++;
+        var wasActive = _activeResearchSessionId is not null;
         _activeResearchSessionId = null;
+        if (wasActive) UpdateResponsiveLayout();
         ResearchHost.Visibility = Visibility.Collapsed;
         foreach (var viewer in _publicationViews.Values) viewer.SetActive(false);
     }

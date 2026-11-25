@@ -29,7 +29,7 @@ public sealed partial class MissumAiAssistantService
             var session = await chats.GetSessionAsync(sessionId, _activeCancellation.Token).ConfigureAwait(false)
                 ?? throw new InvalidOperationException("Die Sitzung wurde nicht gefunden.");
             var contextLimit = string.IsNullOrWhiteSpace(model) ? (int?)null : ModelContextSelection.Resolve(submittedSettings, model,
-                ModelContextProfiles.ResolveMaximum(model, session.ChatMode is ChatMode.Coding or ChatMode.ClaudeScience ? "coding" : "general"));
+                ModelContextProfiles.ResolveMaximum(model, AssistantCoordinator.IsCodingAgentSession(session.ChatMode) ? "coding" : "general"));
             message = await chats.AddMessageAsync(sessionId, ChatRole.Assistant, "", MessageStatus.Streaming,
                 cancellationToken: _activeCancellation.Token).ConfigureAwait(false);
             var now = DateTimeOffset.UtcNow;

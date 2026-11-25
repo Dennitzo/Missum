@@ -157,6 +157,7 @@ public sealed partial class NativeAssistantPage
         HideSubagentOverview();
         _activeSourcesSession = null; _sourcesHost.Visibility = Visibility.Collapsed;
         HideResearchView();
+        HideWebsiteView();
         SaveReviewScrollOffset();
         _activeReviewRunId = tab.RunId;
         BodyGrid.Visibility = Visibility.Collapsed;
@@ -172,6 +173,7 @@ public sealed partial class NativeAssistantPage
         HideSubagentOverview();
         _activeSourcesSession = null; _sourcesHost.Visibility = Visibility.Collapsed;
         HideResearchView();
+        HideWebsiteView();
         SaveReviewScrollOffset();
         _activeReviewRunId = null;
         ReviewScroll.Visibility = Visibility.Collapsed;

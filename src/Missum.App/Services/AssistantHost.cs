@@ -245,7 +245,7 @@ public sealed class AssistantHost : IAsyncDisposable
             using var scope = AssistantClientExecutionScope.Enter(_views, id);
             var view = AssistantClientExecutionScope.Resolve(_settings.Current);
             if (!string.Equals(view.SelectedModel, modelId, StringComparison.Ordinal)) continue;
-            var role = view.SelectedChatMode == ChatMode.Coding ? "coding" : "general";
+            var role = view.SelectedChatMode is ChatMode.Coding or ChatMode.Webdesign ? "coding" : "general";
             try
             {
                 var options = role == changed.Role ? changed

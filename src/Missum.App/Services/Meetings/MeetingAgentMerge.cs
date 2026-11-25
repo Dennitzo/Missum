@@ -20,7 +20,8 @@ public sealed record AgentResult(
     IReadOnlyList<AgentColumn> Columns,
     IReadOnlyList<AgentNewNote> NewNotes,
     IReadOnlyList<string> RemoveNoteIds,
-    string? ChatInfo = null);
+    string? ChatInfo = null,
+    string? Title = null);
 
 /// <summary>
 /// Turns the model's proposal into concrete note and whiteboard state. The
@@ -92,7 +93,20 @@ public static class MeetingAgentMerge
         var reply = String(root, "chatReply");
         var info = String(root, "chatInfo");
         return new AgentResult(string.IsNullOrWhiteSpace(reply) ? null : reply.Trim(), notes, columns, newNotes.Take(8).ToList(), remove,
-            string.IsNullOrWhiteSpace(info) ? null : MeetingRoom.Clip(info, 300, ""));
+            string.IsNullOrWhiteSpace(info) ? null : MeetingRoom.Clip(info, 300, ""), CompactTitle(String(root, "title")));
+    }
+
+    /// <summary>A short session name: one line, no quotes or trailing dot, at most 48 characters.</summary>
+    internal static string? CompactTitle(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var title = value.ReplaceLineEndings(" ").Trim().Trim('"', '„', '“', '\'', '*', '#').Trim().TrimEnd('.', ':').Trim();
+        while (title.Contains("  ", StringComparison.Ordinal)) title = title.Replace("  ", " ", StringComparison.Ordinal);
+        if (title.Length < 3) return null;
+        if (title.Length <= 48) return title;
+        var cut = title[..48];
+        var space = cut.LastIndexOf(' ');
+        return (space > 20 ? cut[..space] : cut).TrimEnd(',', ';', '-', ' ');
     }
 
     public static List<MeetingNoteBlock> MergeNotes(IReadOnlyList<MeetingNoteBlock> existing, AgentNotes? notes)

@@ -213,6 +213,12 @@ public sealed class MeetingRoom
                     block.Section = existing.Section;
                     block.HumanEdited = existing.HumanEdited || (human && existing.AiOwned);
                     block.EditedBy = human ? Clip(op.ActorName, 60, existing.EditedBy ?? "") : existing.EditedBy;
+                    block.Authors = [.. existing.Authors];
+                    if (human && op.ActorId != Guid.Empty && existing.Text != block.Text && !string.IsNullOrWhiteSpace(block.Text)
+                        && !block.Authors.Contains(op.ActorId) && block.Authors.Count < 32)
+                        block.Authors.Add(op.ActorId);
+                    block.AuthorTimes = new Dictionary<Guid, DateTimeOffset>(existing.AuthorTimes);
+                    if (existing.Text != block.Text) StampAuthor(block, op.ActorId, now);
                     document.Blocks[index] = block;
                 }
                 else
@@ -220,6 +226,9 @@ public sealed class MeetingRoom
                     if (document.Blocks.Count >= MaximumBlocksPerDocument) return false;
                     if (human) { block.AiOwned = false; block.Section = null; block.HumanEdited = false; }
                     block.EditedBy = human ? Clip(op.ActorName, 60, "") : null;
+                    block.Authors = human && op.ActorId != Guid.Empty && !string.IsNullOrWhiteSpace(block.Text) ? [op.ActorId] : [];
+                    block.AuthorTimes = [];
+                    StampAuthor(block, op.ActorId, now);
                     var after = op.AfterId is null ? -1 : document.Blocks.FindIndex(b => b.Id == op.AfterId);
                     if (after >= 0) document.Blocks.Insert(after + 1, block);
                     else if (op.AfterId == "") document.Blocks.Insert(0, block);
@@ -426,10 +435,19 @@ public sealed class MeetingRoom
             }
             case MeetingOpTypes.RoomTitle:
             {
+                // Missum names the meeting until the host renames it by hand; then the title is the host's.
                 var title = Clip(op.Text, 120, "");
-                if (title.Length == 0 || title == state.Title) return false;
+                if (title.Length == 0) return false;
+                // A placeholder such as "Neue Sitzung" never counts as the host's name for the meeting.
+                if (!human && state.TitleLocked && !IsPlaceholderTitle(state.Title)) return false;
+                if (!human && IsPlaceholderTitle(title)) return false;
+                if (human && !IsHost(op.ActorId)) return false;
+                var locks = human && !IsPlaceholderTitle(title);
+                var changed = title != state.Title || locks != state.TitleLocked;
                 state.Title = title;
-                return true;
+                state.TitleLocked = locks;
+                foreach (var document in state.Documents) document.Title = title;
+                return changed;
             }
             case MeetingOpTypes.Presence:
             {
@@ -442,6 +460,10 @@ public sealed class MeetingRoom
                 return false;
         }
     }
+
+    /// <summary>Default names that say nothing about the meeting; Missum may always replace them.</summary>
+    public static bool IsPlaceholderTitle(string? title) =>
+        string.IsNullOrWhiteSpace(title) || title.Trim() is "Neue Sitzung" or "Meeting" or "Neues Meeting" or "Claude Meetings";
 
     private MeetingDocument? FindDocument(string? id) =>
         id is null ? null : State.Documents.FirstOrDefault(d => d.Id == id);
@@ -488,6 +510,14 @@ public sealed class MeetingRoom
         if (element.Kind != "table") element.Rows = null;
         if (element.Kind != "image") element.ImageData = null;
         return true;
+    }
+
+    /// <summary>Records when someone (or Missum) last wrote text into a block.</summary>
+    private static void StampAuthor(MeetingNoteBlock block, Guid actor, DateTimeOffset now)
+    {
+        if (actor == Guid.Empty || string.IsNullOrWhiteSpace(block.Text)) return;
+        if (!block.AuthorTimes.ContainsKey(actor) && block.AuthorTimes.Count >= 32) return;
+        block.AuthorTimes[actor] = now;
     }
 
     private static void SanitizeBlock(MeetingNoteBlock block)
@@ -543,11 +573,16 @@ public sealed class MeetingRoom
             }
             state.Documents.RemoveRange(1, state.Documents.Count - 1);
         }
+        // The notes page shows the session title above the blocks; a heading block with the same
+        // title would only repeat it (older meetings started with one).
+        if (state.Documents.Count > 0 && state.Documents[0].Blocks.Count > 0 && state.Documents[0].Blocks[0] is { Kind: "h1" } heading
+            && (heading.Text == state.Title || heading.Text == state.Documents[0].Title))
+            state.Documents[0].Blocks.RemoveAt(0);
         if (state.Documents.Count == 0)
             state.Documents.Add(new MeetingDocument
             {
-                Title = $"Meeting-Notizen – {state.CreatedAt.ToLocalTime():dd.MM.yyyy}",
-                Blocks = [new MeetingNoteBlock { Kind = "h1", Text = state.Title }],
+                Title = state.Title,
+                Blocks = [new MeetingNoteBlock { Kind = "p", Text = "" }],
             });
         EnsureFirstColumn(state.Whiteboard);
         if (state.Participants.All(p => p.Id != AgentId))
@@ -560,4 +595,6 @@ public sealed class MeetingRoom
                 Connected = true,
             });
     }
+
+    private bool IsHost(Guid actorId) => State.Participants.Any(p => p.Id == actorId && p.Role == "host");
 }

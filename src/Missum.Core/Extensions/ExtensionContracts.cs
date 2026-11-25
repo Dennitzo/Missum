@@ -8,6 +8,7 @@ public enum ExtensionChatMode
     Coding,
     ClaudeScience,
     ClaudeMeetings,
+    Webdesign,
 }
 
 public enum ExtensionActionKind

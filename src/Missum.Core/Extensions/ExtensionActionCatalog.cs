@@ -202,7 +202,7 @@ public sealed class ExtensionActionCatalog : IExtensionActionCatalog
 public static class BuiltInExtensionCatalog
 {
     private static readonly ExtensionChatMode[] AllModes =
-        [ExtensionChatMode.General, ExtensionChatMode.Coding, ExtensionChatMode.ClaudeScience, ExtensionChatMode.ClaudeMeetings];
+        [ExtensionChatMode.General, ExtensionChatMode.Coding, ExtensionChatMode.ClaudeScience, ExtensionChatMode.ClaudeMeetings, ExtensionChatMode.Webdesign];
 
     // Purpose groups for the composer tool menu. Every tool sits in the group that matches what it
     // does, so an empty group simply disappears from the menu in the current chat mode.
@@ -232,9 +232,9 @@ public static class BuiltInExtensionCatalog
         Selectable(BuiltInActionIds.CreateDocument, "Dokumente erstellen", "Word, PDF, Tabellen und Präsentationen erstellen", "document", GroupFiles, 10, 20),
         Immediate(BuiltInActionIds.ExportChatPdf, "Chat als PDF exportieren", "Den vollständigen Chat über den Speicherdialog als PDF exportieren", "pdf", GroupFiles, 10, 30),
         Selectable(BuiltInActionIds.PlanMode, "Planmodus", "Projekt schreibgeschützt analysieren und vor Änderungen einen umsetzbaren Plan abstimmen", "plan", GroupPlanning, 20, 10,
-            [ExtensionChatMode.Coding, ExtensionChatMode.ClaudeScience]),
-        Selectable(BuiltInActionIds.ComputerUse, "Computersteuerung", "Den lokalen Windows-Desktop sehen und bedienen", "computer", GroupIntegrations, 60, 30,
-            [ExtensionChatMode.Coding]),
+            [ExtensionChatMode.Coding, ExtensionChatMode.ClaudeScience, ExtensionChatMode.Webdesign]),
+        Selectable(BuiltInActionIds.ComputerUse, "Computersteuerung", "Den lokalen Windows-Desktop oder im Webdesign die Webseite sehen und bedienen", "computer", GroupIntegrations, 60, 30,
+            [ExtensionChatMode.Coding, ExtensionChatMode.Webdesign]),
         Selectable(BuiltInActionIds.SelfImprovement, "Selbstverbesserung", "Den zugeordneten Anwendungsquellcode bauen und prüfen", "computer", GroupIntegrations, 60, 40),
         Selectable(BuiltInActionIds.WebSearch, "Websuche", "Aktuelle Quellen im Web durchsuchen", "web", GroupResearch, 30, 10),
         Selectable(BuiltInActionIds.DeepResearch, "Deep Research", "Eine mehrstufige, quellenbasierte Recherche starten", "research", GroupResearch, 30, 20),
@@ -273,8 +273,8 @@ public static class BuiltInExtensionCatalog
             }, required = new[] { "candidateId" }, additionalProperties = false }),
         Tool(BuiltInActionIds.SelfImprovement, "selfimprovement.apply", "Prüft einen vollständig geprüften Kandidaten erneut und übernimmt ihn. Liefert bei Abweichungen einen konkreten Fehlerbericht.", 3600, 64 * 1024,
             ExtensionToolRiskClass.Process, new { type = "object", properties = new { candidateId = new { type = "string" } }, required = new[] { "candidateId" }, additionalProperties = false }),
-        Tool(BuiltInActionIds.ComputerUse, "computer.observe", "Beobachtet den Desktop oder das sichtbare Vordergrundfenster und liefert ein aktuelles Bild mit Beobachtungskennung. Für die Bedienung eines einzelnen Fensters scope window nutzen.", 300, 4 * 1024 * 1024,
-            schema: new { type = "object", properties = new { scope = new { type = "string", @enum = new[] { "desktop", "window" }, description = "desktop: gesamter Desktop (Standard); window: sichtbarer Ausschnitt des Vordergrundfensters." } }, required = Array.Empty<string>(), additionalProperties = false }),
+        Tool(BuiltInActionIds.ComputerUse, "computer.observe", "Beobachtet den Desktop, das sichtbare Vordergrundfenster oder im Webdesign-Modus die Webseite im Tab Webseite und liefert ein aktuelles Bild mit Beobachtungskennung.", 300, 4 * 1024 * 1024,
+            schema: new { type = "object", properties = new { scope = new { type = "string", @enum = new[] { "desktop", "window", "webview" }, description = "desktop: gesamter Desktop; window: sichtbarer Ausschnitt des Vordergrundfensters; webview: die Webseite im Missum-Tab Webseite mit Liste der Bedienelemente (Standard im Webdesign-Modus)." } }, required = Array.Empty<string>(), additionalProperties = false }),
         Tool(BuiltInActionIds.ComputerUse, "computer.act", "Führt eine Desktopaktion für eine aktuelle Beobachtung aus; danach erneut beobachten. Für jede Aktion mit x/y oder endX/endY ist coordinateSpace explizit erforderlich. Für scroll sind x und y als Bildpunkt innerhalb des scrollbaren Bereichs sowie scrollY erforderlich.", 300, 1024 * 1024,
             ExtensionToolRiskClass.LocalMutation, new
             {

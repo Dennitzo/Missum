@@ -67,6 +67,8 @@ public sealed partial class AgentToolCatalog
         }
         if (HasCapability(capabilities, "visual-tools")) names.Add(WorkspaceTools.ImageInput);
         if (HasCapability(capabilities, "workspace") && HasCapability(capabilities, "workspace.open")) names.Add(WorkspaceTools.Open);
+        if (HasCapability(capabilities, "workspace") && HasCapability(capabilities, "webdesign"))
+            names.UnionWith([WorkspaceTools.WebdesignServe, WorkspaceTools.WebdesignPreview]);
         // PDF bytes are never model-generated. document.create edits a bounded
         // canonical source and delegates rendering to Missum's deterministic path.
         var result = names

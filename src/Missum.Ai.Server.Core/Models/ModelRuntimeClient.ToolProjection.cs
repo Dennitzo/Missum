@@ -160,6 +160,8 @@ public sealed partial class ModelRuntimeClient
         "documents.readPages" => "Konkreten Seitenbereich eines Sitzungsdokuments als Originalbeleg lesen.",
         "image.input" => "file: Projektbild laden; windows: aktuelle Fenster-IDs; capture: solches Fenster erfassen. Danach media.analyze mit uploadId.",
         "workspace.open" => "Projekt-HTML/PDF oder kompilierte EXE zur visuellen Prüfung öffnen; danach image.input und media.analyze.",
+        "webdesign.serve" => "Projekt-Webserver: status|start|stop|restart|log|configure(root,startPage,kind,command). Nie per coding.command starten.",
+        "webdesign.preview" => "Tab Webseite: open(path)|capture(device)→uploadId für media.analyze|console|inspect(selector)|annotations|resolve(ids,note).",
         _ => null,
     };
 }

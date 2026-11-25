@@ -84,6 +84,7 @@ public sealed class MeetingAgentService : IDisposable
                 Schedule(meetingId, room, explicitRequest: null);
                 break;
             case MeetingOpTypes.RoomLive when op.Flag == true:
+                // The model was loaded before the meeting went live (see PrepareModelAsync).
                 SetStatus(meetingId, "listening", "Hört zu");
                 break;
             case MeetingOpTypes.RoomLive:
@@ -135,6 +136,20 @@ public sealed class MeetingAgentService : IDisposable
         }, CancellationToken.None);
     }
 
+    /// <summary>
+    /// Loads the host's selected model before the meeting goes live, so the first question is
+    /// answered without waiting for the model. Throws when the model cannot be loaded.
+    /// </summary>
+    public async Task PrepareModelAsync(CancellationToken cancellationToken)
+    {
+        var (modelId, _, contextLimit) = ResolveSelection(_settings.Current);
+        if (string.IsNullOrWhiteSpace(modelId)) return; // the gateway picks its default on the first run
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _lifetime.Token);
+        using var client = await _connection.CreateClientAsync(linked.Token).ConfigureAwait(false);
+        await _connection.WaitForGatewayAsync(client, linked.Token).ConfigureAwait(false);
+        await client.PrepareModelAsync(new ModelPreparationRequest(modelId, contextLimit ?? 0), linked.Token).ConfigureAwait(false);
+    }
+
     private static TimeSpan Max(TimeSpan left, TimeSpan right) => left > right ? left : right;
 
     private async Task RunAsync(Guid meetingId, AgentRoom room)
@@ -172,6 +187,13 @@ public sealed class MeetingAgentService : IDisposable
                 : question is not null ? "Schreibe die Antwort …" : "Aktualisiere Notizen und Whiteboard …"
                 : status, used, limit ?? 0), cancellation).ConfigureAwait(false);
             var result = MeetingAgentMerge.Parse(raw);
+            if (question is not null && string.IsNullOrWhiteSpace(result.ChatReply))
+            {
+                // Small models sometimes answer a question with a status line only: ask once more for the answer.
+                var again = MeetingAgentMerge.Parse(await AskModelAsync(prompt + QuestionReminder, (state, status) => SetStatus(meetingId, state,
+                    state == "writing" ? "Schreibe die Antwort …" : status, used, limit ?? 0), cancellation).ConfigureAwait(false));
+                if (!string.IsNullOrWhiteSpace(again.ChatReply)) result = result with { ChatReply = again.ChatReply };
+            }
             ApplyResult(meetingId, room, result, question);
             SetStatus(meetingId, "done", question is not null ? "Hat geantwortet" : "Notizen aktualisiert");
             await Task.Delay(TimeSpan.FromSeconds(4), cancellation).ConfigureAwait(false);
@@ -221,6 +243,8 @@ public sealed class MeetingAgentService : IDisposable
     {
         var current = _host.Snapshot(meetingId);
         if (current is null) return;
+        if (result.Title is { } title && (!current.TitleLocked || IsPlaceholderTitle(current.Title)) && title != current.Title && !IsPlaceholderTitle(title) && !title.StartsWith('('))
+            _host.ApplyLocal(meetingId, new MeetingOp { Type = MeetingOpTypes.RoomTitle, ActorId = MeetingRoom.AgentId, ActorName = MeetingRoom.AgentName, Text = title });
         if (current.Documents.FirstOrDefault() is { } notes)
         {
             var merged = MeetingAgentMerge.MergeNotes(notes.Blocks, result.Notes);
@@ -243,8 +267,12 @@ public sealed class MeetingAgentService : IDisposable
             ActorName = MeetingRoom.AgentName,
             Whiteboard = board,
         });
-        if (question is not null && result.ChatReply is { } reply)
+        if (question is not null)
         {
+            // A question always gets a reply, never a status line in its place.
+            var reply = string.IsNullOrWhiteSpace(result.ChatReply)
+                ? $"Ich habe deine Frage gesehen, aber keine verlässliche Antwort gefunden. Frag gern noch einmal etwas genauer, {question.Author ?? "bitte"}."
+                : result.ChatReply!;
             if (question.BlockId is not null) InsertNoteAnswer(meetingId, question, reply);
             else _host.ApplyLocal(meetingId, AgentChat(reply));
         }
@@ -291,19 +319,26 @@ public sealed class MeetingAgentService : IDisposable
             Agent = new MeetingAgentStatus { State = state, Status = status, ContextUsed = contextUsed, ContextLimit = contextLimit },
         });
 
+    internal static bool IsPlaceholderTitle(string? title) => MeetingRoom.IsPlaceholderTitle(title);
+
+    internal const string QuestionReminder =
+        "\nWICHTIG: Oben steht eine Frage an Missum. Setze chatReply auf die direkte Antwort in 1 bis 4 Sätzen; chatReply darf jetzt nicht null sein.\n";
+
     internal static string BuildPrompt(MeetingRoomState state, IReadOnlyList<AgentRequest> requests, IReadOnlyList<MeetingChange>? changes = null)
     {
         var builder = new StringBuilder();
         builder.Append("""
             Du bist Missum und nimmst still an einem Meeting teil. Du bereitest Gespräch, Chat und Notizen live auf.
             Antworte ausschließlich mit einem JSON-Objekt genau in dieser Form, ohne Markdown-Codeblock:
-            {"chatReply": string oder null, "chatInfo": string oder null,
+            {"title": string, "chatReply": string oder null, "chatInfo": string oder null,
              "notes": {"summary": string, "decisions": [string], "actionItems": [{"task": string, "owner": string oder null, "due": string oder null}], "openQuestions": [string]},
              "whiteboard": {"columns": [{"id": string oder null, "title": string, "subtitle": string oder null, "noteIds": [string]}], "newNotes": [{"text": string, "column": string}], "removeNoteIds": [string]}}
 
             Regeln:
             - Schreibe auf Deutsch, kurz, klar und sachlich. Erfinde nichts, was nicht gesagt oder geschrieben wurde.
             - chatReply nur, wenn unten eine Frage an Missum steht. Beantworte sie dann direkt in 1 bis 4 Sätzen. Sonst null.
+            - title: kompakter Name des Meetings aus dem bisherigen Inhalt, 2 bis 5 Wörter, höchstens 40 Zeichen, ohne Datum
+              und ohne Anführungszeichen. Behalte den aktuellen Titel, solange er noch passt.
             - summary: 1 bis 3 Sätze über das bisherige Meeting.
             - decisions: nur echte, getroffene Entscheidungen. actionItems: konkrete Aufgaben mit Person und Termin, falls genannt.
             - openQuestions: Fragen, die noch offen sind.
@@ -326,7 +361,8 @@ public sealed class MeetingAgentService : IDisposable
 
             """);
 
-        builder.Append("Meeting: ").Append(state.Title).Append('\n');
+        // A placeholder is no title to keep: Missum names the meeting as soon as there is content.
+        builder.Append("Meeting: ").Append(IsPlaceholderTitle(state.Title) ? "(noch ohne Titel – wähle einen passenden)" : state.Title).Append('\n');
         var people = state.Participants.Where(p => !p.IsAgent).Select(p => p.Name).Distinct().ToArray();
         builder.Append("Teilnehmer: ").Append(people.Length == 0 ? "–" : string.Join(", ", people)).Append("\n\n");
 

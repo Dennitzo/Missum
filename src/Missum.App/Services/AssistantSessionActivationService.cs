@@ -105,6 +105,7 @@ internal sealed class AssistantSessionActivationService(
             ChatMode.Coding => current.ActiveCodingSessionId,
             ChatMode.ClaudeScience => current.ActiveClaudeScienceSessionId,
             ChatMode.ClaudeMeetings => current.ActiveClaudeMeetingsSessionId,
+            ChatMode.Webdesign => current.ActiveWebdesignSessionId,
             _ => null,
         };
         var sessionChanged = current.SelectedChatMode != session.ChatMode
@@ -138,6 +139,13 @@ internal sealed class AssistantSessionActivationService(
             {
                 SelectedChatMode = ChatMode.ClaudeMeetings,
                 ActiveClaudeMeetingsSessionId = session.Id,
+                ActiveSessionId = session.Id,
+                LastRoute = "assistant",
+            },
+            ChatMode.Webdesign => value with
+            {
+                SelectedChatMode = ChatMode.Webdesign,
+                ActiveWebdesignSessionId = session.Id,
                 ActiveSessionId = session.Id,
                 LastRoute = "assistant",
             },

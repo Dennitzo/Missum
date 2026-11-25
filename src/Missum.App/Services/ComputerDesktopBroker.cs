@@ -19,10 +19,13 @@ public sealed record ComputerWindow(string Id, string Title, int ProcessId, long
 
 public sealed record ComputerImageRegion(int X, int Y, int Width, int Height);
 
+public sealed record ComputerViewport(double Width, double Height, double ScrollX, double ScrollY, string Device);
+
 public sealed record ComputerObservation(string ObservationId, byte[] Content, string ContentType,
     int Width, int Height, int DesktopX, int DesktopY, int DesktopWidth, int DesktopHeight,
     string ForegroundTitle, int ForegroundProcessId, IReadOnlyList<ComputerWindow> Windows,
-    ComputerImageRegion? ImageRegion = null);
+    ComputerImageRegion? ImageRegion = null, string? Url = null, ComputerViewport? Viewport = null,
+    System.Text.Json.JsonElement? Elements = null);
 
 public sealed record ComputerAction(string ObservationId, string Kind, double? X = null, double? Y = null,
     double? EndX = null, double? EndY = null, int? ImageWidth = null, int? ImageHeight = null,
@@ -34,7 +37,8 @@ public sealed record ComputerElement(string Name, int ControlType, int ProcessId
 public sealed record ComputerActionResult(string Status, string Message, ComputerElement? Element = null);
 
 internal sealed record ComputerFrame(ComputerObservation Public, byte[] PhysicalPixels,
-    ComputerWindow? Foreground, nint FocusHandle, ComputerElement? FocusedElement, DateTimeOffset CapturedAt);
+    ComputerWindow? Foreground, nint FocusHandle, ComputerElement? FocusedElement, DateTimeOffset CapturedAt,
+    WebViewFrameState? WebView = null);
 
 internal interface IComputerDesktopPlatform
 {
@@ -63,11 +67,13 @@ public sealed class ComputerDesktopBroker : IDisposable
         public ComputerFrame? Frame { get; set; }
         public IComputerForegroundMonitor Monitor { get; } = monitor;
         public long FrameRevision { get; set; }
+        public WebViewComputerPlatform? WebPlatform { get; set; }
     }
 
     private readonly IComputerActionApproval _approval;
     private readonly IComputerDesktopPlatform _desktop;
     private readonly Func<IComputerForegroundMonitor> _monitorFactory;
+    private readonly Func<WebViewComputerPlatform?> _webViewFactory;
     private readonly ConcurrentDictionary<(Guid, string), Session> _sessions = new();
     private readonly HashSet<(Guid, string)> _endedRuns = [];
     private readonly object _lifecycle = new();
@@ -78,11 +84,13 @@ public sealed class ComputerDesktopBroker : IDisposable
         : this(approval, new WindowsComputerDesktopPlatform(screenshots), static () => new WindowsComputerForegroundMonitor()) { }
 
     internal ComputerDesktopBroker(IComputerActionApproval approval, IComputerDesktopPlatform desktop,
-        Func<IComputerForegroundMonitor>? monitorFactory = null)
+        Func<IComputerForegroundMonitor>? monitorFactory = null, Func<WebViewComputerPlatform?>? webViewFactory = null)
     {
         _approval = approval;
         _desktop = desktop;
         _monitorFactory = monitorFactory ?? (static () => new NoComputerForegroundMonitor());
+        _webViewFactory = webViewFactory ?? (static () => Webdesign.WebdesignPreviewRegistry.Current is { } surface
+            ? new WebViewComputerPlatform(surface) : null);
     }
 
     public void Begin(Guid sessionId, string runId)
@@ -103,7 +111,7 @@ public sealed class ComputerDesktopBroker : IDisposable
 
     public async Task<ComputerObservation> ObserveAsync(Guid sessionId, string runId, string scope, CancellationToken cancellationToken = default)
     {
-        if (scope is not ("desktop" or "window")) throw new ArgumentException("Beobachtungsbereich muss desktop oder window sein.", nameof(scope));
+        if (scope is not ("desktop" or "window" or "webview")) throw new ArgumentException("Beobachtungsbereich muss desktop, window oder webview sein.", nameof(scope));
         var session = GetSession(sessionId, runId);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, session.Lifetime.Token);
         await _gate.WaitAsync(linked.Token).ConfigureAwait(false);
@@ -117,6 +125,18 @@ public sealed class ComputerDesktopBroker : IDisposable
                     throw new UnauthorizedAccessException("Die Computersteuerung wurde nicht freigegeben.");
                 linked.Token.ThrowIfCancellationRequested();
                 session.Activated = true;
+            }
+            session.WebPlatform = null;
+            if (scope == "webview")
+            {
+                // The website tab lives inside Missum and does not depend on the foreground window.
+                var web = _webViewFactory() ?? throw new InvalidOperationException(
+                    "Der Tab Webseite ist nicht geöffnet. Öffne eine Webdesign-Sitzung mit Projekt in Missum.");
+                var webFrame = await web.CaptureAsync(linked.Token).ConfigureAwait(false);
+                linked.Token.ThrowIfCancellationRequested();
+                session.Frame = webFrame;
+                session.WebPlatform = web;
+                return webFrame.Public;
             }
             await session.Monitor.WaitForExpectedAsync(linked.Token).ConfigureAwait(false);
             var revision = session.Monitor.Revision;
@@ -149,6 +169,8 @@ public sealed class ComputerDesktopBroker : IDisposable
                 throw new InvalidOperationException("Die Beobachtung ist nicht mehr gültig. Beobachte den Desktop erneut.");
             if (DateTimeOffset.UtcNow - frame.CapturedAt > ObservationLifetime)
                 throw new InvalidOperationException("Die Beobachtung ist abgelaufen. Beobachte den Desktop erneut.");
+            if (frame.WebView is not null)
+                return await ExecuteWebViewAsync(session, frame, action, linked.Token).ConfigureAwait(false);
             var waited = await session.Monitor.WaitForExpectedAsync(linked.Token).ConfigureAwait(false);
             if (waited || session.Monitor.Revision != session.FrameRevision)
                 throw new InvalidOperationException("Das Vordergrundfenster hat sich geändert. Beobachte den Desktop nach der Pause erneut.");
@@ -250,6 +272,41 @@ public sealed class ComputerDesktopBroker : IDisposable
             return new("completed", "Aktion ausgeführt. Beobachte den Desktop erneut, bevor du fortfährst.");
         }
         finally { session.Monitor.AllowMissum(false); _gate.Release(); }
+    }
+
+    /// <summary>
+    /// An action in the website tab: same coordinate and validity rules as on the desktop, but
+    /// the page itself is the target. Only passwords, file choosers and links to other sites ask
+    /// the user; everything else stays inside the local project page and runs directly.
+    /// </summary>
+    private async Task<ComputerActionResult> ExecuteWebViewAsync(Session session, ComputerFrame frame, ComputerAction action,
+        CancellationToken cancellationToken)
+    {
+        var web = session.WebPlatform ?? throw new InvalidOperationException("Die Webseiten-Beobachtung ist nicht mehr gültig. Beobachte erneut.");
+        action = NormalizeCoordinates(action, frame.Public);
+        ValidateAction(action, frame.Public);
+        var kind = action.Kind.ToLowerInvariant();
+        if (kind == "inspect")
+        {
+            var element = await web.InspectAsync(frame, action, cancellationToken).ConfigureAwait(false);
+            return new("completed", "Element der Webseite gelesen. Beobachte erneut, bevor du fortfährst.", element);
+        }
+        var approved = false;
+        if (await web.RiskAsync(frame, action, cancellationToken).ConfigureAwait(false) is { } risk)
+        {
+            var decision = await _approval.RequestAsync(new(session.SessionId, session.RunId, action.ObservationId,
+                kind, "Webseite · " + risk, Round(action.X), Round(action.Y),
+                kind == "type" ? action.Text : action.Key), cancellationToken).ConfigureAwait(false);
+            if (decision == ComputerActionDecision.Cancel)
+                return new("cancelled", "Die Aktion wurde abgebrochen. Vor weiteren Aktionen neu beobachten.");
+            if (decision == ComputerActionDecision.ManualDone)
+                return new("manual", "Die Aktion wurde durch den Nutzer übernommen. Vor weiteren Aktionen neu beobachten.");
+            if (decision != ComputerActionDecision.Execute)
+                throw new UnauthorizedAccessException("Die Aktion wurde nicht freigegeben.");
+            approved = true;
+        }
+        await web.ExecuteAsync(frame, action, approved, cancellationToken).ConfigureAwait(false);
+        return new("completed", "Aktion in der Webseite ausgeführt. Beobachte erneut, bevor du fortfährst.");
     }
 
     public void End(Guid sessionId, string runId)

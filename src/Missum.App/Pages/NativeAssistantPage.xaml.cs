@@ -301,7 +301,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                 _mode = newMode;
                 _running = _changeReceiptState.IsPromptPending(_session)
                     || (S(data, "isRunning") == "True" && !_finishedSessions.Contains(_session));
-                ModeLabel.Text = _mode switch { "coding" => "Codex", "claudescience" => "Claude Science", "claudemeetings" => "Claude Meetings", _ => "ChatGPT" };
+                ModeLabel.Text = _mode switch { "coding" => "Codex", "claudescience" => "Claude Science", "claudemeetings" => "Claude Meetings", "webdesign" => "Webdesign", _ => "ChatGPT" };
                 ChatStatus = _running && !S(data, "runStatus").StartsWith("Modell generiert", StringComparison.Ordinal) ? S(data, "runStatus") + "  " + S(data, "runDetail") : "";
                 _persistentAction = S(data, "selectedExtensionActionId");
                 if (_persistentAction == BuiltInActionIds.DeepResearch) _persistentAction = null;
@@ -312,7 +312,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                 }
                 else if (_selectedAction is not null)
                     UpdateSelectedToolChip(_lastToolChipLabel);
-                if (ActiveSubagent is null) Composer.PlaceholderText = _mode switch { "coding" => "Leg einfach los", "claudescience" => "Stelle eine Forschungsfrage", "claudemeetings" => "Nachricht an alle oder @Missum", _ => "Frag etwas" };
+                if (ActiveSubagent is null) Composer.PlaceholderText = _mode switch { "coding" => "Leg einfach los", "claudescience" => "Stelle eine Forschungsfrage", "claudemeetings" => "Nachricht an alle oder @Missum", "webdesign" => "Beschreibe deine Webseite oder markiere etwas im Tab Webseite", _ => "Frag etwas" };
                 _rendering = true;
                 if (changed) Composer.Text = S(data, "draft");
                 _rendering = false;
@@ -337,6 +337,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                 SetRunning();
                 SyncResearchSession();
                 SyncMeetingsSession();
+                SyncWebdesignSession();
                 // Closed tool details and older pages intentionally omit URLs.
                 // Load only the compact source index, independently of the tab.
                 if (!_selectionInputSmokeActive && (changed || type == "state.snapshot"))
@@ -405,6 +406,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         }
         if (type == "coding.changes") RenderChanges(data);
         RefreshResearchAfterRun(type);
+        CaptureWebsiteAfterRun(type);
         UpdateResearchRuntimeChrome();
     }
 
@@ -741,6 +743,14 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             MarkMeetingsDirty(chat: true, stage: true);
             return;
         }
+        if (FullWidthViewActive && _websiteHidesInspector)
+        {
+            // The website tab hid the sidebar on its own; the toggle brings it back for this visit
+            // without changing the saved preference.
+            _websiteHidesInspector = false;
+            UpdateResponsiveLayout();
+            return;
+        }
         try { await SetInspectorVisibleAsync(Inspector.Visibility != Visibility.Visible); }
         catch (Exception exception) when (exception is not OutOfMemoryException) { ShowError(exception.Message); }
     }
@@ -853,7 +863,8 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         if (Inspector is null || InspectorColumn is null || AssistantFrame is null || InspectorToggle is null) return;
         var available = NativeInspectorLayout.HasRoom(AssistantFrame.ActualWidth);
         var meetings = IsMeetingsMode;
-        var visible = available && (meetings ? _meetingChatRequested : _inspectorRequested);
+        var visible = available && (meetings ? _meetingChatRequested : _inspectorRequested)
+            && !(FullWidthViewActive && _websiteHidesInspector);
         var width = visible ? meetings ? MeetingChatWidth : NativeInspectorLayout.SidebarWidth : 0;
         if (Inspector.Width != (meetings ? MeetingChatWidth : NativeInspectorLayout.SidebarWidth))
             Inspector.Width = meetings ? MeetingChatWidth : NativeInspectorLayout.SidebarWidth;
@@ -975,6 +986,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         if (planPrompt is null) { _rendering = true; Composer.Text = ""; _rendering = false; }
         // The prompt takes its attachments with it, exactly like its text.
         var submittedAttachmentIds = ClearComposerAttachmentsAfterSubmit();
+        CaptureWebsiteBeforeRun();
         _finishedSessions.Remove(session); _running = true; SetRunning(); _chatErrors.Remove(session); RefreshChatNotices(); ChatStatus = "Anfrage wird vorbereitet …";
         if (!await CommandAsync("chat.send", new { sessionId = session, prompt, attachmentIds = submittedAttachmentIds, extensionActionId = selectedAction }))
         {
@@ -1207,6 +1219,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     {
         CancelPromptTimelineNavigation();
         if (_disposed) return;
+        _websiteView?.Close();
         if (_captionSubscribed) App.Current.GetService<SystemAudioCaptionService>().Changed -= OnNativeCaptionChanged;
         _ = StopNativeDictationAsync();
         DisposeMessageActions();

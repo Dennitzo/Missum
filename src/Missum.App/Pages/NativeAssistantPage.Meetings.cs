@@ -62,7 +62,7 @@ public sealed partial class NativeAssistantPage
             MeetingsHost.SizeChanged += (_, _) => MarkMeetingsDirty(overlay: true);
             _meetingRenderTimer = DispatcherQueue.CreateTimer();
             _meetingRenderTimer.Interval = TimeSpan.FromMilliseconds(110);
-            _meetingRenderTimer.Tick += (_, _) => RunUiCallback("Meetings.Render", RenderMeetingsIfDirty);
+            _meetingRenderTimer.Tick += (_, _) => RunMeetingCallback("Meetings.Render", RenderMeetingsIfDirty);
             _meetingRenderTimer.Start();
             return _meetings;
         }
@@ -87,6 +87,52 @@ public sealed partial class NativeAssistantPage
         if (service.PendingJoin is not null && !_meetingActivationBusy) OnMeetingJoinRequested();
         UpdateResponsiveLayout();
         RenderSessionTabs();
+        SyncMeetingTitle();
+    }
+
+    // One name everywhere: notes, whiteboard and the sidebar session show the room title. Missum
+    // keeps it current; the host renames it in the sidebar, which then locks it against Missum.
+    private Guid _meetingTitleSession;
+    private string? _meetingTitleSynced;
+    private string? _meetingTitleRenaming;
+
+    private static string MeetingSessionTitle(MeetingRoomState snapshot) => snapshot.Title;
+
+    private DateTimeOffset _meetingTitleRenamingSince;
+
+    private void SyncMeetingTitle()
+    {
+        if (!IsMeetingsMode || _meetings?.Room is not { } room || _session == Guid.Empty || _meetings.SessionId != _session) return;
+        if (_meetingTitleSession != _session) { _meetingTitleSession = _session; _meetingTitleSynced = null; _meetingTitleRenaming = null; }
+        var roomTitle = room.Read(state => state.Title);
+        var sessionTitle = Items(_snapshot, "sessions").Where(item => S(item, "id") == _session.ToString("D"))
+            .Select(item => S(item, "title")).FirstOrDefault() ?? "";
+        if (sessionTitle.Length == 0) return;
+        var host = _meetings.View.Role == "host";
+        if (_meetingTitleRenaming is { } pending)
+        {
+            // The sidebar has not taken over the room's title yet: its old name is no rename by the host.
+            if (sessionTitle == pending) { _meetingTitleRenaming = null; _meetingTitleSynced = pending; return; }
+            if (roomTitle == pending && DateTimeOffset.UtcNow - _meetingTitleRenamingSince < TimeSpan.FromSeconds(10)) return;
+            _meetingTitleRenaming = null;
+        }
+        if (host && _meetingTitleSynced is { } synced && sessionTitle != synced && roomTitle == synced)
+        {
+            // The host renamed the session in the sidebar.
+            _meetingTitleSynced = sessionTitle;
+            _meetings.Send(new MeetingOp { Type = MeetingOpTypes.RoomTitle, Text = sessionTitle });
+            return;
+        }
+        if (roomTitle != sessionTitle)
+        {
+            _meetingTitleRenaming = roomTitle;
+            _meetingTitleRenamingSince = DateTimeOffset.UtcNow;
+            _meetingTitleSynced = roomTitle;
+            _ = CommandAsync("session.rename", new { sessionId = _session, title = roomTitle });
+            return;
+        }
+        _meetingTitleSynced = sessionTitle;
+        _meetingTitleRenaming = null;
     }
 
     private async Task ActivateMeetingSessionAsync(Guid sessionId)
@@ -248,15 +294,19 @@ public sealed partial class NativeAssistantPage
         _meetingOverlayDirty |= all || overlay;
     }
 
-    private void OnMeetingChanged() => DispatcherQueue.TryEnqueue(() => MarkMeetingsDirty(stage: true, chat: true, overlay: true, notes: true, board: true));
-    private void OnMeetingSnapshot() => DispatcherQueue.TryEnqueue(() => MarkMeetingsDirty(all: true));
+    private void OnMeetingChanged() => DispatcherQueue.TryEnqueue(() => RunMeetingCallback("Meetings.Changed", () => MarkMeetingsDirty(stage: true, chat: true, overlay: true, notes: true, board: true)));
+    private void OnMeetingSnapshot() => DispatcherQueue.TryEnqueue(() => RunMeetingCallback("Meetings.Snapshot", () => MarkMeetingsDirty(all: true)));
 
-    private void OnMeetingOperation(MeetingOp op) => DispatcherQueue.TryEnqueue(() =>
+    private void OnMeetingOperation(MeetingOp op) => DispatcherQueue.TryEnqueue(() => RunMeetingCallback("Meetings.Operation", () =>
     {
         switch (op.Type)
         {
             case MeetingOpTypes.ChatAdd: MarkMeetingsDirty(chat: true); break;
-            case MeetingOpTypes.TranscriptAdd: MarkMeetingsDirty(chat: true); break;
+            case MeetingOpTypes.TranscriptAdd:
+                // Recognized speech counts as speaking, also when the level was borderline.
+                if (op.Transcript is { } spoken) MarkSpeech(spoken.SpeakerId, TimeSpan.FromMilliseconds(1500));
+                MarkMeetingsDirty(chat: true);
+                break;
             case MeetingOpTypes.AgentStatus: MarkMeetingsDirty(stage: true, overlay: true, chat: true); break;
             case MeetingOpTypes.Presence: MarkMeetingsDirty(notes: true, board: true); break;
             case MeetingOpTypes.ParticipantJoin or MeetingOpTypes.ParticipantLeave or MeetingOpTypes.ParticipantMedia:
@@ -267,7 +317,7 @@ public sealed partial class NativeAssistantPage
                 else MarkMeetingsDirty(notes: true);
                 break;
         }
-    });
+    }));
 
     private void RenderMeetingsIfDirty()
     {
@@ -300,6 +350,7 @@ public sealed partial class NativeAssistantPage
         if (_meetingTab == MeetingTab.Whiteboard && _meetingBoardDirty) { _meetingBoardDirty = false; RenderMeetingBoard(); }
         if (_meetingOverlayDirty) { _meetingOverlayDirty = false; RenderMeetingOverlay(); }
         if (_meetingChatDirty && MeetingChatHost.Visibility == Visibility.Visible) { _meetingChatDirty = false; RenderMeetingChat(); }
+        SyncMeetingTitle();
     }
 
     /// <summary>Meetings live in a project folder; without one every tab explains how to start.</summary>
@@ -365,8 +416,14 @@ public sealed partial class NativeAssistantPage
             await stream.WriteAsync(jpeg.AsBuffer());
             stream.Seek(0);
             var decoder = await BitmapDecoder.CreateAsync(stream);
-            using var bitmap = await decoder.GetSoftwareBitmapAsync(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied);
-            await video.Source.SetBitmapAsync(bitmap);
+            var bitmap = await decoder.GetSoftwareBitmapAsync(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied);
+            try { await video.Source.SetBitmapAsync(bitmap); }
+            catch { bitmap.Dispose(); throw; }
+            // The source keeps reading the bitmap it shows (e.g. when a tile is rebuilt on a tab switch):
+            // only the frame it no longer shows may be released, or XAML fails with RO_E_CLOSED.
+            var previous = video.Bitmap;
+            video.Bitmap = bitmap;
+            previous?.Dispose();
             var first = video.LastFrame == default;
             video.LastFrame = DateTimeOffset.UtcNow;
             if (first) MarkMeetingsDirty(stage: true, overlay: true);
@@ -380,12 +437,64 @@ public sealed partial class NativeAssistantPage
             ? video.Source
             : null;
 
-    private void OnMeetingLevel(Guid participant, double level) => DispatcherQueue.TryEnqueue(() =>
+    private void OnMeetingLevel(Guid participant, double level) => DispatcherQueue.TryEnqueue(() => RunMeetingCallback("Meetings.Level", () =>
     {
         var previous = _meetingLevels.GetValueOrDefault(participant);
         _meetingLevels[participant] = Math.Max(previous, level);
-        if ((previous > .12) != (level > .12)) MarkMeetingsDirty(stage: true);
-    });
+        // Only a clear level counts; background noise stays below this.
+        if (level >= SpeakingLevel) MarkSpeech(participant, TimeSpan.FromMilliseconds(600));
+    }));
+
+    // Speaking: a clear microphone level or recognized speech lights the name green for a moment.
+    private const double SpeakingLevel = .18;
+    private static readonly TimeSpan SpeakerHold = TimeSpan.FromSeconds(5);
+    private readonly Dictionary<Guid, DateTimeOffset> _meetingSpeechUntil = [];
+    private readonly Dictionary<Guid, DateTimeOffset> _meetingLastSpeech = [];
+    private readonly HashSet<Guid> _meetingSpeakingNow = [];
+    private string _overlaySpeakerKey = "";
+
+    private void MarkSpeech(Guid participant, TimeSpan hold)
+    {
+        if (participant == Guid.Empty) return;
+        var now = DateTimeOffset.UtcNow;
+        if (_meetingSpeechUntil.GetValueOrDefault(participant) < now + hold) _meetingSpeechUntil[participant] = now + hold;
+        _meetingLastSpeech[participant] = now;
+        RefreshSpeaking();
+    }
+
+    /// <summary>Updates who speaks now; tiles and the overlay re-render only when that changes.</summary>
+    private void RefreshSpeaking()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var changed = false;
+        foreach (var (id, until) in _meetingSpeechUntil)
+        {
+            var speaking = until > now;
+            if (speaking ? _meetingSpeakingNow.Add(id) : _meetingSpeakingNow.Remove(id)) changed = true;
+        }
+        if (changed) MarkMeetingsDirty(stage: true, overlay: true);
+        var key = string.Join(",", OverlaySpeakers(_meetings?.LocalParticipantId ?? Guid.Empty));
+        if (key != _overlaySpeakerKey) { _overlaySpeakerKey = key; MarkMeetingsDirty(overlay: true); }
+    }
+
+    /// <summary>
+    /// Who the compact overlay shows: people who spoke within the last seconds, latest first,
+    /// at most two, others before yourself. The tiles rotate as the conversation moves on.
+    /// </summary>
+    private List<Guid> OverlaySpeakers(Guid self)
+    {
+        var now = DateTimeOffset.UtcNow;
+        return _meetingLastSpeech
+            .Where(pair => _meetingSpeakingNow.Contains(pair.Key) || now - pair.Value < SpeakerHold)
+            .OrderBy(pair => pair.Key == self ? 1 : 0)
+            .ThenByDescending(pair => pair.Value)
+            .Select(pair => pair.Key)
+            .Take(2)
+            .ToList();
+    }
+
+    internal IReadOnlyCollection<Guid> SpeakingParticipants => _meetingSpeakingNow;
+    internal IReadOnlyList<Guid> OverlaySpeakerIds => OverlaySpeakers(_meetings?.LocalParticipantId ?? Guid.Empty);
 
     private void OnMeetingMicrophoneLevel(double level) => OnMeetingLevel(_meetings?.LocalParticipantId ?? Guid.Empty, level);
 
@@ -394,16 +503,17 @@ public sealed partial class NativeAssistantPage
         foreach (var key in _meetingLevels.Keys.ToArray())
         {
             var next = _meetingLevels[key] * .78;
-            if ((_meetingLevels[key] > .12) != (next > .12)) _meetingStageDirty = true;
             _meetingLevels[key] = next < .01 ? 0 : next;
         }
+        RefreshSpeaking();
     }
 
-    private bool IsSpeaking(Guid participant) => _meetingLevels.GetValueOrDefault(participant) > .12;
+    private bool IsSpeaking(Guid participant) => _meetingSpeakingNow.Contains(participant);
 
     private sealed class MeetingVideoSource
     {
         public SoftwareBitmapSource Source { get; } = new();
+        public SoftwareBitmap? Bitmap { get; set; }
         public bool Decoding { get; set; }
         public DateTimeOffset LastFrame { get; set; }
     }
@@ -420,7 +530,7 @@ public sealed partial class NativeAssistantPage
         var show = IsMeetingsMode && _meetingTab != MeetingTab.Meeting && _meetings?.Room is not null;
         MeetingsOverlayHost.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
         // Keep documents and the board readable next to the floating camera panel.
-        var reserve = show ? 262 : 0;
+        var reserve = show ? _overlayWidth + 26 : 0;
         if (_notesScroll is not null) _notesScroll.Padding = new Thickness(0, 0, reserve, 0);
         if (_boardColumns is not null) _boardColumns.Padding = new Thickness(28, 8, 28 + reserve, 40);
         if (!show) return;
@@ -432,17 +542,20 @@ public sealed partial class NativeAssistantPage
             s.Participants.Count));
         _ = participants;
 
-        _overlayRoot ??= new Border
+        if (_overlayRoot is null)
         {
-            Width = 236,
-            CornerRadius = new CornerRadius(14),
-            Background = ThemeBrush("MissumLayerBrush", 32),
-            BorderBrush = ThemeBrush("MissumStrokeBrush", 48),
-            BorderThickness = new Thickness(1),
-            Padding = new Thickness(8),
-            Shadow = new ThemeShadow(),
-            Translation = new System.Numerics.Vector3(0, 0, 24),
-        };
+            _overlayRoot = new Border
+            {
+                CornerRadius = new CornerRadius(18),
+                BorderThickness = new Thickness(1),
+                Padding = new Thickness(8),
+                Shadow = new ThemeShadow(),
+                Translation = new System.Numerics.Vector3(0, 0, 24),
+            };
+            AttachOverlayManipulation(_overlayRoot);
+        }
+        _overlayRoot.Width = _overlayWidth;
+        UpdateOverlayGlass();
         var stack = new StackPanel { Spacing = 8 };
         var header = new Grid();
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -466,15 +579,35 @@ public sealed partial class NativeAssistantPage
 
         if (!_overlayCollapsed)
         {
-            stack.Children.Add(AgentTile(agent, height: 118, compact: true));
+            stack.Children.Add(AgentTile(agent, height: Math.Round(_overlayWidth * 0.5), compact: true));
+            var speakers = OverlaySpeakers(view.LocalParticipantId)
+                .Select(id => people.FirstOrDefault(p => p.Id == id))
+                .OfType<MeetingParticipant>()
+                .ToList();
             var selfVideo = MeetingVideoFor(view.LocalParticipantId, view.CameraOn);
             var peopleCard = new Border
             {
-                Height = 82,
+                Height = Math.Round(_overlayWidth * 0.35),
                 CornerRadius = new CornerRadius(10),
                 Background = ThemeBrush("MissumLayerStrongBrush", 40),
             };
-            if (selfVideo is not null)
+            if (speakers.Count > 0)
+            {
+                // Whoever speaks is shown here; the tiles change as the conversation moves on.
+                var slots = new Grid { ColumnSpacing = 4 };
+                for (var index = 0; index < speakers.Count; index++)
+                {
+                    slots.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                    var speaker = speakers[index];
+                    var self = speaker.Id == view.LocalParticipantId;
+                    var tile = OverlaySpeakerTile(speaker, self, Math.Round(_overlayWidth * 0.35), speakers.Count == 1);
+                    Grid.SetColumn(tile, index);
+                    slots.Children.Add(tile);
+                }
+                peopleCard.Child = slots;
+                peopleCard.Height = Math.Round(_overlayWidth * (speakers.Count == 1 ? 0.5625 : 0.35));
+            }
+            else if (selfVideo is not null)
             {
                 var grid = new Grid();
                 grid.Children.Add(new Image { Source = selfVideo, Stretch = Stretch.UniformToFill });
@@ -500,6 +633,141 @@ public sealed partial class NativeAssistantPage
         _overlayRoot.Child = stack;
         if (!ReferenceEquals(MeetingsOverlayHost.Content, _overlayRoot)) MeetingsOverlayHost.Content = _overlayRoot;
     }
+
+    /// <summary>A speaker's camera (or avatar) in the overlay, with the green name while speaking.</summary>
+    private Border OverlaySpeakerTile(MeetingParticipant person, bool self, double height, bool wide)
+    {
+        var grid = new Grid();
+        if (MeetingVideoFor(person.Id, person.CameraOn) is { } video)
+            grid.Children.Add(new Image
+            {
+                Source = video, Stretch = Stretch.UniformToFill,
+                RenderTransformOrigin = new Windows.Foundation.Point(.5, .5),
+                RenderTransform = self ? new ScaleTransform { ScaleX = -1 } : null,
+            });
+        else
+        {
+            var avatar = Avatar(person, Math.Clamp(height * .42, 26, 60));
+            avatar.HorizontalAlignment = HorizontalAlignment.Center;
+            avatar.VerticalAlignment = VerticalAlignment.Center;
+            grid.Children.Add(avatar);
+        }
+        var speaking = IsSpeaking(person.Id) && person.MicOn;
+        grid.Children.Add(NameChip(self ? "Du" : person.Name, person.MicOn, small: true, speaking: speaking));
+        _ = wide;
+        return new Border
+        {
+            CornerRadius = new CornerRadius(10),
+            Background = new SolidColorBrush(Blend(ParticipantColors[person.ColorIndex % ParticipantColors.Length], Color.FromArgb(255, 0x22, 0x22, 0x24), .82)),
+            BorderBrush = speaking ? new SolidColorBrush(SpeakingGreen) : new SolidColorBrush(Colors.Transparent),
+            BorderThickness = new Thickness(2),
+            Child = grid,
+        };
+    }
+
+    // The camera panel: translucent like the tool pills, dragged by its header, resized at its
+    // side edges. Handlers live on the outer border, which survives every re-render.
+    private double _overlayWidth = 236;
+    private bool _overlayHovered;
+    private string? _overlayGesture;
+    private Windows.Foundation.Point _overlayGestureStart;
+    private (double X, double Y, double Width) _overlayGestureOrigin;
+    private readonly TranslateTransform _overlayOffset = new();
+
+    private void UpdateOverlayGlass()
+    {
+        if (_overlayRoot is null) return;
+        var input = ThemeBrush("MissumInputBrush", 40).Color;
+        _overlayRoot.Background = new SolidColorBrush(Color.FromArgb(_overlayHovered ? (byte)0xE6 : (byte)0xB8, input.R, input.G, input.B));
+        _overlayRoot.BorderBrush = ThemeBrush("MissumStrokeBrush", 70);
+    }
+
+    private void AttachOverlayManipulation(Border root)
+    {
+        MeetingsOverlayHost.RenderTransform = _overlayOffset;
+        root.PointerEntered += (_, _) => { _overlayHovered = true; UpdateOverlayGlass(); };
+        root.PointerExited += (_, _) => { _overlayHovered = false; UpdateOverlayGlass(); if (_overlayGesture is null) ProtectedCursor = null; };
+        root.PointerPressed += (_, args) =>
+        {
+            if (args.OriginalSource is DependencyObject source && IsInsideButton(source, root)) return;
+            var point = args.GetCurrentPoint(root).Position;
+            _overlayGesture = OverlayEdge(root, point) ?? (point.Y < 34 ? "move" : null);
+            if (_overlayGesture is null) return;
+            _overlayGestureStart = args.GetCurrentPoint(MeetingsHost).Position;
+            _overlayGestureOrigin = (_overlayOffset.X, _overlayOffset.Y, _overlayWidth);
+            root.CapturePointer(args.Pointer);
+            args.Handled = true;
+        };
+        root.PointerMoved += (_, args) =>
+        {
+            if (_overlayGesture is null)
+            {
+                // The side edges scale the panel; the cursor says so.
+                var edge = OverlayEdge(root, args.GetCurrentPoint(root).Position);
+                ProtectedCursor = edge is null ? null : Microsoft.UI.Input.InputSystemCursor.Create(Microsoft.UI.Input.InputSystemCursorShape.SizeWestEast);
+                return;
+            }
+            var point = args.GetCurrentPoint(MeetingsHost).Position;
+            var dx = point.X - _overlayGestureStart.X;
+            var dy = point.Y - _overlayGestureStart.Y;
+            if (_overlayGesture == "move") MoveMeetingOverlay(_overlayGestureOrigin.X + dx, _overlayGestureOrigin.Y + dy);
+            else if (_overlayGesture == "left") ResizeMeetingOverlay(_overlayGestureOrigin.Width - dx);
+            else
+            {
+                // Right edge: the left side of the panel stays where it is.
+                ResizeMeetingOverlay(_overlayGestureOrigin.Width + dx);
+                MoveMeetingOverlay(_overlayGestureOrigin.X + (_overlayWidth - _overlayGestureOrigin.Width), _overlayOffset.Y);
+            }
+            args.Handled = true;
+        };
+        void End(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs args)
+        {
+            if (_overlayGesture is null) return;
+            _overlayGesture = null;
+            root.ReleasePointerCapture(args.Pointer);
+        }
+        root.PointerReleased += End;
+        root.PointerCaptureLost += (_, _) => { _overlayGesture = null; ProtectedCursor = null; };
+        root.DoubleTapped += (_, args) =>
+        {
+            if (args.GetPosition(root).Y > 34) return;
+            _overlayOffset.X = 0; _overlayOffset.Y = 0;
+        };
+    }
+
+    /// <summary>"left" or "right" when the point lies on a side edge of the panel, else null.</summary>
+    private static string? OverlayEdge(FrameworkElement root, Windows.Foundation.Point point) =>
+        point.X <= 7 ? "left" : point.X >= root.ActualWidth - 7 ? "right" : null;
+
+    private static bool IsInsideButton(DependencyObject source, DependencyObject root)
+    {
+        for (var current = source; current is not null && !ReferenceEquals(current, root); current = VisualTreeHelper.GetParent(current))
+            if (current is Microsoft.UI.Xaml.Controls.Primitives.ButtonBase) return true;
+        return false;
+    }
+
+    /// <summary>Moves the panel, kept fully inside the meeting area.</summary>
+    internal void MoveMeetingOverlay(double x, double y)
+    {
+        var width = _overlayRoot?.ActualWidth ?? _overlayWidth;
+        var height = _overlayRoot?.ActualHeight ?? 200;
+        // Anchored top-right with margins 16 (top) and 18 (right).
+        var minX = -Math.Max(0, MeetingsHost.ActualWidth - width - 36);
+        var maxY = Math.Max(0, MeetingsHost.ActualHeight - height - 32);
+        _overlayOffset.X = Math.Clamp(x, minX, 0);
+        _overlayOffset.Y = Math.Clamp(y, -4, maxY);
+    }
+
+    internal void ResizeMeetingOverlay(double width)
+    {
+        var maximum = Math.Max(200, Math.Min(460, MeetingsHost.ActualWidth * 0.45));
+        var next = Math.Round(Math.Clamp(width, 190, maximum));
+        if (Math.Abs(next - _overlayWidth) < 1) return;
+        _overlayWidth = next;
+        RenderMeetingOverlay();
+    }
+
+    internal (double X, double Y, double Width) MeetingOverlayGeometry => (_overlayOffset.X, _overlayOffset.Y, _overlayWidth);
 
     // ── Shared building blocks ───────────────────────────────────────────
 
@@ -561,8 +829,33 @@ public sealed partial class NativeAssistantPage
         return panel;
     }
 
-    private static Border NameChip(string name, bool micOn, bool small = false, bool agent = false)
+    private static readonly Color SpeakingGreen = Color.FromArgb(255, 0x2F, 0xC4, 0x6B);
+
+    private static Border NameChip(string name, bool micOn, bool small = false, bool agent = false, bool speaking = false)
     {
+        if (speaking && micOn)
+        {
+            // Speaking: the name lights up green with a soft halo, readable on any camera picture.
+            var lit = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 5 };
+            lit.Children.Add(new FontIcon { Glyph = "\uE720", FontSize = small ? 10 : 12, Foreground = new SolidColorBrush(Colors.White) });
+            lit.Children.Add(new TextBlock { Text = name, FontSize = small ? 11 : 13, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Foreground = new SolidColorBrush(Colors.White) });
+            return new Border
+            {
+                Background = new SolidColorBrush(Color.FromArgb(90, SpeakingGreen.R, SpeakingGreen.G, SpeakingGreen.B)),
+                CornerRadius = new CornerRadius(9),
+                Padding = new Thickness(3),
+                Margin = new Thickness(5),
+                HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Bottom,
+                Child = new Border
+                {
+                    Background = new SolidColorBrush(SpeakingGreen),
+                    CornerRadius = new CornerRadius(6),
+                    Padding = new Thickness(7, 3, 8, 3),
+                    Child = lit,
+                },
+            };
+        }
         var content = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 5 };
         content.Children.Add(new FontIcon
         {
@@ -735,8 +1028,57 @@ public sealed partial class NativeAssistantPage
     private async Task StartMeetingFromUiAsync()
     {
         _meetingError = null;
+        if (Meetings.View.Role == "host" && !Meetings.View.IsLive) await PrepareMeetingAiAsync();
         await Meetings.StartMeetingAsync(_meetingStartMic, _meetingStartCamera);
         MarkMeetingsDirty(all: true);
+    }
+
+    /// <summary>
+    /// The meeting goes live only once Missum can work: first the selected AI model, then speech
+    /// recognition (Whisper). The lobby shows each step; a failure keeps the meeting closed.
+    /// </summary>
+    internal async Task PrepareMeetingAiAsync()
+    {
+        try
+        {
+            SetMeetingPreparing("AI-Modell wird geladen …");
+            await App.Current.GetService<MeetingAgentService>().PrepareModelAsync(_lifetime.Token);
+            SetMeetingPreparing("Spracherkennung (Whisper) wird geladen …");
+            await App.Current.GetService<MeetingTranscriptionHub>().PrepareAsync(_lifetime.Token);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException and not OperationCanceledException)
+        {
+            throw new InvalidOperationException("Das Meeting startet erst, wenn AI-Modell und Spracherkennung bereit sind. " + exception.Message, exception);
+        }
+        finally { SetMeetingPreparing(null); }
+    }
+
+    private string? _meetingPreparing;
+    private StackPanel? _meetingPrepareLine;
+
+    internal string? MeetingPreparingStatus => _meetingPreparing;
+
+    private void SetMeetingPreparing(string? status)
+    {
+        _meetingPreparing = status;
+        if (_meetingPrepareLine is { } line)
+        {
+            line.Visibility = status is null ? Visibility.Collapsed : Visibility.Visible;
+            if (line.Children.Count > 1 && line.Children[1] is TextBlock text) text.Text = status ?? "";
+        }
+    }
+
+    private StackPanel MeetingPrepareLine()
+    {
+        var line = new StackPanel
+        {
+            Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Center,
+            Visibility = _meetingPreparing is null ? Visibility.Collapsed : Visibility.Visible,
+        };
+        line.Children.Add(new ProgressRing { IsActive = true, Width = 16, Height = 16 });
+        line.Children.Add(new TextBlock { Text = _meetingPreparing ?? "", FontSize = 13, Foreground = ThemeBrush("MissumMutedTextBrush", 170), VerticalAlignment = VerticalAlignment.Center });
+        _meetingPrepareLine = line;
+        return line;
     }
 
     private async Task EndMeetingFromUiAsync()

@@ -55,6 +55,8 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- The Webdesign overlay is injected into pages from memory, never copied next to project files. -->
+    <EmbeddedResource Include="Assets\Webdesign\overlay.js" LogicalName="Missum.Webdesign.overlay.js" />
     <Content Include="Assets\Notices\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>

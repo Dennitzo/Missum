@@ -71,7 +71,7 @@ public sealed class CapabilityService
             ClientToolNames.CodingSearchHistory,
             ClientToolNames.CodingSearchKnowledge,
             ClientToolNames.CodingRenderHtml,
-            WorkspaceTools.ImageInput, WorkspaceTools.Open,
+            WorkspaceTools.ImageInput, WorkspaceTools.Open, WorkspaceTools.WebdesignServe, WorkspaceTools.WebdesignPreview,
             ClientToolNames.DocumentRead,
             ClientToolNames.DocumentCreate,
             ClientToolNames.DocumentsList,

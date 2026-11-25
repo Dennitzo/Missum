@@ -344,12 +344,12 @@ public sealed partial class MissumAiAssistantService
         {
             var match = AssistantCoordinator.CreateExtensionMatch(extension, "Fortsetzen");
             var coding = run?.Action == PromptTriggerAction.Coding
-                || (run?.Action is null && session.ChatMode == ChatMode.Coding);
+                || (run?.Action is null && session.ChatMode is ChatMode.Coding or ChatMode.Webdesign);
             return coding && match.Trigger.Action == PromptTriggerAction.Extension
                 ? match with { Trigger = match.Trigger with { Action = PromptTriggerAction.Coding } }
                 : match;
         }
-        var action = run?.Action ?? (session.ChatMode == ChatMode.Coding ? PromptTriggerAction.Coding
+        var action = run?.Action ?? (session.ChatMode is ChatMode.Coding or ChatMode.Webdesign ? PromptTriggerAction.Coding
             : assistant.ContentProfile == MessageContentProfile.Audiobook ? PromptTriggerAction.Audiobook : (PromptTriggerAction?)null);
         if (action is null) return null;
         if (action is PromptTriggerAction.Transcription or PromptTriggerAction.VoiceInput or PromptTriggerAction.LiveCaptions or PromptTriggerAction.LiveTranslation)

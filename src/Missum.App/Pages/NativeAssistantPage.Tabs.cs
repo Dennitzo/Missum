@@ -23,6 +23,7 @@ public sealed partial class NativeAssistantPage
             ["coding"] = [SessionViewKind.Chat],
             ["claudescience"] = [SessionViewKind.Chat, SessionViewKind.Research],
             ["claudemeetings"] = [SessionViewKind.Meeting, SessionViewKind.Notes, SessionViewKind.Whiteboard],
+            ["webdesign"] = [SessionViewKind.Chat, SessionViewKind.Website],
         };
 
     /// <summary>Call after assigning the active session and its complete coordinator snapshot.</summary>
@@ -99,6 +100,8 @@ public sealed partial class NativeAssistantPage
             : SessionViewLayouts["general"];
         if (!layout.Contains(SessionViewKind.Research) && _researchTabButton is not null)
             SessionTabsPanel.Children.Remove(_researchTabButton);
+        if (!layout.Contains(SessionViewKind.Website) && _websiteTabButton is not null)
+            SessionTabsPanel.Children.Remove(_websiteTabButton);
 
         if (!layout.Contains(SessionViewKind.Meeting))
             foreach (var button in _meetingTabButtons.Values) SessionTabsPanel.Children.Remove(button);
@@ -113,6 +116,15 @@ public sealed partial class NativeAssistantPage
                 position = RenderMeetingTab(view, position);
                 continue;
             }
+            if (view == SessionViewKind.Website)
+            {
+                if (_session != Guid.Empty)
+                {
+                    RenderWebsiteTab(position);
+                    position++;
+                }
+                continue;
+            }
             if (view == SessionViewKind.Research)
             {
                 if (_session != Guid.Empty)
@@ -125,7 +137,7 @@ public sealed partial class NativeAssistantPage
 
             var tab = _sessionTabs.FirstOrDefault(item => item.Id == _session);
             if (tab is null) continue;
-            var active = ActiveSubagent is null && tab.Id == _session && _activeReviewRunId is null && _activeResearchSessionId is null && _activeSourcesSession is null && _activeSubagentOverviewSession is null && _activeToolTab is null && _activeWorkingPlanSession is null && _activePlanModeTab is null;
+            var active = ActiveSubagent is null && tab.Id == _session && _activeReviewRunId is null && _activeResearchSessionId is null && _activeSourcesSession is null && _activeSubagentOverviewSession is null && _activeToolTab is null && _activeWorkingPlanSession is null && _activePlanModeTab is null && !_websiteViewActive;
             SetTabText(tab.Label, tab.Title);
             ApplyTabAppearance(tab.Container, tab.Select, active);
             SetTabEnabled(tab.Select, !_sessionTabNavigationBusy);
@@ -259,6 +271,7 @@ public sealed partial class NativeAssistantPage
         Meeting,
         Notes,
         Whiteboard,
+        Website,
     }
 
     private sealed class SessionTabState(Guid id, string title, string mode, Border container, TextBlock label, Button select)

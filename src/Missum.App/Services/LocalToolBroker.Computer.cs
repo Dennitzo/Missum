@@ -11,14 +11,17 @@ public sealed partial class LocalToolBroker
         computerApproval?.EndRun(runId);
     }
 
+    private async Task<bool> IsWebdesignSessionAsync(Guid sessionId, CancellationToken token) =>
+        (await chats.GetSessionAsync(sessionId, token).ConfigureAwait(false))?.ChatMode == Missum.Core.Models.ChatMode.Webdesign;
+
     private static void ValidateComputerArguments(string name, JsonElement arguments)
     {
         if (name == "computer.observe")
         {
             ValidateProperties(arguments, [], ["scope"]);
             if (arguments.TryGetProperty("scope", out _)
-                && ValidateString(arguments, "scope", 1, 16) is not ("desktop" or "window"))
-                throw new InvalidDataException("Beobachtungsbereich muss desktop oder window sein.");
+                && ValidateString(arguments, "scope", 1, 16) is not ("desktop" or "window" or "webview"))
+                throw new InvalidDataException("Beobachtungsbereich muss desktop, window oder webview sein.");
             return;
         }
         ValidateProperties(arguments, ["observationId", "kind"],
@@ -45,7 +48,8 @@ public sealed partial class LocalToolBroker
                 : await connection.CreateClientAsync(gatewayOverride, ensureProfileNativeRuntime: false, token).ConfigureAwait(false);
             if (!ComputerLocalEndpoint.IsLocal(client.BaseAddress))
                 throw new InvalidOperationException("Bildschirmbilder dürfen nur an ein lokales Missum-Gateway übertragen werden.");
-            var scope = proposal.Arguments.TryGetProperty("scope", out var requestedScope) ? requestedScope.GetString()! : "desktop";
+            var scope = proposal.Arguments.TryGetProperty("scope", out var requestedScope) ? requestedScope.GetString()!
+                : Webdesign.WebdesignPreviewRegistry.Current is not null && await IsWebdesignSessionAsync(sessionId, token).ConfigureAwait(false) ? "webview" : "desktop";
             var observation = await broker.ObserveAsync(sessionId, proposal.RunId, scope, token).ConfigureAwait(false);
             var transferId = await client.UploadComputerObservationAsync(proposal.RunId, proposal.ProposalId, observation.Content, token).ConfigureAwait(false);
             // Only an opaque, short-lived transfer reference is journalled. Never
@@ -55,6 +59,9 @@ public sealed partial class LocalToolBroker
                 observation.ObservationId, observationTransferId = transferId, observation.Width, observation.Height,
                 observation.DesktopX, observation.DesktopY, observation.DesktopWidth, observation.DesktopHeight,
                 observation.ForegroundTitle, observation.ForegroundProcessId, observation.Windows, observation.ImageRegion,
+                url = observation.Url, viewport = observation.Viewport, elements = observation.Elements,
+                instruction = observation.Url is null ? null
+                    : "Beobachtung des Tabs Webseite. elements nennt sichtbare Bedienelemente in Bildpixeln (x, y, width, height); ziele auf deren Mitte.",
             });
         }
         var action = JsonSerializer.Deserialize<ComputerAction>(proposal.Arguments, JsonOptions)

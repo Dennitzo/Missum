@@ -16,7 +16,7 @@ public sealed partial class NativeAssistantPage
     private async Task VerifyMeetingsSmokeAsync()
     {
         if (App.Current.MainWindow is { } window)
-            window.AppWindow.Resize(new Windows.Graphics.SizeInt32(1640, 1000));
+            window.AppWindow.Resize(SmokeWindowSize(1640, 1000)); // logical size, also on high-DPI displays
         await NavigateAsync("mode.switch", new { chatMode = MeetingsMode });
         var report = new Dictionary<string, object?>();
         // Without a project the mode explains what to do and starts nothing.
@@ -92,6 +92,59 @@ public sealed partial class NativeAssistantPage
         await Task.Delay(700);
         report["notes"] = await CaptureMeetingsAsync("meetings-3-notes.png");
         var overlayOnNotes = MeetingsOverlayHost.Visibility == Visibility.Visible;
+        var rework = new Dictionary<string, object?>();
+        rework["notesToolbar"] = _notesToolbar?.Parent is not null;
+        var notesDocument = Meetings.Room!.Read(s => s.Documents[0].Id);
+        rework["noTitleBlock"] = Meetings.Room!.Read(s => s.Documents[0].Blocks.FirstOrDefault()?.Kind != "h1");
+
+        // At most one empty field: three empty blocks shrink to one once nobody is in them.
+        for (var i = 0; i < 3; i++)
+            Meetings.Send(new MeetingOp { Type = MeetingOpTypes.BlockUpsert, DocumentId = notesDocument, Block = new MeetingNoteBlock { Kind = "p", Text = "" } });
+        _notesFocusedBlockId = null; _notesPendingFocus = null;
+        MarkMeetingsDirty(notes: true);
+        await WaitForAsync(() =>
+        {
+            RenderMeetingsIfDirty();
+            MarkMeetingsDirty(notes: true);
+            return Meetings.Room!.Read(s => s.Documents[0].Blocks.Count(b => string.IsNullOrWhiteSpace(b.Text) && !b.AiOwned)) <= 1;
+        }, "Leere Felder wurden nicht aufgeräumt");
+        rework["emptyFields"] = Meetings.Room!.Read(s => s.Documents[0].Blocks.Count(b => string.IsNullOrWhiteSpace(b.Text) && !b.AiOwned));
+
+        // Authors after the text: a block written by me shows my nickname.
+        var mine = new MeetingNoteBlock { Kind = "p", Text = "Catering-Angebote bis Montag vergleichen" };
+        Meetings.Send(new MeetingOp { Type = MeetingOpTypes.BlockUpsert, DocumentId = notesDocument, Block = mine });
+        await WaitForAsync(() => Meetings.Room!.Read(s => s.Documents[0].Blocks.Any(b => b.Id == mine.Id && b.Authors.Contains(Meetings.LocalParticipantId))), "Autor fehlt");
+        MarkMeetingsDirty(notes: true);
+        await Task.Delay(500);
+        rework["authorBar"] = _noteRows.TryGetValue(mine.Id, out var mineRow) && mineRow.Accent.Background is not null && mineRow.Root.ColumnDefinitions.Count == 3;
+        rework["authorTooltip"] = mineRow?.AuthorTooltip;
+        rework["authorTooltipHasTime"] = mineRow?.AuthorTooltip?.Contains(" · ", StringComparison.Ordinal) == true;
+
+        // One title everywhere: Missum renames, the sidebar session follows.
+        var hostService = App.Current.GetService<MeetingHostService>();
+        var meetingKey = Meetings.Room!.Read(s => s.Id);
+        hostService.ApplyLocal(meetingKey, new MeetingOp { Type = MeetingOpTypes.RoomTitle, ActorId = MeetingRoom.AgentId, Text = "Kundenevent 2027" });
+        MarkMeetingsDirty(notes: true);
+        await WaitForAsync(() =>
+        {
+            RenderMeetingsIfDirty();
+            return Items(_snapshot, "sessions").Any(item => S(item, "id") == _session.ToString("D") && S(item, "title") == "Kundenevent 2027");
+        }, "Sitzungsname folgte dem Titel nicht");
+        await WaitForAsync(() => { MarkMeetingsDirty(notes: true); RenderMeetingsIfDirty(); return _notesTitle?.Text == "Kundenevent 2027"; }, "Notes-Titel folgte nicht");
+        rework["titleSynced"] = _notesTitle?.Text == "Kundenevent 2027";
+        report["notesRework"] = await CaptureMeetingsAsync("meetings-3b-notes-rework.png");
+
+        // The camera panel moves and scales.
+        MoveMeetingOverlay(-260, 140);
+        ResizeMeetingOverlay(330);
+        await Task.Delay(500);
+        rework["overlayGeometry"] = MeetingOverlayGeometry.ToString();
+        rework["overlayMoved"] = MeetingOverlayGeometry.X < -200 && MeetingOverlayGeometry.Y > 100;
+        rework["overlayResized"] = Math.Abs(MeetingOverlayGeometry.Width - 330) < 1;
+        report["overlayMoved"] = await CaptureMeetingsAsync("meetings-3c-overlay-moved.png");
+        MoveMeetingOverlay(0, 0);
+        ResizeMeetingOverlay(236);
+        report["rework"] = rework;
 
         SelectMeetingTab(MeetingTab.Whiteboard);
         await Task.Delay(900);
@@ -105,6 +158,7 @@ public sealed partial class NativeAssistantPage
         _boardScroll.ChangeView(0, 0, null, true);
         await Task.Delay(300);
         var overlayOnBoard = MeetingsOverlayHost.Visibility == Visibility.Visible;
+        rework["boardToolbar"] = _boardToolbar?.Parent is not null;
         var elementsRendered = _canvasViews.Count;
         var arrowsRendered = _boardArrows?.Children.Count ?? 0;
 
@@ -152,7 +206,7 @@ public sealed partial class NativeAssistantPage
         // Narrow window: the chat sidebar yields and the layout must stay usable.
         if (App.Current.MainWindow is { } narrow)
         {
-            narrow.AppWindow.Resize(new Windows.Graphics.SizeInt32(1000, 760));
+            narrow.AppWindow.Resize(SmokeWindowSize(1000, 760));
             SelectMeetingTab(MeetingTab.Whiteboard);
             await Task.Delay(900);
             report["whiteboardNarrow"] = await CaptureMeetingsAsync("meetings-8-whiteboard-narrow.png");
@@ -194,11 +248,17 @@ public sealed partial class NativeAssistantPage
             folder,
             hostRunning = App.Current.GetService<MeetingHostService>().IsRunning,
         };
+        // The host renames in the sidebar: the room follows and Missum keeps the host's name.
+        await CommandAsync("session.rename", new { sessionId = _session, title = "Kundentag Hamburg" });
+        await WaitForAsync(() => { SyncMeetingTitle(); return Meetings.Room!.Read(s => s.Title == "Kundentag Hamburg" && s.TitleLocked); }, "Manuelles Umbenennen kam im Raum nicht an");
+        rework["hostRenameLocks"] = true;
         await File.WriteAllTextAsync(Path.Combine(App.Current.DataDirectory, "native-meetings-validation.json"),
             JsonSerializer.Serialize(report, MeetingJson.Indented));
         if (tabs != 3 || !chatRestored || !meetingBack || !chatVisible || !lobbyNameField || !mentionOpened || !headerTabs || overlayOnStage || !overlayOnNotes || !overlayOnBoard || !filesSaved
             || !blockedWithoutProject || elementsRendered < 5 || arrowsRendered < 4 || !panned || !pickerVisible || !pickerOpened)
             throw new InvalidOperationException("Claude Meetings layout check failed: " + JsonSerializer.Serialize(report["checks"]));
+        if (rework.Any(pair => pair.Value is false))
+            throw new InvalidOperationException("Claude Meetings rework check failed: " + JsonSerializer.Serialize(rework));
     }
 
     /// <summary>Places one of each canvas element type next to the columns.</summary>

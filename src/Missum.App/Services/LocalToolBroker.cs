@@ -110,6 +110,14 @@ public sealed partial class LocalToolBroker(
                 return Result(proposal, "completed", Bounded(extensionResult));
             }
 
+            if (WorkspaceTools.IsWebdesign(proposal.Name))
+            {
+                var serve = Webdesign.WebdesignServeService.Instance
+                    ?? throw new InvalidOperationException("Der Webdesign-Server ist in dieser Missum-Instanz nicht verfügbar.");
+                var webdesignResult = await new Webdesign.WebdesignToolService(connection, serve).ExecuteAsync(
+                    proposal, codingWorkspacePath, gatewayOverride, cancellationToken).ConfigureAwait(false);
+                return Result(proposal, "completed", webdesignResult);
+            }
             if (WorkspaceTools.IsLocal(proposal.Name))
             {
                 var workspaceResult = await new WorkspaceToolService(connection).ExecuteAsync(
@@ -406,7 +414,8 @@ public sealed partial class LocalToolBroker(
             "coding.command" or WorkspaceTools.Open => ToolRiskClass.Process,
             ClientToolNames.MathSymbolic or ClientToolNames.MathNumeric or ClientToolNames.MathSmt
                 or ClientToolNames.MathFormalProof => ToolRiskClass.Process,
-            WorkspaceTools.ImageInput => ToolRiskClass.ReadOnly,
+            WorkspaceTools.ImageInput or WorkspaceTools.WebdesignPreview => ToolRiskClass.ReadOnly,
+            WorkspaceTools.WebdesignServe => ToolRiskClass.Process,
             "computer.observe" => ToolRiskClass.ReadOnly,
             "computer.act" => ToolRiskClass.LocalMutation,
             ClientToolNames.DocumentRead or ClientToolNames.DocumentsList

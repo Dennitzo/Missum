@@ -120,6 +120,7 @@ internal sealed record AssistantClientView
     public Guid? CodingSession { get; init; }
     public Guid? ScienceSession { get; init; }
     public Guid? MeetingsSession { get; init; }
+    public Guid? WebdesignSession { get; init; }
     public Guid? ActiveSession { get; init; }
     public Guid? ActiveProject { get; init; }
     public string? Model { get; init; }
@@ -131,6 +132,7 @@ internal sealed record AssistantClientView
     {
         Mode = value.SelectedChatMode, GeneralSession = value.ActiveGeneralSessionId,
         CodingSession = value.ActiveCodingSessionId, ScienceSession = value.ActiveClaudeScienceSessionId, MeetingsSession = value.ActiveClaudeMeetingsSessionId,
+        WebdesignSession = value.ActiveWebdesignSessionId,
         ActiveSession = value.ActiveSessionId, ActiveProject = value.ActiveProjectId,
         Model = value.SelectedModel, SessionPaneOpen = value.IsAssistantSessionPaneOpen,
         Reasoning = new(value.ReasoningEffortsByModel, StringComparer.OrdinalIgnoreCase),
@@ -139,7 +141,7 @@ internal sealed record AssistantClientView
     internal AppSettings Apply(AppSettings global) => global with
     {
         SelectedChatMode = Mode, ActiveGeneralSessionId = GeneralSession, ActiveCodingSessionId = CodingSession,
-        ActiveClaudeScienceSessionId = ScienceSession, ActiveClaudeMeetingsSessionId = MeetingsSession, ActiveSessionId = ActiveSession, ActiveProjectId = ActiveProject,
+        ActiveClaudeScienceSessionId = ScienceSession, ActiveClaudeMeetingsSessionId = MeetingsSession, ActiveWebdesignSessionId = WebdesignSession, ActiveSessionId = ActiveSession, ActiveProjectId = ActiveProject,
         SelectedModel = Model ?? global.SelectedModel, SelectedCodingModel = Model ?? global.SelectedModel, IsAssistantSessionPaneOpen = SessionPaneOpen,
         // Reasoning is a shared PC preference. Legacy per-tab values remain
         // readable in the cache but may not shadow newer saved server choices.

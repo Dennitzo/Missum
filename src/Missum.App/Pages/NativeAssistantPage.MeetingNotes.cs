@@ -15,8 +15,9 @@ public sealed partial class NativeAssistantPage
 {
     private Grid? _notesRoot;
     private StackPanel? _notesBlocks;
-    private TextBox? _notesTitle;
-    private TextBlock? _notesSubtitle;
+    private TextBlock? _notesTitle;
+    private HyperlinkButton? _notesAddBlock;
+    private FloatingToolbar? _notesToolbar;
     private ScrollViewer? _notesScroll;
     private string? _notesDocumentId;
     private string? _notesFocusedBlockId;
@@ -31,31 +32,28 @@ public sealed partial class NativeAssistantPage
         // Meetings use exactly one notes document, so there is no document sidebar.
         _notesRoot = new Grid();
 
-        var page = new StackPanel { MaxWidth = 780, Spacing = 2, Padding = new Thickness(36, 28, 36, 80), HorizontalAlignment = HorizontalAlignment.Stretch };
-        _notesTitle = PlainTextBox(30, "Titel");
-        _notesTitle.FontWeight = Microsoft.UI.Text.FontWeights.SemiBold;
-        _notesTitle.Margin = new Thickness(-6, 0, 0, 0);
-        AutomationProperties.SetName(_notesTitle, "Dokumenttitel");
-        _notesTitle.LostFocus += (_, _) => CommitNotesTitle();
-        _notesTitle.KeyDown += (_, args) => { if (args.Key == VirtualKey.Enter) { args.Handled = true; CommitNotesTitle(); FocusBlock(FirstBlockId(), atEnd: false); } };
+        var page = new StackPanel { MaxWidth = 780, Spacing = 2, Padding = new Thickness(36, 28, 36, 120), HorizontalAlignment = HorizontalAlignment.Stretch };
+        // The title is the session name: Missum keeps it current, only the host renames it in the sidebar.
+        _notesTitle = new TextBlock
+        {
+            FontSize = 30, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 14),
+        };
+        AutomationProperties.SetName(_notesTitle, "Titel der Sitzung");
+        ToolTipService.SetToolTip(_notesTitle, "Name der Sitzung · Missum hält ihn aktuell, der Host benennt ihn in der Seitenleiste um");
         page.Children.Add(_notesTitle);
-        var meta = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 14, Margin = new Thickness(0, 0, 0, 14) };
-        _notesSubtitle = new TextBlock { FontSize = 13, Foreground = ThemeBrush("MissumMutedTextBrush", 160), VerticalAlignment = VerticalAlignment.Center };
-        meta.Children.Add(_notesSubtitle);
-        meta.Children.Add(LinkButton("Von Missum zusammenfassen lassen", () => Meetings.RequestAgent("summarize")));
-        page.Children.Add(meta);
-        page.Children.Add(NotesToolbar());
-        _notesBlocks = new StackPanel { Spacing = 0, Margin = new Thickness(0, 10, 0, 0) };
+        _notesBlocks = new StackPanel { Spacing = 0 };
         page.Children.Add(_notesBlocks);
-        var addBlock = new HyperlinkButton
+        _notesAddBlock = new HyperlinkButton
         {
             Content = new TextBlock { Text = "+ Absatz hinzufügen", FontSize = 13, Foreground = ThemeBrush("MissumMutedTextBrush", 150) },
             Margin = new Thickness(-6, 10, 0, 0),
         };
-        addBlock.Click += (_, _) => InsertBlockAfter(LastBlockId(), "p");
-        page.Children.Add(addBlock);
+        _notesAddBlock.Click += (_, _) => InsertBlockAfter(LastBlockId(), "p");
+        page.Children.Add(_notesAddBlock);
         _notesScroll = new ScrollViewer { Content = page, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
         _notesRoot.Children.Add(_notesScroll);
+        _notesToolbar = new FloatingToolbar("Werkzeuge der Notizen", NotesToolbar(), "\uE70F", "Notizen");
+        _notesRoot.Children.Add(_notesToolbar);
         return _notesRoot;
     }
 
@@ -66,32 +64,24 @@ public sealed partial class NativeAssistantPage
         return link;
     }
 
+    /// <summary>Block kinds and the compact "Zusammenfassen" in the floating toolbar.</summary>
     private StackPanel NotesToolbar()
     {
         var bar = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
         foreach (var (kind, label, glyph) in new[]
                  {
-                     ("p", "Text", ""), ("h2", "Überschrift", ""), ("bullet", "Liste", ""), ("todo", "Aufgabe", ""),
+                     ("p", "Text", "\uE8D2"), ("h2", "Überschrift", "\uE8E9"), ("bullet", "Liste", "\uE8FD"), ("todo", "Aufgabe", "\uE73A"),
                  })
         {
-            var content = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
-            content.Children.Add(new FontIcon { Glyph = glyph, FontSize = 12, Foreground = NativeIconPalette.BrushFor("documents") });
-            content.Children.Add(new TextBlock { Text = label, FontSize = 12 });
-            var button = new Button
-            {
-                Content = content,
-                Padding = new Thickness(9, 4, 10, 5),
-                CornerRadius = new CornerRadius(8),
-                Background = ThemeBrush("MissumLayerStrongBrush", 40),
-                BorderThickness = new Thickness(0),
-                IsTabStop = false,
-                AllowFocusOnInteraction = false,
-            };
-            button.Resources["ButtonBackgroundPointerOver"] = ThemeBrush("MissumHoverBrush", 60);
-            ToolTipService.SetToolTip(button, $"Aktuellen Block in „{label}“ umwandeln");
-            button.Click += (_, _) => ChangeFocusedBlockKind(kind);
+            var button = FloatingToolbar.Tool(glyph, label, $"Aktuellen Block in „{label}“ umwandeln", () => RunUiCallback("Notes.Kind", () => ChangeFocusedBlockKind(kind)));
+            button.IsTabStop = false;
+            button.AllowFocusOnInteraction = false;
             bar.Children.Add(button);
         }
+        bar.Children.Add(FloatingToolbar.Separator());
+        bar.Children.Add(FloatingToolbar.Tool("", "Zusammenfassen", "Missum fasst die Notizen zusammen",
+            () => RunUiCallback("Notes.Summarize", () => Meetings.RequestAgent("summarize")),
+            new MeetingAgentVisual { Height = 16, Width = 16 }));
         return bar;
     }
 
@@ -115,11 +105,9 @@ public sealed partial class NativeAssistantPage
         _notesSyncing = true;
         try
         {
-            if (_notesTitle!.FocusState == FocusState.Unfocused && _notesTitle.Text != document.Title) _notesTitle.Text = document.Title;
-            _notesTitle.IsReadOnly = !canEdit;
-            var aiBlocks = document.Blocks.Count(b => b.AiOwned && !string.IsNullOrWhiteSpace(b.Text) && b.Section?.EndsWith(".h", StringComparison.Ordinal) != true);
-            _notesSubtitle!.Text = (canEdit ? "Alle Teilnehmer können bearbeiten" : "Nur lesen – nicht verbunden")
-                + (aiBlocks > 0 ? $" · Missum hat {aiBlocks} Einträge geschrieben" : " · Missum schreibt live mit");
+            var title = MeetingSessionTitle(snapshot);
+            if (_notesTitle!.Text != title) _notesTitle.Text = title;
+            if (canEdit) PruneEmptyBlocks(document, presence);
 
             var seen = new HashSet<string>(StringComparer.Ordinal);
             for (var index = 0; index < document.Blocks.Count; index++)
@@ -147,6 +135,9 @@ public sealed partial class NativeAssistantPage
             }
         }
         finally { _notesSyncing = false; }
+        // At most one empty field is offered: the add link appears only when none exists.
+        if (_notesAddBlock is not null)
+            _notesAddBlock.Visibility = canEdit && !document.Blocks.Any(IsEmptyBlock) ? Visibility.Visible : Visibility.Collapsed;
 
         if (_notesPendingFocus is { } focus && _noteRows.ContainsKey(focus))
         {
@@ -155,10 +146,22 @@ public sealed partial class NativeAssistantPage
         }
     }
 
-    private void CommitNotesTitle()
+    private static bool IsEmptyBlock(MeetingNoteBlock block) => string.IsNullOrWhiteSpace(block.Text) && !block.AiOwned;
+
+    /// <summary>
+    /// Empty fields nobody is in disappear, so the notes never fill up with blank lines. One empty
+    /// field stays when the document would otherwise be empty, or while someone is typing in it.
+    /// </summary>
+    private void PruneEmptyBlocks(MeetingDocument document, IReadOnlyDictionary<Guid, (string? DocumentId, string? BlockId)> presence)
     {
-        if (_notesSyncing || _notesTitle is null || _notesDocumentId is null || !Meetings.CanEdit) return;
-        Meetings.Send(new MeetingOp { Type = MeetingOpTypes.DocumentRename, DocumentId = _notesDocumentId, Text = _notesTitle.Text });
+        var occupied = presence.Values.Where(value => value.DocumentId == document.Id).Select(value => value.BlockId).ToHashSet(StringComparer.Ordinal);
+        if (_notesFocusedBlockId is { } focused) occupied.Add(focused);
+        if (_notesPendingFocus is { } pending) occupied.Add(pending);
+        var empties = document.Blocks.Where(IsEmptyBlock).ToList();
+        var keep = empties.FirstOrDefault(block => occupied.Contains(block.Id))
+            ?? (document.Blocks.Count == empties.Count ? empties.LastOrDefault() : null);
+        foreach (var block in empties.Where(block => !ReferenceEquals(block, keep)))
+            Meetings.Send(new MeetingOp { Type = MeetingOpTypes.BlockDelete, DocumentId = document.Id, BlockId = block.Id });
     }
 
     private NoteRow CreateNoteRow(MeetingNoteBlock block)
@@ -171,10 +174,10 @@ public sealed partial class NativeAssistantPage
             _ => (15.0, Microsoft.UI.Text.FontWeights.Normal, 0.0),
         };
         var root = new Grid { Margin = new Thickness(0, top, 0, 0), ColumnSpacing = 2 };
-        root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(3) });
+        root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(4) });
         root.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        root.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        // The author bar: one segment per author in their colour; hovering the block names them.
         var accent = new Border { CornerRadius = new CornerRadius(2), Margin = new Thickness(0, 4, 0, 4) };
         root.Children.Add(accent);
         FrameworkElement? marker = null;
@@ -193,11 +196,7 @@ public sealed partial class NativeAssistantPage
         box.AcceptsReturn = true;
         Grid.SetColumn(box, 2);
         root.Children.Add(box);
-        var tag = new Border { CornerRadius = new CornerRadius(5), Padding = new Thickness(6, 1, 6, 2), VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(6, 6, 0, 0), Visibility = Visibility.Collapsed };
-        Grid.SetColumn(tag, 3);
-        root.Children.Add(tag);
-
-        var row = new NoteRow(block.Id, block.Kind, root, box, accent, tag, check);
+        var row = new NoteRow(block.Id, block.Kind, root, box, accent, check);
         var timer = DispatcherQueue.CreateTimer();
         timer.Interval = TimeSpan.FromMilliseconds(500);
         timer.IsRepeating = false;
@@ -213,7 +212,9 @@ public sealed partial class NativeAssistantPage
         box.LostFocus += (_, _) =>
         {
             CommitNoteRow(row, explicitCommit: true);
+            if (_notesFocusedBlockId == row.Id) _notesFocusedBlockId = null;
             Meetings.Send(new MeetingOp { Type = MeetingOpTypes.Presence });
+            MarkMeetingsDirty(notes: true);
         };
         box.PreviewKeyDown += (_, args) => OnNoteKeyDown(row, args);
         if (check is not null)
@@ -230,25 +231,71 @@ public sealed partial class NativeAssistantPage
         row.Done = block.Done;
         if (row.Check is not null) { row.Check.IsChecked = block.Done; row.Check.IsEnabled = canEdit; }
         row.Box.Foreground = block.Done ? ThemeBrush("MissumMutedTextBrush", 150) : ThemeBrush("MissumTextBrush", 240);
-        var aiFresh = block.AiOwned && !block.HumanEdited && block.Section?.EndsWith(".h", StringComparison.Ordinal) != true && block.Section != MeetingAgentMerge.RootSection;
-        row.Accent.Background = aiFresh ? new SolidColorBrush(Windows.UI.Color.FromArgb(160, MeetingAgentVisual.AccentColor.R, MeetingAgentVisual.AccentColor.G, MeetingAgentVisual.AccentColor.B)) : null;
-        ToolTipService.SetToolTip(row.Accent, aiFresh ? "Von Missum geschrieben" : null);
-
+        // Someone typing right now shows in the bar before the text arrives.
         var editor = presence.FirstOrDefault(p => p.Key != Meetings.LocalParticipantId && p.Value.BlockId == block.Id && p.Value.DocumentId == _notesDocumentId).Key;
-        var person = editor == Guid.Empty ? null : snapshot.Participants.FirstOrDefault(p => p.Id == editor);
-        if (person is not null)
+        row.AiOwned = block.AiOwned;
+        RenderBlockAuthors(row, block, snapshot, editor);
+    }
+
+    /// <summary>
+    /// The coloured bar in front of a block replaces an author column: one segment per author in
+    /// the participant's colour (Missum in its own), and hovering the block shows nickname and time.
+    /// </summary>
+    private static void RenderBlockAuthors(NoteRow row, MeetingNoteBlock block, MeetingRoomState snapshot, Guid liveEditor)
+    {
+        var authors = NoteBlockAuthors(block, snapshot);
+        var live = liveEditor == Guid.Empty || authors.Any(a => a.Author.Id == liveEditor) ? null : snapshot.Participants.FirstOrDefault(p => p.Id == liveEditor);
+        var signature = string.Join(",", authors.Select(a => a.Author.Id + ":" + a.Author.Name + ":" + a.Author.ColorIndex + ":" + a.At?.ToUnixTimeSeconds())) + "|" + live?.Id;
+        if (row.AuthorSignature == signature) return;
+        row.AuthorSignature = signature;
+        var colours = authors.Select(a => AuthorBrush(a.Author)).ToList();
+        if (live is not null) colours.Add(ParticipantBrush(live.ColorIndex));
+        if (colours.Count == 0) { row.Accent.Child = null; row.Accent.Background = null; }
+        else if (colours.Count == 1) { row.Accent.Child = null; row.Accent.Background = colours[0]; }
+        else
         {
-            row.Tag.Background = ParticipantBrush(person.ColorIndex);
-            row.Tag.Child = new TextBlock { Text = person.Name, FontSize = 11, Foreground = new SolidColorBrush(Colors.White) };
-            row.Tag.Visibility = Visibility.Visible;
+            row.Accent.Background = null;
+            var bar = new Grid { RowSpacing = 1 };
+            for (var i = 0; i < colours.Count; i++)
+            {
+                bar.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+                var segment = new Border { Background = colours[i], CornerRadius = new CornerRadius(2) };
+                Grid.SetRow(segment, i);
+                bar.Children.Add(segment);
+            }
+            row.Accent.Child = bar;
         }
-        else if (block.Section == MeetingAgentMerge.RootSection)
+        var lines = authors.Select(a => a.At is { } at ? a.Author.Name + " · " + at.ToLocalTime().ToString("HH:mm", System.Globalization.CultureInfo.CurrentCulture) : a.Author.Name).ToList();
+        if (live is not null) lines.Add(live.Name + " · schreibt gerade");
+        var tip = lines.Count == 0 ? null : string.Join("\n", lines);
+        row.AuthorTooltip = tip;
+        ToolTipService.SetToolTip(row.Root, tip);
+        ToolTipService.SetToolTip(row.Box, tip);
+    }
+
+    private static SolidColorBrush AuthorBrush(MeetingParticipant author) =>
+        author.IsAgent ? MeetingAgentVisual.AccentBrush : ParticipantBrush(author.ColorIndex);
+
+    /// <summary>Authors of a block in writing order, each with the time they last wrote into it.</summary>
+    internal static List<(MeetingParticipant Author, DateTimeOffset? At)> NoteBlockAuthors(MeetingNoteBlock block, MeetingRoomState snapshot)
+    {
+        var ids = new List<Guid>(block.Authors);
+        if (block.AiOwned && !ids.Contains(MeetingRoom.AgentId)) ids.Insert(0, MeetingRoom.AgentId);
+        var result = new List<(MeetingParticipant, DateTimeOffset?)>();
+        foreach (var id in ids.Distinct())
         {
-            row.Tag.Background = MeetingAgentVisual.AccentBrush;
-            row.Tag.Child = new TextBlock { Text = "Missum", FontSize = 11, Foreground = new SolidColorBrush(Colors.White) };
-            row.Tag.Visibility = Visibility.Visible;
+            var participant = snapshot.Participants.FirstOrDefault(p => p.Id == id);
+            if (participant is null && id == MeetingRoom.AgentId)
+                participant = new MeetingParticipant { Id = id, Name = MeetingRoom.AgentName, Role = "agent", ColorIndex = 7 };
+            if (participant is null) continue;
+            DateTimeOffset? at = block.AuthorTimes.TryGetValue(id, out var stamp) ? stamp
+                : ids.Count == 1 || id == MeetingRoom.AgentId ? block.UpdatedAt : null;
+            result.Add((participant, at));
         }
-        else row.Tag.Visibility = Visibility.Collapsed;
+        // Older blocks only know the last editor's name.
+        if (result.Count == 0 && !string.IsNullOrWhiteSpace(block.EditedBy) && !string.IsNullOrWhiteSpace(block.Text))
+            result.Add((snapshot.Participants.FirstOrDefault(p => p.Name == block.EditedBy) ?? new MeetingParticipant { Name = block.EditedBy!, ColorIndex = 0 }, block.UpdatedAt));
+        return result;
     }
 
     private void CommitNoteRow(NoteRow row, bool explicitCommit = false)
@@ -291,6 +338,7 @@ public sealed partial class NativeAssistantPage
         if (args.Key == VirtualKey.Enter && !shift)
         {
             args.Handled = true;
+            if (string.IsNullOrWhiteSpace(row.Box.Text)) return;
             CommitNoteRow(row, explicitCommit: true);
             InsertBlockAfter(row.Id, row.Kind is "bullet" or "todo" ? row.Kind : "p");
         }
@@ -317,6 +365,8 @@ public sealed partial class NativeAssistantPage
     private void InsertBlockAfter(string? afterId, string kind)
     {
         if (_notesDocumentId is null || !Meetings.CanEdit) return;
+        var existing = _noteRows.Values.FirstOrDefault(row => row.Id != afterId && string.IsNullOrWhiteSpace(row.Box.Text) && !row.AiOwned);
+        if (existing is not null) { FocusBlock(existing.Id, atEnd: false); return; }
         var block = new MeetingNoteBlock { Kind = kind, Text = "" };
         _notesPendingFocus = block.Id;
         _notesPendingFocusAtEnd = false;
@@ -361,19 +411,21 @@ public sealed partial class NativeAssistantPage
     private string? PreviousBlockId(string id) => BlockIdAt((_, index) => index - 1, id);
     private string? NextBlockId(string id) => BlockIdAt((ids, index) => index < 0 ? -1 : index + 1, id);
 
-    private sealed class NoteRow(string id, string kind, Grid root, TextBox box, Border accent, Border tag, CheckBox? check)
+    private sealed class NoteRow(string id, string kind, Grid root, TextBox box, Border accent, CheckBox? check)
     {
         public string Id { get; } = id;
         public string Kind { get; } = kind;
         public Grid Root { get; } = root;
         public TextBox Box { get; } = box;
         public Border Accent { get; } = accent;
-        public Border Tag { get; } = tag;
+        public string? AuthorTooltip { get; set; }
         public CheckBox? Check { get; } = check;
         public bool Dirty { get; set; }
         public bool Done { get; set; }
         public Microsoft.UI.Dispatching.DispatcherQueueTimer? Debounce { get; set; }
         public MentionAutocomplete? Mention { get; set; }
         public string? AskedQuestion { get; set; }
+        public string? AuthorSignature { get; set; }
+        public bool AiOwned { get; set; }
     }
 }

@@ -13,6 +13,16 @@ public sealed partial class NativeAssistantPage
     // Returning to A must not reuse a footer still parented to A's discarded bubble.
     private async Task<int> VerifyMessageNavigationSmokeAsync()
     {
+        if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_WEBDESIGN") == "1")
+        {
+            await VerifyWebdesignSmokeAsync();
+            return 0;
+        }
+        if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_MEETINGS") is "live-host" or "live-guest")
+        {
+            await VerifyMeetingsLiveAsync(Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_MEETINGS") == "live-host");
+            return 0;
+        }
         if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_MEETINGS") == "1")
         {
             await VerifyMeetingsSmokeAsync();

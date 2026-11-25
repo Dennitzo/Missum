@@ -27,6 +27,13 @@ Claude Meetings ist der vierte Modus neben ChatGPT, Codex und Missum Science. Ei
 
 - Ein Meeting gehört immer zu einem Projekt. Ohne Projektordner zeigt jeder Tab „Projekt erforderlich“; Starten und Beitreten sind gesperrt, und es werden keine Dateien geschrieben.
 - Der Host wählt unten im Meeting-Chat Modell, Denkaufwand und Kontextlimit, wie im Codex-Composer (dieselbe Auswahl, Rolle „coding“). Der Ring daneben zeigt den Kontext des letzten Missum-Laufs. Gäste nutzen das Modell des Hosts.
+- „Meeting starten“ geht erst live, wenn Missum arbeiten kann: zuerst lädt das gewählte Modell (`/v1/models/prepare`),
+  dann die Spracherkennung (Whisper, über die gemeinsame Live-Caption-Session). Die Lobby zeigt den jeweiligen Schritt;
+  schlägt einer fehl, bleibt das Meeting geschlossen und eine Meldung erklärt den Grund.
+- Missum benennt das Meeting, solange es nur einen Platzhalter trägt („Neue Sitzung“, „Meeting“). Ein Platzhalter sperrt
+  den Titel nie; erst ein echter Name vom Host in der Seitenleiste tut das.
+- Eine Frage an Missum bekommt immer eine Antwort: Liefert das Modell keine `chatReply`, fragt Missum einmal gezielt nach;
+  bleibt sie leer, sagt Missum das im Chat, statt eine Statusmeldung an ihre Stelle zu setzen.
 - Bilder auf dem Whiteboard liegen als `assets/<id>.jpg` im Meeting-Ordner.
 
 ## Architektur
@@ -69,12 +76,25 @@ Missum (Host)                                     Missum (Gast)
 
 - **Video:** `MediaCapture` mit `MediaFrameReader`; JPEG mit etwa 640 px Breite und bis zu 12 Bildern pro Sekunde. Ein langsamer Empfänger verliert Bilder, bekommt aber keine Verzögerung.
 - **Audio:** PCM16, 16 kHz, mono, 100-ms-Rahmen. Der Host leitet es weiter, jeder Client mischt die Stimmen der anderen und spielt sie ab. Jeder Teilnehmer lässt sich lokal stummschalten. Kopfhörer vermeiden Echo; eine Echounterdrückung gibt es nicht.
-- **Transkription:** Sprachpausen schneiden das Audio in Äußerungen von höchstens 6 s. Jede Äußerung geht an die Live-Caption-Session des jeweiligen Sprechers.
+- **Transkription:** Sprachpausen schneiden das Audio in Äußerungen von höchstens 6 s. Der Sprachdienst erlaubt nur eine
+  Live-Caption-Session gleichzeitig; deshalb teilen sich alle Sprecher eine Session, die Äußerungen werden nacheinander
+  erkannt. Ist die Session abgelaufen, öffnet der Host einmalig eine neue, ohne die Äußerung zu verlieren.
+- **Wer spricht:** Ein deutlicher Mikrofonausschlag (Pegel ≥ 0,18) oder erkannte Sprache lässt den Namen in der Kamera
+  grün leuchten (grüner Rahmen, grüner Namens-Chip mit Schein). Im Meeting-Tab bleiben die Kacheln fest. Das kompakte
+  Overlay in Notes und Whiteboard zeigt die gerade Sprechenden (höchstens zwei, andere vor dir) und wechselt mit dem
+  Gespräch; fünf Sekunden nach dem letzten Wort fällt es auf die eigene Kamera bzw. die Teilnehmerliste zurück.
+- **Virtuelle Geräte:** `MISSUM_MEETING_VIRTUAL_MEDIA=1` ersetzt Kamera und Mikrofon durch ein bewegtes Testbild und
+  die WAV-Datei aus `MISSUM_MEETING_VIRTUAL_MIC` (einmal in Echtzeit, danach Stille). Alles ab der Aufnahme läuft
+  unverändert – für PCs ohne Geräte und für Live-Tests.
 
 ## Tests
 
 - **Unit- und Integrationstests:** `MissumMeetingsModeTests`, `MeetingCoreTests`, `MeetingAgentMergeTests`, `MeetingStorageTests` und `MeetingHostServiceTests`. Letzterer betreibt einen echten Kestrel-Host mit zwei WebSocket-Clients.
 - **UI-Smoke:** `MISSUM_SMOKE_UI_MEETINGS=1` zusammen mit den üblichen Smoke-Variablen. Er wechselt in den Modus, füllt ein Demo-Meeting und rendert alle Tabs in Dunkel, Hell und im schmalen Fenster als PNG in das Datenverzeichnis. Dazu schreibt er `native-meetings-validation.json`.
+- **Live-Test mit zwei Instanzen:** `MISSUM_SMOKE_UI_MEETINGS=live-host` bzw. `live-guest` mit gemeinsamem
+  `MISSUM_SMOKE_MEETINGS_LIVE_DIR` und virtuellen Geräten. Der Host startet mit Kamera und Mikrofon und legt den Link
+  ab, der Gast tritt bei, schaltet die Kamera ein und schreibt Chat, Notiz und Whiteboard-Zettel; dann fragt der Host
+  Missum mit dem gewählten lokalen Modell. Beide schreiben `native-meetings-live-*.json` und `live-*.png`.
 
 ## Werkzeuge
 
@@ -89,3 +109,18 @@ Meeting, Gespräch, Chat, Notizen und Whiteboard teilen sich einen Kontext. Jede
 - `@Missum`: sofort, mit demselben Kontext.
 - Hat Missum Änderungen spürbar übertragen, sagt es das höchstens alle 2 Minuten mit einem Satz im Chat. Die Kamera-Kachel zeigt z. B. „Übernehme Whiteboard in die anderen Bereiche …“.
 - Eigene Änderungen von Missum lösen keinen neuen Durchgang aus; scheitert ein Durchgang, gehen die Änderungen in den nächsten über.
+
+## Werkzeug-Overlays, Titel und Autoren (Stand Webdesign-Runde)
+
+- Notes und Whiteboard tragen ihre Werkzeuge in einem schwebenden, halbtransparenten Overlay wie im Webdesign-Tab
+  (`Controls/FloatingToolbar.cs`): verschiebbar am Griff, einklappbar. Die Kopfzeilen zeigen nur noch den Titel.
+- Notes: „Zusammenfassen“ sitzt kompakt im Overlay. Vor jedem Block steht ein Balken in der Farbe seines Autors
+  (Missum in seiner eigenen, mehrere Autoren als Segmente); eine Autorenspalte gibt es nicht. Beim Überfahren nennt
+  ein Tooltip Nickname und Uhrzeit jedes Autors. Autoren und Zeiten setzt der Raum aus dem Absender der Änderung
+  (`Authors`, `AuthorTimes`).
+- Es gibt höchstens ein leeres Feld: Leere Blöcke, in denen niemand schreibt, verschwinden; „+ Absatz hinzufügen“
+  erscheint nur, wenn kein leeres Feld existiert, und Enter auf einer leeren Zeile legt keine weitere an.
+- Ein Titel überall: Notes, Whiteboard und der Sitzungsname in der Seitenleiste zeigen den Raumtitel. Missum
+  benennt das Meeting anhand des Inhalts kompakt (`title` in seiner Antwort, höchstens 48 Zeichen). Nur der Host
+  benennt um – in der Seitenleiste; danach behält Missum diesen Namen (`TitleLocked`).
+- Das kompakte Kamera-Overlay ist halbtransparent, am Kopf verschiebbar und an den Seitenrändern skalierbar.

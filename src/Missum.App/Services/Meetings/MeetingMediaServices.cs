@@ -30,11 +30,14 @@ public sealed class MeetingCameraService : IAsyncDisposable
 
     public MeetingCameraService(ILogger<MeetingCameraService> logger) => _logger = logger;
 
-    public bool IsRunning => _reader is not null;
+    private CancellationTokenSource? _virtual;
+
+    public bool IsRunning => _reader is not null || _virtual is not null;
     public event Action<byte[]>? FrameEncoded;
 
     public static async Task<IReadOnlyList<MeetingDevice>> ListAsync()
     {
+        if (MeetingVirtualMedia.Enabled) return [MeetingVirtualMedia.Camera];
         var groups = await MediaFrameSourceGroup.FindAllAsync();
         return groups.Where(g => g.SourceInfos.Any(IsColorVideo))
             .Select(g => new MeetingDevice(g.Id, g.DisplayName))
@@ -50,7 +53,18 @@ public sealed class MeetingCameraService : IAsyncDisposable
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (_reader is not null) return;
+            if (_reader is not null || _virtual is not null) return;
+            if (MeetingVirtualMedia.Enabled)
+            {
+                var virtualCamera = _virtual = new CancellationTokenSource();
+                _ = Task.Run(async () =>
+                {
+                    try { await MeetingVirtualMedia.RunCameraAsync(jpeg => FrameEncoded?.Invoke(jpeg), FrameInterval, virtualCamera.Token).ConfigureAwait(false); }
+                    catch (OperationCanceledException) { }
+                    catch (Exception exception) when (exception is not OutOfMemoryException) { MeetingLog.CameraFrameDropped(_logger, exception); }
+                }, CancellationToken.None);
+                return;
+            }
             var groups = await MediaFrameSourceGroup.FindAllAsync();
             var group = groups.FirstOrDefault(g => g.Id == deviceId && g.SourceInfos.Any(IsColorVideo))
                 ?? groups.FirstOrDefault(g => g.SourceInfos.Any(IsColorVideo))
@@ -194,6 +208,12 @@ public sealed class MeetingCameraService : IAsyncDisposable
             var capture = _capture;
             _reader = null;
             _capture = null;
+            if (_virtual is { } virtualCamera)
+            {
+                _virtual = null;
+                await virtualCamera.CancelAsync().ConfigureAwait(false);
+                virtualCamera.Dispose();
+            }
             if (reader is not null)
             {
                 reader.FrameArrived -= OnFrameArrived;
@@ -224,16 +244,18 @@ public sealed class MeetingAudioService : IDisposable
     private readonly Dictionary<Guid, BufferedWaveProvider> _voices = [];
     private readonly HashSet<Guid> _muted = [];
     private WaveInEvent? _capture;
+    private CancellationTokenSource? _virtual;
     private WaveOutEvent? _output;
     private MixingSampleProvider? _mixer;
 
-    public bool IsCapturing => _capture is not null;
+    public bool IsCapturing => _capture is not null || _virtual is not null;
     public event Action<byte[]>? Captured;
     /// <summary>Microphone level between 0 and 1, for the speaking indicator.</summary>
     public event Action<double>? Level;
 
     public static IReadOnlyList<MeetingDevice> ListMicrophones()
     {
+        if (MeetingVirtualMedia.Enabled) return [MeetingVirtualMedia.Microphone];
         var devices = new List<MeetingDevice> { new("-1", "Standardmikrofon") };
         for (var index = 0; index < WaveInEvent.DeviceCount; index++)
             devices.Add(new MeetingDevice(index.ToString(System.Globalization.CultureInfo.InvariantCulture), WaveInEvent.GetCapabilities(index).ProductName));
@@ -244,7 +266,17 @@ public sealed class MeetingAudioService : IDisposable
     {
         lock (_gate)
         {
-            if (_capture is not null) return;
+            if (_capture is not null || _virtual is not null) return;
+            if (MeetingVirtualMedia.Enabled)
+            {
+                var source = _virtual = new CancellationTokenSource();
+                _ = Task.Run(async () =>
+                {
+                    try { await MeetingVirtualMedia.RunMicrophoneAsync(frame => Deliver(frame), source.Token).ConfigureAwait(false); }
+                    catch (OperationCanceledException) { }
+                }, CancellationToken.None);
+                return;
+            }
             var device = int.TryParse(deviceId, out var number) && number >= -1 && number < WaveInEvent.DeviceCount ? number : -1;
             var capture = new WaveInEvent { DeviceNumber = device, WaveFormat = PcmFormat, BufferMilliseconds = 100 };
             capture.DataAvailable += OnData;
@@ -262,7 +294,11 @@ public sealed class MeetingAudioService : IDisposable
     private void OnData(object? sender, WaveInEventArgs args)
     {
         if (args.BytesRecorded <= 0) return;
-        var frame = args.Buffer.AsSpan(0, args.BytesRecorded).ToArray();
+        Deliver(args.Buffer.AsSpan(0, args.BytesRecorded).ToArray());
+    }
+
+    private void Deliver(byte[] frame)
+    {
         Captured?.Invoke(frame);
         Level?.Invoke(Math.Clamp(UtteranceSegmenter.Rms(frame) * 6, 0, 1));
     }
@@ -270,7 +306,9 @@ public sealed class MeetingAudioService : IDisposable
     public void StopCapture()
     {
         WaveInEvent? capture;
-        lock (_gate) { capture = _capture; _capture = null; }
+        CancellationTokenSource? source;
+        lock (_gate) { capture = _capture; _capture = null; source = _virtual; _virtual = null; }
+        if (source is not null) { source.Cancel(); source.Dispose(); }
         if (capture is null) return;
         capture.DataAvailable -= OnData;
         try { capture.StopRecording(); }

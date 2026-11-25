@@ -28,7 +28,11 @@ public sealed class MeetingTranscriptionHub : IAsyncDisposable
         SingleReader = true,
         FullMode = BoundedChannelFullMode.DropOldest,
     });
-    private readonly Dictionary<Guid, (string SessionId, long Sequence)> _captionSessions = [];
+    // The speech service runs one live-caption session at a time, so every speaker of every
+    // meeting shares it; utterances are recognized one after another by the single worker.
+    private (string? SessionId, long Sequence) _caption;
+    // Guards the shared session: the worker and the start of a meeting may open it at the same time.
+    private readonly SemaphoreSlim _captionGate = new(1, 1);
     private readonly CancellationTokenSource _lifetime = new();
     private readonly Task _worker;
 
@@ -63,7 +67,20 @@ public sealed class MeetingTranscriptionHub : IAsyncDisposable
                 try
                 {
                     client ??= await _connection.CreateClientAsync(cancellationToken).ConfigureAwait(false);
-                    var text = await RecognizeAsync(client, utterance, cancellationToken).ConfigureAwait(false);
+                    string? text;
+                    await _captionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                    try
+                    {
+                        try { text = await RecognizeAsync(client, utterance, cancellationToken).ConfigureAwait(false); }
+                        catch (Exception first) when (first is not OperationCanceledException and not OutOfMemoryException && _caption.SessionId is not null)
+                        {
+                            // The shared session may have expired while nobody spoke: open a new one once.
+                            MeetingLog.SpeechFailed(_logger, first);
+                            _caption = default;
+                            text = await RecognizeAsync(client, utterance, cancellationToken).ConfigureAwait(false);
+                        }
+                    }
+                    finally { _captionGate.Release(); }
                     if (string.IsNullOrWhiteSpace(text)) continue;
                     _host.ApplyLocal(utterance.MeetingId, new MeetingOp
                     {
@@ -79,7 +96,7 @@ public sealed class MeetingTranscriptionHub : IAsyncDisposable
                     MeetingLog.SpeechFailed(_logger, exception);
                     client?.Dispose();
                     client = null;
-                    lock (_captionSessions) _captionSessions.Clear();
+                    _caption = default;
                 }
             }
         }
@@ -89,21 +106,8 @@ public sealed class MeetingTranscriptionHub : IAsyncDisposable
 
     private async Task<string?> RecognizeAsync(MissumAiClient client, Utterance utterance, CancellationToken cancellationToken)
     {
-        (string SessionId, long Sequence) session;
-        lock (_captionSessions) _captionSessions.TryGetValue(utterance.SpeakerId, out session);
-        if (session.SessionId is null)
-        {
-            var language = _settings.Current.LiveCaptionLanguage;
-            var created = await client.CreateLiveCaptionSessionAsync(new LiveCaptionSessionRequest(
-                string.Equals(language, "auto", StringComparison.OrdinalIgnoreCase) ? null : language,
-                LiveCaptionMode.Transcribe,
-                SampleRate,
-                1,
-                WindowMilliseconds,
-                0,
-                LiveCaptionProfile.Dictation), cancellationToken).ConfigureAwait(false);
-            session = (created.SessionId, 0);
-        }
+        var session = _caption;
+        if (session.SessionId is null) session = (await OpenCaptionSessionAsync(client, cancellationToken).ConfigureAwait(false), 0);
         var wave = MicrophoneTranscriptionService.CreatePcm16Wave(utterance.Pcm);
         var response = await client.SendLiveCaptionChunkAsync(
             session.SessionId,
@@ -111,8 +115,41 @@ public sealed class MeetingTranscriptionHub : IAsyncDisposable
             wave,
             new LiveCaptionChunkMetadata(Guid.NewGuid().ToString("N"), 0, 0, true),
             cancellationToken).ConfigureAwait(false);
-        lock (_captionSessions) _captionSessions[utterance.SpeakerId] = (session.SessionId, session.Sequence + 1);
+        _caption = (session.SessionId, session.Sequence + 1);
         return FirstNonEmpty(response.StableText, response.Text, response.Transcript);
+    }
+
+    private async Task<string> OpenCaptionSessionAsync(MissumAiClient client, CancellationToken cancellationToken)
+    {
+        var language = _settings.Current.LiveCaptionLanguage;
+        var created = await client.CreateLiveCaptionSessionAsync(new LiveCaptionSessionRequest(
+            string.Equals(language, "auto", StringComparison.OrdinalIgnoreCase) ? null : language,
+            LiveCaptionMode.Transcribe,
+            SampleRate,
+            1,
+            WindowMilliseconds,
+            0,
+            LiveCaptionProfile.Dictation), cancellationToken).ConfigureAwait(false);
+        return created.SessionId;
+    }
+
+    /// <summary>
+    /// Loads speech recognition (Whisper) before a meeting starts by opening the shared caption
+    /// session, so the first sentence is recognized right away.
+    /// </summary>
+    public bool SpeechReady => _caption.SessionId is not null;
+
+    public async Task PrepareAsync(CancellationToken cancellationToken)
+    {
+        await _captionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (_caption.SessionId is not null) return;
+            using var client = await _connection.CreateClientAsync(cancellationToken).ConfigureAwait(false);
+            await _connection.WaitForGatewayAsync(client, cancellationToken).ConfigureAwait(false);
+            _caption = (await OpenCaptionSessionAsync(client, cancellationToken).ConfigureAwait(false), 0);
+        }
+        finally { _captionGate.Release(); }
     }
 
     private static string? FirstNonEmpty(params string?[] values) =>

@@ -2,7 +2,7 @@ namespace Missum.Core.Models;
 
 public enum ChatRole { System, User, Assistant }
 public enum MessageStatus { Pending, Streaming, Completed, Cancelled, Failed, Interrupted }
-public enum ChatMode { General, Coding, ClaudeScience, ClaudeMeetings }
+public enum ChatMode { General, Coding, ClaudeScience, ClaudeMeetings, Webdesign }
 public enum MessageContentProfile { General, Audiobook }
 public enum SessionContextProfile { General, Audiobook }
 public enum ProjectStatus { Active, Archived }
@@ -331,6 +331,7 @@ public sealed record AppSettings
     public Guid? ActiveCodingSessionId { get; init; }
     public Guid? ActiveClaudeScienceSessionId { get; init; }
     public Guid? ActiveClaudeMeetingsSessionId { get; init; }
+    public Guid? ActiveWebdesignSessionId { get; init; }
     public string? MeetingDisplayName { get; init; }
     public string? MeetingCameraDeviceId { get; init; }
     public string? MeetingMicrophoneDevice { get; init; }

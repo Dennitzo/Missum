@@ -12,6 +12,8 @@ public sealed class MeetingRoomState
 {
     public Guid Id { get; set; }
     public string Title { get; set; } = "Meeting";
+    /// <summary>True once the host renamed the session by hand: Missum then keeps the title.</summary>
+    public bool TitleLocked { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public long Revision { get; set; }
     public bool IsLive { get; set; }
@@ -75,6 +77,10 @@ public sealed class MeetingNoteBlock
     public bool HumanEdited { get; set; }
     public bool Done { get; set; }
     public string? EditedBy { get; set; }
+    /// <summary>Everyone who wrote text into this block, in order. Set by the room, never by the sender.</summary>
+    public List<Guid> Authors { get; set; } = [];
+    /// <summary>When each author (Missum included) last wrote into this block. Set by the room.</summary>
+    public Dictionary<Guid, DateTimeOffset> AuthorTimes { get; set; } = [];
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
 }
 
