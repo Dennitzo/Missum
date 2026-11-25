@@ -6,6 +6,41 @@ namespace Missum.Tests;
 public sealed class NativeMathRendererTests
 {
     [Theory]
+    [InlineData("""
+        \mathcal H_{\mathrm{pot}}(A)=
+        \frac{e^{3n-9A^2/4}}{\beta}
+        \left\langle e^{3As}\,V\!\left(c-\tfrac32Aq+qs\right)\right\rangle .
+        """)]
+    [InlineData("""
+        \begin{aligned}
+        \alpha&=a+A\sin\theta+B_2\cos2\theta,&
+        P&=P_0+2P_1\sin\theta+2P_2\cos2\theta,\\
+        \phi&=c+q\sin\theta+u\cos2\theta,&
+        p&=p_0+2k_1\sin\theta+2k_2\cos2\theta .
+        \end{aligned}
+        """)]
+    [InlineData("""
+        \begin{aligned}
+        C_1&=\tfrac13P_1-\tfrac12P_0A+B_2P_1-\tfrac12AP_2
+        -\tfrac12p_0q+uk_1-\tfrac12qk_2,\\
+        C_2&=-\tfrac23P_2+P_0B_2-\tfrac12AP_1+p_0u-\tfrac12qk_1 .
+        \end{aligned}
+        """)]
+    [InlineData(@"P_0=\sqrt{\tfrac7{18}+\tfrac{m^2}{18}+\tfrac{\lambda}{2592}}.")]
+    [InlineData("""
+        C_1=C_2=\bar{\mathcal H}=0,\qquad
+        \{C_1,C_2\}=-\tfrac1{18},\qquad
+        \{C_1,\bar{\mathcal H}\}=0,\qquad
+        \{C_2,\bar{\mathcal H}\}=\tfrac1{27}+\tfrac{\lambda}{7776}.
+        """)]
+    public void HamiltonianDisplayFormulasTypeset(string latex)
+    {
+        var image = NativeMathRenderer.Render(latex, display: true);
+        Assert.True(image.Error is null, image.Error);
+        Assert.NotEmpty(image.Png);
+    }
+
+    [Theory]
     [InlineData(@"\boxed{\text{Metrik (Krümmung)} \quad \longleftrightarrow \quad \text{Energie-Impuls-Dichte}}")]
     [InlineData(@"E=\boxed{mc^2}+1")]
     [InlineData(@"\boxed{x}+\boxed{y}")]

@@ -9,6 +9,7 @@ public enum ExtensionChatMode
     ClaudeScience,
     ClaudeMeetings,
     Webdesign,
+    ModelHub,
 }
 
 public enum ExtensionActionKind

@@ -59,7 +59,7 @@ public sealed class DeepResearchClientIntegrationTests
         var introductions = new List<string>();
         const string prompt = "Vergleiche Wärmepumpen und Gasheizungen wissenschaftlich.";
         await coordinator.HandleAsync(new WebBridgeEnvelope(AssistantProtocol.ProtocolVersion,
-            "chat.send", Guid.NewGuid().ToString("D"), JsonSerializer.SerializeToElement(new { sessionId = session.Id, prompt, deepResearch = true })),
+            "chat.send", Guid.NewGuid().ToString("D"), JsonSerializer.SerializeToElement(new { sessionId = session.Id, prompt })),
             (type, data, _) =>
             {
                 if (type == "chat.delta" && requests.Count == 0)

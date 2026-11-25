@@ -15,8 +15,7 @@ feste Tab **Webseite**, die Serve-Logik pro Projekt und die visuelle Mitgestaltu
   am Tab zeigt Änderungen, solange der Chat sichtbar ist.
 - **Werkzeug-Overlay:** schwebende, halbtransparente Leiste im Stil des Codex-Eingabefelds. Am Griff links
   verschiebbar (Doppelklick setzt zurück), mit dem Pfeil rechts einklappbar.
-  - Zeile 1: Zurück, Vor, Neu laden, Seitenpfad, Serverstatus mit Port (öffnet die Hosting-Hilfe).
-  - Zeile 2: Geräte Smartphone (390×844), Tablet (820×1180), Laptop (1440×900), Frei, Drehen; dazu Markieren,
+  - Eine Zeile: Geräte Smartphone (390×844), Tablet (820×1180), Laptop (1440×900), Frei, Drehen; dazu Markieren,
     Rahmen, Feintuning, Vorher/Nachher und Rückgängig (mehrstufig: Feintuning-Schritte, Farben, Gerätewechsel).
   - Beim Feintuning wächst das Overlay um eine Zeile mit Farbrad und Knöpfen – ohne zusätzliche Textzeilen.
 - Geräte nutzen DevTools-Emulation (`Emulation.setDeviceMetricsOverride`): Die Seite rendert in der echten

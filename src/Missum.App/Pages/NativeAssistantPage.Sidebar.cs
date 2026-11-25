@@ -28,6 +28,9 @@ public sealed partial class NativeAssistantPage
 
     private void RenderSidebar()
     {
+        // Model Hub lists Hugging Face models instead of sessions.
+        if (IsModelHubMode) { RenderModelHubSidebar(); return; }
+        ProjectsHeader.Visibility = Visibility.Visible;
         ProjectsPanel.Children.Clear();
         _sidebarActivityRings.Clear();
         _sidebarReportedBusy.Clear();

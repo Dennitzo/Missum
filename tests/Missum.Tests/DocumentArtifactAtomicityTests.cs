@@ -28,7 +28,7 @@ public sealed class DocumentArtifactAtomicityTests
         var messageBefore = await chats.GetMessageAsync(message.Id);
         var sessionBefore = await chats.GetSessionAsync(session.Id);
         var args = first is { } original
-            ? Arguments("replaceSection", original.GetProperty("documentId").GetGuid().ToString("D"), "Neue Fassung", original.GetProperty("sha256").GetString())
+            ? Arguments("replaceSection", original.GetProperty("documentId").GetGuid().ToString("D"), "Neue Fassung", null)
             : Arguments("create", "Bericht.md", "Neue Fassung");
         var failing = Service(environment, exporter, new InterceptingBlobStore(environment.Get<IBinaryObjectStore>(), failBeforeImport: true));
 
@@ -59,7 +59,7 @@ public sealed class DocumentArtifactAtomicityTests
         var messageBefore = await chats.GetMessageAsync(message.Id);
         var sessionBefore = await chats.GetSessionAsync(session.Id);
         var args = first is { } original
-            ? Arguments("replaceSection", original.GetProperty("documentId").GetGuid().ToString("D"), "Neue Fassung", original.GetProperty("sha256").GetString())
+            ? Arguments("replaceSection", original.GetProperty("documentId").GetGuid().ToString("D"), "Neue Fassung", null)
             : Arguments("create", "Bericht.md", "Neue Fassung");
         await SetArtifactFailureAsync(environment, true);
 
@@ -137,7 +137,7 @@ public sealed class DocumentArtifactAtomicityTests
         var messageBefore = await chats.GetMessageAsync(message.Id);
 
         var repeated = Json(await service.CreateAsync(Arguments("replaceSection", first.GetProperty("documentId").GetGuid().ToString("D"), "Unverändert",
-            first.GetProperty("sha256").GetString()), session.Id, message.Id, CancellationToken.None));
+            null), session.Id, message.Id, CancellationToken.None));
 
         Assert.Equal(first.GetProperty("artifactId").GetGuid(), repeated.GetProperty("artifactId").GetGuid());
         Assert.Equal(1L, repeated.GetProperty("revision").GetInt64());
@@ -158,7 +158,7 @@ public sealed class DocumentArtifactAtomicityTests
         var normal = Service(environment, exporter);
         var first = Json(await normal.CreateAsync(Arguments("create", "Bericht.md", "Original"), session.Id, message.Id, CancellationToken.None));
         var documentId = first.GetProperty("documentId").GetGuid();
-        var oldHash = first.GetProperty("sha256").GetString();
+        string? oldHash = null; // edits are protected by the document revision, not by a hash
         JsonElement winner = default;
         var tracking = new InterceptingBlobStore(environment.Get<IBinaryObjectStore>(), async () =>
         {
@@ -170,7 +170,7 @@ public sealed class DocumentArtifactAtomicityTests
             Arguments("replaceSection", documentId.ToString("D"), "Veraltete parallele Änderung", oldHash), session.Id, message.Id, CancellationToken.None));
 
         var stored = (await environment.Get<IGeneratedDocumentRepository>().GetAsync(documentId))!;
-        Assert.Equal(winner.GetProperty("sha256").GetString(), stored.Sha256);
+        Assert.Equal(winner.GetProperty("revision").GetInt64(), stored.Revision);
         Assert.Equal(2L, stored.Revision);
         Assert.Equal(2, (await environment.Get<IChatArtifactRepository>().ListForMessageAsync(message.Id)).Count);
         await Assert.ThrowsAsync<KeyNotFoundException>(() => environment.Get<IBinaryObjectStore>().OpenReadAsync(tracking.LastImportedId));

@@ -42,7 +42,7 @@ public sealed partial class NativeAssistantPage
     private readonly Dictionary<Guid, double> _meetingLevels = [];
     private bool _meetingDictation;
 
-    private enum MeetingTab { Meeting, Notes, Whiteboard }
+    private enum MeetingTab { Meeting, Transcript, Notes, Whiteboard }
 
     private bool IsMeetingsMode => _mode == MeetingsMode;
 
@@ -254,6 +254,7 @@ public sealed partial class NativeAssistantPage
         var tab = view switch
         {
             SessionViewKind.Meeting => MeetingTab.Meeting,
+            SessionViewKind.Transcript => MeetingTab.Transcript,
             SessionViewKind.Notes => MeetingTab.Notes,
             _ => MeetingTab.Whiteboard,
         };
@@ -262,6 +263,7 @@ public sealed partial class NativeAssistantPage
             var (glyph, title, help) = tab switch
             {
                 MeetingTab.Meeting => ("", "Meeting", "Kameras, Steuerung und Einladungslink"),
+                MeetingTab.Transcript => ("", "Transcript", "Live-Transkript der Lobby, nach Teilnehmer"),
                 MeetingTab.Notes => ("", "Notes", "Gemeinsames Dokument mit Missums Live-Notizen"),
                 _ => ("", "Whiteboard", "Gemeinsames Whiteboard mit Haftnotizen"),
             };
@@ -288,6 +290,7 @@ public sealed partial class NativeAssistantPage
     private void MarkMeetingsDirty(bool all = false, bool stage = false, bool notes = false, bool board = false, bool chat = false, bool overlay = false)
     {
         _meetingStageDirty |= all || stage;
+        _meetingTranscriptDirty |= all || chat;
         _meetingNotesDirty |= all || notes;
         _meetingBoardDirty |= all || board;
         _meetingChatDirty |= all || chat;
@@ -335,17 +338,19 @@ public sealed partial class NativeAssistantPage
             if (_meetingChatDirty && MeetingChatHost.Visibility == Visibility.Visible) { _meetingChatDirty = false; RenderMeetingChat(); }
             return;
         }
-        if (_meetingStageDirty || _meetingNotesDirty || _meetingBoardDirty)
+        if (_meetingStageDirty || _meetingNotesDirty || _meetingBoardDirty || _meetingTranscriptDirty)
         {
             var content = _meetingTab switch
             {
                 MeetingTab.Meeting => (UIElement)MeetingStageRoot(),
+                MeetingTab.Transcript => MeetingTranscriptRoot(),
                 MeetingTab.Notes => MeetingNotesRoot(),
                 _ => MeetingBoardRoot(),
             };
             if (!ReferenceEquals(MeetingsContent.Content, content)) MeetingsContent.Content = content;
         }
         if (_meetingTab == MeetingTab.Meeting && _meetingStageDirty) { _meetingStageDirty = false; RenderMeetingStage(); }
+        if (_meetingTab == MeetingTab.Transcript && _meetingTranscriptDirty) { _meetingTranscriptDirty = false; RenderMeetingTranscript(); }
         if (_meetingTab == MeetingTab.Notes && _meetingNotesDirty) { _meetingNotesDirty = false; RenderMeetingNotes(); }
         if (_meetingTab == MeetingTab.Whiteboard && _meetingBoardDirty) { _meetingBoardDirty = false; RenderMeetingBoard(); }
         if (_meetingOverlayDirty) { _meetingOverlayDirty = false; RenderMeetingOverlay(); }
@@ -532,6 +537,7 @@ public sealed partial class NativeAssistantPage
         // Keep documents and the board readable next to the floating camera panel.
         var reserve = show ? _overlayWidth + 26 : 0;
         if (_notesScroll is not null) _notesScroll.Padding = new Thickness(0, 0, reserve, 0);
+        if (_transcriptScroll is not null) _transcriptScroll.Padding = new Thickness(0, 0, reserve, 0);
         if (_boardColumns is not null) _boardColumns.Padding = new Thickness(28, 8, 28 + reserve, 40);
         if (!show) return;
         var room = _meetings!.Room!;

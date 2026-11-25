@@ -8,7 +8,7 @@ namespace Missum.Infrastructure.Storage;
 
 public sealed class SqliteDatabase : IMissumDatabase, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 60;
+    public const int CurrentSchemaVersion = 61;
     private static readonly Action<ILogger, string, Exception?> DatabaseInitialized = LoggerMessage.Define<string>(
         LogLevel.Information, new EventId(1000, nameof(DatabaseInitialized)), "SQLite-Datenbank {DatabasePath} wurde initialisiert.");
     private static readonly Action<ILogger, string?, Exception?> IntegrityCheckFailed = LoggerMessage.Define<string?>(
@@ -116,6 +116,8 @@ public sealed class SqliteDatabase : IMissumDatabase, IAsyncDisposable
             await ApplyMigrationFiftyNineAsync(connection, cancellationToken).ConfigureAwait(false);
             await BackupBeforeMigrationAsync(connection, 60, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationSixtyAsync(connection, cancellationToken).ConfigureAwait(false);
+            await BackupBeforeMigrationAsync(connection, 61, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationSixtyOneAsync(connection, cancellationToken).ConfigureAwait(false);
             // A full scan belongs to migrations/recovery and explicit diagnostics, not every ordinary launch.
             if (previousVersion != CurrentSchemaVersion
                 || previousSchema != await ReadSchemaCookieAsync(connection, cancellationToken).ConfigureAwait(false))
@@ -2807,6 +2809,42 @@ public sealed class SqliteDatabase : IMissumDatabase, IAsyncDisposable
                 await RebuildModeTableAsync(connection, transaction, "chat_session_groups", oldCheck, newCheck, cancellationToken, "_webdesign_v60").ConfigureAwait(false);
                 await RebuildModeTableAsync(connection, transaction, "chat_sessions", oldCheck, newCheck, cancellationToken, "_webdesign_v60").ConfigureAwait(false);
                 command.CommandText = "INSERT INTO schema_migrations(version,applied_at) VALUES(60,$now);";
+                command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            await using var pragma = connection.CreateCommand();
+            pragma.CommandText = "PRAGMA legacy_alter_table=OFF; PRAGMA foreign_keys=ON;";
+            await pragma.ExecuteNonQueryAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+    }
+
+    private static async Task ApplyMigrationSixtyOneAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        // Model Hub is a sixth mode (models from Hugging Face, no chat). Its hidden placeholder session
+        // needs the mode in the CHECK constraint, widened like migration 60.
+        const string oldCheck = "CHECK(chat_mode IN ('general','coding','claudescience','claudemeetings','webdesign'))";
+        const string newCheck = "CHECK(chat_mode IN ('general','coding','claudescience','claudemeetings','webdesign','modelhub'))";
+        await using (var pragma = connection.CreateCommand())
+        {
+            pragma.CommandText = "PRAGMA foreign_keys=OFF; PRAGMA legacy_alter_table=ON;";
+            await pragma.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        try
+        {
+            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=61;";
+            if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+            {
+                await RebuildModeTableAsync(connection, transaction, "chat_session_groups", oldCheck, newCheck, cancellationToken, "_modelhub_v61").ConfigureAwait(false);
+                await RebuildModeTableAsync(connection, transaction, "chat_sessions", oldCheck, newCheck, cancellationToken, "_modelhub_v61").ConfigureAwait(false);
+                command.CommandText = "INSERT INTO schema_migrations(version,applied_at) VALUES(61,$now);";
                 command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
                 await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             }

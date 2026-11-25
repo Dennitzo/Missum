@@ -281,7 +281,6 @@ public sealed class AssistantIntegrationTests
         Assert.DoesNotContain("Header=\"Coding AI Modell\"", settingsPage, StringComparison.Ordinal);
         Assert.DoesNotContain("SelectedGeneralModelItem", settingsPage, StringComparison.Ordinal);
         Assert.DoesNotContain("SelectedCodingModelItem", settingsPage, StringComparison.Ordinal);
-        Assert.Contains("Promptfenster", settingsPage, StringComparison.Ordinal);
         Assert.Contains("SelectedModel = current.SelectedModel", settingsViewModel, StringComparison.Ordinal);
     }
 

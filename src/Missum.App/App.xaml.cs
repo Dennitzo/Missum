@@ -168,6 +168,18 @@ public partial class App : Application
                 services.AddSingleton<MissumAiAssistantService>();
                 services.AddSingleton<MeetingHostService>();
                 services.AddSingleton<Missum.App.Services.Webdesign.WebdesignServeService>();
+                services.AddSingleton(provider => new Missum.App.Services.ModelHub.ModelDownloadService(
+                    provider.GetRequiredService<ILogger<Missum.App.Services.ModelHub.ModelDownloadService>>(),
+                    DataDirectory,
+                    async (folder, cancellationToken) =>
+                    {
+                        // Only a folder the native catalog scans can be confirmed; ask the gateway for its model ids.
+                        var settings = provider.GetRequiredService<SettingsCoordinator>();
+                        if (!Missum.App.Services.ModelHub.ModelHubCatalogId.GatewaySees(folder, settings.Current.LocalAiModelDirectory)) return null;
+                        using var client = await provider.GetRequiredService<MissumAiConnectionService>().CreateClientAsync(cancellationToken).ConfigureAwait(false);
+                        var catalog = await client.GetCodingModelsAsync(cancellationToken).ConfigureAwait(false);
+                        return catalog.Models.Select(model => model.Id).ToList();
+                    }));
                 services.AddSingleton<MeetingCameraService>();
                 services.AddSingleton<MeetingAudioService>();
                 services.AddSingleton<MeetingSessionService>();
@@ -863,6 +875,9 @@ public partial class App : Application
             // Project dev servers run in job objects; stopping them here ends their process trees.
             await RunShutdownStepAsync("webdesign", async _ =>
                 await GetService<Missum.App.Services.Webdesign.WebdesignServeService>().DisposeAsync(), TimeSpan.FromSeconds(10));
+            // Running model downloads stop here and continue from their part files on the next start.
+            await RunShutdownStepAsync("modelhub", async _ =>
+                await GetService<Missum.App.Services.ModelHub.ModelDownloadService>().DisposeAsync(), TimeSpan.FromSeconds(8));
             await RunShutdownStepAsync("host", _ => _host.StopAsync(TimeSpan.FromSeconds(4)), TimeSpan.FromSeconds(6));
         }
         finally

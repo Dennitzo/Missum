@@ -142,6 +142,68 @@ public sealed partial class SettingsPage : Page
         });
     }
 
+    /// <summary>
+    /// The cross-session memory as an editable overlay: one statement per line. Only "Übernehmen"
+    /// saves; closing in any other way simply drops the edits.
+    /// </summary>
+    private async void OnEditMemory(object sender, RoutedEventArgs e)
+    {
+        await RunActionAsync(async () =>
+        {
+            var store = App.Current.GetService<Missum.Core.Memory.IUserMemoryStore>();
+            var shown = await UserMemoryEditing.ListGlobalAsync(store, CancellationToken.None);
+            var editor = new TextBox
+            {
+                Text = UserMemoryEditing.ToText(shown),
+                AcceptsReturn = true,
+                TextWrapping = TextWrapping.Wrap,
+                MinHeight = 320,
+                MaxHeight = 520,
+                PlaceholderText = "Noch nichts gespeichert. Eine Zeile pro Eintrag, z. B. „Antworte auf Deutsch.“",
+            };
+            ScrollViewer.SetVerticalScrollBarVisibility(editor, ScrollBarVisibility.Auto);
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(editor, "Gedächtnis, eine Zeile pro Eintrag");
+            var content = new StackPanel { Spacing = 10, MinWidth = 560 };
+            content.Children.Add(new TextBlock
+            {
+                Text = "Eine Zeile pro Eintrag. Zeilen ändern, löschen oder neue hinzufügen.",
+                TextWrapping = TextWrapping.Wrap,
+                Foreground = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["MissumMutedTextBrush"],
+            });
+            content.Children.Add(editor);
+
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Content = content,
+                PrimaryButtonText = "Übernehmen",
+                DefaultButton = ContentDialogButton.Primary,
+            };
+            // Title row with the close button in the top right corner.
+            var title = new Grid();
+            title.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            title.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            title.Children.Add(new TextBlock { Text = "Gedächtnis", VerticalAlignment = VerticalAlignment.Center });
+            var close = new Button
+            {
+                Content = new FontIcon { Glyph = "\uE711", FontSize = 12 },
+                Width = 32, Height = 32, Padding = new Thickness(0),
+                Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.Transparent),
+                BorderThickness = new Thickness(0),
+            };
+            ToolTipService.SetToolTip(close, "Schließen");
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(close, "Schließen");
+            close.Click += (_, _) => dialog.Hide();
+            Grid.SetColumn(close, 1);
+            title.Children.Add(close);
+            dialog.Title = title;
+
+            if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+            var plan = UserMemoryEditing.Plan(shown, editor.Text);
+            if (!plan.IsEmpty) await UserMemoryEditing.ApplyAsync(store, plan, CancellationToken.None);
+        });
+    }
+
     private async void OnRefreshModels(object sender, RoutedEventArgs e)
     {
         await RunActionAsync(async () =>

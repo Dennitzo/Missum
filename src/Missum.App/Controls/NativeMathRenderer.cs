@@ -34,7 +34,11 @@ public static class NativeMathRenderer
         LaTeXSettings.Commands.Select(pair => pair.Key).ToHashSet(StringComparer.Ordinal));
     private static int _cachedBytes;
 
-    static NativeMathRenderer() => NativeBoxedMathPainter.RegisterCommands();
+    static NativeMathRenderer()
+    {
+        NativeBoxedMathPainter.RegisterCommands();
+        NativeMathCompatibility.RegisterCommands();
+    }
 
     public static async Task<NativeMathBitmap> RenderAsync(string latex, bool display, double fontSize = 16,
         bool dark = true, CancellationToken cancellationToken = default)
@@ -259,6 +263,12 @@ public static class NativeMathRenderer
             }
             while (index < latex.Length && (char.IsAsciiLetter(latex[index]) || latex[index] == '@'))
                 normalized.Append(latex[index++]);
+            if (latex.AsSpan(start, index - start).SequenceEqual(@"\begin")
+                && NativeMathCompatibility.IsAlignedEnvironment(latex.AsSpan(index)))
+            {
+                normalized.Length -= index - start;
+                normalized.Append(NativeMathCompatibility.AlignedCommand);
+            }
             if (index < latex.Length && latex[index] is '=' or '*' or '\'')
             {
                 var command = latex[start..index];

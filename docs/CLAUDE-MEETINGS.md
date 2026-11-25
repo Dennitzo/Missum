@@ -23,6 +23,16 @@ Claude Meetings ist der vierte Modus neben ChatGPT, Codex und Missum Science. Ei
 
   Zwischen zwei automatischen Läufen liegen mindestens 20 s. Antworten auf Fragen erscheinen im Chat. Eine Sprachausgabe gibt es bewusst nicht.
 
+## Tab „Transcript“
+
+- Fester Tab nach „Meeting“: alles Gesprochene der Lobby, nach Teilnehmer, als Chatfenster ohne Eingabefeld.
+- **Eigene Sätze** stehen rechts in einer Blase, wie die eigenen Nachrichten im ChatGPT-Modus.
+- **Alle anderen** stehen links mit Profilbild, Name und Uhrzeit. Aufeinanderfolgende Sätze eines Sprechers bilden einen
+  Block.
+- **Neue Zeilen** erscheinen wie gestreamter Text, Zeichen für Zeichen. Wer unten ist, dem folgt die Ansicht.
+- **Rechte Seitenleiste:** zeigt wie in Notes und Whiteboard den globalen Chat. Das kompakte Lobby-Overlay schwebt über dem
+  Tab.
+
 ## Projektpflicht und Modellwahl
 
 - Ein Meeting gehört immer zu einem Projekt. Ohne Projektordner zeigt jeder Tab „Projekt erforderlich“; Starten und Beitreten sind gesperrt, und es werden keine Dateien geschrieben.

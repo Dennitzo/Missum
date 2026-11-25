@@ -136,6 +136,7 @@ public sealed class ClientRestartRequestTests
             client, sessionId, NextPrompt, trigger, Array.Empty<AssistantAttachment>(), history,
             Array.CreateInstance(uploadedType, 0), assistant,
             (Func<MissumAiAssistantUpdate, Task>)(static _ => Task.CompletedTask), CancellationToken.None,
+            null, // memoryNote: reflection does not fill optional parameters
         ])!;
         var request = await requestTask;
         return new Capture(request, JsonSerializer.Serialize(request, Json), JsonSerializer.Serialize(history, Json),

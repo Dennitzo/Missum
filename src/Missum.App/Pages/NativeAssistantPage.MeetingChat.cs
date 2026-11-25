@@ -49,13 +49,20 @@ public sealed partial class NativeAssistantPage
         _meetingModelLabel.Text = ModelLabel.Text;
         _meetingReasoningLabel.Text = ReasoningLabel.Text;
         var agent = _meetings!.Room?.Read(static s => (s.Agent.ContextUsed, s.Agent.ContextLimit));
+        // Same wording as the prompt window's context ring.
+        string description;
         if (agent is { } usage && usage.ContextLimit > 0)
         {
             _meetingContextRing!.Value = Math.Clamp(usage.ContextUsed * 100.0 / usage.ContextLimit, 0, 100);
-            ToolTipService.SetToolTip(_meetingContextRing.Parent as FrameworkElement,
-                $"Letzter Missum-Lauf: {usage.ContextUsed:N0} von {usage.ContextLimit:N0} Tokens ({_meetingContextRing.Value:0} %)");
+            description = $"Kontext: {usage.ContextUsed:N0} / {usage.ContextLimit:N0} Token ({_meetingContextRing.Value:0.0} %)";
         }
+        else description = "Kontext noch nicht verfügbar";
+        if (_meetingContextToolTip is not null && !Equals(_meetingContextToolTip.Content, description)) _meetingContextToolTip.Content = description;
+        if (_meetingContextRing?.Parent is FrameworkElement ring) Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(ring, description);
     }
+
+    private ToolTip? _meetingContextToolTip;
+    internal string? MeetingContextDescription => _meetingContextToolTip?.Content as string;
     private string? _meetingChatSignature;
 
     private Grid MeetingChatRoot()
@@ -136,8 +143,16 @@ public sealed partial class NativeAssistantPage
         _meetingModelFooter.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         _meetingModelFooter.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         _meetingContextRing = new NativeContextRing { Value = 0, Maximum = 100 };
-        var ringHost = new Border { Width = 28, Height = 28, Child = _meetingContextRing, VerticalAlignment = VerticalAlignment.Center };
-        ToolTipService.SetToolTip(ringHost, "Kontext des letzten Missum-Laufs");
+        // A background makes the ring hoverable; the tooltip opens on hover like in the prompt window.
+        var ringHost = new Border
+        {
+            Width = 28, Height = 28, Child = _meetingContextRing, VerticalAlignment = VerticalAlignment.Center,
+            Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
+        };
+        _meetingContextToolTip = new ToolTip { Content = "Kontext noch nicht verfügbar" };
+        ToolTipService.SetToolTip(ringHost, _meetingContextToolTip);
+        ringHost.PointerEntered += (_, _) => _meetingContextToolTip.IsOpen = true;
+        ringHost.PointerExited += (_, _) => _meetingContextToolTip.IsOpen = false;
         _meetingModelLabel = new TextBlock { FontSize = 12, MaxWidth = 170, TextTrimming = TextTrimming.CharacterEllipsis, Foreground = ThemeBrush("MissumTextBrush", 240) };
         _meetingReasoningLabel = new TextBlock { FontSize = 12, Foreground = ThemeBrush("MissumAccentReadableBrush", 190) };
         var labels = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };

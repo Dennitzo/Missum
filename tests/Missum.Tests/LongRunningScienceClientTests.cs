@@ -71,11 +71,8 @@ public sealed class LongRunningScienceClientTests
         PromptTriggerMatch? trigger = planMode ? AssistantCoordinator.CreateExtensionMatch(BuiltInActionIds.PlanMode, prompt) : mode switch
         {
             ChatMode.Coding => AssistantCoordinator.CreateToolMatch("coding", prompt),
-            ChatMode.ClaudeScience => AssistantCoordinator.CreateToolMatch("webSearch", prompt) with
-            {
-                DeepResearch = true,
-                DeepResearchProfile = "mathematicalInvestigation",
-            },
+            // An ordinary Science request: Deep Research runs only when it is chosen explicitly.
+            ChatMode.ClaudeScience => AssistantCoordinator.CreateToolMatch("webSearch", prompt),
             _ => null,
         };
         // Exercise the actual request path without inference or starting a sandbox.
@@ -86,6 +83,7 @@ public sealed class LongRunningScienceClientTests
             client, session.Id, prompt, trigger, Array.Empty<AssistantAttachment>(), history,
             Array.CreateInstance(uploadedType, 0), assistant,
             (Func<MissumAiAssistantUpdate, Task>)(static _ => Task.CompletedTask), CancellationToken.None,
+            null, // memoryNote: reflection does not fill optional parameters
         ])!;
 
         Assert.NotNull(request.Limits);

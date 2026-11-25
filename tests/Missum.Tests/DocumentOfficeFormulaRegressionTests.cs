@@ -98,12 +98,12 @@ public sealed class DocumentOfficeFormulaRegressionTests
         var first = Json(await service.CreateAsync(Arguments("create", "Kosten.xlsx", "kosten", "Kosten", "Posten\tBetrag\nEnergie\t12.5"), session.Id, message.Id, CancellationToken.None));
         var id = first.GetProperty("documentId").GetGuid();
         var appended = Json(await service.CreateAsync(Arguments("appendSection", id.ToString("D"), "fazit", "Fazit", "Wert\n" + formula,
-            first.GetProperty("sha256").GetString()), session.Id, message.Id, CancellationToken.None));
+            null), session.Id, message.Id, CancellationToken.None));
         var before = await environment.Get<IGeneratedDocumentRepository>().GetAsync(id);
         var artifactIds = (await environment.Get<IChatArtifactRepository>().ListForMessageAsync(message.Id)).Select(static artifact => artifact.Id).ToArray();
 
         var error = await Assert.ThrowsAsync<InvalidDataException>(() => service.CreateAsync(
-            Arguments("replaceSection", id.ToString("D"), "kosten", "Kosten 2027", "Posten\tBetrag\nEnergie\t15", appended.GetProperty("sha256").GetString()),
+            Arguments("replaceSection", id.ToString("D"), "kosten", "Kosten 2027", "Posten\tBetrag\nEnergie\t15", null),
             session.Id, message.Id, CancellationToken.None));
         Assert.Contains("Blattname", error.Message, StringComparison.Ordinal);
         Assert.Equal(before, await environment.Get<IGeneratedDocumentRepository>().GetAsync(id));
@@ -123,7 +123,7 @@ public sealed class DocumentOfficeFormulaRegressionTests
         var service = Service(environment, exporter);
         var first = Json(await service.CreateAsync(Arguments("create", "Kosten.xlsx", "kosten", "Kosten", "Posten\tBetrag\tFormel\nEnergie\t12.5\t" + formula), session.Id, message.Id, CancellationToken.None));
         var result = Json(await service.CreateAsync(Arguments("replaceSection", first.GetProperty("documentId").GetGuid().ToString("D"), "kosten", heading,
-            "Posten\tBetrag\tFormel\nEnergie\t15\t" + formula, first.GetProperty("sha256").GetString()), session.Id, message.Id, CancellationToken.None));
+            "Posten\tBetrag\tFormel\nEnergie\t15\t" + formula, null), session.Id, message.Id, CancellationToken.None));
         Assert.Equal(2L, result.GetProperty("revision").GetInt64());
         var artifact = (await environment.Get<IChatArtifactRepository>().GetAsync(result.GetProperty("artifactId").GetGuid()))!;
         await using var input = await environment.Get<IBinaryObjectStore>().OpenReadAsync(artifact.BlobId);

@@ -156,6 +156,14 @@
 
       <Border Style="{StaticResource MissumCardStyle}">
         <StackPanel Spacing="12">
+          <TextBlock Style="{StaticResource MissumSectionTitleStyle}" Text="Gedächtnis" />
+          <TextBlock Foreground="{ThemeResource MissumMutedTextBrush}" Text="Was Missum sitzungsübergreifend über dich weiß: Vorlieben und dauerhafte Anweisungen, die jeder neue Chat mitbekommt." TextWrapping="Wrap" />
+          <Button Click="OnEditMemory" Content="Gedächtnis anzeigen und bearbeiten" HorizontalAlignment="Left" />
+        </StackPanel>
+      </Border>
+
+      <Border Style="{StaticResource MissumCardStyle}">
+        <StackPanel Spacing="12">
           <TextBlock Style="{StaticResource MissumSectionTitleStyle}" Text="Sicherung" />
           <TextBlock Foreground="{ThemeResource MissumMutedTextBrush}" Text="Chats, Projekte, Dateien und Einstellungen in einer .missumbackup-Datei sichern. Backups sind nicht verschlüsselt." TextWrapping="Wrap" />
           <StackPanel Orientation="Horizontal" Spacing="8">

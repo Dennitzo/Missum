@@ -139,7 +139,9 @@ public sealed class ScienceToolExecutionTests(ITestOutputHelper output)
             new { projectId = "research-" + session.Id.ToString("N"), source }), session.Id, null);
         Assert.Equal("failed", result.Status);
         Assert.Equal("client.tool_failed", result.ErrorCode);
-        Assert.Contains("deklarative Lean", result.Message, StringComparison.Ordinal);
+        // Sources with '#' fail the stricter source check first; everything else the declarative contract.
+        Assert.True(result.Message?.Contains("deklarative Lean", StringComparison.Ordinal) == true
+            || result.Message?.Contains("Quellprüfung wurde vor der Lean-Kernelprüfung abgebrochen", StringComparison.Ordinal) == true, result.Message);
         Assert.False(Directory.Exists(Path.Combine(environment.Directory, "ResearchSandbox")));
     }
 

@@ -22,8 +22,9 @@ public sealed partial class NativeAssistantPage
             ["general"] = [SessionViewKind.Chat],
             ["coding"] = [SessionViewKind.Chat],
             ["claudescience"] = [SessionViewKind.Chat, SessionViewKind.Research],
-            ["claudemeetings"] = [SessionViewKind.Meeting, SessionViewKind.Notes, SessionViewKind.Whiteboard],
+            ["claudemeetings"] = [SessionViewKind.Meeting, SessionViewKind.Transcript, SessionViewKind.Notes, SessionViewKind.Whiteboard],
             ["webdesign"] = [SessionViewKind.Chat, SessionViewKind.Website],
+            ["modelhub"] = [],
         };
 
     /// <summary>Call after assigning the active session and its complete coordinator snapshot.</summary>
@@ -111,7 +112,7 @@ public sealed partial class NativeAssistantPage
         var position = 0;
         foreach (var view in layout)
         {
-            if (view is SessionViewKind.Meeting or SessionViewKind.Notes or SessionViewKind.Whiteboard)
+            if (view is SessionViewKind.Meeting or SessionViewKind.Transcript or SessionViewKind.Notes or SessionViewKind.Whiteboard)
             {
                 position = RenderMeetingTab(view, position);
                 continue;
@@ -272,6 +273,7 @@ public sealed partial class NativeAssistantPage
         Notes,
         Whiteboard,
         Website,
+        Transcript,
     }
 
     private sealed class SessionTabState(Guid id, string title, string mode, Border container, TextBlock label, Button select)

@@ -13,6 +13,11 @@ public sealed partial class NativeAssistantPage
     // Returning to A must not reuse a footer still parented to A's discarded bubble.
     private async Task<int> VerifyMessageNavigationSmokeAsync()
     {
+        if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_MODELHUB") == "1")
+        {
+            await VerifyModelHubSmokeAsync();
+            return 0;
+        }
         if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_WEBDESIGN") == "1")
         {
             await VerifyWebdesignSmokeAsync();
@@ -168,6 +173,11 @@ public sealed partial class NativeAssistantPage
             return await VerifyIconPaletteSmokeAsync();
         }
         var original = _snapshot.Clone();
+        if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_RESPONSIVENESS") == "math")
+        {
+            await VerifyChatMathFixtureAsync(original);
+            return 0;
+        }
         if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_RESPONSIVENESS") == "focused")
         {
             // Explicit dispatcher/clipboard regression scope. It never starts

@@ -441,6 +441,7 @@ public sealed partial class AssistantCoordinator(
             ChatMode.ClaudeScience => ExtensionChatMode.ClaudeScience,
             ChatMode.ClaudeMeetings => ExtensionChatMode.ClaudeMeetings,
             ChatMode.Webdesign => ExtensionChatMode.Webdesign,
+            ChatMode.ModelHub => ExtensionChatMode.ModelHub,
             _ => throw new InvalidOperationException("Der Chatmodus ist ungültig."),
         };
         return _extensionActions.GetActions(extensionMode)
@@ -478,6 +479,7 @@ public sealed partial class AssistantCoordinator(
                     ExtensionChatMode.ClaudeScience => "claudescience",
                     ExtensionChatMode.ClaudeMeetings => "claudemeetings",
                     ExtensionChatMode.Webdesign => "webdesign",
+                    ExtensionChatMode.ModelHub => "modelhub",
                     _ => throw new InvalidOperationException("Der Extension-Chatmodus ist ungültig."),
                 }),
                 actionKind = action.ActionKind switch
@@ -515,6 +517,7 @@ public sealed partial class AssistantCoordinator(
             ChatMode.ClaudeScience => ExtensionChatMode.ClaudeScience,
             ChatMode.ClaudeMeetings => ExtensionChatMode.ClaudeMeetings,
             ChatMode.Webdesign => ExtensionChatMode.Webdesign,
+            ChatMode.ModelHub => ExtensionChatMode.ModelHub,
             _ => throw new InvalidOperationException("Der Chatmodus ist ungültig."),
         };
         var usedGroupIds = _extensionActions.GetActions(extensionMode)
@@ -980,6 +983,12 @@ public sealed partial class AssistantCoordinator(
                 ActiveWebdesignSessionId = session.Id,
                 ActiveSessionId = session.Id,
             },
+            ChatMode.ModelHub => current with
+            {
+                SelectedChatMode = ChatMode.ModelHub,
+                ActiveModelHubSessionId = session.Id,
+                ActiveSessionId = session.Id,
+            },
             _ => throw new InvalidOperationException("Die Sitzung enthält einen unbekannten Chatmodus."),
         }, cancellationToken);
 
@@ -990,6 +999,7 @@ public sealed partial class AssistantCoordinator(
         ChatMode.ClaudeScience => settingsValue.ActiveClaudeScienceSessionId,
         ChatMode.ClaudeMeetings => settingsValue.ActiveClaudeMeetingsSessionId,
         ChatMode.Webdesign => settingsValue.ActiveWebdesignSessionId,
+        ChatMode.ModelHub => settingsValue.ActiveModelHubSessionId,
         _ => throw new InvalidOperationException("Der Chatmodus ist ungültig."),
     };
 
@@ -1320,6 +1330,11 @@ public sealed partial class AssistantCoordinator(
                     ActiveWebdesignSessionId = null,
                     ActiveSessionId = current.SelectedChatMode == ChatMode.Webdesign ? null : current.ActiveSessionId,
                 },
+                ChatMode.ModelHub => current with
+                {
+                    ActiveModelHubSessionId = null,
+                    ActiveSessionId = current.SelectedChatMode == ChatMode.ModelHub ? null : current.ActiveSessionId,
+                },
                 _ => throw new InvalidOperationException("Die Sitzung enthält einen unbekannten Chatmodus."),
             }, cancellationToken).ConfigureAwait(false);
         }
@@ -1411,6 +1426,11 @@ public sealed partial class AssistantCoordinator(
             {
                 ActiveWebdesignSessionId = null,
                 ActiveSessionId = current.SelectedChatMode == ChatMode.Webdesign ? null : current.ActiveSessionId,
+            },
+            ChatMode.ModelHub => current with
+            {
+                ActiveModelHubSessionId = null,
+                ActiveSessionId = current.SelectedChatMode == ChatMode.ModelHub ? null : current.ActiveSessionId,
             },
             _ => throw new InvalidOperationException("Der Chatmodus ist ungültig."),
         }, cancellationToken).ConfigureAwait(false);
@@ -1902,6 +1922,7 @@ public sealed partial class AssistantCoordinator(
         ChatMode.ClaudeScience => ExtensionChatMode.ClaudeScience,
         ChatMode.ClaudeMeetings => ExtensionChatMode.ClaudeMeetings,
         ChatMode.Webdesign => ExtensionChatMode.Webdesign,
+        ChatMode.ModelHub => ExtensionChatMode.ModelHub,
         _ => throw new InvalidOperationException("Der Chatmodus ist ungültig."),
     };
 
@@ -1912,6 +1933,7 @@ public sealed partial class AssistantCoordinator(
         ChatMode.ClaudeScience => "claudescience",
         ChatMode.ClaudeMeetings => "claudemeetings",
         ChatMode.Webdesign => "webdesign",
+        ChatMode.ModelHub => "modelhub",
         _ => throw new InvalidOperationException("Der Chatmodus ist ungültig."),
     };
 
@@ -1922,6 +1944,7 @@ public sealed partial class AssistantCoordinator(
         "claudescience" or "claude-science" or "science" => ChatMode.ClaudeScience,
         "claudemeetings" or "claude-meetings" or "meetings" => ChatMode.ClaudeMeetings,
         "webdesign" or "web-design" or "web" => ChatMode.Webdesign,
+        "modelhub" or "model-hub" or "models" or "hub" => ChatMode.ModelHub,
         _ => throw new ArgumentException("Die angeforderte Chatansicht ist unbekannt."),
     };
 

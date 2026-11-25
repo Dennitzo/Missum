@@ -66,6 +66,35 @@ public sealed partial class WebdesignPreviewView
         _address.Width = wide ? 300 : 160;
     }
 
+    /// <summary>
+    /// Toggles look exactly like the buttons of the Claude Meetings tool pill: transparent, the
+    /// Missum hover and pressed surfaces, the same corner radius as their hover state. A checked
+    /// tool keeps the pressed surface instead of the WinUI accent fill.
+    /// </summary>
+    internal static ToggleButton PillToggle(ToggleButton toggle)
+    {
+        var transparent = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        var hover = NativeThemeBrushes.Resource("MissumHoverBrush", 60);
+        var pressed = NativeThemeBrushes.Resource("MissumPressedBrush", 80);
+        var text = NativeThemeBrushes.Resource("MissumTextBrush", 240);
+        foreach (var (key, brush) in new (string, Brush)[]
+        {
+            ("ToggleButtonBackground", transparent), ("ToggleButtonBackgroundPointerOver", hover), ("ToggleButtonBackgroundPressed", pressed),
+            ("ToggleButtonBackgroundDisabled", transparent),
+            ("ToggleButtonBackgroundChecked", pressed), ("ToggleButtonBackgroundCheckedPointerOver", pressed), ("ToggleButtonBackgroundCheckedPressed", hover),
+            ("ToggleButtonBackgroundCheckedDisabled", transparent),
+            ("ToggleButtonBorderBrush", transparent), ("ToggleButtonBorderBrushPointerOver", transparent), ("ToggleButtonBorderBrushPressed", transparent),
+            ("ToggleButtonBorderBrushChecked", transparent), ("ToggleButtonBorderBrushCheckedPointerOver", transparent), ("ToggleButtonBorderBrushCheckedPressed", transparent),
+            ("ToggleButtonBorderBrushDisabled", transparent), ("ToggleButtonBorderBrushCheckedDisabled", transparent),
+            ("ToggleButtonForeground", text), ("ToggleButtonForegroundPointerOver", text), ("ToggleButtonForegroundPressed", text),
+            ("ToggleButtonForegroundChecked", text), ("ToggleButtonForegroundCheckedPointerOver", text), ("ToggleButtonForegroundCheckedPressed", text),
+        })
+            toggle.Resources[key] = brush;
+        toggle.BorderThickness = new Thickness(0);
+        toggle.CornerRadius = new CornerRadius(4);
+        return toggle;
+    }
+
     private ToggleButton ToolToggle(string glyph, string text, string tip)
     {
         var content = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
@@ -73,7 +102,7 @@ public sealed partial class WebdesignPreviewView
         var caption = new TextBlock { Text = text, FontSize = 12, VerticalAlignment = VerticalAlignment.Center };
         _toolbarLabels.Add(caption);
         content.Children.Add(caption);
-        var button = new ToggleButton { Content = content, Height = 30, Padding = new Thickness(8, 0, 10, 0), CornerRadius = new CornerRadius(15) };
+        var button = PillToggle(new ToggleButton { Content = content, Height = 30, Padding = new Thickness(10, 0, 11, 0) });
         AutomationProperties.SetName(button, text);
         ToolTipService.SetToolTip(button, tip);
         return button;
@@ -151,7 +180,7 @@ public sealed partial class WebdesignPreviewView
         grip.DoubleTapped += (_, _) => { _overlayAnchor = null; PlaceOverlay(); };
         layout.Children.Add(grip);
 
-        // Row 1: navigation, address, server. Row 2: devices and the marking tools.
+        // Navigation, path and server (kept wired for state updates, not shown). Shown: devices and the marking tools.
         var first = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
         _back.Click += (_, _) => { if (_core?.CanGoBack == true) _core.GoBack(); };
         _forward.Click += (_, _) => { if (_core?.CanGoForward == true) _core.GoForward(); };
@@ -178,16 +207,16 @@ public sealed partial class WebdesignPreviewView
         AutomationProperties.SetName(_serverChip, "Server und Hosting");
         _serverChip.Click += (_, _) => ShowHostingFlyout();
         first.Children.Add(_serverChip);
-        _overlayBody.Children.Add(first);
+        // The overlay shows only the tool row; navigation, path and server are no longer part of it.
+        _ = first;
 
         var second = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
         foreach (var (id, device) in Devices)
         {
-            var toggle = new ToggleButton
+            var toggle = PillToggle(new ToggleButton
             {
-                Content = new FontIcon { Glyph = device.Glyph, FontSize = 14 }, Width = 36, Height = 30, Padding = new Thickness(0),
-                CornerRadius = new CornerRadius(15),
-            };
+                Content = new FontIcon { Glyph = device.Glyph, FontSize = 13 }, Width = 32, Height = 30, Padding = new Thickness(0),
+            });
             AutomationProperties.SetName(toggle, device.Label);
             ToolTipService.SetToolTip(toggle, id == "free" ? "Frei · volle Breite des Tabs" : $"{device.Label} · {device.Width}×{device.Height}");
             toggle.Click += async (_, _) => { PushUndo(); await SetDeviceAsync(id); };
@@ -211,7 +240,8 @@ public sealed partial class WebdesignPreviewView
             second.Children.Add(toggle);
         }
         _compareToggle.Content = Label("", "Vorher/Nachher");
-        _compareToggle.CornerRadius = new CornerRadius(15);
+        PillToggle(_compareToggle);
+        _compareToggle.Padding = new Thickness(10, 0, 11, 0);
         ToolTipService.SetToolTip(_compareToggle, "Stand vor und nach dem letzten Lauf vergleichen");
         _compareToggle.Click += (_, _) => ShowCompare(_compareToggle.IsChecked == true);
         second.Children.Add(_compareToggle);

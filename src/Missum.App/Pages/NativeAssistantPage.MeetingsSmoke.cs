@@ -52,7 +52,12 @@ public sealed partial class NativeAssistantPage
         MarkMeetingsDirty(stage: true);
         await Task.Delay(600);
         report["stageLoading"] = await CaptureMeetingsAsync("meetings-2b-stage-loading.png");
-        host.ApplyLocal(meetingId, new MeetingOp { Type = MeetingOpTypes.AgentStatus, ActorId = MeetingRoom.AgentId, Agent = new MeetingAgentStatus { State = "thinking", Status = "Denke nach …" } });
+        host.ApplyLocal(meetingId, new MeetingOp { Type = MeetingOpTypes.AgentStatus, ActorId = MeetingRoom.AgentId, Agent = new MeetingAgentStatus { State = "thinking", Status = "Denke nach …", ContextUsed = 12_000, ContextLimit = 262_144 } });
+        await WaitForAsync(() => Meetings.Room!.Read(s => s.Agent.ContextLimit == 262_144), "Kontextstand kam nicht an");
+        UpdateMeetingModelFooter();
+        report["contextTooltip"] = MeetingContextDescription;
+        if (MeetingContextDescription?.StartsWith("Kontext: ", StringComparison.Ordinal) != true || !MeetingContextDescription.Contains("Token", StringComparison.Ordinal))
+            throw new InvalidOperationException("Kontext-Tooltip im Meeting-Chat fehlt: " + MeetingContextDescription);
 
         // Renaming applies immediately and is visible to everyone.
         await Meetings.ApplySettingsAsync("Dennis", _settings.Current.MeetingCameraDeviceId, _settings.Current.MeetingMicrophoneDevice);
@@ -88,11 +93,34 @@ public sealed partial class NativeAssistantPage
         await Meetings.SetMicrophoneAsync(false);
         MarkMeetingsDirty(stage: true);
 
+        // Transcript tab: the lobby's words by participant, live, with chat and camera panel beside it.
+        var transcript = new Dictionary<string, object?>();
+        SelectMeetingTab(MeetingTab.Transcript);
+        var expectedLines = Meetings.Room!.Read(s => s.Transcript.Count);
+        await WaitForAsync(() => { RenderMeetingsIfDirty(); return TranscriptLinesShown == expectedLines; }, "Transkript zeigte nicht alle Zeilen");
+        transcript["lines"] = TranscriptLinesShown;
+        transcript["noPromptWindow"] = BodyGrid.Visibility == Visibility.Collapsed;
+        transcript["overlay"] = MeetingsOverlayHost.Visibility == Visibility.Visible;
+        transcript["chatSidebar"] = MeetingChatHost.Visibility == Visibility.Visible;
+        var spoken = "Wir nehmen die Location in Hamburg, wenn das Angebot bis Freitag kommt.";
+        var guestSpeaker = Meetings.Room!.Read(s => s.Participants.First(p => !p.IsAgent && p.Id != Meetings.LocalParticipantId));
+        App.Current.GetService<MeetingHostService>().ApplyLocal(Meetings.Room!.Read(s => s.Id), new MeetingOp
+        {
+            Type = MeetingOpTypes.TranscriptAdd, ActorId = guestSpeaker.Id, ActorName = guestSpeaker.Name,
+            Transcript = new MeetingTranscriptEntry(Guid.NewGuid(), guestSpeaker.Id, guestSpeaker.Name, spoken, DateTimeOffset.UtcNow),
+        });
+        await WaitForAsync(() => { RenderMeetingsIfDirty(); return TranscriptLinesShown == expectedLines + 1; }, "Neue Zeile kam nicht an");
+        transcript["streams"] = !TranscriptRevealDone;
+        await WaitForAsync(() => TranscriptRevealDone, "Zeile wurde nicht fertig angezeigt");
+        report["transcriptTab"] = await CaptureMeetingsAsync("meetings-2e-transcript.png");
+        report["transcript"] = transcript;
+
         SelectMeetingTab(MeetingTab.Notes);
         await Task.Delay(700);
         report["notes"] = await CaptureMeetingsAsync("meetings-3-notes.png");
         var overlayOnNotes = MeetingsOverlayHost.Visibility == Visibility.Visible;
         var rework = new Dictionary<string, object?>();
+        foreach (var (key, value) in transcript) rework["transcript." + key] = value;
         rework["notesToolbar"] = _notesToolbar?.Parent is not null;
         var notesDocument = Meetings.Room!.Read(s => s.Documents[0].Id);
         rework["noTitleBlock"] = Meetings.Room!.Read(s => s.Documents[0].Blocks.FirstOrDefault()?.Kind != "h1");
@@ -254,7 +282,7 @@ public sealed partial class NativeAssistantPage
         rework["hostRenameLocks"] = true;
         await File.WriteAllTextAsync(Path.Combine(App.Current.DataDirectory, "native-meetings-validation.json"),
             JsonSerializer.Serialize(report, MeetingJson.Indented));
-        if (tabs != 3 || !chatRestored || !meetingBack || !chatVisible || !lobbyNameField || !mentionOpened || !headerTabs || overlayOnStage || !overlayOnNotes || !overlayOnBoard || !filesSaved
+        if (tabs != 4 || !chatRestored || !meetingBack || !chatVisible || !lobbyNameField || !mentionOpened || !headerTabs || overlayOnStage || !overlayOnNotes || !overlayOnBoard || !filesSaved
             || !blockedWithoutProject || elementsRendered < 5 || arrowsRendered < 4 || !panned || !pickerVisible || !pickerOpened)
             throw new InvalidOperationException("Claude Meetings layout check failed: " + JsonSerializer.Serialize(report["checks"]));
         if (rework.Any(pair => pair.Value is false))

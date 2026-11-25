@@ -301,7 +301,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                 _mode = newMode;
                 _running = _changeReceiptState.IsPromptPending(_session)
                     || (S(data, "isRunning") == "True" && !_finishedSessions.Contains(_session));
-                ModeLabel.Text = _mode switch { "coding" => "Codex", "claudescience" => "Claude Science", "claudemeetings" => "Claude Meetings", "webdesign" => "Webdesign", _ => "ChatGPT" };
+                ModeLabel.Text = _mode switch { "coding" => "Codex", "claudescience" => "Claude Science", "claudemeetings" => "Claude Meetings", "webdesign" => "Webdesign", "modelhub" => "Model Hub", _ => "ChatGPT" };
                 ChatStatus = _running && !S(data, "runStatus").StartsWith("Modell generiert", StringComparison.Ordinal) ? S(data, "runStatus") + "  " + S(data, "runDetail") : "";
                 _persistentAction = S(data, "selectedExtensionActionId");
                 if (_persistentAction == BuiltInActionIds.DeepResearch) _persistentAction = null;
@@ -338,6 +338,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                 SyncResearchSession();
                 SyncMeetingsSession();
                 SyncWebdesignSession();
+                SyncModelHubSession();
                 // Closed tool details and older pages intentionally omit URLs.
                 // Load only the compact source index, independently of the tab.
                 if (!_selectionInputSmokeActive && (changed || type == "state.snapshot"))
@@ -735,6 +736,12 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     }
     public async void OnToggleInspector(object sender, RoutedEventArgs e)
     {
+        if (IsModelHubMode)
+        {
+            _hubPanelRequested = Inspector.Visibility != Visibility.Visible;
+            UpdateResponsiveLayout();
+            return;
+        }
         if (IsMeetingsMode)
         {
             // In Claude Meetings the right sidebar is the meeting chat.
@@ -863,24 +870,30 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
         if (Inspector is null || InspectorColumn is null || AssistantFrame is null || InspectorToggle is null) return;
         var available = NativeInspectorLayout.HasRoom(AssistantFrame.ActualWidth);
         var meetings = IsMeetingsMode;
-        var visible = available && (meetings ? _meetingChatRequested : _inspectorRequested)
+        var modelHub = IsModelHubMode;
+        var visible = available && (meetings ? _meetingChatRequested : modelHub ? _hubPanelRequested : _inspectorRequested)
             && !(FullWidthViewActive && _websiteHidesInspector);
-        var width = visible ? meetings ? MeetingChatWidth : NativeInspectorLayout.SidebarWidth : 0;
-        if (Inspector.Width != (meetings ? MeetingChatWidth : NativeInspectorLayout.SidebarWidth))
-            Inspector.Width = meetings ? MeetingChatWidth : NativeInspectorLayout.SidebarWidth;
+        var panelWidth = meetings ? MeetingChatWidth : modelHub ? ModelHubPanelWidth : NativeInspectorLayout.SidebarWidth;
+        var width = visible ? panelWidth : 0;
+        if (Inspector.Width != panelWidth) Inspector.Width = panelWidth;
         var chatVisibility = meetings ? Visibility.Visible : Visibility.Collapsed;
         if (MeetingChatHost.Visibility != chatVisibility)
         {
             MeetingChatHost.Visibility = chatVisibility;
-            InspectorScroll.Visibility = meetings ? Visibility.Collapsed : Visibility.Visible;
             if (meetings) { _meetingChatSignature = null; MarkMeetingsDirty(chat: true); }
         }
+        // The Model Hub's right sidebar shows downloads and errors only.
+        if (_hubPanel is not null) _hubPanel.Visibility = modelHub ? Visibility.Visible : Visibility.Collapsed;
+        var inspectorScroll = meetings || modelHub ? Visibility.Collapsed : Visibility.Visible;
+        if (InspectorScroll.Visibility != inspectorScroll) InspectorScroll.Visibility = inspectorScroll;
         if (InspectorColumn.Width.Value != width) InspectorColumn.Width = new(width);
         var visibility = visible ? Visibility.Visible : Visibility.Collapsed;
         if (Inspector.Visibility != visibility) Inspector.Visibility = visibility;
         InspectorToggle.IsEnabled = available;
         var label = meetings
             ? !available ? "Chat bei größerem Fenster verfügbar" : visible ? "Meeting-Chat schließen" : "Meeting-Chat öffnen"
+            : modelHub
+            ? !available ? "Downloads bei größerem Fenster verfügbar" : visible ? "Downloads schließen" : "Downloads öffnen"
             : !available ? "Ausgaben bei größerem Fenster verfügbar" : visible ? "Ausgaben schließen" : "Ausgaben öffnen";
         ToolTipService.SetToolTip(InspectorToggle, label);
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(InspectorToggle, label);
