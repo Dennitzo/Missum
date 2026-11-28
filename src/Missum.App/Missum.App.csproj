@@ -207,7 +207,7 @@
           Condition="'$(DesignTimeBuild)' != 'true' and '$(SkipPublicationRendererBundle)' != 'true'">
     <RemoveDir Directories="$(PublicationRendererPublishDir)" />
     <MSBuild Projects="..\..\tools\Missum.Publication.Cli\Missum.Publication.Cli.csproj"
-             Targets="Restore;Publish" BuildInParallel="false"
+             Targets="Publish" BuildInParallel="false"
              RemoveProperties="TargetFramework;TargetFrameworks;OutputPath;OutDir;IntermediateOutputPath;BaseIntermediateOutputPath;WindowsAppSDKSelfContained;IncludeAllContentForSelfExtract"
              Properties="Configuration=Release;RuntimeIdentifier=win-x64;SelfContained=true;PublishSingleFile=false;PublishTrimmed=false;PublishReadyToRun=false;DebugSymbols=false;DebugType=None;PublishDir=$(PublicationRendererPublishDir)" />
     <Error Condition="!Exists('$(PublicationRendererPublishDir)Missum.Publication.Cli.exe')"
