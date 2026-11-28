@@ -28,6 +28,11 @@ public sealed partial class NativeAssistantPage
             await VerifyLiquidGlassSmokeAsync(glassDirectory);
             return 0;
         }
+        if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_RESPONSIVENESS") == "glass-hover")
+        {
+            await VerifyLiquidGlassHoverAsync();
+            return 0;
+        }
         if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_MODELHUB") == "1")
         {
             await VerifyModelHubSmokeAsync();

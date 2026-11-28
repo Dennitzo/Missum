@@ -1182,6 +1182,7 @@ public partial class App : Application
         SetBrushColor("MissumInputBrush", palette.Background);
         SetBrushColor("MissumHoverBrush", palette.Background);
         SetBrushColor("MissumPressedBrush", palette.Background);
+        SetBrushColor("MissumHoverHighlightBrush", Windows.UI.Color.FromArgb(0x40, palette.Foreground.R, palette.Foreground.G, palette.Foreground.B));
         SetBrushColor("MissumStrokeBrush", palette.Foreground);
         SetBrushColor("MissumMenuBrush", palette.Background);
         SetBrushColor("MissumMenuStrokeBrush", palette.Foreground);
@@ -1231,6 +1232,11 @@ public partial class App : Application
         SetBrushColor("MissumTextBrush", isLight ? Windows.UI.Color.FromArgb(228, 0, 0, 0) : Microsoft.UI.Colors.White);
         SetBrushColor("MissumMutedTextBrush", isLight ? Windows.UI.Color.FromArgb(255, 0x51, 0x46, 0x5D) : Windows.UI.Color.FromArgb(255, 0x99, 0x99, 0x99));
         ApplyCodePalette(isLight);
+        // Neutral hover sheen (see MissumHoverButtonTemplate): the same light/dark veil over every
+        // surface, so a hover never changes hue between glass, accent lights and solid fills.
+        SetBrushColor("MissumHoverHighlightBrush", isLight
+            ? Windows.UI.Color.FromArgb(0x1A, 0x00, 0x00, 0x00)
+            : Windows.UI.Color.FromArgb(0x24, 0xFF, 0xFF, 0xFF));
         Windows.UI.Color window;
         if (isLight)
         {
@@ -1437,20 +1443,24 @@ public partial class App : Application
     private LinearGradientBrush? _glassRim;
     private LinearGradientBrush? _glassAccentRim;
 
-    // Standard WinUI control surfaces become glass: their resting background is the
-    // glass control material, their edge the glass rim. Hover/pressed stay translucent tints.
+    // Standard WinUI control surfaces become glass: their resting background is the glass
+    // control material, their edge the glass rim. Buttons keep that same acrylic in every
+    // state: swapping it for a translucent tint on hover replaced the frosted backdrop with
+    // an unfrosted color and made the glass jump in brightness and hue. The hover lights up
+    // the rim in the accent instead (no backdrop change at all).
     private static readonly (string Key, string Glass)[] GlassControlAliases =
     [
-        ("ButtonBackground", "MissumGlassControlBrush"), ("ButtonBackgroundPointerOver", "MissumHoverBrush"),
-        ("ButtonBackgroundPressed", "MissumPressedBrush"), ("ButtonBorderBrush", "MissumGlassRimBrush"),
-        ("ButtonBorderBrushPointerOver", "MissumGlassRimBrush"), ("ButtonBorderBrushPressed", "MissumGlassRimBrush"),
-        ("ToggleButtonBackground", "MissumGlassControlBrush"), ("ToggleButtonBackgroundPointerOver", "MissumHoverBrush"),
-        ("ToggleButtonBackgroundPressed", "MissumPressedBrush"), ("ToggleButtonBorderBrush", "MissumGlassRimBrush"),
-        ("RepeatButtonBackground", "MissumGlassControlBrush"), ("RepeatButtonBackgroundPointerOver", "MissumHoverBrush"),
-        ("RepeatButtonBackgroundPressed", "MissumPressedBrush"),
+        ("ButtonBackground", "MissumGlassControlBrush"), ("ButtonBackgroundPointerOver", "MissumGlassControlBrush"),
+        ("ButtonBackgroundPressed", "MissumGlassControlBrush"), ("ButtonBorderBrush", "MissumGlassRimBrush"),
+        ("ButtonBorderBrushPointerOver", "MissumGlassAccentRimBrush"), ("ButtonBorderBrushPressed", "MissumGlassAccentRimBrush"),
+        ("ToggleButtonBackground", "MissumGlassControlBrush"), ("ToggleButtonBackgroundPointerOver", "MissumGlassControlBrush"),
+        ("ToggleButtonBackgroundPressed", "MissumGlassControlBrush"), ("ToggleButtonBorderBrush", "MissumGlassRimBrush"),
+        ("ToggleButtonBorderBrushPointerOver", "MissumGlassAccentRimBrush"), ("ToggleButtonBorderBrushPressed", "MissumGlassAccentRimBrush"),
+        ("RepeatButtonBackground", "MissumGlassControlBrush"), ("RepeatButtonBackgroundPointerOver", "MissumGlassControlBrush"),
+        ("RepeatButtonBackgroundPressed", "MissumGlassControlBrush"),
         ("DropDownButtonBackground", "MissumGlassControlBrush"),
-        ("SplitButtonBackground", "MissumGlassControlBrush"), ("SplitButtonBackgroundPointerOver", "MissumHoverBrush"),
-        ("SplitButtonBackgroundPressed", "MissumPressedBrush"),
+        ("SplitButtonBackground", "MissumGlassControlBrush"), ("SplitButtonBackgroundPointerOver", "MissumGlassControlBrush"),
+        ("SplitButtonBackgroundPressed", "MissumGlassControlBrush"),
         ("ControlFillColorDefaultBrush", "MissumGlassControlBrush"), ("ControlFillColorSecondaryBrush", "MissumHoverBrush"),
         ("ControlFillColorTertiaryBrush", "MissumPressedBrush"),
         ("ControlElevationBorderBrush", "MissumGlassRimBrush"), ("ControlStrokeColorDefaultBrush", "MissumGlassRimBrush"),

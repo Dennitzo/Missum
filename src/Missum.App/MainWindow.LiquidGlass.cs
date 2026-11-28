@@ -33,8 +33,7 @@ public sealed partial class MainWindow
         if (!App.Current.IsLiquidGlassEnabled || Content is not Grid root) return;
         _liquidGlassSceneBase = new SolidColorBrush(Microsoft.UI.Colors.Black);
         _liquidGlassScene = new Grid { IsHitTestVisible = false, Background = _liquidGlassSceneBase };
-        var lightCount = LiquidGlassAppearance.SceneLights(false, 0, 0).Count;
-        for (var index = 0; index < lightCount; index++)
+        for (var index = 0; index < LiquidGlassAppearance.MaximumSceneLights; index++)
         {
             var light = new RadialGradientBrush { MappingMode = BrushMappingMode.RelativeToBoundingBox };
             _liquidGlassLights.Add(light);
@@ -57,10 +56,12 @@ public sealed partial class MainWindow
         }
 
         _liquidGlassSceneBase.Color = Color(LiquidGlassAppearance.SceneBase(Argb(glass.Window)));
-        var lights = LiquidGlassAppearance.SceneLights(glass.Light, Argb(glass.Accent), Argb(glass.Background));
-        for (var index = 0; index < _liquidGlassLights.Count && index < lights.Count; index++)
+        var lights = LiquidGlassAppearance.SceneLights(glass.Light, Argb(glass.Accent), Argb(glass.Background), Argb(glass.Window));
+        for (var index = 0; index < _liquidGlassLights.Count; index++)
         {
             var brush = _liquidGlassLights[index];
+            // Lights that would darken the scene are left out (see SceneLights).
+            if (index >= lights.Count) { brush.GradientStops.Clear(); continue; }
             var light = lights[index];
             brush.Center = new Point(light.CenterX, light.CenterY);
             brush.GradientOrigin = brush.Center;

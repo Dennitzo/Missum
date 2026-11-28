@@ -140,7 +140,8 @@ public sealed class LiquidGlassSettingsTests
     public void SceneIsOpaqueAndLitByAccentAndBackground(bool light)
     {
         Assert.Equal(0xFF2A2342u, LiquidGlassAppearance.SceneBase(0x002A2342));
-        var lights = LiquidGlassAppearance.SceneLights(light, 0xA970FF, 0x261D45);
+        var lights = LiquidGlassAppearance.SceneLights(light, 0xA970FF, 0x261D45, 0x1A1A1A);
+        Assert.Contains(lights, item => (item.Color & 0x00FFFFFF) != 0xA970FF && (item.Color & 0x00FFFFFF) != 0xFFFFFF);
         Assert.Contains(lights, item => (item.Color & 0x00FFFFFF) == 0xA970FF);
         Assert.All(lights, item =>
         {
@@ -158,6 +159,21 @@ public sealed class LiquidGlassSettingsTests
         Assert.True(left.Color >> 24 <= 0x50);
         Assert.Equal(1 - left.CenterX, right.CenterX, 6);
         Assert.Equal((left.CenterY, left.RadiusX, left.RadiusY, left.Color), (right.CenterY, right.RadiusX, right.RadiusY, right.Color));
+    }
+
+    [Fact]
+    public void ADarkBackgroundNeverDarkensTheSceneIntoStreaks()
+    {
+        // Pink accent on #181818 in dark mode: the window base (#1F1F1F) is lighter than the
+        // background, so the background light would only draw dark rounded bands. It is left out.
+        const uint window = 0x1F1F1F;
+        var lights = LiquidGlassAppearance.SceneLights(false, 0xD95BA8, 0x181818, window);
+        Assert.DoesNotContain(lights, item => (item.Color & 0x00FFFFFF) == 0x181818);
+        Assert.Equal(2, lights.Count(item => (item.Color & 0x00FFFFFF) == 0xD95BA8));
+        Assert.InRange(lights.Count, 1, LiquidGlassAppearance.MaximumSceneLights);
+        // A lighter background still tints the scene.
+        Assert.Contains(LiquidGlassAppearance.SceneLights(false, 0xD95BA8, 0x3A2A55, window),
+            item => (item.Color & 0x00FFFFFF) == 0x3A2A55);
     }
 
     [Theory]

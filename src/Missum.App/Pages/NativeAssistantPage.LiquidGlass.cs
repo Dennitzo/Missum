@@ -18,7 +18,7 @@ public sealed partial class NativeAssistantPage
     /// Liquid Glass chrome (startup decision, applies after a restart): the sidebar and
     /// inspector float as rounded native glass panes, and the composer floats over the
     /// conversation so messages scroll beneath its glass. Behind the composer, composition
-    /// visuals add a lift shadow, an accent glow, an accent reflection near the send button
+    /// visuals add an accent glow, an accent reflection near the send button
     /// and a top sheen; the composer acrylic frosts them, so the accent shows in the glass.
     /// Without the setting nothing here changes the classic layout.
     /// </summary>
@@ -90,8 +90,9 @@ public sealed partial class NativeAssistantPage
     }
 
     /// <summary>
-    /// Composition visuals behind the composer glass: an accent glow around it, a soft lift
-    /// shadow below it, an accent reflection near the send button and a sheen along the top.
+    /// Composition visuals behind the composer glass: an accent glow around it, an accent
+    /// reflection near the send button and a sheen along the top. No dark lift shadow: its black
+    /// ellipse showed as dark rounded streaks in the chat beside and below the composer.
     /// All are radial gradients (no LayerVisual shadows, which clip to the layer and render
     /// black outside their content); the composer acrylic frosts the parts beneath it.
     /// </summary>
@@ -100,7 +101,6 @@ public sealed partial class NativeAssistantPage
         private readonly ContainerVisual _root;
         private readonly CompositionRoundedRectangleGeometry _clipGeometry;
         private readonly (SpriteVisual Visual, CompositionRadialGradientBrush Brush) _glow;
-        private readonly (SpriteVisual Visual, CompositionRadialGradientBrush Brush) _lift;
         private readonly (SpriteVisual Visual, CompositionRadialGradientBrush Brush) _reflection;
         private readonly (SpriteVisual Visual, CompositionRadialGradientBrush Brush) _sheen;
 
@@ -110,7 +110,6 @@ public sealed partial class NativeAssistantPage
             _clipGeometry = compositor.CreateRoundedRectangleGeometry();
             _clipGeometry.CornerRadius = new Vector2(ComposerGlassRadius);
             _glow = Spot(compositor, clipToComposer: false);
-            _lift = Spot(compositor, clipToComposer: false);
             _reflection = Spot(compositor, clipToComposer: true);
             _sheen = Spot(compositor, clipToComposer: true);
         }
@@ -134,10 +133,6 @@ public sealed partial class NativeAssistantPage
             // Accent glow: light spilling around the glass and, frosted, into it.
             var glow = new Vector2(lights.AccentGlowSpread, lights.AccentGlowRise);
             Place(_glow, -glow, size + glow * 2, half + glow, half + glow, lights.AccentGlowColor, fadeStart: 0.62f);
-            // Lift: a soft shadow ellipse below the floating composer.
-            var lift = new Vector2(lights.LiftSpread);
-            Place(_lift, new Vector2(0, size.Y - lift.Y), new Vector2(size.X, lift.Y * 2 + lights.LiftOffsetY),
-                new Vector2(half.X, lift.Y + lights.LiftOffsetY), new Vector2(half.X, lift.Y), lights.LiftShadowColor, fadeStart: 0.25f);
             // Accent reflection where the accent send button sits (bottom right).
             Place(_reflection, Vector2.Zero, size, new Vector2(size.X - 44, size.Y - 26),
                 new Vector2(Math.Min(size.X * 0.45f, 280), Math.Max(size.Y * 0.9f, 60)), lights.AccentReflectionColor, fadeStart: 0f);

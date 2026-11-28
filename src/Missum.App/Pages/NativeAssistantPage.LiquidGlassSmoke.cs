@@ -11,6 +11,64 @@ public sealed partial class NativeAssistantPage
 {
     private static readonly JsonSerializerOptions LiquidGlassReportOptions = new() { WriteIndented = true };
 
+    private async Task VerifyLiquidGlassHoverAsync()
+    {
+        if (App.Current.LiquidGlass is null || Environment.GetEnvironmentVariable("ASSISTANT_DISABLE_RUNTIME_AUTOSTART") != "1")
+            throw new InvalidOperationException("Der Hover-Test benötigt ein isoliertes Profil mit aktivem Liquid Glass.");
+
+        var checks = new List<object>();
+        foreach (var button in new[] { ModeButton, ModelButton, DictationButton })
+        {
+            button.ApplyTemplate();
+            UpdateLayout();
+            if (button.ActualWidth <= 0 || button.ActualHeight <= 0)
+                throw new InvalidOperationException($"Schaltfläche {button.Name} ist im Testfenster nicht sichtbar.");
+            var parts = Descendants(button).OfType<Border>().ToArray();
+            var surface = parts.Single(part => part.Name == "HoverSurface");
+            var highlight = parts.Single(part => part.Name == "HoverHighlight");
+            void Enter(string state)
+            {
+                if (!VisualStateManager.GoToState(button, state, true))
+                    throw new InvalidOperationException($"Zustand {button.Name}.{state} fehlt.");
+            }
+            (double, double, CornerRadius, Thickness, Brush?, Brush?) GeometryAndMaterial() =>
+                (surface.ActualWidth, surface.ActualHeight, surface.CornerRadius, surface.BorderThickness,
+                    surface.Background, surface.BorderBrush);
+
+            Enter("Normal");
+            var initial = GeometryAndMaterial();
+            var overlayBrush = highlight.Background;
+            if (overlayBrush is null || highlight.IsHitTestVisible || highlight.Opacity != 0)
+                throw new InvalidOperationException($"Ungültiger Ruhezustand bei {button.Name}.");
+            Enter("PointerOver");
+            var hoveredOpacity = highlight.Opacity;
+            if (!initial.Equals(GeometryAndMaterial()) || !ReferenceEquals(highlight.Background, overlayBrush))
+                throw new InvalidOperationException($"Hover verändert die Form oder das Material bei {button.Name}.");
+            Enter("Pressed");
+            var pressedOpacity = highlight.Opacity;
+            if (!initial.Equals(GeometryAndMaterial()) || !ReferenceEquals(highlight.Background, overlayBrush)
+                || hoveredOpacity <= 0 || pressedOpacity <= hoveredOpacity)
+                throw new InvalidOperationException($"Material, Form oder Hervorhebung bei {button.Name} instabil.");
+
+            // Reverse the transition before it can finish, then check its settled target.
+            Enter("Normal");
+            await WaitForNativePreviewFrameAsync();
+            Enter("PointerOver");
+            await Task.Delay(250, _lifetime.Token);
+            UpdateLayout();
+            if (!initial.Equals(GeometryAndMaterial()) || highlight.Opacity != hoveredOpacity || !ReferenceEquals(highlight.Background, overlayBrush))
+                throw new InvalidOperationException($"Erneuter Hover bei {button.Name} instabil.");
+            Enter("Normal");
+            await Task.Delay(250, _lifetime.Token);
+            UpdateLayout();
+            if (!initial.Equals(GeometryAndMaterial()) || highlight.Opacity != 0)
+                throw new InvalidOperationException($"Ruhezustand nach Hover bei {button.Name} instabil: Deckkraft {highlight.Opacity}, vorher {initial}, jetzt {GeometryAndMaterial()}.");
+            checks.Add(new { control = button.Name, hoveredOpacity, pressedOpacity });
+        }
+        await File.WriteAllTextAsync(Path.Combine(App.Current.DataDirectory, "native-glass-hover-validation.json"),
+            JsonSerializer.Serialize(new { passed = true, checks }, LiquidGlassReportOptions), _lifetime.Token);
+    }
+
     /// <summary>
     /// Visual Liquid Glass smoke for the isolated profile. The acrylic backdrop is
     /// composed by DWM and is invisible to RenderTargetBitmap, so every variant is
@@ -45,6 +103,8 @@ public sealed partial class NativeAssistantPage
                 ("dark-accent", AppTheme.Dark, "#A970FF", "#261D45"),
                 ("light-accent", AppTheme.Light, "#4C8DFF", "#4C8DFF"),
                 ("dark-cyberpunk", AppTheme.Dark, AppSettings.CyberpunkAccentColor, "#261D45"),
+                // Pink accent on a near-black background: the lights must not leave dark streaks.
+                ("dark-pink", AppTheme.Dark, "#D95BA8", "#181818"),
             ];
             foreach (var variant in variants)
             {
@@ -55,6 +115,34 @@ public sealed partial class NativeAssistantPage
                 WelcomePanel.Visibility = Visibility.Collapsed;
                 checks.Add(await CaptureLiquidGlassVariantAsync(directory, ++step, $"{prefix}-{variant.Name}", expectGlass));
             }
+
+            // Collapsing and expanding the left sidebar keeps its rounded glass pane.
+            OnToggleSidebar(this, new RoutedEventArgs());
+            await Task.Delay(300);
+            OnToggleSidebar(this, new RoutedEventArgs());
+            await Task.Delay(300);
+            if (expectGlass && (Sidebar.CornerRadius.TopLeft != 20 || Sidebar.BorderThickness.Left != 1 || Sidebar.Background is not AcrylicBrush))
+                throw new InvalidOperationException($"Seitenleiste nach Ein-/Ausklappen ohne Glas: Ecken {Sidebar.CornerRadius}, Rand {Sidebar.BorderThickness}.");
+            checks.Add(await CaptureLiquidGlassVariantAsync(directory, ++step, $"{prefix}-sidebar-toggled", expectGlass));
+
+            // Hover moving from element to element (all three button templates). The external capture
+            // records frames meanwhile, so a flash or color jump between the states shows up.
+            Control[] hoverTargets = [ModeButton, InspectorProjectRow, ChangesSummaryButton, ModelButton, DictationButton];
+            checks.Add(await CaptureLiquidGlassVariantAsync(directory, ++step, $"{prefix}-hover-sequence", expectGlass, async () =>
+            {
+                await Task.Delay(1200);
+                for (var round = 0; round < 2; round++)
+                {
+                    for (var index = 0; index < hoverTargets.Length; index++)
+                    {
+                        if (index > 0) VisualStateManager.GoToState(hoverTargets[index - 1], "Normal", true);
+                        VisualStateManager.GoToState(hoverTargets[index], "PointerOver", true);
+                        await Task.Delay(350);
+                    }
+                    VisualStateManager.GoToState(hoverTargets[^1], "Normal", true);
+                    await Task.Delay(350);
+                }
+            }));
 
             // The "+" tool menu stays opaque for readability, also with Liquid Glass.
             app.ApplyTheme(AppTheme.Dark);
@@ -136,7 +224,8 @@ public sealed partial class NativeAssistantPage
         return null;
     }
 
-    private static async Task<object> CaptureLiquidGlassVariantAsync(string directory, int step, string name, bool glass)
+    private static async Task<object> CaptureLiquidGlassVariantAsync(string directory, int step, string name, bool glass,
+        Func<Task>? whileCapturing = null)
     {
         var app = App.Current;
         var window = app.MainWindow!;
@@ -177,6 +266,7 @@ public sealed partial class NativeAssistantPage
         {
             step, name, x = position.X, y = position.Y, width = size.Width, height = size.Height,
         }));
+        if (whileCapturing is not null) await whileCapturing();
         var deadline = DateTimeOffset.UtcNow.AddSeconds(90);
         while (!File.Exists(done))
         {

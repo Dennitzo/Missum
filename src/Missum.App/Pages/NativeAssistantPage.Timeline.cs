@@ -303,10 +303,8 @@ public sealed partial class NativeAssistantPage
 
     private static Border CreatePromptPreview(PromptTimelinePreviewContent content)
     {
-        var grid = new Grid { Width = 300, ColumnSpacing = 10 };
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        var text = new StackPanel { Spacing = 5 };
+        // Text only: no bookmark icon beside the prompt.
+        var text = new StackPanel { Width = 300, Spacing = 5 };
         text.Children.Add(new TextBlock
         {
             Text = content.Prompt,
@@ -327,16 +325,6 @@ public sealed partial class NativeAssistantPage
                 MaxLines = 3,
             });
         }
-        grid.Children.Add(text);
-        var bookmark = new FontIcon
-        {
-            Glyph = "\uE735",
-            FontSize = 14,
-            Foreground = NativeIconPalette.BrushFor("plan"),
-            VerticalAlignment = VerticalAlignment.Top,
-        };
-        Grid.SetColumn(bookmark, 1);
-        grid.Children.Add(bookmark);
         return new Border
         {
             // Opaque like every menu: without the tooltip box behind it, the card alone keeps the text readable.
@@ -345,7 +333,7 @@ public sealed partial class NativeAssistantPage
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(14),
             Padding = new Thickness(12, 10, 12, 11),
-            Child = grid,
+            Child = text,
         };
     }
 

@@ -34,8 +34,7 @@ public sealed partial class FloatingToolbar : Canvas
         _pill.Translation = new System.Numerics.Vector3(0, 0, 32);
         _pill.Shadow = new ThemeShadow();
         _pill.SizeChanged += (_, _) => Place();
-        _pill.PointerEntered += (_, _) => { _hovered = true; UpdateSurface(); };
-        _pill.PointerExited += (_, _) => { _hovered = false; UpdateSurface(); };
+        PointerHover.Track(_pill, value => { _hovered = value; UpdateSurface(); });
         AutomationProperties.SetName(_pill, name);
         ActualThemeChanged += (_, _) => UpdateSurface();
         UpdateSurface();

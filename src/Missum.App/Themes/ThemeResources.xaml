@@ -55,6 +55,8 @@
   <SolidColorBrush x:Key="MissumLayerStrongBrush" Color="{ThemeResource MissumLayerStrongColor}" />
   <SolidColorBrush x:Key="MissumInputBrush" Color="{ThemeResource MissumLayerStrongColor}" />
   <SolidColorBrush x:Key="MissumHoverBrush" Color="{ThemeResource MissumLayerStrongColor}" />
+  <!-- Neutral sheen of the hover/pressed highlight (MissumHoverButtonTemplate); App sets it per theme. -->
+  <SolidColorBrush x:Key="MissumHoverHighlightBrush" Color="#24FFFFFF" />
   <SolidColorBrush x:Key="MissumPressedBrush" Color="{ThemeResource MissumLayerStrongColor}" />
   <SolidColorBrush x:Key="MissumStrokeBrush" Color="{ThemeResource MissumStrokeColor}" />
   <!-- Always opaque, also with Liquid Glass: menus with many text rows stay readable. -->
@@ -185,6 +187,48 @@
     <Setter Property="MinHeight" Value="32" />
     <Setter Property="Padding" Value="12,6" />
   </Style>
+
+  <!-- One hover for every button in the chat window (plain rows, model picker, round icons), in
+       Liquid Glass and classic alike. The surface never changes in any state: no brush swap (which
+       made glass surfaces jump between differently tinted colors), no corner morph and no color
+       interpolation (a transition from Transparent, i.e. transparent white, flashed light). Only a
+       single neutral highlight above the surface fades by opacity: lighter on hover, stronger
+       while pressed. A neutral white/black sheen looks the same over glass, accent lights and
+       solid fills. Reversing mid-transition simply retargets the opacity. -->
+  <ControlTemplate x:Key="MissumHoverButtonTemplate" TargetType="Button">
+    <Grid x:Name="HoverButtonRoot" Background="Transparent" Control.IsTemplateFocusTarget="True">
+      <VisualStateManager.VisualStateGroups>
+        <VisualStateGroup x:Name="CommonStates">
+          <!-- Every state sets the highlight explicitly: WinUI does not reliably restore a value whose
+               setter is removed while its opacity transition is running, which left hovers stuck. -->
+          <VisualState x:Name="Normal">
+            <VisualState.Setters><Setter Target="HoverHighlight.Opacity" Value="0" /><Setter Target="HoverButtonRoot.Opacity" Value="1" /></VisualState.Setters>
+          </VisualState>
+          <VisualState x:Name="PointerOver">
+            <VisualState.Setters><Setter Target="HoverHighlight.Opacity" Value="0.6" /><Setter Target="HoverButtonRoot.Opacity" Value="1" /></VisualState.Setters>
+          </VisualState>
+          <VisualState x:Name="Pressed">
+            <VisualState.Setters><Setter Target="HoverHighlight.Opacity" Value="1" /><Setter Target="HoverButtonRoot.Opacity" Value="1" /></VisualState.Setters>
+          </VisualState>
+          <VisualState x:Name="Disabled">
+            <VisualState.Setters><Setter Target="HoverButtonRoot.Opacity" Value="0.4" /><Setter Target="HoverHighlight.Opacity" Value="0" /></VisualState.Setters>
+          </VisualState>
+        </VisualStateGroup>
+      </VisualStateManager.VisualStateGroups>
+      <Border x:Name="HoverSurface" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+              BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{TemplateBinding CornerRadius}" />
+      <Border x:Name="HoverHighlight" IsHitTestVisible="False" Opacity="0" Margin="{TemplateBinding BorderThickness}"
+              Background="{ThemeResource MissumHoverHighlightBrush}" CornerRadius="{TemplateBinding CornerRadius}">
+        <Border.OpacityTransition><ScalarTransition Duration="0:0:0.12" /></Border.OpacityTransition>
+      </Border>
+      <ContentPresenter Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}"
+                        Foreground="{TemplateBinding Foreground}" Padding="{TemplateBinding Padding}"
+                        Margin="{TemplateBinding BorderThickness}"
+                        HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                        VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
+                        AutomationProperties.AccessibilityView="Raw" />
+    </Grid>
+  </ControlTemplate>
 
   <Style x:Key="MissumPrimaryButtonStyle" TargetType="Button" BasedOn="{StaticResource AccentButtonStyle}">
     <Setter Property="Background" Value="{ThemeResource MissumAccentBrush}" />

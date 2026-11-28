@@ -120,13 +120,15 @@ public static class LiquidGlassAppearance
     /// sidebar and, mirrored, from the top right behind the right sidebar; the background
     /// color comes from the bottom right, plus a faint white sky light.
     /// The chat center stays calm; the lights only color what the glass frosts.
+    /// A light darker than the window base is left out: it would not tint but darken, and its
+    /// shallow gradient shows as dark rounded bands in the chat (e.g. a near-black background).
     /// </summary>
-    public static IReadOnlyList<LiquidGlassLight> SceneLights(bool light, uint accentArgb, uint backgroundArgb)
+    public static IReadOnlyList<LiquidGlassLight> SceneLights(bool light, uint accentArgb, uint backgroundArgb, uint windowArgb)
     {
         var accent = accentArgb & 0x00FFFFFF;
         var background = Mix(backgroundArgb, light ? 0xFFFFFFu : 0x000000u, light ? 0.15 : 0.0) & 0x00FFFFFF;
         var accentGlow = ((light ? 0x33u : 0x46u) << 24) | accent;
-        return
+        LiquidGlassLight[] lights =
         [
             // Halved on request (intensity and reach): the accent stays behind the sidebars
             // instead of shining into the chat text. The right glow mirrors the left one exactly.
@@ -135,7 +137,15 @@ public static class LiquidGlassAppearance
             new(0.98, 0.98, 0.50, 0.65, ((light ? 0x80u : 0x99u) << 24) | background),
             new(0.70, 0.00, 0.40, 0.35, ((light ? 0xA6u : 0x1Fu) << 24) | 0xFFFFFF),
         ];
+        var baseLuma = Luma(windowArgb);
+        return [.. lights.Where(item => Luma(item.Color) >= baseLuma)];
     }
+
+    /// <summary>Upper bound of <see cref="SceneLights"/>; the window creates this many light fields.</summary>
+    public const int MaximumSceneLights = 4;
+
+    private static double Luma(uint argb) =>
+        0.2126 * ((argb >> 16) & 0xFF) + 0.7152 * ((argb >> 8) & 0xFF) + 0.0722 * (argb & 0xFF);
 
     /// <summary>
     /// Lights behind the floating composer: a lift shadow, an accent glow around the

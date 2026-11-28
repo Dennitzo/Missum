@@ -691,8 +691,12 @@ public sealed partial class NativeAssistantPage
     private void AttachOverlayManipulation(Border root)
     {
         MeetingsOverlayHost.RenderTransform = _overlayOffset;
-        root.PointerEntered += (_, _) => { _overlayHovered = true; UpdateOverlayGlass(); };
-        root.PointerExited += (_, _) => { _overlayHovered = false; UpdateOverlayGlass(); if (_overlayGesture is null) ProtectedCursor = null; };
+        Controls.PointerHover.Track(root, value =>
+        {
+            _overlayHovered = value;
+            UpdateOverlayGlass();
+            if (!value && _overlayGesture is null) ProtectedCursor = null;
+        });
         root.PointerPressed += (_, args) =>
         {
             if (args.OriginalSource is DependencyObject source && IsInsideButton(source, root)) return;

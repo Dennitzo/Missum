@@ -731,6 +731,9 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     }
     private void ApplyJoinedFrameCorners()
     {
+        // Liquid Glass keeps its floating, rounded glass panes (set once in ApplyLiquidGlassChrome);
+        // the classic joined frame would replace them with square, glass-less borders.
+        if (App.Current.IsLiquidGlassEnabled) return;
         Sidebar.CornerRadius = new CornerRadius(0);
         Sidebar.BorderThickness = new Thickness(0, 1, 1, 0);
         AssistantFrame.CornerRadius = new CornerRadius(0);

@@ -12,9 +12,10 @@ namespace Missum.App.Controls;
 /// </summary>
 internal static class MarqueeText
 {
-    private const double PixelsPerSecond = 42;
-    private const double StartPause = 0.7;
-    private const double EndPause = 1.1;
+    private const double PixelsPerSecond = 36;
+    private const double StartPause = 0.6;
+    private const double EndPause = 1.2;
+    private const int HoverDelayMilliseconds = 350;
 
     public static FrameworkElement Create(string text, double fontSize, Brush foreground, Control trigger)
     {
@@ -28,6 +29,8 @@ internal static class MarqueeText
         {
             Text = text, FontSize = fontSize, Foreground = foreground,
             TextWrapping = TextWrapping.NoWrap, RenderTransform = transform,
+            // Rasterized once and moved as a bitmap: no glyph re-rendering (shimmer) per frame.
+            CacheMode = new BitmapCache(),
         };
         // A canvas never constrains its child, so the full line exists and the host clips it.
         var track = new Canvas { Visibility = Visibility.Collapsed, IsHitTestVisible = false };
@@ -51,19 +54,18 @@ internal static class MarqueeText
             // keyboard focus and is the only way to read the full description.
             if (overflow <= 1) return;
             var travel = overflow / PixelsPerSecond;
+            // Calm back-and-forth: pause, glide to the end, pause, glide back. No jump to the start.
             var animation = new DoubleAnimationUsingKeyFrames { RepeatBehavior = RepeatBehavior.Forever };
-            void Key(double seconds, double value, bool jump = false)
+            var ease = new SineEase { EasingMode = EasingMode.EaseInOut };
+            void Key(double seconds, double value) => animation.KeyFrames.Add(new EasingDoubleKeyFrame
             {
-                var time = KeyTime.FromTimeSpan(TimeSpan.FromSeconds(seconds));
-                animation.KeyFrames.Add(jump
-                    ? new DiscreteDoubleKeyFrame { KeyTime = time, Value = value }
-                    : new LinearDoubleKeyFrame { KeyTime = time, Value = value });
-            }
-            Key(0, 0, jump: true);
+                KeyTime = KeyTime.FromTimeSpan(TimeSpan.FromSeconds(seconds)), Value = value, EasingFunction = ease,
+            });
+            Key(0, 0);
             Key(StartPause, 0);
             Key(StartPause + travel, -overflow);
             Key(StartPause + travel + EndPause, -overflow);
-            Key(StartPause + travel + EndPause, 0, jump: true);
+            Key(StartPause + travel * 2 + EndPause, 0);
             Storyboard.SetTarget(animation, transform);
             Storyboard.SetTargetProperty(animation, nameof(TranslateTransform.X));
             storyboard = new Storyboard();
@@ -83,12 +85,44 @@ internal static class MarqueeText
             trimmed.Opacity = 1;
         }
 
-        trigger.PointerEntered += (_, _) => Start();
-        trigger.PointerExited += (_, _) => { if (trigger.FocusState == FocusState.Unfocused || trigger.FocusState == FocusState.Pointer) Stop(); };
-        trigger.PointerCanceled += (_, _) => Stop();
-        trigger.GotFocus += (_, _) => { if (trigger.FocusState == FocusState.Keyboard) Start(); };
-        trigger.LostFocus += (_, _) => Stop();
-        host.Unloaded += (_, _) => Stop();
+        // Only a deliberate hover starts the text: sweeping across the menu leaves every row still.
+        var hoverDelay = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread().CreateTimer();
+        hoverDelay.Interval = TimeSpan.FromMilliseconds(HoverDelayMilliseconds);
+        hoverDelay.IsRepeating = false;
+        hoverDelay.Tick += (_, _) => Start();
+
+        // PointerEntered/PointerExited bubble up from the row's children (icon, name, text), so an
+        // exit is real only once the pointer has left the row itself; otherwise every small move
+        // inside the row would restart the animation.
+        bool Inside(Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+        {
+            var point = e.GetCurrentPoint(trigger).Position;
+            return point.X >= 0 && point.Y >= 0 && point.X < trigger.ActualWidth && point.Y < trigger.ActualHeight;
+        }
+
+        var hovered = false;
+        var keyboardFocused = false;
+        trigger.PointerEntered += (_, _) =>
+        {
+            if (hovered) return;
+            hovered = true;
+            if (storyboard is null) hoverDelay.Start();
+        };
+        trigger.PointerExited += (_, e) =>
+        {
+            if (!hovered || Inside(e)) return;
+            hovered = false;
+            hoverDelay.Stop();
+            if (!keyboardFocused) Stop();
+        };
+        trigger.PointerCanceled += (_, _) => { hovered = false; hoverDelay.Stop(); if (!keyboardFocused) Stop(); };
+        trigger.GotFocus += (_, _) =>
+        {
+            keyboardFocused = trigger.FocusState == FocusState.Keyboard;
+            if (keyboardFocused) Start();
+        };
+        trigger.LostFocus += (_, _) => { keyboardFocused = false; if (!hovered) Stop(); };
+        host.Unloaded += (_, _) => { hovered = keyboardFocused = false; hoverDelay.Stop(); Stop(); };
         return host;
     }
 }

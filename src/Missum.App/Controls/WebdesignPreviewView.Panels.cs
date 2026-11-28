@@ -160,8 +160,7 @@ public sealed partial class WebdesignPreviewView
         _toolOverlay.Translation = new System.Numerics.Vector3(0, 0, 32);
         _toolOverlay.Shadow = new ThemeShadow();
         _toolOverlay.SizeChanged += (_, _) => PlaceOverlay();
-        _toolOverlay.PointerEntered += (_, _) => { _overlayHovered = true; UpdateOverlaySurface(); };
-        _toolOverlay.PointerExited += (_, _) => { _overlayHovered = false; UpdateOverlaySurface(); };
+        PointerHover.Track(_toolOverlay, value => { _overlayHovered = value; UpdateOverlaySurface(); });
         AutomationProperties.SetName(_toolOverlay, "Werkzeuge der Webseite");
         ActualThemeChanged += (_, _) => UpdateOverlaySurface();
         UpdateOverlaySurface();

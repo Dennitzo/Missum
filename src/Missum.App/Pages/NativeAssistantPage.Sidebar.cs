@@ -147,8 +147,8 @@ public sealed partial class NativeAssistantPage
                 button.IsHitTestVisible = visible;
             }
         }
-        row.PointerEntered += (_, _) => { hovered = true; Update(); };
-        row.PointerExited += (_, _) => { hovered = false; Update(); };
+        // Bubbled child exits (title, buttons) must not hide the actions while the row stays hovered.
+        Controls.PointerHover.Track(row, value => { hovered = value; Update(); });
         row.GotFocus += (_, _) => Update();
         row.LostFocus += (_, _) => Update();
         Update();

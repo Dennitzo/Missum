@@ -2,7 +2,6 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using Microsoft.UI.Xaml.Media.Animation;
 
 namespace Missum.App.Controls;
 
@@ -18,7 +17,6 @@ public sealed class NativeComposerToolChip : Button
     private readonly TextBlock _label = new() { FontSize = 13, MaxWidth = 180, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center };
     private bool _hovered;
     private bool _keyboardFocused;
-    private Storyboard? _transition;
     internal bool IsRemoveAffordanceVisible { get; private set; }
 
     public NativeComposerToolChip()
@@ -26,6 +24,8 @@ public sealed class NativeComposerToolChip : Button
         Height = MinHeight = 28; MinWidth = 28; MaxWidth = 220;
         Padding = new(7, 3, 7, 3); BorderThickness = new(0); CornerRadius = new(14);
         VerticalAlignment = VerticalAlignment.Center;
+        _icon.OpacityTransition = new ScalarTransition { Duration = TimeSpan.FromMilliseconds(100) };
+        _close.OpacityTransition = new ScalarTransition { Duration = TimeSpan.FromMilliseconds(100) };
         ApplyBackground();
         ActualThemeChanged += (_, _) => ApplyBackground();
         Foreground = NativeThemeBrushes.MutedText;
@@ -36,21 +36,23 @@ public sealed class NativeComposerToolChip : Button
         row.ColumnDefinitions.Add(new() { Width = new(1, GridUnitType.Star) });
         row.Children.Add(slot); Grid.SetColumn(_label, 1); row.Children.Add(_label);
         Content = row;
-        PointerEntered += (_, _) => SetPointerState(true);
-        PointerExited += (_, _) => SetPointerState(false);
+        PointerHover.Track(this, SetPointerState);
         GettingFocus += (_, args) => SetKeyboardFocusState(args.FocusState == FocusState.Keyboard);
         GotFocus += (_, _) => SetKeyboardFocusState(FocusState == FocusState.Keyboard);
         LostFocus += (_, _) => SetKeyboardFocusState(false);
-        Unloaded += (_, _) => { _hovered = false; _keyboardFocused = false; _transition?.Stop(); };
+        Unloaded += (_, _) => { _hovered = _keyboardFocused = false; UpdateAffordance(); };
     }
 
     public void SetTool(string label, string glyph, Brush? iconBrush = null)
     {
-        _label.Text = label; _icon.Glyph = glyph;
+        if (_label.Text != label)
+        {
+            _label.Text = label;
+            ToolTipService.SetToolTip(this, label + " entfernen");
+            AutomationProperties.SetName(this, label + " entfernen");
+        }
+        _icon.Glyph = glyph;
         _icon.Foreground = iconBrush ?? NativeIconPalette.BrushFor("tool");
-        ToolTipService.SetToolTip(this, label + " entfernen");
-        AutomationProperties.SetName(this, label + " entfernen");
-        UpdateAffordance();
     }
 
     internal void SetPointerState(bool hovered) { _hovered = hovered; UpdateAffordance(); }
@@ -66,16 +68,9 @@ public sealed class NativeComposerToolChip : Button
     private void UpdateAffordance()
     {
         var show = _hovered || _keyboardFocused;
+        if (IsRemoveAffordanceVisible == show) return;
         IsRemoveAffordanceVisible = show;
-
-        _transition?.Stop();
-        var storyboard = new Storyboard();
-        foreach (var (target, opacity) in new (FrameworkElement, double)[] { (_icon, show ? 0 : 1), (_close, show ? 1 : 0) })
-        {
-            var animation = new DoubleAnimation { To = opacity, Duration = new Duration(TimeSpan.FromMilliseconds(100)) };
-            Storyboard.SetTarget(animation, target); Storyboard.SetTargetProperty(animation, "Opacity");
-            storyboard.Children.Add(animation);
-        }
-        _transition = storyboard; storyboard.Begin();
+        _icon.Opacity = show ? 0 : 1;
+        _close.Opacity = show ? 1 : 0;
     }
 }
