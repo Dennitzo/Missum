@@ -107,7 +107,13 @@ public sealed class LongRunningScienceClientTests
             Assert.Contains("assistant-plan", planPrompt, StringComparison.Ordinal);
             Assert.Contains("Publikation.md", planPrompt, StringComparison.Ordinal);
             Assert.Contains("PDF-Bau und die Behebung seiner Fehler gehören zur Umsetzung nach der Freigabe", planPrompt, StringComparison.Ordinal);
-            Assert.DoesNotContain("coding.command", planPrompt, StringComparison.Ordinal);
+            // The tool list stays identical between plan and implementation (prompt cache), so the plan
+            // prompt names the writing tools once - only to forbid them. No other part may ask for a
+            // command, e.g. running the PDF build while planning.
+            const string visibleButRejected = "Schreibende Werkzeuge, coding.command, coding.updatePlan und Subagenten sind sichtbar";
+            Assert.Contains(visibleButRejected, planPrompt, StringComparison.Ordinal);
+            Assert.Contains("im Planmodus werden sie abgelehnt. Rufe sie nicht auf", planPrompt, StringComparison.Ordinal);
+            Assert.DoesNotContain("coding.command", planPrompt!.Replace(visibleButRejected, "", StringComparison.Ordinal), StringComparison.Ordinal);
             Assert.Empty(Directory.EnumerateFileSystemEntries(workspace));
         }
         else if (mode == ChatMode.ClaudeScience)

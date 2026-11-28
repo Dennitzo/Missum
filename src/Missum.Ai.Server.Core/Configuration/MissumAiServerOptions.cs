@@ -8,9 +8,9 @@ public sealed class MissumAiServerOptions
 
     public string DataDirectory { get; set; } = ResolveDefaultDataDirectory();
 
-    public string ExpectedLanIp { get; set; } = "192.168.0.67";
+    public string ExpectedLanIp { get; set; } = "127.0.0.1";
 
-    public string PublicUrl { get; set; } = "http://192.168.0.67:8080";
+    public string PublicUrl { get; set; } = "http://127.0.0.1:8080";
 
     public int GatewayPort { get; set; } = 8080;
 

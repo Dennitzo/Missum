@@ -9,7 +9,11 @@ param(
     [ValidateSet('win-x64')]
     [string] $RuntimeIdentifier = 'win-x64',
 
-    [string] $PortableOutputDirectory
+    [string] $PortableOutputDirectory,
+
+    # Release version (e.g. 2.1.0 or 2.1.0-rc1); empty keeps Version from Directory.Build.props.
+    [ValidatePattern('^$|^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$')]
+    [string] $Version
 )
 
 Set-StrictMode -Version 2.0
@@ -17,6 +21,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
 
 $appProject = Resolve-MissumRepositoryPath -RelativePath 'src\Missum.App\Missum.App.csproj'
+$versionArguments = @(if ($Version) { "-p:Version=$Version" })
 if ([string]::IsNullOrWhiteSpace($PortableOutputDirectory)) {
     $PortableOutputDirectory = Resolve-MissumRepositoryPath -RelativePath ("artifacts\portable\{0}" -f $RuntimeIdentifier)
 }
@@ -24,27 +29,28 @@ else {
     $PortableOutputDirectory = Assert-MissumArtifactPath -Path $PortableOutputDirectory
 }
 
-Invoke-MissumDotNet -CommandArguments @(
+Invoke-MissumDotNet -CommandArguments (@(
     'restore', $appProject,
     '--runtime', $RuntimeIdentifier,
     ("-p:Configuration={0}" -f $Configuration),
     '-p:Platform=x64',
     '--nologo'
-)
-Invoke-MissumDotNet -CommandArguments @(
+) + $versionArguments)
+Invoke-MissumDotNet -CommandArguments (@(
     'build', $appProject,
     '--configuration', $Configuration,
     '--no-restore',
     '-p:Platform=x64',
     ("-p:RuntimeIdentifier={0}" -f $RuntimeIdentifier),
     '--nologo'
-)
+) + $versionArguments)
 if (-not $SkipPublish) {
     # Build and publish only. Validation belongs to the separate test scripts.
     & (Join-Path $PSScriptRoot 'publish.ps1') `
         -Mode SingleFile `
         -RuntimeIdentifier $RuntimeIdentifier `
         -OutputDirectory $PortableOutputDirectory `
+        -Version ([string]$Version) `
         -SkipSmoke
 
     $portableExecutable = Join-Path $PortableOutputDirectory 'Missum Labs.exe'

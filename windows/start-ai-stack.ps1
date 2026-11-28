@@ -4,7 +4,7 @@ param(
     [string] $DataRoot = (Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) 'Missum-AI-Stack'),
     [string] $ModelRoot,
     [Alias('CodingModelRoot')][string] $NativeModelRoot,
-    [string] $ServerIp = '192.168.0.67',
+    [string] $ServerIp = '',  # empty: keep the address saved in stack.env (new installations: 127.0.0.1)
     [string] $ImageVersion = '2.0.0',
     [string] $NativeBinaryPath,
     [string] $NativeStateDirectory,
@@ -57,5 +57,7 @@ Write-MissumAiStackEnvironment -Paths $paths -ServerIp $ServerIp -ImageVersion $
 Invoke-MissumAiCompose -Paths $paths -Arguments @('config', '--quiet')
 & (Join-Path $PSScriptRoot 'manage-coding-llama.ps1') -Action Start `
     -ModelRoot (Join-Path $env:USERPROFILE '.cache\huggingface') -BinaryPath $NativeBinaryPath -StateDirectory $NativeStateDirectory
-Invoke-MissumAiCompose -Paths $paths -Arguments @('up', '-d', '--no-build', '--pull', 'never')
-Write-Host "Missum AI stack is starting at http://${ServerIp}:8080; all language, vision and embedding models use native Windows llama.cpp on port 8081." -ForegroundColor Green
+# Missum images are built locally; only the pinned upstream images (Caddy, SearXNG) may be pulled once.
+Invoke-MissumAiCompose -Paths $paths -Arguments @('up', '-d', '--no-build', '--pull', 'missing')
+$publicUrl = (Read-MissumAiStackEnvironment -Path $paths.EnvironmentFile)['MISSUM_AI_PUBLIC_URL']
+Write-Host "Missum AI stack is starting at ${publicUrl}; all language, vision and embedding models use native Windows llama.cpp on port 8081." -ForegroundColor Green

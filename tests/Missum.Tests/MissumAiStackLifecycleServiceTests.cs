@@ -251,7 +251,9 @@ public sealed partial class MissumAiStackLifecycleServiceTests
         docker.Containers.Clear();
         using var service = Create(docker);
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => service.EnsureStartedAsync(docker.Profile.GatewayUri));
-        Assert.Contains("deploy-ai-stack.ps1", exception.Message, StringComparison.Ordinal);
+        // Users set the stack up in the app, not with a repository script.
+        Assert.Contains("Lokaler KI-Stack", exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("deploy-ai-stack.ps1", exception.Message, StringComparison.Ordinal);
         await service.StopAsync(docker.Profile.GatewayUri);
         await service.StopAsync(docker.Profile.GatewayUri);
         Assert.Empty(docker.Mutations);

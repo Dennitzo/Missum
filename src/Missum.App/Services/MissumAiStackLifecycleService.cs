@@ -16,6 +16,9 @@ public sealed partial class MissumAiStackLifecycleService : IDisposable
     public const string ComposeProject = "missum-ai-stack";
     public const string ProfileLabel = "com.missum.runtime.profile";
     public const string StackDataRootLabel = "com.missum.runtime.stack-data-root";
+    /// <summary>Shown when no stack exists yet: the in-app setup (Settings) replaces the repository deploy script.</summary>
+    public const string NotInstalledMessage =
+        "Der lokale Missum-KI-Stack ist noch nicht eingerichtet. Öffne Einstellungen › Lokaler KI-Stack und wähle „Einrichten“; danach startet Missum die Dienste automatisch.";
     private const string ComposeProjectLabel = "com.docker.compose.project";
     private const string ComposeServiceLabel = "com.docker.compose.service";
     private static readonly Regex ContainerIdPattern = new("^[a-fA-F0-9]{12,64}$", RegexOptions.CultureInvariant | RegexOptions.Compiled);
@@ -277,7 +280,7 @@ public sealed partial class MissumAiStackLifecycleService : IDisposable
         var compose = containers.Where(static container => container.IsCompose).ToArray();
         if (compose.Length == 0)
         {
-            if (requireInstalled) throw new InvalidOperationException("Der lokale Missum-AI-Stack ist noch nicht installiert. Führe windows/deploy-ai-stack.ps1 aus; anschließend startet Missum die vorhandenen Dienste automatisch.");
+            if (requireInstalled) throw new InvalidOperationException(NotInstalledMessage);
             return;
         }
         var gateways = compose.Where(static container => container.Service == "gateway").ToArray();

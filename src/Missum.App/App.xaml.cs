@@ -117,6 +117,7 @@ public partial class App : Application
                 services.AddSingleton<AssistantSessionActivationService>();
                 services.AddSingleton<NativeModelRuntimeService>();
                 services.AddSingleton<MissumAiStackLifecycleService>();
+                services.AddSingleton<Services.AiStack.AiStackSetupService>();
                 services.AddSingleton<MissumAiConnectionService>();
                 services.AddSingleton<ModelCapabilityRegistry>();
                 services.AddSingleton<SystemAudioCaptionService>();
@@ -355,11 +356,34 @@ public partial class App : Application
             }
             StartAiAvailabilityMonitoring();
             StartUserMemoryBackfill();
+            await OpenAiStackSetupIfNeededAsync();
         }
         catch (Exception exception)
         {
             System.Diagnostics.Debug.WriteLine($"Missum startup failed: {exception}");
             throw;
+        }
+    }
+
+    /// <summary>
+    /// First start after the installer (it passes --ai-stack-setup), or an installed Missum whose local AI
+    /// stack was never set up: opens Settings at "Lokaler KI-Stack". Developer checkouts are left alone.
+    /// </summary>
+    private async Task OpenAiStackSetupIfNeededAsync()
+    {
+        try
+        {
+            if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("ASSISTANT_DISABLE_RUNTIME_AUTOSTART"))
+                || !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("MISSUM_SMOKE_INSTANCE_KEY"))) return;
+            var setup = GetService<Services.AiStack.AiStackSetupService>();
+            var requested = Environment.GetCommandLineArgs().Any(static argument => string.Equals(argument, "--ai-stack-setup", StringComparison.OrdinalIgnoreCase));
+            if (!requested && (setup.ReadState() is not null || !Services.AiStack.AiStackSetupService.HasInstalledBundle
+                || await setup.IsInstalledAsync(CancellationToken.None))) return;
+            if (_window is { } window) await window.OpenAiStackSetupAsync();
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            AppLog.ShutdownCleanupFailed(GetService<ILogger<App>>(), exception);
         }
     }
 

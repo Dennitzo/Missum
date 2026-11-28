@@ -17,7 +17,7 @@ public sealed partial class MissumAiConnectionService(
     NativeModelRuntimeService? nativeRuntime = null,
     MissumAiStackLifecycleService? stackLifecycle = null) : IDisposable
 {
-    public const string DefaultServerUrl = "http://192.168.0.67:8080";
+    public const string DefaultServerUrl = "http://127.0.0.1:8080";
     private static readonly TimeSpan DefaultProbeTimeout = TimeSpan.FromSeconds(12);
     private static readonly Action<ILogger, string, Exception?> ConnectionFailed = LoggerMessage.Define<string>(
         LogLevel.Warning,

@@ -1,0 +1,93 @@
+# A version tag (v2.1.0, v2.1.0-rc1 …) builds Missum with that version and creates a release DRAFT
+# with installer, portable zip, AI stack sources and checksums. Check the draft on GitHub and
+# publish it there; nothing becomes public automatically.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write # create the release draft and upload its assets
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 'true'
+
+jobs:
+  release:
+    name: Release-Entwurf erstellen
+    runs-on: windows-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Version aus dem Tag
+        shell: powershell
+        run: |
+          $version = '${{ github.ref_name }}'.TrimStart('v')
+          if ($version -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$') { throw "Tag ${{ github.ref_name }} ist keine Version der Form v1.2.3 oder v1.2.3-rc1." }
+          "MISSUM_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('global.json', 'Directory.Packages.props', '**/*.csproj') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Publish-Sicherheit
+        shell: powershell
+        run: ./windows/test-publish-safety.ps1
+
+      - name: App-Tests
+        shell: powershell
+        run: dotnet test tests/Missum.Tests/Missum.Tests.csproj -c Release -p:Platform=x64
+
+      - name: Gateway-Tests
+        shell: powershell
+        run: dotnet test tests/Missum.Ai.Server.Tests/Missum.Ai.Server.Tests.csproj -c Release
+
+      - name: Portable bauen
+        shell: powershell
+        run: ./windows/build.ps1 -Version $env:MISSUM_VERSION
+
+      - name: Inno Setup installieren
+        shell: powershell
+        run: choco install innosetup --no-progress -y
+
+      - name: Release-Dateien packen
+        shell: powershell
+        run: ./windows/package-release.ps1 -Version $env:MISSUM_VERSION
+
+      - name: Release-Entwurf anlegen
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $directory = "artifacts/release/$env:MISSUM_VERSION"
+          $notes = (Get-Content -LiteralPath windows/installer/release-notes.md -Raw -Encoding UTF8) -replace '<Version>', $env:MISSUM_VERSION
+          $notesFile = Join-Path $env:RUNNER_TEMP 'release-notes.md'
+          [IO.File]::WriteAllText($notesFile, $notes, [Text.UTF8Encoding]::new($false))
+          $assets = @(Get-ChildItem -LiteralPath $directory -File | ForEach-Object FullName)
+          $arguments = @('release', 'create', '${{ github.ref_name }}') + $assets + @(
+            '--draft', '--verify-tag', '--title', "Missum $env:MISSUM_VERSION", '--notes-file', $notesFile, '--generate-notes')
+          if ($env:MISSUM_VERSION -match '-') { $arguments += '--prerelease' }
+          gh @arguments
+          if ($LASTEXITCODE -ne 0) { throw "gh release create ist mit Code $LASTEXITCODE fehlgeschlagen." }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: missum-release-${{ env.MISSUM_VERSION }}
+          path: artifacts/release/
+          retention-days: 30

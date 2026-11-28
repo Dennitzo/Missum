@@ -48,5 +48,19 @@
           SkipUnchangedFiles="true"
           Condition="Exists('$(OutDir)Missum.Core.dll')" />
   </Target>
+
+  <!-- Missum.App publishes its self-contained publication renderer after its own build, but copies it only
+       into its own output. Tests that create a Claude Science project install that renderer exactly like
+       an installed Missum, so the test output needs the same Assets\PublicationTool\Renderer payload. -->
+  <Target Name="CopyPublicationRendererTestArtifacts" AfterTargets="Build">
+    <ItemGroup>
+      <_PublicationRendererTestArtifacts Include="..\..\src\Missum.App\obj\publication-renderer-publish\**\*" />
+    </ItemGroup>
+    <Error Condition="'@(_PublicationRendererTestArtifacts)' == ''"
+           Text="Das Publikationswerkzeug von Missum.App fehlt (obj\publication-renderer-publish); die Science-Tests brauchen es." />
+    <Copy SourceFiles="@(_PublicationRendererTestArtifacts)"
+          DestinationFiles="@(_PublicationRendererTestArtifacts->'$(OutDir)Assets\PublicationTool\Renderer\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
 </Project>
 

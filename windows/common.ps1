@@ -108,7 +108,8 @@ function Get-MissumAiStackDefaults {
 function Write-MissumAiStackEnvironment {
     param(
         [Parameter(Mandatory = $true)] $Paths,
-        [string] $ServerIp = '192.168.0.67',
+        # Empty keeps the address already saved in stack.env; a new installation is local-only (127.0.0.1).
+        [string] $ServerIp = '',
         [string] $ImageVersion = '2.0.0',
         [Alias('CodingModelRoot')][string] $NativeModelRoot,
         [string] $NativeBinaryPath,
@@ -129,8 +130,12 @@ function Write-MissumAiStackEnvironment {
     $values['MISSUM_AI_NATIVE_MODEL_ROOT'] = $NativeModelRoot -replace '\\','/'
     $values['MISSUM_AI_CODING_MODEL_ROOT'] = $NativeModelRoot -replace '\\','/'
     if (-not $values.ContainsKey('MISSUM_AI_MODEL_RUNTIME_URL')) { $values['MISSUM_AI_MODEL_RUNTIME_URL'] = 'http://host.docker.internal:8081' }
+    if ([string]::IsNullOrWhiteSpace($ServerIp)) { $ServerIp = $values['MISSUM_AI_EXPECTED_LAN_IP'] }
+    if ([string]::IsNullOrWhiteSpace($ServerIp)) { $ServerIp = '127.0.0.1' }
     $values['MISSUM_AI_EXPECTED_LAN_IP'] = $ServerIp
     $values['MISSUM_AI_PUBLIC_URL'] = "http://${ServerIp}:8080"
+    # Caddy publishes only on loopback unless the stack serves a LAN address.
+    $values['MISSUM_AI_BIND_ADDRESS'] = if ($ServerIp -in @('127.0.0.1', 'localhost')) { '127.0.0.1' } else { '0.0.0.0' }
     $values['MISSUM_AI_IMAGE_VERSION'] = $ImageVersion
     if ($NativeBinaryPath) { $values['MISSUM_AI_NATIVE_BINARY_PATH'] = [IO.Path]::GetFullPath($NativeBinaryPath) -replace '\\','/' }
     if ($NativeStateDirectory) { $values['MISSUM_AI_NATIVE_STATE_ROOT'] = [IO.Path]::GetFullPath($NativeStateDirectory) -replace '\\','/' }

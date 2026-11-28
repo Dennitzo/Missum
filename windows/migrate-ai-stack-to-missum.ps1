@@ -140,7 +140,7 @@ if ($NativeModelRoot -ine $destinationHub -and $NativeModelRoot -ine $destinatio
     Write-Warning "The legacy model cache $NativeModelRoot will not be used or copied. Install the required models under $destinationHub before starting Missum."
 }
 if ([string]::IsNullOrWhiteSpace($ServerIp)) { $ServerIp = $sourceEnvironment[$SourceEnvironmentPrefix + 'EXPECTED_LAN_IP'] }
-if ([string]::IsNullOrWhiteSpace($ServerIp)) { $ServerIp = '192.168.0.67' }
+if ([string]::IsNullOrWhiteSpace($ServerIp)) { $ServerIp = '127.0.0.1' }
 if ([IO.Path]::GetFileName($SourceDatabaseName) -ne $SourceDatabaseName) { throw '-SourceDatabaseName must be a filename without directories.' }
 $sourceDatabase = Join-Path $SourceDataRoot ('data\database\' + $SourceDatabaseName)
 if (-not (Test-Path -LiteralPath $sourceDatabase -PathType Leaf)) { throw "Source database is missing: $sourceDatabase" }

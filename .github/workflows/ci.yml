@@ -1,0 +1,120 @@
+# Builds and tests Missum on every push and pull request and uploads the release assets
+# (installer, portable zip, AI stack sources, checksums) as a workflow artifact.
+# A version tag (v*) is handled by release.yml instead.
+name: CI
+
+on:
+  push:
+    branches: ['**']
+    tags-ignore: ['v*']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      build_gpu_images:
+        description: 'Auch die großen GPU-Images (speech, image) testweise bauen'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 'true'
+
+jobs:
+  windows:
+    name: Windows – Tests, Build und Installer
+    runs-on: windows-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the publish manifest records the commit as build id
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('global.json', 'Directory.Packages.props', '**/*.csproj') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Publish-Sicherheit
+        shell: powershell
+        run: ./windows/test-publish-safety.ps1
+
+      - name: App-Tests
+        shell: powershell
+        run: dotnet test tests/Missum.Tests/Missum.Tests.csproj -c Release -p:Platform=x64 --logger trx --results-directory artifacts/test-results/app
+
+      - name: Gateway-Tests
+        shell: powershell
+        run: dotnet test tests/Missum.Ai.Server.Tests/Missum.Ai.Server.Tests.csproj -c Release --logger trx --results-directory artifacts/test-results/server
+
+      - name: Portable bauen
+        shell: powershell
+        run: ./windows/build.ps1
+
+      - name: Inno Setup installieren
+        shell: powershell
+        run: choco install innosetup --no-progress -y
+
+      - name: Release-Dateien packen
+        shell: powershell
+        run: ./windows/package-release.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: missum-${{ github.sha }}
+          path: artifacts/release/
+          retention-days: 14
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: test-results-${{ github.sha }}
+          path: artifacts/test-results/
+          retention-days: 7
+
+  docker:
+    name: Linux – Docker-Images aus dem Stack-Paket
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stack-Variablen für den Testbuild
+        run: |
+          mkdir -p "$RUNNER_TEMP/stack/Models" "$RUNNER_TEMP/stack/hub"
+          cat > "$RUNNER_TEMP/stack.env" <<EOF
+          MISSUM_AI_DATA_ROOT=$RUNNER_TEMP/stack
+          MISSUM_AI_MODEL_ROOT=$RUNNER_TEMP/stack/Models
+          MISSUM_AI_CODING_MODEL_ROOT=$RUNNER_TEMP/stack/hub
+          MISSUM_AI_IMAGE_VERSION=ci-${{ github.run_number }}
+          EOF
+
+      - name: compose.yaml prüfen
+        run: docker compose --env-file "$RUNNER_TEMP/stack.env" -f deploy/missum-ai/compose.yaml config --quiet
+
+      - name: Gateway und Media bauen
+        run: docker compose --env-file "$RUNNER_TEMP/stack.env" -f deploy/missum-ai/compose.yaml --progress plain build gateway media
+
+      - name: Platz für GPU-Images schaffen
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_gpu_images }}
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker system prune --all --force
+          df -h /
+
+      - name: Speech und Image bauen
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_gpu_images }}
+        run: docker compose --env-file "$RUNNER_TEMP/stack.env" -f deploy/missum-ai/compose.yaml --progress plain build speech image

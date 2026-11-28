@@ -4,7 +4,7 @@ param(
     [string] $DataRoot = (Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) 'Missum-AI-Stack'),
     [string] $ModelRoot,
     [string] $NativeModelRoot,
-    [string] $ServerUrl = 'http://192.168.0.67:8080',
+    [string] $ServerUrl = 'http://127.0.0.1:8080',
     [ValidateRange(1, 120)] [int] $WaitMinutes = 10,
     [switch] $IncludeInference
 )

@@ -7,9 +7,9 @@ using Microsoft.Extensions.Logging;
 var options = new MissumAiServerOptions
 {
     DataDirectory = ResolveDataDirectory(),
-    ExpectedLanIp = Environment.GetEnvironmentVariable("MISSUM_AI_EXPECTED_LAN_IP") ?? "192.168.0.67",
+    ExpectedLanIp = Environment.GetEnvironmentVariable("MISSUM_AI_EXPECTED_LAN_IP") ?? "127.0.0.1",
     GatewayPort = ReadGatewayPort(),
-    PublicUrl = Environment.GetEnvironmentVariable("MISSUM_AI_PUBLIC_URL") ?? "http://192.168.0.67:8080",
+    PublicUrl = Environment.GetEnvironmentVariable("MISSUM_AI_PUBLIC_URL") ?? "http://127.0.0.1:8080",
     ModelRuntimeUri = ResolveUri("MISSUM_AI_MODEL_RUNTIME_URL", "http://host.docker.internal:8081"),
     CodingModelRoot = Environment.GetEnvironmentVariable("MISSUM_AI_CODING_MODEL_ROOT") ?? "Windows-Modellordner",
     CodingModelId = Environment.GetEnvironmentVariable("MISSUM_AI_CODING_MODEL_ID") ?? string.Empty,

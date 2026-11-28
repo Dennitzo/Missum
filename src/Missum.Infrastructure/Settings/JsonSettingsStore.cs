@@ -160,7 +160,7 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
         if (!Uri.TryCreate(missumAiServerUrl, UriKind.Absolute, out var missumAiUri)
             || missumAiUri.Scheme is not ("http" or "https"))
         {
-            missumAiServerUrl = "http://192.168.0.67:8080";
+            missumAiServerUrl = "http://127.0.0.1:8080";
         }
         else if (settings.Version < 13
                  && string.Equals(missumAiUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)

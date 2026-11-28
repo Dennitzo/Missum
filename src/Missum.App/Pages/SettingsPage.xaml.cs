@@ -79,10 +79,12 @@ public sealed partial class SettingsPage : Page
             }
             await ViewModel.RefreshModelsAsync();
         });
+        await InitializeAiStackCardAsync();
     }
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
+        DetachAiStackCard();
         if (!_sharedSettingsSubscribed) return;
         App.Current.GetService<AssistantSettingsService>().Changed -= OnSharedSettingsChanged;
         _sharedSettingsSubscribed = false;

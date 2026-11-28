@@ -120,6 +120,20 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    /// <summary>Opens Settings at the "Lokaler KI-Stack" card (first start after the installer).</summary>
+    internal async Task OpenAiStackSetupAsync()
+    {
+        await NavigateToAsync("settings");
+        if (ContentFrame.Content is not Pages.SettingsPage page) return;
+        if (page.IsLoaded) { page.BringAiStackCardIntoView(); return; }
+        void OnLoaded(object sender, RoutedEventArgs args)
+        {
+            page.Loaded -= OnLoaded;
+            page.DispatcherQueue.TryEnqueue(page.BringAiStackCardIntoView);
+        }
+        page.Loaded += OnLoaded;
+    }
+
     private async void OnMenuAssistant(object sender, RoutedEventArgs e) =>
         await OpenAssistantSessionAsync(refreshSession: false);
 

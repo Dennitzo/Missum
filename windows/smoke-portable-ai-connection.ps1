@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param(
     [string] $PublishDirectory,
-    [string] $ServerUrl = 'http://192.168.0.67:8080',
+    [string] $ServerUrl = 'http://127.0.0.1:8080',
     [string] $GatewayContainer = 'missum-ai-gateway',
     [int] $WaitSeconds = 20
 )

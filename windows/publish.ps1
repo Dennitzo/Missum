@@ -9,7 +9,11 @@ param(
 
     [string] $OutputDirectory,
 
-    [switch] $SkipSmoke
+    [switch] $SkipSmoke,
+
+    # Release version (e.g. 2.1.0 or 2.1.0-rc1); empty keeps Version from Directory.Build.props.
+    [ValidatePattern('^$|^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$')]
+    [string] $Version
 )
 
 Set-StrictMode -Version 2.0
@@ -17,6 +21,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
 
 $appProject = Resolve-MissumRepositoryPath -RelativePath 'src\Missum.App\Missum.App.csproj'
+$versionArguments = @(if ($Version) { "-p:Version=$Version" })
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
     if ($Mode -eq 'SingleFile') {
         $OutputDirectory = Resolve-MissumRepositoryPath -RelativePath ("artifacts\portable\{0}" -f $RuntimeIdentifier)
@@ -40,15 +45,15 @@ $singleFile = if ($Mode -eq 'SingleFile') { 'true' } else { 'false' }
 $extractAll = if ($Mode -eq 'SingleFile') { 'true' } else { 'false' }
 
 try {
-Invoke-MissumDotNet -CommandArguments @(
+Invoke-MissumDotNet -CommandArguments (@(
     'restore', $appProject,
     '--runtime', $RuntimeIdentifier,
     ("-p:Configuration={0}" -f $configuration),
     '-p:Platform=x64',
     '-p:EnableMsixTooling=true',
-    '--nologo'
-)
-Invoke-MissumDotNet -CommandArguments @(
+    '--nologo'
+) + $versionArguments)
+Invoke-MissumDotNet -CommandArguments (@(
     'publish', $appProject,
     '--configuration', $configuration,
     '--runtime', $RuntimeIdentifier,
@@ -62,8 +67,8 @@ Invoke-MissumDotNet -CommandArguments @(
     ("-p:IncludeAllContentForSelfExtract={0}" -f $extractAll),
     '-p:PublishTrimmed=false',
     '-p:PublishReadyToRun=false',
-    '--nologo'
-)
+    '--nologo'
+) + $versionArguments)
 
 $null = Assert-MissumArtifactTree -Path $stageDirectory
 $executable = Join-Path $stageDirectory 'Missum Labs.exe'
@@ -74,6 +79,7 @@ if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
 $manifest = [ordered]@{
     schema = 'missum.windows.publish.v1'
     mode = $Mode
+    version = $(if ($Version) { $Version } else { $null })
     runtimeIdentifier = $RuntimeIdentifier
     selfContained = $true
     windowsAppSdkSelfContained = $true

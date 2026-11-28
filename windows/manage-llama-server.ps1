@@ -4,7 +4,8 @@ param(
     [ValidateSet('Start', 'Stop', 'Status', 'Update', 'ConfigureFirewall')]
     [string] $Action = 'Start',
 
-    [string] $ModelPath = 'C:\Users\AMD\.lmstudio\models\lmstudio-community\Qwen3.8-27B-GGUF\Qwen3.8-27B-Q8_0.gguf',
+    # Required for -Action Start (one GGUF file); the Missum app uses the router via manage-coding-llama.ps1.
+    [string] $ModelPath,
 
     [string] $InstallRoot = (Join-Path $env:LOCALAPPDATA 'Missum-LlamaServer'),
 
@@ -416,7 +417,7 @@ function Stop-LlamaServer {
 }
 
 function Start-LlamaServer {
-    if (-not (Test-Path -LiteralPath $ModelPath -PathType Leaf)) {
+    if ([string]::IsNullOrWhiteSpace($ModelPath) -or -not (Test-Path -LiteralPath $ModelPath -PathType Leaf)) {
         throw "GGUF model not found: $ModelPath"
     }
     if (Get-ServerProcess) {

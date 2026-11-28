@@ -4,7 +4,7 @@ param(
     [string] $DataRoot = (Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) 'Missum-AI-Stack'),
     [string] $ModelRoot,
     [string] $NativeModelRoot,
-    [string] $ServerIp = '192.168.0.67',
+    [string] $ServerIp = '',  # empty: keep the address saved in stack.env (new installations: 127.0.0.1)
     [string] $ImageVersion = '2.0.0',
     [ValidatePattern('^missum-ai/research-runner:[a-zA-Z0-9_.-]+$')]
     [string] $ResearchRunnerImage = 'missum-ai/research-runner:3',
