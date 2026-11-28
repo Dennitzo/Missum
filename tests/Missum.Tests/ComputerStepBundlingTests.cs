@@ -30,7 +30,7 @@ public sealed class ComputerStepBundlingTests
         var group = bundled[0];
         Assert.Equal(ComputerStepBundling.GroupTool, group.GetProperty("tool").GetString());
         Assert.Equal("computer-group:o1", group.GetProperty("id").GetString());
-        Assert.Equal("Computersteuerung · 3 Schritte", group.GetProperty("label").GetString());
+        Assert.Equal("Computer-Use · 3 Schritte", group.GetProperty("label").GetString());
         Assert.Equal("completed", group.GetProperty("status").GetString());
         Assert.Equal(7, group.GetProperty("contentOffset").GetInt32());
         Assert.Equal(35, ComputerStepBundling.ContentEnd(group));
@@ -59,7 +59,7 @@ public sealed class ComputerStepBundlingTests
         var bundled = ComputerStepBundling.Bundle(steps, "").ToArray();
 
         Assert.Equal(["computer.session", "coding.read", "computer.session"], bundled.Select(step => step.GetProperty("tool").GetString()));
-        Assert.Equal("Computersteuerung · 1 Schritt", bundled[0].GetProperty("label").GetString());
+        Assert.Equal("Computer-Use · 1 Schritt", bundled[0].GetProperty("label").GetString());
         Assert.Equal("running", bundled[2].GetProperty("status").GetString());
         Assert.Contains("Klick · Element 4", bundled[2].GetProperty("detail").GetString());
     }

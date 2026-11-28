@@ -66,6 +66,12 @@ public sealed partial class NativeAssistantPage
             if (menuBrush.Color.A != 0xFF)
                 throw new InvalidOperationException("Das Werkzeugmenü ist nicht deckend: " + menuBrush.Color);
             checks.Add(await CaptureLiquidGlassVariantAsync(directory, ++step, $"{prefix}-tools-menu", expectGlass));
+            // A long tool description scrolls through while its row is hovered or keyboard-focused.
+            var browserUse = FindSmokeButton(toolsMenu.Content as DependencyObject, "Browser-Use")
+                ?? throw new InvalidOperationException("Werkzeug Browser-Use fehlt im Menü.");
+            browserUse.Focus(FocusState.Keyboard);
+            await Task.Delay(2200);
+            checks.Add(await CaptureLiquidGlassVariantAsync(directory, ++step, $"{prefix}-tools-menu-marquee", expectGlass));
             toolsMenu.Hide();
             await Task.Delay(300);
 

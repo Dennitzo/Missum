@@ -3064,7 +3064,7 @@ public sealed partial class MissumAiAssistantService(
             {
                 result = new ClientToolResult(proposal.ProposalId, "rejected",
                     JsonSerializer.SerializeToElement(new { failed = true }, JsonOptions),
-                    "computer.action_not_selected", "Computersteuerung ist für diesen Codex-Lauf nicht aktiviert.");
+                    "computer.action_not_selected", "Computer-Use ist für diesen Codex-Lauf nicht aktiviert.");
             }
             else if (proposal.Name.StartsWith("blender.", StringComparison.Ordinal)
                 && (localRun.Action != PromptTriggerAction.Coding || localRun.ExtensionActionId != "com.missum.blender/edit"
@@ -3664,9 +3664,9 @@ public sealed partial class MissumAiAssistantService(
                 ?? throw new InvalidOperationException("Das ausgewählte Coding-AI-Modell ist nicht verfügbar.");
             var computerUse = trigger?.Trigger.ExtensionActionId == "builtin.computer/use";
             if (computerUse && !ComputerLocalEndpoint.IsLocal(client.BaseAddress))
-                throw new InvalidOperationException("Computersteuerung benötigt ein lokales Missum-Gateway auf diesem Rechner; Bildschirmbilder werden nicht an entfernte Gateways gesendet.");
+                throw new InvalidOperationException("Computer-Use benötigt ein lokales Missum-Gateway auf diesem Rechner; Bildschirmbilder werden nicht an entfernte Gateways gesendet.");
             if (computerUse && (!availableCodingModel.SupportsVision || !availableCodingModel.SupportsTools))
-                throw new InvalidOperationException("Die Computersteuerung benötigt ein lokales Coding-Modell mit Bildverarbeitung und Werkzeugaufrufen. Wähle ein geeignetes Modell aus.");
+                throw new InvalidOperationException("Computer-Use benötigt ein lokales Coding-Modell mit Bildverarbeitung und Werkzeugaufrufen. Wähle ein geeignetes Modell aus.");
             availableCodingModel = availableCodingModel with { ContextTokens = ModelContextSelection.Resolve(CurrentSettings, codingModel,
                 availableCodingModel.MaximumContextTokens ?? availableCodingModel.ContextTokens) };
             var codingPrompt = originalPrompt;
@@ -4448,7 +4448,7 @@ public sealed partial class MissumAiAssistantService(
     }
 
     internal const string ChatGptReadOnlyMessage =
-        "Der ChatGPT-Modus ist auf Antworten, Recherche und Gedächtnis beschränkt: Dateiänderungen, Projektwerkzeuge und Computersteuerung gibt es nur in Codex.";
+        "Der ChatGPT-Modus ist auf Antworten, Recherche und Gedächtnis beschränkt: Dateiänderungen, Projektwerkzeuge und Computer-Use gibt es nur in Codex.";
 
     /// <summary>Refuses Codex, desktop and project work in a ChatGPT session before anything is prepared.</summary>
     internal static void EnsureChatGptRunStaysReadOnly(ChatMode? chatMode, PromptTriggerAction? action, PromptTriggerMatch? trigger)
@@ -4588,7 +4588,7 @@ public sealed partial class MissumAiAssistantService(
         device smartphone/tablet/laptop für responsive Prüfung) und liefert eine uploadId. Rufe danach media.analyze mit genau
         dieser uploadId und einer konkreten Prüffrage auf; Aussagen über Aussehen, Layout, Farben oder Lesbarkeit stützt du nur
         auf dieses Ergebnis. Nach jeder sichtbaren Änderung nimmst du erneut capture auf und bestätigst mit media.analyze, dass
-        sie wirklich so aussieht. Behaupte ein sichtbares Ergebnis nie ohne diese Prüfung. Computersteuerung sieht nur den
+        sie wirklich so aussieht. Behaupte ein sichtbares Ergebnis nie ohne diese Prüfung. Computer-Use sieht nur den
         Windows-Desktop, nicht den Tab Webseite.
         Markierungen des Nutzers kommen als nummerierte Referenzen (#1, #2 …) mit Selektor, Text, Box, Gerät und vermuteter
         Quelldatei; Kommentare, Rahmen und Feintuning-Wünsche haben ebenfalls Nummern. Setze genau diese Stellen in den
@@ -4645,7 +4645,7 @@ public sealed partial class MissumAiAssistantService(
         unreal.camera operation=frame (ohne cameraName richtet es den Editor-Viewport aus). Blueprints untersuchst und erstellst du mit unreal.blueprint (operation read, create,
         compile, save); Knoten- und Pinverbindungen sind über Python nicht zuverlässig möglich – baue
         Logik dann über Komponenten und Eigenschaften. unreal.launcher.start öffnet den Epic Games Launcher;
-        Klicks im Launcher oder im Blueprint-Editor erledigt der separate Modus Computersteuerung – nenne
+        Klicks im Launcher oder im Blueprint-Editor erledigt das separate Werkzeug Computer-Use – nenne
         dem Nutzer dann den konkreten Schritt.
         3D-Geometrie aus Blender liegt als FBX/GLB unter Import/Blender im Projektordner; importiere sie
         mit unreal.asset (operation import) und prüfe das Ergebnis im Viewport.

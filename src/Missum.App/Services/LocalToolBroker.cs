@@ -82,7 +82,7 @@ public sealed partial class LocalToolBroker(
             {
                 // Computer tools exist only in runs where Computersteuerung was selected.
                 if (!(computerUseEnabled || computerToolsAllowed) || researchActorAgentId is not null)
-                    throw new UnauthorizedAccessException("Die Computersteuerung ist für diesen Lauf nicht freigegeben.");
+                    throw new UnauthorizedAccessException("Computer-Use ist für diesen Lauf nicht freigegeben.");
                 ValidateProposal(proposal);
                 return await ExecuteComputerToolAsync(proposal, sessionId, gatewayOverride, cancellationToken).ConfigureAwait(false);
             }

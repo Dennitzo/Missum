@@ -91,7 +91,7 @@ public sealed class WebdesignModeTests : IAsyncLifetime
         Assert.Contains("Rufe danach media.analyze mit genau\ndieser uploadId", prompt.ReplaceLineEndings("\n"), StringComparison.Ordinal);
         Assert.Contains("Nach jeder sichtbaren Änderung nimmst du erneut capture auf", prompt, StringComparison.Ordinal);
         Assert.Contains("Behaupte ein sichtbares Ergebnis nie ohne diese Prüfung", prompt, StringComparison.Ordinal);
-        Assert.Contains("Computersteuerung sieht nur den\nWindows-Desktop", prompt.ReplaceLineEndings("\n"), StringComparison.Ordinal);
+        Assert.Contains("Computer-Use sieht nur den\nWindows-Desktop", prompt.ReplaceLineEndings("\n"), StringComparison.Ordinal);
         Assert.DoesNotContain("Missum-Modus", prompt, StringComparison.Ordinal);
         Assert.Contains("Im Planmodus prüfst du nur", MissumAiAssistantService.BuildWebdesignPrompt("Prüfen", Project("vision-plan"), planMode: true), StringComparison.Ordinal);
         // The short hint of auto-detected runs names both tools and the same capture → media.analyze check.

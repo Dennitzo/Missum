@@ -37,9 +37,9 @@ public sealed partial class NativeAssistantPage
             await WaitForBrowserUseSmokeAsync(() => shell.IsAiServerReady, TimeSpan.FromMinutes(20), "Die lokale AI wurde nicht bereit.");
             // MISSUM_SMOKE_UI_COMPUTERUSE_TOOL=none sends a plain ChatGPT prompt (e.g. a cold model start check);
             // Computersteuerung belongs to Codex and runs in a scratch project there.
-            // TOOL = menu entry name (default Computersteuerung, e.g. "Browser-Use"); WEBDESIGN=1 turns the
+            // TOOL = menu entry name (default Computer-Use, e.g. "Browser-Use"); WEBDESIGN=1 turns the
             // Webdesign tool on first, with a small test page in the scratch project.
-            var toolName = Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_COMPUTERUSE_TOOL") is { Length: > 0 } named ? named : "Computersteuerung";
+            var toolName = Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_COMPUTERUSE_TOOL") is { Length: > 0 } named ? named : "Computer-Use";
             var withTool = toolName != "none";
             var webdesign = Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_COMPUTERUSE_WEBDESIGN") == "1";
             var mode = withTool && toolName != "Browser-Use" || webdesign ? "coding" : "general";

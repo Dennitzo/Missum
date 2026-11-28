@@ -10,11 +10,11 @@ public sealed partial class NativeAssistantPage
     private async Task VerifyComputerUseSmokeAsync()
     {
         if (!IsMessageFooterSmoke || Environment.GetEnvironmentVariable("ASSISTANT_DISABLE_RUNTIME_AUTOSTART") != "1")
-            throw new InvalidOperationException("Die Computersteuerungsprüfung benötigt ein isoliertes Profil.");
+            throw new InvalidOperationException("Die Computer-Use-Prüfung benötigt ein isoliertes Profil.");
         var chats = App.Current.GetService<IChatRepository>();
-        var fixture = await chats.CreateSessionAsync("Computersteuerung · Test", ChatMode.Coding, _lifetime.Token);
+        var fixture = await chats.CreateSessionAsync("Computer-Use · Test", ChatMode.Coding, _lifetime.Token);
         if (!await CommandAsync("session.open", new { sessionId = fixture.Id }))
-            throw new InvalidOperationException("Die Computersteuerungs-Test-Sitzung konnte nicht geöffnet werden.");
+            throw new InvalidOperationException("Die Computer-Use-Test-Sitzung konnte nicht geöffnet werden.");
         ShowChatView(); RenderSessionTabs(); RenderMessagesNow(); UpdateLayout();
         _ = ShowFixtureAsync();
 

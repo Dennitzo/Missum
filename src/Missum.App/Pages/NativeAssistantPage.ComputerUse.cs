@@ -29,7 +29,7 @@ public sealed partial class NativeAssistantPage
             var row = new Grid { ColumnSpacing = 12 };
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            row.Children.Add(new TextBlock { Text = pending is not null ? "Computersteuerung · Bestätigung erforderlich" : "Computersteuerung aktiv", VerticalAlignment = VerticalAlignment.Center,
+            row.Children.Add(new TextBlock { Text = pending is not null ? "Computer-Use · Bestätigung erforderlich" : "Computer-Use aktiv", VerticalAlignment = VerticalAlignment.Center,
                 FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap });
             var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
             if (pending is not null)
@@ -39,7 +39,7 @@ public sealed partial class NativeAssistantPage
                 actions.Children.Add(show);
             }
             var stop = new Button { Content = "Stoppen", CornerRadius = new CornerRadius(8) };
-            AutomationProperties.SetName(stop, "Computersteuerung und Lauf stoppen");
+            AutomationProperties.SetName(stop, "Computer-Use und Lauf stoppen");
             var runId = state.ActiveRun ?? pending!.RunId;
             var session = _session;
             stop.Click += async (_, _) => await StopComputerUseAsync(session, runId);
@@ -55,13 +55,13 @@ public sealed partial class NativeAssistantPage
         // borders, spacing, typography and hover states stay in sync.
         var card = PlanCard();
         var content = (StackPanel)card.Child;
-        content.Children.Add(PlanLabel(pending.IsActivation ? "Computersteuerung für diesen Lauf aktivieren?" : "Computeraktion bestätigen", bold: true));
+        content.Children.Add(PlanLabel(pending.IsActivation ? "Computer-Use für diesen Lauf aktivieren?" : "Computeraktion bestätigen", bold: true));
         var description = pending.IsActivation
             ? "Missum darf den gesamten Windows-Desktop für diesen Lauf sehen und bedienen. Du kannst den Lauf jederzeit stoppen."
             : DescribeComputerAction(pending.Request!);
         content.Children.Add(PlanLabel(description, bold: false));
         if (pending.IsActivation)
-            content.Children.Add(ComputerDecisionButton("✓", "Computersteuerung aktivieren", pending, ComputerActionDecision.Execute));
+            content.Children.Add(ComputerDecisionButton("✓", "Computer-Use aktivieren", pending, ComputerActionDecision.Execute));
         else
         {
             content.Children.Add(ComputerDecisionButton("1", "Ich habe es erledigt", pending, ComputerActionDecision.ManualDone));

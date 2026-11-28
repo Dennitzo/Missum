@@ -170,12 +170,15 @@ public sealed partial class NativeAssistantPage
             content.Children.Add(new FontIcon { Glyph = glyph, FontSize = 15, Foreground = ComposerGroupIconBrush(groupId), VerticalAlignment = VerticalAlignment.Center });
             var label = new TextBlock { Text = name, FontSize = 14, Foreground = menuForeground, VerticalAlignment = VerticalAlignment.Center };
             Grid.SetColumn(label, 1); content.Children.Add(label);
-            var detail = new TextBlock { Text = description, FontSize = 14, Foreground = menuForeground, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
-            Grid.SetColumn(detail, 2); content.Children.Add(detail);
             var button = new Button { Content = content, HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch,
                 Padding = new(8, 5, 8, 5), MinHeight = 28, CornerRadius = new(15), IsEnabled = enabled, BorderThickness = new(0), Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent) };
+            // Long descriptions are trimmed at rest and scroll through while the row is hovered or
+            // keyboard-focused, so no tooltip covers the next rows.
+            var detail = MarqueeText.Create(description, 14, menuForeground, button);
+            detail.VerticalAlignment = VerticalAlignment.Center;
+            Grid.SetColumn(detail, 2); content.Children.Add(detail);
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(button, name);
-            ToolTipService.SetToolTip(button, description);
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(button, description);
             button.Click += (_, _) => { menu.Hide(); action(); };
             _ = iconKey; _ = actionId;
             entries.Add(new ComposerToolEntry(group.Order, groupId, group.Label, itemOrder, button));

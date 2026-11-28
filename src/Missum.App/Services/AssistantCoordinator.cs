@@ -1879,7 +1879,7 @@ public sealed partial class AssistantCoordinator(
             var computerUse = string.Equals(match.Trigger.ExtensionActionId, BuiltInActionIds.ComputerUse, StringComparison.Ordinal);
             // ChatGPT never controls the computer; the catalog already hides the action there.
             if (computerUse && session.ChatMode == ChatMode.General)
-                throw new InvalidOperationException("Die Computersteuerung ist im ChatGPT-Modus nicht verfügbar. Wechsle für Desktop-Aufgaben zu Codex.");
+                throw new InvalidOperationException("Computer-Use ist im ChatGPT-Modus nicht verfügbar. Wechsle für Desktop-Aufgaben zu Codex.");
             // Computer-Use always runs as a Codex run (the gateway's desktop loop) in the modes offering it.
             if ((session.ChatMode is ChatMode.Coding or ChatMode.Webdesign || computerUse)
                 && match.Trigger.Action == PromptTriggerAction.Extension)

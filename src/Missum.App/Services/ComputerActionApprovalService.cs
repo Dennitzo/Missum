@@ -25,7 +25,7 @@ public sealed class ComputerActionApprovalService : IComputerActionApproval
             cancellationToken.ThrowIfCancellationRequested();
             if (_endedRuns.Contains(runId)) return Task.FromResult(false);
             if (_activeRun is not null && (!string.Equals(_activeRun, runId, StringComparison.Ordinal) || _activeSession != sessionId))
-                throw new InvalidOperationException("Ein anderer Computersteuerungs-Lauf ist bereits aktiv.");
+                throw new InvalidOperationException("Ein anderer Computer-Use-Lauf ist bereits aktiv.");
             _activeSession = sessionId;
             _activeRun = runId;
         }
@@ -39,7 +39,7 @@ public sealed class ComputerActionApprovalService : IComputerActionApproval
         lock (_gate)
         {
             if (_activeSession != request.SessionId || !string.Equals(_activeRun, request.RunId, StringComparison.Ordinal))
-                throw new InvalidOperationException("Die Computersteuerung ist für diesen Lauf nicht freigegeben.");
+                throw new InvalidOperationException("Computer-Use ist für diesen Lauf nicht freigegeben.");
         }
         return AwaitDecisionAsync(new PendingComputerApproval(Guid.NewGuid(), request.SessionId, request.RunId, false, request), cancellationToken);
     }
@@ -76,8 +76,8 @@ public sealed class ComputerActionApprovalService : IComputerActionApproval
         lock (_gate)
         {
             if (_endedRuns.Contains(request.RunId))
-                throw new InvalidOperationException("Dieser Computersteuerungs-Lauf wurde bereits beendet.");
-            if (_pending is not null) throw new InvalidOperationException("Eine Computersteuerungs-Freigabe wartet bereits.");
+                throw new InvalidOperationException("Dieser Computer-Use-Lauf wurde bereits beendet.");
+            if (_pending is not null) throw new InvalidOperationException("Eine Computer-Use-Freigabe wartet bereits.");
             _pending = request;
         }
         NotifyChanged();

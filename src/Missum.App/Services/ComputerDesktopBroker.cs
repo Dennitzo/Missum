@@ -108,7 +108,7 @@ public sealed class ComputerDesktopBroker : IDisposable
     public void Begin(Guid sessionId, string runId)
     {
         if (sessionId == Guid.Empty || string.IsNullOrWhiteSpace(runId))
-            throw new ArgumentException("Computersteuerung benötigt eine Sitzung und einen Lauf.");
+            throw new ArgumentException("Computer-Use benötigt eine Sitzung und einen Lauf.");
         lock (_lifecycle)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
@@ -134,7 +134,7 @@ public sealed class ComputerDesktopBroker : IDisposable
             if (!session.Activated)
             {
                 if (!await _approval.ActivateAsync(sessionId, runId, linked.Token).ConfigureAwait(false))
-                    throw new UnauthorizedAccessException("Die Computersteuerung wurde nicht freigegeben.");
+                    throw new UnauthorizedAccessException("Computer-Use wurde nicht freigegeben.");
                 linked.Token.ThrowIfCancellationRequested();
                 session.Activated = true;
             }
@@ -251,7 +251,7 @@ public sealed class ComputerDesktopBroker : IDisposable
 
     private Session GetSession(Guid sessionId, string runId) =>
         _sessions.TryGetValue((sessionId, runId), out var value) ? value
-            : throw new UnauthorizedAccessException("Keine aktive Computersteuerung für diese Sitzung und diesen Lauf.");
+            : throw new UnauthorizedAccessException("Kein aktives Computer-Use für diese Sitzung und diesen Lauf.");
 
     internal static ComputerAction NormalizeCoordinates(ComputerAction action, ComputerObservation frame)
     {

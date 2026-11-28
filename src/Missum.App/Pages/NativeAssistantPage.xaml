@@ -118,7 +118,7 @@
       <Grid x:Name="ConversationContent" HorizontalAlignment="Stretch">
        <StackPanel Spacing="12">
         <StackPanel x:Name="MessagesPanel" Spacing="24"/>
-        <StackPanel x:Name="ComputerControlHost" Visibility="Collapsed" Spacing="10" AutomationProperties.Name="Computersteuerung"/>
+        <StackPanel x:Name="ComputerControlHost" Visibility="Collapsed" Spacing="10" AutomationProperties.Name="Computer-Use"/>
         <TextBlock x:Name="StatusText" Visibility="Collapsed" TextWrapping="Wrap" Foreground="{ThemeResource MissumMutedTextBrush}" FontSize="14"/>
         <InfoBar x:Name="ErrorBar" IsOpen="False" IsClosable="True" Severity="Error" Closed="OnChatErrorClosed"/>
        </StackPanel>
@@ -130,7 +130,7 @@
       <Path Width="16" Height="16" Data="M8,2 L8,14 M3,9 L8,14 L13,9" Stroke="{ThemeResource MissumIconNavigationBrush}" StrokeThickness="1.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
      </Button>
      <StackPanel x:Name="ComposerDock" Grid.Row="1" MaxWidth="960" HorizontalAlignment="Stretch">
-      <StackPanel x:Name="ComputerControlStatusHost" Visibility="Collapsed" Margin="0,0,0,8" AutomationProperties.Name="Status der Computersteuerung"/>
+      <StackPanel x:Name="ComputerControlStatusHost" Visibility="Collapsed" Margin="0,0,0,8" AutomationProperties.Name="Status von Computer-Use"/>
       <Grid x:Name="ComposerShell">
       <!-- Liquid Glass only: lift shadow, accent glow and reflections behind the composer glass. -->
       <Grid x:Name="ComposerLightHost" IsHitTestVisible="False"/>

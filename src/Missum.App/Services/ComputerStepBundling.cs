@@ -7,7 +7,7 @@ namespace Missum.App.Services;
 /// <summary>
 /// Folds a run of Computer-Use steps (observe/act and the short model comments
 /// between them) into one chat receipt. The individual steps stay durable; only
-/// the chat projection shows them as a single expandable "Computersteuerung" row.
+/// the chat projection shows them as a single expandable "Computer-Use" row.
 /// </summary>
 internal static class ComputerStepBundling
 {
@@ -80,7 +80,7 @@ internal static class ComputerStepBundling
             id = "computer-group:" + Text(run[0], "id"),
             tool = GroupTool,
             status,
-            label = count == 1 ? "Computersteuerung · 1 Schritt" : $"Computersteuerung · {count} Schritte",
+            label = count == 1 ? "Computer-Use · 1 Schritt" : $"Computer-Use · {count} Schritte",
             detail = detail.ToString().TrimEnd(),
             contentOffset = start,
             contentEnd = end,
