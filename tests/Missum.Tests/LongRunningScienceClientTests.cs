@@ -91,14 +91,17 @@ public sealed class LongRunningScienceClientTests
         Assert.Null(request.Limits.MaximumOutputTokens);
         Assert.Equal(ContextTokens, request.Limits.MaximumContextTokens);
         Assert.Equal(session.Id.ToString("D"), request.SessionId);
-        Assert.Equal(workspace, mode is ChatMode.Coding or ChatMode.ClaudeScience ? request.CodingOptions?.WorkspacePath : request.WorkspacePath);
+        // ChatGPT keeps the project as grouping only; its runs never receive the workspace.
+        Assert.Equal(mode == ChatMode.General ? null : workspace,
+            mode is ChatMode.Coding or ChatMode.ClaudeScience ? request.CodingOptions?.WorkspacePath : request.WorkspacePath);
         if (planMode)
         {
             Assert.Equal(RunMode.Coding, request.Mode);
             Assert.Equal(ConversationProfile.PlanMode, request.ConversationProfile);
             Assert.Null(request.WorkflowProfile);
             Assert.Null(request.ResearchOptions);
-            Assert.False(request.CodingOptions!.ContinueSessionContext);
+            // Plan and implementation share one continuous context whenever there is history.
+            Assert.Equal(continuing, request.CodingOptions!.ContinueSessionContext);
             Assert.Equal(MissumAiAssistantService.GetAllowedServerTools(PromptTriggerAction.PlanMode), request.AllowedServerTools);
             var planPrompt = Assert.Single(request.Messages[^1].Content).Text;
             Assert.Contains("assistant-plan", planPrompt, StringComparison.Ordinal);

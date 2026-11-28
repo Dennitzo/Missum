@@ -25,6 +25,10 @@ public sealed partial class ModelRuntimeClient : IDisposable
         LogLevel.Warning,
         new EventId(4102, "ModelInferenceRetry"),
         "Transient model inference failure; retrying before any tool is executed.");
+    private static readonly Action<ILogger, Exception?> LogRouterBusyDuringLoad = LoggerMessage.Define(
+        LogLevel.Information,
+        new EventId(4105, "ModelRouterBusyDuringLoad"),
+        "The native llama router did not answer the status probe while this gateway loads a model; reporting the load.");
     private static readonly Action<ILogger, int, string, int, string, int, bool, Exception?> LogStreamingAttempt =
         LoggerMessage.Define<int, string, int, string, int, bool>(
             LogLevel.Warning,
@@ -85,6 +89,13 @@ public sealed partial class ModelRuntimeClient : IDisposable
             return ownsModelGate ? Cache(status) : status;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (OperationCanceledException exception) when (!ownsModelGate && TryDescribeOwnModelLoad(out var loading))
+        {
+            // Spawning a model keeps the router from answering within the probe.
+            // That is this gateway's own load, not an outage; never cache it.
+            LogRouterBusyDuringLoad(_logger, exception);
+            return new ModelStatusSnapshot(true, _options.ModelRuntimeUri.ToString(), loading, DateTimeOffset.UtcNow);
+        }
         catch (Exception exception) when (exception is HttpRequestException or JsonException or OperationCanceledException)
         {
             LogRouterUnavailable(_logger, exception);
@@ -2392,6 +2403,20 @@ public sealed partial class ModelRuntimeClient : IDisposable
             _cacheExpiresAt = DateTimeOffset.UtcNow.Add(StatusCacheDuration);
         }
         return status;
+    }
+
+    private bool TryDescribeOwnModelLoad(out IReadOnlyList<ModelRuntimeStatus> models)
+    {
+        lock (_cacheLock)
+        {
+            models = [];
+            if (_lastReachableModels.Count == 0 || !_modelTransitions.ContainsValue("loading")) return false;
+            models = [.. _lastReachableModels.Select(model => _modelTransitions.TryGetValue(model.Id, out var transition)
+                && (transition == "loading" || model.State is "loaded" or "sleeping" or "loading")
+                    ? model with { State = transition, Loaded = false, LoadedContextTokens = null }
+                    : model)];
+            return true;
+        }
     }
 
     private IReadOnlyList<ModelRuntimeStatus> GetLastReachableModels()

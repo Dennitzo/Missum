@@ -29,7 +29,7 @@ public sealed partial class NativeAssistantPage
             var row = new Grid { ColumnSpacing = 12 };
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            row.Children.Add(new TextBlock { Text = pending is not null ? "Computersteuerung · Bestätigung erforderlich" : "Computersteuerung aktiv · Desktop nicht isoliert", VerticalAlignment = VerticalAlignment.Center,
+            row.Children.Add(new TextBlock { Text = pending is not null ? "Computersteuerung · Bestätigung erforderlich" : "Computersteuerung aktiv", VerticalAlignment = VerticalAlignment.Center,
                 FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap });
             var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
             if (pending is not null)
@@ -57,7 +57,7 @@ public sealed partial class NativeAssistantPage
         var content = (StackPanel)card.Child;
         content.Children.Add(PlanLabel(pending.IsActivation ? "Computersteuerung für diesen Lauf aktivieren?" : "Computeraktion bestätigen", bold: true));
         var description = pending.IsActivation
-            ? "Missum darf den gesamten Windows-Desktop für diesen Lauf sehen und bedienen. Der Desktop ist keine isolierte Umgebung. Du kannst den Lauf jederzeit stoppen."
+            ? "Missum darf den gesamten Windows-Desktop für diesen Lauf sehen und bedienen. Du kannst den Lauf jederzeit stoppen."
             : DescribeComputerAction(pending.Request!);
         content.Children.Add(PlanLabel(description, bold: false));
         if (pending.IsActivation)

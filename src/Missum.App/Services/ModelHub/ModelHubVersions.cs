@@ -49,8 +49,14 @@ public static class ModelHubVersions
                     && string.Equals(f.RepoPath.Contains('/', StringComparison.Ordinal) ? f.RepoPath[..(f.RepoPath.LastIndexOf('/') + 1)] : "", folder, StringComparison.OrdinalIgnoreCase));
                 if (alternative is not null) byPath[projector.Path] = alternative with { Size = projector.Size, RepoPath = projector.Path, Alternative = true };
             }
+            // Likewise any draft head already in the snapshot serves; a second one would only cost space.
+            foreach (var draft in quantization.Companions.Where(c => ModelHubQuantizations.IsDraft(c.Path) && !byPath.ContainsKey(c.Path)))
+            {
+                var alternative = snapshot.FirstOrDefault(f => ModelHubQuantizations.IsDraft(f.RepoPath) && f.RepoPath.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase));
+                if (alternative is not null) byPath[draft.Path] = alternative with { Size = draft.Size, RepoPath = draft.Path, Alternative = true };
+            }
             var present = wanted.Where(file => byPath.ContainsKey(file.Path)).ToList();
-            // Shared companions (the vision projector) alone do not make a quantization present.
+            // Shared companions (vision projector, draft head) alone do not make a quantization present.
             if (!quantization.Parts.Any(part => byPath.ContainsKey(part.Path))) continue;
             anyPresent = true;
             bestFolder ??= snapshot.Key;
@@ -80,6 +86,5 @@ public static class ModelHubVersions
             : new(LocalQuantizationState.Missing, null, none);
     }
 
-    private static bool IsProjector(string path) =>
-        path[(path.LastIndexOf('/') + 1)..].StartsWith("mmproj", StringComparison.OrdinalIgnoreCase);
+    private static bool IsProjector(string path) => ModelHubQuantizations.IsProjector(path);
 }

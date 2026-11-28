@@ -157,10 +157,13 @@ internal sealed record AssistantClientView
         foreach (var entry in Drafts ?? [])
             if (Guid.TryParse(entry.Key, out var id) && id != Guid.Empty && entry.Value is { Length: <= 100_000 })
                 drafts[id.ToString("D")] = entry.Value;
+        // The former Webdesign mode (stored as 4) is Codex with the Webdesign tool now.
+        var webdesign = Mode == ChatMode.Webdesign;
         return this with
         {
-            Mode = Enum.IsDefined(Mode) ? Mode : ChatMode.General,
-            GeneralSession = NormalizeId(GeneralSession), CodingSession = NormalizeId(CodingSession),
+            Mode = webdesign ? ChatMode.Coding : Enum.IsDefined(Mode) ? Mode : ChatMode.General,
+            GeneralSession = NormalizeId(GeneralSession), CodingSession = NormalizeId(CodingSession) ?? NormalizeId(WebdesignSession),
+            WebdesignSession = null,
             ScienceSession = NormalizeId(ScienceSession), MeetingsSession = NormalizeId(MeetingsSession), ActiveSession = NormalizeId(ActiveSession), ActiveProject = NormalizeId(ActiveProject),
             Model = IsValidText(Model, 512) ? Model : null,
             Reasoning = reasoning, Drafts = drafts,

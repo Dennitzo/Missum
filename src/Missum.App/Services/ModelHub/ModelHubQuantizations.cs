@@ -21,6 +21,7 @@ public static partial class ModelHubQuantizations
         var ggufs = files.Where(f => f.Path.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase) && !IsExcluded(f.Path)).ToList();
         var projectors = ggufs.Where(f => FileName(f.Path).StartsWith("mmproj", StringComparison.OrdinalIgnoreCase)).ToList();
         var models = ggufs.Where(f => !IsCompanion(f.Path)).ToList();
+        var draft = Draft(ggufs.Where(f => IsDraft(f.Path)));
 
         var groups = new Dictionary<string, List<HubFile>>(StringComparer.OrdinalIgnoreCase);
         foreach (var file in models)
@@ -40,7 +41,7 @@ public static partial class ModelHubQuantizations
             if (split.Success && ordered.Count != int.Parse(split.Groups["total"].Value, System.Globalization.CultureInfo.InvariantCulture)) continue;
             var stem = split.Success ? FileName(split.Groups["stem"].Value) : Path.GetFileNameWithoutExtension(FileName(ordered[0].Path));
             var folder = Folder(ordered[0].Path);
-            result.Add(new HubQuantization(Label(stem, folder), ordered, Projector(projectors, folder)));
+            result.Add(new HubQuantization(Label(stem, folder), ordered, [.. Projector(projectors, folder), .. draft]));
             _ = key;
         }
         return result.OrderBy(q => q.ModelBytes).ToList();
@@ -72,6 +73,49 @@ public static partial class ModelHubQuantizations
             if (current.Length == 0) return [];
         }
     }
+
+    /// <summary>
+    /// One speculative-decoding draft (MTP head) for the whole repository, never every variant: the
+    /// native catalog links any draft in the snapshot to each quantization. Only self-contained heads:
+    /// "shared-" heads borrow the target's token embedding, which the official llama.cpp build
+    /// rejects at load (tested with b12780), and the catalog ignores them. Q8_0 is preferred: a draft step is dominated by the output projection,
+    /// which runs faster at 8 bits, and BF16 has no hardware support on pre-Ampere GPUs (Turing),
+    /// so it comes last. F16 is the 16-bit choice when no 8-bit head exists. Among equal files
+    /// the shallowest path wins (unsloth places the recommended head at the root as well).
+    /// </summary>
+    internal static List<HubFile> Draft(IEnumerable<HubFile> drafts)
+    {
+        var pick = drafts
+            .Where(d => !SplitPattern().IsMatch(d.Path) && !FileName(d.Path).Contains("shared", StringComparison.OrdinalIgnoreCase))
+            .OrderBy(d => Array.FindIndex(DraftPrefixes, prefix => FileName(d.Path).StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) is var kind and >= 0 ? kind : DraftPrefixes.Length)
+            .ThenBy(d => DraftPrecisionRank(FileName(d.Path)))
+            .ThenBy(d => d.Path.Count(c => c == '/'))
+            .ThenBy(d => d.Path, StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault();
+        return pick is null ? [] : [pick];
+    }
+
+    private static int DraftPrecisionRank(string name)
+    {
+        string[] order = ["Q8_0", "F16", "Q6_K", "Q5_K_M", "Q4_K_M"];
+        var stem = Path.GetFileNameWithoutExtension(name);
+        for (var index = 0; index < order.Length; index++)
+            if (stem.EndsWith(order[index], StringComparison.OrdinalIgnoreCase)
+                && !(order[index] == "F16" && stem.EndsWith("BF16", StringComparison.OrdinalIgnoreCase)))
+                return index;
+        return stem.EndsWith("BF16", StringComparison.OrdinalIgnoreCase) ? order.Length + 1 : order.Length;
+    }
+
+    /// <summary>An MTP/draft head: an mtp-, dspark-, eagle- or draft- file or one in such a folder.</summary>
+    public static bool IsDraft(string path)
+    {
+        var name = FileName(path);
+        return DraftPrefixes.Any(prefix => name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            || path.Split('/').SkipLast(1).Any(part => DraftPrefixes.Any(prefix => part.Equals(prefix, StringComparison.OrdinalIgnoreCase)));
+    }
+
+    /// <summary>A vision projector (mmproj-*).</summary>
+    public static bool IsProjector(string path) => FileName(path).StartsWith("mmproj", StringComparison.OrdinalIgnoreCase);
 
     // Speculative-decoding drafts (mtp, dspark, eagle, draft) belong to a model; they are no model of their own.
     private static readonly string[] DraftPrefixes = ["mtp", "dspark", "eagle", "draft"];

@@ -14,9 +14,9 @@ using Windows.Storage.Streams;
 namespace Missum.App.Controls;
 
 /// <summary>
-/// The fixed "Webseite" tab of the Webdesign mode: a native WebView2 that shows the project's
+/// The "Webseite" tab of the Codex tool Webdesign: a native WebView2 that shows the project's
 /// local server, follows file changes, emulates devices, carries the marking overlay and serves
-/// as the target of the AI preview tools and of computer control. All WebView2 work happens on
+/// as the target of the AI preview tools (webdesign.preview). All WebView2 work happens on
 /// the UI thread; tool calls from other threads are marshalled through <see cref="RunOnUiAsync{T}"/>.
 /// </summary>
 public sealed partial class WebdesignPreviewView : Grid, IWebdesignPreviewSurface
@@ -138,9 +138,14 @@ public sealed partial class WebdesignPreviewView : Grid, IWebdesignPreviewSurfac
         }
     }
 
+    /// <summary>
+    /// The Webdesign tool is off for the open session (or another mode is shown). The server idles out
+    /// later; the next <see cref="SetWorkspaceAsync"/> starts it again and reloads the start page.
+    /// </summary>
     public Task DeactivateAsync()
     {
         _serve.SetActiveWorkspace(null);
+        _workspace = null;
         return Task.CompletedTask;
     }
 
@@ -583,7 +588,69 @@ public sealed partial class WebdesignPreviewView : Grid, IWebdesignPreviewSurfac
         return true;
     });
 
-    public Task<WebdesignCapture> CaptureAsync(string? device, CancellationToken cancellationToken) => RunOnUiAsync(async () =>
+    // ---------------------------------------------------------------------------------------
+    // Visibility: the host shows the tab; a capture renders a hidden tab invisibly
+    // ---------------------------------------------------------------------------------------
+
+    private bool _hostVisible;
+    private int _offscreenRenders;
+
+    /// <summary>The host page shows (true) or hides (false) the "Webseite" tab.</summary>
+    internal void SetHostVisible(bool visible)
+    {
+        _hostVisible = visible;
+        if (visible)
+        {
+            Opacity = 1;
+            IsHitTestVisible = true;
+            Visibility = Visibility.Visible;
+            return;
+        }
+        if (_offscreenRenders > 0)
+        {
+            Opacity = 0;
+            IsHitTestVisible = false;
+            return;
+        }
+        Visibility = Visibility.Collapsed;
+    }
+
+    /// <summary>
+    /// A collapsed WebView2 produces no frames, so a screenshot of the page (webdesign.preview capture,
+    /// before/after) would see nothing while the user reads the chat. The tab is laid out and rendered
+    /// for the capture, fully transparent and without hit testing, and hidden again afterwards.
+    /// </summary>
+    private async Task<T> WithRenderedPageAsync<T>(Func<Task<T>> work, CancellationToken cancellationToken)
+    {
+        if (_hostVisible) return await work();
+        _offscreenRenders++;
+        Opacity = 0;
+        IsHitTestVisible = false;
+        Visibility = Visibility.Visible;
+        try
+        {
+            UpdateLayout();
+            await Task.Delay(350, cancellationToken);
+            return await work();
+        }
+        finally
+        {
+            if (--_offscreenRenders == 0)
+            {
+                if (!_hostVisible) Visibility = Visibility.Collapsed;
+                Opacity = 1;
+                IsHitTestVisible = true;
+            }
+        }
+    }
+
+    /// <summary>The browser runs and shows the project's ready server (tools may capture and inspect).</summary>
+    public bool IsReady => !_disposed && _core is not null && _state is { Status: "ready" };
+
+    public Task<WebdesignCapture> CaptureAsync(string? device, CancellationToken cancellationToken) => RunOnUiAsync(() =>
+        WithRenderedPageAsync(() => CaptureRenderedAsync(device, cancellationToken), cancellationToken));
+
+    private async Task<WebdesignCapture> CaptureRenderedAsync(string? device, CancellationToken cancellationToken)
     {
         var core = RequireCore();
         var previous = (_device, _landscape);
@@ -603,13 +670,14 @@ public sealed partial class WebdesignPreviewView : Grid, IWebdesignPreviewSurfac
             return new WebdesignCapture(png, pixelWidth, pixelHeight,
                 state.GetProperty("width").GetDouble(), state.GetProperty("height").GetDouble(),
                 state.GetProperty("scrollX").GetDouble(), state.GetProperty("scrollY").GetDouble(),
-                state.GetProperty("url").GetString() ?? _currentUrl ?? "", _device, elements.Clone());
+                state.GetProperty("url").GetString() ?? _currentUrl ?? "", _device, elements.Clone(),
+                state.TryGetProperty("title", out var title) && title.ValueKind == JsonValueKind.String ? title.GetString() : null);
         }
         finally
         {
             if (previous._device != _device || previous._landscape != _landscape) await SetDeviceAsync(previous._device, previous._landscape);
         }
-    });
+    }
 
     public Task<IReadOnlyList<string>> ConsoleAsync(CancellationToken cancellationToken) => RunOnUiAsync(() =>
     {
@@ -622,6 +690,16 @@ public sealed partial class WebdesignPreviewView : Grid, IWebdesignPreviewSurfac
     public Task<JsonElement> ElementAtAsync(double cssX, double cssY, CancellationToken cancellationToken) => RunOnUiAsync(async () =>
         (await EvaluateAsync(RequireCore(), string.Create(CultureInfo.InvariantCulture,
             $"window.__missum ? window.__missum.elementAt({cssX},{cssY}) : null"))).Clone());
+
+    public Task GoBackAsync(CancellationToken cancellationToken) => RunOnUiAsync(async () =>
+    {
+        var core = RequireCore();
+        if (!core.CanGoBack) throw new InvalidOperationException("Im Verlauf des Tabs Webseite gibt es keine vorherige Seite.");
+        var before = _navigationCount;
+        core.GoBack();
+        for (var waited = 0; waited < 50 && _navigationCount == before; waited++) await Task.Delay(100, cancellationToken);
+        return true;
+    });
 
     public Task<(double X, double Y)> ScrollAsync(CancellationToken cancellationToken) => RunOnUiAsync(async () =>
     {

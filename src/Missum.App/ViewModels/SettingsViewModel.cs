@@ -31,6 +31,8 @@ public sealed partial class SettingsViewModel(
         || Theme != _preferencesBaseline.Theme
         || AccentColor != _preferencesBaseline.AccentColor
         || BackgroundColor != _preferencesBaseline.BackgroundColor
+        || IsLiquidGlassEnabled != _preferencesBaseline.IsLiquidGlassEnabled
+        || IsCrossSessionMemoryEnabled != _preferencesBaseline.IsCrossSessionMemoryEnabled
         || Language != _preferencesBaseline.Language;
 
     public ObservableCollection<LocalAiModel> Models { get; } = [];
@@ -76,6 +78,13 @@ public sealed partial class SettingsViewModel(
     public partial string BackgroundColor { get; set; } = AppSettings.DefaultBackgroundColor;
 
     [ObservableProperty]
+    public partial bool IsLiquidGlassEnabled { get; set; }
+
+    /// <summary>ChatGPT mode may search earlier chats across sessions and projects.</summary>
+    [ObservableProperty]
+    public partial bool IsCrossSessionMemoryEnabled { get; set; } = true;
+
+    [ObservableProperty]
     public partial string Language { get; set; } = "de-DE";
 
     [ObservableProperty]
@@ -103,6 +112,8 @@ public sealed partial class SettingsViewModel(
         Theme = current.Theme;
         AccentColor = current.AccentColor;
         BackgroundColor = current.BackgroundColor;
+        IsLiquidGlassEnabled = current.IsLiquidGlassEnabled;
+        IsCrossSessionMemoryEnabled = current.IsCrossSessionMemoryEnabled;
         Language = current.Language;
         IsServerReady = shell.IsAiServerReady;
         ConnectionStatus = "Nicht geprüft";
@@ -165,6 +176,8 @@ public sealed partial class SettingsViewModel(
             Theme = Theme,
             AccentColor = AccentColor,
             BackgroundColor = BackgroundColor,
+            IsLiquidGlassEnabled = IsLiquidGlassEnabled,
+            IsCrossSessionMemoryEnabled = IsCrossSessionMemoryEnabled,
             Language = Language,
         };
 

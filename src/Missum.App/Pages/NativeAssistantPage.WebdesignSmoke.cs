@@ -9,11 +9,12 @@ using Missum.App.Services.Webdesign;
 namespace Missum.App.Pages;
 
 /// <summary>
-/// MISSUM_SMOKE_UI_WEBDESIGN=1: drives the Webdesign mode end to end in the real app: empty
-/// project with placeholder, automatic display of a written page, CSS swap without reload,
-/// devices, LAN with QR code, marking, comment, frame, fine-tuning, done badges, computer
-/// control on the tab, console errors and before/after. Writes window captures (including the
-/// WebView) and native-webdesign-validation.json.
+/// MISSUM_SMOKE_UI_WEBDESIGN=1: drives the Codex tool Webdesign end to end in the real app: the
+/// tool from the "+" menu with its chip and the "Webseite" tab, empty project with placeholder,
+/// automatic display of a written page, CSS swap without reload, devices, hosting chip with LAN and
+/// QR code, marking, comment, frame, fine-tuning, done badges, the WebView input platform, console
+/// errors, a capture while the chat is in front, before/after, Plan mode beside the tool and
+/// removing the chip. Writes window captures (including the WebView) and native-webdesign-validation.json.
 /// </summary>
 public sealed partial class NativeAssistantPage
 {
@@ -25,12 +26,17 @@ public sealed partial class NativeAssistantPage
         var checks = new Dictionary<string, object?>();
         var serve = App.Current.GetService<WebdesignServeService>();
 
-        await NavigateAsync("mode.switch", new { chatMode = WebdesignMode });
+        await NavigateAsync("mode.switch", new { chatMode = "coding" });
         var project = Path.Combine(App.Current.DataDirectory, "SmokeWebdesign Portfolio");
         if (Directory.Exists(project)) Directory.Delete(project, true);
         Directory.CreateDirectory(project);
-        await NavigateAsync("session.projectCreate", new { workspacePath = project, chatMode = WebdesignMode });
-        await WaitForAsync(() => _mode == WebdesignMode && _websiteTabButton?.Parent is not null, "Tab Webseite fehlt");
+        await NavigateAsync("session.projectCreate", new { workspacePath = project, chatMode = "coding" });
+        await WaitForAsync(() => _mode == "coding" && S(_snapshot, "workspacePath").Length > 0, "Codex-Projektsitzung fehlt");
+        checks["noTabWithoutTool"] = _websiteTabButton?.Parent is null && WebdesignToolChip.Visibility != Visibility.Visible;
+        checks["offeredInMenu"] = Items(_snapshot, "actionDescriptors").Any(action => S(action, "actionId") == Missum.Core.Extensions.BuiltInActionIds.Webdesign);
+        await ChooseWebdesignToolAsync();
+        await WaitForAsync(() => WebdesignToolActive && _websiteTabButton?.Parent is not null, "Tab Webseite fehlt");
+        checks["chipShown"] = WebdesignToolChip.Visibility == Visibility.Visible;
         var view = WebsiteView();
         await WaitForAsync(() => view.ServerState is { Status: "ready" } && view.NavigationCount >= 1, "Server oder erste Seite kam nicht");
         OpenWebsiteView();
@@ -123,8 +129,12 @@ public sealed partial class NativeAssistantPage
         checks["smartphoneWidth"] = (string)checks["viewport-smartphone"]! == "390x844";
         await view.SetDeviceAsync("free");
 
-        SmokeStep("LAN with QR code.");
-        // LAN with QR code.
+        SmokeStep("Hosting chip in the tool pill, LAN with QR code.");
+        // The hosting chip is part of the visible tool pill, so LAN, QR code and restart stay reachable.
+        checks["hostingInToolbar"] = view.HostingChipInToolbar;
+        view.ShowHostingForSmoke();
+        await Task.Delay(500);
+        report["hosting"] = await CaptureWebdesignAsync("webdesign-3b-hosting.png");
         var lanState = await serve.ConfigureAsync(project, config => config with { Lan = true });
         checks["lanUrl"] = lanState.LanUrl;
         checks["lanPortKept"] = lanState.Port == state.Port;
@@ -241,8 +251,9 @@ public sealed partial class NativeAssistantPage
         await Task.Delay(1500);
         report["badges"] = await CaptureWebdesignAsync("webdesign-6-badges.png");
 
-        SmokeStep("Computer control directly on the tab: observe, click the ");
-        // Computer control directly on the tab: observe, click the button, check the result.
+        SmokeStep("WebView input platform: observe, click the ");
+        // Computersteuerung itself only sees the desktop now. The WebView input platform stays for a later
+        // Browser-Use mode on the tab and is exercised directly: observe, click the button, check the result.
         var approvals = new SmokeApproval();
         using (var broker = new ComputerDesktopBroker(approvals, new SmokeNoDesktop(), webViewFactory: () => new WebViewComputerPlatform(view)))
         {
@@ -264,10 +275,21 @@ public sealed partial class NativeAssistantPage
             SmokeStep("computer step 4");
             await broker.ExecuteAsync(session, "smoke-web", new ComputerAction(observation.ObservationId, "click",
                 link.GetProperty("x").GetDouble() + 4, link.GetProperty("y").GetDouble() + 4, CoordinateSpace: "pixels"));
-            checks["externalLinkAsked"] = approvals.Requests == 1 && approvals.LastTarget?.Contains("example.org", StringComparison.Ordinal) == true;
+            // Computer actions run without approval prompts; an external link must not leave the project tab.
+            checks["externalLinkWithoutPrompt"] = approvals.Requests == 0;
             checks["tabStillLocal"] = view.CurrentUrl?.StartsWith(state.LocalUrl, StringComparison.Ordinal) == true;
             broker.End(session, "smoke-web");
         }
+
+        SmokeStep("Capture while the chat is in front.");
+        // webdesign.preview capture renders the hidden tab (not the desktop) and hides it again.
+        ShowChatView();
+        RenderSessionTabs();
+        var hiddenCapture = await view.CaptureAsync(null, CancellationToken.None);
+        checks["captureWhileHidden"] = hiddenCapture.Png.Length > 1_000 && hiddenCapture.PixelWidth > 0;
+        checks["hiddenAfterCapture"] = view.Visibility != Visibility.Visible && BodyGrid.Visibility == Visibility.Visible;
+        await File.WriteAllBytesAsync(Path.Combine(App.Current.DataDirectory, "webdesign-6b-hidden-capture.png"), hiddenCapture.Png);
+        OpenWebsiteView();
 
         SmokeStep("Before/after around a change.");
         // Before/after around a change.
@@ -300,15 +322,28 @@ public sealed partial class NativeAssistantPage
         checks["sidebarBackInChat"] = Inspector.Visibility == inspectorInChat;
         OpenWebsiteView();
 
-        SmokeStep("Switching to Codex hides the tab, switching back restores");
-        // Switching to Codex hides the tab, switching back restores it.
-        await NavigateAsync("mode.switch", new { chatMode = "coding" });
-        await WaitForAsync(() => _mode == "coding", "Wechsel zu Codex kam nicht an");
+        SmokeStep("Plan mode beside the Webdesign tool.");
+        // Plan mode is the selected tool while Webdesign stays switched on: two chips, the tab remains.
+        var planSession = _session;
+        await CommandAsync("action.invoke", new { sessionId = planSession, actionId = Missum.Core.Extensions.BuiltInActionIds.PlanMode, enabled = true });
+        await RefreshForExternalActivationAsync();
+        await WaitForAsync(() => _persistentAction == Missum.Core.Extensions.BuiltInActionIds.PlanMode, "Planmodus kam nicht an");
+        checks["coexistsWithPlanMode"] = WebdesignToolActive && SelectedToolChip.Visibility == Visibility.Visible
+            && WebdesignToolChip.Visibility == Visibility.Visible && _websiteTabButton?.Parent is not null;
+        await CommandAsync("action.invoke", new { sessionId = planSession, actionId = Missum.Core.Extensions.BuiltInActionIds.PlanMode, enabled = false });
+        ClearToolSelection();
+        await RefreshForExternalActivationAsync();
+
+        SmokeStep("Removing the chip hides the tab, choosing the tool again restores");
+        // Removing the chip switches the tool off and hides the tab; the "+" menu brings both back.
+        await SetWebdesignToolAsync(false);
+        await WaitForAsync(() => !WebdesignToolActive && _websiteTabButton?.Parent is null, "Webdesign ließ sich nicht abschalten");
         await Task.Delay(600);
-        checks["codexWithoutTab"] = _websiteTabButton?.Parent is null && BodyGrid.Visibility == Visibility.Visible && view.Visibility != Visibility.Visible;
-        await NavigateAsync("mode.switch", new { chatMode = WebdesignMode });
-        await WaitForAsync(() => _mode == WebdesignMode && _websiteTabButton?.Parent is not null, "Rückkehr zu Webdesign fehlgeschlagen");
-        checks["webdesignBack"] = true;
+        checks["chipRemovedHidesTab"] = BodyGrid.Visibility == Visibility.Visible && view.Visibility != Visibility.Visible
+            && WebdesignToolChip.Visibility != Visibility.Visible && WebdesignPreviewRegistry.Current is null;
+        await ChooseWebdesignToolAsync();
+        await WaitForAsync(() => WebdesignToolActive && _websiteTabButton?.Parent is not null, "Webdesign kam nicht zurück");
+        checks["webdesignBack"] = WebdesignPreviewRegistry.Current is not null;
 
         _websiteSubmitOverride = null;
         report["checks"] = checks;

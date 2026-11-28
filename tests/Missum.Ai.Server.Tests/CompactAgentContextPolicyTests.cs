@@ -99,7 +99,8 @@ public sealed class CompactAgentContextPolicyTests
     [Fact]
     public void GeneralContextKeepsPermissionsEvidenceAndMathWithoutTheCodingResearchManual()
     {
-        var policy = CompactAgentContextPolicy.Build(Request(RunMode.General), []);
+        // A general run with project tools (Meetings) keeps the complete file and document rules.
+        var policy = CompactAgentContextPolicy.Build(Request(RunMode.General), [ClientToolNames.DocumentCreate, WorkspaceTools.ImageInput]);
         Assert.Contains("Systemweit lesen ist erlaubt", policy, StringComparison.Ordinal);
         Assert.Contains("nur im ausgewählten Workspace", policy, StringComparison.Ordinal);
         Assert.Contains("Dateien direkt bearbeiten, Nutzeränderungen erhalten", policy, StringComparison.Ordinal);
@@ -118,6 +119,41 @@ public sealed class CompactAgentContextPolicyTests
         Assert.DoesNotContain(".assistant/research/", policy, StringComparison.Ordinal);
         Assert.DoesNotContain("coding.updatePlan:", policy, StringComparison.Ordinal);
         Assert.True(policy.Length < 6500 + AgentNarrationPolicy.Instructions.Length, $"General policy contains {policy.Length} characters.");
+    }
+
+    [Fact]
+    public void ReadOnlyChatGptRunMentionsNoFileWorkAndOffersMemoryOnlyWithItsTool()
+    {
+        string[] chatGptTools = [ClientToolNames.DocumentsList, ClientToolNames.DocumentsSearch, ClientToolNames.DocumentsReadPages,
+            "web.search", "web.fetch", "media.analyze"];
+        var policy = CompactAgentContextPolicy.Build(Request(RunMode.General), chatGptTools);
+        foreach (var fileRule in new[] { "Dateien direkt bearbeiten", "nur im ausgewählten Workspace", "document.create",
+                     "image.input", "Systemweit lesen", "memory.sessions.search" })
+            Assert.DoesNotContain(fileRule, policy, StringComparison.Ordinal);
+        Assert.Contains("keine Werkzeuge zum Schreiben oder Bearbeiten von Dateien", policy, StringComparison.Ordinal);
+        Assert.Contains("Schneller Antwortmodus", policy, StringComparison.Ordinal);
+        Assert.Contains("documents.readPages", policy, StringComparison.Ordinal);
+        Assert.Contains("ohne erneute Ausführung", policy, StringComparison.Ordinal);
+        Assert.Contains(MathFormattingPolicy.Instructions, policy, StringComparison.Ordinal);
+
+        var memory = CompactAgentContextPolicy.Build(Request(RunMode.General), [.. chatGptTools, SessionMemoryToolContract.Name]);
+        Assert.Contains("memory.sessions.search", memory, StringComparison.Ordinal);
+        Assert.Contains("Nutzerprofil", memory, StringComparison.Ordinal);
+        Assert.Contains("andere Projekte", memory, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CodingPromptKeepsTheFormerFileRulesWordForWord()
+    {
+        var policy = CompactAgentContextPolicy.Build(Request(RunMode.Coding), [ClientToolNames.CodingRead]);
+        var newline = policy.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
+        // The split sections join with their own line breaks, so Codex keeps its exact native prefix.
+        Assert.Contains("als Abschluss. Berichte knapp neue Befunde; die abschließende Antwort ist direktes valides Markdown." + newline
+            + "Systemweit lesen ist erlaubt; Dateien schreiben/bearbeiten nur im ausgewählten Workspace. Ein reiner", policy, StringComparison.Ordinal);
+        Assert.Contains("offene eigene Aufgaben bearbeiten." + newline + "Der jüngste [MISSUM_RUNTIME_CONTEXT]-Block", policy, StringComparison.Ordinal);
+        Assert.Contains("Ein Bildtreffer belegt keine Textfakten." + newline + "Dokumente: zuerst list/outline", policy, StringComparison.Ordinal);
+        Assert.Contains("full bedeutet vollständig." + newline + "Sichtprüfung: image.input", policy, StringComparison.Ordinal);
+        Assert.DoesNotContain("Schneller Antwortmodus", policy, StringComparison.Ordinal);
     }
 
     [Fact]

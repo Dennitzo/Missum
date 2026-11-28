@@ -162,10 +162,12 @@ public static class BuiltInExtensionIds
     public const string Audiobook = "builtin.audiobook";
     public const string Math = "builtin.math";
     public const string Computer = "builtin.computer";
+    public const string Browser = "builtin.browser";
+    public const string Webdesign = "builtin.webdesign";
 
     public static IReadOnlyList<string> All { get; } =
     [
-        Coding, Web, Media, Image, Speech, Documents, Workspace, Audiobook, Math, Computer,
+        Coding, Web, Media, Image, Speech, Documents, Workspace, Audiobook, Math, Computer, Browser, Webdesign,
     ];
 }
 
@@ -187,6 +189,13 @@ public static class BuiltInActionIds
     public const string PlanMode = BuiltInExtensionIds.Coding + "/plan-mode";
     public const string Lean = BuiltInExtensionIds.Math + "/lean";
     public const string ComputerUse = BuiltInExtensionIds.Computer + "/use";
+    public const string BrowserUse = BuiltInExtensionIds.Browser + "/use";
+    /// <summary>
+    /// Codex tool "Webdesign": the live "Webseite" tab with local hosting. It is a per-session switch
+    /// stored next to the selected tool (chat_sessions.webdesign_enabled), so Plan mode, Browser-Use or
+    /// Computersteuerung can be selected while it stays on.
+    /// </summary>
+    public const string Webdesign = BuiltInExtensionIds.Webdesign + "/website";
     public const string SelfImprovement = "builtin.self-improvement/build";
 }
 

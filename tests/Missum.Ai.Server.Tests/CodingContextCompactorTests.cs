@@ -24,6 +24,18 @@ public sealed class CodingContextCompactorTests
     }
 
     [Fact]
+    public void MeasuredNativeTokensDecideInsteadOfTheCharacterEstimate()
+    {
+        // JSON-escaped source looks like 240k tokens by characters but measured only 200k:
+        // no compaction yet. The measured count reaching the budget does compact.
+        LmChatMessage[] source = [new("system", "Policy"), new("user", "Earlier task"),
+            new("assistant", new string('x', 240_000 * 3)), new("user", "Continue")];
+        Assert.NotNull(CodingContextCompactor.Plan(source, 262_144));
+        Assert.Null(CodingContextCompactor.Plan(source, 262_144, measuredPromptTokens: 200_000));
+        Assert.NotNull(CodingContextCompactor.Plan(source, 262_144, measuredPromptTokens: 236_000));
+    }
+
+    [Fact]
     public void ManySmallMessagesDoNotTriggerPrematureCompaction()
     {
         var messages = Enumerable.Range(0, 200).Select(i => new LmChatMessage(i % 2 == 0 ? "user" : "assistant", "Small turn")).ToArray();

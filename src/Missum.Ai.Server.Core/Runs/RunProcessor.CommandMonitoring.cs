@@ -65,10 +65,16 @@ internal static class CommandMonitoringPolicy
         return value.Length <= maximum ? value : value[..maximum] + "\n[für die Prozessprüfung gekürzt]";
     }
 
+    // Each check is a separate small prompt on the model's only slot: the main session's
+    // long context must be restored from disk afterwards. Check rarely, and only with
+    // new output, so long builds and test runs keep their warm context.
+    internal const long FirstCheckMilliseconds = 180_000;
+    internal static readonly TimeSpan CheckInterval = TimeSpan.FromMinutes(5);
+
     internal static bool IsDue(ClientToolProgress progress, CommandMonitoringCheckpoint state, DateTimeOffset now) =>
-        progress.ElapsedMilliseconds >= 30_000 && (state.ProposalId != progress.ProposalId
+        progress.ElapsedMilliseconds >= FirstCheckMilliseconds && (state.ProposalId != progress.ProposalId
             || state.LastAttemptAt is null
-            || progress.Revision > state.LastProgressRevision && now - state.LastAttemptAt >= TimeSpan.FromSeconds(60));
+            || progress.Revision > state.LastProgressRevision && now - state.LastAttemptAt >= CheckInterval);
 
     internal static CommandMonitoringCheckpoint ClosePendingCalls(List<LmChatMessage> messages,
         LmToolCall current, ClientToolProgress progress, CommandMonitoringCheckpoint state, DateTimeOffset now)

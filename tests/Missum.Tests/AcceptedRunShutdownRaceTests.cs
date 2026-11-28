@@ -19,7 +19,8 @@ public sealed class AcceptedRunShutdownRaceTests
         await using var environment = await TestEnvironment.CreateAsync();
         var chats = environment.Get<IChatRepository>();
         var runs = environment.Get<IMissumAiRunRepository>();
-        var session = await chats.CreateSessionAsync("Annahme während Beenden", ChatMode.General);
+        // Image generation is not offered in ChatGPT; Meetings keeps it without a project folder.
+        var session = await chats.CreateSessionAsync("Annahme während Beenden", ChatMode.ClaudeMeetings);
         using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
         await settings.InitializeAsync();
         await settings.UpdateAsync(current => current with { MissumAiServerUrl = "http://127.0.0.1:65000" });

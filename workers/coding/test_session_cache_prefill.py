@@ -170,6 +170,23 @@ class PrefillTests(unittest.TestCase):
         self.assertEqual("shortPrefill", self.cache.prefill("model", "key", self.body)["reason"])
         self.assertTrue(any("action=save" in path for path, _ in self.calls))
 
+    def test_clean_resident_session_skips_the_verification_snapshot(self):
+        # After a completed turn of this very session, a short extension needs no
+        # proof of the resident tokens: no checkpoint would be written anyway.
+        self.tokens = self.prompt[:-2]
+        self.cache.save("model", "key", force=False, new_tokens=5)
+        self.calls.clear()
+        result = self.cache.prefill("model", "key", self.body)
+        self.assertEqual("shortResidentTail", result["reason"])
+        self.assertFalse(any("action=save" in path for path, _ in self.calls))
+
+    def test_fork_on_the_parent_slot_requires_verification_again(self):
+        self.tokens = self.prompt[:-2]
+        self.cache.save("model", "key", force=False, new_tokens=5)
+        self.cache.resident["model"]["clean"] = False  # what _prefill_fork records
+        self.calls.clear()
+        self.assertNotEqual("shortResidentTail", self.cache.prefill("model", "key", self.body).get("reason"))
+
     def test_identical_long_resident_is_not_reprocessed(self):
         self.tokens = self.prompt.copy()
         self.assertEqual("shortPrefill", self.cache.prefill("model", "key", self.body)["reason"])

@@ -109,17 +109,32 @@ class SessionCacheTests(unittest.TestCase):
         reopened = self.create_cache()
         self.assertEqual(dict(status="restored", restoredTokens=100), reopened.prepare("model", "session"))
 
-    def test_non_forced_completed_small_turn_is_saved_and_restored(self):
+    def test_non_forced_small_tool_turn_is_deferred_until_the_final_answer(self):
+        # Intermediate tool turns keep the resident slot; writing the whole KV prefix
+        # on every step only delays the agent. The final answer (force) persists it.
         self.cache.prepare("model", "session")
-        self.assertEqual("saved", self.cache.save("model", "session", force=False, new_tokens=1)["status"])
+        self.assertEqual("deferred", self.cache.save("model", "session", force=False, new_tokens=1)["status"])
+        self.assertFalse(self.actions("save"))
+        self.assertEqual("saved", self.cache.save("model", "session", force=True, new_tokens=1)["status"])
         self.tokens = 0
         self.assertEqual("restored", self.create_cache().prepare("model", "session")["status"])
+
+    def test_deferred_work_is_saved_after_enough_tokens_or_on_session_switch(self):
+        self.cache.prepare("model", "session")
+        self.assertEqual("deferred", self.cache.save("model", "session", force=False, new_tokens=1000)["status"])
+        self.assertEqual("saved", self.cache.save("model", "session", force=False,
+                                                  new_tokens=session_cache.DEFERRED_SAVE_TOKENS)["status"])
+        self.cache.prepare("model", "session")  # next turn of the same session
+        self.assertEqual("deferred", self.cache.save("model", "session", force=False, new_tokens=10)["status"])
+        before = len(self.actions("save"))
+        self.cache.prepare("model", "other")  # switching sessions saves the deferred owner first
+        self.assertEqual(before + 1, len(self.actions("save")))
 
     def test_non_forced_save_does_not_snapshot_a_busy_prefill(self):
         self.cache.prepare("model", "session")
         self.busy = True
         with patch("session_cache.time.monotonic", side_effect=[0, 3]):
-            self.assertEqual("unavailable", self.cache.save("model", "session", force=False, new_tokens=1)["status"])
+            self.assertIn(self.cache.save("model", "session", force=False, new_tokens=1)["status"], ("unavailable", "deferred"))
         self.assertFalse(self.actions("save"))
 
     def test_renamed_session_key_reuses_legacy_disk_and_resident_cache(self):

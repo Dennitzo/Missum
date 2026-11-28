@@ -139,6 +139,54 @@ public sealed class ModelCatalogRaceTests
         Assert.True((await client.GetStatusAsync()).ProviderReachable);
     }
 
+    [Fact]
+    public async Task RouterTimeoutWhileThisGatewayLoadsAModelReportsTheLoadInsteadOfAnOutage()
+    {
+        using var handler = new ColdLoadHandler();
+        using var http = new HttpClient(handler);
+        using var client = CreateClient(http);
+        Assert.True((await client.GetStatusAsync()).ProviderReachable);
+        var load = client.EnsureModelLoadedAsync(NextId, 16_384);
+        await handler.LoadEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        try
+        {
+            var busy = await client.GetStatusAsync().WaitAsync(TimeSpan.FromSeconds(1));
+            Assert.True(busy.ProviderReachable);
+            Assert.Null(busy.ErrorCode);
+            var loading = Assert.Single(busy.Models, model => model.Id == NextId);
+            Assert.Equal("loading", loading.State);
+            Assert.False(loading.Loaded);
+            // A load snapshot is never cached: the next probe asks the router again.
+            var reads = handler.CatalogReads;
+            Assert.True((await client.GetStatusAsync()).ProviderReachable);
+            Assert.Equal(reads + 1, handler.CatalogReads);
+        }
+        finally { handler.ReleaseLoad.TrySetResult(); }
+        Assert.Equal(NextId, await load.WaitAsync(TimeSpan.FromSeconds(5)));
+        var loaded = await client.GetStatusAsync();
+        Assert.True(loaded.ProviderReachable);
+        Assert.True(Assert.Single(loaded.Models, model => model.Id == NextId).Loaded);
+    }
+
+    [Fact]
+    public async Task RouterTimeoutDuringLoadWithoutAnyReachableCatalogStaysAVisibleTimeout()
+    {
+        using var handler = new ColdLoadHandler();
+        using var http = new HttpClient(handler);
+        using var client = CreateClient(http);
+        var load = client.EnsureModelLoadedAsync(NextId, 16_384);
+        await handler.LoadEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        try
+        {
+            var status = await client.GetStatusAsync().WaitAsync(TimeSpan.FromSeconds(1));
+            Assert.False(status.ProviderReachable);
+            Assert.Equal("modelRuntime.timeout", status.ErrorCode);
+            Assert.Empty(status.Models);
+        }
+        finally { handler.ReleaseLoad.TrySetResult(); }
+        await load.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
     private static ModelRuntimeClient CreateClient(HttpClient http) => new(http,
         Options.Create(new MissumAiServerOptions { ModelRuntimeUri = new Uri("http://native.test:8081") }),
         NullLogger<ModelRuntimeClient>.Instance);
@@ -205,6 +253,45 @@ public sealed class ModelCatalogRaceTests
                 Assert.Equal("/models/load", request.RequestUri.AbsolutePath);
                 _loadedId = body.RootElement.GetProperty("model").GetString();
             }
+            return Json(new { success = true });
+        }
+
+        private static HttpResponseMessage Json(object value) => new(HttpStatusCode.OK)
+        {
+            Content = new StringContent(JsonSerializer.Serialize(value), Encoding.UTF8, "application/json"),
+        };
+    }
+
+    /// <summary>
+    /// A cold native load: nothing is resident, the router keeps the load request
+    /// open while it spawns the child and misses status probes in the meantime.
+    /// </summary>
+    private sealed class ColdLoadHandler : HttpMessageHandler
+    {
+        private bool _loading;
+        private bool _loaded;
+        public int CatalogReads { get; private set; }
+        public TaskCompletionSource LoadEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseLoad { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (request.RequestUri!.AbsolutePath is "/sessions/prepare" or "/sessions/save")
+                return new HttpResponseMessage(HttpStatusCode.NotFound);
+            if (request.RequestUri.AbsolutePath == "/v1/models")
+            {
+                CatalogReads++;
+                if (_loading) throw new OperationCanceledException("Native model status timed out.");
+                return Json(new { data = new[] { new { id = NextId, status = new { value = _loaded ? "loaded" : "unloaded" } } } });
+            }
+            if (request.RequestUri.AbsolutePath == "/props")
+                return Json(new { default_generation_settings = new { n_ctx = 16_384 } });
+            Assert.Equal("/models/load", request.RequestUri.AbsolutePath);
+            _loading = true;
+            LoadEntered.TrySetResult();
+            try { await ReleaseLoad.Task.WaitAsync(cancellationToken); }
+            finally { _loading = false; }
+            _loaded = true;
             return Json(new { success = true });
         }
 

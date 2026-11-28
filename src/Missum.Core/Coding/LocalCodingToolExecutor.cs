@@ -166,8 +166,10 @@ public sealed class LocalCodingToolExecutor
             throw new InvalidDataException("Die Textdatei überschreitet das direkte Leselimit von 8 MiB. "
                 + "Große JSON-/Array-Ergebnisse mit einem gezielten Auswertungsskript lesen und nur Schema, Status, Parameter und benötigte Messwerte ausgeben; "
                 + "nicht den vollständigen Datensatz in den Modellkontext übertragen.");
-        // Direct reads are complete; only an explicit line range limits the returned content.
-        // Search and mutation retain their independent safety limits.
+        // Without an explicit range a read returns at most DefaultReadLines lines: every
+        // returned token has to be evaluated by the local model once, and whole large
+        // files cost minutes at deep context. truncated/nextLine say where to continue;
+        // an explicit maximumLines can still cover the whole file.
         var bytes = await ReadSharedAsync(path, cancellationToken).ConfigureAwait(false);
         if (bytes.Length > MaximumReadFileBytes)
             throw new InvalidDataException("Die Datei ist während des Lesens über das direkte Leselimit von 8 MiB gewachsen.");
@@ -176,7 +178,8 @@ public sealed class LocalCodingToolExecutor
         var lineStarts = new List<int> { 0 };
         for (var offset = 0; (offset = text.IndexOf('\n', offset)) >= 0; offset++) lineStarts.Add(offset + 1);
         var start = Integer(args, "startLine", 1, 1, int.MaxValue);
-        var maximum = Integer(args, "maximumLines", int.MaxValue, 1, int.MaxValue);
+        var explicitLength = args.TryGetProperty("maximumLines", out var requested) && requested.ValueKind == JsonValueKind.Number;
+        var maximum = Integer(args, "maximumLines", DefaultReadLines, 1, int.MaxValue);
         var first = Math.Min(start - 1, lineStarts.Count);
         var next = (int)Math.Min((long)lineStarts.Count, (long)first + maximum);
         var startOffset = first < lineStarts.Count ? lineStarts[first] : text.Length;
@@ -187,9 +190,16 @@ public sealed class LocalCodingToolExecutor
             path = Relative(path), totalLines = lineStarts.Count, contentFormat = "source",
             startLine = start, endLine = next > first ? (int?)next : null,
             nextLine = next < lineStarts.Count ? (int?)next + 1 : null,
-            truncated = next < lineStarts.Count, content,
+            truncated = next < lineStarts.Count,
+            hint = next < lineStarts.Count && !explicitLength
+                ? $"Erste {next - first} von {lineStarts.Count} Zeilen. Weiterlesen mit startLine={next + 1}; maximumLines legt die Länge fest. Gezielte Stellen findet coding.search."
+                : null,
+            content,
         });
     }
+
+    /// <summary>Lines returned by coding.read when no maximumLines is given.</summary>
+    public const int DefaultReadLines = 1000;
 
     private async Task<JsonElement> WriteAsync(JsonElement args, bool edit, CancellationToken cancellationToken)
     {

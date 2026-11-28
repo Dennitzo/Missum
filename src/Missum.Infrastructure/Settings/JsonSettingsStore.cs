@@ -110,6 +110,12 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
             && (globalModel is not JsonValue global || !global.TryGetValue<string>(out var chosen) || string.IsNullOrWhiteSpace(chosen)))
         { root["selectedModel"] = oldModel; migrated = true; }
         RemoveDeprecated("selectedCodingModel");
+        // Write the Webdesign → Codex move back at once, not only with the next settings change.
+        var selectedMode = root.FirstOrDefault(pair => pair.Key.Equals("selectedChatMode", StringComparison.OrdinalIgnoreCase)).Value;
+        var webdesignSession = root.FirstOrDefault(pair => pair.Key.Equals("activeWebdesignSessionId", StringComparison.OrdinalIgnoreCase)).Value;
+        if (selectedMode is JsonValue modeValue && modeValue.TryGetValue<string>(out var modeName)
+            && string.Equals(modeName, "webdesign", StringComparison.OrdinalIgnoreCase)) migrated = true;
+        if (webdesignSession is JsonValue) migrated = true;
         var provider = root.FirstOrDefault(pair => pair.Key.Equals("aiProvider", StringComparison.OrdinalIgnoreCase)).Value;
         if (provider is JsonValue providerValue && providerValue.TryGetValue<string>(out var providerName)
             && string.Equals(providerName, "goAiServer", StringComparison.OrdinalIgnoreCase)) migrated = true;
@@ -210,9 +216,14 @@ public sealed class JsonSettingsStore : ISettingsStore, IDisposable
             NavigationPaneWidth = Math.Clamp(settings.NavigationPaneWidth, 280, 520),
             Language = string.IsNullOrWhiteSpace(settings.Language) ? "de-DE" : settings.Language,
             LastRoute = string.IsNullOrWhiteSpace(settings.LastRoute) ? "assistant" : settings.LastRoute,
-            SelectedChatMode = Enum.IsDefined(settings.SelectedChatMode)
-                ? settings.SelectedChatMode
-                : ChatMode.General,
+            // The former Webdesign mode is Codex with the Webdesign tool; its active chat stays open there.
+            SelectedChatMode = settings.SelectedChatMode == ChatMode.Webdesign
+                ? ChatMode.Coding
+                : Enum.IsDefined(settings.SelectedChatMode)
+                    ? settings.SelectedChatMode
+                    : ChatMode.General,
+            ActiveCodingSessionId = settings.ActiveCodingSessionId ?? settings.ActiveWebdesignSessionId,
+            ActiveWebdesignSessionId = null,
             LastActivityText = lastActivityAt is null ? null : lastActivityText,
             LastActivityAt = lastActivityAt,
             Window = window,

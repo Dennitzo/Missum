@@ -383,14 +383,18 @@
     const result = [];
     const nodes = document.querySelectorAll("a[href],button,input,select,textarea,summary,label,[role=button],[role=link],[role=tab],[role=menuitem],[onclick],[tabindex]:not([tabindex='-1'])");
     for (const el of nodes) {
-      if (result.length >= 80) break;
+      if (result.length >= 120) break;
       const r = el.getBoundingClientRect();
       if (r.width < 2 || r.height < 2 || r.bottom < 0 || r.right < 0 || r.top > innerHeight || r.left > innerWidth) continue;
       const style = getComputedStyle(el);
       if (style.visibility === "hidden" || style.display === "none" || Number(style.opacity) === 0) continue;
       result.push({ role: role(el) || el.tagName.toLowerCase(), name: label(el).slice(0, 80), selector: selectorFor(el),
         x: Math.round(r.left), y: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height),
-        disabled: !!el.disabled, inputType: el.type || undefined });
+        disabled: !!el.disabled, inputType: el.type || undefined, tag: el.tagName.toLowerCase(),
+        href: el.tagName === "A" ? (el.getAttribute("href") || undefined) : undefined,
+        value: "value" in el && typeof el.value === "string" && el.tagName !== "BUTTON"
+          ? (el.type === "password" ? (el.value ? "••••" : "") : el.value.slice(0, 80)) : undefined,
+        checked: el.type === "checkbox" || el.type === "radio" ? !!el.checked : undefined });
     }
     return result;
   }

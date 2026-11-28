@@ -80,6 +80,8 @@ public partial class App : Application
     private Uri? _lifecycleGateway;
     private AssistantResolvedAppearance? _resolvedAppearance;
     private UISettings? _appearanceSystemSettings;
+    // Opaque palette colors behind translucent Liquid Glass surfaces; empty when glass is off.
+    private readonly Dictionary<string, Windows.UI.Color> _opaqueSurfaceColors = new(StringComparer.Ordinal);
 
     public App()
     {
@@ -201,6 +203,12 @@ public partial class App : Application
 
     public string BackgroundColor { get; private set; } = AppSettings.DefaultBackgroundColor;
 
+    /// <summary>Liquid Glass as read at startup; the saved preference applies after a restart.</summary>
+    public bool IsLiquidGlassEnabled { get; private set; }
+
+    /// <summary>Glass parameters for the window chrome; null when the classic opaque look is shown.</summary>
+    internal LiquidGlassFrame? LiquidGlass { get; private set; }
+
     public event EventHandler? ThemeChanged;
 
     internal bool IsHighContrastActive => IsHighContrastEnabled();
@@ -278,6 +286,8 @@ public partial class App : Application
             _appInstance.Activated += OnAppInstanceActivated;
             TryRegisterSessionProtocol();
             await _host.StartAsync();
+            // Codex runs reach webdesign.* through WebdesignServeService.Instance before any website tab exists.
+            _ = GetService<Missum.App.Services.Webdesign.WebdesignServeService>();
             var database = GetService<IMissumDatabase>();
             await database.InitializeAsync();
             await GetService<IProjectMemoryStore>().InitializeAsync();
@@ -312,6 +322,10 @@ public partial class App : Application
 
             GetService<RecentActivityService>().Restore();
             GetService<ProjectAssetActivityService>().Start();
+            // Liquid Glass is a startup decision: WinUI control surfaces are aliased to the
+            // glass brushes before any XAML resolves them, and the window starts with its backdrop.
+            IsLiquidGlassEnabled = settings.Current.IsLiquidGlassEnabled;
+            if (IsLiquidGlassEnabled) CreateLiquidGlassMaterials();
             _window = GetService<MainWindow>();
             if (_window.Content is FrameworkElement themeRoot)
             {
@@ -1015,6 +1029,8 @@ public partial class App : Application
             || (_appliedTheme == AppTheme.System && _themeRoot?.ActualTheme == ElementTheme.Light);
         string ReadBrush(string key, Windows.UI.Color fallback)
         {
+            // Browser editors render without the glass backdrop: publish opaque surfaces.
+            if (_opaqueSurfaceColors.TryGetValue(key, out var opaque)) return CssColor(opaque, 1);
             if (Resources.TryGetValue(key, out var value) && value is SolidColorBrush brush)
                 return CssColor(brush.Color, brush.Opacity);
             return CssColor(fallback, 1);
@@ -1156,6 +1172,8 @@ public partial class App : Application
 
     private void ApplyHighContrastPalette(HighContrastPalette palette)
     {
+        _opaqueSurfaceColors.Clear();
+        LiquidGlass = null;
         SetBrushColors(AccentBrushKeys, palette.Accent);
         SetBrushColors(AccentTextBrushKeys, palette.AccentForeground);
         SetBrushColor("MissumWindowBrush", palette.Background);
@@ -1165,6 +1183,8 @@ public partial class App : Application
         SetBrushColor("MissumHoverBrush", palette.Background);
         SetBrushColor("MissumPressedBrush", palette.Background);
         SetBrushColor("MissumStrokeBrush", palette.Foreground);
+        SetBrushColor("MissumMenuBrush", palette.Background);
+        SetBrushColor("MissumMenuStrokeBrush", palette.Foreground);
         SetBrushColor("MissumMutedTextBrush", palette.Foreground);
         SetBrushColor("MissumTextBrush", palette.Foreground);
         ApplyCodePalette(light: false, highContrast: palette);
@@ -1207,30 +1227,56 @@ public partial class App : Application
     {
         var isLight = _appliedTheme == AppTheme.Light
             || (_appliedTheme == AppTheme.System && _themeRoot?.ActualTheme == ElementTheme.Light);
+        var glass = LiquidGlassAppearance.IsActive(IsLiquidGlassEnabled, IsHighContrastEnabled());
         SetBrushColor("MissumTextBrush", isLight ? Windows.UI.Color.FromArgb(228, 0, 0, 0) : Microsoft.UI.Colors.White);
         SetBrushColor("MissumMutedTextBrush", isLight ? Windows.UI.Color.FromArgb(255, 0x51, 0x46, 0x5D) : Windows.UI.Color.FromArgb(255, 0x99, 0x99, 0x99));
         ApplyCodePalette(isLight);
+        Windows.UI.Color window;
         if (isLight)
         {
-            SetBrushColor("MissumWindowBrush", MixBackground(0xF3F0F5, background, 0.07, 0xFF));
-            SetBrushColor("MissumLayerBrush", MixBackground(0xFFFFFF, background, 0.04, 0xF8));
-            SetBrushColor("MissumLayerStrongBrush", MixBackground(0xFAF8FC, background, 0.08, 0xFF));
-            SetBrushColor("MissumInputBrush", MixBackground(0xFFFFFF, background, 0.09, 0xFF));
-            SetBrushColor("MissumHoverBrush", MixBackground(0xF5F1F7, background, 0.13, 0xFF));
-            SetBrushColor("MissumPressedBrush", MixBackground(0xEEE9F1, background, 0.18, 0xFF));
-            SetBrushColor("MissumStrokeBrush", MixBackground(0x302A38, background, 0.22, 0x52));
-            return;
+            window = MixBackground(0xF3F0F5, background, 0.07, 0xFF);
+            SetSurface("MissumWindowBrush", LiquidGlassSurface.Window, window);
+            SetSurface("MissumLayerBrush", LiquidGlassSurface.Layer, MixBackground(0xFFFFFF, background, 0.04, 0xF8));
+            SetSurface("MissumLayerStrongBrush", LiquidGlassSurface.LayerStrong, MixBackground(0xFAF8FC, background, 0.08, 0xFF));
+            SetSurface("MissumInputBrush", LiquidGlassSurface.Input, MixBackground(0xFFFFFF, background, 0.09, 0xFF));
+            SetSurface("MissumHoverBrush", LiquidGlassSurface.Hover, MixBackground(0xF5F1F7, background, 0.13, 0xFF));
+            SetSurface("MissumPressedBrush", LiquidGlassSurface.Pressed, MixBackground(0xEEE9F1, background, 0.18, 0xFF));
+            SetStroke(MixBackground(0x302A38, background, 0.22, 0x52));
+        }
+        else
+        {
+            window = MixBackground(0x202020, background, 0.08, 0xFF);
+            SetSurface("MissumWindowBrush", LiquidGlassSurface.Window, window);
+            SetSurface("MissumLayerBrush", LiquidGlassSurface.Layer, MixBackground(0x202020, background, 0.12, 0xE6));
+            // Limit bright custom backgrounds in dark mode: even selected/hovered
+            // surfaces must retain enough contrast for a single stable icon brush.
+            SetSurface("MissumLayerStrongBrush", LiquidGlassSurface.LayerStrong, MixBackground(0x2B2B2B, background, 0.14, 0xF2));
+            SetSurface("MissumInputBrush", LiquidGlassSurface.Input, MixBackground(0x333333, background, 0.16, 0xFF));
+            SetSurface("MissumHoverBrush", LiquidGlassSurface.Hover, MixBackground(0x303030, background, 0.16, 0xFF));
+            SetSurface("MissumPressedBrush", LiquidGlassSurface.Pressed, MixBackground(0x383838, background, 0.18, 0xFF));
+            SetStroke(MixBackground(0xFFFFFF, background, 0.28, 0x42));
         }
 
-        SetBrushColor("MissumWindowBrush", MixBackground(0x202020, background, 0.08, 0xFF));
-        SetBrushColor("MissumLayerBrush", MixBackground(0x202020, background, 0.12, 0xE6));
-        // Limit bright custom backgrounds in dark mode: even selected/hovered
-        // surfaces must retain enough contrast for a single stable icon brush.
-        SetBrushColor("MissumLayerStrongBrush", MixBackground(0x2B2B2B, background, 0.14, 0xF2));
-        SetBrushColor("MissumInputBrush", MixBackground(0x333333, background, 0.16, 0xFF));
-        SetBrushColor("MissumHoverBrush", MixBackground(0x303030, background, 0.16, 0xFF));
-        SetBrushColor("MissumPressedBrush", MixBackground(0x383838, background, 0.18, 0xFF));
-        SetBrushColor("MissumStrokeBrush", MixBackground(0xFFFFFF, background, 0.28, 0x42));
+        _ = TryParsePaletteColor(AccentColor, out var glassAccent);
+        LiquidGlass = glass ? new LiquidGlassFrame(isLight, window, glassAccent, background) : null;
+
+        void SetSurface(string key, LiquidGlassSurface surface, Windows.UI.Color opaque)
+        {
+            if (glass) _opaqueSurfaceColors[key] = opaque;
+            else _opaqueSurfaceColors.Remove(key);
+            // Menus keep the opaque strong layer in every mode for readability.
+            // The classic dark layer is only 95 % opaque; menus composite it onto the window color.
+            if (surface == LiquidGlassSurface.LayerStrong) SetBrushColor("MissumMenuBrush", CompositeColor(opaque, window));
+            SetBrushColor(key, ColorFromArgb(LiquidGlassAppearance.Surface(surface, isLight, ArgbFromColor(window), ArgbFromColor(opaque), glass)));
+        }
+
+        void SetStroke(Windows.UI.Color opaque)
+        {
+            SetBrushColor("MissumMenuStrokeBrush", opaque);
+            if (glass) _opaqueSurfaceColors["MissumStrokeBrush"] = opaque;
+            else _opaqueSurfaceColors.Remove("MissumStrokeBrush");
+            SetBrushColor("MissumStrokeBrush", glass ? ColorFromArgb(LiquidGlassAppearance.Edge(isLight, ArgbFromColor(window))) : opaque);
+        }
     }
 
     private void ApplyCodePalette(bool light, HighContrastPalette? highContrast = null)
@@ -1255,6 +1301,7 @@ public partial class App : Application
     private void UpdateReadableAccentBrush()
     {
         UpdateSelectionSurfaceBrush();
+        UpdateLiquidGlassMaterials();
         if (IsHighContrastEnabled())
         {
             var palette = ResolveHighContrastPalette();
@@ -1273,6 +1320,7 @@ public partial class App : Application
     {
         Windows.UI.Color ReadColor(string key, Windows.UI.Color fallback)
         {
+            if (_opaqueSurfaceColors.TryGetValue(key, out var opaque)) return opaque;
             if (Resources.TryGetValue(key, out var value) && value is SolidColorBrush brush)
             {
                 var color = brush.Color;
@@ -1288,6 +1336,18 @@ public partial class App : Application
         var window = ReadColor("MissumWindowBrush", Microsoft.UI.Colors.Black);
         var sidebar = CompositeColor(ReadColor("MissumLayerBrush", window), window);
         var selection = CompositeColor(ReadColor("MissumAccentSubtleBrush", Microsoft.UI.Colors.Transparent), sidebar);
+        if (LiquidGlass is { } glass)
+        {
+            // Selected items are accent-tinted glass: the accent wash over a frosted pane.
+            _opaqueSurfaceColors["MissumSelectionBrush"] = selection;
+            var pane = ColorFromArgb(LiquidGlassAppearance.Surface(LiquidGlassSurface.Selection, glass.Light,
+                ArgbFromColor(glass.Window), ArgbFromColor(selection), active: true));
+            var paneAlpha = pane.A;
+            pane.A = 255;
+            selection = CompositeColor(ReadColor("MissumAccentSubtleBrush", Microsoft.UI.Colors.Transparent), pane);
+            selection.A = paneAlpha;
+        }
+        else _opaqueSurfaceColors.Remove("MissumSelectionBrush");
         SetBrushColor("MissumSelectionBrush", selection);
     }
 
@@ -1360,6 +1420,136 @@ public partial class App : Application
         foreach (var key in keys)
         {
             SetBrushColor(key, color);
+        }
+    }
+
+    private static uint ArgbFromColor(Windows.UI.Color color) =>
+        ((uint)color.A << 24) | ((uint)color.R << 16) | ((uint)color.G << 8) | color.B;
+
+    private static Windows.UI.Color ColorFromArgb(uint argb) =>
+        Windows.UI.Color.FromArgb((byte)(argb >> 24), (byte)(argb >> 16), (byte)(argb >> 8), (byte)argb);
+
+    // Native glass materials (in-app acrylic) and their rims; created once at startup
+    // when Liquid Glass is enabled and kept in step with theme, accent and background.
+    private AcrylicBrush? _glassPane;
+    private AcrylicBrush? _glassControl;
+    private AcrylicBrush? _glassInput;
+    private LinearGradientBrush? _glassRim;
+    private LinearGradientBrush? _glassAccentRim;
+
+    // Standard WinUI control surfaces become glass: their resting background is the
+    // glass control material, their edge the glass rim. Hover/pressed stay translucent tints.
+    private static readonly (string Key, string Glass)[] GlassControlAliases =
+    [
+        ("ButtonBackground", "MissumGlassControlBrush"), ("ButtonBackgroundPointerOver", "MissumHoverBrush"),
+        ("ButtonBackgroundPressed", "MissumPressedBrush"), ("ButtonBorderBrush", "MissumGlassRimBrush"),
+        ("ButtonBorderBrushPointerOver", "MissumGlassRimBrush"), ("ButtonBorderBrushPressed", "MissumGlassRimBrush"),
+        ("ToggleButtonBackground", "MissumGlassControlBrush"), ("ToggleButtonBackgroundPointerOver", "MissumHoverBrush"),
+        ("ToggleButtonBackgroundPressed", "MissumPressedBrush"), ("ToggleButtonBorderBrush", "MissumGlassRimBrush"),
+        ("RepeatButtonBackground", "MissumGlassControlBrush"), ("RepeatButtonBackgroundPointerOver", "MissumHoverBrush"),
+        ("RepeatButtonBackgroundPressed", "MissumPressedBrush"),
+        ("DropDownButtonBackground", "MissumGlassControlBrush"),
+        ("SplitButtonBackground", "MissumGlassControlBrush"), ("SplitButtonBackgroundPointerOver", "MissumHoverBrush"),
+        ("SplitButtonBackgroundPressed", "MissumPressedBrush"),
+        ("ControlFillColorDefaultBrush", "MissumGlassControlBrush"), ("ControlFillColorSecondaryBrush", "MissumHoverBrush"),
+        ("ControlFillColorTertiaryBrush", "MissumPressedBrush"),
+        ("ControlElevationBorderBrush", "MissumGlassRimBrush"), ("ControlStrokeColorDefaultBrush", "MissumGlassRimBrush"),
+        ("CardBackgroundFillColorDefaultBrush", "MissumGlassPaneBrush"), ("CardBackgroundFillColorSecondaryBrush", "MissumGlassControlBrush"),
+        ("CardStrokeColorDefaultBrush", "MissumGlassRimBrush"),
+        ("SubtleFillColorSecondaryBrush", "MissumHoverBrush"), ("SubtleFillColorTertiaryBrush", "MissumPressedBrush"),
+        ("ExpanderHeaderBackground", "MissumGlassPaneBrush"), ("ExpanderContentBackground", "MissumGlassPaneBrush"),
+        ("ExpanderHeaderBorderBrush", "MissumGlassRimBrush"), ("ExpanderContentBorderBrush", "MissumGlassRimBrush"),
+        ("ToggleSwitchFillOff", "MissumInputBrush"), ("ToggleSwitchFillOffPointerOver", "MissumHoverBrush"),
+        ("ToggleSwitchFillOffPressed", "MissumPressedBrush"),
+        ("ListViewItemBackgroundPressed", "MissumPressedBrush"),
+        ("TextControlBackground", "MissumGlassControlBrush"), ("TextControlBackgroundFocused", "MissumGlassInputBrush"),
+        ("TextControlBorderBrush", "MissumGlassRimBrush"), ("TextControlBorderBrushPointerOver", "MissumGlassRimBrush"),
+        ("ComboBoxBackground", "MissumGlassControlBrush"),
+        ("ComboBoxBorderBrush", "MissumGlassRimBrush"), ("ComboBoxBorderBrushPointerOver", "MissumGlassRimBrush"),
+        ("InfoBarInformationalSeverityBackgroundBrush", "MissumGlassControlBrush"),
+    ];
+
+    /// <summary>
+    /// Liquid Glass is a startup decision: create the native glass materials, alias the
+    /// WinUI control surfaces to them and restyle the shared Missum card, pill and button
+    /// styles before any page resolves them.
+    /// </summary>
+    private void CreateLiquidGlassMaterials()
+    {
+        AcrylicBrush Acrylic() => new() { TintColor = Microsoft.UI.Colors.Gray, TintOpacity = 0.3, FallbackColor = Microsoft.UI.Colors.Gray };
+        LinearGradientBrush Rim() => new() { StartPoint = new Windows.Foundation.Point(0, 0), EndPoint = new Windows.Foundation.Point(1, 1) };
+        Resources["MissumGlassPaneBrush"] = _glassPane = Acrylic();
+        Resources["MissumGlassControlBrush"] = _glassControl = Acrylic();
+        Resources["MissumGlassInputBrush"] = _glassInput = Acrylic();
+        Resources["MissumGlassRimBrush"] = _glassRim = Rim();
+        Resources["MissumGlassAccentRimBrush"] = _glassAccentRim = Rim();
+        foreach (var (key, glass) in GlassControlAliases)
+            if (Resources.TryGetValue(glass, out var brush))
+                Resources[key] = brush;
+        RestyleForGlass("MissumCardStyle", _glassPane);
+        RestyleForGlass("MissumStatusPillStyle", _glassControl);
+        RestyleForGlass("MissumSubtleButtonStyle", _glassControl);
+    }
+
+    private void RestyleForGlass(string styleKey, Brush background)
+    {
+        if (!Resources.TryGetValue(styleKey, out var value) || value is not Style { IsSealed: false } style) return;
+        foreach (var setter in style.Setters.OfType<Setter>().Where(setter =>
+            setter.Property == Microsoft.UI.Xaml.Controls.Border.BackgroundProperty
+            || setter.Property == Microsoft.UI.Xaml.Controls.Control.BackgroundProperty
+            || setter.Property == Microsoft.UI.Xaml.Controls.Border.BorderBrushProperty
+            || setter.Property == Microsoft.UI.Xaml.Controls.Control.BorderBrushProperty).ToArray())
+        {
+            var isBorder = setter.Property == Microsoft.UI.Xaml.Controls.Border.BorderBrushProperty
+                || setter.Property == Microsoft.UI.Xaml.Controls.Control.BorderBrushProperty;
+            style.Setters.Remove(setter);
+            style.Setters.Add(new Setter(setter.Property, isBorder ? _glassRim : background));
+        }
+    }
+
+    /// <summary>Keeps the glass materials, rims and the window's light frame in step with the palette.</summary>
+    private void UpdateLiquidGlassMaterials()
+    {
+        if (_glassPane is null || _glassControl is null || _glassInput is null || _glassRim is null || _glassAccentRim is null) return;
+        _ = TryParsePaletteColor(AccentColor, out var accent);
+        if (LiquidGlass is { } frame && !IsHighContrastEnabled())
+        {
+            LiquidGlass = frame = frame with { Accent = accent };
+            var window = ArgbFromColor(frame.Window);
+            uint Opaque(string key) => _opaqueSurfaceColors.TryGetValue(key, out var color) ? ArgbFromColor(color) : window;
+            Apply(_glassPane, LiquidGlassAppearance.Material(LiquidGlassMaterialKind.Pane, frame.Light, window, Opaque("MissumLayerBrush")));
+            Apply(_glassControl, LiquidGlassAppearance.Material(LiquidGlassMaterialKind.Control, frame.Light, window, Opaque("MissumLayerStrongBrush")));
+            Apply(_glassInput, LiquidGlassAppearance.Material(LiquidGlassMaterialKind.Input, frame.Light, window, Opaque("MissumInputBrush")));
+            SetStops(_glassRim, LiquidGlassAppearance.Rim(frame.Light));
+            SetStops(_glassAccentRim, LiquidGlassAppearance.Rim(frame.Light, ArgbFromColor(accent)));
+            return;
+        }
+
+        // High contrast: solid, opaque contrast surfaces with a solid foreground edge.
+        var palette = ResolveHighContrastPalette();
+        foreach (var brush in new[] { _glassPane, _glassControl, _glassInput })
+        {
+            brush.AlwaysUseFallback = true;
+            brush.FallbackColor = palette.Background;
+            brush.TintColor = palette.Background;
+        }
+        SetStops(_glassRim, [new(0, ArgbFromColor(palette.Foreground)), new(1, ArgbFromColor(palette.Foreground))]);
+        SetStops(_glassAccentRim, [new(0, ArgbFromColor(palette.Foreground)), new(1, ArgbFromColor(palette.Foreground))]);
+
+        static void Apply(AcrylicBrush brush, LiquidGlassMaterial material)
+        {
+            brush.AlwaysUseFallback = false;
+            brush.TintColor = ColorFromArgb(material.TintColor);
+            brush.TintOpacity = material.TintOpacity;
+            brush.TintLuminosityOpacity = material.LuminosityOpacity;
+            brush.FallbackColor = ColorFromArgb(material.FallbackColor);
+        }
+
+        static void SetStops(LinearGradientBrush brush, IReadOnlyList<LiquidGlassStop> stops)
+        {
+            brush.GradientStops.Clear();
+            foreach (var stop in stops)
+                brush.GradientStops.Add(new GradientStop { Offset = stop.Offset, Color = ColorFromArgb(stop.Color) });
         }
     }
 
@@ -1461,4 +1651,5 @@ public partial class App : Application
         Windows.UI.Color AccentForeground);
 }
 
-
+/// <summary>Colors the main window needs to paint the Liquid Glass backdrop and sheen.</summary>
+internal sealed record LiquidGlassFrame(bool Light, Windows.UI.Color Window, Windows.UI.Color Accent, Windows.UI.Color Background);

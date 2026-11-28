@@ -506,6 +506,15 @@ public sealed partial class RunProcessor : BackgroundService
         }
         IReadOnlyList<LmChatMessage>? lastNativePrompt = null;
         string? lastNativeReasoning = null;
+        // Exact native token count of the last turn and the conversation it covered.
+        int? measuredTokens = null;
+        LmChatMessage? measuredFirst = null, measuredLast = null;
+        var measuredCount = 0;
+        int? MeasuredPromptTokens(IReadOnlyList<LmChatMessage> current) =>
+            measuredTokens is { } tokens && measuredCount > 0 && current.Count >= measuredCount
+                && ReferenceEquals(current[0], measuredFirst) && ReferenceEquals(current[measuredCount - 1], measuredLast)
+                ? tokens + ContextPlanner.EstimateTokens(current.Skip(measuredCount).ToArray())
+                : null;
         if (selectedToolName is not null
             && !availableTools.Any(tool => string.Equals(tool.Name, selectedToolName, StringComparison.Ordinal)))
         {
@@ -730,6 +739,9 @@ public sealed partial class RunProcessor : BackgroundService
                         _toolCatalog.Validate(tool, call.Arguments);
                         if (!ResearchSubagentAllowsTool(request.Subagent, tool))
                             throw new InvalidOperationException("Dieser Rechercheauftrag ist nur lesend. Das Werkzeug verändert Dateien oder startet Prozesse und ist für diesen Auftrag nicht freigegeben.");
+                        if (!AgentToolCatalog.PlanModeAllowsTool(request, tool))
+                            throw new InvalidOperationException("Im Planmodus sind nur lesende Werkzeuge freigegeben. " + call.Name
+                                + " wird erst nach der Freigabe des Plans ausgeführt; beschreibe den Schritt stattdessen im Plan.");
                         if (isCoding && htmlRenderUsed && call.Name == ClientToolNames.CodingRenderHtml)
                             throw new ArgumentException("coding.renderHtml darf höchstens einmal pro Lauf ausgeführt werden; die vorhandene Vorschau bleibt erhalten.");
                         if (isCoding) CodingLoopGuard.ThrowIfRenderAlreadyUsed(messages, call);
@@ -793,10 +805,17 @@ public sealed partial class RunProcessor : BackgroundService
                         if (workingState is not null && call.Name != "computer.observe")
                             workingState = CodingWorkingStateReducer.ObserveToolResult(workingState, observedCall, rawResult);
                         var projectedResult = isCoding ? CodingLoopGuard.BoundToolResult(rawResult, call.Name) : rawResult;
+                        // An identical repeat of a read still in context costs a full prefill for nothing.
+                        if (isCoding) projectedResult = CodingReadDeduplicator.Apply(messages, call, projectedResult);
+                        // The action result itself asks for the next observation. A separate
+                        // instruction turn would change the rendered history (and drop the
+                        // previous reasoning), costing a re-evaluation of the KV cache.
+                        if (computerRun && call.Name == "computer.act")
+                            projectedResult = ComputerObservationGuard.WithInstruction(projectedResult);
                         messages.Add(CommandMonitoringPolicy.ToolResult(call, projectedResult, commandMonitoring));
-                        // Every attempted desktop operation consumes its frame. The next
-                        // model turn must not mistake the previous screenshot for the result.
-                        if (call.Name == "computer.act") _computerObservations.RemoveRun(runId);
+                        // The latest frame stays in the prompt until the next observation
+                        // replaces it: the following turn then extends the cached prefix
+                        // unchanged. The guard still forces that fresh observation.
                         if (call.Name == "computer.observe" && clientResult.Status == "completed")
                         {
                             if (!clientResult.Result.TryGetProperty("observationTransferId", out var observation)
@@ -1073,9 +1092,13 @@ public sealed partial class RunProcessor : BackgroundService
             var modelTools = contextTools ?? CreateModelToolDefinitions(selectableTools, selectedToolName, isCoding || useStableSubagentToolCatalog);
             if (computerObservationRequired)
             {
-                modelTools = modelTools.Where(tool => tool.Name == "computer.observe").ToArray();
-                if (modelTools.Length != 1) throw new InvalidOperationException("Das erforderliche Computer-Beobachtungswerkzeug ist nicht verfügbar.");
-                messages.Add(new("system", ComputerObservationGuard.Instruction));
+                // Keep the offered tools identical on every step: their schemas open the
+                // native prompt, so a smaller list would re-evaluate the whole context.
+                // The rejection path below enforces the observation instead.
+                if (!modelTools.Any(tool => tool.Name == "computer.observe"))
+                    throw new InvalidOperationException("Das erforderliche Computer-Beobachtungswerkzeug ist nicht verfügbar.");
+                if (!ComputerObservationGuard.InstructionPending(messages))
+                    messages.Add(new("system", ComputerObservationGuard.Instruction));
             }
             // A turn following assistant.selectTool has exactly one purpose: emit the
             // selected structured call. Some local models narrate that intent
@@ -1259,7 +1282,7 @@ public sealed partial class RunProcessor : BackgroundService
                 var summarizedThisTurn = false;
                 effort = ResolveTurnReasoningEffort();
                 if ((isCoding || request.Subagent is not null) && !budgetSummary && CodingContextCompactor.Plan(messages, contextLength, workingState,
-                    includeWorkingStateInBudget: !workingStatePromptIncluded) is { } compaction)
+                    includeWorkingStateInBudget: !workingStatePromptIncluded, measuredPromptTokens: MeasuredPromptTokens(messages)) is { } compaction)
                 {
                     await CompactWorkingContextAsync(compaction, contextLength, queueMilliseconds, steeringCall.Token,
                         tools: modelTools).ConfigureAwait(false);
@@ -1448,6 +1471,14 @@ public sealed partial class RunProcessor : BackgroundService
                         preserveSessionPromptPrefix = true;
                         workingStatePromptIncluded = workingState is not null;
                         lastNativeReasoning = response.ReasoningContent;
+                        if (response.InputTokens > 0 && messages.Count > 0)
+                        {
+                            // Exact for this prompt; the answer and tool results appended next are estimated.
+                            measuredTokens = response.InputTokens;
+                            measuredFirst = messages[0];
+                            measuredLast = messages[^1];
+                            measuredCount = messages.Count;
+                        }
                     }
                     if (reasoningActivity.Complete() is { } completedReasoning)
                         await _repository.AppendEventAsync(runId, RunEventTypes.ModelGeneration,

@@ -16,11 +16,20 @@ internal sealed class ScientificPresentationPublishedEventArgs(string projectId,
 public sealed class ScientificPresentationCoordinator(ScientificPublicationService publications) : IDisposable
 {
     internal event EventHandler<ScientificPresentationPublishedEventArgs>? SnapshotPublished;
+    /// <summary>Raised with the project id when a publication build starts or finishes.</summary>
+    internal event EventHandler<string>? BuildStateChanged;
     private readonly ConcurrentDictionary<string, Pending> _projects = new(StringComparer.Ordinal);
     private readonly CancellationTokenSource _shutdown = new();
 
     public ScientificPresentationSnapshot? GetSnapshot(string projectId) =>
         _projects.TryGetValue(projectId, out var state) ? Volatile.Read(ref state.Snapshot) : null;
+
+    /// <summary>True while the publication of <paramref name="projectId"/> is being (re)built.</summary>
+    public bool IsBuilding(string projectId)
+    {
+        if (string.IsNullOrWhiteSpace(projectId) || !_projects.TryGetValue(projectId, out var state)) return false;
+        lock (state) return state.Working;
+    }
 
     public void RegisterWorkspace(string projectId, string workspace, string? title = null) =>
         publications.RegisterWorkspace(projectId, workspace, title);
@@ -36,6 +45,13 @@ public sealed class ScientificPresentationCoordinator(ScientificPublicationServi
             state.Working = true;
             _ = Task.Run(() => RefreshLoopAsync(projectId, state));
         }
+        NotifyBuildState(projectId);
+    }
+
+    private void NotifyBuildState(string projectId)
+    {
+        try { BuildStateChanged?.Invoke(this, projectId); }
+        catch (Exception exception) when (exception is not OutOfMemoryException) { } // Passive UI observers cannot interrupt rendering.
     }
 
     public async Task WaitForIdleAsync(string projectId, CancellationToken cancellationToken = default)
@@ -87,7 +103,11 @@ public sealed class ScientificPresentationCoordinator(ScientificPublicationServi
             }
         }
         catch (OperationCanceledException) when (_shutdown.IsCancellationRequested) { }
-        finally { if (!released) lock (state) state.Working = false; }
+        finally
+        {
+            if (!released) lock (state) state.Working = false;
+            NotifyBuildState(projectId);
+        }
     }
 
     public void Dispose() => _shutdown.Cancel();

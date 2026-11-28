@@ -28,14 +28,19 @@ internal static partial class CodingContextCompactor
 
     internal static CodingCompactionPlan? Plan(IReadOnlyList<LmChatMessage> messages, int contextLength,
         CodingWorkingState? workingState = null, bool includeWorkingStateInBudget = true,
-        bool force = false)
+        bool force = false, int? measuredPromptTokens = null)
     {
         var budget = ContextPlanner.ComputeInputTokenBudget(contextLength, null);
         // Retain the evaluated prefix below the shared working-context boundary. Compact
         // deliberately between turns, leaving room for large tool receipts.
         var prompt = workingState is null || !includeWorkingStateInBudget
             ? messages : messages.Append(CodingEvidenceContext.Build(workingState)).ToArray();
-        if (!force && ContextPlanner.EstimateTokens(prompt) < budget) return null;
+        // The native token count of the previous turn is exact; the character estimate
+        // overestimates JSON-escaped source and compacted at a median 79 % instead of 90 %.
+        var used = measuredPromptTokens is { } measured
+            ? measured + (workingState is not null && includeWorkingStateInBudget ? ContextPlanner.EstimateTokens([CodingEvidenceContext.Build(workingState)]) : 0)
+            : ContextPlanner.EstimateTokens(prompt);
+        if (!force && used < budget) return null;
         var currentRequestIndex = -1;
         for (var index = messages.Count - 1; index >= 0; index--)
             if (messages[index].Role == "user" && messages[index].ComputerObservationId is null && messages[index].Content?.StartsWith(MemoryMarker, StringComparison.Ordinal) != true

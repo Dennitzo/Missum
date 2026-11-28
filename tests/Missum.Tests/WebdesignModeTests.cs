@@ -12,6 +12,7 @@ namespace Missum.Tests;
 
 // xUnit calls IAsyncLifetime.DisposeAsync, which stops every server of the test class.
 #pragma warning disable CA1001
+[Collection(WebdesignTestGroup.Name)]
 public sealed class WebdesignModeTests : IAsyncLifetime
 #pragma warning restore CA1001
 {
@@ -34,21 +35,25 @@ public sealed class WebdesignModeTests : IAsyncLifetime
         return path;
     }
 
-    // ----- mode -----------------------------------------------------------------------------
+    // ----- Codex tool (former mode) -----------------------------------------------------------
 
     [Fact]
-    public async Task WebdesignModeHasItsOwnSessionsProjectsAndMigration()
+    public async Task TheLegacyWebdesignModeCreatesCodexSessionsWithTheTool()
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var chats = environment.Get<IChatRepository>();
         var codex = await chats.CreateSessionAsync("Codex", ChatMode.Coding);
         var web = await chats.CreateSessionAsync("Portfolio", ChatMode.Webdesign);
-        Assert.Equal([web.Id], (await chats.ListSessionsAsync(ChatMode.Webdesign)).Select(item => item.Id));
-        Assert.Equal([codex.Id], (await chats.ListSessionsAsync(ChatMode.Coding)).Select(item => item.Id));
+        Assert.Equal(ChatMode.Coding, web.ChatMode);
+        Assert.True(web.WebdesignEnabled);
+        Assert.Empty(await chats.ListSessionsAsync(ChatMode.Webdesign));
+        Assert.Equal([web.Id, codex.Id], (await chats.ListSessionsAsync(ChatMode.Coding)).Select(item => item.Id).OrderBy(id => id == codex.Id));
         await chats.SetCodingWorkspacePathAsync(web.Id, environment.Directory);
-        var group = Assert.Single(await chats.ListSessionGroupsAsync(ChatMode.Webdesign));
-        Assert.Equal(ChatMode.Webdesign, group.ChatMode);
-        Assert.Single(Directory.EnumerateFiles(Path.Combine(environment.Directory, "DatabaseBackups"), "*.pre-v60-*.bak"));
+        var group = Assert.Single(await chats.ListSessionGroupsAsync(ChatMode.Coding));
+        Assert.Equal(ChatMode.Coding, group.ChatMode);
+        Assert.True((await chats.GetSessionAsync(web.Id))!.WebdesignEnabled);
+        Assert.False((await chats.GetSessionAsync(codex.Id))!.WebdesignEnabled);
+        Assert.Single(Directory.EnumerateFiles(Path.Combine(environment.Directory, "DatabaseBackups"), "*.pre-v62-*.bak"));
         Assert.True(await environment.Get<IMissumDatabase>().CheckIntegrityAsync());
     }
 
@@ -56,15 +61,44 @@ public sealed class WebdesignModeTests : IAsyncLifetime
     [InlineData("webdesign")]
     [InlineData("Web-Design")]
     [InlineData("web")]
-    public void WireNamesParseToWebdesign(string value) =>
-        Assert.Equal(ChatMode.Webdesign, AssistantCoordinator.ParseChatMode(value));
+    public void LegacyWireNamesOpenCodex(string value) =>
+        Assert.Equal(ChatMode.Coding, AssistantCoordinator.ParseChatMode(value));
 
     [Fact]
-    public void WebdesignRunsAsCodexWithWorkPlanAndComputerRouting()
+    public void TheToolRunsAsCodexAndKeepsPageChecksAwayFromDesktopControl()
     {
-        Assert.True(AssistantCoordinator.IsCodingAgentSession(ChatMode.Webdesign));
+        var now = DateTimeOffset.UtcNow;
+        var webdesign = new ChatSession(Guid.NewGuid(), "Portfolio", now, now, ChatMode.Coding, WebdesignEnabled: true);
+        var codex = webdesign with { WebdesignEnabled = false };
+        Assert.True(AssistantCoordinator.IsCodingAgentSession(webdesign.ChatMode));
+        Assert.True(AssistantCoordinator.IsWebdesignToolActive(webdesign));
+        Assert.True(AssistantCoordinator.IsWebdesignToolActive(webdesign with { ChatMode = ChatMode.Webdesign, WebdesignEnabled = false }));
+        Assert.False(AssistantCoordinator.IsWebdesignToolActive(codex));
+        // The flag means nothing outside Codex (ChatGPT never gets webdesign tools).
+        Assert.False(AssistantCoordinator.IsWebdesignToolActive(webdesign with { ChatMode = ChatMode.General }));
         var trigger = AssistantCoordinator.CreateToolMatch("coding", "Klicke auf Kontakt");
-        Assert.True(MissumAiAssistantService.ShouldAutoRouteComputer(PromptTriggerAction.Coding, trigger, ChatMode.Webdesign));
+        Assert.True(MissumAiAssistantService.ShouldAutoRouteComputer(PromptTriggerAction.Coding, trigger, ChatMode.Coding));
+        Assert.True(MissumAiAssistantService.ShouldClassifyComputerRoute(PromptTriggerAction.Coding, trigger, codex));
+        Assert.False(MissumAiAssistantService.ShouldClassifyComputerRoute(PromptTriggerAction.Coding, trigger, webdesign));
+    }
+
+    [Fact]
+    public void ThePromptTellsTheModelToCaptureTheTabAndInspectItBeforeClaimingAVisualResult()
+    {
+        var prompt = MissumAiAssistantService.BuildWebdesignPrompt("Mach die Überschrift größer.", Project("vision"), planMode: false);
+        Assert.StartsWith("Du arbeitest in Codex mit dem Werkzeug Webdesign", prompt, StringComparison.Ordinal);
+        Assert.Contains("webdesign.preview capture nimmt die gerenderte Seite im Tab Webseite auf (nicht den Desktop", prompt, StringComparison.Ordinal);
+        Assert.Contains("Rufe danach media.analyze mit genau\ndieser uploadId", prompt.ReplaceLineEndings("\n"), StringComparison.Ordinal);
+        Assert.Contains("Nach jeder sichtbaren Änderung nimmst du erneut capture auf", prompt, StringComparison.Ordinal);
+        Assert.Contains("Behaupte ein sichtbares Ergebnis nie ohne diese Prüfung", prompt, StringComparison.Ordinal);
+        Assert.Contains("Computersteuerung sieht nur den\nWindows-Desktop", prompt.ReplaceLineEndings("\n"), StringComparison.Ordinal);
+        Assert.DoesNotContain("Missum-Modus", prompt, StringComparison.Ordinal);
+        Assert.Contains("Im Planmodus prüfst du nur", MissumAiAssistantService.BuildWebdesignPrompt("Prüfen", Project("vision-plan"), planMode: true), StringComparison.Ordinal);
+        // The short hint of auto-detected runs names both tools and the same capture → media.analyze check.
+        Assert.Contains("webdesign.serve", MissumAiAssistantService.WebdesignToolHint, StringComparison.Ordinal);
+        Assert.Contains("webdesign.preview capture", MissumAiAssistantService.WebdesignToolHint, StringComparison.Ordinal);
+        Assert.Contains("media.analyze", MissumAiAssistantService.WebdesignToolHint, StringComparison.Ordinal);
+        Assert.InRange(MissumAiAssistantService.WebdesignToolHint.Length, 100, 700);
     }
 
     [Fact]
@@ -353,12 +387,13 @@ public sealed class WebdesignModeTests : IAsyncLifetime
         await Assert.ThrowsAsync<InvalidOperationException>(() => broker.ExecuteAsync(session, "run-1",
             new ComputerAction(observation.ObservationId, "click", 10, 10, CoordinateSpace: "pixels")));
 
-        // A link to another site needs the user's approval.
+        // Computer-Use acts directly: a link to another site is followed without an approval card.
         surface.Url = "http://127.0.0.1:5555/";
         surface.Href = "https://example.org/";
         observation = await broker.ObserveAsync(session, "run-1", "webview");
-        await broker.ExecuteAsync(session, "run-1", new ComputerAction(observation.ObservationId, "click", 10, 10, CoordinateSpace: "pixels"));
-        Assert.Equal(1, approvals.Requests);
+        var external = await broker.ExecuteAsync(session, "run-1", new ComputerAction(observation.ObservationId, "click", 10, 10, CoordinateSpace: "pixels"));
+        Assert.Equal("completed", external.Status);
+        Assert.Equal(0, approvals.Requests);
     }
 
     private sealed class FakeSurface : IWebdesignPreviewSurface

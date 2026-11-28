@@ -624,7 +624,16 @@ class MtpPairingTests(unittest.TestCase):
     def test_companion_declaring_no_prediction_layer_at_all_is_still_recognised(self):
         target_model(self.snapshot / "Demo-Q4_K_XL.gguf")
         gguf(self.snapshot / "mtp-Demo-Q8_0.gguf", architecture="qwen35moe", blocks=49, width=4096,
+             tensor_names=["token_embd.weight"] + head_tensors(48))
+        self.assertEqual("mtp-Demo-Q8_0.gguf", Path(self.listed()[0]["mtp"]).name)
+
+    def test_head_borrowing_the_target_embedding_is_not_paired(self):
+        # unsloth "shared-" heads lack token_embd; the official build rejects them at load.
+        target_model(self.snapshot / "Demo-Q4_K_XL.gguf")
+        gguf(self.snapshot / "MTP" / "mtp-Demo-shared-Q8_0.gguf", architecture="qwen35moe", blocks=49, width=4096,
              tensor_names=head_tensors(48))
+        self.assertNotIn("mtp", self.listed()[0])
+        prediction_head(self.snapshot / "MTP" / "mtp-Demo-Q8_0.gguf", extra_bytes=8 * 1024 * 1024)
         self.assertEqual("mtp-Demo-Q8_0.gguf", Path(self.listed()[0]["mtp"]).name)
 
     def test_companion_in_a_dedicated_mtp_folder_pairs_with_the_snapshot_target(self):
@@ -676,7 +685,7 @@ class MtpPairingTests(unittest.TestCase):
 
     def test_marked_companion_carrying_a_base_stack_is_never_a_chat_model(self):
         gguf(self.snapshot / "mtp-Demo-Shared-Q8_0.gguf", architecture="qwen35moe", blocks=49, nextn=1,
-             width=4096, tensor_names=target_tensors(48) + head_tensors(48))
+             width=4096, tensor_names=["token_embd.weight"] + target_tensors(48) + head_tensors(48))
         target_model(self.snapshot / "Demo-Q4_K_XL.gguf")
         models = self.listed()
         self.assertEqual(["Demo-Q4_K_XL.gguf"], [model["path"].name for model in models])

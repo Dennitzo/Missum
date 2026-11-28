@@ -2,6 +2,8 @@ namespace Missum.Core.Models;
 
 public enum ChatRole { System, User, Assistant }
 public enum MessageStatus { Pending, Streaming, Completed, Cancelled, Failed, Interrupted }
+// Webdesign is a legacy value (stored data, old settings): the former mode is the Codex tool
+// "Webdesign" now. It keeps its number so ModelHub and stored integers stay valid.
 public enum ChatMode { General, Coding, ClaudeScience, ClaudeMeetings, Webdesign, ModelHub }
 public enum MessageContentProfile { General, Audiobook }
 public enum SessionContextProfile { General, Audiobook }
@@ -19,7 +21,10 @@ public sealed record ChatSession(
     string? PersistentExtensionActionId = null,
     long ConversationRevision = 0,
     string? CodingWorkspacePath = null,
-    Guid? SessionGroupId = null);
+    Guid? SessionGroupId = null,
+    // The Codex tool "Webdesign" (website tab, webdesign.serve/preview). Stored next to the
+    // persistent tool so it can stay on while Plan mode or another tool is selected.
+    bool WebdesignEnabled = false);
 
 public sealed record ChatSessionGroup(
     Guid Id,
@@ -320,6 +325,13 @@ public sealed record AppSettings
     public AppTheme Theme { get; init; } = AppTheme.Dark;
     public string AccentColor { get; init; } = DefaultAccentColor;
     public string BackgroundColor { get; init; } = DefaultBackgroundColor;
+    /// <summary>Optional translucent "Liquid Glass" window material; off keeps the opaque classic look.</summary>
+    public bool IsLiquidGlassEnabled { get; init; }
+    /// <summary>
+    /// ChatGPT mode may recall earlier chats across sessions and projects (memory.sessions.search)
+    /// and is told to use it together with the memory profile. Off removes both from its runs.
+    /// </summary>
+    public bool IsCrossSessionMemoryEnabled { get; init; } = true;
     public string Language { get; init; } = "de-DE";
     public WindowPlacement Window { get; init; } = new();
     public double NavigationPaneWidth { get; init; } = 320;
@@ -331,6 +343,7 @@ public sealed record AppSettings
     public Guid? ActiveCodingSessionId { get; init; }
     public Guid? ActiveClaudeScienceSessionId { get; init; }
     public Guid? ActiveClaudeMeetingsSessionId { get; init; }
+    /// <summary>Legacy pointer of the former Webdesign mode; loading moves it to <see cref="ActiveCodingSessionId"/>.</summary>
     public Guid? ActiveWebdesignSessionId { get; init; }
     public Guid? ActiveModelHubSessionId { get; init; }
     /// <summary>Model Hub download folder; null means %USERPROFILE%\.cache\huggingface.</summary>

@@ -8,6 +8,8 @@ public enum ExtensionChatMode
     Coding,
     ClaudeScience,
     ClaudeMeetings,
+    // Legacy: the former Webdesign mode is the Codex tool BuiltInActionIds.Webdesign. The value stays
+    // so stored manifests keep validating and the numbering of ModelHub does not change.
     Webdesign,
     ModelHub,
 }

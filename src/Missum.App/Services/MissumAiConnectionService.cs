@@ -30,6 +30,9 @@ public sealed partial class MissumAiConnectionService(
 
     public string? NativeRuntimeError { get; private set; }
 
+    /// <summary>The model the user selected; local tools such as Browser-Use prefer it when several are loaded.</summary>
+    internal string? SelectedModel => AssistantClientExecutionScope.Resolve(settings.Current).SelectedModel;
+
     internal MissumAiConnectionService(
         SettingsCoordinator settings,
         ILogger<MissumAiConnectionService> logger,

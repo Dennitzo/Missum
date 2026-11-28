@@ -137,6 +137,51 @@ public sealed class ReasoningSelectionTests
     }
 
     [Fact]
+    public async Task ModelLoadThatDelaysTheRuntimeStatusDoesNotFailTheRun()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var store = environment.Get<ISettingsStore>();
+        await store.SaveAsync(new AppSettings { MissumAiServerUrl = "http://127.0.0.1:65000" });
+        using var settings = new SettingsCoordinator(store);
+        await settings.InitializeAsync();
+        var model = new ModelRuntimeStatus("Model-A", "coding", true, false, "unloaded", 4096,
+            ReasoningEfforts: ["low", "high"], DefaultReasoningEffort: "high");
+        const string busyMessage = "Windows llama.cpp (http://native.test:8081) antwortete nicht innerhalb von 5 Sekunden.";
+        ModelStatusSnapshot Busy(params ModelRuntimeStatus[] lastKnown) =>
+            new(false, "fixture", lastKnown, DateTimeOffset.UtcNow, "modelRuntime.timeout", busyMessage);
+        var reads = 0;
+        var current = Busy(model);
+        using var connection = new MissumAiConnectionService(settings, NullLogger<MissumAiConnectionService>.Instance,
+            () => new ModelStatusHandler(() => { Interlocked.Increment(ref reads); return Volatile.Read(ref current); }));
+        using var service = new MissumAiAssistantService(connection, null!, null!, null!, null!, null!, null!, null!, null!,
+            null!, null!, null!, null!, settings, null!, NullLogger<MissumAiAssistantService>.Instance);
+        using var client = await connection.CreateClientAsync();
+        var poll = TimeSpan.FromMilliseconds(10);
+
+        // The gateway's last reachable catalog still lists the model it is loading.
+        Assert.Equal("high", await service.ResolveRequestedReasoningAsync(client, model.Id, model.Role, poll, TimeSpan.FromSeconds(30), CancellationToken.None));
+        Assert.Equal(1, reads);
+
+        // Without that entry the run waits until the runtime answers again.
+        Volatile.Write(ref current, Busy());
+        reads = 0;
+        var waiting = service.ResolveRequestedReasoningAsync(client, model.Id, model.Role, poll, TimeSpan.FromSeconds(30), CancellationToken.None);
+        for (var attempt = 0; attempt < 500 && Volatile.Read(ref reads) < 3; attempt++) await Task.Delay(10);
+        Assert.True(Volatile.Read(ref reads) >= 3);
+        Assert.False(waiting.IsCompleted);
+        Volatile.Write(ref current, Snapshot(model with { Loaded = true, State = "loaded" }));
+        Assert.Equal("high", await waiting.WaitAsync(TimeSpan.FromSeconds(5)));
+
+        // A runtime that stays busy past the bound, or is really offline, still fails visibly.
+        Volatile.Write(ref current, Busy());
+        Assert.Equal(busyMessage, (await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.ResolveRequestedReasoningAsync(client, model.Id, model.Role, poll, TimeSpan.FromMilliseconds(100), CancellationToken.None))).Message);
+        Volatile.Write(ref current, Snapshot(model) with { ProviderReachable = false, ErrorCode = "modelRuntime.unreachable", ErrorMessage = "offline" });
+        Assert.Equal("offline", (await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.ResolveRequestedReasoningAsync(client, model.Id, model.Role, CancellationToken.None))).Message);
+    }
+
+    [Fact]
     public async Task ChoicesSurviveSettingsReloadAndAreGlobalAcrossModes()
     {
         await using var environment = await TestEnvironment.CreateAsync();

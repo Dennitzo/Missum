@@ -16,7 +16,7 @@ public sealed partial class NativeAssistantPage
     private long _researchTabSelectionVersion;
 
     // Claude Meetings picks its model like Codex does.
-    private string ModelRole => _mode is "coding" or "claudescience" or "claudemeetings" or "webdesign" ? "coding" : "general";
+    private string ModelRole => _mode is "coding" or "claudescience" or "claudemeetings" ? "coding" : "general";
 
     private NativeResearchSession ResearchState(Guid sessionId)
     {

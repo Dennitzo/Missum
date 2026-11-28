@@ -231,14 +231,13 @@ public sealed class CodingToolStepTests
     }
 
     [Fact]
-    public void PlanModeUsesCodingAgentButOnlyReadOnlyServerTools()
+    public void PlanModeAdvertisesTheCodingToolsButOnlyRunsReadOnlyClientTools()
     {
         Assert.True(MissumAiAssistantService.UsesCodingAgent(PromptTriggerAction.PlanMode));
-        var tools = MissumAiAssistantService.GetAllowedServerTools(PromptTriggerAction.PlanMode);
-        Assert.Contains("web.search", tools);
-        Assert.Contains("media.analyze", tools);
-        Assert.DoesNotContain("image.generate", tools);
-        Assert.DoesNotContain("context.embed", tools);
+        // Identical tool list keeps the native prompt prefix for the implementation run;
+        // the gateway refuses generating tools while planning.
+        Assert.Equal(MissumAiAssistantService.GetAllowedServerTools(PromptTriggerAction.Coding),
+            MissumAiAssistantService.GetAllowedServerTools(PromptTriggerAction.PlanMode));
         Assert.True(MissumAiAssistantService.IsClientToolAllowed(PromptTriggerAction.PlanMode, ToolRiskClass.ReadOnly));
         Assert.False(MissumAiAssistantService.IsClientToolAllowed(PromptTriggerAction.PlanMode, ToolRiskClass.LocalMutation));
         Assert.False(MissumAiAssistantService.IsClientToolAllowed(PromptTriggerAction.PlanMode, ToolRiskClass.Process));

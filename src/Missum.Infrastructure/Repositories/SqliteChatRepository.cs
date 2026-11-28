@@ -37,7 +37,7 @@ public sealed partial class SqliteChatRepository(SqliteDatabase database) : ICha
         await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT id,title,created_at,updated_at,chat_mode,draft,persistent_extension_action_id,conversation_revision,coding_workspace_path,session_group_id
+            SELECT id,title,created_at,updated_at,chat_mode,draft,persistent_extension_action_id,conversation_revision,coding_workspace_path,session_group_id,webdesign_enabled
             FROM chat_sessions
             WHERE ($mode IS NULL OR chat_mode=$mode)
               AND ($search='' OR rowid IN (SELECT rowid FROM session_search WHERE session_search MATCH $fts))
@@ -60,7 +60,7 @@ public sealed partial class SqliteChatRepository(SqliteDatabase database) : ICha
     {
         await using var connection = await database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT id,title,created_at,updated_at,chat_mode,draft,persistent_extension_action_id,conversation_revision,coding_workspace_path,session_group_id FROM chat_sessions WHERE id=$id;";
+        command.CommandText = "SELECT id,title,created_at,updated_at,chat_mode,draft,persistent_extension_action_id,conversation_revision,coding_workspace_path,session_group_id,webdesign_enabled FROM chat_sessions WHERE id=$id;";
         command.Parameters.AddWithValue("$id", id.ToString("D"));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadSession(reader) : null;
@@ -76,17 +76,21 @@ public sealed partial class SqliteChatRepository(SqliteDatabase database) : ICha
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(title);
         if (!Enum.IsDefined(mode)) throw new ArgumentOutOfRangeException(nameof(mode));
+        // The former Webdesign mode is Codex with the Webdesign tool switched on.
+        var webdesign = mode == ChatMode.Webdesign;
+        if (webdesign) mode = ChatMode.Coding;
         var now = DateTimeOffset.UtcNow;
-        var session = new ChatSession(Guid.NewGuid(), title.Trim(), now, now, mode);
+        var session = new ChatSession(Guid.NewGuid(), title.Trim(), now, now, mode, WebdesignEnabled: webdesign);
         await database.WriteAsync(async (connection, transaction, token) =>
         {
             await using var command = connection.CreateCommand();
             command.Transaction = transaction;
-            command.CommandText = "INSERT INTO chat_sessions(id,title,created_at,updated_at,chat_mode) VALUES($id,$title,$now,$now,$mode);";
+            command.CommandText = "INSERT INTO chat_sessions(id,title,created_at,updated_at,chat_mode,webdesign_enabled) VALUES($id,$title,$now,$now,$mode,$webdesign);";
             command.Parameters.AddWithValue("$id", session.Id.ToString("D"));
             command.Parameters.AddWithValue("$title", session.Title);
             command.Parameters.AddWithValue("$now", now.ToDb());
             command.Parameters.AddWithValue("$mode", SqliteMapping.EnumName(mode));
+            command.Parameters.AddWithValue("$webdesign", webdesign ? 1 : 0);
             await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
         }, cancellationToken).ConfigureAwait(false);
         return session;
@@ -508,6 +512,24 @@ public sealed partial class SqliteChatRepository(SqliteDatabase database) : ICha
         }, cancellationToken);
     }
 
+    public Task SetWebdesignEnabledAsync(Guid id, bool enabled, CancellationToken cancellationToken = default) =>
+        database.WriteAsync(async (connection, transaction, token) =>
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            // Only a real change touches updated_at, so a repeated switch never reorders the sidebar.
+            command.CommandText = """
+                UPDATE chat_sessions
+                SET webdesign_enabled=$enabled,
+                    updated_at=$now
+                WHERE id=$id AND webdesign_enabled<>$enabled;
+                """;
+            command.Parameters.AddWithValue("$id", id.ToString("D"));
+            command.Parameters.AddWithValue("$enabled", enabled ? 1 : 0);
+            command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToDb());
+            await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+        }, cancellationToken);
+
     public async Task<SessionContextPreparation?> GetSessionContextPreparationAsync(
         string cacheKey,
         CancellationToken cancellationToken = default)
@@ -738,7 +760,8 @@ public sealed partial class SqliteChatRepository(SqliteDatabase database) : ICha
         ReadPersistentExtensionActionId(reader),
         reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
         reader.IsDBNull(8) ? null : reader.GetString(8),
-        reader.IsDBNull(9) ? null : reader.ReadGuid(9));
+        reader.IsDBNull(9) ? null : reader.ReadGuid(9),
+        reader.FieldCount > 10 && !reader.IsDBNull(10) && reader.GetInt64(10) != 0);
 
     private static string? ReadPersistentExtensionActionId(SqliteDataReader reader)
     {

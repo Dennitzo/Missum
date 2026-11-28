@@ -158,6 +158,8 @@ def model_metadata(path, allow_metadata_only=False, inspect_mtp=False):
                 offsets.append((u64(stream), name))
                 if name == "per_layer_token_embd.weight":
                     metadata["has_engram_table"] = True
+                if name == "token_embd.weight":
+                    metadata["has_token_embedding"] = True
                 if match := NEXTN_TENSOR.fullmatch(name):
                     index, tail = int(match[1]), match[2]
                     block_indices.add(index)
@@ -487,6 +489,13 @@ def matching_mtp(model, candidates, scopes):
             continue
         layout = mtp_tensor_layout(shards)
         if layout is None:
+            continue
+        # "shared-" heads borrow token_embd from the running target. The official
+        # llama.cpp build cannot borrow tensors and rejects such a draft at load
+        # time (check_tensor_dims: token_embd.weight not found), which would
+        # silently cost the whole speculation. Only self-contained heads qualify.
+        if not any((model_metadata(shard, allow_metadata_only=True, inspect_mtp=True) or {}).get("has_token_embedding")
+                   for shard in shards):
             continue
         draft_base_blocks = len(layout[0])
         declared_base = draft.get(f"{architecture}.block_count", 0) - draft.get(f"{architecture}.nextn_predict_layers", 0)
@@ -1192,7 +1201,9 @@ def moe_performance_options(model, policy, devices, binary):
     except (OSError, subprocess.SubprocessError):
         return {}
     # Retain the mtmd requirement that a complete image batch fit in one ubatch.
-    options = dict(batchSize=2048, ubatchSize=1024)
+    # Measured on Qwen3.8 IQ3_XXS (2 GPUs): ubatch 2048 prefills 9 % faster than 1024
+    # at empty and 3 % at 32k context; 4096 is slower again.
+    options = dict(batchSize=2048, ubatchSize=2048)
     if policy.get("mtpMode") and all(flag in native_help for flag in
             ("ngram-simple", "--spec-ngram-simple-size-n", "--spec-ngram-simple-size-m")):
         options["promptLookup"] = True
@@ -1322,7 +1333,12 @@ class GpuLoadManager:
         policy = vision_batch_policy(model, limit_context_policy(model, policy))
         # Preserve the existing default layer/single-GPU snapshot identity:
         # the same loaded configuration must not force a large prefix re-eval.
-        fingerprint = dict(version=1, files=identity, context=policy["context"], cache="q8_0", slots=1,
+        # The window size is no part of a slot snapshot: llama.cpp stores the
+        # used cells per layer, and a restore into a window that is too small
+        # fails visibly and falls back to a cold prompt. Keeping it out lets a
+        # session survive loading the same model with another context limit
+        # (262k ↔ 1M). RoPE scaling, which changes the KV values, stays below.
+        fingerprint = dict(version=2, files=identity, cache="q8_0", slots=1,
                            template=native_history_template(metadata.get("tokenizer.chat_template", "")),
                            placement=self.placements.get(model_id), fit=self.fit_target, gpuLayers=self.gpu_layers,
                            split="layer" if policy["split"] == "none" else policy["split"])

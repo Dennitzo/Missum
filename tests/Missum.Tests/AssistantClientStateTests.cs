@@ -350,7 +350,8 @@ public sealed class AssistantClientStateTests
         using var settings = new SettingsCoordinator(environment.Get<ISettingsStore>());
         await settings.InitializeAsync();
         var chats = environment.Get<IChatRepository>();
-        var session = await chats.CreateSessionAsync("Persistent tool");
+        // Hörbuch is not offered in ChatGPT; Meetings keeps it without a project folder.
+        var session = await chats.CreateSessionAsync("Persistent tool", ChatMode.ClaudeMeetings);
         using var views = new AssistantClientStateStore(environment.Directory);
         await using var scheduler = new ProfileAssistantRunScheduler(NullLogger<ProfileAssistantRunScheduler>.Instance);
         var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

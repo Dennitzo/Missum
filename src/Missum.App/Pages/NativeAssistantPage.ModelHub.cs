@@ -170,7 +170,7 @@ public sealed partial class NativeAssistantPage
     {
         if (_hubHost is not null) return;
         _hubHost = new Grid { Visibility = Visibility.Collapsed };
-        AutomationProperties.SetName(_hubHost, "Model Hub");
+        AutomationProperties.SetName(_hubHost, ModelHubTitle);
         _hubHost.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         _hubHost.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         _hubHost.Children.Add(ModelHubHeader());
@@ -207,8 +207,10 @@ public sealed partial class NativeAssistantPage
                 if (!IsModelHubMode) return;
                 var completed = Downloads.Jobs.Count(j => j.State == ModelDownloadState.Completed);
                 if (completed != _hubCompletedSeen) { _hubCompletedSeen = completed; _ = ScanHubFolderAsync(); }
-                RenderModelHubPanel();
-                RenderHubQuantizations();
+                // Progress ticks only update the existing bars and lines; rebuilding the cards every
+                // 300 ms restarted each ProgressBar's entrance animation and made the panel flicker.
+                if (!UpdateModelHubPanelInPlace()) RenderModelHubPanel();
+                if (!UpdateHubQuantizationsInPlace()) RenderHubQuantizations();
             }));
         }
         RenderModelHubBody();
@@ -647,6 +649,8 @@ public sealed partial class NativeAssistantPage
     {
         if (_hubQuantPanel is null || _hubDetails is null) return;
         _hubQuantPanel.Children.Clear();
+        _hubQuantStateViews.Clear();
+        _hubQuantSignature = HubQuantSignature();
         if (_hubQuantizations.Count == 0)
         {
             _hubQuantPanel.Children.Add(new TextBlock { Text = "Dieses Repository enthält keine ladbaren GGUF-Dateien.", Foreground = ThemeBrush("MissumMutedTextBrush", 160) });
@@ -668,7 +672,9 @@ public sealed partial class NativeAssistantPage
         var label = new StackPanel { Spacing = 1, VerticalAlignment = VerticalAlignment.Center };
         label.Children.Add(new TextBlock { Text = quantization.Label, FontSize = 14, FontWeight = FontWeights.SemiBold });
         var files = quantization.Parts.Count > 1 ? $"{quantization.Parts.Count} Teile" : "1 Datei";
-        if (quantization.Companions.Count > 0) files += " + Vision";
+        if (quantization.Companions.Any(c => ModelHubQuantizations.IsProjector(c.Path))) files += " + Vision";
+        if (quantization.Companions.FirstOrDefault(c => ModelHubQuantizations.IsDraft(c.Path)) is { } draft)
+            files += " + MTP " + ModelHubQuantizations.Label(Path.GetFileNameWithoutExtension(draft.Path[(draft.Path.LastIndexOf('/') + 1)..]), "");
         label.Children.Add(new TextBlock { Text = files, FontSize = 11, Foreground = ThemeBrush("MissumMutedTextBrush", 150) });
         grid.Children.Add(label);
         var size = new TextBlock { Text = ModelHubFormat.Gigabytes(quantization.TotalBytes), FontSize = 13, VerticalAlignment = VerticalAlignment.Center };
@@ -731,14 +737,9 @@ public sealed partial class NativeAssistantPage
     {
         if (job is { IsActive: true } or { State: ModelDownloadState.Paused })
         {
-            var state = job.State switch
-            {
-                ModelDownloadState.Queued => "Wartet",
-                ModelDownloadState.Verifying => "Prüft …",
-                ModelDownloadState.Paused => $"Pausiert · {job.Progress:P0}",
-                _ => $"Lädt · {job.Progress:P0}",
-            };
-            return new TextBlock { Text = state, FontSize = 13, VerticalAlignment = VerticalAlignment.Center, Foreground = ThemeBrush("MissumMutedTextBrush", 180) };
+            var stateText = new TextBlock { Text = HubQuantizationStateText(job), FontSize = 13, VerticalAlignment = VerticalAlignment.Center, Foreground = ThemeBrush("MissumMutedTextBrush", 180) };
+            _hubQuantStateViews[quantization.Label] = stateText;
+            return stateText;
         }
         // One button, three states: present (greyed, no action), update, download.
         var (glyph, text, help) = status.State switch
@@ -828,9 +829,55 @@ public sealed partial class NativeAssistantPage
 
     // ── Right sidebar: downloads and errors only ─────────────────────────
 
+    // Live elements of the rendered download cards, keyed by job id, and the structure they show.
+    private readonly Dictionary<string, (ProgressBar Bar, TextBlock Line)> _hubJobViews = new(StringComparer.Ordinal);
+    private string? _hubPanelSignature;
+    private readonly Dictionary<string, TextBlock> _hubQuantStateViews = new(StringComparer.OrdinalIgnoreCase);
+    private string? _hubQuantSignature;
+
+    /// <summary>What the panel's layout depends on: which jobs are shown, in which state, and the notice.</summary>
+    private string HubPanelSignature() =>
+        string.Join("|", Downloads.Jobs.Select(j => j.Id + ":" + (int)j.State + ":" + j.GatewayReady)) + "|" + _hubNotice;
+
+    private bool UpdateModelHubPanelInPlace()
+    {
+        if (_hubPanel is null || _hubPanelSignature is null || _hubPanelSignature != HubPanelSignature()) return false;
+        foreach (var job in Downloads.Jobs)
+        {
+            if (!_hubJobViews.TryGetValue(job.Id, out var view)) continue;
+            if (!view.Bar.IsIndeterminate) view.Bar.Value = job.Progress;
+            var line = HubJobLine(job);
+            if (view.Line.Text != line) view.Line.Text = line;
+        }
+        return true;
+    }
+
+    private string HubQuantSignature() => _hubDetails is null ? "" :
+        _hubDetails.Id + "@" + _hubDetails.Commit + "|" + string.Join("|", _hubQuantizations.Select(q =>
+            q.Label + ":" + (Downloads.Find(_hubDetails.Id, _hubDetails.Commit, q.Label)?.State is { } state ? (int)state : -1)));
+
+    private bool UpdateHubQuantizationsInPlace()
+    {
+        if (_hubDetails is null || _hubQuantSignature is null || _hubQuantSignature != HubQuantSignature()) return false;
+        foreach (var (label, text) in _hubQuantStateViews)
+            if (Downloads.Find(_hubDetails.Id, _hubDetails.Commit, label) is { } job && HubQuantizationStateText(job) is var value && text.Text != value)
+                text.Text = value;
+        return true;
+    }
+
+    private static string HubQuantizationStateText(ModelDownloadJob job) => job.State switch
+    {
+        ModelDownloadState.Queued => "Wartet",
+        ModelDownloadState.Verifying => "Prüft …",
+        ModelDownloadState.Paused => $"Pausiert · {job.Progress:P0}",
+        _ => $"Lädt · {job.Progress:P0}",
+    };
+
     private void RenderModelHubPanel()
     {
         if (_hubPanel is null) return;
+        _hubJobViews.Clear();
+        _hubPanelSignature = HubPanelSignature();
         var stack = new StackPanel { Spacing = 10 };
         stack.Children.Add(new TextBlock { Text = "Downloads", FontSize = 15, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 2, 0, 2) });
         var jobs = Downloads.Jobs;
@@ -869,7 +916,9 @@ public sealed partial class NativeAssistantPage
         stack.Children.Add(new TextBlock { Text = job.Label, FontSize = 12, Foreground = ThemeBrush("MissumMutedTextBrush", 160) });
         var progress = new ProgressBar { Minimum = 0, Maximum = 1, Value = job.Progress, IsIndeterminate = job.State == ModelDownloadState.Verifying };
         if (job.State != ModelDownloadState.Completed) stack.Children.Add(progress);
-        stack.Children.Add(new TextBlock { Text = HubJobLine(job), FontSize = 12, TextWrapping = TextWrapping.Wrap, Foreground = ThemeBrush("MissumMutedTextBrush", 175) });
+        // One fixed line: wrapping text of changing width made the card's height jump on every tick.
+        var line = new TextBlock { Text = HubJobLine(job), FontSize = 12, TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis, Foreground = ThemeBrush("MissumMutedTextBrush", 175) };        stack.Children.Add(line);
+        _hubJobViews[job.Id] = (progress, line);
 
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
         switch (job.State)

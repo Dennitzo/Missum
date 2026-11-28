@@ -27,6 +27,9 @@ public sealed partial class WebdesignPreviewView
     private readonly Microsoft.UI.Xaml.Shapes.Ellipse _serverDot = new() { Width = 8, Height = 8, VerticalAlignment = VerticalAlignment.Center };
     private readonly ToggleButton _compareToggle = new() { Height = 30, Padding = new Thickness(10, 0, 10, 0), IsEnabled = false };
     private readonly StackPanel _tunePanel = new() { Spacing = 4, Visibility = Visibility.Collapsed };
+    // Hosting details open inside the tool pill: a Flyout anchored in the pill above the
+    // WebView2 is rejected by WinUI (E_INVALIDARG), so no popup is used here.
+    private readonly Border _hostingPanel = new() { Visibility = Visibility.Collapsed, Padding = new Thickness(8, 6, 8, 6) };
     private readonly TextBlock _toast = new() { FontSize = 12, Visibility = Visibility.Collapsed, TextWrapping = TextWrapping.Wrap };
     private readonly Grid _compare = new() { Visibility = Visibility.Collapsed };
     private readonly Image _compareBefore = new() { Stretch = Stretch.Uniform };
@@ -93,6 +96,27 @@ public sealed partial class WebdesignPreviewView
         toggle.BorderThickness = new Thickness(0);
         toggle.CornerRadius = new CornerRadius(4);
         return toggle;
+    }
+
+    /// <summary>A plain button with the same transparent pill look as <see cref="PillToggle"/>.</summary>
+    internal static Button PillButton(Button button)
+    {
+        var transparent = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        var hover = NativeThemeBrushes.Resource("MissumHoverBrush", 60);
+        var pressed = NativeThemeBrushes.Resource("MissumPressedBrush", 80);
+        var text = NativeThemeBrushes.Resource("MissumTextBrush", 240);
+        foreach (var (key, brush) in new (string, Brush)[]
+        {
+            ("ButtonBackground", transparent), ("ButtonBackgroundPointerOver", hover), ("ButtonBackgroundPressed", pressed),
+            ("ButtonBackgroundDisabled", transparent),
+            ("ButtonBorderBrush", transparent), ("ButtonBorderBrushPointerOver", transparent), ("ButtonBorderBrushPressed", transparent),
+            ("ButtonBorderBrushDisabled", transparent),
+            ("ButtonForeground", text), ("ButtonForegroundPointerOver", text), ("ButtonForegroundPressed", text),
+        })
+            button.Resources[key] = brush;
+        button.Background = transparent;
+        button.BorderThickness = new Thickness(0);
+        return button;
     }
 
     private ToggleButton ToolToggle(string glyph, string text, string tip)
@@ -206,8 +230,8 @@ public sealed partial class WebdesignPreviewView
         _serverChip.CornerRadius = new CornerRadius(15);
         AutomationProperties.SetName(_serverChip, "Server und Hosting");
         _serverChip.Click += (_, _) => ShowHostingFlyout();
-        first.Children.Add(_serverChip);
-        // The overlay shows only the tool row; navigation, path and server are no longer part of it.
+        // The overlay shows only the tool row; navigation and path are not part of it. The server chip
+        // sits in the tool row, so hosting (LAN, QR code, restart, hosting without Missum) stays reachable.
         _ = first;
 
         var second = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
@@ -253,9 +277,12 @@ public sealed partial class WebdesignPreviewView
             Key = Windows.System.VirtualKey.Z, Modifiers = Windows.System.VirtualKeyModifiers.Control,
         });
         second.Children.Add(_undoButton);
+        second.Children.Add(new Border { Width = 1, Margin = new Thickness(4, 4, 4, 4), Background = NativeThemeBrushes.Resource("MissumStrokeBrush", 70) });
+        second.Children.Add(PillButton(_serverChip));
         _overlayBody.Children.Add(second);
         // Third row, only while an element is being fine-tuned.
         _overlayBody.Children.Add(_tunePanel);
+        _overlayBody.Children.Add(_hostingPanel);
         SetColumn(_overlayBody, 1);
         layout.Children.Add(_overlayBody);
 
@@ -430,9 +457,20 @@ public sealed partial class WebdesignPreviewView
             "Erstelle für dieses Webdesign-Projekt ein Startskript start-server.ps1 (bzw. ein serve-Skript in package.json, falls vorhanden) und eine HOSTING.md: lokal starten ohne Missum, freien Port wählen, im Netzwerk freigeben und Hinweise zur Veröffentlichung auf einem Webspace.");
         buttons.Children.Add(restart);
         buttons.Children.Add(external);
-        buttons.Children.Add(files);
         panel.Children.Add(buttons);
-        new Flyout { Content = panel, Placement = FlyoutPlacementMode.BottomEdgeAlignedRight }.ShowAt(_serverChip);
+        // Second row: the panel is 360 px wide, four buttons in one row would be clipped.
+        var more = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        more.Children.Add(files);
+        panel.Children.Add(more);
+        // The chip sits in the floating tool pill (usually at the bottom): let the flyout pick its side.
+        // A collapsed tool pill leaves the chip without size; WinUI then rejects it as anchor.
+        var close = new Button { Content = "Schließen" };
+        close.Click += (_, _) => _hostingPanel.Visibility = Visibility.Collapsed;
+        more.Children.Add(close);
+        _hostingPanel.Child = panel;
+        _hostingPanel.Visibility = Visibility.Visible;
+        // A collapsed pill would hide the panel: expand it while hosting is shown.
+        SetOverlayCollapsed(false);
     }
 
     private static StackPanel UrlRow(string label, string url)
@@ -1120,6 +1158,9 @@ public sealed partial class WebdesignPreviewView
     internal Task CommitTuneForSmokeAsync() => CommitTuneAsync();
     internal bool CompareAvailable => _compareToggle.IsEnabled && _beforePng is not null && _afterPng is not null;
     internal void ShowCompareForSmoke() => ShowCompare(true);
+    /// <summary>The hosting chip is part of the visible tool pill (smoke check).</summary>
+    internal bool HostingChipInToolbar => _serverChip.Parent is not null;
+    internal void ShowHostingForSmoke() => ShowHostingFlyout();
     internal void HideCompareForSmoke() => ShowCompare(false);
 
     private void BuildCompare()

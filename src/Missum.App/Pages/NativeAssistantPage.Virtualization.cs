@@ -211,9 +211,10 @@ public sealed partial class NativeAssistantPage
                 Text(activityKey ?? "text:" + offset, content[offset..next], offset, activitySlot: activityKey is not null, replacesKey);
                 offset = next;
             }
-            var eligible = steps.Where(step => !IsDeepResearchReceipt(step)
+            // Computer-Use steps and the comments between them read as one receipt.
+            var eligible = ComputerStepBundling.Bundle(steps.Where(step => !IsDeepResearchReceipt(step)
                 && !IsAcceptedSubagentManagementStep(step, receipts)
-                && (S(step, "tool") != "assistant.continuation" || S(step, "status") == "completed"));
+                && (S(step, "tool") != "assistant.continuation" || S(step, "status") == "completed")), content);
             foreach (var activity in NativeActivityProjection.Build(eligible, S(message, "status") is "streaming" or "pending", content.Length, waitingForModel))
             {
                 var step = activity.Step;
@@ -238,6 +239,9 @@ public sealed partial class NativeAssistantPage
                     }
                     else result.Add(new(activity.Key, tool is "subagent" or "subagent.completed" ? "subagent" : tool == "assistant.continuation" ? "continuationReceipt" : tool == "context.compact" ? "compactionReceipt" : "tool",
                         "", 0, step, Number: tool == "assistant.activity" ? number : ++number, ReplacesKey: activity.ReplacesKey, OwnsActivitySlot: true));
+                    // The comments between bundled computer steps are shown inside the receipt.
+                    if (tool == ComputerStepBundling.GroupTool && ComputerStepBundling.ContentEnd(step) is { } groupEnd)
+                        offset = Math.Clamp(groupEnd, offset, content.Length);
                 }
                 if (artifactGroups.Remove(stepId, out var images))
                     result.Add(new("artifacts:step:" + stepId, "artifacts", "", 0, default, images));

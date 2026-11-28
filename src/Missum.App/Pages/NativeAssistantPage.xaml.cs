@@ -58,6 +58,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     public NativeAssistantPage()
     {
         InitializeComponent();
+        ApplyLiquidGlassChrome();
         Composer.Paste += OnComposerPaste;
         NativeNotice.Attach(ErrorBar);
         _conversationSelection = new NativeConversationSelection(ConversationContent, MessagesPanel, ConversationScroll)
@@ -301,7 +302,8 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                 _mode = newMode;
                 _running = _changeReceiptState.IsPromptPending(_session)
                     || (S(data, "isRunning") == "True" && !_finishedSessions.Contains(_session));
-                ModeLabel.Text = _mode switch { "coding" => "Codex", "claudescience" => "Claude Science", "claudemeetings" => "Claude Meetings", "webdesign" => "Webdesign", "modelhub" => "Model Hub", _ => "ChatGPT" };
+                ModeLabel.Text = _mode switch { "coding" => "Codex", "claudescience" => "Claude Science", "claudemeetings" => "Claude Meetings", "modelhub" => ModelHubTitle, _ => "ChatGPT" };
+                ObserveWebdesignTool(data);
                 ChatStatus = _running && !S(data, "runStatus").StartsWith("Modell generiert", StringComparison.Ordinal) ? S(data, "runStatus") + "  " + S(data, "runDetail") : "";
                 _persistentAction = S(data, "selectedExtensionActionId");
                 if (_persistentAction == BuiltInActionIds.DeepResearch) _persistentAction = null;
@@ -312,7 +314,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
                 }
                 else if (_selectedAction is not null)
                     UpdateSelectedToolChip(_lastToolChipLabel);
-                if (ActiveSubagent is null) Composer.PlaceholderText = _mode switch { "coding" => "Leg einfach los", "claudescience" => "Stelle eine Forschungsfrage", "claudemeetings" => "Nachricht an alle oder @Missum", "webdesign" => "Beschreibe deine Webseite oder markiere etwas im Tab Webseite", _ => "Frag etwas" };
+                if (ActiveSubagent is null) Composer.PlaceholderText = _mode switch { "coding" when WebdesignToolActive => "Beschreibe deine Webseite oder markiere etwas im Tab Webseite", "coding" => "Leg einfach los", "claudescience" => "Stelle eine Forschungsfrage", "claudemeetings" => "Nachricht an alle oder @Missum", _ => "Frag etwas" };
                 _rendering = true;
                 if (changed) Composer.Text = S(data, "draft");
                 _rendering = false;
@@ -875,7 +877,9 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
             && !(FullWidthViewActive && _websiteHidesInspector);
         var panelWidth = meetings ? MeetingChatWidth : modelHub ? ModelHubPanelWidth : NativeInspectorLayout.SidebarWidth;
         var width = visible ? panelWidth : 0;
-        if (Inspector.Width != panelWidth) Inspector.Width = panelWidth;
+        // A floating Liquid Glass pane keeps its margin inside the column instead of overflowing it.
+        var paneWidth = Math.Max(0, panelWidth - InspectorGlassMarginWidth);
+        if (Inspector.Width != paneWidth) Inspector.Width = paneWidth;
         var chatVisibility = meetings ? Visibility.Visible : Visibility.Collapsed;
         if (MeetingChatHost.Visibility != chatVisibility)
         {
@@ -1232,6 +1236,7 @@ public sealed partial class NativeAssistantPage : Page, IDisposable
     {
         CancelPromptTimelineNavigation();
         if (_disposed) return;
+        UnsubscribeWebdesignActivation();
         _websiteView?.Close();
         if (_captionSubscribed) App.Current.GetService<SystemAudioCaptionService>().Changed -= OnNativeCaptionChanged;
         _ = StopNativeDictationAsync();

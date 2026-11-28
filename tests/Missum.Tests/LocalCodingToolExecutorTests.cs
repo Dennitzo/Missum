@@ -112,14 +112,21 @@ public sealed class LocalCodingToolExecutorTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task ReadWholeFileBeyondFormerFileAndReceiptLimitsWithoutTruncation()
+    public async Task ReadWithoutRangeStopsAtTheDefaultAndAnExplicitRangeReadsEverything()
     {
         var line = new string('x', 3000);
         await File.WriteAllTextAsync(Path.Combine(_root, "complete.txt"), string.Join("\n", Enumerable.Repeat(line, 1100)));
+        // Without a range: the first 1000 lines and a hint where to continue.
         var result = await Execute("coding.read", new { path = "complete.txt" });
-        Assert.False(result.GetProperty("truncated").GetBoolean());
-        Assert.Equal(JsonValueKind.Null, result.GetProperty("nextLine").ValueKind);
-        Assert.Equal(string.Join("\n", Enumerable.Repeat(line, 1100)), result.GetProperty("content").GetString());
+        Assert.True(result.GetProperty("truncated").GetBoolean());
+        Assert.Equal(LocalCodingToolExecutor.DefaultReadLines + 1, result.GetProperty("nextLine").GetInt32());
+        Assert.Contains("startLine=1001", result.GetProperty("hint").GetString(), StringComparison.Ordinal);
+        Assert.Equal(string.Join("\n", Enumerable.Repeat(line, 1000)) + "\n", result.GetProperty("content").GetString());
+        // An explicit length still returns the whole file, without a hint.
+        var whole = await Execute("coding.read", new { path = "complete.txt", maximumLines = int.MaxValue });
+        Assert.False(whole.GetProperty("truncated").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, whole.GetProperty("hint").ValueKind);
+        Assert.Equal(string.Join("\n", Enumerable.Repeat(line, 1100)), whole.GetProperty("content").GetString());
         var selected = await Execute("coding.read", new { path = "complete.txt", startLine = 1099, maximumLines = int.MaxValue });
         Assert.Equal(line + "\n" + line, selected.GetProperty("content").GetString());
         Assert.False(selected.GetProperty("truncated").GetBoolean());

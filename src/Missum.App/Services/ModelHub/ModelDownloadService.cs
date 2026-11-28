@@ -396,7 +396,10 @@ public sealed class ModelDownloadService : IAsyncDisposable
             job.DoneBytes = others + written;
             if (window.Elapsed > TimeSpan.FromSeconds(1))
             {
-                job.BytesPerSecond = windowBytes / window.Elapsed.TotalSeconds;
+                // Exponential smoothing: a raw one-second rate jumps with every network burst,
+                // which made speed and remaining time flicker in the downloads panel.
+                var rate = windowBytes / window.Elapsed.TotalSeconds;
+                job.BytesPerSecond = job.BytesPerSecond > 0 ? job.BytesPerSecond * 0.8 + rate * 0.2 : rate;
                 windowBytes = 0;
                 window.Restart();
             }

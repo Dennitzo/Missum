@@ -66,17 +66,17 @@ public sealed class CommandMonitoringTests
     }
 
     [Fact]
-    public void MonitoringStartsAfterThirtySecondsAndRequiresFreshObservationsAfterEachMinute()
+    public void MonitoringStartsAfterThreeMinutesAndRequiresFreshObservationsEveryFiveMinutes()
     {
         var now = new DateTimeOffset(2026, 11, 5, 12, 0, 0, TimeSpan.Zero);
-        var fresh = new ClientToolProgress("p", 1, 30_000, "", "", false);
+        var fresh = new ClientToolProgress("p", 1, CommandMonitoringPolicy.FirstCheckMilliseconds, "", "", false);
         var empty = new CommandMonitoringCheckpoint(null, 0, null, []);
-        Assert.False(CommandMonitoringPolicy.IsDue(fresh with { ElapsedMilliseconds = 29_999 }, empty, now));
+        Assert.False(CommandMonitoringPolicy.IsDue(fresh with { ElapsedMilliseconds = 179_999 }, empty, now));
         Assert.True(CommandMonitoringPolicy.IsDue(fresh, empty, now));
         var last = new CommandMonitoringCheckpoint("p", 1, now, []);
-        Assert.False(CommandMonitoringPolicy.IsDue(fresh, last, now.AddSeconds(120)));
-        Assert.False(CommandMonitoringPolicy.IsDue(fresh with { Revision = 2 }, last, now.AddSeconds(59)));
-        Assert.True(CommandMonitoringPolicy.IsDue(fresh with { Revision = 2 }, last, now.AddSeconds(60)));
+        Assert.False(CommandMonitoringPolicy.IsDue(fresh, last, now.AddMinutes(10)));
+        Assert.False(CommandMonitoringPolicy.IsDue(fresh with { Revision = 2 }, last, now.AddSeconds(299)));
+        Assert.True(CommandMonitoringPolicy.IsDue(fresh with { Revision = 2 }, last, now.AddMinutes(5)));
         Assert.True(CommandMonitoringPolicy.IsDue(fresh with { ProposalId = "next" }, last, now));
     }
 
@@ -84,7 +84,7 @@ public sealed class CommandMonitoringTests
     public void InterimReceiptsCloseAllPendingCallsTruthfullyWithoutDuplicatingTheirFinalResults()
     {
         var messages = new List<LmChatMessage> { new("user", "Berechnen und prüfen."), new("assistant", ToolCalls: [Command, Read]) };
-        var progress = new ClientToolProgress("p", 1, 30_000, "Arbeitet", "", false);
+        var progress = new ClientToolProgress("p", 1, CommandMonitoringPolicy.FirstCheckMilliseconds, "Arbeitet", "", false);
         var state = CommandMonitoringPolicy.ClosePendingCalls(messages, Command, progress, new(null, 0, null, []), DateTimeOffset.UtcNow);
         var receipts = messages.Where(item => item.Role == "tool").ToArray();
         Assert.Equal(2, receipts.Length);
@@ -144,7 +144,7 @@ public sealed class CommandMonitoringTests
             })),
         };
         var prompt = CommandMonitoringPolicy.CreatePrompt("Auftrag", null, command,
-            new("p", 1, 30_000, "", "", false));
+            new("p", 1, CommandMonitoringPolicy.FirstCheckMilliseconds, "", "", false));
 
         Assert.True(prompt.Sum(message => message.Content?.Length ?? 0) < 30_000);
         var instruction = prompt[2].Content!;
@@ -189,7 +189,7 @@ public sealed class CommandMonitoringTests
     {
         var render = new LmToolCall("render", ClientToolNames.CodingRenderHtml, J("""{"code":"<p>Plot</p>","title":"Plot"}"""));
         var messages = new List<LmChatMessage> { new("assistant", ToolCalls: [Command, render]) };
-        var progress = new ClientToolProgress("p", 1, 30_000, "", "", false);
+        var progress = new ClientToolProgress("p", 1, CommandMonitoringPolicy.FirstCheckMilliseconds, "", "", false);
         var state = CommandMonitoringPolicy.ClosePendingCalls(messages, Command, progress, new(null, 0, null, []), DateTimeOffset.UtcNow);
         CodingLoopGuard.ThrowIfRenderAlreadyUsed(messages, render);
         messages.Add(CommandMonitoringPolicy.ToolResult(render, """{"success":true,"previewDisplayed":true}""", state));
@@ -279,7 +279,7 @@ public sealed class CommandMonitoringTests
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
         await Assert.ThrowsAsync<RunWaitingForClientException>(() => harness.Processor.ProcessAsync(run, timeout.Token));
         var response = await harness.Repository.SaveClientToolProgressAsync(run,
-            new(Harness.ProposalId, 2, 35_000, "ZeroDivisionError", "", false));
+            new(Harness.ProposalId, 2, CommandMonitoringPolicy.FirstCheckMilliseconds + 5_000, "ZeroDivisionError", "", false));
         Assert.True(response.StopRequested);
         Assert.Equal("Die Ausgabe meldet wiederholt Division durch null.", response.Reason);
         Assert.Equal(RunState.WaitingForClient, (await harness.Repository.GetAsync(run))!.State);
@@ -301,7 +301,7 @@ public sealed class CommandMonitoringTests
         Assert.Equal(8, saved.OutputTokens);
         Assert.Equal(7, saved.RoundCount);
         Assert.False((await harness.Repository.SaveClientToolProgressAsync(run,
-            new(Harness.ProposalId, 2, 35_000, "", "", false))).StopRequested);
+            new(Harness.ProposalId, 2, CommandMonitoringPolicy.FirstCheckMilliseconds + 5_000, "", "", false))).StopRequested);
         var events = await harness.Repository.GetEventsAfterAsync(run, 0);
         Assert.Contains(events, item => item.Type == RunEventTypes.TextDelta
             && item.Data.GetProperty("delta").GetString()!.Contains("inhaltliche AI-Prüfung", StringComparison.Ordinal));
@@ -321,13 +321,13 @@ public sealed class CommandMonitoringTests
         Assert.Equal(Harness.ProposalId, saved.PendingProposalId);
         Assert.NotNull(saved.CommandMonitoring!.LastAttemptAt);
         Assert.Equal(7, saved.RoundCount);
-        Assert.False((await harness.Repository.SaveClientToolProgressAsync(run, new(Harness.ProposalId, 2, 95_000, "", "", false))).StopRequested);
+        Assert.False((await harness.Repository.SaveClientToolProgressAsync(run, new(Harness.ProposalId, 2, CommandMonitoringPolicy.FirstCheckMilliseconds + 400_000, "", "", false))).StopRequested);
         var fallbackEvents = await harness.Repository.GetEventsAfterAsync(run, 0);
         Assert.Contains(fallbackEvents, item => item.Type == RunEventTypes.TextDelta
             && item.Data.GetProperty("delta").GetString()!.Contains("inhaltliche AI-Prüfung", StringComparison.Ordinal));
         Assert.DoesNotContain(fallbackEvents, item => item.Type == RunEventTypes.RunFailed);
         await harness.Repository.SaveCheckpointAsync(run, saved with
-        { CommandMonitoring = saved.CommandMonitoring with { LastAttemptAt = DateTimeOffset.UtcNow.AddMinutes(-2) } });
+        { CommandMonitoring = saved.CommandMonitoring with { LastAttemptAt = DateTimeOffset.UtcNow.AddMinutes(-6) } });
         harness.Handler.FailGeneration = false;
         await Assert.ThrowsAsync<RunWaitingForClientException>(() => harness.Processor.ProcessAsync(run, timeout.Token));
         Assert.Contains(await harness.Repository.GetEventsAfterAsync(run, 0), item => item.Type == RunEventTypes.TextDelta);
@@ -397,7 +397,7 @@ public sealed class CommandMonitoringTests
             await Repository.SaveToolProposalAsync(new(ProposalId, run, ClientToolNames.CodingCommand, Command.Arguments,
                 ToolRiskClass.Process, "Berechnung", DateTimeOffset.MaxValue));
             await Repository.EnsureClientToolProposedEventAsync(run, ProposalId);
-            await Repository.SaveClientToolProgressAsync(run, new(ProposalId, 1, 30_000, "Berechnung gestartet", "", false,
+            await Repository.SaveClientToolProgressAsync(run, new(ProposalId, 1, CommandMonitoringPolicy.FirstCheckMilliseconds, "Berechnung gestartet", "", false,
                 ProcessId: 123, CpuMilliseconds: 29_000, WorkingSetBytes: 1_000_000, LastOutputElapsedMilliseconds: 1_000, OutputCharacters: 21));
             return run;
         }

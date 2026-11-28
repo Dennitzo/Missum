@@ -13,7 +13,8 @@ public sealed record WebdesignCapture(
     double ScrollY,
     string Url,
     string Device,
-    JsonElement Elements);
+    JsonElement Elements,
+    string? Title = null);
 
 /// <summary>One input event for the website, in CSS pixels of the page viewport.</summary>
 public sealed record WebdesignInput(
@@ -37,6 +38,8 @@ public interface IWebdesignPreviewSurface
     string? Workspace { get; }
     string? CurrentUrl { get; }
     string Device { get; }
+    /// <summary>The browser runs and the project's server is ready, so captures and inspection work.</summary>
+    bool IsReady => true;
     Task ShowAsync(CancellationToken cancellationToken);
     Task NavigateAsync(string url, CancellationToken cancellationToken);
     Task<WebdesignCapture> CaptureAsync(string? device, CancellationToken cancellationToken);
@@ -45,9 +48,15 @@ public interface IWebdesignPreviewSurface
     Task<JsonElement> ElementAtAsync(double cssX, double cssY, CancellationToken cancellationToken);
     Task<(double X, double Y)> ScrollAsync(CancellationToken cancellationToken);
     Task DispatchAsync(WebdesignInput input, CancellationToken cancellationToken);
+    /// <summary>Goes one page back in the tab's history (browser.use "back").</summary>
+    Task GoBackAsync(CancellationToken cancellationToken) =>
+        throw new NotSupportedException("Der Tab Webseite kann nicht zurücknavigieren.");
 }
 
-/// <summary>Where tools find the live website tab. The page registers it while Webdesign is shown.</summary>
+/// <summary>
+/// Where tools find the live website tab. The page registers it while the open Codex session has the
+/// Webdesign tool switched on.
+/// </summary>
 public static class WebdesignPreviewRegistry
 {
     private static IWebdesignPreviewSurface? _current;
@@ -63,10 +72,51 @@ public static class WebdesignPreviewRegistry
     public static IWebdesignPreviewSurface For(string? workspace)
     {
         var surface = Current ?? throw new InvalidOperationException(
-            "Der Tab Webseite ist nicht geöffnet. Öffne die Webdesign-Sitzung des Projekts in Missum.");
+            "Der Tab Webseite ist nicht geöffnet. Öffne die Codex-Sitzung des Projekts in Missum und schalte das Werkzeug Webdesign ein.");
         if (workspace is not null && surface.Workspace is { } shown
             && !string.Equals(WebdesignServeService.Normalize(shown), WebdesignServeService.Normalize(workspace), StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Der Tab Webseite zeigt gerade ein anderes Projekt. Öffne die Sitzung dieses Projekts.");
         return surface;
     }
+
+    /// <summary>
+    /// The registered tab when it shows this project (any project for null), otherwise null. For
+    /// in-app features that work on the website tab without the AI tool error texts.
+    /// </summary>
+    internal static IWebdesignPreviewSurface? TryGet(string? workspace)
+    {
+        var surface = Current;
+        if (surface is null) return null;
+        if (workspace is null) return surface;
+        return surface.Workspace is { } shown
+            && string.Equals(WebdesignServeService.Normalize(shown), WebdesignServeService.Normalize(workspace), StringComparison.OrdinalIgnoreCase)
+                ? surface : null;
+    }
+
+    /// <summary>
+    /// Waits, bounded, until the tab of this project is registered (and with <paramref name="ready"/>
+    /// also shows the running server). Returns false on timeout; the caller's tool reports the reason.
+    /// </summary>
+    internal static async Task<bool> WaitForAsync(string workspace, bool ready, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (true)
+        {
+            if (TryGet(workspace) is { } surface && (!ready || surface.IsReady)) return true;
+            if (DateTime.UtcNow >= deadline) return false;
+            await Task.Delay(100, cancellationToken).ConfigureAwait(false);
+        }
+    }
+}
+
+/// <summary>
+/// The model used webdesign.* in a Codex session whose Webdesign tool was off. The tool service has
+/// switched it on in the database; the page refreshes so chip and "Webseite" tab appear and the tab
+/// registers its preview surface.
+/// </summary>
+public static class WebdesignToolActivation
+{
+    public static event Action<Guid>? Activated;
+
+    internal static void Raise(Guid sessionId) => Activated?.Invoke(sessionId);
 }

@@ -21,7 +21,8 @@ public sealed class ExtensionActionPersistenceTests
         Assert.Equal(BuiltInExtensionCatalog.GroupPlanning, plan.GroupId);
         Assert.Equal(ExtensionActionKind.SelectableTool, plan.ActionKind);
         Assert.Equal(ExtensionSelectionBehavior.Toggle, plan.SelectionBehavior);
-        Assert.DoesNotContain(scienceActions, action => action.ActionId == BuiltInActionIds.ComputerUse);
+        // Computersteuerung is available in every chat mode except ChatGPT, including Claude Science.
+        Assert.Contains(scienceActions, action => action.ActionId == BuiltInActionIds.ComputerUse);
         Assert.DoesNotContain(catalog.GetActions(ExtensionChatMode.General), action => action.ActionId == BuiltInActionIds.PlanMode);
     }
 

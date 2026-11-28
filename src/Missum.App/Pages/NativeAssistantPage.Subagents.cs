@@ -568,7 +568,7 @@ public sealed partial class NativeAssistantPage
         SaveConversationOffset(); _activeSubagentId = null;
         _rendering = true;
         Composer.Text = _parentComposerDraft ?? S(_snapshot, "draft");
-        Composer.PlaceholderText = _parentComposerPlaceholder ?? (_mode is "coding" or "webdesign" ? "Leg einfach los" : "Frag etwas");
+        Composer.PlaceholderText = _parentComposerPlaceholder ?? (_mode is "coding" ? "Leg einfach los" : "Frag etwas");
         _rendering = false;
         _parentComposerDraft = _parentComposerPlaceholder = null;
         RefreshConversationTab();

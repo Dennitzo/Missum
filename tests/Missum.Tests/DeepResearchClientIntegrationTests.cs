@@ -161,7 +161,15 @@ public sealed class DeepResearchClientIntegrationTests
             Assert.Equal(session.Id.ToString("D"), sent.SessionId);
             Assert.Contains("web.search", sent.AllowedServerTools!);
             Assert.Contains("web.fetch", sent.AllowedServerTools!);
-            Assert.Contains("documentIo", sent.ClientCapabilities!);
+            // Codex edits documents; ChatGPT only reads attachments, even inside a project.
+            if (coding) Assert.Contains("documentIo", sent.ClientCapabilities!);
+            else
+            {
+                Assert.Contains("documents", sent.ClientCapabilities!);
+                Assert.DoesNotContain("documentIo", sent.ClientCapabilities!);
+                Assert.DoesNotContain("workspace", sent.ClientCapabilities!);
+                Assert.Null(sent.WorkspacePath);
+            }
             Assert.DoesNotContain("document-agent", sent.ClientCapabilities!);
             if (coding)
             {

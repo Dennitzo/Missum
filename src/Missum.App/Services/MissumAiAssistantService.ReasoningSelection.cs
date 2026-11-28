@@ -64,10 +64,40 @@ public sealed partial class MissumAiAssistantService
             return current with { ReasoningEffortsByModel = choices };
         }, cancellationToken);
 
-    internal async Task<string?> ResolveRequestedReasoningAsync(MissumAiClient client, string modelId, string role, CancellationToken cancellationToken)
+    internal Task<string?> ResolveRequestedReasoningAsync(MissumAiClient client, string modelId, string role, CancellationToken cancellationToken) =>
+        ResolveRequestedReasoningAsync(client, modelId, role, RuntimeBusyPollInterval, RuntimeBusyMaximumWait, cancellationToken);
+
+    // Loading weights can keep the native router from answering the gateway's
+    // five-second status probe. That is a busy runtime, not a failed request.
+    private static readonly TimeSpan RuntimeBusyPollInterval = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan RuntimeBusyMaximumWait = TimeSpan.FromMinutes(15);
+
+    internal async Task<string?> ResolveRequestedReasoningAsync(MissumAiClient client, string modelId, string role,
+        TimeSpan pollInterval, TimeSpan maximumWait, CancellationToken cancellationToken)
     {
         var status = await client.GetModelStatusAsync(cancellationToken).ConfigureAwait(false);
-        if (!status.ProviderReachable) throw new InvalidOperationException(status.ErrorMessage ?? "Reasoning-Kompatibilität des Modells ist nicht erreichbar.");
+        var busy = System.Diagnostics.Stopwatch.StartNew();
+        // Without a previously reachable catalog entry, wait for the load to answer.
+        while (!status.ProviderReachable && IsBusyModelRuntime(status) && !ListsModel(status, modelId, role)
+            && busy.Elapsed < maximumWait)
+        {
+            await Task.Delay(pollInterval, cancellationToken).ConfigureAwait(false);
+            status = await client.GetModelStatusAsync(cancellationToken).ConfigureAwait(false);
+        }
+        if (!status.ProviderReachable)
+        {
+            if (!IsBusyModelRuntime(status) || !ListsModel(status, modelId, role))
+                throw new InvalidOperationException(status.ErrorMessage ?? "Reasoning-Kompatibilität des Modells ist nicht erreichbar.");
+            // The gateway's last reachable catalog still describes the model it is
+            // loading; the run itself waits for that load before generating.
+            status = status with { ProviderReachable = true };
+        }
         return ResolveComposerReasoning(CurrentSettings, modelId, role, status).Selected;
     }
+
+    internal static bool IsBusyModelRuntime(ModelStatusSnapshot status) =>
+        string.Equals(status.ErrorCode, "modelRuntime.timeout", StringComparison.Ordinal);
+
+    private static bool ListsModel(ModelStatusSnapshot status, string modelId, string role) =>
+        status.Models.Any(item => item.Id == modelId && item.Role == role);
 }

@@ -23,6 +23,31 @@ public sealed class AgentToolCatalogTests
     }
 
     [Fact]
+    public void PlanModeAdvertisesTheImplementationToolsButRefusesMutationsAtExecution()
+    {
+        var catalog = new AgentToolCatalog();
+        var coding = CreateRequest(["coding", "workspace"]) with
+        {
+            Mode = RunMode.Coding,
+            AllowedServerTools = ["web.search", "web.fetch", "image.generate", "context.embed", "context.retrieve"],
+        };
+        var plan = coding with { ConversationProfile = ConversationProfile.PlanMode };
+        var codingTools = catalog.GetAvailableTools(coding);
+        var planTools = catalog.GetAvailableTools(plan);
+        // Identical definitions: the accepted plan continues on the same native prompt prefix.
+        Assert.Equal(codingTools.Select(tool => tool.Name), planTools.Select(tool => tool.Name));
+        Assert.True(AgentToolCatalog.PlanModeAllowsTool(plan, catalog.Resolve("coding.read", planTools)));
+        Assert.True(AgentToolCatalog.PlanModeAllowsTool(plan, catalog.Resolve("web.search", planTools)));
+        Assert.False(AgentToolCatalog.PlanModeAllowsTool(plan, catalog.Resolve("image.generate", planTools)));
+        foreach (var mutating in planTools.Where(tool => tool.RiskClass != ToolRiskClass.ReadOnly))
+        {
+            Assert.False(AgentToolCatalog.PlanModeAllowsTool(plan, mutating));
+            Assert.True(AgentToolCatalog.PlanModeAllowsTool(coding, mutating));
+        }
+        Assert.Contains(planTools, tool => tool.RiskClass != ToolRiskClass.ReadOnly);
+    }
+
+    [Fact]
     public void CompactSelectorExposesNamesWithoutFullToolSchemas()
     {
         var catalog = new AgentToolCatalog();

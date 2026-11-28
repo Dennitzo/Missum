@@ -232,7 +232,7 @@ public sealed partial class NativeAssistantPage
             {
                 var content = prompt.Preview with { Prompt = $"{index + 1}) " + prompt.Preview.Prompt };
                 if (marker.PreviewContent == content) continue;
-                var preview = new ToolTip { Content = CreatePromptPreview(content), Placement = PlacementMode.Right };
+                var preview = CreatePromptPreviewToolTip(content);
                 preview.Opened += (_, _) =>
                 {
                     // ToolTipService may also react to the coerced focus state.
@@ -282,6 +282,25 @@ public sealed partial class NativeAssistantPage
         return result;
     }
 
+    /// <summary>
+    /// The preview card is the bordered element itself. The tooltip's own chrome (background,
+    /// border, padding, shadow and its 320 px width limit) would otherwise draw a second box
+    /// with a background color around the card, so it is switched off.
+    /// </summary>
+    private static ToolTip CreatePromptPreviewToolTip(PromptTimelinePreviewContent content) => new()
+    {
+        Content = CreatePromptPreview(content),
+        Placement = PlacementMode.Right,
+        Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
+        BorderBrush = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
+        BorderThickness = new Thickness(0),
+        Padding = new Thickness(0),
+        CornerRadius = new CornerRadius(14),
+        MaxWidth = double.PositiveInfinity,
+        Translation = System.Numerics.Vector3.Zero,
+        Shadow = null,
+    };
+
     private static Border CreatePromptPreview(PromptTimelinePreviewContent content)
     {
         var grid = new Grid { Width = 300, ColumnSpacing = 10 };
@@ -320,8 +339,9 @@ public sealed partial class NativeAssistantPage
         grid.Children.Add(bookmark);
         return new Border
         {
-            Background = ThemeBrush("MissumLayerStrongBrush", 0x32),
-            BorderBrush = ThemeBrush("MissumStrokeBrush", 0x48),
+            // Opaque like every menu: without the tooltip box behind it, the card alone keeps the text readable.
+            Background = ThemeBrush("MissumMenuBrush", 43),
+            BorderBrush = ThemeBrush("MissumMenuStrokeBrush", 49),
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(14),
             Padding = new Thickness(12, 10, 12, 11),

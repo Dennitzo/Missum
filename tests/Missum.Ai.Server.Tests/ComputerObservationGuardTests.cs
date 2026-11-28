@@ -87,5 +87,24 @@ public sealed class ComputerObservationGuardTests
             allowLossyCompaction: false, preserveConversationPrefix: true));
     }
 
+    [Fact]
+    public void ActionResultCarriesTheObservationRequestInsteadOfAnExtraTurn()
+    {
+        var json = ComputerObservationGuard.WithInstruction("{\"status\":\"completed\",\"message\":\"Klick ausgeführt\"}");
+        using var document = JsonDocument.Parse(json);
+        Assert.Equal("completed", document.RootElement.GetProperty("status").GetString());
+        Assert.Equal(ComputerObservationGuard.Instruction, document.RootElement.GetProperty("next").GetString());
+        // Umlauts stay readable for the model instead of \u escapes.
+        Assert.Contains("führst", json, StringComparison.Ordinal);
+        Assert.Equal(json, ComputerObservationGuard.WithInstruction(json));
+        Assert.EndsWith(ComputerObservationGuard.Instruction, ComputerObservationGuard.WithInstruction("kein JSON"), StringComparison.Ordinal);
+
+        var act = Call("act", "computer.act");
+        List<LmChatMessage> history = [new("user", "Aufgabe"), new("assistant", ToolCalls: [act]), new("tool", json, ToolCallId: act.Id)];
+        Assert.True(ComputerObservationGuard.InstructionPending(history));
+        history.Add(new("assistant", "weiter"));
+        Assert.False(ComputerObservationGuard.InstructionPending(history));
+    }
+
     private static LmToolCall Call(string id, string name) => new(id, name, JsonSerializer.SerializeToElement(new { }));
 }

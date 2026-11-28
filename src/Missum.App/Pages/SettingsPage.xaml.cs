@@ -16,6 +16,7 @@ public sealed partial class SettingsPage : Page
     private readonly ILogger<SettingsPage> _logger;
     private bool _synchronizing;
     private bool _sharedSettingsSubscribed;
+    internal const string LiquidGlassRestartHint = "Liquid Glass wird beim nächsten Start von Missum wirksam.";
 
     public SettingsPage()
     {
@@ -114,6 +115,8 @@ public sealed partial class SettingsPage : Page
                 string.Equals(color.Value, ViewModel.AccentColor, StringComparison.OrdinalIgnoreCase));
             BackgroundColorList.SelectedItem = BackgroundColors.FirstOrDefault(color =>
                 string.Equals(color.Value, ViewModel.BackgroundColor, StringComparison.OrdinalIgnoreCase));
+            LiquidGlassToggle.IsOn = ViewModel.IsLiquidGlassEnabled;
+            CrossSessionMemoryToggle.IsOn = ViewModel.IsCrossSessionMemoryEnabled;
         }
         finally
         {
@@ -126,7 +129,9 @@ public sealed partial class SettingsPage : Page
         await RunActionAsync(async () =>
         {
             await ViewModel.SaveAsync();
-            ShowStatus("Einstellungen gespeichert.", InfoBarSeverity.Success);
+            ShowStatus(ViewModel.IsLiquidGlassEnabled != App.Current.IsLiquidGlassEnabled
+                ? "Einstellungen gespeichert. " + LiquidGlassRestartHint
+                : "Einstellungen gespeichert.", InfoBarSeverity.Success);
         });
     }
 
@@ -261,6 +266,22 @@ public sealed partial class SettingsPage : Page
             ViewModel.BackgroundColor = option.Value;
             App.Current.ApplyBackgroundColor(option.Value);
         }
+    }
+
+    private void OnLiquidGlassToggled(object sender, RoutedEventArgs e)
+    {
+        if (_synchronizing) return;
+        // Liquid Glass applies after a restart; the switch only edits the saved preference.
+        ViewModel.IsLiquidGlassEnabled = LiquidGlassToggle.IsOn;
+        if (LiquidGlassToggle.IsOn != App.Current.IsLiquidGlassEnabled)
+            ShowStatus(LiquidGlassRestartHint, InfoBarSeverity.Informational);
+        else StatusBar.IsOpen = false;
+    }
+
+    private void OnCrossSessionMemoryToggled(object sender, RoutedEventArgs e)
+    {
+        // Saved with the other preferences; the next ChatGPT run uses the new value.
+        if (!_synchronizing) ViewModel.IsCrossSessionMemoryEnabled = CrossSessionMemoryToggle.IsOn;
     }
 
     private async void OnCreateBackup(object sender, RoutedEventArgs e)

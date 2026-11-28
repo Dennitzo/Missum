@@ -100,7 +100,7 @@ class MtpRuntimeTests(unittest.TestCase):
         attempts = self.router_loads(("CUDA error: out of memory",))
         with patch.object(catalog, "gpu_inventory", return_value=[]), patch.object(
                 catalog, "moe_performance_options", return_value=dict(
-                    moeCacheMiB=4096, batchSize=2048, ubatchSize=1024, promptLookup=True)):
+                    moeCacheMiB=4096, batchSize=2048, ubatchSize=2048, promptLookup=True)):
             result = self.manager.load(self.model_id, 8192)
 
         self.assertTrue(result["fallback"])
@@ -129,7 +129,7 @@ class MtpRuntimeTests(unittest.TestCase):
 
         self.assertEqual(5632, constrained["moeCacheMiB"])
         self.assertNotIn("moeCacheMiB", full_resident)
-        self.assertEqual(1024, full_resident["ubatchSize"])
+        self.assertEqual(2048, full_resident["ubatchSize"])
 
     def test_mtp_load_failure_preserves_existing_gpu_fallback_and_context_limit(self):
         devices = [{"index": 0, "device": "CUDA0", "free": 48 * 1024**3}]

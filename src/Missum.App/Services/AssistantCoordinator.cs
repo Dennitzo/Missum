@@ -152,7 +152,7 @@ public sealed partial class AssistantCoordinator(
     {
         var session = await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false);
         return string.Equals(
-                session.PersistentExtensionActionId,
+                ActivePersistentActionId(session),
                 BuiltInActionIds.CreateAudiobook,
                 StringComparison.Ordinal)
             || await HasAudiobookContentAsync(session.Id, cancellationToken).ConfigureAwait(false);
@@ -413,8 +413,10 @@ public sealed partial class AssistantCoordinator(
             contextNotice = display?.ContextUsed is not null ? null : context.TruncationNotice,
             contextSource = display?.ContextUsed is not null ? display.ContextSource ?? "estimated" : "estimated",
             contextMessageId = display?.ContextUsed is not null ? display.MessageId : (Guid?)null,
-            selectedExtensionActionId = session.PersistentExtensionActionId,
-            selectedToolAction = LegacyToolAliasFor(session.PersistentExtensionActionId),
+            selectedExtensionActionId = ActivePersistentActionId(session),
+            selectedToolAction = LegacyToolAliasFor(ActivePersistentActionId(session)),
+            // The Codex tool "Webdesign" is a switch next to the selected tool: chip and "Webseite" tab.
+            webdesignEnabled = IsWebdesignToolActive(session),
             reasoningModelId = selectedModel,
             reasoningRole = isCodingSession ? "coding" : "general",
             workspacePath = session.CodingWorkspacePath,
@@ -456,6 +458,14 @@ public sealed partial class AssistantCoordinator(
             if (string.Equals(action.ActionId, BuiltInActionIds.ComputerUse, StringComparison.Ordinal)
                 && modelCapabilities?.SupportsComputerUse(CurrentSettings.SelectedModel) == false)
                 disabledReason = "Das ausgewählte lokale Codex-Modell benötigt Bildverarbeitung und Werkzeugaufrufe. Wähle ein geeignetes Vision-Modell.";
+            // Browser-Use drives the browser with the model loaded on this PC.
+            if (string.Equals(action.ActionId, BuiltInActionIds.BrowserUse, StringComparison.Ordinal)
+                && !ComputerLocalEndpoint.IsLocal(Uri.TryCreate(CurrentSettings.MissumAiServerUrl, UriKind.Absolute, out var browserGateway) ? browserGateway : null))
+                disabledReason = "Browser-Use benötigt den lokalen AI-Server auf diesem PC.";
+            // ChatGPT forwards no extension tools, so a package's model tools stay in Codex.
+            if (chatMode == ChatMode.General && action.ActionKind == ExtensionActionKind.SelectableTool
+                && !action.ActionId.StartsWith("builtin.", StringComparison.Ordinal))
+                disabledReason ??= ChatGptExtensionToolsUnavailable;
             if (!action.ActionId.StartsWith("builtin.", StringComparison.Ordinal))
                 disabledReason ??= extensionRuntime is null
                     ? "Der ExtensionHost ist für diese Aktion nicht verfügbar."
@@ -1116,17 +1126,31 @@ public sealed partial class AssistantCoordinator(
             ?? (await EnsureActiveSessionAsync(cancellationToken).ConfigureAwait(false)).Id;
         var session = await chats.GetSessionAsync(sessionId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("Die Sitzung der Erweiterungsaktion wurde nicht gefunden.");
-        var extensionMode = ToExtensionChatMode(session.ChatMode);
-        if (!descriptor.SupportedChatModes.Contains(extensionMode))
-            throw new InvalidOperationException("Die Erweiterungsaktion unterstützt den aktuellen Chatmodus nicht.");
-        if (!string.IsNullOrWhiteSpace(descriptor.DisabledReason))
-            throw new InvalidOperationException(descriptor.DisabledReason);
         var enabled = true;
         if (envelope.Payload.TryGetProperty("enabled", out var enabledElement))
         {
             if (enabledElement.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
                 throw new InvalidOperationException("'enabled' muss ein boolescher Wert sein.");
             enabled = enabledElement.GetBoolean();
+        }
+        var extensionMode = ToExtensionChatMode(session.ChatMode);
+        // Releasing a selection is always allowed: an older ChatGPT chat may still hold a
+        // persistent Hörbuch mode that ChatGPT no longer offers.
+        if (enabled && !descriptor.SupportedChatModes.Contains(extensionMode))
+            throw new InvalidOperationException("Die Erweiterungsaktion unterstützt den aktuellen Chatmodus nicht.");
+        if (enabled && session.ChatMode == ChatMode.General && descriptor.ActionKind == ExtensionActionKind.SelectableTool
+            && !actionId.StartsWith("builtin.", StringComparison.Ordinal))
+            throw new InvalidOperationException(ChatGptExtensionToolsUnavailable);
+        if (!string.IsNullOrWhiteSpace(descriptor.DisabledReason))
+            throw new InvalidOperationException(descriptor.DisabledReason);
+        if (string.Equals(actionId, BuiltInActionIds.Webdesign, StringComparison.Ordinal))
+        {
+            // A switch beside the selected tool, not a selection: Plan mode or another tool stays as it is.
+            // It may change during a run; that run keeps its tools, the tab follows at once.
+            await chats.SetWebdesignEnabledAsync(session.Id, enabled, cancellationToken).ConfigureAwait(false);
+            await emit("action.completed", new { actionId, toolToggle = "webdesign", enabled }, envelope.RequestId).ConfigureAwait(false);
+            await emit("session.changed", await BuildSnapshotAsync(cancellationToken).ConfigureAwait(false), envelope.RequestId).ConfigureAwait(false);
+            return;
         }
         if (descriptor.ActionKind == ExtensionActionKind.SelectableTool) EnsureContextCanChange(sessionId);
         if (!actionId.StartsWith("builtin.", StringComparison.Ordinal))
@@ -1163,7 +1187,8 @@ public sealed partial class AssistantCoordinator(
             return;
         }
 
-        if (string.Equals(actionId, BuiltInActionIds.ComputerUse, StringComparison.Ordinal))
+        if (string.Equals(actionId, BuiltInActionIds.ComputerUse, StringComparison.Ordinal)
+            || string.Equals(actionId, BuiltInActionIds.BrowserUse, StringComparison.Ordinal))
         {
             await emit("action.completed", new { actionId, enabled }, envelope.RequestId).ConfigureAwait(false);
             return;
@@ -1640,6 +1665,7 @@ public sealed partial class AssistantCoordinator(
                 ChatMode = queuedInput.Session.ChatMode,
                 CodingWorkspacePath = queuedInput.Session.CodingWorkspacePath,
                 PersistentExtensionActionId = queuedInput.Session.PersistentExtensionActionId,
+                WebdesignEnabled = queuedInput.Session.WebdesignEnabled,
             };
         if (IsCodingAgentSession(session.ChatMode)
             && (string.IsNullOrWhiteSpace(session.CodingWorkspacePath)
@@ -1814,6 +1840,9 @@ public sealed partial class AssistantCoordinator(
         string? explicitExtensionActionId,
         CancellationToken cancellationToken)
     {
+        // Webdesign is a session switch, never the prompt's tool: the session flag adds its tools.
+        if (string.Equals(explicitExtensionActionId, BuiltInActionIds.Webdesign, StringComparison.Ordinal))
+            explicitExtensionActionId = null;
         if (!string.IsNullOrWhiteSpace(explicitExtensionActionId))
         {
             if (!_extensionActions.TryGetAction(explicitExtensionActionId, out var descriptor) || descriptor is null
@@ -1822,6 +1851,8 @@ public sealed partial class AssistantCoordinator(
             var mode = ToExtensionChatMode(session.ChatMode);
             if (!descriptor.SupportedChatModes.Contains(mode))
                 throw new InvalidOperationException("Die ausgewählte Erweiterungsaktion unterstützt diesen Chatmodus nicht.");
+            if (session.ChatMode == ChatMode.General && !explicitExtensionActionId.StartsWith("builtin.", StringComparison.Ordinal))
+                throw new InvalidOperationException(ChatGptExtensionToolsUnavailable);
             if (!string.IsNullOrWhiteSpace(descriptor.DisabledReason))
                 throw new InvalidOperationException(descriptor.DisabledReason);
             if (!explicitExtensionActionId.StartsWith("builtin.", StringComparison.Ordinal))
@@ -1845,22 +1876,29 @@ public sealed partial class AssistantCoordinator(
                     DeepResearch = true,
                     DeepResearchProfile = DeepResearchProfiles.Auto,
                 };
-            if (session.ChatMode is ChatMode.Coding or ChatMode.Webdesign && match.Trigger.Action == PromptTriggerAction.Extension)
+            var computerUse = string.Equals(match.Trigger.ExtensionActionId, BuiltInActionIds.ComputerUse, StringComparison.Ordinal);
+            // ChatGPT never controls the computer; the catalog already hides the action there.
+            if (computerUse && session.ChatMode == ChatMode.General)
+                throw new InvalidOperationException("Die Computersteuerung ist im ChatGPT-Modus nicht verfügbar. Wechsle für Desktop-Aufgaben zu Codex.");
+            // Computer-Use always runs as a Codex run (the gateway's desktop loop) in the modes offering it.
+            if ((session.ChatMode is ChatMode.Coding or ChatMode.Webdesign || computerUse)
+                && match.Trigger.Action == PromptTriggerAction.Extension)
                 match = match with { Trigger = match.Trigger with { Action = PromptTriggerAction.Coding } };
             return match;
         }
 
         // Typed and dictated prompts both reach this path as ordinary text.
         // Words alone never activate a previously configured trigger.
+        var persistentActionId = ActivePersistentActionId(session);
         if (string.Equals(
-            session.PersistentExtensionActionId,
+            persistentActionId,
             BuiltInActionIds.CreateAudiobook,
             StringComparison.Ordinal))
         {
             return CreateToolMatch("audiobook", prompt);
         }
         if (string.Equals(
-            session.PersistentExtensionActionId,
+            persistentActionId,
             BuiltInActionIds.PlanMode,
             StringComparison.Ordinal))
         {
@@ -1912,8 +1950,26 @@ public sealed partial class AssistantCoordinator(
         _ => null,
     };
 
-    // Webdesign is Codex with a live website tab: same coding agent, workspace duty and work plan.
+    // ChatMode.Webdesign is legacy (migrated to Codex with the Webdesign tool) and still runs as Codex.
     internal static bool IsCodingAgentSession(ChatMode? mode) => mode is ChatMode.Coding or ChatMode.ClaudeScience or ChatMode.Webdesign;
+
+    /// <summary>The Codex tool "Webdesign" is on for this session (website tab, webdesign.* tools).</summary>
+    internal static bool IsWebdesignToolActive(ChatSession? session) =>
+        session is { ChatMode: ChatMode.Webdesign } or { ChatMode: ChatMode.Coding, WebdesignEnabled: true };
+
+    internal const string ChatGptExtensionToolsUnavailable =
+        "Im ChatGPT-Modus nicht verfügbar. Programmintegrationen und Erweiterungswerkzeuge laufen in Codex.";
+
+    /// <summary>
+    /// The session's persistent tool mode, unless the chat mode no longer offers it (an older
+    /// chat may still carry a tool its mode has lost). The stored value stays untouched.
+    /// </summary>
+    private string? ActivePersistentActionId(ChatSession session) =>
+        !string.IsNullOrWhiteSpace(session.PersistentExtensionActionId)
+        && _extensionActions.TryGetAction(session.PersistentExtensionActionId, out var descriptor) && descriptor is not null
+        && !descriptor.SupportedChatModes.Contains(ToExtensionChatMode(session.ChatMode))
+            ? null
+            : session.PersistentExtensionActionId;
 
     private static ExtensionChatMode ToExtensionChatMode(ChatMode mode) => mode switch
     {
@@ -1943,7 +1999,8 @@ public sealed partial class AssistantCoordinator(
         "coding" => ChatMode.Coding,
         "claudescience" or "claude-science" or "science" => ChatMode.ClaudeScience,
         "claudemeetings" or "claude-meetings" or "meetings" => ChatMode.ClaudeMeetings,
-        "webdesign" or "web-design" or "web" => ChatMode.Webdesign,
+        // The former Webdesign mode is the Codex tool "Webdesign"; old links and clients land in Codex.
+        "webdesign" or "web-design" or "web" => ChatMode.Coding,
         "modelhub" or "model-hub" or "models" or "hub" => ChatMode.ModelHub,
         _ => throw new ArgumentException("Die angeforderte Chatansicht ist unbekannt."),
     };

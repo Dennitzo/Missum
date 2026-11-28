@@ -27,6 +27,9 @@ PREPARATION_MAXIMUM_SECONDS = 2 * 60 * 60.0
 # Checkpoint only long uncached portions. Each checkpoint writes the entire KV
 # prefix, so short intervals can turn a long prefill into quadratic disk I/O.
 PREFILL_CHECKPOINT_TOKENS = 65536
+# Tool turns inside an agent loop: save only after this much new work or time.
+DEFERRED_SAVE_TOKENS = 24576
+DEFERRED_SAVE_SECONDS = 600.0
 # Native versions 3 and 4 retain the same leading token payload layout. Their
 # KV tensors differ and remain bound to the native binary/model fingerprint;
 # accepting this header for bounded inspection does not make KV interchangeable.
@@ -574,7 +577,11 @@ class NativeSessionCache:
                 return dict(status="unchanged")
             if prompt_tokens is not None:
                 current["interrupted_prompt_tokens"] = prompt_tokens
+                current["clean"] = False
             elif type(new_tokens) is int and new_tokens > 0:
+                # A completed turn of this session: the slot holds exactly its
+                # prompt plus generation, nothing foreign since prepare.
+                current["clean"] = True
                 # This counter is supplied only after a completed model turn.
                 # A shorter completed prompt can be intentional compaction and
                 # must replace the old cache. Flush/unload/fork calls carry no
@@ -588,12 +595,16 @@ class NativeSessionCache:
                 self.save_progress[current["identity"]] = progress
             if type(new_tokens) is int and new_tokens > 0:
                 progress["new_tokens"] += new_tokens
-            # Persist at each requested completed inference boundary. The
-            # native slot-save API defers requests while a slot is processing,
-            # so it cannot create a durable checkpoint in the middle of a
-            # prefill. Keeping the old time/token thresholds here would also
-            # lose already completed work after a crash or model switch.
-            # `force` remains accepted for wire compatibility with older clients.
+            # A full save writes the whole KV prefix (several GB at long contexts)
+            # and blocks the next step for seconds. Within an agent loop the slot
+            # stays resident, so intermediate tool turns save only after a lot of
+            # new work or a long time. Final answers (force), interrupted turns,
+            # session switches (prepare), unloads and shutdown still save at once,
+            # so a crash costs at most the bounded work since the last save.
+            if (prompt_tokens is None and not force and current.get("dirty")
+                    and progress["new_tokens"] < DEFERRED_SAVE_TOKENS
+                    and time.monotonic() - progress["time"] < DEFERRED_SAVE_SECONDS):
+                return self._record(model, "save", dict(status="deferred", pendingTokens=progress["new_tokens"]))
             return self._save(model, prompt_tokens)
         except Exception as error:
             return self._record(model, "save", dict(status="unavailable", detail=str(error)[:500]))
@@ -684,6 +695,15 @@ class NativeSessionCache:
             partial = self.directory / (identity + ".prefill.bin")
             temporary = self.directory / (identity + "." + uuid.uuid4().hex + ".pending")
             common = 0
+            # This session owns the slot and the prompt extends it by less than
+            # one checkpoint interval: no checkpoint would be written, so proving
+            # the resident tokens with a full snapshot (several GB) only costs time.
+            # llama.cpp still compares the prompt with its cache token by token.
+            if (current.get("clean") and resident_tokens
+                    and 0 <= len(tokens) - resident_tokens <= PREFILL_CHECKPOINT_TOKENS
+                    and not partial.is_file()):
+                return self._record(model, "prefill", dict(status="skipped", reason="shortResidentTail",
+                    promptTokens=len(tokens), residentTokens=resident_tokens, started=False))
             if resident_tokens:
                 saved_prefix = current.get("saved_prefix")
                 if (saved_prefix and slot.get("missum_prefix_revision") == saved_prefix[0]
@@ -805,6 +825,9 @@ class NativeSessionCache:
         sampling (current native servers still sample one token with that value).
         """
         body = dict(prefill, model=source_model, add_generation_prompt=False)
+        owner = self.resident.get(source_model)
+        if owner:
+            owner["clean"] = False  # The child branch now extends the parent's live slot.
         self._check_preparation_cancelled(cancelled)
         rendered = self.router("apply-template", body, timeout=120).get("prompt")
         if not isinstance(rendered, str) or not rendered:

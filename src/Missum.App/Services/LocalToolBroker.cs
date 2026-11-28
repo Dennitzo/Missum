@@ -60,10 +60,6 @@ public sealed partial class LocalToolBroker(
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
-            // Enforce this at the actual execution boundary too: server-side tool
-            // filtering and model instructions are not an authorization boundary.
-            if (computerUseEnabled && proposal.Name is not ("computer.observe" or "computer.act"))
-                throw new UnauthorizedAccessException("Während der Computersteuerung sind andere lokale Werkzeuge gesperrt.");
             var selfImprovementName = proposal.Name switch
             {
                 "selfImprovement.build" => "selfimprovement.build",
@@ -84,11 +80,16 @@ public sealed partial class LocalToolBroker(
             }
             if (proposal.Name is "computer.observe" or "computer.act")
             {
-                if (!(computerUseEnabled || computerToolsAllowed) || runAction != PromptTriggerAction.Coding || researchActorAgentId is not null)
+                // Computer tools exist only in runs where Computersteuerung was selected.
+                if (!(computerUseEnabled || computerToolsAllowed) || researchActorAgentId is not null)
                     throw new UnauthorizedAccessException("Die Computersteuerung ist für diesen Lauf nicht freigegeben.");
                 ValidateProposal(proposal);
                 return await ExecuteComputerToolAsync(proposal, sessionId, gatewayOverride, cancellationToken).ConfigureAwait(false);
             }
+            if (proposal.Name == BuiltInExtensionCatalog.BrowserUseToolName)
+                return await ExecuteBrowserUseAsync(proposal, sessionId, codingWorkspacePath, researchActorAgentId, cancellationToken).ConfigureAwait(false);
+            if (proposal.Name == SessionMemoryToolContract.Name)
+                return await ExecuteSessionMemorySearchAsync(proposal, sessionId, cancellationToken).ConfigureAwait(false);
             ExtensionToolDescriptor? extensionTool = null;
             if (extensionActions?.TryGetToolByModelName(proposal.Name, out var registeredTool) == true
                 && registeredTool is not null
@@ -114,6 +115,8 @@ public sealed partial class LocalToolBroker(
             {
                 var serve = Webdesign.WebdesignServeService.Instance
                     ?? throw new InvalidOperationException("Der Webdesign-Server ist in dieser Missum-Instanz nicht verfügbar.");
+                WorkspaceTools.Validate(proposal.Name, proposal.Arguments);
+                await EnsureWebdesignToolAsync(proposal, sessionId, codingWorkspacePath, cancellationToken).ConfigureAwait(false);
                 var webdesignResult = await new Webdesign.WebdesignToolService(connection, serve).ExecuteAsync(
                     proposal, codingWorkspacePath, gatewayOverride, cancellationToken).ConfigureAwait(false);
                 return Result(proposal, "completed", webdesignResult);

@@ -8,7 +8,7 @@ namespace Missum.Infrastructure.Storage;
 
 public sealed class SqliteDatabase : IMissumDatabase, IAsyncDisposable
 {
-    public const int CurrentSchemaVersion = 61;
+    public const int CurrentSchemaVersion = 62;
     private static readonly Action<ILogger, string, Exception?> DatabaseInitialized = LoggerMessage.Define<string>(
         LogLevel.Information, new EventId(1000, nameof(DatabaseInitialized)), "SQLite-Datenbank {DatabasePath} wurde initialisiert.");
     private static readonly Action<ILogger, string?, Exception?> IntegrityCheckFailed = LoggerMessage.Define<string?>(
@@ -118,6 +118,8 @@ public sealed class SqliteDatabase : IMissumDatabase, IAsyncDisposable
             await ApplyMigrationSixtyAsync(connection, cancellationToken).ConfigureAwait(false);
             await BackupBeforeMigrationAsync(connection, 61, cancellationToken).ConfigureAwait(false);
             await ApplyMigrationSixtyOneAsync(connection, cancellationToken).ConfigureAwait(false);
+            await BackupBeforeMigrationAsync(connection, 62, cancellationToken).ConfigureAwait(false);
+            await ApplyMigrationSixtyTwoAsync(connection, cancellationToken).ConfigureAwait(false);
             // A full scan belongs to migrations/recovery and explicit diagnostics, not every ordinary launch.
             if (previousVersion != CurrentSchemaVersion
                 || previousSchema != await ReadSchemaCookieAsync(connection, cancellationToken).ConfigureAwait(false))
@@ -2856,6 +2858,113 @@ public sealed class SqliteDatabase : IMissumDatabase, IAsyncDisposable
             pragma.CommandText = "PRAGMA legacy_alter_table=OFF; PRAGMA foreign_keys=ON;";
             await pragma.ExecuteNonQueryAsync(CancellationToken.None).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// The Webdesign mode became the Codex tool "Webdesign". Every Webdesign session moves into Codex
+    /// with the tool switched on (new column webdesign_enabled). A Webdesign project joins the Codex
+    /// project of the same folder; without one it simply becomes that Codex project. Messages, drafts,
+    /// the selected tool (for example Plan mode) and updated_at stay untouched. The mode-equality
+    /// triggers hold at every step: a session changes mode and project in one statement, a project
+    /// changes mode only while it has no members.
+    /// </summary>
+    private static async Task ApplyMigrationSixtyTwoAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version=62;";
+        if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) != 0)
+        {
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        command.CommandText = "SELECT COUNT(*) FROM pragma_table_info('chat_sessions') WHERE name='webdesign_enabled';";
+        if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+        {
+            command.CommandText = """
+                ALTER TABLE chat_sessions
+                    ADD COLUMN webdesign_enabled INTEGER NOT NULL DEFAULT 0
+                    CHECK(webdesign_enabled IN (0,1));
+                """;
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        command.CommandText = "UPDATE chat_sessions SET webdesign_enabled=1 WHERE chat_mode='webdesign';";
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+
+        var codingProjects = new List<(string Id, string Path)>();
+        command.CommandText = """
+            SELECT id,workspace_path FROM chat_session_groups
+            WHERE chat_mode='coding' AND workspace_path IS NOT NULL
+            ORDER BY created_at,id;
+            """;
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+        {
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                codingProjects.Add((reader.GetString(0), reader.GetString(1)));
+        }
+        var webdesignProjects = new List<(string Id, string? Path)>();
+        command.CommandText = "SELECT id,workspace_path FROM chat_session_groups WHERE chat_mode='webdesign' ORDER BY created_at,id;";
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+        {
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                webdesignProjects.Add((reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetString(1)));
+        }
+
+        foreach (var (sourceId, path) in webdesignProjects)
+        {
+            // Same folder comparison as GetOrCreateWorkspaceGroupAsync (Windows paths, non-ASCII names).
+            var target = path is null ? null : codingProjects
+                .Where(project => string.Equals(project.Path, path, StringComparison.OrdinalIgnoreCase))
+                .Select(static project => project.Id)
+                .FirstOrDefault();
+            command.Parameters.Clear();
+            command.Parameters.AddWithValue("$source", sourceId);
+            if (target is not null)
+            {
+                command.CommandText = """
+                    UPDATE chat_sessions SET chat_mode='coding',session_group_id=$target WHERE session_group_id=$source;
+                    DELETE FROM chat_session_groups
+                    WHERE id=$source AND NOT EXISTS(SELECT 1 FROM chat_sessions WHERE session_group_id=$source);
+                    """;
+                command.Parameters.AddWithValue("$target", target);
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            // No Codex project for this folder yet: the Webdesign project keeps its id, name and
+            // collapsed state and becomes it. Members leave it briefly so its mode may change.
+            var members = new List<string>();
+            command.CommandText = "SELECT id FROM chat_sessions WHERE session_group_id=$source;";
+            await using (var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+            {
+                while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false)) members.Add(reader.GetString(0));
+            }
+            command.CommandText = """
+                UPDATE chat_sessions SET chat_mode='coding',session_group_id=NULL WHERE session_group_id=$source;
+                UPDATE chat_session_groups SET chat_mode='coding' WHERE id=$source;
+                """;
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            command.CommandText = "UPDATE chat_sessions SET session_group_id=$source WHERE id=$member;";
+            var member = command.Parameters.Add("$member", SqliteType.Text);
+            foreach (var id in members)
+            {
+                member.Value = id;
+                await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+            if (path is not null) codingProjects.Add((sourceId, path));
+        }
+
+        command.Parameters.Clear();
+        command.CommandText = """
+            UPDATE chat_sessions SET chat_mode='coding' WHERE chat_mode='webdesign' AND session_group_id IS NULL;
+            INSERT INTO schema_migrations(version,applied_at) VALUES(62,$now);
+            """;
+        command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private static async Task ApplyMarkerMigrationAsync(SqliteConnection connection, int version, CancellationToken cancellationToken)

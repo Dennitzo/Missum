@@ -23,9 +23,16 @@ public sealed partial class NativeAssistantPage
             ["coding"] = [SessionViewKind.Chat],
             ["claudescience"] = [SessionViewKind.Chat, SessionViewKind.Research],
             ["claudemeetings"] = [SessionViewKind.Meeting, SessionViewKind.Transcript, SessionViewKind.Notes, SessionViewKind.Whiteboard],
-            ["webdesign"] = [SessionViewKind.Chat, SessionViewKind.Website],
             ["modelhub"] = [],
         };
+
+    // Codex with the Webdesign tool switched on (and a project): the website sits next to the chat.
+    private static readonly SessionViewKind[] CodexWebdesignLayout = [SessionViewKind.Chat, SessionViewKind.Website];
+
+    private SessionViewKind[] CurrentSessionViewLayout() =>
+        WebdesignTabAvailable ? CodexWebdesignLayout
+        : SessionViewLayouts.TryGetValue(_mode, out var configured) ? configured
+        : SessionViewLayouts["general"];
 
     /// <summary>Call after assigning the active session and its complete coordinator snapshot.</summary>
     private void SyncSessionTabs()
@@ -96,9 +103,7 @@ public sealed partial class NativeAssistantPage
     private void RenderSessionTabs()
     {
         if (SessionTabsPanel.Spacing != 6) SessionTabsPanel.Spacing = 6;
-        var layout = SessionViewLayouts.TryGetValue(_mode, out var configured)
-            ? configured
-            : SessionViewLayouts["general"];
+        var layout = CurrentSessionViewLayout();
         if (!layout.Contains(SessionViewKind.Research) && _researchTabButton is not null)
             SessionTabsPanel.Children.Remove(_researchTabButton);
         if (!layout.Contains(SessionViewKind.Website) && _websiteTabButton is not null)
@@ -180,14 +185,14 @@ public sealed partial class NativeAssistantPage
         {
             control.Height = 32;
             control.CornerRadius = new CornerRadius(8);
-            control.BorderThickness = new Thickness(0);
+            control.BorderThickness = new Thickness(App.Current.IsLiquidGlassEnabled ? 1 : 0);
             control.FontFamily = new FontFamily("Segoe UI Variable Text");
             control.FontSize = 13;
         }
         // Match the selected project session; selection is a filled surface,
         // never an accent outline. The shared brush also tracks live theme changes.
-        control.Background = active ? ThemeBrush("MissumSelectionBrush", 46) : ThemeBrush("MissumLayerStrongBrush", 29);
-        control.BorderBrush = state.TransparentBorder;
+        control.Background = active ? ThemeBrush("MissumSelectionBrush", 46) : GlassControlOr(ThemeBrush("MissumLayerStrongBrush", 29));
+        control.BorderBrush = GlassRimOr(state.TransparentBorder);
         control.Foreground = ThemeBrush(active ? "MissumTextBrush" : "MissumMutedTextBrush", active ? (byte)242 : (byte)170);
         state.Initialized = true;
         state.Active = active;
@@ -201,12 +206,12 @@ public sealed partial class NativeAssistantPage
         {
             container.Height = 32;
             container.CornerRadius = new CornerRadius(8);
-            container.BorderThickness = new Thickness(0);
+            container.BorderThickness = new Thickness(App.Current.IsLiquidGlassEnabled ? 1 : 0);
             select.FontFamily = new FontFamily("Segoe UI Variable Text");
             select.FontSize = 13;
         }
-        container.Background = active ? ThemeBrush("MissumSelectionBrush", 46) : ThemeBrush("MissumLayerStrongBrush", 29);
-        container.BorderBrush = state.TransparentBorder;
+        container.Background = active ? ThemeBrush("MissumSelectionBrush", 46) : GlassControlOr(ThemeBrush("MissumLayerStrongBrush", 29));
+        container.BorderBrush = GlassRimOr(state.TransparentBorder);
         select.Foreground = ThemeBrush(active ? "MissumTextBrush" : "MissumMutedTextBrush", active ? (byte)242 : (byte)170);
         state.Initialized = true;
         state.Active = active;

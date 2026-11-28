@@ -30,6 +30,8 @@ internal static class PortableToolAcceptance
         var effort = ReasoningEffort();
         return models
             .Where(static item => !string.IsNullOrWhiteSpace(item.ModelId) && !string.IsNullOrWhiteSpace(item.Role))
+            // One model may serve several roles that map to the same key (e.g. general and coding).
+            .DistinctBy(static item => MissumAiAssistantService.ReasoningKey(item.ModelId, item.Role), StringComparer.OrdinalIgnoreCase)
             .ToDictionary(
                 static item => MissumAiAssistantService.ReasoningKey(item.ModelId, item.Role),
                 _ => effort,
@@ -62,6 +64,8 @@ internal static class PortableToolAcceptance
             [BuiltInActionIds.ReadAloud] = "documents-and-audiobook+gateway-server-media-speech",
             [BuiltInActionIds.LiveCaptions] = "gateway-server-media-speech",
             [BuiltInActionIds.ComputerUse] = "native-computer-use-contracts",
+            [BuiltInActionIds.BrowserUse] = "native-browser-use-contracts",
+            [BuiltInActionIds.Webdesign] = "native-webdesign-tool-contracts",
             [BuiltInActionIds.SelfImprovement] = "self-improvement-tool-contract",
         };
 }

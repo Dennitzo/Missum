@@ -674,11 +674,17 @@ public sealed class AssistantIntegrationTests
     [Fact]
     public void NormalChatCanAutonomouslyUseImageAndMediaTools()
     {
-        var tools = MissumAiAssistantService.GetAllowedServerTools(null);
+        // Meetings keep generating images; ChatGPT only researches and analyzes.
+        var tools = MissumAiAssistantService.GetAllowedServerTools(null, chatMode: ChatMode.ClaudeMeetings);
         Assert.Contains("image.generate", tools);
         Assert.Contains("media.analyze", tools);
         Assert.Contains("web.search", tools);
         Assert.Contains("web.fetch", tools);
+        var chatGpt = MissumAiAssistantService.GetAllowedServerTools(null);
+        Assert.Contains("media.analyze", chatGpt);
+        Assert.Contains("web.search", chatGpt);
+        Assert.DoesNotContain("image.generate", chatGpt);
+        Assert.DoesNotContain("speech.synthesize", chatGpt);
     }
 
     [Theory]

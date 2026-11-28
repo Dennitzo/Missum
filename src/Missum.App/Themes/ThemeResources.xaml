@@ -57,6 +57,9 @@
   <SolidColorBrush x:Key="MissumHoverBrush" Color="{ThemeResource MissumLayerStrongColor}" />
   <SolidColorBrush x:Key="MissumPressedBrush" Color="{ThemeResource MissumLayerStrongColor}" />
   <SolidColorBrush x:Key="MissumStrokeBrush" Color="{ThemeResource MissumStrokeColor}" />
+  <!-- Always opaque, also with Liquid Glass: menus with many text rows stay readable. -->
+  <SolidColorBrush x:Key="MissumMenuBrush" Color="{ThemeResource MissumLayerStrongColor}" />
+  <SolidColorBrush x:Key="MissumMenuStrokeBrush" Color="{ThemeResource MissumStrokeColor}" />
   <SolidColorBrush x:Key="MissumMutedTextBrush" Color="{ThemeResource MissumMutedTextColor}" />
   <SolidColorBrush x:Key="MissumTextBrush" Color="{ThemeResource MissumTextColor}" />
   <SolidColorBrush x:Key="MissumAccentBrush" Color="{ThemeResource MissumAccentColor}" />

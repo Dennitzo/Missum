@@ -80,6 +80,8 @@ public sealed class SettingsCoordinator(ISettingsStore store) : IDisposable
         && left.Theme == right.Theme
         && left.AccentColor == right.AccentColor
         && left.BackgroundColor == right.BackgroundColor
+        && left.IsLiquidGlassEnabled == right.IsLiquidGlassEnabled
+        && left.IsCrossSessionMemoryEnabled == right.IsCrossSessionMemoryEnabled
         && left.Language == right.Language;
 
     public void Dispose() => _gate.Dispose();

@@ -103,9 +103,10 @@ public sealed partial class AgentToolCatalog
             var planIndex = result.FindIndex(tool => tool.Name == CodingWorkingStateTools.PlanTool);
             if (planIndex >= 0) result[planIndex] = ScienceSkill.DescribePlanTool(result[planIndex]);
         }
-        if (request.ConversationProfile == ConversationProfile.PlanMode)
-            result.RemoveAll(tool => tool.RiskClass != ToolRiskClass.ReadOnly
-                || SubagentToolNames.All.Contains(tool.Name) || tool.Name == CodingWorkingStateTools.PlanTool);
+        // Plan mode advertises the same tool set as the implementation run: tool definitions
+        // open the native prompt, so any difference forced a full re-evaluation of the whole
+        // plan conversation once the plan was accepted. Mutating tools are refused at
+        // execution instead (PlanModeAllowsTool).
         var hasComputerTool = request.ClientTools?.Any(tool => tool.Name is "computer.observe" or "computer.act") == true;
         if (hasComputerTool || HasCapability(capabilities, "computer.use"))
         {
@@ -121,6 +122,12 @@ public sealed partial class AgentToolCatalog
         }
         return result.OrderBy(static tool => tool.Name, StringComparer.Ordinal).ToArray();
     }
+
+    /// <summary>Plan mode only inspects: no writes, processes, subagents, plan commits or generated media.</summary>
+    public static bool PlanModeAllowsTool(RunRequest request, AgentToolSpec tool) =>
+        request.ConversationProfile != ConversationProfile.PlanMode
+        || (tool.RiskClass == ToolRiskClass.ReadOnly && !SubagentToolNames.All.Contains(tool.Name)
+            && tool.Name is not (CodingWorkingStateTools.PlanTool or "image.generate" or "speech.synthesize" or "context.embed"));
 
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1822", Justification = "Resolution intentionally stays on the catalog service API.")]
     public AgentToolSpec Resolve(string name, IReadOnlyList<AgentToolSpec> available)

@@ -201,8 +201,17 @@ public sealed class ExtensionActionCatalog : IExtensionActionCatalog
 
 public static class BuiltInExtensionCatalog
 {
+    // ExtensionChatMode.Webdesign is a legacy value: the former Webdesign mode is the Codex tool
+    // "Webdesign" now, so no action is offered for it any more.
     private static readonly ExtensionChatMode[] AllModes =
-        [ExtensionChatMode.General, ExtensionChatMode.Coding, ExtensionChatMode.ClaudeScience, ExtensionChatMode.ClaudeMeetings, ExtensionChatMode.Webdesign];
+        [ExtensionChatMode.General, ExtensionChatMode.Coding, ExtensionChatMode.ClaudeScience, ExtensionChatMode.ClaudeMeetings];
+
+    /// <summary>
+    /// Every mode except ChatGPT (General). ChatGPT stays limited to text answers, research and
+    /// memory, so tools that create files or media, control the computer or build code are absent there.
+    /// </summary>
+    public static IReadOnlyList<ExtensionChatMode> ModesWithoutChatGpt { get; } =
+        [ExtensionChatMode.Coding, ExtensionChatMode.ClaudeScience, ExtensionChatMode.ClaudeMeetings];
 
     // Purpose groups for the composer tool menu. Every tool sits in the group that matches what it
     // does, so an empty group simply disappears from the menu in the current chat mode.
@@ -223,25 +232,37 @@ public static class BuiltInExtensionCatalog
         new(GroupIntegrations, "Programmintegrationen", 60),
     ];
 
+    /// <summary>Model tool name of Browser-Use (runs browser-use in the app, driven by the local model).</summary>
+    public const string BrowserUseToolName = "browser.use";
+
     public static IReadOnlyDictionary<string, string> GroupLabels { get; } =
         Groups.ToDictionary(static group => group.GroupId, static group => group.Label, StringComparer.Ordinal);
 
     public static IReadOnlyList<ExtensionActionDescriptor> Actions { get; } =
     [
         Immediate(BuiltInActionIds.AttachFilesAndFolders, "Dateien und Ordner", "Dateien oder Ordner zum aktuellen Chat hinzufügen", "attachment", GroupFiles, 10, 10),
-        Selectable(BuiltInActionIds.CreateDocument, "Dokumente erstellen", "Word, PDF, Tabellen und Präsentationen erstellen", "document", GroupFiles, 10, 20),
+        Selectable(BuiltInActionIds.CreateDocument, "Dokumente erstellen", "Word, PDF, Tabellen und Präsentationen erstellen", "document", GroupFiles, 10, 20,
+            [.. ModesWithoutChatGpt]),
         Immediate(BuiltInActionIds.ExportChatPdf, "Chat als PDF exportieren", "Den vollständigen Chat über den Speicherdialog als PDF exportieren", "pdf", GroupFiles, 10, 30),
         Selectable(BuiltInActionIds.PlanMode, "Planmodus", "Projekt schreibgeschützt analysieren und vor Änderungen einen umsetzbaren Plan abstimmen", "plan", GroupPlanning, 20, 10,
-            [ExtensionChatMode.Coding, ExtensionChatMode.ClaudeScience, ExtensionChatMode.Webdesign]),
-        Selectable(BuiltInActionIds.ComputerUse, "Computersteuerung", "Den lokalen Windows-Desktop oder im Webdesign die Webseite sehen und bedienen", "computer", GroupIntegrations, 60, 30,
-            [ExtensionChatMode.Coding, ExtensionChatMode.Webdesign]),
-        Selectable(BuiltInActionIds.SelfImprovement, "Selbstverbesserung", "Den zugeordneten Anwendungsquellcode bauen und prüfen", "computer", GroupIntegrations, 60, 40),
+            [ExtensionChatMode.Coding, ExtensionChatMode.ClaudeScience]),
+        // A per-session switch beside the selected tool: it shows the "Webseite" tab and gives Codex runs
+        // the webdesign.serve/webdesign.preview tools (see BuiltInActionIds.Webdesign).
+        Selectable(BuiltInActionIds.Webdesign, "Webdesign", "Webseite live im Tab ansehen, bearbeiten und hosten", "web", GroupIntegrations, 60, 20,
+            [ExtensionChatMode.Coding]),
+        Selectable(BuiltInActionIds.ComputerUse, "Computersteuerung", "Windows-Programme und den Unreal Editor sehen, erkennen und direkt bedienen", "computer", GroupIntegrations, 60, 30,
+            [.. ModesWithoutChatGpt]),
+        Selectable(BuiltInActionIds.SelfImprovement, "Selbstverbesserung", "Den zugeordneten Anwendungsquellcode bauen und prüfen", "computer", GroupIntegrations, 60, 40,
+            [.. ModesWithoutChatGpt]),
         Selectable(BuiltInActionIds.WebSearch, "Websuche", "Aktuelle Quellen im Web durchsuchen", "web", GroupResearch, 30, 10),
+        Selectable(BuiltInActionIds.BrowserUse, "Browser-Use", "Einen echten Browser mit der lokalen AI bedienen: Webseiten öffnen, klicken, ausfüllen und Ergebnisse auslesen", "browser", GroupResearch, 30, 15),
         Selectable(BuiltInActionIds.DeepResearch, "Deep Research", "Eine mehrstufige, quellenbasierte Recherche starten", "research", GroupResearch, 30, 20),
-        Selectable(BuiltInActionIds.Lean, "Lean", "Mathematische Aussagen mit Lean 4 und Mathlib formalisieren und Beweise prüfen", "lean", GroupResearch, 30, 30),
+        Selectable(BuiltInActionIds.Lean, "Lean", "Mathematische Aussagen mit Lean 4 und Mathlib formalisieren und Beweise prüfen", "lean", GroupResearch, 30, 30,
+            [.. ModesWithoutChatGpt]),
         Selectable(BuiltInActionIds.ImageAnalysis, "Bild analysieren", "Bilder inhaltlich untersuchen", "image", GroupVisual, 40, 10),
         Selectable(BuiltInActionIds.VideoAnalysis, "Video analysieren", "Videodateien inhaltlich untersuchen", "video", GroupVisual, 40, 20),
-        Selectable(BuiltInActionIds.GenerateImage, "Bild erstellen", "Ein Bild aus einer Beschreibung erzeugen", "image", GroupVisual, 40, 30),
+        Selectable(BuiltInActionIds.GenerateImage, "Bild erstellen", "Ein Bild aus einer Beschreibung erzeugen", "image", GroupVisual, 40, 30,
+            [.. ModesWithoutChatGpt]),
         Selectable(BuiltInActionIds.ReadAloud, "Vorlesen", "Text mit lokaler Sprachausgabe vorlesen", "speech", GroupSpeech, 50, 10),
         Selectable(BuiltInActionIds.Translate, "Übersetzen", "Text in eine andere Sprache übertragen", "translate", GroupSpeech, 50, 20),
         Immediate(BuiltInActionIds.LiveCaptions, "Live-Untertitel", "Untertitel für laufende Sprache ein- oder ausschalten", "captions", GroupSpeech, 50, 30),
@@ -273,23 +294,41 @@ public static class BuiltInExtensionCatalog
             }, required = new[] { "candidateId" }, additionalProperties = false }),
         Tool(BuiltInActionIds.SelfImprovement, "selfimprovement.apply", "Prüft einen vollständig geprüften Kandidaten erneut und übernimmt ihn. Liefert bei Abweichungen einen konkreten Fehlerbericht.", 3600, 64 * 1024,
             ExtensionToolRiskClass.Process, new { type = "object", properties = new { candidateId = new { type = "string" } }, required = new[] { "candidateId" }, additionalProperties = false }),
-        Tool(BuiltInActionIds.ComputerUse, "computer.observe", "Beobachtet den Desktop, das sichtbare Vordergrundfenster oder im Webdesign-Modus die Webseite im Tab Webseite und liefert ein aktuelles Bild mit Beobachtungskennung.", 300, 4 * 1024 * 1024,
-            schema: new { type = "object", properties = new { scope = new { type = "string", @enum = new[] { "desktop", "window", "webview" }, description = "desktop: gesamter Desktop; window: sichtbarer Ausschnitt des Vordergrundfensters; webview: die Webseite im Missum-Tab Webseite mit Liste der Bedienelemente (Standard im Webdesign-Modus)." } }, required = Array.Empty<string>(), additionalProperties = false }),
-        Tool(BuiltInActionIds.ComputerUse, "computer.act", "Führt eine Desktopaktion für eine aktuelle Beobachtung aus; danach erneut beobachten. Für jede Aktion mit x/y oder endX/endY ist coordinateSpace explizit erforderlich. Für scroll sind x und y als Bildpunkt innerhalb des scrollbaren Bereichs sowie scrollY erforderlich.", 300, 1024 * 1024,
+        Tool(BuiltInActionIds.BrowserUse, BrowserUseToolName, "Erledigt eine Webaufgabe in einem echten Chrome- oder Edge-Browser, den die lokale AI Schritt für Schritt bedient, und liefert das Ergebnis als Text. Ist Webdesign aktiv, arbeitet es im Tab Webseite des Projekts. Für Seiten, die geklickt, ausgefüllt oder durchsucht werden müssen.", 900, 256 * 1024,
+            ExtensionToolRiskClass.Process, new
+            {
+                type = "object", properties = new
+                {
+                    task = new { type = "string", description = "Vollständige Aufgabe für den Browser in natürlicher Sprache, inklusive gewünschtem Ergebnis." },
+                    startUrl = new { type = "string", description = "Optionale http(s)-Adresse, mit der der Browser beginnt." },
+                    maxSteps = new { type = "integer", minimum = 1, maximum = 60, description = "Optionale Höchstzahl an Browser-Schritten (Standard 25)." },
+                },
+                required = new[] { "task" }, additionalProperties = false,
+            }),
+        Tool(BuiltInActionIds.ComputerUse, "computer.observe", "Beobachtet den Desktop: Bild mit nummerierten Bedienelementen (elements für elementIndex), erkanntes Programm (app, etwa Unreal Editor), Fensterliste und Beobachtungskennung.", 300, 4 * 1024 * 1024,
+            schema: new { type = "object", properties = new { scope = new { type = "string", @enum = new[] { "desktop", "window" }, description = "desktop: gesamter Desktop mit Taskleiste (Standard); window: nur das Programmfenster." } }, required = Array.Empty<string>(), additionalProperties = false }),
+        Tool(BuiltInActionIds.ComputerUse, "computer.act", "Führt eine Aktion zur aktuellen Beobachtung aus, bevorzugt per elementIndex, sonst x/y mit coordinateSpace. kind: click, double_click, right_click, type, set_value, keypress (ctrl+s, alt+f4, win, f5), scroll, drag, window, launch, wait. Danach erneut beobachten.", 300, 1024 * 1024,
             ExtensionToolRiskClass.LocalMutation, new
             {
                 type = "object", properties = new
                 {
                     observationId = new { type = "string" },
-                    kind = new { type = "string", @enum = new[] { "inspect", "move", "click", "double_click", "drag", "scroll", "type", "keypress", "focus", "wait" } },
-                    x = new { type = "number", description = "Horizontale Bildkoordinate; bei inspect, move, click, double_click, drag und scroll erforderlich." },
-                    y = new { type = "number", description = "Vertikale Bildkoordinate; bei inspect, move, click, double_click, drag und scroll erforderlich." },
-                    endX = new { type = "number" }, endY = new { type = "number" },
+                    kind = new { type = "string", @enum = new[] { "click", "double_click", "right_click", "middle_click", "type", "set_value", "keypress", "scroll", "drag", "move", "inspect", "focus", "window", "launch", "wait" } },
+                    elementIndex = new { type = "integer", minimum = 1, description = "Nummer eines markierten Elements aus elements; zuverlässiger als Koordinaten." },
+                    x = new { type = "number", description = "Horizontale Bildkoordinate, wenn kein elementIndex passt." },
+                    y = new { type = "number", description = "Vertikale Bildkoordinate, wenn kein elementIndex passt." },
+                    endX = new { type = "number", description = "Zielpunkt bei drag." }, endY = new { type = "number", description = "Zielpunkt bei drag." },
                     imageWidth = new { type = "integer" }, imageHeight = new { type = "integer" },
-                    text = new { type = "string" }, key = new { type = "string" },
-                    scrollY = new { type = "integer", description = "Vertikaler Scrollwert: positiv nach unten, negativ nach oben; 120 entspricht einer Mausradrastung." }, windowId = new { type = "string" },
+                    text = new { type = "string", description = "Text für type oder set_value (set_value ersetzt den Inhalt des Elements)." },
+                    key = new { type = "string", description = "Taste oder Kombination, z. B. enter, ctrl+s, alt+f4, ctrl+shift+esc, win, win+r, f2, f5." },
+                    scrollY = new { type = "integer", description = "Vertikal scrollen: positiv nach unten, negativ nach oben; 120 je Mausradrastung." },
+                    scrollX = new { type = "integer", description = "Horizontal scrollen: positiv nach rechts." },
+                    windowId = new { type = "string", description = "Fenster aus windows für focus oder window." },
+                    windowAction = new { type = "string", @enum = new[] { "focus", "maximize", "minimize", "restore", "close" } },
+                    target = new { type = "string", description = "Für launch: Programm (notepad, calc, explorer, chrome, unreal), Pfad, Ordner, .uproject-Datei oder URL." },
+                    arguments = new { type = "string", description = "Optionale Startparameter für launch." },
                     coordinateSpace = new { type = "string", @enum = new[] { "pixels", "normalized1000" },
-                        description = "Pflicht bei jeder Aktion mit x/y oder endX/endY. pixels: Bildpixel; normalized1000: je Bildachse 0 bis 999. Bei Aktionen ohne Koordinaten optional." },
+                        description = "Pflicht bei x/y oder endX/endY. pixels: Bildpixel; normalized1000: je Bildachse 0 bis 999." },
                 },
                 required = new[] { "observationId", "kind" }, additionalProperties = false,
             }),

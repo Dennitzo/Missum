@@ -15,7 +15,7 @@ public interface IComputerActionApproval
 }
 
 public sealed record ComputerWindow(string Id, string Title, int ProcessId, long ProcessStartTimeUtcTicks,
-    int X, int Y, int Width, int Height);
+    int X, int Y, int Width, int Height, string Process = "");
 
 public sealed record ComputerImageRegion(int X, int Y, int Width, int Height);
 
@@ -25,20 +25,25 @@ public sealed record ComputerObservation(string ObservationId, byte[] Content, s
     int Width, int Height, int DesktopX, int DesktopY, int DesktopWidth, int DesktopHeight,
     string ForegroundTitle, int ForegroundProcessId, IReadOnlyList<ComputerWindow> Windows,
     ComputerImageRegion? ImageRegion = null, string? Url = null, ComputerViewport? Viewport = null,
-    System.Text.Json.JsonElement? Elements = null);
+    System.Text.Json.JsonElement? Elements = null, ComputerApp? App = null, bool Grid = false);
 
 public sealed record ComputerAction(string ObservationId, string Kind, double? X = null, double? Y = null,
     double? EndX = null, double? EndY = null, int? ImageWidth = null, int? ImageHeight = null,
     string? Text = null, string? Key = null, int? ScrollY = null, string? WindowId = null,
-    string? CoordinateSpace = null);
+    string? CoordinateSpace = null, int? ElementIndex = null, int? ScrollX = null, string? Target = null,
+    string? Arguments = null, string? WindowAction = null);
 
 public sealed record ComputerElement(string Name, int ControlType, int ProcessId, bool IsEnabled, bool IsPassword, string RuntimeId = "");
 
-public sealed record ComputerActionResult(string Status, string Message, ComputerElement? Element = null);
+public sealed record ComputerActionResult(string Status, string Message, ComputerElement? Element = null, ComputerAfter? After = null);
+
+/// <summary>What an action changed on the desktop, so the model can verify it before the next step.</summary>
+public sealed record ComputerAfter(string ForegroundTitle, string ForegroundProcess, IReadOnlyList<string> OpenedWindows,
+    IReadOnlyList<string> ClosedWindows, string? Focus);
 
 internal sealed record ComputerFrame(ComputerObservation Public, byte[] PhysicalPixels,
     ComputerWindow? Foreground, nint FocusHandle, ComputerElement? FocusedElement, DateTimeOffset CapturedAt,
-    WebViewFrameState? WebView = null);
+    WebViewFrameState? WebView = null, IReadOnlyList<ComputerUiTarget>? Targets = null, ComputerWindow? Subject = null);
 
 internal interface IComputerDesktopPlatform
 {
@@ -46,9 +51,16 @@ internal interface IComputerDesktopPlatform
     Task<ComputerFrame> CaptureWindowAsync(CancellationToken cancellationToken) => CaptureAsync(cancellationToken);
     Task ExecuteAsync(ComputerFrame frame, ComputerAction action, bool approved, CancellationToken cancellationToken);
     Task<ComputerElement> InspectAsync(ComputerFrame frame, ComputerAction action, CancellationToken cancellationToken);
+    /// <summary>Describes the desktop after an action (new or closed windows, foreground, focus).</summary>
+    Task<ComputerAfter?> DescribeAsync(ComputerFrame frame, CancellationToken cancellationToken) => Task.FromResult<ComputerAfter?>(null);
 }
 
-/// <summary>Serializes input and owns an explicitly activated, run-bound desktop session.</summary>
+/// <summary>
+/// Serializes input and owns a run-bound desktop session. Computer-Use controls the real desktop
+/// directly: actions run without per-action approvals and without waiting for a particular
+/// foreground window; the user stops a run with "Stoppen". Each observation still authorizes
+/// exactly one action, so the model always acts on what it has just seen.
+/// </summary>
 public sealed class ComputerDesktopBroker : IDisposable
 {
     /// <summary>
@@ -138,13 +150,9 @@ public sealed class ComputerDesktopBroker : IDisposable
                 session.WebPlatform = web;
                 return webFrame.Public;
             }
-            await session.Monitor.WaitForExpectedAsync(linked.Token).ConfigureAwait(false);
-            var revision = session.Monitor.Revision;
             var frame = scope == "window" ? await _desktop.CaptureWindowAsync(linked.Token).ConfigureAwait(false)
                 : await _desktop.CaptureAsync(linked.Token).ConfigureAwait(false);
             linked.Token.ThrowIfCancellationRequested();
-            if (session.Monitor.Revision != revision)
-                throw new InvalidOperationException("Das Vordergrundfenster hat sich während der Aufnahme geändert. Bitte erneut beobachten.");
             session.Monitor.Expect(frame.Foreground?.Id);
             session.Frame = frame;
             session.FrameRevision = session.Monitor.Revision;
@@ -171,141 +179,50 @@ public sealed class ComputerDesktopBroker : IDisposable
                 throw new InvalidOperationException("Die Beobachtung ist abgelaufen. Beobachte den Desktop erneut.");
             if (frame.WebView is not null)
                 return await ExecuteWebViewAsync(session, frame, action, linked.Token).ConfigureAwait(false);
-            var waited = await session.Monitor.WaitForExpectedAsync(linked.Token).ConfigureAwait(false);
-            if (waited || session.Monitor.Revision != session.FrameRevision)
-                throw new InvalidOperationException("Das Vordergrundfenster hat sich geändert. Beobachte den Desktop nach der Pause erneut.");
             action = NormalizeCoordinates(action, frame.Public);
-            ValidateAction(action, frame.Public);
+            ValidateAction(action, frame.Public, frame.Targets?.Count ?? 0);
             var kind = action.Kind.ToLowerInvariant();
             if (kind == "focus" && !frame.Public.Windows.Any(window => window.Id == action.WindowId))
                 throw new InvalidOperationException("Das anzusteuernde Fenster gehört nicht zur aktuellen Beobachtung.");
-            var approved = false;
-            // The broker, not the model, classifies a narrow set of navigation
-            // actions. Unknown controls still require explicit user review.
             if (kind == "inspect")
             {
                 var element = await _desktop.InspectAsync(frame, action, linked.Token).ConfigureAwait(false);
                 return new("completed", "Zugängliches UI-Element gelesen. Beobachte den Desktop vor weiteren Aktionen erneut.", element);
             }
-            var safeNavigation = kind is "move" or "wait" or "focus"
-                || kind == "keypress" && string.Equals(action.Key, "Tab", StringComparison.OrdinalIgnoreCase);
-            if (kind == "scroll")
+            // Direct desktop control: no approval step and no foreground lock. The user can stop the
+            // run at any time; Missum never steers its own window (checked by the platform).
+            if (kind == "focus") session.Monitor.Expect(action.WindowId);
+            await _desktop.ExecuteAsync(frame, action, true, linked.Token).ConfigureAwait(false);
+            ComputerAfter? after = null;
+            if (kind != "wait")
             {
-                try
-                {
-                    var element = await _desktop.InspectAsync(frame, action, linked.Token).ConfigureAwait(false);
-                    // UIA Document, List, ListItem and ScrollBar describe navigation
-                    // targets; editable and unknown controls still require review.
-                    safeNavigation = element.IsEnabled && !element.IsPassword
-                        && element.ProcessId == frame.Foreground?.ProcessId && element.ControlType is 50007 or 50008 or 50018 or 50030;
-                }
-                catch (InvalidOperationException) { safeNavigation = false; }
+                try { after = await _desktop.DescribeAsync(frame, linked.Token).ConfigureAwait(false); }
+                catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception) { }
             }
-            if (kind == "click")
-            {
-                try
-                {
-                    // An ordinary click into a verified edit control is navigation.
-                    // Buttons and controls whose identity cannot be checked still need review.
-                    var element = await _desktop.InspectAsync(frame, action, linked.Token).ConfigureAwait(false);
-                    safeNavigation = IsOrdinaryEdit(element, frame.Foreground);
-                }
-                catch (InvalidOperationException) { safeNavigation = false; }
-            }
-            if (kind == "type")
-            {
-                // The platform rechecks the focus handle and UIA identity immediately
-                // before injection. Control characters can submit or move focus, so
-                // only plain text in the observed edit control is automatic.
-                safeNavigation = frame.FocusHandle != 0
-                    && IsOrdinaryEdit(frame.FocusedElement, frame.Foreground)
-                    && action.Text!.All(character => !char.IsControl(character));
-            }
-            if (!safeNavigation)
-            {
-                var approvalTarget = kind == "focus"
-                    ? frame.Public.Windows.SingleOrDefault(window => window.Id == action.WindowId)
-                        ?? throw new InvalidOperationException("Das anzusteuernde Fenster gehört nicht zur aktuellen Beobachtung.")
-                    : frame.Foreground;
-                session.Monitor.AllowMissum(true);
-                var decision = await _approval.RequestAsync(new(sessionId, runId, action.ObservationId,
-                    kind, approvalTarget?.Title ?? "Desktop", Round(action.X), Round(action.Y),
-                    kind == "type" ? action.Text : action.Key), linked.Token).ConfigureAwait(false);
-                linked.Token.ThrowIfCancellationRequested();
-                if (decision == ComputerActionDecision.Cancel)
-                    return new("cancelled", "Die Aktion wurde abgebrochen. Vor weiteren Aktionen neu beobachten.");
-                if (decision == ComputerActionDecision.ManualDone)
-                    return new("manual", "Die Aktion wurde durch den Nutzer übernommen. Vor weiteren Aktionen neu beobachten.");
-                if (decision != ComputerActionDecision.Execute)
-                    throw new UnauthorizedAccessException("Die Aktion wurde nicht freigegeben.");
-                waited = await session.Monitor.WaitForExpectedAsync(linked.Token).ConfigureAwait(false);
-                if (waited || session.Monitor.Revision != session.FrameRevision)
-                    throw new InvalidOperationException("Das Vordergrundfenster hat sich während der Freigabe geändert. Bitte erneut beobachten.");
-                if (DateTimeOffset.UtcNow - frame.CapturedAt > ObservationLifetime)
-                    throw new InvalidOperationException("Die Beobachtung ist während der Freigabe abgelaufen. Bitte erneut beobachten.");
-                approved = true;
-            }
-            waited = await session.Monitor.WaitForExpectedAsync(linked.Token).ConfigureAwait(false);
-            if (waited || session.Monitor.Revision != session.FrameRevision)
-                throw new InvalidOperationException("Das Vordergrundfenster hat sich geändert. Bitte erneut beobachten.");
-            using var interrupted = CancellationTokenSource.CreateLinkedTokenSource(linked.Token);
-            void OnWindowChanged() { try { interrupted.Cancel(); } catch (ObjectDisposedException) { } }
-            session.Monitor.UnexpectedForeground += OnWindowChanged;
-            try
-            {
-                if (session.Monitor.Revision != session.FrameRevision)
-                    throw new InvalidOperationException("Das Vordergrundfenster hat sich geändert. Bitte erneut beobachten.");
-                if (kind == "focus") session.Monitor.Expect(action.WindowId);
-                await _desktop.ExecuteAsync(frame, action, approved, interrupted.Token).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (!linked.IsCancellationRequested && interrupted.IsCancellationRequested)
-            {
-                if (kind == "focus") session.Monitor.Expect(frame.Foreground?.Id);
-                throw new InvalidOperationException("Das Vordergrundfenster hat sich geändert. Bitte erneut beobachten.");
-            }
-            catch
-            {
-                if (kind == "focus") session.Monitor.Expect(frame.Foreground?.Id);
-                throw;
-            }
-            finally { session.Monitor.UnexpectedForeground -= OnWindowChanged; }
-            return new("completed", "Aktion ausgeführt. Beobachte den Desktop erneut, bevor du fortfährst.");
+            return new("completed", "Aktion ausgeführt. Prüfe after und beobachte den Desktop erneut, bevor du fortfährst.", null, after);
         }
         finally { session.Monitor.AllowMissum(false); _gate.Release(); }
     }
 
     /// <summary>
     /// An action in the website tab: same coordinate and validity rules as on the desktop, but
-    /// the page itself is the target. Only passwords, file choosers and links to other sites ask
-    /// the user; everything else stays inside the local project page and runs directly.
+    /// the page itself is the target. Actions run directly, like on the desktop.
     /// </summary>
-    private async Task<ComputerActionResult> ExecuteWebViewAsync(Session session, ComputerFrame frame, ComputerAction action,
+    private static async Task<ComputerActionResult> ExecuteWebViewAsync(Session session, ComputerFrame frame, ComputerAction action,
         CancellationToken cancellationToken)
     {
         var web = session.WebPlatform ?? throw new InvalidOperationException("Die Webseiten-Beobachtung ist nicht mehr gültig. Beobachte erneut.");
-        action = NormalizeCoordinates(action, frame.Public);
+        action = ResolveWebElement(NormalizeCoordinates(action, frame.Public), frame.Public);
         ValidateAction(action, frame.Public);
+        if (action.Kind.ToLowerInvariant() is "right_click" or "middle_click" or "set_value" or "window" or "launch")
+            throw new ArgumentException("Diese Aktion ist im Tab Webseite nicht verfügbar; nutze click, type, keypress, scroll oder drag.");
         var kind = action.Kind.ToLowerInvariant();
         if (kind == "inspect")
         {
             var element = await web.InspectAsync(frame, action, cancellationToken).ConfigureAwait(false);
             return new("completed", "Element der Webseite gelesen. Beobachte erneut, bevor du fortfährst.", element);
         }
-        var approved = false;
-        if (await web.RiskAsync(frame, action, cancellationToken).ConfigureAwait(false) is { } risk)
-        {
-            var decision = await _approval.RequestAsync(new(session.SessionId, session.RunId, action.ObservationId,
-                kind, "Webseite · " + risk, Round(action.X), Round(action.Y),
-                kind == "type" ? action.Text : action.Key), cancellationToken).ConfigureAwait(false);
-            if (decision == ComputerActionDecision.Cancel)
-                return new("cancelled", "Die Aktion wurde abgebrochen. Vor weiteren Aktionen neu beobachten.");
-            if (decision == ComputerActionDecision.ManualDone)
-                return new("manual", "Die Aktion wurde durch den Nutzer übernommen. Vor weiteren Aktionen neu beobachten.");
-            if (decision != ComputerActionDecision.Execute)
-                throw new UnauthorizedAccessException("Die Aktion wurde nicht freigegeben.");
-            approved = true;
-        }
-        await web.ExecuteAsync(frame, action, approved, cancellationToken).ConfigureAwait(false);
+        await web.ExecuteAsync(frame, action, true, cancellationToken).ConfigureAwait(false);
         return new("completed", "Aktion in der Webseite ausgeführt. Beobachte erneut, bevor du fortfährst.");
     }
 
@@ -336,13 +253,6 @@ public sealed class ComputerDesktopBroker : IDisposable
         _sessions.TryGetValue((sessionId, runId), out var value) ? value
             : throw new UnauthorizedAccessException("Keine aktive Computersteuerung für diese Sitzung und diesen Lauf.");
 
-    private static int? Round(double? value) => value is { } number && double.IsFinite(number) ? (int)Math.Round(number) : null;
-
-    private static bool IsOrdinaryEdit(ComputerElement? element, ComputerWindow? foreground) =>
-        element is { ControlType: 50004, IsEnabled: true, IsPassword: false }
-        && foreground is not null && element.ProcessId == foreground.ProcessId
-        && !string.IsNullOrWhiteSpace(element.RuntimeId);
-
     internal static ComputerAction NormalizeCoordinates(ComputerAction action, ComputerObservation frame)
     {
         if (action.CoordinateSpace is null)
@@ -365,30 +275,63 @@ public sealed class ComputerDesktopBroker : IDisposable
             EndX = Scale(action.EndX, frame.Width), EndY = Scale(action.EndY, frame.Height), CoordinateSpace = "pixels" };
     }
 
-    internal static void ValidateAction(ComputerAction action, ComputerObservation frame)
+    internal static readonly string[] Kinds =
+    [
+        "inspect", "move", "click", "double_click", "right_click", "middle_click", "drag", "scroll",
+        "type", "set_value", "keypress", "focus", "window", "launch", "wait",
+    ];
+
+    internal static void ValidateAction(ComputerAction action, ComputerObservation frame, int targetCount = 0)
     {
         var kind = action.Kind?.ToLowerInvariant();
-        if (kind is not ("inspect" or "move" or "click" or "double_click" or "drag" or "scroll" or "type" or "keypress" or "focus" or "wait"))
+        if (kind is null || !Kinds.Contains(kind))
             throw new ArgumentException("Nicht unterstützte Computeraktion.");
         if ((action.ImageWidth is { } w && w != frame.Width) || (action.ImageHeight is { } h && h != frame.Height))
             throw new InvalidOperationException("Die Bildabmessungen stimmen nicht mit der Beobachtung überein.");
+        if (action.ElementIndex is { } index && (index < 1 || index > targetCount))
+            throw new ArgumentOutOfRangeException(nameof(action), $"elementIndex {index} gehört nicht zur aktuellen Beobachtung (1–{targetCount}).");
         static bool Within(double? n, int size) => n is { } x && double.IsFinite(x) && x >= 0 && x < size;
-        if (kind is "inspect" or "move" or "click" or "double_click" or "drag" or "scroll")
+        var byElement = action.ElementIndex is not null;
+        if (kind is "inspect" or "move" or "click" or "double_click" or "right_click" or "middle_click" or "drag" or "scroll" && !byElement)
         {
             if (kind == "scroll" && (action.X is null || action.Y is null))
-                throw new ArgumentException("Für scroll sind x und y als Bildpunkt im scrollbaren Bereich erforderlich.");
+                throw new ArgumentException("Für scroll sind elementIndex oder x und y im scrollbaren Bereich erforderlich.");
             if (!Within(action.X, frame.Width) || !Within(action.Y, frame.Height))
-                throw new ArgumentOutOfRangeException(nameof(action), "Die Koordinate liegt außerhalb der Beobachtung.");
-            if (kind == "drag" && (!Within(action.EndX, frame.Width) || !Within(action.EndY, frame.Height)))
-                throw new ArgumentOutOfRangeException(nameof(action), "Das Drag-Ziel liegt außerhalb der Beobachtung.");
+                throw new ArgumentOutOfRangeException(nameof(action), "Die Koordinate liegt außerhalb der Beobachtung; nutze elementIndex oder x/y.");
         }
+        if (kind == "drag" && (!Within(action.EndX, frame.Width) || !Within(action.EndY, frame.Height)))
+            throw new ArgumentOutOfRangeException(nameof(action), "Das Drag-Ziel endX/endY liegt außerhalb der Beobachtung.");
         if (kind == "type" && (string.IsNullOrEmpty(action.Text) || action.Text.Length > 4096))
             throw new ArgumentException("Texteingabe muss zwischen 1 und 4096 Zeichen lang sein.");
+        if (kind == "set_value" && (!byElement || action.Text is null || action.Text.Length > 4096))
+            throw new ArgumentException("set_value benötigt elementIndex und text (höchstens 4096 Zeichen).");
         if (kind == "keypress" && (string.IsNullOrWhiteSpace(action.Key) || action.Key.Length > 80))
             throw new ArgumentException("Ungültige Tastenkombination.");
         if (kind == "focus" && string.IsNullOrWhiteSpace(action.WindowId))
             throw new ArgumentException("Für Fensterwechsel ist eine beobachtete Fensterkennung erforderlich.");
-        if (kind == "scroll" && (action.ScrollY is null or 0 || Math.Abs((long)action.ScrollY.Value) > 2400))
-            throw new ArgumentException("Ungültiger Scrollwert.");
+        if (kind == "window" && action.WindowAction is not ("focus" or "maximize" or "minimize" or "restore" or "close"))
+            throw new ArgumentException("windowAction muss focus, maximize, minimize, restore oder close sein.");
+        if (kind == "launch" && (string.IsNullOrWhiteSpace(action.Target) || action.Target.Length > 1024 || action.Arguments?.Length > 2048))
+            throw new ArgumentException("launch benötigt target (Programm, Datei, Ordner, URL oder unreal).");
+        if (kind == "scroll")
+        {
+            var vertical = action.ScrollY ?? 0;
+            var horizontal = action.ScrollX ?? 0;
+            if (vertical == 0 && horizontal == 0 || Math.Abs((long)vertical) > 2400 || Math.Abs((long)horizontal) > 2400)
+                throw new ArgumentException("Ungültiger Scrollwert: scrollY oder scrollX zwischen -2400 und 2400, ungleich 0.");
+        }
+    }
+
+    /// <summary>In the website tab an elementIndex selects the n-th listed page element (its center).</summary>
+    internal static ComputerAction ResolveWebElement(ComputerAction action, ComputerObservation frame)
+    {
+        if (action.ElementIndex is not { } index) return action;
+        if (frame.Elements is not { ValueKind: System.Text.Json.JsonValueKind.Array } elements || index < 1 || index > elements.GetArrayLength())
+            throw new ArgumentOutOfRangeException(nameof(action), "elementIndex gehört nicht zur aktuellen Beobachtung.");
+        var element = elements[index - 1];
+        double Read(string name) => element.TryGetProperty(name, out var value) && value.TryGetDouble(out var number) ? number : 0;
+        var x = Math.Clamp(Read("x") + Read("width") / 2, 0, frame.Width - 1);
+        var y = Math.Clamp(Read("y") + Read("height") / 2, 0, frame.Height - 1);
+        return action with { ElementIndex = null, X = x, Y = y, CoordinateSpace = "pixels" };
     }
 }

@@ -21,7 +21,9 @@ public sealed class BuiltinModesLiveTests(ITestOutputHelper output)
     {
         if (Environment.GetEnvironmentVariable("MISSUM_AI_BUILTIN_MODES_LIVE") != "1") return;
         await using var environment = await TestEnvironment.CreateAsync();
-        using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(20));
+        // Large offloaded models load and plan slowly; the implementation step adds more.
+        using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(
+            Environment.GetEnvironmentVariable("MISSUM_AI_LIVE_PLAN_IMPLEMENT") == "1" ? 90 : 20));
         var ct = deadline.Token;
         var chats = environment.Get<IChatRepository>();
         var documents = environment.Get<IDocumentIngestor>();
@@ -106,7 +108,8 @@ public sealed class BuiltinModesLiveTests(ITestOutputHelper output)
             var blockStart = plan.Content.LastIndexOf("```assistant-plan", StringComparison.Ordinal);
             Assert.True(blockStart >= 0, plan.Content);
             var jsonStart = plan.Content.IndexOf('{', blockStart);
-            var blockEnd = plan.Content.IndexOf("```", jsonStart, StringComparison.Ordinal);
+            // The closing fence starts a line; a fenced code sample inside the JSON string has escaped newlines.
+            var blockEnd = plan.Content.IndexOf("\n```", jsonStart, StringComparison.Ordinal);
             using var planBlock = JsonDocument.Parse(plan.Content[jsonStart..blockEnd]);
             Assert.Equal("plan", planBlock.RootElement.GetProperty("kind").GetString());
             Assert.Contains("addition.py", plan.Content, StringComparison.Ordinal);
@@ -126,6 +129,17 @@ public sealed class BuiltinModesLiveTests(ITestOutputHelper output)
             Assert.Equal(BuiltInActionIds.PlanMode, restored.GetProperty("selectedExtensionActionId").GetString());
             await Command("action.invoke", new { sessionId = coding, actionId = BuiltInActionIds.PlanMode, enabled = false });
             Assert.Null((await chats.GetSessionAsync(coding, ct))!.PersistentExtensionActionId);
+            if (Environment.GetEnvironmentVariable("MISSUM_AI_LIVE_PLAN_IMPLEMENT") == "1")
+            {
+                // The accepted plan continues on the plan run's context (same tools, same session
+                // cache key): the implementation needs no re-read of the README.
+                await Command("chat.send", new { sessionId = coding,
+                    prompt = "Der Plan ist freigegeben. Setze ihn jetzt vollständig um und führe die Tests aus." });
+                var implementation = (await chats.ListMessagesAsync(coding, ct)).Last(item => item.Role == ChatRole.Assistant);
+                Assert.True(implementation.Status == MessageStatus.Completed, implementation.Error);
+                Assert.True(File.Exists(Path.Combine(workspace, "addition.py")), implementation.Content);
+                receipts.Add(new { kind = "implementation", implementation.Content, implementation.ToolSteps });
+            }
             Assert.False(microphone.Current.IsRecording);
             receipts.Add(new { kind = "plan", sessionId = coding, marker, plan.Content, plan.Status, plan.ToolSteps,
                 sourceUnchanged = true, persistentModeRestored = true, modeDisabled = true });

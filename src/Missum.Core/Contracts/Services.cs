@@ -25,6 +25,8 @@ public interface IChatRepository
         Guid id,
         string? extensionActionId,
         CancellationToken cancellationToken = default);
+    /// <summary>Turns the Codex tool "Webdesign" on or off for one session; it persists like the selected tool.</summary>
+    Task SetWebdesignEnabledAsync(Guid id, bool enabled, CancellationToken cancellationToken = default);
     Task SetCodingWorkspacePathAsync(Guid id, string? path, CancellationToken cancellationToken = default);
     Task SetCodingWorkspacePathAsync(Guid id, string? path, bool activateCoding, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<ChatSessionGroup>> ListSessionGroupsAsync(CancellationToken cancellationToken = default);
@@ -43,6 +45,28 @@ public interface IChatRepository
         await GetMessageAsync(messageId, cancellationToken).ConfigureAwait(false) is { } message ? message with { ToolSteps = [] } : null;
     async Task<ChatMessage?> GetFirstUserMessageAsync(Guid sessionId, CancellationToken cancellationToken = default) =>
         (await ListMessagesAsync(sessionId, cancellationToken).ConfigureAwait(false)).FirstOrDefault(message => message.Role == ChatRole.User);
+    /// <summary>
+    /// Newest finished user and assistant messages of every chat mode that contain at least one of the
+    /// terms (case-insensitive), without tool steps. Bounded input for cross-session memory search.
+    /// </summary>
+    async Task<IReadOnlyList<ChatMessage>> SearchMessagesAsync(IReadOnlyList<string> terms, int maximumMessages = 200,
+        Guid? excludeSessionId = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(terms);
+        var found = new List<ChatMessage>();
+        if (terms.Count == 0) return found;
+        foreach (var session in await ListSessionsAsync(search: null, cancellationToken).ConfigureAwait(false))
+        {
+            if (session.Id == excludeSessionId) continue;
+            found.AddRange((await ListMessagesAsync(session.Id, cancellationToken).ConfigureAwait(false))
+                .Where(message => message.Role is ChatRole.User or ChatRole.Assistant
+                    && message.Status is MessageStatus.Completed or MessageStatus.Cancelled or MessageStatus.Interrupted
+                    && terms.Any(term => message.Content.Contains(term, StringComparison.OrdinalIgnoreCase)))
+                .Select(message => message with { ToolSteps = [] }));
+        }
+        return found.OrderByDescending(message => message.CreatedAt).ThenByDescending(message => message.Id)
+            .Take(Math.Clamp(maximumMessages, 1, 1_000)).ToArray();
+    }
     async Task<IReadOnlyList<ChatMessage>> ListContextMessagesAsync(Guid sessionId, int maximumMessages = 256,
         ConversationCursor? before = null, CancellationToken cancellationToken = default) =>
         (await ListMessagesAsync(sessionId, cancellationToken).ConfigureAwait(false))

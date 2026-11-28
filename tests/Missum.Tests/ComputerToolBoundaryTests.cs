@@ -32,13 +32,24 @@ public sealed class ComputerToolBoundaryTests
     }
 
     [Fact]
-    public async Task ComputerRunRejectsOtherLocalToolsAtExecutionBoundary()
+    public async Task ComputerRunDoesNotLockOtherLocalTools()
     {
+        // Computer-Use is not an isolated area: other local tools are not refused because desktop
+        // control is active (this proposal fails later only for its own missing test services).
         var broker = new LocalToolBroker(null!, null!, null!, null!);
         var result = await broker.ExecuteForAgentAsync(Proposal("coding.command", new { command = "ignored" }, ToolRiskClass.Process),
             Guid.NewGuid(), null, runAction: PromptTriggerAction.Coding, computerUseEnabled: true);
-        Assert.Equal("failed", result.Status);
-        Assert.Contains("gesperrt", result.Message);
+        Assert.DoesNotContain("gesperrt", result.Message ?? "");
+    }
+
+    [Fact]
+    public async Task ComputerToolsWorkOutsideCodexRunsWhenTheRunSelectedThem()
+    {
+        var broker = new LocalToolBroker(null!, null!, null!, null!);
+        var result = await broker.ExecuteForAgentAsync(Proposal("computer.observe", new { }, ToolRiskClass.ReadOnly),
+            Guid.NewGuid(), null, runAction: PromptTriggerAction.Extension, computerUseEnabled: true);
+        // No mode refusal; it only fails here because the test broker has no desktop service.
+        Assert.DoesNotContain("nicht freigegeben", result.Message ?? "");
     }
 
     [Fact]

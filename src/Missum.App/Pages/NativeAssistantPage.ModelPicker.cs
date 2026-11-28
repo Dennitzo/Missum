@@ -72,10 +72,11 @@ public sealed partial class NativeAssistantPage
     private static Flyout ComposerPickerFlyout()
     {
         var presenter = new Style(typeof(FlyoutPresenter));
-        presenter.Setters.Add(new Setter(Control.BackgroundProperty, NativeThemeBrushes.Resource("MissumLayerStrongBrush", 43)));
+        // Opaque like every menu (also with Liquid Glass), so model and effort lists stay readable.
+        presenter.Setters.Add(new Setter(Control.BackgroundProperty, NativeThemeBrushes.Resource("MissumMenuBrush", 43)));
         presenter.Setters.Add(new Setter(Control.CornerRadiusProperty, new CornerRadius(16)));
         presenter.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(12, 8, 12, 8)));
-        presenter.Setters.Add(new Setter(Control.BorderBrushProperty, NativeThemeBrushes.Resource("MissumStrokeBrush", 62)));
+        presenter.Setters.Add(new Setter(Control.BorderBrushProperty, NativeThemeBrushes.Resource("MissumMenuStrokeBrush", 62)));
         presenter.Setters.Add(new Setter(Control.BorderThicknessProperty, new Thickness(1)));
         presenter.Setters.Add(new Setter(FrameworkElement.MaxWidthProperty, 320d));
         return new Flyout { Placement = FlyoutPlacementMode.TopEdgeAlignedRight,

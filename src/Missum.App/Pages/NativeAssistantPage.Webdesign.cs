@@ -1,32 +1,53 @@
+using System.Text.Json;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Shapes;
 using Missum.App.Controls;
 using Missum.App.Services.Webdesign;
+using Missum.Core.Extensions;
 
 namespace Missum.App.Pages;
 
 /// <summary>
-/// Webdesign mode: Codex plus the fixed "Webseite" tab. The tab's control lives as long as the
-/// page and follows the project of the open session; it reloads in the background and marks the
-/// tab with a dot instead of pulling the user out of the chat.
+/// The Codex tool "Webdesign": a switch beside the selected tool with its own composer chip. While it
+/// is on in a Codex session with a project, the "Webseite" tab sits next to the chat. The tab's
+/// control lives as long as the page and follows the project of the open session; it reloads in the
+/// background and marks the tab with a dot instead of pulling the user out of the chat.
 /// </summary>
 public sealed partial class NativeAssistantPage
 {
-    private const string WebdesignMode = "webdesign";
     private WebdesignPreviewView? _websiteView;
     private Button? _websiteTabButton;
     private Ellipse? _websiteDot;
     private bool _websiteViewActive;
+    private bool _websiteRegistered;
     private long _websiteTabSelectionVersion;
     private bool _websiteBeforeCaptured;
+    private bool _webdesignEnabled;
+    private bool _webdesignToggleBusy;
+    private bool _webdesignActivationSubscribed;
     // The website uses the full width: opening the tab hides the right sidebar until the chat is
     // shown again. The saved sidebar preference stays untouched.
     private bool _websiteHidesInspector = true;
 
     /// <summary>Tabs that use the full width: the website and the Science publication.</summary>
     private bool FullWidthViewActive => _websiteViewActive || (_activeResearchSessionId is { } research && research == _session);
+
+    /// <summary>The open session is Codex with the Webdesign tool switched on.</summary>
+    private bool WebdesignToolActive => _mode == "coding" && _webdesignEnabled && _session != Guid.Empty;
+
+    private string WebdesignWorkspace
+    {
+        get
+        {
+            var workspace = S(_snapshot, "codingWorkspacePath");
+            return workspace.Length == 0 ? S(_snapshot, "workspacePath") : workspace;
+        }
+    }
+
+    /// <summary>The "Webseite" tab exists: Webdesign is on and the session has a project folder.</summary>
+    private bool WebdesignTabAvailable => WebdesignToolActive && WebdesignWorkspace.Length > 0;
 
     private WebdesignPreviewView WebsiteView()
     {
@@ -53,31 +74,101 @@ public sealed partial class NativeAssistantPage
         return view;
     }
 
+    /// <summary>Reads the session's Webdesign switch from a full coordinator snapshot.</summary>
+    private void ObserveWebdesignTool(JsonElement data)
+    {
+        if (data.ValueKind == JsonValueKind.Object && data.TryGetProperty("webdesignEnabled", out var enabled))
+            _webdesignEnabled = enabled.ValueKind == JsonValueKind.True;
+        if (!_webdesignActivationSubscribed && !_disposed)
+        {
+            // The model may switch the tool on with its first webdesign.* call (LocalToolBroker).
+            WebdesignToolActivation.Activated += OnWebdesignToolActivated;
+            _webdesignActivationSubscribed = true;
+        }
+    }
+
+    private void OnWebdesignToolActivated(Guid sessionId) => DispatcherQueue.TryEnqueue(() =>
+    {
+        if (_disposed || sessionId != _session) return;
+        _ = RefreshForExternalActivationAsync();
+    });
+
+    private void UnsubscribeWebdesignActivation()
+    {
+        if (!_webdesignActivationSubscribed) return;
+        WebdesignToolActivation.Activated -= OnWebdesignToolActivated;
+        _webdesignActivationSubscribed = false;
+    }
+
     /// <summary>Call after the snapshot of the active session was applied.</summary>
     private void SyncWebdesignSession()
     {
-        if (_mode != WebdesignMode)
+        UpdateWebdesignToolChip();
+        if (!WebdesignTabAvailable)
         {
-            if (_websiteView is { } view)
+            if (_websiteView is { } view && (_websiteRegistered || _websiteViewActive))
             {
                 if (_websiteViewActive) ShowChatView();
                 WebdesignPreviewRegistry.Unregister(view);
                 _ = view.DeactivateAsync();
             }
+            _websiteRegistered = false;
             RenderSessionTabs();
             return;
         }
         var website = WebsiteView();
         WebdesignPreviewRegistry.Register(website);
-        var workspace = S(_snapshot, "codingWorkspacePath");
-        if (workspace.Length == 0) workspace = S(_snapshot, "workspacePath");
-        _ = website.SetWorkspaceAsync(workspace.Length == 0 ? null : workspace);
+        _websiteRegistered = true;
+        // Starts (or reuses) the project's server only now that the tool is on for this project.
+        _ = website.SetWorkspaceAsync(WebdesignWorkspace);
         RenderSessionTabs();
+    }
+
+    private void UpdateWebdesignToolChip()
+    {
+        var visible = WebdesignToolActive;
+        if (visible)
+            WebdesignToolChip.SetTool("Webdesign", ToolIconGlyph("web"), ComposerGroupIconBrush(BuiltInExtensionCatalog.GroupIntegrations));
+        WebdesignToolChip.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>"+" menu: switches Webdesign on, or opens the tab when it already is.</summary>
+    private async Task ChooseWebdesignToolAsync()
+    {
+        if (WebdesignToolActive)
+        {
+            if (WebdesignTabAvailable) OpenWebsiteView();
+            return;
+        }
+        await SetWebdesignToolAsync(true);
+        if (!_disposed) Composer.Focus(FocusState.Programmatic);
+    }
+
+    private async void OnClearWebdesignTool(object sender, RoutedEventArgs e) => await SetWebdesignToolAsync(false);
+
+    /// <summary>Persists the switch for the open session; the following snapshot updates chip and tab.</summary>
+    private async Task SetWebdesignToolAsync(bool enabled)
+    {
+        if (_webdesignToggleBusy || _disposed || _session == Guid.Empty) return;
+        var sessionId = _session;
+        _webdesignToggleBusy = true;
+        WebdesignToolChip.IsEnabled = false;
+        try
+        {
+            await CommandAsync("action.invoke", new { sessionId, actionId = BuiltInActionIds.Webdesign, enabled });
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (Exception exception) when (exception is not OutOfMemoryException) { ShowError(exception.Message); }
+        finally
+        {
+            _webdesignToggleBusy = false;
+            if (!_disposed) WebdesignToolChip.IsEnabled = true;
+        }
     }
 
     private void RenderWebsiteTab(int index)
     {
-        if (_mode != WebdesignMode || _session == Guid.Empty)
+        if (!WebdesignTabAvailable)
         {
             if (_websiteTabButton is not null) SessionTabsPanel.Children.Remove(_websiteTabButton);
             return;
@@ -115,21 +206,21 @@ public sealed partial class NativeAssistantPage
         // Like the publication tab: WebView2 and XAML changes wait until the click has unwound.
         DispatcherQueue.TryEnqueue(() => RunUiCallback("Webdesign.TabSelection", () =>
         {
-            if (version != _websiteTabSelectionVersion || owner != _session || _mode != WebdesignMode) return;
+            if (version != _websiteTabSelectionVersion || owner != _session || !WebdesignTabAvailable) return;
             OpenWebsiteView();
         }));
     }
 
     private void OpenWebsiteView()
     {
-        if (_disposed || _mode != WebdesignMode || _session == Guid.Empty) return;
+        if (_disposed || !WebdesignTabAvailable) return;
         SaveConversationOffset();
         ShowChatView();
         BodyGrid.Visibility = Visibility.Collapsed;
         _websiteViewActive = true;
         _websiteHidesInspector = true;
         UpdateResponsiveLayout();
-        WebsiteView().Visibility = Visibility.Visible;
+        WebsiteView().SetHostVisible(true);
         SetWebsiteDot(false);
         RenderSessionTabs();
     }
@@ -139,7 +230,7 @@ public sealed partial class NativeAssistantPage
         _websiteTabSelectionVersion++;
         var wasActive = _websiteViewActive;
         _websiteViewActive = false;
-        if (_websiteView is { } view) view.Visibility = Visibility.Collapsed;
+        _websiteView?.SetHostVisible(false);
         if (wasActive) UpdateResponsiveLayout();
     }
 
@@ -177,7 +268,7 @@ public sealed partial class NativeAssistantPage
     /// <summary>Before/after: the page as it was when the prompt was sent …</summary>
     private void CaptureWebsiteBeforeRun()
     {
-        if (_mode != WebdesignMode || _websiteView is not { } view) return;
+        if (!WebdesignTabAvailable || _websiteView is not { } view) return;
         _websiteBeforeCaptured = true;
         _ = view.CaptureBeforeAsync();
     }
@@ -185,7 +276,7 @@ public sealed partial class NativeAssistantPage
     /// <summary>… and when the run ended.</summary>
     private void CaptureWebsiteAfterRun(string type)
     {
-        if (_mode != WebdesignMode || !_websiteBeforeCaptured || _websiteView is not { } view
+        if (!WebdesignTabAvailable || !_websiteBeforeCaptured || _websiteView is not { } view
             || type is not ("chat.completed" or "chat.cancelled" or "chat.failed")) return;
         _websiteBeforeCaptured = false;
         _ = view.CaptureAfterAsync();

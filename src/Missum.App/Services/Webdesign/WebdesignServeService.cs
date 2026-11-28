@@ -51,7 +51,7 @@ public sealed partial class WebdesignServeService : IAsyncDisposable
 
     internal static string Normalize(string workspace) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(workspace));
 
-    /// <summary>The project currently shown in Webdesign mode, or null outside the mode.</summary>
+    /// <summary>The project currently shown in the "Webseite" tab (Codex tool Webdesign), or null without the tab.</summary>
     public void SetActiveWorkspace(string? workspace)
     {
         _activeWorkspace = string.IsNullOrWhiteSpace(workspace) ? null : Normalize(workspace);

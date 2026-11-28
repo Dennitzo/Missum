@@ -13,6 +13,21 @@ public sealed partial class NativeAssistantPage
     // Returning to A must not reuse a footer still parented to A's discarded bubble.
     private async Task<int> VerifyMessageNavigationSmokeAsync()
     {
+        if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_COMPUTERUSE") is { Length: > 0 } computerDirectory)
+        {
+            await VerifyComputerUseScenarioSmokeAsync(computerDirectory);
+            return 0;
+        }
+        if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_BROWSERUSE") is { Length: > 0 } browserDirectory)
+        {
+            await VerifyBrowserUseSmokeAsync(browserDirectory);
+            return 0;
+        }
+        if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_LIQUIDGLASS") is { Length: > 0 } glassDirectory)
+        {
+            await VerifyLiquidGlassSmokeAsync(glassDirectory);
+            return 0;
+        }
         if (Environment.GetEnvironmentVariable("MISSUM_SMOKE_UI_MODELHUB") == "1")
         {
             await VerifyModelHubSmokeAsync();

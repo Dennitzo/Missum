@@ -7,10 +7,14 @@ public sealed class ComputerActionApprovalServiceTests
 {
     private static readonly string[] ComputerToolNames = ["computer.act", "computer.observe"];
     [Fact]
-    public void ComputerActionIsAvailableOnlyInCodingAndDeclaresBothTools()
+    public void ComputerActionIsAvailableOutsideChatGptAndDeclaresBothTools()
     {
         var catalog = ExtensionActionCatalog.CreateWithBuiltIns();
-        Assert.Contains(catalog.GetActions(ExtensionChatMode.Coding), action => action.ActionId == BuiltInActionIds.ComputerUse);
+        foreach (var mode in new[] { ExtensionChatMode.Coding, ExtensionChatMode.ClaudeScience, ExtensionChatMode.ClaudeMeetings })
+            Assert.Contains(catalog.GetActions(mode), action => action.ActionId == BuiltInActionIds.ComputerUse);
+        // The former Webdesign mode is the Codex tool Webdesign; its legacy mode offers nothing.
+        Assert.Empty(catalog.GetActions(ExtensionChatMode.Webdesign));
+        // ChatGPT never controls the computer.
         Assert.DoesNotContain(catalog.GetActions(ExtensionChatMode.General), action => action.ActionId == BuiltInActionIds.ComputerUse);
         Assert.True(catalog.TryGetTools(BuiltInActionIds.ComputerUse, out var tools));
         Assert.Equal(ComputerToolNames, tools!.Select(tool => tool.ModelToolName).Order().ToArray());

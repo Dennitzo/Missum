@@ -58,6 +58,7 @@ public sealed partial class MainWindow : Window
             _appWindow.SetIcon(iconPath);
         }
         ConfigureTitleBar();
+        InstallLiquidGlassScene();
         App.Current.ThemeChanged += OnAppThemeChanged;
         AppTitleBar.SizeChanged += (_, _) =>
         {
@@ -144,7 +145,11 @@ public sealed partial class MainWindow : Window
     private void OnTitleBarActualThemeChanged(FrameworkElement sender, object args) =>
         UpdateTitleBarColors();
 
-    private void OnAppThemeChanged(object? sender, EventArgs args) => UpdateTitleBarColors();
+    private void OnAppThemeChanged(object? sender, EventArgs args)
+    {
+        UpdateTitleBarColors();
+        UpdateLiquidGlass();
+    }
 
     private void UpdateTitleBarColors()
     {

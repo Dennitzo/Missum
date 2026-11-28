@@ -46,7 +46,7 @@ public sealed class ExtensionFoundationTests : IDisposable
         Assert.Equal("builtin.documents/export-chat-pdf", BuiltInActionIds.ExportChatPdf);
         var planMode = Assert.Single(BuiltInExtensionCatalog.Actions, action =>
             action.ActionId == BuiltInActionIds.PlanMode);
-        Assert.Equal([ExtensionChatMode.Coding, ExtensionChatMode.ClaudeScience, ExtensionChatMode.Webdesign], planMode.SupportedChatModes);
+        Assert.Equal([ExtensionChatMode.Coding, ExtensionChatMode.ClaudeScience], planMode.SupportedChatModes);
         Assert.Equal(ExtensionActionKind.SelectableTool, planMode.ActionKind);
         var publicCatalog = JsonSerializer.Serialize(BuiltInExtensionCatalog.Actions, ManifestJson);
         Assert.DoesNotContain("Missum", publicCatalog, StringComparison.OrdinalIgnoreCase);

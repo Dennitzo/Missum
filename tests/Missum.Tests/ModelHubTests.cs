@@ -37,8 +37,36 @@ public sealed class ModelHubTests
         Assert.Equal("BF16/gemma-3-27b-it-BF16-00001-of-00002.gguf", bf16.Primary.Path);
         Assert.Equal(2, bf16.Parts.Count);
         // The vision projector comes along (the 16-bit one), found walking up from the folder.
-        Assert.Equal(["mmproj-F16.gguf"], bf16.Companions.Select(c => c.Path));
-        Assert.Equal(50 * Gb + 800_000_000, bf16.TotalBytes);
+        // Plus exactly one draft head: an MTP head before other draft kinds.
+        Assert.Equal(["mmproj-F16.gguf", "mtp-gemma-Q8_0.gguf"], bf16.Companions.Select(c => c.Path));
+        Assert.Equal(52 * Gb + 800_000_000, bf16.TotalBytes);
+    }
+
+    [Fact]
+    public void OnlyOneSelfContainedEightBitMtpHeadIsDownloaded()
+    {
+        // The real unsloth/Qwen3.8-Flash-Next-GGUF layout.
+        var files = new[]
+        {
+            new HubFile("MTP/mtp-Qwen3.8-Flash-Next-BF16.gguf", 7_770_760_320, "a"),
+            new HubFile("MTP/mtp-Qwen3.8-Flash-Next-Q4_K_M.gguf", 2_786_204_800, "b"),
+            new HubFile("MTP/mtp-Qwen3.8-Flash-Next-Q8_0.gguf", 4_137_429_120, "c"),
+            new HubFile("MTP/mtp-Qwen3.8-Flash-Next-shared-BF16.gguf", 5_227_963_456, "d"),
+            new HubFile("MTP/mtp-Qwen3.8-Flash-Next-shared-Q4_K_M.gguf", 1_907_151_936, "e"),
+            new HubFile("MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf", 2_786_568_256, "f"),
+            new HubFile("mmproj-BF16.gguf", 907_542_944, "g"),
+            new HubFile("mmproj-F16.gguf", 904_004_000, "h"),
+            new HubFile("mtp-Qwen3.8-Flash-Next-Q8_0.gguf", 4_137_429_120, "c"),
+            new HubFile("Q8_0/Qwen3.8-Flash-Next-Q8_0-00001-of-00002.gguf", 10, "i"),
+            new HubFile("Q8_0/Qwen3.8-Flash-Next-Q8_0-00002-of-00002.gguf", 20, "j"),
+        };
+        var q8 = Assert.Single(ModelHubQuantizations.Group(files));
+        Assert.Equal("Q8_0", q8.Label);
+        Assert.Equal(["mmproj-F16.gguf", "mtp-Qwen3.8-Flash-Next-Q8_0.gguf"], q8.Companions.Select(c => c.Path));
+        // Without an 8-bit head the 16-bit F16 one wins over BF16 (no BF16 hardware on Turing).
+        Assert.Equal("MTP/mtp-m-F16.gguf", Assert.Single(ModelHubQuantizations.Draft(
+            [new HubFile("MTP/mtp-m-BF16.gguf", 8, null), new HubFile("MTP/mtp-m-F16.gguf", 8, null), new HubFile("MTP/mtp-m-shared-Q8_0.gguf", 3, null)])).Path);
+        Assert.Empty(ModelHubQuantizations.Draft([new HubFile("MTP/mtp-m-shared-Q8_0.gguf", 3, null)]));
     }
 
     [Fact]
@@ -334,6 +362,16 @@ public sealed class ModelHubVersionTests
     public void ASharedProjectorAloneIsNoCopy() =>
         Assert.Equal(LocalQuantizationState.Missing, ModelHubVersions.Compare(Q4, "c2", Local("c2", ("mmproj-BF16.gguf", 907), ("Q8/m-Q8.gguf", 300)),
             new Dictionary<string, IReadOnlyDictionary<string, HubFile>?>()).State);
+
+    [Fact]
+    public void AnExistingDraftHeadOfAnotherPrecisionCounts()
+    {
+        var withDraft = Q4 with { Companions = [.. Q4.Companions, new HubFile("mtp-m-Q8_0.gguf", 40, "draft")] };
+        Assert.Equal(LocalQuantizationState.Current, ModelHubVersions.Compare(withDraft, "c2",
+            Local("c2", [.. AllFiles, ("MTP/mtp-m-BF16.gguf", 80)]), new Dictionary<string, IReadOnlyDictionary<string, HubFile>?>()).State);
+        Assert.Equal(LocalQuantizationState.Outdated, ModelHubVersions.Compare(withDraft, "c2",
+            Local("c2", AllFiles), new Dictionary<string, IReadOnlyDictionary<string, HubFile>?>()).State);
+    }
 
     [Fact]
     public void AnotherProjectorVariantCounts() =>

@@ -133,6 +133,14 @@
               <ComboBoxItem Content="Deutsch" Tag="de-DE" />
               <ComboBoxItem Content="English" Tag="en-US" />
             </ComboBox>
+            <ToggleSwitch
+              x:Name="LiquidGlassToggle"
+              Header="Liquid Glass"
+              OffContent="Aus"
+              OnContent="Ein"
+              Toggled="OnLiquidGlassToggled"
+              AutomationProperties.Name="Liquid Glass" />
+            <TextBlock Margin="0,-6,0,0" Foreground="{ThemeResource MissumMutedTextBrush}" Text="Native Glasoptik für Fenster, Seitenleisten, Schaltflächen und Steuerelemente. Akzent- und Hintergrundfarbe tönen das Glas; bei hohem Kontrast bleibt die Optik deckend. Wirksam nach einem Neustart von Missum." TextWrapping="Wrap" />
           </StackPanel>
           <StackPanel Spacing="7">
             <TextBlock FontWeight="SemiBold" Text="Akzentfarbe" />
@@ -159,6 +167,14 @@
           <TextBlock Style="{StaticResource MissumSectionTitleStyle}" Text="Gedächtnis" />
           <TextBlock Foreground="{ThemeResource MissumMutedTextBrush}" Text="Was Missum sitzungsübergreifend über dich weiß: Vorlieben und dauerhafte Anweisungen, die jeder neue Chat mitbekommt." TextWrapping="Wrap" />
           <Button Click="OnEditMemory" Content="Gedächtnis anzeigen und bearbeiten" HorizontalAlignment="Left" />
+          <ToggleSwitch
+            x:Name="CrossSessionMemoryToggle"
+            Header="Sitzungs- und projektübergreifendes Gedächtnis im ChatGPT-Modus"
+            OffContent="Aus"
+            OnContent="Ein"
+            Toggled="OnCrossSessionMemoryToggled"
+            AutomationProperties.Name="Sitzungs- und projektübergreifendes Gedächtnis im ChatGPT-Modus" />
+          <TextBlock Margin="0,-6,0,0" Foreground="{ThemeResource MissumMutedTextBrush}" Text="ChatGPT kann frühere Chats aus allen Modi und Projekten durchsuchen, wenn du dich auf sie beziehst, und berücksichtigt dabei dein Gedächtnisprofil. Ausgeschaltet bleibt jede Antwort auf den aktuellen Chat und das Profil beschränkt." TextWrapping="Wrap" />
         </StackPanel>
       </Border>
 

@@ -138,9 +138,9 @@ public sealed partial class NativeAssistantPage
             if (firstStep < positionedSteps.Length && TryNativeStepOffset(positionedSteps[firstStep], out var startOffset))
                 offset = Math.Clamp(startOffset, 0, content.Length);
         }
-        var eligible = positionedSteps.Skip(firstStep).Where(step => !IsDeepResearchReceipt(step)
+        var eligible = ComputerStepBundling.Bundle(positionedSteps.Skip(firstStep).Where(step => !IsDeepResearchReceipt(step)
             && !IsAcceptedSubagentManagementStep(step, subagentReceipts)
-            && (S(step, "tool") != "assistant.continuation" || S(step, "status") == "completed"));
+            && (S(step, "tool") != "assistant.continuation" || S(step, "status") == "completed")), content);
         var projected = assistant ? NativeActivityProjection.Build(eligible, S(message, "status") is "streaming" or "pending", content.Length, WaitingForModel(messageId, message)) : [];
         foreach (var activity in projected)
         {
@@ -244,6 +244,9 @@ public sealed partial class NativeAssistantPage
             if (toolView.IsActivity) toolView.SetThinkingLabel(ThinkingLabelFor(messageId));
             desired.Add(ActivityContainer(messageId, key, element, activity.ReplacesKey));
             ArtifactsAfterStep(id);
+            // The comments between bundled computer steps are shown inside the receipt.
+            if (tool == ComputerStepBundling.GroupTool && ComputerStepBundling.ContentEnd(step) is { } groupEnd)
+                offset = Math.Clamp(groupEnd, offset, content.Length);
         }
         Text("text:" + offset, content[offset..], offset);
         if (S(message, "error") is { Length: > 0 } error && error != content) Text("error", error);
@@ -546,7 +549,8 @@ public sealed partial class NativeAssistantPage
                     "completed" => "Lauf fortgesetzt", "failed" or "denied" => "Fortsetzen fehlgeschlagen",
                     "cancelled" or "interrupted" => "Fortsetzung abgebrochen", _ => "Fortsetzung wird vorbereitet",
                 },
-                "web.search" => "Websuche", "web.fetch" => "Webseite lesen", "web.deepResearch" => "Deep Research", _ => S(step, "label", tool) };
+                "web.search" => "Websuche", "web.fetch" => "Webseite lesen", "web.deepResearch" => "Deep Research",
+                "browser.use" => "Browser-Use", _ => S(step, "label", tool) };
             _running = S(step, "status") is "running" or "pending";
             var iconKey = ToolStepIconKey(tool);
             _compactIcon.Glyph = ToolIconGlyph(iconKey);
@@ -709,7 +713,7 @@ public sealed partial class NativeAssistantPage
             if (IsTrue(_step, "detailsDeferred")) { _ = LoadDetailsAsync(); return; }
             if (!_detailsDirty) return;
             _detailsDirty = false;
-            if (_reasoning || S(_step, "tool") == "assistant.continuation")
+            if (_reasoning || S(_step, "tool") is "assistant.continuation" or ComputerStepBundling.GroupTool)
             {
                 var text = S(_step, "detail", S(_step, "explanation"));
                 if (text.Length > 8192 && ScrollOwner is { } scroll)

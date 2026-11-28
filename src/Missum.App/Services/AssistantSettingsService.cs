@@ -62,6 +62,8 @@ public sealed class AssistantSettingsService : IDisposable
                 language = current.Language,
                 accentColor = current.AccentColor,
                 backgroundColor = current.BackgroundColor,
+                isLiquidGlassEnabled = current.IsLiquidGlassEnabled,
+                isCrossSessionMemoryEnabled = current.IsCrossSessionMemoryEnabled,
             },
             resolvedAppearance = appearance,
             resolvedTheme = appearance?.Theme ?? (current.Theme == AppTheme.System
@@ -329,6 +331,8 @@ public sealed class AssistantSettingsService : IDisposable
         Language = patch.Language ?? current.Language,
         AccentColor = patch.AccentColor ?? current.AccentColor,
         BackgroundColor = patch.BackgroundColor ?? current.BackgroundColor,
+        IsLiquidGlassEnabled = patch.IsLiquidGlassEnabled ?? current.IsLiquidGlassEnabled,
+        IsCrossSessionMemoryEnabled = patch.IsCrossSessionMemoryEnabled ?? current.IsCrossSessionMemoryEnabled,
     };
 
     private static string NormalizeColor(string value)
@@ -362,6 +366,8 @@ public sealed class AssistantSettingsService : IDisposable
                 "language" => patch with { Language = StringValue(field.Value, field.Name) },
                 "accentColor" => patch with { AccentColor = StringValue(field.Value, field.Name) },
                 "backgroundColor" => patch with { BackgroundColor = StringValue(field.Value, field.Name) },
+                "isLiquidGlassEnabled" => patch with { IsLiquidGlassEnabled = BooleanValue(field.Value, field.Name) },
+                "isCrossSessionMemoryEnabled" => patch with { IsCrossSessionMemoryEnabled = BooleanValue(field.Value, field.Name) },
                 _ => throw new ArgumentException($"Nicht bearbeitbare Einstellung: {field.Name}"),
             };
         return patch;
@@ -404,6 +410,8 @@ public sealed record AssistantSettingsPatch
     public string? Language { get; init; }
     public string? AccentColor { get; init; }
     public string? BackgroundColor { get; init; }
+    public bool? IsLiquidGlassEnabled { get; init; }
+    public bool? IsCrossSessionMemoryEnabled { get; init; }
 }
 
 public sealed record AssistantSettingsResource(string Path, string ContentType, string FileName, DateTimeOffset ExpiresAt);

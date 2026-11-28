@@ -29,7 +29,7 @@ public sealed partial class SqliteConversationSnapshotRepository(SqliteDatabase 
             command.CommandText = """
                 SELECT id,title,created_at,updated_at,chat_mode,draft,
                        persistent_extension_action_id,conversation_revision,coding_workspace_path,
-                       session_group_id
+                       session_group_id,webdesign_enabled
                 FROM chat_sessions WHERE id=$id;
                 """;
             command.Parameters.AddWithValue("$id", sessionId.ToString("D"));

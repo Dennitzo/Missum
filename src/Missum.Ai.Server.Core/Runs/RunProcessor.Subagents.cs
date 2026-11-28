@@ -121,7 +121,8 @@ public sealed partial class RunProcessor
 
     private async Task<bool> CanOfferSubagentToolsAsync(RunRequest request, ModelSelection selection, CancellationToken cancellationToken)
     {
-        if (request.ConversationProfile is ConversationProfile.ContextPreparation or ConversationProfile.PlanMode
+        // Plan mode keeps the subagent tools visible (identical prompt prefix); their execution is refused.
+        if (request.ConversationProfile is ConversationProfile.ContextPreparation
             || request.ClientCapabilities?.Contains("subagents", StringComparer.OrdinalIgnoreCase) != true)
             return false;
         // Only the gateway can create this persisted relation. Inherit the

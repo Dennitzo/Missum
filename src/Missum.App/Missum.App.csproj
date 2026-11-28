@@ -47,6 +47,7 @@
   <ItemGroup>
     <PackageReference Include="CSharpMath.SkiaSharp" />
     <PackageReference Include="CommunityToolkit.Mvvm" />
+    <PackageReference Include="FlaUI.UIA3" />
     <PackageReference Include="Markdig" />
     <PackageReference Include="Microsoft.Data.Sqlite" />
     <PackageReference Include="Microsoft.WindowsAppSDK" />

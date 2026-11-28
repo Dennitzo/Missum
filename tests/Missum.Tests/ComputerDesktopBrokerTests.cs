@@ -29,17 +29,18 @@ public sealed class ComputerDesktopBrokerTests
     }
 
     [Fact]
-    public async Task UnclassifiedActionNeedsApprovalAndManualDoneDoesNotInject()
+    public async Task ActionsRunDirectlyWithoutApprovalAndEachObservationAuthorizesOne()
     {
-        var approval = new FakeApproval { Decision = ComputerActionDecision.ManualDone };
+        var approval = new FakeApproval();
         var platform = new FakePlatform();
         using var broker = new ComputerDesktopBroker(approval, platform);
         broker.Begin(Session, Run);
         var frame = await broker.ObserveAsync(Session, Run);
         var result = await broker.ExecuteAsync(Session, Run, new(frame.ObservationId, "click", X: 2, Y: 3, CoordinateSpace: "pixels"));
-        Assert.Equal("manual", result.Status);
-        Assert.Equal(1, approval.Requests);
-        Assert.Empty(platform.Actions);
+        Assert.Equal("completed", result.Status);
+        Assert.Equal(0, approval.Requests);
+        Assert.Single(platform.Actions);
+        Assert.NotNull(result.After);
         await Assert.ThrowsAsync<InvalidOperationException>(() => broker.ExecuteAsync(Session, Run, new(frame.ObservationId, "click", X: 2, Y: 3, CoordinateSpace: "pixels")));
     }
 
@@ -60,127 +61,114 @@ public sealed class ComputerDesktopBrokerTests
     }
 
     [Fact]
-    public async Task RefusedActionDoesNotInjectAndRequiresANewObservation()
+    public async Task StoppedRunRefusesFurtherActions()
     {
-        var approval = new FakeApproval { Decision = ComputerActionDecision.Cancel };
         var platform = new FakePlatform();
-        using var broker = new ComputerDesktopBroker(approval, platform);
+        using var broker = new ComputerDesktopBroker(new FakeApproval(), platform);
         broker.Begin(Session, Run);
         var frame = await broker.ObserveAsync(Session, Run);
-
-        var result = await broker.ExecuteAsync(Session, Run, new(frame.ObservationId, "click", X: 2, Y: 3, CoordinateSpace: "pixels"));
-
-        Assert.Equal("cancelled", result.Status);
-        Assert.Empty(platform.Actions);
-        await Assert.ThrowsAsync<InvalidOperationException>(() => broker.ExecuteAsync(Session, Run,
-            new(frame.ObservationId, "click", X: 2, Y: 3, CoordinateSpace: "pixels")));
-    }
-
-    [Fact]
-    public async Task StoppingRunWhileApprovalIsPendingCancelsTheRequestWithoutInput()
-    {
-        var approval = new PendingApproval();
-        var platform = new FakePlatform();
-        using var broker = new ComputerDesktopBroker(approval, platform);
-        broker.Begin(Session, Run);
-        var frame = await broker.ObserveAsync(Session, Run);
-        var action = broker.ExecuteAsync(Session, Run, new(frame.ObservationId, "click", X: 2, Y: 3, CoordinateSpace: "pixels"));
-        await approval.Requested.Task.WaitAsync(TimeSpan.FromSeconds(5));
-
         broker.End(Session, Run);
-
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => action);
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => broker.ExecuteAsync(Session, Run,
+            new(frame.ObservationId, "click", X: 2, Y: 3, CoordinateSpace: "pixels")));
         Assert.Empty(platform.Actions);
         Assert.Throws<UnauthorizedAccessException>(() => broker.Begin(Session, Run));
     }
 
     [Fact]
-    public async Task ObservationWaitsForReturnAndRejectsWindowSwitchDuringCapture()
+    public async Task ObservationDoesNotWaitForAPreviousForegroundWindow()
     {
+        // Launching or switching programs changes the foreground; the next observation must see it.
         var activity = new FakeForeground(); activity.Pause();
         var platform = new FakePlatform();
         using var broker = new ComputerDesktopBroker(new FakeApproval(), platform, () => activity);
         broker.Begin(Session, Run);
-        var observation = broker.ObserveAsync(Session, Run);
-        Assert.False(observation.IsCompleted);
-        Assert.Equal(0, platform.Captures);
-        activity.Resume();
-        await observation;
+        await broker.ObserveAsync(Session, Run).WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(1, platform.Captures);
         platform.OnCapture = () => activity.ChangeWindow();
-        await Assert.ThrowsAsync<InvalidOperationException>(() => broker.ObserveAsync(Session, Run));
+        await broker.ObserveAsync(Session, Run).WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(2, platform.Captures);
     }
 
     [Fact]
-    public async Task WindowSwitchPausesActionAndInvalidatesObservation()
+    public async Task WindowSwitchesDoNotBlockTheNextAction()
     {
         var activity = new FakeForeground(); var platform = new FakePlatform();
         using var broker = new ComputerDesktopBroker(new FakeApproval(), platform, () => activity);
         broker.Begin(Session, Run);
         var frame = await broker.ObserveAsync(Session, Run);
         activity.ChangeWindow(); activity.Pause();
-        var action = broker.ExecuteAsync(Session, Run, new(frame.ObservationId, "move", X: 1, Y: 1, CoordinateSpace: "pixels"));
-        Assert.False(action.IsCompleted);
-        activity.Resume();
-        await Assert.ThrowsAsync<InvalidOperationException>(() => action);
-        Assert.Empty(platform.Actions);
+        var result = await broker.ExecuteAsync(Session, Run, new(frame.ObservationId, "move", X: 1, Y: 1, CoordinateSpace: "pixels"))
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal("completed", result.Status);
+        Assert.Single(platform.Actions);
     }
 
     [Fact]
-    public async Task StoppingDuringUserPauseCancelsWithoutInput()
-    {
-        var activity = new FakeForeground(); var platform = new FakePlatform();
-        using var broker = new ComputerDesktopBroker(new FakeApproval(), platform, () => activity);
-        broker.Begin(Session, Run);
-        var frame = await broker.ObserveAsync(Session, Run);
-        activity.Pause();
-        var action = broker.ExecuteAsync(Session, Run, new(frame.ObservationId, "move", X: 1, Y: 1, CoordinateSpace: "pixels"));
-        Assert.False(action.IsCompleted);
-        broker.End(Session, Run);
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => action);
-        Assert.Empty(platform.Actions);
-    }
-
-    [Fact]
-    public async Task WindowSwitchAndReturnBetweenCallsInvalidatesObservation()
-    {
-        var activity = new FakeForeground(); var platform = new FakePlatform();
-        using var broker = new ComputerDesktopBroker(new FakeApproval(), platform, () => activity);
-        broker.Begin(Session, Run);
-        var frame = await broker.ObserveAsync(Session, Run);
-        activity.ChangeWindow();
-        await Assert.ThrowsAsync<InvalidOperationException>(() => broker.ExecuteAsync(Session, Run,
-            new(frame.ObservationId, "move", X: 1, Y: 1, CoordinateSpace: "pixels")));
-        Assert.Empty(platform.Actions);
-    }
-
-    [Fact]
-    public async Task WindowSwitchInterruptsActionInProgress()
+    public async Task WindowOpenedByTheActionItselfDoesNotFailIt()
     {
         var monitor = new FakeForeground();
         var platform = new FakePlatform { OnExecute = () => monitor.ChangeWindow() };
         using var broker = new ComputerDesktopBroker(new FakeApproval(), platform, () => monitor);
         broker.Begin(Session, Run);
         var frame = await broker.ObserveAsync(Session, Run);
-        await Assert.ThrowsAsync<InvalidOperationException>(() => broker.ExecuteAsync(Session, Run,
-            new(frame.ObservationId, "move", X: 1, Y: 1, CoordinateSpace: "pixels")));
-        Assert.Empty(platform.Actions);
+        var result = await broker.ExecuteAsync(Session, Run, new(frame.ObservationId, "click", X: 1, Y: 1, CoordinateSpace: "pixels"));
+        Assert.Equal("completed", result.Status);
+        Assert.Single(platform.Actions);
+    }
+
+    [Fact]
+    public async Task ElementIndexTargetsAMarkedElementWithoutCoordinates()
+    {
+        var target = new ComputerUiTarget(1, new ComputerUiCandidate("Button", "OK", null, true, 10, 10, 20, 10, ComputerUiSource.Window), 5, 5, 10, 5);
+        var platform = new FakePlatform { Targets = [target] };
+        using var broker = new ComputerDesktopBroker(new FakeApproval(), platform);
+        broker.Begin(Session, Run);
+        var frame = await broker.ObserveAsync(Session, Run);
+        Assert.Equal("completed", (await broker.ExecuteAsync(Session, Run, new(frame.ObservationId, "click", ElementIndex: 1))).Status);
+        Assert.Equal(1, Assert.Single(platform.Actions).ElementIndex);
+        var next = await broker.ObserveAsync(Session, Run);
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => broker.ExecuteAsync(Session, Run, new(next.ObservationId, "click", ElementIndex: 2)));
+        var third = await broker.ObserveAsync(Session, Run);
+        await Assert.ThrowsAsync<ArgumentException>(() => broker.ExecuteAsync(Session, Run, new(third.ObservationId, "set_value", Text: "x")));
     }
 
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task ApprovalAllowsMissumCardButRejectsOtherWindowSwitches(bool outside)
+    [InlineData("right_click")]
+    [InlineData("middle_click")]
+    [InlineData("double_click")]
+    public async Task AllMouseButtonsAreAvailable(string kind)
     {
-        var activity = new FakeForeground(); var platform = new FakePlatform(); var approval = new ControlledApproval();
-        using var broker = new ComputerDesktopBroker(approval, platform, () => activity);
+        var platform = new FakePlatform();
+        using var broker = new ComputerDesktopBroker(new FakeApproval(), platform);
         broker.Begin(Session, Run);
         var frame = await broker.ObserveAsync(Session, Run);
-        var action = broker.ExecuteAsync(Session, Run, new(frame.ObservationId, "click", X: 1, Y: 1, CoordinateSpace: "pixels"));
-        await approval.Requested.Task;
-        activity.ChangeWindow(isMissum: !outside);
-        approval.Decision.SetResult(ComputerActionDecision.Execute);
-        if (outside) { await Assert.ThrowsAsync<InvalidOperationException>(() => action); Assert.Empty(platform.Actions); }
-        else { Assert.Equal("completed", (await action).Status); Assert.Single(platform.Actions); }
+        await broker.ExecuteAsync(Session, Run, new(frame.ObservationId, kind, X: 4, Y: 4, CoordinateSpace: "pixels"));
+        Assert.Equal(kind, Assert.Single(platform.Actions).Kind);
+    }
+
+    [Theory]
+    [InlineData("launch", null, null, true)]
+    [InlineData("launch", "notepad", null, false)]
+    [InlineData("window", null, "explode", true)]
+    [InlineData("window", null, "maximize", false)]
+    public void LaunchAndWindowActionsAreValidated(string kind, string? target, string? windowAction, bool rejected)
+    {
+        var frame = new ComputerObservation("frame", [], "image/png", 100, 50, 0, 0, 100, 50, "", 0, []);
+        var action = new ComputerAction("frame", kind, Target: target, WindowAction: windowAction);
+        if (rejected) Assert.Throws<ArgumentException>(() => ComputerDesktopBroker.ValidateAction(action, frame));
+        else ComputerDesktopBroker.ValidateAction(action, frame);
+    }
+
+    [Fact]
+    public void WebsiteElementIndexSelectsTheCenterOfTheListedElement()
+    {
+        var elements = System.Text.Json.JsonSerializer.SerializeToElement(new[] { new { x = 10, y = 20, width = 40, height = 10 } });
+        var frame = new ComputerObservation("web-1", [], "image/png", 200, 100, 0, 0, 200, 100, "", 0, [], Elements: elements);
+        var resolved = ComputerDesktopBroker.ResolveWebElement(new("web-1", "click", ElementIndex: 1), frame);
+        Assert.Equal(30, resolved.X);
+        Assert.Equal(25, resolved.Y);
+        Assert.Equal("pixels", resolved.CoordinateSpace);
+        Assert.Throws<ArgumentOutOfRangeException>(() => ComputerDesktopBroker.ResolveWebElement(new("web-1", "click", ElementIndex: 2), frame));
     }
 
     [Fact]
@@ -276,9 +264,9 @@ public sealed class ComputerDesktopBrokerTests
     [InlineData(50004, 42, false, false, "1.2.3")]
     [InlineData(50004, 42, true, true, "1.2.3")]
     [InlineData(50004, 42, true, false, "")]
-    public async Task UnverifiedOrProtectedEditRequiresApproval(int controlType, int pid, bool enabled, bool password, string runtimeId)
+    public async Task AnyControlCanBeClickedAndTypedIntoDirectly(int controlType, int pid, bool enabled, bool password, string runtimeId)
     {
-        var approval = new FakeApproval { Decision = ComputerActionDecision.Cancel };
+        var approval = new FakeApproval();
         var element = new ComputerElement("Eingabe", controlType, pid, enabled, password, runtimeId);
         var platform = new FakePlatform { Foreground = new("window", "Test", 42, 1, 0, 0, 100, 50),
             InspectedElement = element, FocusedElement = element, FocusHandle = 7 };
@@ -287,24 +275,9 @@ public sealed class ComputerDesktopBrokerTests
         var first = await broker.ObserveAsync(Session, Run);
         await broker.ExecuteAsync(Session, Run, new(first.ObservationId, "click", X: 2, Y: 3, CoordinateSpace: "pixels"));
         var second = await broker.ObserveAsync(Session, Run);
-        await broker.ExecuteAsync(Session, Run, new(second.ObservationId, "type", Text: "Hallo"));
-        Assert.Equal(2, approval.Requests);
-        Assert.Empty(platform.Actions);
-    }
-
-    [Fact]
-    public async Task TextWithControlCharactersRequiresApprovalEvenInVerifiedEdit()
-    {
-        var approval = new FakeApproval { Decision = ComputerActionDecision.Cancel };
-        var element = new ComputerElement("Eingabe", 50004, 42, true, false, "1.2.3");
-        var platform = new FakePlatform { Foreground = new("window", "Test", 42, 1, 0, 0, 100, 50),
-            FocusedElement = element, FocusHandle = 7 };
-        using var broker = new ComputerDesktopBroker(approval, platform);
-        broker.Begin(Session, Run);
-        var frame = await broker.ObserveAsync(Session, Run);
-        await broker.ExecuteAsync(Session, Run, new(frame.ObservationId, "type", Text: "Hallo\n"));
-        Assert.Equal(1, approval.Requests);
-        Assert.Empty(platform.Actions);
+        await broker.ExecuteAsync(Session, Run, new(second.ObservationId, "type", Text: "Hallo\n"));
+        Assert.Equal(0, approval.Requests);
+        Assert.Equal(2, platform.Actions.Count);
     }
 
     [Fact]
@@ -369,27 +342,6 @@ public sealed class ComputerDesktopBrokerTests
         { Requests++; LastRequest = request; return Task.FromResult(Decision); }
     }
 
-    private sealed class PendingApproval : IComputerActionApproval
-    {
-        public TaskCompletionSource<bool> Requested { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public Task<bool> ActivateAsync(Guid sessionId, string runId, CancellationToken cancellationToken) => Task.FromResult(true);
-        public async Task<ComputerActionDecision> RequestAsync(ComputerApprovalRequest request, CancellationToken cancellationToken)
-        {
-            Requested.TrySetResult(true);
-            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
-            return ComputerActionDecision.Execute;
-        }
-    }
-
-    private sealed class ControlledApproval : IComputerActionApproval
-    {
-        public TaskCompletionSource<bool> Requested { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public TaskCompletionSource<ComputerActionDecision> Decision { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public Task<bool> ActivateAsync(Guid sessionId, string runId, CancellationToken cancellationToken) => Task.FromResult(true);
-        public async Task<ComputerActionDecision> RequestAsync(ComputerApprovalRequest request, CancellationToken cancellationToken)
-        { Requested.TrySetResult(true); return await Decision.Task.WaitAsync(cancellationToken); }
-    }
-
     private sealed class FakeForeground : IComputerForegroundMonitor
     {
         private TaskCompletionSource? _pause;
@@ -413,6 +365,7 @@ public sealed class ComputerDesktopBrokerTests
         public int Captures { get; private set; }
         public TimeSpan Age { get; set; }
         public IReadOnlyList<ComputerWindow> Windows { get; set; } = [];
+        public IReadOnlyList<ComputerUiTarget>? Targets { get; set; }
         public ComputerWindow? Foreground { get; set; }
         public ComputerElement? FocusedElement { get; set; }
         public ComputerElement InspectedElement { get; set; } = new("Example", 50000, 42, true, false);
@@ -426,11 +379,13 @@ public sealed class ComputerDesktopBrokerTests
             OnCapture?.Invoke();
             var view = new ComputerObservation(Guid.NewGuid().ToString("N"), [1, 2, 3], "image/png", 100, 50,
                 -1920, 0, 3840, 1080, "Test", 42, Windows);
-            return Task.FromResult(new ComputerFrame(view, [], Foreground, FocusHandle, FocusedElement, DateTimeOffset.UtcNow - Age));
+            return Task.FromResult(new ComputerFrame(view, [], Foreground, FocusHandle, FocusedElement, DateTimeOffset.UtcNow - Age, Targets: Targets));
         }
         public Task ExecuteAsync(ComputerFrame frame, ComputerAction action, bool approved, CancellationToken cancellationToken)
         { OnExecute?.Invoke(); cancellationToken.ThrowIfCancellationRequested(); Actions.Add(action); return Task.CompletedTask; }
         public Task<ComputerElement> InspectAsync(ComputerFrame frame, ComputerAction action, CancellationToken cancellationToken) =>
             Task.FromResult(InspectedElement);
+        public Task<ComputerAfter?> DescribeAsync(ComputerFrame frame, CancellationToken cancellationToken) =>
+            Task.FromResult<ComputerAfter?>(new("Test", "test", [], [], null));
     }
 }

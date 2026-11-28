@@ -206,9 +206,10 @@ class GpuPlacementTests(unittest.TestCase):
                         catalog.os.environ, {"MISSUM_NATIVE_MULTI_GPU_SPLIT": "layer"}):
                     manager.load(self.model["id"])
                 path = self.model["path"]
-                expected = dict(version=1,
+                # Version 2: the context window is no longer part of a snapshot's identity.
+                expected = dict(version=2,
                                 files=[(str(path.resolve()), path.stat().st_size, path.stat().st_mtime_ns)],
-                                context=32768, cache="q8_0", slots=1, template=None,
+                                cache="q8_0", slots=1, template=None,
                                 placement=placement, fit="2048", gpuLayers="auto", split="layer")
                 self.assertEqual(manager.session_fingerprint(self.model["id"]), expected)
 

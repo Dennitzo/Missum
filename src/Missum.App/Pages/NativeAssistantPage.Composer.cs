@@ -11,6 +11,9 @@ namespace Missum.App.Pages;
 
 public sealed partial class NativeAssistantPage
 {
+    /// <summary>Display name of the Model Hub mode. The app UI is German ("Modell Hub"); in English it is "Model Hub".</summary>
+    internal const string ModelHubTitle = "Modell Hub";
+
     private string? _composerInstruction;
     private bool _composerToolSelectionBusy;
 
@@ -18,22 +21,24 @@ public sealed partial class NativeAssistantPage
     {
         var flyout = new Flyout { Placement = FlyoutPlacementMode.BottomEdgeAlignedLeft };
         var style = new Style(typeof(FlyoutPresenter));
-        style.Setters.Add(new Setter(Control.BackgroundProperty, ThemeBrush("MissumLayerStrongBrush", 43)));
+        // Opaque like every menu (also with Liquid Glass), so the mode list stays readable.
+        style.Setters.Add(new Setter(Control.BackgroundProperty, ThemeBrush("MissumMenuBrush", 43)));
         style.Setters.Add(new Setter(Control.CornerRadiusProperty, new CornerRadius(18)));
         style.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(4)));
         style.Setters.Add(new Setter(Control.BorderThicknessProperty, new Thickness(1)));
-        style.Setters.Add(new Setter(Control.BorderBrushProperty, ThemeBrush("MissumStrokeBrush", 49)));
+        style.Setters.Add(new Setter(Control.BorderBrushProperty, ThemeBrush("MissumMenuStrokeBrush", 49)));
         flyout.FlyoutPresenterStyle = style;
         var panel = new StackPanel { Width = 232, Spacing = 2 };
-        foreach (var (mode, title, description) in new[] { ("general", "ChatGPT", "Erstellen, lernen und erkunden"), ("coding", "Codex", "Erstellen, debuggen und ausliefern"), ("claudescience", "Claude Science", "Deep Research, Analysen und Nachweise"), ("claudemeetings", "Claude Meetings", "Live-Meetings mit Notizen und Whiteboard"), ("webdesign", "Webdesign", "Webseiten gestalten, live ansehen und hosten"), ("modelhub", "Model Hub", "Neueste Unsloth-Modelle finden und laden") })
+        foreach (var (mode, title, description) in new[] { ("general", "ChatGPT", "Schnelle Antworten, Recherche und Gedächtnis"), ("coding", "Codex", "Erstellen, debuggen und ausliefern"), ("claudescience", "Claude Science", "Deep Research, Analysen und Nachweise"), ("claudemeetings", "Claude Meetings", "Live-Meetings mit Notizen und Whiteboard"), ("modelhub", ModelHubTitle, "Neueste Unsloth-Modelle finden und laden") })
         {
             var row = new Grid();
             var text = new StackPanel { Spacing = 2 };
             text.Children.Add(new TextBlock { Text = title, FontSize = 15, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
-            text.Children.Add(new TextBlock { Text = description, FontSize = 13, Foreground = ThemeBrush("MissumMutedTextBrush", 160) });
             row.Children.Add(text);
             if (_mode == mode) row.Children.Add(new FontIcon { Glyph = "\uE73E", FontSize = 14, Foreground = NativeIconPalette.BrushFor("success"), HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Top, Margin = new(0, 5, 0, 0) });
             var button = new Button { Content = row, Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new(0), HorizontalContentAlignment = HorizontalAlignment.Stretch, HorizontalAlignment = HorizontalAlignment.Stretch, Padding = new(8, 8, 8, 8), CornerRadius = new(12) };
+            // Long descriptions are trimmed at rest and scroll through while hovered.
+            text.Children.Add(MarqueeText.Create(description, 13, ThemeBrush("MissumMutedTextBrush", 160), button));
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(button, title);
             button.Click += async (_, _) => { flyout.Hide(); await NavigateAsync("mode.switch", new { chatMode = mode }); };
             panel.Children.Add(button);
@@ -123,8 +128,9 @@ public sealed partial class NativeAssistantPage
         var width = Math.Max(280, ComposerSurface.ActualWidth);
         var menu = new Flyout { Placement = FlyoutPlacementMode.TopEdgeAlignedLeft, AreOpenCloseAnimationsEnabled = true };
         var style = new Style(typeof(FlyoutPresenter));
-        style.Setters.Add(new Setter(Control.BackgroundProperty, ThemeBrush("MissumLayerStrongBrush", 44)));
-        style.Setters.Add(new Setter(Control.BorderBrushProperty, ThemeBrush("MissumStrokeBrush", 61)));
+        // Opaque on purpose (also with Liquid Glass): the tool rows must stay readable.
+        style.Setters.Add(new Setter(Control.BackgroundProperty, ThemeBrush("MissumMenuBrush", 44)));
+        style.Setters.Add(new Setter(Control.BorderBrushProperty, ThemeBrush("MissumMenuStrokeBrush", 61)));
         style.Setters.Add(new Setter(Control.BorderThicknessProperty, new Thickness(1)));
         style.Setters.Add(new Setter(Control.CornerRadiusProperty, new CornerRadius(20)));
         style.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(4, 5, 4, 5)));
@@ -200,8 +206,14 @@ public sealed partial class NativeAssistantPage
         var attachGroup = S(descriptors.FirstOrDefault(a => S(a, "actionId") == BuiltInActionIds.AttachFilesAndFolders), "groupId", "files");
         var planningGroup = S(plan, "groupId", "planning");
 
-        AddEntry(attachGroup, 10, "Dateien und Dokumente", 10,
-            "\uE723", "Dateien und Ordner", "", () => ShowFileChoices(), "attachment");
+        // ChatGPT only reads attachments; a project folder would offer file tools it never gets.
+        const string ChatGptAttachLabel = "Dateien hinzufügen";
+        if (IsChatGptMode)
+            AddEntry(attachGroup, 10, "Dateien und Dokumente", 10,
+                "\uE723", ChatGptAttachLabel, "", () => OnAttach(this, new RoutedEventArgs()), "attachment");
+        else
+            AddEntry(attachGroup, 10, "Dateien und Dokumente", 10,
+                "\uE723", "Dateien und Ordner", "", () => ShowFileChoices(), "attachment");
         if (document.ValueKind == JsonValueKind.Object)
             AddCatalogEntry(document, id => () => SelectComposerTool(id, "Dokumente erstellen"), 20);
         AddEntry(planningGroup, 20, "Planung und Kontext", 20,
@@ -210,8 +222,12 @@ public sealed partial class NativeAssistantPage
             !_running && !_manualCompactionBusy && Items(_snapshot, "messages").Length > 0);
         if (plan.ValueKind == JsonValueKind.Object)
             AddCatalogEntry(plan, id => () => SelectComposerTool(id, S(plan, "displayName")), 10);
+        // Webdesign is a switch beside the selected tool (own chip): Plan mode or another tool stays selected.
+        var webdesign = actions.FirstOrDefault(a => S(a, "actionId") == BuiltInActionIds.Webdesign);
+        if (webdesign.ValueKind == JsonValueKind.Object)
+            AddCatalogEntry(webdesign, webdesignId => () => _ = ChooseWebdesignToolAsync(), 20);
         foreach (var action in actions.Where(a => !S(a, "actionId").StartsWith("builtin.", StringComparison.Ordinal)
-                     || (S(a, "actionId") != BuiltInActionIds.PlanMode
+                     || (S(a, "actionId") is not (BuiltInActionIds.PlanMode or BuiltInActionIds.Webdesign)
                          && S(a, "iconKey") != "document")))
             AddCatalogEntry(action, id => () => SelectComposerTool(id, S(action, "displayName")));
         foreach (var action in descriptors.Where(a =>
@@ -265,6 +281,9 @@ public sealed partial class NativeAssistantPage
         finally { _manualCompactionBusy = false; }
     }
 
+    /// <summary>ChatGPT answers, researches and remembers; it never offers project-folder file tools.</summary>
+    private bool IsChatGptMode => _mode == "general";
+
     private void ShowFileChoices()
     {
         var menu = new MenuFlyout();
@@ -273,7 +292,9 @@ public sealed partial class NativeAssistantPage
         files.Click += OnAttach;
         var folder = new MenuFlyoutItem { Text = "Projektordner auswählen", Foreground = menuForeground, Icon = new FontIcon { Glyph = "\uE8B7", Foreground = menuForeground } };
         folder.Click += OnAddProject;
-        menu.Items.Add(files); menu.Items.Add(folder); menu.ShowAt(ComposerSurface);
+        menu.Items.Add(files);
+        if (!IsChatGptMode) menu.Items.Add(folder);
+        menu.ShowAt(ComposerSurface);
     }
 
     private async void AttachWorkspaceContext()
