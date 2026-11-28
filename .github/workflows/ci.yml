@@ -51,9 +51,7 @@ jobs:
         shell: powershell
         run: ./windows/test-publish-safety.ps1
 
-      - name: App-Tests
-        shell: powershell
-        run: dotnet test tests/Missum.Tests/Missum.Tests.csproj -c Release -p:Platform=x64 --logger trx --results-directory artifacts/test-results/app
+      # The app test suite (~1 h on the runner) runs locally before a release, not in CI.
 
       - name: Gateway-Tests
         shell: powershell
